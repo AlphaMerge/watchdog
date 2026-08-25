@@ -29,19 +29,22 @@ const result = (sensorId: number): CheckResult => ({
 class StubCore implements ResultSender {
   connected = true;
   readonly offered: CheckResult[][] = [];
+  /** What the probe claimed was still on disk behind each batch. */
+  readonly backlogs: number[] = [];
   answer: (batch: readonly CheckResult[]) => ResultsOutcome = () => ({
     kind: 'ack',
     storedSamples: 0,
     retryAfterMs: 0,
   });
 
-  sendResults(results: readonly CheckResult[]): Promise<ResultsOutcome> {
+  sendResults(results: readonly CheckResult[], backlog: number): Promise<ResultsOutcome> {
     this.offered.push([...results]);
+    this.backlogs.push(backlog);
     return Promise.resolve(this.answer(results));
   }
 }
 
-async function harness(over: { batchMaxRows?: number } = {}) {
+async function harness(over: { batchMaxRows?: number; catchUpMaxRows?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'ms-drain-'));
   dirs.push(dir);
   const spool = await ResultSpool.open({ dir, maxBytes: 1_000_000, logger: silent });
@@ -51,6 +54,7 @@ async function harness(over: { batchMaxRows?: number } = {}) {
     client: core,
     logger: silent,
     batchMaxRows: over.batchMaxRows ?? 100,
+    ...(over.catchUpMaxRows === undefined ? {} : { catchUpMaxRows: over.catchUpMaxRows }),
     idleMs: 5,
   });
   return { spool, core, drain };
@@ -204,5 +208,116 @@ describe('spool drain', () => {
     drain.start();
     await drain.stop();
     await drain.stop();
+  });
+});
+
+/**
+ * The half of R-03 the probe owns: telling the core how far behind it is, and clearing a
+ * backlog in fewer round trips so its own live results spend less time queued behind one.
+ */
+describe('catch-up', () => {
+  it('tells the core how much is still behind each batch', async () => {
+    // Without this the core cannot tell a live batch from a replay, so it has to slow both
+    // alike — which is exactly how one probe's catch-up stalls everyone's live ingestion.
+    const { spool, core, drain } = await harness({ batchMaxRows: 2 });
+    await spool.append([result(1), result(2), result(3), result(4), result(5)]);
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'everything to drain');
+      assert.deepEqual(core.backlogs.slice(0, 2), [3, 1], 'counted down as it drained');
+      assert.equal(core.backlogs.at(-1), 0, 'and reached zero when caught up');
+    } finally {
+      await drain.stop();
+    }
+  });
+
+  it('reports no backlog at all when it is keeping up', async () => {
+    const { spool, core, drain } = await harness({ batchMaxRows: 100 });
+    await spool.append([result(1)]);
+
+    drain.start();
+    try {
+      await until(() => core.backlogs.length > 0, 'the batch to be offered');
+      assert.equal(core.backlogs[0], 0, 'a live probe must never look like one catching up');
+    } finally {
+      await drain.stop();
+    }
+  });
+
+  it('takes bigger bites once there is a backlog', async () => {
+    // The same rows in fewer round trips. The core paces catch-up by delay rather than by batch
+    // size, so a larger batch clears the backlog sooner without taking more of the core.
+    const { spool, core, drain } = await harness({ batchMaxRows: 2, catchUpMaxRows: 10 });
+    await spool.append(Array.from({ length: 12 }, (_, index) => result(index + 1)));
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'everything to drain');
+      assert.ok(
+        (core.offered[0]?.length ?? 0) > 2,
+        `first batch was ${String(core.offered[0]?.length)}, expected a catch-up-sized one`,
+      );
+    } finally {
+      await drain.stop();
+    }
+  });
+
+  it('waits as long as the core asked before offering the next batch', async () => {
+    const { spool, core, drain } = await harness({ batchMaxRows: 1 });
+    await spool.append([result(1), result(2)]);
+    core.answer = () => ({ kind: 'ack', storedSamples: 2, retryAfterMs: 300 });
+
+    drain.start();
+    try {
+      await until(() => core.offered.length >= 1, 'the first batch');
+      const at = Date.now();
+      await until(() => core.offered.length >= 2, 'the second batch', 5_000);
+      assert.ok(Date.now() - at >= 250, 'the pacing delay was ignored');
+    } finally {
+      await drain.stop();
+    }
+  });
+
+  it('records what Probe Health will report', async () => {
+    // These are the numbers P-13 surfaces: how far behind this probe is, and how hard the core
+    // has been asking it to slow down. Untested stats are stats that quietly stop being written.
+    const { spool, core, drain } = await harness({ batchMaxRows: 1 });
+    await spool.append([result(1), result(2), result(3)]);
+    core.answer = () => ({ kind: 'ack', storedSamples: 2, retryAfterMs: 40 });
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'everything to drain');
+      const stats = drain.stats();
+      assert.equal(stats.backlog, 0, 'caught up');
+      assert.equal(stats.maxRetryAfterMs, 40, 'the largest delay the core asked for');
+      assert.equal(stats.sent, 3);
+    } finally {
+      await drain.stop();
+    }
+  });
+
+  it('keeps global order when results arrive during a replay', async () => {
+    // Ordering is the other half of this task. New checks are appended to the tail while the
+    // head is still draining, and what the core sees must be one ordered stream — a replay that
+    // interleaves would write samples the core then has to sort.
+    const { spool, core, drain } = await harness({ batchMaxRows: 3 });
+    await spool.append(Array.from({ length: 9 }, (_, index) => result(index + 1)));
+
+    drain.start();
+    try {
+      await until(() => core.offered.length >= 1, 'the replay to start');
+      for (let id = 10; id <= 15; id += 1) await spool.append([result(id)]);
+
+      await until(() => spool.stats().pending === 0, 'everything to drain');
+      assert.deepEqual(
+        core.offered.flat().map((r) => r.sensorId),
+        Array.from({ length: 15 }, (_, index) => index + 1),
+        'the stream must be ordered end to end, backlog then live',
+      );
+    } finally {
+      await drain.stop();
+    }
   });
 });

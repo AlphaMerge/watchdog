@@ -15,7 +15,8 @@
     "checkQueueMaxLength": 1000,
     "checkAbortGraceMs": 2000,
     "spoolSegmentMaxBytes": 8388608,
-    "spoolBatchMaxRows": 500
+    "spoolBatchMaxRows": 500,
+    "spoolCatchUpMaxRows": 2000
   },
   "core": {
     "host": "127.0.0.1",

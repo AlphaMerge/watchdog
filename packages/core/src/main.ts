@@ -25,6 +25,7 @@ import { HistoryService } from './timeseries/history.js';
 import { SqlTimeSeriesStore } from './timeseries/store.js';
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
+import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
 import { ConfigChangeNotifier } from './probes/notifier.js';
 import { VERSION } from './version.js';
@@ -215,7 +216,14 @@ async function serve(): Promise<void> {
     timeoutMs: 20_000,
     run: () => ingestor.stop(),
   });
-  const ingestion = new IngestionService({ db, logger, ingestor });
+  const ingestion = new IngestionService({
+    db,
+    logger,
+    ingestor,
+    // Catch-up is paced separately from absolute queue pressure, so a fleet replaying their
+    // spools cannot queue everyone else's live results behind them (R-03).
+    pacer: new ReplayPacer({ config: config.ingestion.replay, logger }),
+  });
 
   const probeEndpoint = new ProbeEndpoint({
     config: config.probeEndpoint,

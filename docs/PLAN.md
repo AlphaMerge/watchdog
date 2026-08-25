@@ -446,7 +446,8 @@ exit criteria are untouched — neither can be met before Phase 3 and `P-08`.
 | --- | --- | --- |
 | R-02 disk-backed result spool | done | Segmented NDJSON, bounded and evicting oldest-first with a counter, torn tails healed on open; the drain clears nothing until the core confirms |
 | R-04 incremental config push | done | Protocol 3; content-addressed fingerprint on the handshake, deltas within a session, snapshot or `config-unchanged` after a disconnect; change detection rides the audit sink |
-| R-01, R-03, R-05…R-08 | not started | R-04 added the storage half of R-01: `probe_config.gid`, one branch per probe |
+| R-03 ordered replay on reconnect | done | Probes report their backlog; catch-up is paced by how many are replaying at once and live batches are never paced; larger batches once behind |
+| R-01, R-05…R-08 | not started | R-04 added the storage half of R-01: `probe_config.gid`, one branch per probe |
 
 Pulled forward out of order, on request, and it closed the loop the previous phases had left
 open: with `P-08` providing a sensor type and `R-04` telling a probe which sensors it owns, the
@@ -458,6 +459,10 @@ core was up when the check ran.
 scanning for 100 seconds, and the whole process was then restarted: 12 results came back off disk,
 replayed as one batch, and the per-minute sample timeline has no gap across the outage. PRTG
 buffers in RAM and loses that.
+
+`R-03` then made catch-up fair. The queue's own `retryAfterMs` is one global signal and slows
+every probe alike; a probe now reports how far behind it is, and only probes with a backlog are
+paced — so a reconnecting fleet cannot queue everyone else's live results behind it.
 
 What the system still cannot do is turn readings into *states* — Up, Warning, Down — which is
 Phase 3.

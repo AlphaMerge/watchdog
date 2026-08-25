@@ -669,7 +669,7 @@ because each is a decision rather than a defect:
       `/dev/shm`, which `drop_chunks` over a day of readings exhausts — reported as "No space left
       on device", which reads like a disk problem and is not one. `shm_size: 1gb` in
       `docker-compose.dev.yml`. It made the rollup perf test flaky, not R-02.
-- [ ] **R-03 — Ordered replay on reconnect** · L · R-02, S-07 · Rate-limited catch-up that cannot
+- [x] **R-03 — Ordered replay on reconnect** · L · R-02, S-07 · Rate-limited catch-up that cannot
       stall live ingestion; ordering preserved.
       **Added by S-07:** ordering per connection is already done — the endpoint chains a probe's
       result batches so an acknowledgement can never overtake an earlier batch still in flight.
@@ -682,6 +682,37 @@ because each is a decision rather than a defect:
       probes — a hundred reconnecting at once, each politely obeying its own signal, still
       arrives as a stampede — and a catch-up that yields to live results rather than starving
       them.
+      **R-03 outcome.** The gap was that `retryAfterMs` is *one global signal*: it rises with
+      queue depth and asks every probe to slow down, live and replaying alike. Right for absolute
+      capacity, wrong for fairness — a probe reporting a check that just ran was throttled exactly
+      as hard as one dumping an hour of spool, which is "live ingestion stalled by catch-up" in
+      one sentence.
+      **So the probe now says how far behind it is.** `results` carries an optional `backlog`,
+      because only the probe knows it. `ReplayPacer` adds delay to catch-up acknowledgements in
+      proportion to how many probes are catching up at once, and adds *nothing* to a batch with
+      no backlog behind it. A probe that has caught up rejoins the fast path on its very next
+      batch. It converges with no coordination: the count falls as probes finish, and the delay
+      each is asked for falls with it. Capped, because past a point asking politely is not the
+      tool — the queue's own refusals are, and they do not depend on a probe honouring a hint.
+      **Optional, so no version bump.** A version-3 probe that sends no `backlog` is read as
+      "unknown" and paced as live, which is exactly how it behaved before. Adding a nack reason
+      for "queued behind other probes" was considered and rejected: an unknown enum value fails
+      schema validation on an older probe and drops the connection, and the delay already carries
+      everything the probe acts on.
+      **Bigger bites when behind.** The drain uses `spoolCatchUpMaxRows` once there is a backlog —
+      the same rows in fewer round trips clear it sooner, and the sooner it clears the less time
+      that probe's own live results spend queued behind it. Pacing is by delay, not batch size,
+      so a larger batch does not take more of the core.
+      **Ordering** was already guaranteed per connection (S-07 chains a probe's batches); what is
+      new is a test that appends live results *during* a replay and asserts the core sees one
+      ordered stream end to end.
+      **Verified live:** with a live batch size of 2 and a catch-up size of 8, a probe recovering
+      10 spooled results sent 8 with `backlog: 2`, then 2 with `backlog: 0`, then returned to
+      one-result live batches — never paced again.
+      **Not done, deliberately:** within a single probe, live results still queue behind that
+      probe's own backlog. The spool is a durable FIFO and reordering it to prioritise the tail
+      would cost a much more complex cursor for a delay already bounded by how fast the backlog
+      drains — which is what the larger catch-up batches shorten.
 - [x] **R-04 — Incremental config push** · L · S-03, F-09 · Each probe receives only its own
       subtree, as deltas, with a resync path after a long disconnect.
       **R-04 outcome.** Protocol version 3: `config-set`, `config-delta`, `config-unchanged`

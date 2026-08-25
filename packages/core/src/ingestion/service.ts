@@ -2,6 +2,7 @@ import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from
 import type { Database } from '../db/pool.js';
 import { ChannelResolver } from './channels.js';
 import type { Ingestor, SampleRow } from './ingestor.js';
+import type { ReplayPacer } from './replay-pacer.js';
 
 export type ResultsMessage = Extract<ProbeToCoreMessage, { type: 'results' }>;
 
@@ -10,6 +11,8 @@ export interface IngestionServiceOptions {
   logger: Logger;
   ingestor: Ingestor;
   resolver?: ChannelResolver;
+  /** Absent leaves catch-up unpaced, which is how it behaved before R-03. */
+  pacer?: ReplayPacer;
 }
 
 export interface ResultStats {
@@ -39,6 +42,7 @@ export class IngestionService {
   readonly #logger: Logger;
   readonly #ingestor: Ingestor;
   readonly #resolver: ChannelResolver;
+  readonly #pacer: ReplayPacer | undefined;
 
   #resultsReceived = 0;
   #readingsReceived = 0;
@@ -52,6 +56,7 @@ export class IngestionService {
     this.#logger = options.logger.child({ component: 'ingestion' });
     this.#ingestor = options.ingestor;
     this.#resolver = options.resolver ?? new ChannelResolver({ logger: options.logger });
+    this.#pacer = options.pacer;
   }
 
   stats(): ResultStats {
@@ -108,11 +113,16 @@ export class IngestionService {
       };
     }
 
+    // The queue's hint says how full the core is; the pacer says how much of that capacity this
+    // probe may take. Added rather than maximised: a catch-up during genuine pressure should
+    // wait for both reasons, not for whichever happens to be larger.
+    const pacing = this.#pacer?.pace(source, message.backlog) ?? 0;
+
     return {
       type: 'results-ack',
       batchId: message.batchId,
       storedSamples: outcome.storedSamples,
-      retryAfterMs: outcome.retryAfterMs,
+      retryAfterMs: outcome.retryAfterMs + pacing,
     };
   }
 

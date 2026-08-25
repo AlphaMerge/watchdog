@@ -27,7 +27,13 @@
     "batchMaxRows": 1000,
     "batchMaxDelayMs": 250,
     "slowDownAtPercent": 50,
-    "retryAfterMs": 1000
+    "retryAfterMs": 1000,
+    "replay": {
+      "maxConcurrentProbes": 4,
+      "stepMs": 250,
+      "maxDelayMs": 30000,
+      "idleAfterMs": 30000
+    }
   },
   "housekeeping": {
     "enabled": true,

@@ -44,10 +44,11 @@ async function main(): Promise<void> {
       get connected() {
         return coreClient.connected;
       },
-      sendResults: (results) => coreClient.sendResults(results),
+      sendResults: (results, backlog) => coreClient.sendResults(results, backlog),
     },
     logger,
     batchMaxRows: config.probe.spoolBatchMaxRows,
+    catchUpMaxRows: config.probe.spoolCatchUpMaxRows,
   });
 
   const pool = new CheckPool({

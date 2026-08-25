@@ -11,6 +11,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { ReplayPacer } from '../src/ingestion/replay-pacer.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -24,6 +25,7 @@ function ingestion(overrides: Partial<IngestionConfig> = {}): IngestionConfig {
     batchMaxDelayMs: 20,
     slowDownAtPercent: 50,
     retryAfterMs: 1_000,
+    replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
     ...overrides,
   };
 }
@@ -424,13 +426,84 @@ describe(
     // The service the probe endpoint talks to.
     // ---------------------------------------------------------------------------------------
 
-    function service(config = ingestion()): { service: IngestionService; ingestor: Ingestor } {
+    function service(
+      config = ingestion(),
+      pacer?: ReplayPacer,
+    ): { service: IngestionService; ingestor: Ingestor } {
       const created = new Ingestor({ db, logger: silent, config });
       return {
-        service: new IngestionService({ db, logger: silent, ingestor: created }),
+        service: new IngestionService({
+          db,
+          logger: silent,
+          ingestor: created,
+          ...(pacer === undefined ? {} : { pacer }),
+        }),
         ingestor: created,
       };
     }
+
+    const batch = (backlog?: number) => ({
+      type: 'results' as const,
+      batchId: `batch-${String(process.hrtime.bigint())}`,
+      ...(backlog === undefined ? {} : { backlog }),
+      results: [
+        {
+          sensorId,
+          at: new Date(AT.getTime() + Number(process.hrtime.bigint() % 100_000n)).toISOString(),
+          outcome: 'ok' as const,
+          message: '',
+          durationMs: 1,
+          channels: [{ key: 'rtt', value: 1 }],
+        },
+      ],
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // Pacing catch-up so it cannot stall live ingestion (R-03).
+    // ---------------------------------------------------------------------------------------
+
+    it('does not slow a probe that has nothing behind it', async () => {
+      const pacer = new ReplayPacer({
+        config: { maxConcurrentProbes: 1, stepMs: 500, maxDelayMs: 5_000, idleAfterMs: 30_000 },
+        logger: silent,
+      });
+      const { service: svc } = service(ingestion(), pacer);
+
+      // Three probes deep in a replay, and the queue itself is nowhere near full.
+      for (const source of ['a', 'b', 'c']) await svc.acceptResults(source, batch(10_000));
+
+      const live = await svc.acceptResults('live-probe', batch(0));
+      assert.equal(live.type, 'results-ack');
+      assert.equal(
+        live.retryAfterMs,
+        0,
+        'a probe reporting a check that just ran must not be queued behind a replaying fleet',
+      );
+    });
+
+    it('slows a probe that is catching up behind others', async () => {
+      const pacer = new ReplayPacer({
+        config: { maxConcurrentProbes: 1, stepMs: 500, maxDelayMs: 5_000, idleAfterMs: 30_000 },
+        logger: silent,
+      });
+      const { service: svc } = service(ingestion(), pacer);
+
+      const first = await svc.acceptResults('a', batch(10_000));
+      assert.equal(first.type, 'results-ack');
+      assert.equal(first.retryAfterMs, 0, 'the first one through is not slowed');
+
+      const second = await svc.acceptResults('b', batch(10_000));
+      assert.equal(second.type, 'results-ack');
+      assert.equal(second.retryAfterMs, 500, 'one over the limit');
+    });
+
+    it('leaves the acknowledgement alone when no pacer is wired', async () => {
+      // The behaviour before R-03, and what a build without one still does.
+      const { service: svc } = service();
+      const reply = await svc.acceptResults('a', batch(10_000));
+      assert.equal(reply.type, 'results-ack');
+      assert.equal(reply.retryAfterMs, 0);
+    });
 
     it('acknowledges a results batch with the readings it stored', async () => {
       const { service: svc, ingestor: created } = service();

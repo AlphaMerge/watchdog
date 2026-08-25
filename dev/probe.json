@@ -13,7 +13,8 @@
     "spoolMaxBytes": 104857600,
     "workerPoolSize": 0,
     "spoolSegmentMaxBytes": 8388608,
-    "spoolBatchMaxRows": 500
+    "spoolBatchMaxRows": 500,
+    "spoolCatchUpMaxRows": 2000
   },
   "core": {
     "host": "127.0.0.1",

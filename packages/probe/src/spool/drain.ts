@@ -5,7 +5,7 @@ import type { ResultSpool } from './spool.js';
 /** The part of `CoreClient` a drain needs. An interface so tests need no socket. */
 export interface ResultSender {
   readonly connected: boolean;
-  sendResults(results: readonly CheckResult[]): Promise<ResultsOutcome>;
+  sendResults(results: readonly CheckResult[], backlog: number): Promise<ResultsOutcome>;
 }
 
 export interface SpoolDrainOptions {
@@ -13,6 +13,12 @@ export interface SpoolDrainOptions {
   client: ResultSender;
   logger: Logger;
   batchMaxRows: number;
+  /**
+   * Batch size once there is a backlog. Larger than `batchMaxRows` on purpose: the same rows in
+   * fewer round trips clear the backlog sooner, and the sooner it clears the less time this
+   * probe's own live results spend queued behind it.
+   */
+  catchUpMaxRows?: number;
   /** How long to wait before looking again when there is nothing to do. */
   idleMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -21,6 +27,10 @@ export interface SpoolDrainOptions {
 export interface DrainStats {
   /** Batches the core stored. */
   sent: number;
+  /** Results still on disk after the last batch. Probe Health reads this (P-13). */
+  backlog: number;
+  /** Longest delay the core has asked this probe to wait between batches. */
+  maxRetryAfterMs: number;
   /** Results the core refused as unparseable. Discarded, because they can never succeed. */
   rejected: number;
   /** Batches the core asked us to retry. */
@@ -48,19 +58,24 @@ export class SpoolDrain {
   readonly #client: ResultSender;
   readonly #logger: Logger;
   readonly #batchMaxRows: number;
+  readonly #catchUpMaxRows: number;
   readonly #idleMs: number;
   readonly #sleep: (ms: number) => Promise<void>;
 
   #running = false;
   #loop: Promise<void> | undefined;
   #wake: (() => void) | undefined;
-  #stats: DrainStats = { sent: 0, rejected: 0, retried: 0 };
+  #stats: DrainStats = { sent: 0, backlog: 0, maxRetryAfterMs: 0, rejected: 0, retried: 0 };
 
   constructor(options: SpoolDrainOptions) {
     this.#spool = options.spool;
     this.#client = options.client;
     this.#logger = options.logger.child({ component: 'spool-drain' });
     this.#batchMaxRows = options.batchMaxRows;
+    this.#catchUpMaxRows = Math.max(
+      options.catchUpMaxRows ?? options.batchMaxRows,
+      options.batchMaxRows,
+    );
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.#sleep =
       options.sleep ??
@@ -122,23 +137,36 @@ export class SpoolDrain {
   async #step(): Promise<number> {
     if (!this.#client.connected) return this.#idleMs;
 
-    const batch = await this.#spool.peek(this.#batchMaxRows);
-    if (batch.length === 0) return this.#idleMs;
+    // Behind, so take bigger bites. `pending` is what is on disk right now, so this reads the
+    // backlog before deciding how much of it to move.
+    const pending = this.#spool.stats().pending;
+    const take = pending > this.#batchMaxRows ? this.#catchUpMaxRows : this.#batchMaxRows;
 
-    const outcome = await this.#client.sendResults(batch);
+    const batch = await this.#spool.peek(take);
+    if (batch.length === 0) {
+      this.#stats.backlog = 0;
+      return this.#idleMs;
+    }
+
+    const backlog = Math.max(0, pending - batch.length);
+    this.#stats.backlog = backlog;
+    const outcome = await this.#client.sendResults(batch, backlog);
 
     if (outcome.kind === 'ack') {
       await this.#spool.commit();
       this.#stats.sent += 1;
+      this.#stats.maxRetryAfterMs = Math.max(this.#stats.maxRetryAfterMs, outcome.retryAfterMs);
       this.#logger.debug(
         {
           results: batch.length,
           stored: outcome.storedSamples,
-          pending: this.#spool.stats().pending,
+          backlog,
+          retryAfterMs: outcome.retryAfterMs,
         },
         'sent a batch of spooled results',
       );
-      // Straight back round when the core is happy; there may be a backlog behind this batch.
+      // Zero means straight back round. Anything else is the core pacing this probe's catch-up,
+      // which it can do and this probe cannot: only the core knows how many others are replaying.
       return outcome.retryAfterMs;
     }
 

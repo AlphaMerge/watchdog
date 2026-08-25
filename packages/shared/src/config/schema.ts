@@ -112,6 +112,20 @@ export interface IngestionConfig {
   slowDownAtPercent: number;
   /** How long a probe is asked to wait when it is slowed down or refused. */
   retryAfterMs: number;
+  /**
+   * How catch-up is paced so it cannot stall live ingestion (R-03).
+   *
+   * The queue's own `retryAfterMs` is one global signal and slows every probe alike. This
+   * applies only to probes reporting a backlog, in proportion to how many are catching up at
+   * once, so a probe reporting a check that just ran is never queued behind a fleet replaying
+   * their spools.
+   */
+  replay: {
+    maxConcurrentProbes: number;
+    stepMs: number;
+    maxDelayMs: number;
+    idleAfterMs: number;
+  };
 }
 
 export interface CoreConfig {
@@ -160,6 +174,12 @@ export interface ProbeConfig {
     spoolSegmentMaxBytes: number;
     /** Results per batch offered to the core, which refuses anything over 5,000 either way. */
     spoolBatchMaxRows: number;
+    /**
+     * Batch size once there is a backlog. Larger than `spoolBatchMaxRows`: the same rows in
+     * fewer round trips clear a backlog sooner, and the core paces catch-up by delay rather
+     * than by batch size (R-03).
+     */
+    spoolCatchUpMaxRows: number;
     /** 0 means "derive from CPU count". */
     workerPoolSize: number;
     /**
@@ -276,6 +296,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         'batchMaxDelayMs',
         'slowDownAtPercent',
         'retryAfterMs',
+        'replay',
       ],
       properties: {
         // 200,000 readings is about two minutes of the v1 target's output, and a few tens of
@@ -295,6 +316,24 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         batchMaxDelayMs: { type: 'integer', minimum: 1, maximum: 60_000, default: 250 },
         slowDownAtPercent: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
         retryAfterMs: { type: 'integer', minimum: 1, maximum: 300_000, default: 1_000 },
+        replay: {
+          type: 'object',
+          default: {} as IngestionConfig['replay'],
+          additionalProperties: false,
+          required: ['maxConcurrentProbes', 'stepMs', 'maxDelayMs', 'idleAfterMs'],
+          properties: {
+            // Four at once: enough that a small site's probes all catch up immediately, few
+            // enough that a large one's do not arrive as a single wall of writes.
+            maxConcurrentProbes: { type: 'integer', minimum: 1, maximum: 1_000, default: 4 },
+            stepMs: { type: 'integer', minimum: 1, maximum: 60_000, default: 250 },
+            // Past this, asking politely is not the tool any more — the queue's own refusals
+            // are, and they do not depend on a probe choosing to honour a hint.
+            maxDelayMs: { type: 'integer', minimum: 100, maximum: 600_000, default: 30_000 },
+            // Two heartbeat intervals' worth: long enough not to forget a probe between
+            // batches, short enough that a disconnected one stops counting against the others.
+            idleAfterMs: { type: 'integer', minimum: 1_000, maximum: 600_000, default: 30_000 },
+          },
+        },
       },
     },
     housekeeping: {
@@ -373,6 +412,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'spoolMaxBytes',
         'spoolSegmentMaxBytes',
         'spoolBatchMaxRows',
+        'spoolCatchUpMaxRows',
         'workerPoolSize',
         'checkQueueMaxLength',
         'checkAbortGraceMs',
@@ -394,6 +434,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         },
         // The core refuses a batch over 5,000 rows, so this cannot usefully exceed it.
         spoolBatchMaxRows: { type: 'integer', minimum: 1, maximum: 5_000, default: 500 },
+        spoolCatchUpMaxRows: { type: 'integer', minimum: 1, maximum: 5_000, default: 2_000 },
         workerPoolSize: { type: 'integer', minimum: 0, maximum: 1_024, default: 0 },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },

@@ -314,7 +314,7 @@ export class CoreClient {
    * A duplicate write costs nothing — the core's unique index on `(channel_id, time)` makes it
    * a no-op — while a discarded batch is a reading nothing can recover.
    */
-  async sendResults(results: readonly CheckResult[]): Promise<ResultsOutcome> {
+  async sendResults(results: readonly CheckResult[], backlog = 0): Promise<ResultsOutcome> {
     const connection = this.#connection;
     if (connection === undefined || this.#state !== 'connected') {
       throw new Error('not connected to the core');
@@ -326,7 +326,9 @@ export class CoreClient {
     return new Promise<ResultsOutcome>((resolve, reject) => {
       this.#inFlight.set(batchId, resolve);
       try {
-        connection.send({ type: 'results', batchId, results: [...results] });
+        // The core cannot tell a live batch from a replay without this, so it would have to
+        // slow both alike — which is how one probe's catch-up stalls everyone's live data.
+        connection.send({ type: 'results', batchId, results: [...results], backlog });
       } catch (error: unknown) {
         this.#inFlight.delete(batchId);
         reject(error instanceof Error ? error : new Error(String(error)));

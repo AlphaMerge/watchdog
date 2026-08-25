@@ -124,6 +124,14 @@ export type ProbeToCoreMessage =
        */
       batchId: string;
       results: CheckResult[];
+      /**
+       * Results still on disk *after* this batch, or absent when the probe does not track it.
+       *
+       * Only the probe knows this, and without it the core cannot tell a live batch from a
+       * probe replaying an hour of backlog — so it has to slow both down alike, which is
+       * precisely how a catch-up stalls everyone else's live ingestion (R-03).
+       */
+      backlog?: number;
     }
   | {
       type: 'config-ack';
@@ -227,6 +235,9 @@ const probeToCoreSchema = {
       properties: {
         type: { const: 'results' },
         batchId: { type: 'string', minLength: 1, maxLength: 128 },
+        // Optional, so a version-3 probe that does not report one still validates. Absent is
+        // read as "unknown", which is paced like a live batch — the behaviour before R-03.
+        backlog: { type: 'integer', minimum: 0 },
         results: {
           type: 'array',
           // Bounded here as well as by the 4 MB frame cap, so a malformed peer is refused by
