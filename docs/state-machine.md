@@ -256,7 +256,7 @@ Four sources, evaluated in this order every tick (`WORKFLOW.MD §5`):
 | - | ------------ | ------------ | --------------------------------------------- | -------------------------------------- |
 | 1 | Parent       | `parent`     | An ancestor being paused, cascading down      | That ancestor resuming                 |
 | 2 | Dependency   | `dependency` | A master object reaching `down`               | Master recovering, plus the delay      |
-| 3 | Schedule     | `schedule`   | A schedule's inactive window                  | The window ending                      |
+| 3 | Schedule     | `schedule`   | A schedule's inactive window (`M-09`)         | The window ending                      |
 | 4 | Manual       | `user`       | A person, indefinitely / timed / until a date | That person, or the timer expiring     |
 
 ### The rule
@@ -466,7 +466,7 @@ is waiting for one task to set it:
 
 | Input                    | Set by  | Until then                                            |
 | ------------------------ | ------- | ----------------------------------------------------- |
-| The four pause flags     | ~~`M-08`~~, `M-09`…`M-11` | `parent` and `manual` are live. `schedule` and `dependency` are still always false. |
+| The four pause flags     | ~~`M-08`~~, ~~`M-09`~~, `M-10`, `M-11` | `parent`, `manual` and `schedule` are live. `dependency` is still always false. |
 | `acknowledged_at/until`  | `M-13`  | Always null                                           |
 | `simulated_error`        | `M-14`  | Always false                                          |
 | The channel verdict (§2.2) | ~~`M-04`, `M-06`~~ | Live: limits and lookups both produce one |

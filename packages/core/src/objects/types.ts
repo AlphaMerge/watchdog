@@ -143,13 +143,35 @@ export interface PauseView {
   readonly objectId: ObjectId;
   readonly paused: boolean;
   readonly resumable: boolean;
-  readonly source: 'manual' | 'parent' | null;
+  /**
+   * Which source is reported, in the order `WORKFLOW.MD §5` evaluates them.
+   *
+   * Never which source is the *only* one: the four are an independent set, and a sensor held by
+   * a schedule and by an operator is held by both. `resumable` is what says whether this object
+   * is the one a resume would act on.
+   */
+  readonly source: 'manual' | 'parent' | 'schedule' | null;
   readonly pausedAt: string | null;
   /** `null` while paused indefinitely — until a person says otherwise. */
   readonly pausedUntil: string | null;
   readonly message: string;
   readonly actor: { readonly kind: string; readonly label: string | null } | null;
   readonly inheritedFrom: { readonly objectId: ObjectId; readonly name: string } | null;
+  /**
+   * The schedule in effect here, if any (`M-09`).
+   *
+   * On the view rather than left to the caller, because "why is this sensor paused" has four
+   * possible answers and a view that could only give two of them sent an operator to the state
+   * endpoint to find out which. `active` false is the object being paused right now.
+   */
+  readonly schedule: {
+    readonly id: number;
+    readonly name: string;
+    readonly active: boolean;
+    readonly nextChangeAt: string | null;
+    /** The object the assignment is on — the one to change to lift it. */
+    readonly definedOn: ObjectId;
+  } | null;
 }
 
 export interface ChannelRecord {

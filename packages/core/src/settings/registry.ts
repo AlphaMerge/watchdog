@@ -54,10 +54,31 @@ export const SCAN_RETRY_WARNINGS: SettingDefinition<number> = {
     'Consecutive failed scans reported as Warning before the sensor goes Down. 0 goes Down immediately.',
 };
 
+/**
+ * The schedule in effect for an object and everything beneath it (`M-09`).
+ *
+ * An ordinary inheritable setting rather than a mechanism of its own, so a group sets it, a
+ * device overrides it, and a sensor reverts to inherit — with one resolver, one API and one
+ * settings form, and no second parent-walk to keep in step with the first.
+ *
+ * `null` is both the default and a meaningful override: an object that sets it to null is
+ * saying "monitor me always", which is how one device inside a scheduled group is exempted
+ * without moving it out of the group.
+ */
+export const SCHEDULE_ID: SettingDefinition<number | null> = {
+  key: 'schedule.id',
+  schema: { type: ['integer', 'null'], minimum: 1 },
+  default: null,
+  description:
+    'The schedule that decides when this object and everything beneath it is monitored. ' +
+    'Null means always.',
+};
+
 const DEFINITIONS: readonly SettingDefinition<unknown>[] = [
   SCAN_INTERVAL_SECONDS,
   SCAN_TIMEOUT_MS,
   SCAN_RETRY_WARNINGS,
+  SCHEDULE_ID,
 ];
 
 const ajv = new Ajv({ allErrors: true, strict: false });

@@ -2,10 +2,11 @@ import type { Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
-import { settingRegistry } from '../settings/registry.js';
+import { settingRegistry, SCHEDULE_ID } from '../settings/registry.js';
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
 import { validateTransform } from '../ingestion/scaling.js';
 import { refuseResume, resolvePause, type PauseRequest } from '../state/pause.js';
+import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
 import { PauseRepository } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
@@ -57,8 +58,28 @@ export interface ObjectServiceOptions {
    * is not a system anyone should run.
    */
   states?: StateReevaluator;
+  /**
+   * What the pause view asks "is a schedule holding this object" (`M-09`).
+   *
+   * Read-only and optional: a schedule pauses through `sensor_runtime`, not through
+   * `object_pause`, so without this the view would report a sensor as unpaused while its state
+   * says Paused. Nothing here writes; `ScheduleSync` owns that.
+   */
+  schedules?: ScheduleLookup;
   /** Refuses a clone larger than this. Protects the request, not the database. */
   maxCloneObjects?: number;
+}
+
+/** Just enough of `ScheduleRepository` for the pause view to name the schedule. */
+export interface ScheduleLookup {
+  effectiveFor(
+    q: Queryable,
+    objectId: ObjectId,
+  ): Promise<{ scheduleId: number; definedOn: ObjectId } | null>;
+  get(
+    q: Queryable,
+    id: number,
+  ): Promise<{ id: number; name: string; definition: ScheduleDefinition } | null>;
 }
 
 /** Just enough of `SensorStateService` for a pause to take effect now. */
@@ -88,6 +109,7 @@ export class ObjectService {
   readonly #logger: Logger;
   readonly #pauses = new PauseRepository();
   readonly #states: StateReevaluator | undefined;
+  readonly #schedules: ScheduleLookup | undefined;
   readonly #maxCloneObjects: number;
 
   constructor(options: ObjectServiceOptions) {
@@ -98,6 +120,7 @@ export class ObjectService {
     this.#sensorTypes = options.sensorTypes;
     this.#logger = options.logger.child({ component: 'objects' });
     this.#states = options.states;
+    this.#schedules = options.schedules;
     this.#maxCloneObjects = options.maxCloneObjects ?? 5_000;
   }
 
@@ -498,12 +521,24 @@ export class ObjectService {
   async #pauseView(q: Queryable, id: ObjectId, now: Date): Promise<PauseView> {
     const effective = await this.#pauses.effective(q, id, now);
     const own = effective.own;
+    const schedule = await this.#scheduleView(q, id, now);
+    const scheduleHolds = schedule !== null && !schedule.active;
     return {
       objectId: id,
-      paused: own !== null || effective.inherited !== null,
+      paused: own !== null || effective.inherited !== null || scheduleHolds,
       // Only an own pause can be lifted here; everything else points at the object that can.
       resumable: own !== null,
-      source: own !== null ? 'manual' : effective.inherited !== null ? 'parent' : null,
+      // In the order §5 evaluates the sources — parent, dependency, schedule, manual — not in
+      // the order they are convenient to test. Reporting the manual pause on an object whose
+      // parent is also paused would name the one source a resume cannot lift.
+      source:
+        effective.inherited !== null
+          ? 'parent'
+          : scheduleHolds
+            ? 'schedule'
+            : own !== null
+              ? 'manual'
+              : null,
       pausedAt: own?.pausedAt.toISOString() ?? null,
       pausedUntil: own?.pausedUntil?.toISOString() ?? null,
       // The reason, wherever it lives: an operator looking at a cascaded sensor is asking why,
@@ -514,6 +549,26 @@ export class ObjectService {
         effective.inherited === null
           ? null
           : { objectId: effective.inherited.objectId, name: effective.inherited.name },
+      schedule,
+    };
+  }
+
+  /** The schedule in effect on an object, evaluated against the same clock as the pause. */
+  async #scheduleView(q: Queryable, id: ObjectId, now: Date): Promise<PauseView['schedule']> {
+    if (this.#schedules === undefined) return null;
+    const assignment = await this.#schedules.effectiveFor(q, id);
+    if (assignment === null) return null;
+    const schedule = await this.#schedules.get(q, assignment.scheduleId);
+    // An assignment pointing at a deleted schedule. The delete path refuses while anything
+    // references it, so this is a hand-edited row — reported as no schedule rather than as a
+    // crash, because the sensors under it are not paused either.
+    if (schedule === null) return null;
+    return {
+      id: schedule.id,
+      name: schedule.name,
+      active: isActiveAt(schedule.definition, now),
+      nextChangeAt: nextChangeAfter(schedule.definition, now)?.toISOString() ?? null,
+      definedOn: assignment.definedOn,
     };
   }
 
@@ -588,6 +643,19 @@ export class ObjectService {
       if (object === null) throw notFound(id);
       if (pre.kind === 'version' && object.version !== pre.expected) {
         throw versionConflict(id, pre.expected, object.version);
+      }
+
+      // A schedule id is the one setting whose value names a row in another table, and jsonb
+      // carries no foreign key. An id that resolves to nothing is a silent "never paused" —
+      // the assignment looks set, the UI shows a schedule, and monitoring never stops — so it
+      // is refused here rather than discovered when a maintenance window does not happen.
+      if (key === SCHEDULE_ID.key && typeof value === 'number' && this.#schedules !== undefined) {
+        if ((await this.#schedules.get(q, value)) === null) {
+          throw new ObjectError('OBJECT_INVALID', `no schedule ${String(value)}`, {
+            context: { objectId: id, phase: 'settings' },
+            details: { key, scheduleId: value },
+          });
+        }
       }
 
       const bound = this.#resolver.withExecutor(q);

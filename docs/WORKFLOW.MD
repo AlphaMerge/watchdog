@@ -299,8 +299,15 @@ flowchart LR
 ```
 
 - Schedules are **reusable named objects**, authored either as a weekday × hour grid or as a
-  list of inactive periods (`fr:19:30-mo:06:05 we:18:45-we:23:00`).
+  period list (`fr:19:30-mo:06:05 we:18:45-we:23:00`). A period list says explicitly which of
+  the two it describes: the times monitoring runs, or the times it is suspended. Both are
+  things operators write — "office hours" is naturally the first, "the weekend change freeze"
+  the second — and storing which one was meant is what stops an editor silently inverting
+  somebody's schedule. Grid cells always mark the monitored hours.
 - A schedule suppresses **monitoring, notifications and reports** — not just alerting.
+- A schedule assignment is an **inheritable setting** like any other: set it on a group and
+  everything beneath it follows, override it on a device, or set it to none so one device inside
+  a scheduled group is always watched.
 - A maintenance window is the one-off equivalent, with explicit start and end datetimes;
   ending it early means setting the end time to the past.
 - Schedules and dependencies are independent mechanisms and do not override each other.

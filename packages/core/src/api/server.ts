@@ -16,12 +16,15 @@ import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
+import { scheduleRoutes } from './routes/schedules.js';
 import { stateRoutes } from './routes/state.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
+import type { ScheduleService } from '../schedules/service.js';
 import { LOOKUP_SCHEMAS } from './schemas/lookups.js';
 import { PAUSE_SCHEMAS } from './schemas/pause.js';
+import { SCHEDULE_SCHEMAS } from './schemas/schedules.js';
 import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
@@ -41,6 +44,14 @@ export interface ApiServerOptions {
    * an empty list, which is the honest answer for an installation with no lookups.
    */
   lookups?: LookupCatalogue;
+  /**
+   * The schedule library (`M-09`).
+   *
+   * Optional so a test about objects need not build one; absent, the routes are simply not
+   * registered rather than served as an empty list — an installation whose schedules are
+   * missing should 404 rather than quietly report that it has none.
+   */
+  schedules?: ScheduleService;
 }
 
 /**
@@ -61,6 +72,7 @@ export class ApiServer {
   readonly #audit: AuditRepository;
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
+  readonly #schedules: ScheduleService | undefined;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -80,6 +92,7 @@ export class ApiServer {
     this.#audit = options.audit;
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
+    this.#schedules = options.schedules;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -129,6 +142,7 @@ export class ApiServer {
       ...STATE_SCHEMAS,
       ...LOOKUP_SCHEMAS,
       ...PAUSE_SCHEMAS,
+      ...SCHEDULE_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 
@@ -205,6 +219,9 @@ export class ApiServer {
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
         await scope.register(lookupRoutes, { lookups: this.#lookups });
+        if (this.#schedules !== undefined) {
+          await scope.register(scheduleRoutes, { schedules: this.#schedules });
+        }
       },
       { prefix: '/api/v1' },
     );

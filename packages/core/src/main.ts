@@ -17,6 +17,11 @@ import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { ObjectService } from './objects/service.js';
 import { PauseExpiry } from './objects/pause-expiry.js';
+import { SchedulePauses } from './schedules/pauses.js';
+import { ScheduleRepository } from './schedules/repository.js';
+import { ScheduleService } from './schedules/service.js';
+import { ScheduleSweep } from './schedules/sweep.js';
+import { ScheduleSync } from './schedules/sync.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
@@ -176,6 +181,12 @@ async function serve(): Promise<void> {
   const states = new SensorStateService({ db, logger, settings: resolver });
   const cacheInvalidator = new ResultCacheInvalidator({ channels, sensors: states, logger });
 
+  // What turns a schedule into `sensor_runtime.paused_by_schedule` (M-09). It rides the audit
+  // sink for the same reason the config push does — assigning a schedule, editing one and
+  // moving a device into a scheduled group are three code paths, and all three end in one.
+  const schedulePauses = new SchedulePauses({ logger, states });
+  const scheduleSync = new ScheduleSync({ pauses: schedulePauses, logger });
+
   const service = new ObjectService({
     db,
     repository: new ObjectRepository(),
@@ -188,15 +199,31 @@ async function serve(): Promise<void> {
       new LoggingAuditSink(logger),
       configNotifier,
       cacheInvalidator,
+      scheduleSync,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
     // for maintenance means now, and a sensor that alarmed thirty seconds into a planned outage
     // is the exact failure pausing exists to prevent.
     states,
+    // Read-only: the pause view has to be able to say "held by the office-hours schedule", and
+    // a schedule pauses through `sensor_runtime` rather than through `object_pause` (M-09).
+    schedules: new ScheduleRepository(),
     logger,
   });
   logSensorTypes(logger, catalogue);
+
+  // The library itself. Its own audit sink, so a schedule edit re-derives the flags in the same
+  // transaction that changed it — the same composite the object service uses, because a
+  // schedule change has to reach the probes exactly as an object change does.
+  const scheduleAudit = new CompositeAuditSink([
+    new DatabaseAuditSink(),
+    new LoggingAuditSink(logger),
+    configNotifier,
+    scheduleSync,
+  ]);
+  const schedules = new ScheduleService({ db, audit: scheduleAudit, logger });
+  await schedules.seedBuiltIns();
 
   const history = new HistoryService({ db, logger, store });
   // Notices when a timed pause runs out. Every read already accounts for the clock; this is
@@ -212,6 +239,27 @@ async function serve(): Promise<void> {
     },
   });
 
+  // Notices when a schedule's window opens or closes (M-09). On the wall-clock minute, which is
+  // the resolution a schedule has; an installation that assigns none pays one `LIMIT 1` a
+  // minute for it.
+  const scheduleSweep = new ScheduleSweep({
+    db,
+    pauses: schedulePauses,
+    logger,
+    onChanged: () => {
+      configNotifier.flush();
+    },
+  });
+  scheduleSweep.start();
+  lifecycle.onShutdown({
+    name: 'schedule-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      scheduleSweep.stop();
+      return Promise.resolve();
+    },
+  });
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -222,6 +270,7 @@ async function serve(): Promise<void> {
     audit: new AuditRepository(),
     catalogue,
     lookups,
+    schedules,
   });
   await api.build(VERSION, service);
   await api.start();

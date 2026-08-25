@@ -66,7 +66,10 @@ export class ResultCacheInvalidator implements AuditSink {
       // `channel.*` mutation carries the sensor's id, and the alternative — three names to keep
       // in step with the union — is a list `M-07` had already fallen off before its own test
       // caught it.
-      if (mutation.action.startsWith('channel.')) {
+      // `objectId` is null on the schedule mutations, which are about a library object and
+      // never about a channel; the guard is what makes the prefix test type-safe as well as
+      // correct.
+      if (mutation.action.startsWith('channel.') && mutation.objectId !== null) {
         this.#forgetSensor(mutation.objectId);
       } else if (
         mutation.action === 'setting.set' ||

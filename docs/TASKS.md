@@ -710,11 +710,82 @@ because each is a decision rather than a defect:
       is the least useful error a UI can render. `M-12`'s "cascade-paused children cannot be
       resumed individually" is therefore already in place for the two sources that exist.
 
-- [ ] **M-09 — Schedules** · L · M-08 · **`M-08` left the flag:**
+- [x] **M-09 — Schedules** · L · M-08 · **`M-08` left the flag:**
       `sensor_runtime.paused_by_schedule`, plus `PauseRepository.recompute` to model a second
       derived source on, and `SensorStateService.reevaluate` to make a window opening or closing
       take effect at the moment it does. Reusable schedule objects; weekly grid **and** period-list
       (`ww:hh:mm-ww:hh:mm`) authoring; suppress monitoring, notifications and reports.
+
+      **M-09 outcome.** Migration 011 adds `schedule`; `packages/core/src/schedules/` holds the
+      model (`definition.ts`), the storage and derivation (`repository.ts`), the recompute
+      (`pauses.ts`), the CRUD service, the audit-sink hook (`sync.ts`) and the sweep.
+      `GET`/`POST`/`PUT`/`DELETE /schedules`. Assigning one is not a route of its own — see
+      below.
+
+      **A library table, not a branch of the tree.** A schedule is referenced by many objects and
+      belongs to none; giving it a place in the tree would give it a parent whose settings it
+      inherits, a position among siblings and a pause of its own. `[V2]`'s templates and report
+      definitions want the same shape.
+
+      **The assignment is an ordinary inheritable setting** (`schedule.id`), so a group sets it,
+      a device overrides it, a sensor reverts, and the settings form renders it for free — one
+      inheritance chain resolved in one place, as `CLAUDE.md` requires. Setting it to `null`
+      explicitly is a meaningful override: "monitor me always", which is how one device inside a
+      scheduled group is exempted. The price is that jsonb carries no foreign key, so the delete
+      path checks for references itself and names the objects still using it.
+
+      **One canonical form, two editors.** Half-open intervals in minutes from Monday 00:00,
+      sorted, disjoint and merged. A period that wraps past Sunday midnight — `fr:19:00-mo:06:00`,
+      the shape every maintenance window has — is stored as the two intervals it really is, so
+      the evaluator is a containment test with no wraparound case. The grid is a rendering of the
+      same intervals, with `gridIsExact` false when minute-level edges cannot be drawn on hourly
+      cells, so a UI can say that switching editors will round rather than letting somebody find
+      out by saving.
+
+      **Polarity is stored, because the two source documents disagreed.** `CAPABILITIES.MD §5`
+      describes a grid whose marked cells are when monitoring runs; `WORKFLOW.MD §8` gave its
+      period-list example as a maintenance window, which is the complement. Both are things
+      operators write, one is the negation of the other, and an editor that silently inverted
+      what somebody typed would be worse than either reading. `WORKFLOW.MD §8` now says so.
+      Validation refuses a schedule that resolves to no monitored minutes at all in either
+      polarity — that is a permanent outage with a name, and the way somebody discovers it months
+      later is the failure this subsystem exists to prevent.
+
+      **A schedule carries its own time zone**, `null` meaning the core's own. Office hours that
+      do not move with daylight saving are not office hours, so the evaluation goes through
+      `Intl` rather than offset arithmetic; both transitions are table-tested, including the
+      autumn one where an hour happens twice and the naive next-boundary arithmetic is an hour
+      out.
+
+      **Derived downward, not upward.** `resolveForObjects` answers "what does this sensor
+      inherit" by walking from each of five thousand sensors to the root; `applyPauses` walks
+      from each *assignment* — of which an installation has a handful — down to the sensors it
+      covers, stopping where a nearer assignment takes over. Same rule, opposite direction, and a
+      test asserts the two agree rather than trusting that they do.
+
+      **On the wall-clock minute, not a computed deadline.** A deadline worked out an hour ago is
+      an hour wrong the moment a country changes its clocks, and the boundaries that matter most
+      are the ones nobody is awake for. Aligning to the minute cannot drift and costs one
+      `LIMIT 1` a minute in an installation that assigns no schedules. That guard asks two
+      questions, not one: a test found that "nothing is assigned" is not "nothing to do", because
+      clearing the last assignment leaves the flags it set standing.
+
+      **Immediate on every write path that can invalidate it** — assigning, reverting, editing
+      the schedule, moving a device — because `ScheduleSync` rides the audit sink and therefore
+      runs inside the mutation's own transaction. `object.created` is deliberately excluded:
+      discovery creates sensors in thousands and a full recompute per create is the regression
+      `P-04`'s budget caught in `M-08`. A sensor created inside a closed window is paused by the
+      next sweep instead — bounded, stated, and `M-12`'s to close properly with a subtree-scoped
+      recompute if it matters.
+
+      **Notifications and reports are not suppressed here**, because neither exists yet. The
+      schedule is resolved and exposed (`GET /objects/:id/pause` names it, and `nextChangeAt`
+      says when it lifts) so `N-12` and `[V2]`'s reports consult one answer rather than deriving
+      a second.
+
+      Also fixed on the way past: `PauseView.source` reported a manual pause ahead of a parent
+      cascade, which is the opposite of the order `WORKFLOW.MD §5` evaluates them in and the
+      exact class of bug `M-01`'s tables exist to prevent.
 - [ ] **M-10 — Maintenance windows** · M · M-09 · One-off start/end datetimes; early cancel by
       setting the end to the past.
 - [ ] **M-11 — Dependencies** · L · M-08 · **`M-08` left the flag:**

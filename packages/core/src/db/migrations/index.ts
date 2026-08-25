@@ -9,6 +9,7 @@ import { migration007 } from './007-probe-identity.js';
 import { migration008 } from './008-sensor-runtime.js';
 import { migration009 } from './009-channel-lookup.js';
 import { migration010 } from './010-object-pause.js';
+import { migration011 } from './011-schedules.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -27,6 +28,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration008,
   migration009,
   migration010,
+  migration011,
 ];
 
 export type { Migration } from './types.js';

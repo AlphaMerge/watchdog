@@ -11,6 +11,7 @@ import {
 } from '../../src/objects/audit.js';
 import { ObjectRepository } from '../../src/objects/repository.js';
 import { ObjectService } from '../../src/objects/service.js';
+import { ScheduleRepository } from '../../src/schedules/repository.js';
 import { SensorStateService } from '../../src/state/service.js';
 import { testSensorTypes } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
@@ -91,6 +92,9 @@ export async function buildHarness(
     audit,
     sensorTypes: testSensorTypes(),
     ...(states === undefined ? {} : { states }),
+    // Read-only, and unconditional: the pause view has to be able to say a schedule is holding
+    // an object (`M-09`), and a harness that could not would let that regress unnoticed.
+    schedules: new ScheduleRepository(),
     logger: silent,
   });
 

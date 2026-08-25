@@ -19,12 +19,13 @@ export const pauseViewSchema = {
     'pausedUntil',
     'message',
     'inheritedFrom',
+    'schedule',
   ],
   properties: {
     objectId: { type: 'integer' },
     paused: { type: 'boolean' },
     resumable: { type: 'boolean' },
-    source: { enum: ['manual', 'parent', null] },
+    source: { enum: ['manual', 'parent', 'schedule', null] },
     pausedAt: { type: ['string', 'null'] },
     /** `null` while paused indefinitely — until a person says otherwise. */
     pausedUntil: { type: ['string', 'null'] },
@@ -41,6 +42,19 @@ export const pauseViewSchema = {
       additionalProperties: false,
       required: ['objectId', 'name'],
       properties: { objectId: { type: 'integer' }, name: { type: 'string' } },
+    },
+    /** The schedule in effect here (`M-09`), whether it is monitoring, and where it is set. */
+    schedule: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['id', 'name', 'active', 'nextChangeAt', 'definedOn'],
+      properties: {
+        id: { type: 'integer' },
+        name: { type: 'string' },
+        active: { type: 'boolean' },
+        nextChangeAt: { type: ['string', 'null'] },
+        definedOn: { type: 'integer' },
+      },
     },
   },
 } as const;

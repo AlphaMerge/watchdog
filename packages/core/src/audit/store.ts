@@ -1,5 +1,5 @@
 import type { Queryable } from '../db/pool.js';
-import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
+import type { Actor, AuditSink, Mutation, ScheduleAudit } from '../objects/audit.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { ChannelProcessing } from '../objects/types.js';
 import type { ObjectKind } from '../objects/types.js';
@@ -256,6 +256,46 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       };
     }
 
+    case 'schedule.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
+        diff: SCHEDULE_FIELDS.map((field) => ({
+          field: `schedule.${field}`,
+          before: null,
+          after: mutation.after[field],
+        })),
+      };
+
+    case 'schedule.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
+        // Only what moved. Editing a schedule's periods and editing its description are very
+        // different events, and a diff that listed all five every time would not say which.
+        diff: SCHEDULE_FIELDS.filter(
+          (field) => mutation.before[field] !== mutation.after[field],
+        ).map((field) => ({
+          field: `schedule.${field}`,
+          before: mutation.before[field],
+          after: mutation.after[field],
+        })),
+      };
+
+    case 'schedule.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.before.name },
+        diff: SCHEDULE_FIELDS.map((field) => ({
+          field: `schedule.${field}`,
+          before: mutation.before[field],
+          after: null,
+        })),
+      };
+
     case 'setting.set':
       return {
         ...base,
@@ -351,6 +391,14 @@ const PROCESSING_FIELDS = [
   'spikeMin',
   'spikeMax',
 ] as const satisfies readonly (keyof ChannelProcessing)[];
+
+const SCHEDULE_FIELDS = [
+  'name',
+  'description',
+  'polarity',
+  'timezone',
+  'periods',
+] as const satisfies readonly (keyof ScheduleAudit)[];
 
 const LIMIT_FIELDS = [
   'enabled',

@@ -154,7 +154,51 @@ export type Mutation =
       sensorsAffected: number;
     }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
-  | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown };
+  | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
+  | {
+      /**
+       * A schedule was created, changed or removed (`M-09`).
+       *
+       * `objectId` is null because a schedule is not in the object tree: it is a library object
+       * that many objects reference and none contains. The audit column is nullable for exactly
+       * this, and the schedule's own id travels in the summary.
+       *
+       * Auditable because editing a schedule silently changes when several thousand sensors are
+       * watched — a wider blast radius than most single-object edits, and one nobody would
+       * think to look for after the fact.
+       */
+      action: 'schedule.created';
+      objectId: null;
+      scheduleId: number;
+      after: ScheduleAudit;
+    }
+  | {
+      action: 'schedule.updated';
+      objectId: null;
+      scheduleId: number;
+      before: ScheduleAudit;
+      after: ScheduleAudit;
+    }
+  | {
+      action: 'schedule.deleted';
+      objectId: null;
+      scheduleId: number;
+      before: ScheduleAudit;
+    };
+
+/**
+ * A schedule as the audit log records it.
+ *
+ * The periods in their text form rather than as intervals: a diff is read by a person, and
+ * `fr:19:00-mo:06:00` is a change somebody can recognise where `[{"start":6900,...}]` is not.
+ */
+export interface ScheduleAudit {
+  readonly name: string;
+  readonly description: string;
+  readonly polarity: 'active' | 'inactive';
+  readonly timezone: string | null;
+  readonly periods: string;
+}
 
 export interface AuditSink {
   /**
@@ -249,5 +293,18 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'setting.set':
     case 'setting.reverted':
       return { action: mutation.action, objectId: mutation.objectId, key: mutation.key };
+    case 'schedule.created':
+    case 'schedule.deleted':
+      return {
+        action: mutation.action,
+        scheduleId: mutation.scheduleId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'schedule.updated':
+      return {
+        action: mutation.action,
+        scheduleId: mutation.scheduleId,
+        name: mutation.after.name,
+      };
   }
 }
