@@ -304,7 +304,19 @@ test it exhaustively.
 | Task | State | Notes |
 | --- | --- | --- |
 | M-01 state and pause precedence tables | done | `docs/state-machine.md` plus `packages/core/src/state/tables.ts`; all sixteen pause combinations written out and computed, and asserted to agree |
-| M-02…M-19 | not started | |
+| M-02 core state machine | done | `packages/core/src/state/`; migration 008 adds `sensor_runtime`. Decisions ride in the readings' own transaction, so a state change and the readings that caused it commit together. Measured cost **8.3% of ingestion throughput** — 2.53M samples/min against 2.76M without, p99 write 38.8 ms against a 100 ms budget |
+| M-03…M-19 | not started | |
+
+**Where Phase 3's exit criteria stand after `M-02`.**
+
+- *No sequence of events reaches an undefined state* — the whole input space is enumerated in
+  `state-machine.test.ts`: 16 pause combinations × simulated × probe × acknowledged × 5 scan
+  facts × 4 channel verdicts, asserting exactly one v1 state, a cause on every one, and each
+  invariant of `state-machine.md` §5. `M-16` still owns the property test over event
+  *sequences*, which needs `M-12` and `M-13` to have events to shuffle.
+- *Paused states survive a core restart* — the columns are there and are read back on the first
+  result after a restart; a restart-with-a-pause scenario is testable once `M-08` can set one.
+- *One dependency-suppressed alarm, not forty* — untouched; `M-11` and `M-17`.
 
 The tables are the specification `M-02` implements against, which is the order this phase's risk
 demands: precedence is a *set* of independent sources, not a priority chain, and the sixteen-row

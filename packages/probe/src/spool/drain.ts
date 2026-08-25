@@ -153,7 +153,9 @@ export class SpoolDrain {
     const outcome = await this.#client.sendResults(batch, backlog);
 
     if (outcome.kind === 'ack') {
-      await this.#spool.commit();
+      // Counted before the commit, deliberately. These count what the core answered, which is
+      // already true — and an observer that sees the spool empty must not see the counters
+      // still behind, because clearing the spool is what tells everyone the batch is done.
       this.#stats.sent += 1;
       this.#stats.maxRetryAfterMs = Math.max(this.#stats.maxRetryAfterMs, outcome.retryAfterMs);
       this.#logger.debug(
@@ -165,6 +167,7 @@ export class SpoolDrain {
         },
         'sent a batch of spooled results',
       );
+      await this.#spool.commit();
       // Zero means straight back round. Anything else is the core pacing this probe's catch-up,
       // which it can do and this probe cannot: only the core knows how many others are replaying.
       return outcome.retryAfterMs;
@@ -174,12 +177,12 @@ export class SpoolDrain {
       // The one refusal that retrying cannot fix. Keeping it would jam every result behind it
       // for ever, so it is discarded — loudly, and counted, because silently losing readings is
       // the failure mode this whole file exists to avoid.
-      await this.#spool.commit();
       this.#stats.rejected += batch.length;
       this.#logger.error(
         { results: batch.length, totalRejected: this.#stats.rejected },
         'the core refused a batch as invalid; discarding it rather than blocking the spool',
       );
+      await this.#spool.commit();
       return 0;
     }
 

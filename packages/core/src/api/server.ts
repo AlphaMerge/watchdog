@@ -15,8 +15,10 @@ import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
+import { stateRoutes } from './routes/state.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
+import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
 export interface ApiServerOptions {
@@ -107,7 +109,12 @@ export class ApiServer {
   }
 
   async build(version: string, service: ObjectService): Promise<void> {
-    for (const schema of [...SHARED_SCHEMAS, ...HISTORY_SCHEMAS, ...AUDIT_SCHEMAS])
+    for (const schema of [
+      ...SHARED_SCHEMAS,
+      ...HISTORY_SCHEMAS,
+      ...AUDIT_SCHEMAS,
+      ...STATE_SCHEMAS,
+    ])
       this.#app.addSchema(schema);
 
     await this.#app.register(fastifySwagger, {
@@ -179,6 +186,7 @@ export class ApiServer {
       async (scope) => {
         await scope.register(objectRoutes, { service, buildVersion: version });
         await scope.register(historyRoutes, { history: this.#history });
+        await scope.register(stateRoutes, { db: this.#db });
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
       },

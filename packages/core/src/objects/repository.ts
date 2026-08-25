@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import type { SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
 import type {
@@ -69,6 +70,7 @@ interface SummaryRow {
   depth?: number;
   host: string | null;
   sensor_type: string | null;
+  state: SensorState | null;
 }
 
 /** Columns every detail read needs, joined to the two kind-specific side tables. */
@@ -86,6 +88,7 @@ const DETAIL_FROM = `
   LEFT JOIN device_config dc ON dc.object_id = o.id
   LEFT JOIN sensor_config sc ON sc.object_id = o.id
   LEFT JOIN probe_config pc ON pc.object_id = o.id
+  LEFT JOIN sensor_runtime sr ON sr.object_id = o.id
 `;
 
 /**
@@ -95,7 +98,7 @@ const DETAIL_FROM = `
 const SUMMARY_COLUMNS = `
   o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.version, o.sort_order,
   EXISTS (SELECT 1 FROM object c WHERE c.parent_id = o.id) AS has_children,
-  dc.host, sc.type AS sensor_type
+  dc.host, sc.type AS sensor_type, sr.state
 `;
 
 /**
@@ -167,6 +170,10 @@ function toSummary(row: SummaryRow): ObjectSummary {
     ...(row.depth === undefined ? {} : { depth: row.depth }),
     ...(row.host === null ? {} : { host: row.host }),
     ...(row.sensor_type === null ? {} : { sensorType: row.sensor_type }),
+    // Present for a sensor and absent for everything else, rather than defaulted to `unknown`:
+    // a group has no state, and one that read as Unknown would be indistinguishable from a
+    // sensor that has never reported.
+    ...(row.state === null ? {} : { state: row.state }),
   };
 }
 

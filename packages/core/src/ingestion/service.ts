@@ -1,5 +1,7 @@
 import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import type { StateDecisions } from '../state/runtime.js';
+import type { SensorResult, SensorStateService, StateStats } from '../state/service.js';
 import { ChannelResolver } from './channels.js';
 import type { Ingestor, SampleRow } from './ingestor.js';
 import type { ReplayPacer } from './replay-pacer.js';
@@ -13,6 +15,11 @@ export interface IngestionServiceOptions {
   resolver?: ChannelResolver;
   /** Absent leaves catch-up unpaced, which is how it behaved before R-03. */
   pacer?: ReplayPacer;
+  /**
+   * The state machine (`M-02`). Absent stores readings and decides nothing, which is what a
+   * throughput benchmark wants and no running system does.
+   */
+  states?: SensorStateService;
 }
 
 export interface ResultStats {
@@ -26,16 +33,22 @@ export interface ResultStats {
   discardedUnknownSensor: number;
   channelsCreated: number;
   cachedChannels: number;
+  /** Absent when no state machine is wired. */
+  state?: StateStats;
 }
 
 /**
- * Turns a probe's `results` message into readings, and answers it.
+ * Turns a probe's `results` message into readings and states, and answers it.
  *
  * The division of labour is `WORKFLOW.MD` §4: the probe reports what happened to the check, the
- * core decides what that means. So this reads the channel values and stores them, and leaves
- * `outcome` and `message` for the state machine (`M-02`), which is the only thing entitled to
- * decide whether a sensor is Up, Warning or Down — limits and lookups are the core's
- * configuration, not the probe's.
+ * core decides what that means. So the channel values are stored here, and `outcome`, `message`
+ * and the sensor's own history go to the state machine (`M-02`) — the only thing entitled to
+ * decide whether a sensor is Up, Warning or Down, because limits, lookups, pauses and
+ * acknowledgements are the core's configuration and a probe knows none of them.
+ *
+ * The two halves are decided separately and written together. A failed check is the case that
+ * makes the distinction visible: it contributes no readings at all and yet is the most
+ * important thing in the batch.
  */
 export class IngestionService {
   readonly #db: Database;
@@ -43,6 +56,7 @@ export class IngestionService {
   readonly #ingestor: Ingestor;
   readonly #resolver: ChannelResolver;
   readonly #pacer: ReplayPacer | undefined;
+  readonly #states: SensorStateService | undefined;
 
   #resultsReceived = 0;
   #readingsReceived = 0;
@@ -57,6 +71,7 @@ export class IngestionService {
     this.#ingestor = options.ingestor;
     this.#resolver = options.resolver ?? new ChannelResolver({ logger: options.logger });
     this.#pacer = options.pacer;
+    this.#states = options.states;
   }
 
   stats(): ResultStats {
@@ -68,6 +83,7 @@ export class IngestionService {
       discardedUnknownSensor: this.#discardedUnknownSensor,
       channelsCreated: this.#channelsCreated,
       cachedChannels: this.#resolver.cached,
+      ...(this.#states === undefined ? {} : { state: this.#states.stats() }),
     };
   }
 
@@ -91,10 +107,14 @@ export class IngestionService {
     }
 
     let samples: SampleRow[];
+    let decisions: StateDecisions | undefined;
     try {
       samples = await this.#toSamples(usable);
+      // Every result, not just the usable ones: a check that failed has no readings and is
+      // precisely the one the state machine exists for.
+      decisions = await this.#states?.decide(toSensorResults(message.results));
     } catch (error: unknown) {
-      this.#logger.error({ err: error, source }, 'could not resolve channels for a results batch');
+      this.#logger.error({ err: error, source }, 'could not prepare a results batch for storage');
       return {
         type: 'results-nack',
         batchId: message.batchId,
@@ -103,8 +123,16 @@ export class IngestionService {
       };
     }
 
-    const outcome = await this.#ingestor.submit({ source, samples });
+    const outcome = await this.#ingestor.submit({
+      source,
+      samples,
+      ...(decisions === undefined ? {} : { states: decisions }),
+    });
     if (!outcome.accepted) {
+      // Nothing committed, so the probe will offer the batch again — but the machine has
+      // already moved. Rewinding it here is what stops the resent results looking stale and the
+      // state change being lost for good.
+      if (decisions !== undefined) this.#states?.forget(decisions);
       return {
         type: 'results-nack',
         batchId: message.batchId,
@@ -170,4 +198,27 @@ export class IngestionService {
     }
     return samples;
   }
+}
+
+/**
+ * The state machine's view of a batch: every result, whatever its outcome, minus the ones whose
+ * timestamp is not a date.
+ *
+ * An unparseable time is already counted as a discard by `#usableResults`; it is dropped again
+ * here rather than defaulted, because a result with no usable time cannot be ordered against
+ * the last one, and ordering is what makes the machine idempotent.
+ */
+function toSensorResults(results: readonly CheckResult[]): SensorResult[] {
+  const usable: SensorResult[] = [];
+  for (const result of results) {
+    const at = Date.parse(result.at);
+    if (Number.isNaN(at)) continue;
+    usable.push({
+      sensorId: result.sensorId,
+      at: new Date(at),
+      outcome: result.outcome,
+      message: result.message,
+    });
+  }
+  return usable;
 }

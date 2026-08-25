@@ -85,7 +85,7 @@ function TreeRow({ item }: { item: ObjectSummary }): React.JSX.Element {
 
       {item.kind === 'sensor' && (
         <span className="ml-auto shrink-0">
-          <StatusBadge state="unknown" size="sm" />
+          <StatusBadge state={item.state ?? 'unknown'} size="sm" />
         </span>
       )}
     </li>

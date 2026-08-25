@@ -192,6 +192,16 @@ export const TRANSITIONS: readonly Transition[] = [
     trigger: 'recovered to a warning, which clears the acknowledgement',
   },
   { from: 'paused', to: 'unknown', causes: ['scan'], trigger: 'the last pause source cleared' },
+  // Re-entry with a different cause. Not a change of state, but a change an operator has to
+  // see — Warning because the scan failed and Warning because a limit was breached are two
+  // different problems — and §5 invariant 10 requires it to be recorded. Added by `M-02`,
+  // whose conformance test drove the machine into it and found the table silent.
+  ...(['up', 'warning', 'down'] as const).map((state): Transition => ({
+    from: state,
+    to: state,
+    causes: ['scan', 'limit', 'lookup'],
+    trigger: 'the reason changed, not the state',
+  })),
   // Reachable from every state, including itself when the reported cause changes.
   ...V1_STATES.map((from): Transition => ({
     from,

@@ -7,11 +7,11 @@ const ALL: SensorState[] = [
   'up',
   'warning',
   'down',
-  'down-acknowledged',
+  'down_acknowledged',
   'paused',
   'unknown',
   'unusual',
-  'down-partial',
+  'down_partial',
 ];
 
 describe('StatusBadge', () => {
@@ -34,7 +34,7 @@ describe('StatusBadge', () => {
   });
 
   it('distinguishes acknowledged from plain Down', () => {
-    render(<StatusBadge state="down-acknowledged" />);
+    render(<StatusBadge state="down_acknowledged" />);
     expect(screen.getByText('Down (acknowledged)')).toBeDefined();
   });
 

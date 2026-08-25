@@ -133,6 +133,21 @@ else
   failed=1
 fi
 
+echo "==> asserting the state machine is wired into the packaged build"
+# A fresh install has no sensors, so no state can be produced — but the route being registered
+# proves migration 008 applied and M-02's read side shipped. An unregistered route answers
+# ROUTE_NOT_FOUND; a registered one looks for the object and answers OBJECT_NOT_FOUND. The
+# difference is the whole assertion.
+state_code="$(docker exec "${container}" curl -s http://127.0.0.1:8080/api/v1/sensors/999999/state \
+  | sed -n 's/.*"code":"\([A-Z_]*\)".*/\1/p')"
+if [ "${state_code}" = "OBJECT_NOT_FOUND" ]; then
+  echo "    GET /api/v1/sensors/:id/state: registered"
+else
+  echo "    GET /api/v1/sensors/:id/state: FAILED — answered ${state_code:-nothing}" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+
 echo "==> asserting the data lifecycle ran"
 # The housekeeping loop is what rolls up, compresses and drops. It runs on a timer inside the
 # service, so a packaging or migration fault that leaves it dead would otherwise show up as

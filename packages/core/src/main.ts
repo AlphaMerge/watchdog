@@ -27,6 +27,7 @@ import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
+import { SensorStateService } from './state/service.js';
 import { ConfigChangeNotifier } from './probes/notifier.js';
 import { VERSION } from './version.js';
 
@@ -223,6 +224,9 @@ async function serve(): Promise<void> {
     // Catch-up is paced separately from absolute queue pressure, so a fleet replaying their
     // spools cannot queue everyone else's live results behind them (R-03).
     pacer: new ReplayPacer({ config: config.ingestion.replay, logger }),
+    // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
+    // own transaction, so the two can never disagree about what happened.
+    states: new SensorStateService({ db, logger }),
   });
 
   const probeEndpoint = new ProbeEndpoint({

@@ -6,6 +6,10 @@
  * `secret` property anywhere in this file, and a test walks every schema to keep it that way.
  */
 
+// Imported rather than repeated: migration 003 defines the enum, `state/tables.ts` mirrors it
+// under test, and a third copy here would be the one that drifts.
+import { SENSOR_STATES } from '../../state/tables.js';
+
 const OBJECT_KINDS = ['root', 'probe', 'group', 'device', 'sensor'] as const;
 const CREDENTIAL_KINDS = ['snmp', 'windows', 'ssh', 'vmware', 'database', 'http'] as const;
 
@@ -78,6 +82,7 @@ export const objectSummarySchema = {
     depth: { type: 'integer' },
     host: { type: 'string' },
     sensorType: { type: 'string' },
+    state: { enum: SENSOR_STATES },
     effective: { type: 'object', additionalProperties: { $ref: 'ms:resolvedSetting' } },
   },
 } as const;

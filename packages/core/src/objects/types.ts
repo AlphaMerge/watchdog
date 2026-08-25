@@ -1,6 +1,7 @@
 import type { CredentialKind, ResolvedSetting, SettingSource } from '../settings/inheritance.js';
+import type { SensorState } from '../state/tables.js';
 
-export type { CredentialKind, ResolvedSetting, SettingSource };
+export type { CredentialKind, ResolvedSetting, SensorState, SettingSource };
 
 export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
 /** Every kind the API can create. The root is seeded by migration 001 and there is only one. */
@@ -90,6 +91,18 @@ export interface ObjectSummary {
   readonly depth?: number;
   readonly host?: string;
   readonly sensorType?: string;
+  /**
+   * A sensor's current state (`M-02`). Absent on every other kind, and on a sensor that has
+   * never reported.
+   *
+   * On the summary and not on `ObjectDetail`, deliberately. The detail read is conditional —
+   * it carries an ETag whose validator is built from configuration versions — and a fact that
+   * changes on every scan would either be served stale behind a 304 or force the validator to
+   * move once a minute for every sensor, which would also push a fresh configuration to every
+   * probe (`R-04` diffs on exactly those versions). Listings are never conditionally cached,
+   * so this is where a live fact belongs.
+   */
+  readonly state?: SensorState;
   readonly effective?: Readonly<Record<string, ResolvedSetting>>;
 }
 

@@ -15,7 +15,7 @@ const PRESENTATION: Record<SensorState, Presentation> = {
     classes: 'bg-warning-bg text-warning-fg border-warning-border',
   },
   down: { label: 'Down', glyph: '■', classes: 'bg-down-bg text-down-fg border-down-border' },
-  'down-acknowledged': {
+  down_acknowledged: {
     label: 'Down (acknowledged)',
     glyph: '◆',
     classes: 'bg-ack-bg text-ack-fg border-ack-border',
@@ -36,7 +36,7 @@ const PRESENTATION: Record<SensorState, Presentation> = {
     glyph: '◇',
     classes: 'bg-unknown-bg text-unknown-fg border-unknown-border',
   },
-  'down-partial': {
+  down_partial: {
     label: 'Down (partial)',
     glyph: '◧',
     classes: 'bg-unknown-bg text-unknown-fg border-unknown-border',

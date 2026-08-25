@@ -5,6 +5,7 @@ import type {
   ChannelRecord,
   HistorySeries,
   ObjectDetail,
+  SensorStateView,
   SensorTypeSummary,
 } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
@@ -22,6 +23,9 @@ export function ObjectDetailView(): React.JSX.Element {
     object.status === 'ready' ? `/objects/${id}/audit?limit=10` : null,
   );
   const history = useApi<HistorySeries>(isSensor ? `/sensors/${id}/history` : null);
+  // Read separately from the object, because it is the one thing here that changes on its own:
+  // the object read is conditional and a live state behind an ETag would be served stale.
+  const state = useApi<SensorStateView>(isSensor ? `/sensors/${id}/state` : null);
   const types = useApi<{ items: SensorTypeSummary[] }>(isSensor ? '/sensor-types' : null);
 
   // Whether the catalogue knows this sensor's type changes what withheld parameters *mean*.
@@ -45,7 +49,9 @@ export function ObjectDetailView(): React.JSX.Element {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold text-text">{detail.name}</h1>
           <span className="text-xs uppercase tracking-wide text-text-muted">{detail.kind}</span>
-          {detail.kind === 'sensor' && <StatusBadge state="unknown" size="sm" />}
+          {detail.kind === 'sensor' && state.status === 'ready' && (
+            <SensorState view={state.data} />
+          )}
         </div>
       </header>
 
@@ -274,5 +280,27 @@ function History({ series }: { series: HistorySeries }): React.JSX.Element {
         Empty cells are gaps, not zeroes — a Down sensor records no channel values at all.
       </p>
     </div>
+  );
+}
+
+/**
+ * The badge, plus the part of a state that is not the state: why, and since when.
+ *
+ * "Down" on its own is what an operator already knows from the colour. The cause is what tells
+ * them where to look, and it is the reason every transition records one.
+ */
+function SensorState({ view }: { view: SensorStateView }): React.JSX.Element {
+  const since = new Date(view.since);
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <StatusBadge state={view.state} size="sm" />
+      <span className="text-xs text-text-muted">
+        {view.cause} · since{' '}
+        <time dateTime={view.since} title={view.since}>
+          {since.toLocaleString()}
+        </time>
+        {view.pausedBy.length > 1 && ` · also paused by ${view.pausedBy.slice(1).join(', ')}`}
+      </span>
+    </span>
   );
 }

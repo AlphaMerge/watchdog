@@ -4,6 +4,7 @@ import { coreConfigSchema, loadConfig, type CheckResult, type CoreConfig } from 
 import type { Database } from '../../src/db/pool.js';
 import { Ingestor, type SampleRow } from '../../src/ingestion/ingestor.js';
 import { IngestionService } from '../../src/ingestion/service.js';
+import { SensorStateService } from '../../src/state/service.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -255,6 +256,160 @@ describe(
       assert.ok(
         perMinute >= TARGET_PER_MINUTE,
         `sustained ${Math.round(perMinute).toString()} samples/minute through the full path`,
+      );
+    });
+
+    it('carries the state machine for a bounded, measured cost', async () => {
+      // M-02 adds two statements per write: an UPDATE over `sensor_runtime` for every sensor in
+      // the batch, and an INSERT into `sensor_state` only for the ones that actually moved. The
+      // claim that this is affordable at the v1 target is measured here rather than asserted.
+      const keys = ['rtt', 'loss', 'jitter'];
+      const ticks = 100;
+      const total = ticks * sensorIds.length * keys.length;
+
+      const healthy = (from: number): CheckResult[][] =>
+        Array.from({ length: ticks }, (_, tick) =>
+          sensorIds.map((sensorId) => ({
+            sensorId,
+            at: new Date(from + tick * 60_000).toISOString(),
+            outcome: 'ok' as const,
+            message: '',
+            durationMs: 2,
+            channels: keys.map((key) => ({ key, value: tick + key.length })),
+          })),
+        );
+
+      const build = (states: boolean): { service: IngestionService; ingestor: Ingestor } => {
+        const ingestor = new Ingestor({ db, logger: silent, config: SHIPPED });
+        return {
+          ingestor,
+          service: new IngestionService({
+            db,
+            logger: silent,
+            ingestor,
+            ...(states ? { states: new SensorStateService({ db, logger: silent }) } : {}),
+          }),
+        };
+      };
+
+      /**
+       * Every batch offered at once, as a fleet of probes would.
+       *
+       * Valid here only because every result in this run succeeded: whichever order they land
+       * in, the sensor is Up afterwards. Offering *one* probe's batches concurrently would not
+       * be — the machine is a fold over time, and it correctly discards a result that arrives
+       * behind a newer one. A probe never does that: the spool drain keeps one batch in flight.
+       */
+      const measure = async (
+        label: string,
+        from: number,
+        states: boolean,
+      ): Promise<{ label: string; perMinute: number; transitions: number; p99: number }> => {
+        const { service, ingestor } = build(states);
+        const messages = healthy(from);
+
+        // Warm the caches — channels and runtimes alike. Steady state is what is being
+        // measured, not the first minute after a restart.
+        await service.acceptResults('probe-warm', {
+          type: 'results',
+          batchId: `warm-${label}`,
+          results: messages[0] ?? [],
+        });
+
+        const startedAt = process.hrtime.bigint();
+        await Promise.all(
+          messages.map((results, index) =>
+            service.acceptResults('probe-1', {
+              type: 'results',
+              batchId: `${label}-${String(index)}`,
+              results,
+            }),
+          ),
+        );
+        await ingestor.stop();
+        const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+        return {
+          label,
+          perMinute: (total / elapsedMs) * 60_000,
+          transitions: ingestor.stats().storedStateChanges,
+          p99: ingestor.stats().writeMs.p99,
+        };
+      };
+
+      const day = 86_400_000;
+      const base = new Date('2026-07-10T00:00:00.000Z').getTime();
+      const without = await measure('no states', base, false);
+      const steady = await measure('steady', base + day, true);
+
+      // What a flapping fleet costs, which is the other shape entirely: in steady state the
+      // history insert never runs, and here it runs for every sensor on every scan. Offered one
+      // batch at a time, because alternating outcomes *are* order-sensitive — so this measures
+      // the cost of a batch rather than the throughput of a fleet, and is reported as such.
+      const flapTicks = 20;
+      const { service, ingestor } = build(true);
+      const flapBase = base + 2 * day;
+      const startedAt = process.hrtime.bigint();
+      for (let tick = 0; tick < flapTicks; tick += 1) {
+        await service.acceptResults('probe-flap', {
+          type: 'results',
+          batchId: `flap-${String(tick)}`,
+          results: sensorIds.map((sensorId) => ({
+            sensorId,
+            at: new Date(flapBase + tick * 60_000).toISOString(),
+            outcome: tick % 2 === 1 ? ('error' as const) : ('ok' as const),
+            message: tick % 2 === 1 ? 'simulated failure' : '',
+            durationMs: 2,
+            channels: tick % 2 === 1 ? [] : keys.map((key) => ({ key, value: tick + key.length })),
+          })),
+        });
+      }
+      await ingestor.stop();
+      const flapMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const flapping = ingestor.stats();
+      assert.ok(
+        flapping.writeMs.p99 < P99_BUDGET_MS,
+        `p99 write was ${flapping.writeMs.p99.toFixed(1)} ms while every sensor was flapping`,
+      );
+
+      process.stdout.write(
+        `\n    measured, ${String(sensorIds.length)} sensors x ${String(ticks)} scans, ` +
+          `${String(total)} readings:\n` +
+          [without, steady]
+            .map(
+              (row) =>
+                `      ${row.label.padEnd(10)} ` +
+                `${Math.round(row.perMinute).toLocaleString('en-GB').padStart(11)} samples/min  ` +
+                `p99 ${row.p99.toFixed(1).padStart(6)} ms  ` +
+                `${String(row.transitions).padStart(5)} transitions written`,
+            )
+            .join('\n') +
+          `\n      state machine costs ` +
+          `${(100 - (steady.perMinute / without.perMinute) * 100).toFixed(1)}% of throughput\n` +
+          `      flapping   every sensor changing state on every scan: p99 write ` +
+          `${flapping.writeMs.p99.toFixed(1)} ms, ` +
+          `${String(flapping.storedStateChanges)} transitions in ` +
+          `${String(flapping.writes)} writes\n` +
+          `                 (${(flapMs / flapTicks).toFixed(0)} ms per batch end to end, of ` +
+          `which ${String(SHIPPED.batchMaxDelayMs)} ms is the flush timer — one probe offering ` +
+          `one batch at a time never fills a write)\n`,
+      );
+
+      assert.equal(steady.transitions, sensorIds.length, 'one transition each, then nothing');
+      assert.equal(
+        flapping.storedStateChanges,
+        sensorIds.length * (flapTicks - 1),
+        'and a flapping fleet writes a row every time it moves — every scan, here',
+      );
+      // The criterion, with the machine in the path: adding states must not cost the phase's
+      // exit number.
+      assert.ok(
+        steady.perMinute >= TARGET_PER_MINUTE,
+        `sustained ${Math.round(steady.perMinute).toString()} samples/minute with the state machine`,
+      );
+      assert.ok(
+        steady.p99 < P99_BUDGET_MS,
+        `p99 write was ${steady.p99.toFixed(1)} ms with the state machine`,
       );
     });
   },

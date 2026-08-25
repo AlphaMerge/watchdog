@@ -444,7 +444,7 @@ because each is a decision rather than a defect:
       **16 tests**, including two that read the enums back out of a migrated database: a state
       the code can produce and the column cannot store is a write that fails while recording an
       outage.
-- [ ] **M-02 — Core state machine** · L · M-01, P-05 · The six v1 states (Up, Warning, Down,
+- [x] **M-02 — Core state machine** · L · M-01, P-05 · The six v1 states (Up, Warning, Down,
       Down (Acknowledged), Paused, Unknown), all transitions between them, cause attribution on
       every change. Unusual and Down (Partial) are `[V2]`; leave room in the type for them.
       **Added by S-07:** the wire already carries what this needs — a result's `outcome`,
@@ -452,9 +452,43 @@ because each is a decision rather than a defect:
       dropped there, because deciding a state is this task's job, not the probe's. Hook in at
       that point. `sensor_state` writes want the same batching the readings get, so extend
       `Ingestor` with a second row type rather than opening a second pipeline.
-- [ ] **M-03 — Two-step failure and retry policy** · M · M-02 · Per-sensor policy from
+
+      **M-02 outcome.** `packages/core/src/state/` — `machine.ts` is the layered model of
+      `docs/state-machine.md` §2 as a pure function with no database, clock or logger, so the
+      whole of Phase 3's principal risk is driven from a table; `runtime.ts` is the rows;
+      `service.ts` is the cache that makes deciding a state a map lookup at the v1 target.
+      Migration 008 adds `sensor_runtime`: current state, cause, message, since, the failure
+      count, the four pause flags, the acknowledgement and the simulated-error flag — one row
+      per sensor, created **by trigger on `sensor_config`** so a clone or a discovery run cannot
+      produce a sensor whose pause `UPDATE` silently matches nothing. It carries no
+      `object_touch_owner` trigger: a scan is not a configuration change, and if it bumped
+      `object.version` every interval, `R-04` would push a fresh configuration to every probe
+      once a minute. For the same reason state is on `ObjectSummary` (listings are never
+      conditionally cached) and **not** on `ObjectDetail`, whose ETag is a configuration
+      validator; `GET /sensors/:id/state` is the whole answer for one sensor, `no-store`.
+
+      Three things the conformance test found rather than review: `M-01`'s transition table was
+      silent about re-entering a state with a different cause, which §5 invariant 10 requires
+      (now `TRANSITIONS`, and `state-machine.md` §4.2); an expiring acknowledgement must report
+      `user`, not `scan`; and "cleared by recovery" cannot mean "the state is not Down", because
+      a lost probe reads Unknown and clearing there un-suppresses an outage nobody has fixed.
+
+      Measured (`test/perf/ingestion-performance.test.ts`): 2.53M samples/min with the machine
+      against 2.76M without — **8.3% of throughput**, 25× the 100,000/min exit criterion, p99
+      write 38.8 ms against a 100 ms budget. A fleet where every sensor changes state on every
+      scan writes 1,900 transitions at a p99 of 28.2 ms.
+
+      Left unwired on purpose, each with a layer, a column and a test: the pause flags
+      (`M-08`…`M-11`), the acknowledgement (`M-13`), the simulated error (`M-14`), the channel
+      verdict (`M-04`/`M-06`) and probe reachability (`R-05`, and deliberately not persisted).
+      `state-machine.md` §7 is the table.
+- [ ] **M-03 — Two-step failure and retry policy** · M · M-02 · **`M-02` left the shape:**
+      `FailurePolicy { warnFor }` in `state/machine.ts`, one policy for the whole system with
+      `warnFor: 1`. This makes it per-sensor and inheritable; nothing else in §2.1 moves. Per-sensor policy from
       immediate-down through warn-N-intervals-then-down; default one warning interval.
-- [ ] **M-04 — Channel limits** · M · M-02 · Upper/lower error and warning limits, custom limit
+- [ ] **M-04 — Channel limits** · M · M-02 · **`M-02` left the plug point:** `ChannelVerdict`
+      in `state/machine.ts` is §2.2's output and is `null` today, so the state is the query
+      state alone. Produce one and the layered model already combines it. Upper/lower error and warning limits, custom limit
       messages, immediate effect (not subject to the two-step rule).
 - [ ] **M-05 — Multi-channel state rollup** · S · M-04 · Sensor state = worst channel state
       combined with the query-failure state.
@@ -463,7 +497,9 @@ because each is a decision rather than a defect:
       reporting.
 - [ ] **M-07 — Scaling factors and spike filter** · S · M-04 · Multiplication/division, decimal
       places, min/max spike discard.
-- [ ] **M-08 — Manual pause** · M · M-02 · Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,
+- [ ] **M-08 — Manual pause** · M · M-02 · **`M-02` left the column:**
+      `sensor_runtime.paused_manually`, one row per sensor from the moment it exists. Set it and
+      re-evaluate; `clearedByResume` is what the *last* source clearing calls. Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,
       optional message. Persists across core restart.
       **Added by S-03:** a cloned object is created manually paused with the message
       `cloned from #<sourceId>`, with a scenario test. All clone paths go through
@@ -479,10 +515,13 @@ because each is a decision rather than a defect:
 - [ ] **M-12 — Pause precedence integration** · M · M-08…M-11 · Parent cascade → dependency →
       schedule → manual, exhaustively tested. Cascade-paused children cannot be resumed
       individually, and the API says so clearly.
-- [ ] **M-13 — Acknowledgement** · M · M-02 · Down (Acknowledged) state, until-options, message
+- [ ] **M-13 — Acknowledgement** · M · M-02 · **`M-02` left the columns and the transitions:**
+      `acknowledged_at` / `acknowledged_until`, expiry against the result clock, and clearing on
+      a recovery that a reading decided. What is missing is the API, the presets and who did it. Down (Acknowledged) state, until-options, message
       stored as last message, expiry back to Down, cleared by pause+resume, permission grantable to
       read-only users.
-- [ ] **M-14 — Simulated error state** · S · M-02 · Force a sensor Down to test notification
+- [ ] **M-14 — Simulated error state** · S · M-02 · **`M-02` left the column and the layer:**
+      `sensor_runtime.simulated_error`, evaluated below pause and above everything else. Force a sensor Down to test notification
       chains end to end.
 - [ ] **M-15 — State-change log** · M · M-02, S-10 · Every transition with previous state, new
       state, message and cause.
@@ -773,7 +812,9 @@ because each is a decision rather than a defect:
       the wheel scheduled them, and `icmp.ping` ran against `ms-target` on its own. Adding a third
       sensor to the live tree arrived as a delta of one upsert.
 - [ ] **R-05 — Probe offline handling** · M · R-01, M-02 · One alarm for the probe; its sensors go
-      Unknown, not Down.
+      Unknown, not Down. **`M-02` left the layer:** `StateFacts.probeReachable`, evaluated third
+      and deliberately **not persisted** — restoring it from a table would record a transition
+      for every sensor on every core restart, an alarm storm generated by the restart itself.
 - [ ] **R-06 — Version skew detection** · M · F-09 · Core and probe negotiate a protocol version;
       incompatibility is reported clearly, never silently mishandled.
 - [ ] **R-07 — Probe installers** · L · F-07 · Linux and Windows probe-only packages with a

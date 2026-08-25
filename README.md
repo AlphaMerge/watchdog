@@ -162,8 +162,12 @@ as it acknowledges them, so they survive the core being down and the probe being
 (`R-02`). They land in the `sample` hypertable and are readable through
 `GET /api/v1/sensors/{id}/history`.
 
-Sensors still read **Unknown** in the UI: turning readings into states is the Phase 3 state
-machine, and nothing writes `sensor_state` yet.
+Every result also decides a state (`M-02`). A sensor goes **Unknown → Up** on its first
+successful scan, **Up → Warning → Down** across two consecutive failures, and back to **Up** on
+recovery — each change appended to `sensor_state` with what it changed from, why, and the
+probe's own message. A failed check records no readings at all, so a graph breaks the line
+rather than drawing it to zero. `GET /api/v1/sensors/{id}/state` is the current answer for one
+sensor; listings carry `state` so the tree can colour itself.
 
 ## Configuration
 

@@ -12,19 +12,19 @@ export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
 /**
  * The six v1 states of `WORKFLOW.MD` §4, plus the two `[V2]` ones the type must accommodate.
  *
- * Nothing produces any of these yet — the state machine is Phase 3 — so every sensor reads as
- * `unknown` today. The union exists now so the day `sensor_state` is written, the UI is already
- * shaped for it rather than being retrofitted.
+ * Spelled exactly as the database enum and the wire spell them. A hyphenated variant here would
+ * mean a translation on every read, and the failure mode of a missed translation is a state
+ * that silently matches nothing.
  */
 export type SensorState =
   | 'up'
   | 'warning'
   | 'down'
-  | 'down-acknowledged'
+  | 'down_acknowledged'
   | 'paused'
   | 'unknown'
   | 'unusual'
-  | 'down-partial';
+  | 'down_partial';
 
 export interface ObjectSummary {
   id: number;
@@ -38,6 +38,8 @@ export interface ObjectSummary {
   depth?: number;
   host?: string;
   sensorType?: string;
+  /** A sensor's current state (`M-02`). Absent on other kinds, and before the first result. */
+  state?: SensorState;
 }
 
 export interface ObjectDetail extends ObjectSummary {
@@ -112,4 +114,23 @@ export interface HistorySeries {
   buckets: string[];
   channels: HistoryChannel[];
   segments: { table: string; from: string; to: string }[];
+}
+
+/** `GET /sensors/:id/state` — the whole answer for one sensor (`M-02`). */
+export interface SensorStateView {
+  sensorId: number;
+  state: SensorState;
+  cause: string;
+  message: string;
+  since: string;
+  lastResultAt: string | null;
+  consecutiveFailures: number;
+  /**
+   * Every pause source holding this sensor, not only the one `cause` names. The four are an
+   * independent set: clearing the reported one does not necessarily resume it.
+   */
+  pausedBy: ('parent' | 'dependency' | 'schedule' | 'manual')[];
+  acknowledged: boolean;
+  acknowledgedUntil?: string | null;
+  simulatedError: boolean;
 }

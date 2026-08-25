@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
-import type { ObjectDetail, SensorTypeSummary, TreePage } from '../api/types';
+import type { ObjectDetail, SensorState, SensorTypeSummary, TreePage } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 
@@ -9,6 +9,21 @@ interface OpenApi {
 }
 
 const KINDS = ['probe', 'group', 'device', 'sensor'] as const;
+
+/**
+ * Worst first. An operator opening this page is looking for what is broken, and a list that
+ * leads with the healthy majority makes them read past it every time.
+ */
+const STATE_ORDER = [
+  'down',
+  'down_partial',
+  'down_acknowledged',
+  'warning',
+  'unusual',
+  'unknown',
+  'paused',
+  'up',
+] as const satisfies readonly SensorState[];
 
 export function Overview(): React.JSX.Element {
   const root = useApi<ObjectDetail>('/objects/root');
@@ -34,6 +49,16 @@ export function Overview(): React.JSX.Element {
     for (const item of tree.data.items) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
   }
   const sensorCount = counts.get('sensor') ?? 0;
+
+  const states = new Map<SensorState, number>();
+  if (tree.status === 'ready') {
+    for (const item of tree.data.items) {
+      if (item.kind !== 'sensor') continue;
+      // A sensor that has never reported has no state at all, which is exactly Unknown.
+      const state = item.state ?? 'unknown';
+      states.set(state, (states.get(state) ?? 0) + 1);
+    }
+  }
   const typeCount = types.status === 'ready' ? types.data.items.length : 0;
 
   return (
@@ -75,25 +100,20 @@ export function Overview(): React.JSX.Element {
             </Empty>
           ) : (
             <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <StatusBadge state="unknown" />
-                <span className="text-sm text-text">
-                  {sensorCount} sensor{sensorCount === 1 ? '' : 's'}
-                </span>
-              </div>
-              {/*
-                Being straight about it rather than drawing a green dial. Every sensor reads
-                Unknown because nothing writes `sensor_state` yet: the state machine is Phase 3,
-                and there is no sensor type to run in the first place until P-08.
-              */}
+              <ul className="flex flex-wrap gap-x-6 gap-y-2">
+                {STATE_ORDER.filter((state) => (states.get(state) ?? 0) > 0).map((state) => (
+                  <li key={state} className="flex items-center gap-2">
+                    <StatusBadge state={state} size="sm" />
+                    <span className="text-sm tabular-nums text-text">{states.get(state) ?? 0}</span>
+                  </li>
+                ))}
+              </ul>
               <p className="text-sm text-text-muted">
-                Every sensor is <strong className="font-medium text-text">Unknown</strong>, and will
-                be until three things land: a sensor type to run (
-                <code className="font-mono">P-08</code>
-                ), the config push that tells a probe which sensors it owns (
-                <code className="font-mono">R-04</code>), and the state machine that turns results
-                into states (<code className="font-mono">Phase 3</code>). Nothing here is measuring
-                anything yet.
+                {sensorCount} sensor{sensorCount === 1 ? '' : 's'}, from{' '}
+                <code className="font-mono">sensor_state</code>. A sensor reads{' '}
+                <strong className="font-medium text-text">Unknown</strong> until its first result —
+                and again after a resume, because a state measured before a pause is not something
+                the system has checked since.
               </p>
             </div>
           ))}

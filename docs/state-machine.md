@@ -88,6 +88,12 @@ Per-sensor policy: `immediate` makes the first failure `down`; `warn N` holds `w
 consecutive failures before `down`. Default N = 1, giving the table above. A successful scan
 resets the counter to zero.
 
+`M-02` implements the policy as `FailurePolicy { warnFor }` with that default, and the counter
+is persisted in `sensor_runtime.consecutive_failures` — not held in memory. A restart between
+the first and second failure would otherwise silently hold a genuinely down sensor at Warning
+for another interval, which is a deploy changing what an operator is told about an outage.
+`M-03` makes the policy per-sensor and inheritable; nothing else about §2.1 moves.
+
 ### 2.2 Channel state — were the readings acceptable?
 
 From limits (`M-04`) and lookups (`M-06`). **Immediate**: the two-step rule does not apply, so a
@@ -127,6 +133,12 @@ Applied last, and only to `down`:
 - On expiry while still failing, the state returns to `down` with cause `user` — the change an
   operator needs to see is that the acknowledgement lapsed, not that the target is still down.
   *Decided here.*
+- **"Recovery" means a reading decided the state.** Layers 1 to 3 short-circuit before the
+  reading is looked at, so a sensor that reads `unknown` because its probe went away has not
+  recovered from anything, and clearing the acknowledgement there would un-suppress an outage
+  nobody has fixed. *Decided by `M-02`*, whose test drove exactly that sequence.
+- **Expiry is evaluated against the result's clock**, not the wall clock, so replaying a spool
+  writes the history it would have written live. *Decided by `M-02`.*
 
 ---
 
@@ -214,6 +226,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
 | any but `paused`    | `down`              | Simulated error set                                | `simulated`            |
+| `up`/`warning`/`down` | itself            | The reason changed, not the state                  | `scan` / `limit` / `lookup` |
 
 **Not in v1:** every transition into or out of `unusual` and `down_partial`.
 
@@ -234,6 +247,15 @@ same documents, which is why the diagram not drawing it is an omission rather th
 | any → `down` on simulated error    | `PLAN.md` Phase 3: a simulated error state for testing chains       |
 
 Nothing in the diagram is missing from the table.
+
+### 4.2 What `M-02` added
+
+One row, found by the conformance test rather than by reading: the machine moved from
+`warning` (`scan`) to `warning` (`limit`) and the table was silent about it. §5 invariant 10
+already required that change to be recorded — "including one whose state is the same as the last
+if its *cause* differs" — so the omission was in the table, not in the rule. Re-entry with a new
+cause is now listed, for `up`, `warning` and `down`. It is a real event: Warning because the scan
+failed and Warning because a limit was breached are two different problems.
 
 ---
 
@@ -272,6 +294,39 @@ Named so they are decisions rather than omissions:
 - **`M-11`** — where the "delay after dependency ends" timer lives and what restarts it if the
   master flaps during the delay.
 - **`M-15`** — the state-change log. §5 invariant 10 is what it has to record.
-- **Restart.** Pause state must survive a core restart (Phase 3 exit criterion). It is
-  configuration, so it belongs in the object tree rather than in `sensor_state`, which is
-  history. *Decided here*; the column is `M-02`'s to add.
+- **Restart.** ~~Pause state must survive a core restart~~ — done by `M-02`. The columns are on
+  `sensor_runtime` (migration 008), one row per sensor, created by trigger the moment a sensor
+  exists so that a later task's `UPDATE ... SET paused_manually = true` cannot silently match
+  nothing.
+
+---
+
+## 7. What `M-02` built, and what it deliberately left unwired
+
+The machine is complete: every layer of §2 is evaluated, every v1 transition of §4 is reachable,
+and `state-machine.test.ts` drives the whole input space — 16 pause combinations × simulated ×
+probe × acknowledged × 5 scan facts × 4 channel verdicts — asserting totality, determinism and
+each invariant of §5.
+
+What it does **not** do is decide the inputs. Each of these has a layer, a column and a test, and
+is waiting for one task to set it:
+
+| Input                    | Set by  | Until then                                            |
+| ------------------------ | ------- | ----------------------------------------------------- |
+| The four pause flags     | `M-08`…`M-11` | Always false. §3 is fully implemented and unreachable. |
+| `acknowledged_at/until`  | `M-13`  | Always null                                           |
+| `simulated_error`        | `M-14`  | Always false                                          |
+| The channel verdict (§2.2) | `M-04`, `M-06` | `null` — the state is the query state alone   |
+| `probeReachable`         | `R-05`  | Always true, and **not persisted**: it is a fact about a live connection, and restoring it from a table would record thousands of "probe unreachable" transitions on every core restart — an alarm storm generated by the restart itself. |
+
+Two further notes for whoever picks those up:
+
+- **Results for one sensor must arrive in order.** They do: a probe's spool drain keeps one
+  batch in flight (`R-02`), and one probe owns one branch. A result no newer than the last one
+  applied is discarded and counted as `resultsStale`, which is what makes an at-least-once
+  protocol safe — a resent batch must not advance a two-step failure twice.
+- **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
+  and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
+  configuration versions. A scan is not a configuration change, and if it were, `R-04` would
+  push a fresh configuration to every probe once per interval. Listings carry `state` for
+  colouring a tree; `GET /sensors/:id/state` is the whole answer for one sensor, uncached.

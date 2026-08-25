@@ -1,5 +1,7 @@
 import { describeError, type IngestionConfig, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import { writeRuntimes, writeStateHistory } from '../state/runtime.js';
+import type { RuntimeWrite, StateDecisions, StateTransition } from '../state/runtime.js';
 
 /** One channel reading, resolved to a channel id and ready to write. */
 export interface SampleRow {
@@ -12,6 +14,16 @@ export interface IngestBatch {
   /** Where it came from — a probe gid, or `local`. For logs and per-source metrics. */
   source: string;
   samples: readonly SampleRow[];
+  /**
+   * What the same results did to their sensors' states (`M-02`).
+   *
+   * A second row type rather than a second pipeline, and written in the readings' own
+   * transaction: a state change committed without the readings that caused it, or readings
+   * committed without the state change, is a history that disagrees with itself. It also means
+   * a failed write rolls both back, and the probe — which was never acknowledged — offers the
+   * whole thing again.
+   */
+  states?: StateDecisions;
 }
 
 export type IngestOutcome =
@@ -63,6 +75,16 @@ export interface IngestionStats {
   storedSamples: number;
   /** Readings that were already there — normal during a replay, suspicious otherwise. */
   duplicateSamples: number;
+  /** Transitions appended to `sensor_state`. What uptime and SLA are computed from. */
+  storedStateChanges: number;
+  /** Sensors whose current row moved forward. */
+  runtimeWrites: number;
+  /**
+   * Runtime updates that matched no row, because the sensor was deleted between the decision
+   * and the write, or because the result was older than what is already stored. Expected during
+   * a replay; a steady stream of them outside one means the two disagree about time.
+   */
+  staleRuntimeWrites: number;
   writes: number;
   /** Write latency in milliseconds over the last 1,024 writes. */
   writeMs: { p50: number; p95: number; p99: number; max: number };
@@ -121,6 +143,9 @@ export class Ingestor {
   #duplicateSamples = 0;
   #writes = 0;
   #backfillsQueued = 0;
+  #storedStateChanges = 0;
+  #runtimeWrites = 0;
+  #staleRuntimeWrites = 0;
 
   constructor(options: IngestorOptions) {
     this.#db = options.db;
@@ -138,19 +163,29 @@ export class Ingestor {
    */
   async submit(batch: IngestBatch): Promise<IngestOutcome> {
     const rows = batch.samples.length;
+    // A failed check records no channel values at all, so the batch that matters most to the
+    // state machine is exactly the one with no readings in it. Counting only samples here would
+    // acknowledge an outage and never write it down.
+    const stateRows =
+      (batch.states?.transitions.length ?? 0) + (batch.states?.runtimes.length ?? 0);
 
     if (this.#stopping) {
       this.#refuse(rows);
       return { accepted: false, reason: 'shutting-down', retryAfterMs: this.#config.retryAfterMs };
     }
 
-    // An empty batch is not an error — a probe whose checks all failed has readings for none of
-    // them — and it must still be acknowledged, or the probe will offer it again for ever.
-    if (rows === 0) {
+    // An empty batch is not an error — a probe with nothing due has results for nothing — and it
+    // must still be acknowledged, or the probe will offer it again for ever.
+    if (rows === 0 && stateRows === 0) {
       this.#acceptedBatches += 1;
       return { accepted: true, storedSamples: 0, retryAfterMs: this.#retryHint() };
     }
 
+    // The queue limit counts readings only, not state rows. State rows are bounded by the
+    // number of sensors in the batch and are written in the same flush, so they cannot be the
+    // thing that fills memory — and counting them here without also counting them in the flush
+    // would leave `queuedRows` drifting upward until the queue wedged shut. `queuedBatches` is
+    // what watches the other dimension.
     if (this.#queuedRows + rows > this.#config.queueMaxRows) {
       this.#refuse(rows);
       this.#logger.warn(
@@ -208,6 +243,9 @@ export class Ingestor {
       failedBatches: this.#failedBatches,
       storedSamples: this.#storedSamples,
       duplicateSamples: this.#duplicateSamples,
+      storedStateChanges: this.#storedStateChanges,
+      runtimeWrites: this.#runtimeWrites,
+      staleRuntimeWrites: this.#staleRuntimeWrites,
       writes: this.#writes,
       writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       slowingDown: this.#retryHint() > 0,
@@ -283,6 +321,10 @@ export class Ingestor {
     const values: number[] = [];
     let oldest = Number.POSITIVE_INFINITY;
     let newest = Number.NEGATIVE_INFINITY;
+    const transitions: StateTransition[] = [];
+    // One runtime row per sensor, whatever the merge swept in: the UPDATE joins on the sensor
+    // id, and two rows for the same sensor would let the database pick either of them.
+    const runtimes = new Map<number, RuntimeWrite>();
     for (const queued of taken) {
       for (const sample of queued.batch.samples) {
         times.push(sample.at);
@@ -292,27 +334,46 @@ export class Ingestor {
         if (at < oldest) oldest = at;
         if (at > newest) newest = at;
       }
+      const states = queued.batch.states;
+      if (states === undefined) continue;
+      transitions.push(...states.transitions);
+      for (const write of states.runtimes) {
+        const held = runtimes.get(write.sensorId);
+        if (held === undefined || write.at.getTime() >= held.at.getTime()) {
+          runtimes.set(write.sensorId, write);
+        }
+      }
     }
 
     const startedAt = process.hrtime.bigint();
     try {
-      const { stored, late } = await this.#db.tx(async (q) => {
-        const written = await q.query<{ channel_id: number; time: Date }>(
-          `INSERT INTO sample (time, channel_id, value)
-           SELECT * FROM unnest($1::timestamptz[], $2::int[], $3::float8[])
-           ON CONFLICT (channel_id, time) DO NOTHING
-           RETURNING channel_id, time`,
-          [times, channelIds, values],
-        );
+      const { stored, late, changes, moved } = await this.#db.tx(async (q) => {
+        // Guarded rather than relying on `unnest` of empty arrays: with no readings at all the
+        // range below is (+Infinity, -Infinity), and an Invalid Date reaching the backfill
+        // queue would corrupt the rollup's idea of what needs re-rolling.
+        const written =
+          times.length === 0
+            ? []
+            : await q.query<{ channel_id: number; time: Date }>(
+                `INSERT INTO sample (time, channel_id, value)
+                 SELECT * FROM unnest($1::timestamptz[], $2::int[], $3::float8[])
+                 ON CONFLICT (channel_id, time) DO NOTHING
+                 RETURNING channel_id, time`,
+                [times, channelIds, values],
+              );
         // In the same transaction, deliberately. If this fails the readings roll back with it —
         // which is the right way round: the probe still holds the batch and will offer it again,
         // whereas committed readings with no backfill queued would leave the rollup silently
         // wrong with nothing left to notice it.
         const noted =
-          this.#lateData === undefined
+          this.#lateData === undefined || times.length === 0
             ? false
             : await this.#lateData.noteWrittenRange(q, new Date(oldest), new Date(newest));
-        return { stored: written, late: noted };
+        // Same transaction, same reason: the readings and the state they decided commit
+        // together or not at all (M-02).
+        const appended = await writeStateHistory(q, transitions);
+        const advanced = await writeRuntimes(q, [...runtimes.values()]);
+        return { stored: written, late: noted, changes: appended, moved: advanced };
       });
 
       this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);
@@ -320,6 +381,9 @@ export class Ingestor {
       this.#writes += 1;
       this.#storedSamples += stored.length;
       this.#duplicateSamples += rows - stored.length;
+      this.#storedStateChanges += changes;
+      this.#runtimeWrites += moved;
+      this.#staleRuntimeWrites += runtimes.size - moved;
       if (late) {
         this.#backfillsQueued += 1;
         this.#logger.info(

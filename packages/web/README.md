@@ -35,10 +35,14 @@ For production, `scripts/package.sh` runs `vite build` and stages `dist` into th
 | `/objects/:id`  | Configuration, parameters, channels, history, recent changes              |
 | `/sensor-types` | The catalogue and each type's parameter schema                            |
 
-**Nothing is monitored yet, and the UI says so rather than drawing a green dial.** Every sensor
-reads Unknown because nothing writes `sensor_state`: the state machine is Phase 3, the config
-push that tells a probe what it owns is `R-04`, and there is no sensor type to run until `P-08`.
-Panels that are empty say which task fills them.
+**States are real since `M-02`.** The overview counts sensors by state, worst first; the tree
+colours each row; the detail page shows the state with its cause and since when, read from
+`GET /sensors/:id/state` rather than from the object, because that read is conditional and a
+live state behind an ETag would be served stale. A sensor still reads Unknown until its first
+result, and again after a resume — that is the state, not a placeholder. Panels that are empty
+say which task fills them.
+
+Nothing polls yet: every panel loads once. The live stream is `U-02`.
 
 ## Design system
 
