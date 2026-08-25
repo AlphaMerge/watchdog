@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import type { CheckRegistry } from './types.js';
+import { UNKNOWN_SENSOR_TYPE, type CheckRegistry } from './types.js';
 
 /**
  * A pool worker.
@@ -70,6 +70,7 @@ async function run(message: RunMessage): Promise<void> {
       durationMs: elapsed(startedAt),
       ok: false,
       aborted: controller.signal.aborted,
+      unknownType: (error as { code?: unknown } | null)?.code === UNKNOWN_SENSOR_TYPE,
       message: error instanceof Error ? error.message : String(error),
     });
   } finally {

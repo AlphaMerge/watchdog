@@ -46,8 +46,9 @@ export async function auditRoutes(
         description:
           "An object's configuration history, newest first: who changed it, when, and what " +
           'changed. Page with `before`, using the `nextBefore` from the previous page. ' +
-          'Sensor parameters are listed in `summary.paramsChanged` by key only — never by ' +
-          'value — because a parameter can hold a credential until P-05 lands redaction.',
+          'Sensor parameters changed are listed in `summary.paramsChanged` by key. Values ' +
+          'appear in `diff` for parameters the sensor type does not mark `writeOnly`; a ' +
+          'credential never appears in either, in any entry, at any age.',
         params: idParams,
         querystring: auditQuery,
         response: { 200: { $ref: 'ms:auditPage' } },

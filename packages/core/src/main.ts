@@ -7,15 +7,13 @@ import {
   type CoreConfig,
   type Logger,
 } from '@ms/shared';
+import { standardCatalogue } from '@ms/sensors';
 import { ApiServer } from './api/server.js';
 import { runMigrateCommand, type MigrateAction } from './commands/migrate.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/store.js';
 import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
-import {
-  permissiveSensorTypeGate,
-  warnSensorTypesUnvalidated,
-} from './objects/sensor-type-gate.js';
+import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { ObjectService } from './objects/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
@@ -144,6 +142,10 @@ async function serve(): Promise<void> {
   }
 
   const resolver = new InheritanceResolver({ db, logger });
+  // Registered once, then sealed: a type appearing later would mean two probes disagreeing
+  // about what a sensor is.
+  const catalogue = standardCatalogue();
+
   const service = new ObjectService({
     db,
     repository: new ObjectRepository(),
@@ -152,11 +154,10 @@ async function serve(): Promise<void> {
     // and what S-10 made queryable, and the log is the plain-text audit component
     // CAPABILITIES.MD §9 lists — the copy that survives someone dropping the database.
     audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
-    // P-05 swaps this for the sensor-type registry.
-    sensorTypes: permissiveSensorTypeGate,
+    sensorTypes: catalogueSensorTypeGate(catalogue),
     logger,
   });
-  warnSensorTypesUnvalidated(logger);
+  logSensorTypes(logger, catalogue);
 
   const history = new HistoryService({ db, logger, store });
   const api = new ApiServer({
@@ -167,6 +168,7 @@ async function serve(): Promise<void> {
     history,
     db,
     audit: new AuditRepository(),
+    catalogue,
   });
   await api.build(VERSION, service);
   await api.start();

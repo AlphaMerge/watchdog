@@ -1,8 +1,17 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/shared" },
-    { "path": "packages/core" },
-    { "path": "packages/probe" }
+    {
+      "path": "packages/shared"
+    },
+    {
+      "path": "packages/sensors"
+    },
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/probe"
+    }
   ]
 }

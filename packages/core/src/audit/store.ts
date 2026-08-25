@@ -2,13 +2,7 @@ import type { Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
 import type { ObjectKind } from '../objects/types.js';
 import type { ObjectDetail } from '../objects/types.js';
-import {
-  changedParamKeys,
-  describeCreated,
-  describeDeleted,
-  diffObjects,
-  type FieldChange,
-} from './diff.js';
+import { describeCreated, describeDeleted, diffObjects, type FieldChange } from './diff.js';
 
 export interface AuditEntry {
   /** bigint, so a string on the wire — a JS number would lose precision eventually. */
@@ -205,7 +199,7 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       return {
         ...base,
         objectKind: mutation.kind,
-        summary: paramsSummary(changedParamKeys(mutation.before, mutation.after)),
+        summary: paramsSummary(mutation.changedParams),
         diff: diffObjects(mutation.before, mutation.after),
       };
 
@@ -286,9 +280,16 @@ function paramsSummary(changed: readonly string[]): Record<string, unknown> {
   return changed.length === 0 ? {} : { paramsChanged: [...changed] };
 }
 
-/** Parameter names only. The values are never recorded — see `changedParamKeys`. */
+/**
+ * Every parameter name a sensor has, including the ones whose values were redacted away.
+ *
+ * `redactedParams` is the only trace a `writeOnly` parameter leaves on a redacted detail, so
+ * without it a create would record "no parameters" for a sensor configured entirely with
+ * secrets.
+ */
 function paramKeysOf(object: ObjectDetail): string[] {
-  return object.kind === 'sensor' ? Object.keys(object.params).sort() : [];
+  if (object.kind !== 'sensor') return [];
+  return [...new Set([...Object.keys(object.params), ...object.redactedParams])].sort();
 }
 
 function fromActor(actor: Actor): {

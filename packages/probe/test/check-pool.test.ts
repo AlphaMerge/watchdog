@@ -246,4 +246,20 @@ describe('check pool', () => {
     );
     assert.ok(pool.stats().workerCrashes >= 1);
   });
+
+  it('reports an unregistered sensor type as its own phase, not as a failed check', async () => {
+    // A missing sensor type fails identically for ever. Counting it with genuine check failures
+    // buries a configuration error inside a rate that looks like a flapping target, and no
+    // amount of retrying will change the outcome.
+    const { pool, seen } = await poolOf();
+    assert.equal(pool.submit(request(1, 'test.nonexistent')), 'accepted');
+
+    await until(() => seen.length === 1, 'the check to be refused');
+    const entry = seen[0];
+    assert.ok(entry);
+    assert.equal(entry.meta.phase, 'unknown-type');
+    assert.equal(entry.result.outcome, 'error');
+    assert.match(entry.result.message, /test\.nonexistent/, 'names the type it could not find');
+    assert.deepEqual(entry.result.channels, [], 'a failed check records no channel values');
+  });
 });

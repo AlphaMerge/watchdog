@@ -12,3 +12,4 @@ coverage/
 /spool/
 dev/tls/
 dev/data/
+.claude/settings.local.json

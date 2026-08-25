@@ -10,6 +10,7 @@
   },
   "workspaces": [
     "packages/shared",
+    "packages/sensors",
     "packages/core",
     "packages/probe",
     "packages/web"
@@ -25,6 +26,8 @@
     "format:check": "prettier --check .",
     "test": "npm run test --workspaces --if-present",
     "dev": "docker compose -f docker-compose.dev.yml up -d",
+    "dev:services": "scripts/dev-services.sh start",
+    "dev:ui": "docker compose -f docker-compose.dev.yml --profile ui up -d web",
     "dev:down": "docker compose -f docker-compose.dev.yml down"
   },
   "devDependencies": {
@@ -32,6 +35,7 @@
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-react-hooks": "^7.0.0",
     "prettier": "^3.0.0",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.0.0"

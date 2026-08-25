@@ -11,7 +11,7 @@ import {
 } from '../../src/objects/audit.js';
 import { ObjectRepository } from '../../src/objects/repository.js';
 import { ObjectService } from '../../src/objects/service.js';
-import { permissiveSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
+import { testSensorTypes } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
 
 export const silent = pino({ level: 'silent' });
@@ -62,7 +62,7 @@ export async function buildHarness(db: Database): Promise<Harness> {
     repository,
     resolver,
     audit,
-    sensorTypes: permissiveSensorTypeGate,
+    sensorTypes: testSensorTypes(),
     logger: silent,
   });
 

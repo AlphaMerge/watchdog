@@ -119,6 +119,12 @@ export interface CoreConfig {
   api: {
     host: string;
     port: number;
+    /**
+     * Directory of the built web UI, served at `/` by the core itself (ADR-001 Decision 8:
+     * there is no second web server to install). Empty serves no UI at all, which is what a
+     * headless install or a development run against the Vite dev server wants.
+     */
+    webRoot: string;
   };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
@@ -217,10 +223,11 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as CoreConfig['api'],
       additionalProperties: false,
-      required: ['host', 'port'],
+      required: ['host', 'port', 'webRoot'],
       properties: {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
         port: { type: 'integer', minimum: 1, maximum: 65_535, default: 8080 },
+        webRoot: { type: 'string', default: '' },
       },
     },
     database: {

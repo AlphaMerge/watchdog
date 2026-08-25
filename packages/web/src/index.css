@@ -1,0 +1,151 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Every colour is a custom property on :root, overridden under [data-theme='dark'], and exposed
+ * to Tailwind through `@theme inline` — "inline" so Tailwind emits `var(--ms-…)` rather than
+ * baking the light value in, which is what makes switching themes a single attribute change
+ * instead of a stylesheet swap.
+ *
+ * They are custom properties rather than Tailwind theme keys because uPlot draws to a canvas
+ * (U-05). A canvas cannot read a utility class, but `getComputedStyle` reads these, so the
+ * charts and the DOM share one palette instead of two that drift.
+ *
+ * Contrast: every `-fg` token meets WCAG 2.1 AA (4.5:1) against its own surface, in both themes.
+ * Colour is never the only signal — see `StatusBadge`, which pairs each state with a distinct
+ * glyph and its name (WCAG 1.4.1).
+ */
+
+@theme inline {
+  --color-bg: var(--ms-bg);
+  --color-surface: var(--ms-surface);
+  --color-surface-muted: var(--ms-surface-muted);
+  --color-border: var(--ms-border);
+  --color-text: var(--ms-text);
+  --color-text-muted: var(--ms-text-muted);
+  --color-accent: var(--ms-accent);
+  --color-accent-contrast: var(--ms-accent-contrast);
+
+  --color-up-fg: var(--ms-up-fg);
+  --color-up-bg: var(--ms-up-bg);
+  --color-up-border: var(--ms-up-border);
+  --color-warning-fg: var(--ms-warning-fg);
+  --color-warning-bg: var(--ms-warning-bg);
+  --color-warning-border: var(--ms-warning-border);
+  --color-down-fg: var(--ms-down-fg);
+  --color-down-bg: var(--ms-down-bg);
+  --color-down-border: var(--ms-down-border);
+  --color-ack-fg: var(--ms-ack-fg);
+  --color-ack-bg: var(--ms-ack-bg);
+  --color-ack-border: var(--ms-ack-border);
+  --color-paused-fg: var(--ms-paused-fg);
+  --color-paused-bg: var(--ms-paused-bg);
+  --color-paused-border: var(--ms-paused-border);
+  --color-unknown-fg: var(--ms-unknown-fg);
+  --color-unknown-bg: var(--ms-unknown-bg);
+  --color-unknown-border: var(--ms-unknown-border);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+:root {
+  --ms-bg: #f8fafc;
+  --ms-surface: #ffffff;
+  --ms-surface-muted: #f1f5f9;
+  --ms-border: #e2e8f0;
+  --ms-text: #0f172a;
+  --ms-text-muted: #475569;
+  --ms-accent: #2563eb;
+  --ms-accent-contrast: #ffffff;
+
+  /* The six v1 states of WORKFLOW.MD §4. Unusual and Down (Partial) are [V2]; the token set
+     accommodates them by reusing `unknown` until they exist, rather than inventing a colour
+     nothing can currently produce. */
+  --ms-up-fg: #15803d;
+  --ms-up-bg: #dcfce7;
+  --ms-up-border: #86efac;
+  --ms-warning-fg: #a16207;
+  --ms-warning-bg: #fef9c3;
+  --ms-warning-border: #fde047;
+  --ms-down-fg: #b91c1c;
+  --ms-down-bg: #fee2e2;
+  --ms-down-border: #fca5a5;
+  --ms-ack-fg: #7e22ce;
+  --ms-ack-bg: #f3e8ff;
+  --ms-ack-border: #d8b4fe;
+  --ms-paused-fg: #0369a1;
+  --ms-paused-bg: #e0f2fe;
+  --ms-paused-border: #7dd3fc;
+  --ms-unknown-fg: #475569;
+  --ms-unknown-bg: #f1f5f9;
+  --ms-unknown-border: #cbd5e1;
+
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --ms-bg: #0b1220;
+  --ms-surface: #111827;
+  --ms-surface-muted: #1e293b;
+  --ms-border: #334155;
+  --ms-text: #f1f5f9;
+  --ms-text-muted: #94a3b8;
+  --ms-accent: #60a5fa;
+  --ms-accent-contrast: #0b1220;
+
+  --ms-up-fg: #4ade80;
+  --ms-up-bg: #052e16;
+  --ms-up-border: #166534;
+  --ms-warning-fg: #fbbf24;
+  --ms-warning-bg: #422006;
+  --ms-warning-border: #854d0e;
+  --ms-down-fg: #f87171;
+  --ms-down-bg: #450a0a;
+  --ms-down-border: #991b1b;
+  --ms-ack-fg: #c084fc;
+  --ms-ack-bg: #3b0764;
+  --ms-ack-border: #6b21a8;
+  --ms-paused-fg: #38bdf8;
+  --ms-paused-bg: #082f49;
+  --ms-paused-border: #075985;
+  --ms-unknown-fg: #94a3b8;
+  --ms-unknown-bg: #1e293b;
+  --ms-unknown-border: #475569;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    background-color: var(--ms-bg);
+  }
+
+  body {
+    background-color: var(--ms-bg);
+    color: var(--ms-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible focus is a WCAG 2.4.7 requirement and the thing most often removed by a reset.
+     `:focus-visible` keeps it off mouse clicks and on for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--ms-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* Respect a user who has asked the operating system for less motion (WCAG 2.3.3). */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

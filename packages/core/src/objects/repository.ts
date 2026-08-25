@@ -139,6 +139,9 @@ function toDetail(row: ObjectRow): ObjectDetail {
         parentId: Number(row.parent_id),
         sensorType: row.sensor_type ?? '',
         params: row.params ?? {},
+        // The repository deals in what is stored. Redaction is the service's job, because the
+        // probe config push (R-04) needs the real values and reads it through here too.
+        redactedParams: [],
       };
   }
 }
@@ -471,12 +474,21 @@ export class ObjectRepository {
    * declares three or five channels it is the difference between one round trip per create and
    * six, on the path a 5,000-sensor provisioning run repeats five thousand times.
    */
+  /**
+   * Returns the count written and the owner's version *after* the write.
+   *
+   * The version matters: `channel` is a side table, and writing it fires the trigger that
+   * invalidates the sensor's ETag. A create that returned the version it read before inserting
+   * channels would hand back a tag that is already stale — the same trap S-16 documented for
+   * `sensor_config`. It cannot come from the INSERT's own `RETURNING`, because a CTE sees the
+   * snapshot the statement began with, which is the version before the trigger fired.
+   */
   async createChannels(
     q: Queryable,
     sensorId: ObjectId,
     drafts: readonly ChannelDraft[],
-  ): Promise<number> {
-    if (drafts.length === 0) return 0;
+  ): Promise<{ created: number; ownerVersion: number | null }> {
+    if (drafts.length === 0) return { created: 0, ownerVersion: null };
     const rows = await q.query<{ id: number }>(
       `INSERT INTO channel (sensor_id, key, name, unit, is_primary)
        SELECT $1, key, name, unit, is_primary
@@ -491,7 +503,11 @@ export class ObjectRepository {
         drafts.map((draft) => draft.isPrimary ?? false),
       ],
     );
-    return rows.length;
+    // A primary-key lookup, and only on sensor creation.
+    const [owner] = await q.query<{ version: number }>('SELECT version FROM object WHERE id = $1', [
+      sensorId,
+    ]);
+    return { created: rows.length, ownerVersion: owner === undefined ? null : owner.version };
   }
 
   /**

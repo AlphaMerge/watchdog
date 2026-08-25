@@ -41,7 +41,11 @@ const registry: CheckRegistry = {
       default:
         break;
     }
-    throw new Error(`no such check type: ${sensorType}`);
+    // Same signal the real registry raises, so the pool classifies it the same way: a type
+    // nothing has registered is a configuration error, not a check that failed.
+    throw Object.assign(new Error(`no such check type: ${sensorType}`), {
+      code: 'UNKNOWN_SENSOR_TYPE',
+    });
   },
 };
 

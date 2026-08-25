@@ -1,3 +1,4 @@
+import { testCatalogue } from './support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
@@ -78,13 +79,14 @@ describe(
       history = new HistoryService({ db, logger: silent });
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service: harness.service,
         history,
         db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', harness.service);
       app = server.app;
@@ -115,10 +117,11 @@ describe(
       });
       otherSensorId = bare.id;
 
+      // The channels are not inserted here any more: since P-05 the sensor type declares them
+      // and creating the sensor creates them. Reading them back is the stronger assertion — it
+      // fails if the registry ever stops declaring what this suite depends on.
       const channels = await db.query<{ id: number; key: string }>(
-        `INSERT INTO channel (sensor_id, key, name, unit, is_primary)
-         VALUES ($1, 'rtt', 'Round trip', 'ms', true), ($1, 'loss', 'Packet loss', '%', false)
-         RETURNING id, key`,
+        'SELECT id, key FROM channel WHERE sensor_id = $1',
         [sensorId],
       );
       rtt = channels.find((c) => c.key === 'rtt')?.id ?? 0;
@@ -306,15 +309,27 @@ describe(
     // Shape and errors.
     // ---------------------------------------------------------------------------------------
 
-    it('returns an empty series for a sensor that has never reported', async () => {
+    it('returns declared channels, all gaps, for a sensor that has never reported', async () => {
       const result = await history.forSensor(otherSensorId, {
         from: base,
         to: new Date(base.getTime() + 10 * MINUTE),
         resolutionSeconds: 300,
       });
-      // Not a 404: the sensor exists, it simply has no channels yet.
-      assert.deepEqual(result.channels, []);
+
+      // Not a 404, and since P-05 not an empty list either: the sensor type declares its
+      // channels, so they exist from the moment the sensor does. A graph drawn from this shows
+      // two named, empty series rather than a blank panel that looks like a broken query.
+      assert.deepEqual(
+        result.channels.map((channel) => channel.key),
+        ['rtt', 'loss'],
+      );
       assert.equal(result.bucketCount, 2);
+
+      // And every bucket is a gap, not a zero (CLAUDE.md: no-data is not zero).
+      for (const channel of result.channels) {
+        assert.deepEqual(channel.avg, [null, null]);
+        assert.deepEqual(channel.count, [null, null]);
+      }
     });
 
     it('answers over HTTP with the effective range and what was adjusted', async () => {

@@ -116,7 +116,13 @@ export const objectDetailSchema = {
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
     // sensor
     sensorType: { type: 'string' },
+    /**
+     * Never contains a parameter the type marked `writeOnly` — `ObjectService` strips them
+     * before a detail reaches a route. `fast-json-stringify` cannot help here: `params` is
+     * free-form by design, so the serialiser has no list of keys to omit.
+     */
     params: { type: 'object', additionalProperties: true },
+    redactedParams: { type: 'array', items: { type: 'string' } },
     // expansions
     settings: { type: 'array', items: { $ref: 'ms:settingView' } },
     channels: { type: 'array', items: { $ref: 'ms:channelRecord' } },

@@ -1,3 +1,4 @@
+import { testCatalogue } from '../support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
@@ -36,13 +37,14 @@ describe(
       const h = await buildHarness(scratch.db);
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service: h.service,
         history: new HistoryService({ db: scratch.db, logger: silent }),
         db: scratch.db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', h.service);
       app = server.app;

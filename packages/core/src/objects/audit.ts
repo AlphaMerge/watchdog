@@ -33,8 +33,17 @@ export type Mutation =
       action: 'object.updated';
       objectId: ObjectId;
       kind: ObjectKind;
+      /** Redacted, like everything the sink is handed. */
       before: ObjectDetail;
       after: ObjectDetail;
+      /**
+       * Which sensor parameters changed, computed by the service from the *unredacted* values.
+       *
+       * Without this, rotating a `writeOnly` parameter would be invisible: both sides redact to
+       * the same absence, so a diff of what the sink can see reports no change at all. The name
+       * is the auditable fact; the value is the thing that must not be here.
+       */
+      changedParams: readonly string[];
     }
   | {
       action: 'object.moved';

@@ -62,9 +62,11 @@ describe(
       });
       sensorId = sensor.id;
 
+      // None of these is primary: since P-05 the sensor type declares its own channels, and
+      // `rtt` already holds that flag. A second primary violates the per-sensor unique index.
       const channels = await db.query<{ id: number }>(
         `INSERT INTO channel (sensor_id, key, name, unit, is_primary)
-         SELECT $1, 'ch' || n, 'Channel ' || n, 'ms', n = 1
+         SELECT $1, 'ch' || n, 'Channel ' || n, 'ms', false
          FROM generate_series(1, $2) n
          RETURNING id`,
         [sensorId, CHANNELS],

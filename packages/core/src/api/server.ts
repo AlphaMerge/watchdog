@@ -1,8 +1,11 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifySwagger from '@fastify/swagger';
+import fastifyStatic from '@fastify/static';
+import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { describeError, newCorrelationId, withCorrelation, type Logger } from '@ms/shared';
 import type { CoreConfig } from '@ms/shared';
+import type { SensorCatalogue } from '@ms/sensors';
 import type { ObjectService } from '../objects/service.js';
 import type { AuditRepository } from '../audit/store.js';
 import type { Database } from '../db/pool.js';
@@ -11,6 +14,7 @@ import { logIfUnexpected, toHttpError } from './errors.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
+import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
@@ -23,6 +27,7 @@ export interface ApiServerOptions {
   history: HistoryService;
   db: Database;
   audit: AuditRepository;
+  catalogue: SensorCatalogue;
 }
 
 /**
@@ -41,7 +46,17 @@ export class ApiServer {
   readonly #history: HistoryService;
   readonly #db: Database;
   readonly #audit: AuditRepository;
+  readonly #catalogue: SensorCatalogue;
   readonly #undeclared: string[] = [];
+  /**
+   * Routes exempted from the response-schema guard because they serve files, not JSON.
+   *
+   * Recorded rather than skipped silently: the guard is the structural half of the credential
+   * defence, and an exemption nobody can enumerate is an exemption nobody reviews. It is logged
+   * at startup and asserted in a test.
+   */
+  readonly #assetRoutes: string[] = [];
+  #registeringAssets = false;
 
   constructor(options: ApiServerOptions) {
     this.#config = options.config;
@@ -49,6 +64,7 @@ export class ApiServer {
     this.#history = options.history;
     this.#db = options.db;
     this.#audit = options.audit;
+    this.#catalogue = options.catalogue;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -68,6 +84,12 @@ export class ApiServer {
     // registered by a plugin before our own. A guard with a blind spot is not a guard.
     this.#app.addHook('onRoute', (route) => {
       if (route.method === 'HEAD' || route.method === 'OPTIONS') return;
+      // The static plugin serves bytes off disk; `fast-json-stringify` has nothing to filter
+      // and no schema to filter it against. The exemption is bounded to the one registration.
+      if (this.#registeringAssets) {
+        this.#assetRoutes.push(`${String(route.method)} ${route.url}`);
+        return;
+      }
       const schema = route.schema as { response?: unknown } | undefined;
       if (schema?.response === undefined) {
         this.#undeclared.push(`${String(route.method)} ${route.url}`);
@@ -77,6 +99,11 @@ export class ApiServer {
 
   get app(): FastifyInstance {
     return this.#app;
+  }
+
+  /** Routes exempted from the response-schema guard because they serve files. Asserted in a test. */
+  get assetRoutes(): readonly string[] {
+    return this.#assetRoutes;
   }
 
   async build(version: string, service: ObjectService): Promise<void> {
@@ -124,6 +151,19 @@ export class ApiServer {
     });
 
     this.#app.setNotFoundHandler((request, reply) => {
+      // A deep link into the single-page app — /objects/42 — is a route in the browser's
+      // router, not here. Anything that is not an API call and is not asking for JSON gets the
+      // app shell; the API keeps answering 404 with a body a client can parse.
+      if (
+        this.#config.webRoot !== '' &&
+        request.method === 'GET' &&
+        !request.url.startsWith('/api/') &&
+        !(request.headers.accept ?? '').includes('application/json')
+      ) {
+        void reply.type('text/html').sendFile('index.html');
+        return;
+      }
+
       void reply.status(404).send({
         error: {
           code: 'ROUTE_NOT_FOUND',
@@ -140,6 +180,7 @@ export class ApiServer {
         await scope.register(objectRoutes, { service, buildVersion: version });
         await scope.register(historyRoutes, { history: this.#history });
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
+        await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
       },
       { prefix: '/api/v1' },
     );
@@ -151,6 +192,30 @@ export class ApiServer {
       { schema: { response: { 200: { type: 'object', additionalProperties: true } } } },
       () => this.#app.swagger(),
     );
+
+    // The web UI, served by the core itself — ADR-001 Decision 8, no second web server to
+    // install. Registered *after* the API so a file can never shadow a route, and rooted at an
+    // absolute path so the plugin's traversal checks have something stable to resolve against.
+    if (this.#config.webRoot !== '') {
+      const root = resolve(this.#config.webRoot);
+      this.#registeringAssets = true;
+      await this.#app.register(fastifyStatic, {
+        root,
+        prefix: '/',
+        // The hashed asset filenames Vite emits are content-addressed, so they can be cached
+        // hard; index.html cannot, or an upgrade would serve last week's app forever.
+        maxAge: '1y',
+        immutable: true,
+        index: ['index.html'],
+        setHeaders(reply, path) {
+          if (path.endsWith('index.html')) {
+            reply.header('cache-control', 'no-cache');
+          }
+        },
+      });
+      this.#registeringAssets = false;
+      this.#logger.info({ webRoot: root, routes: this.#assetRoutes }, 'serving the web UI');
+    }
 
     await this.#app.ready();
     this.#assertEveryRouteDeclaresItsResponses();

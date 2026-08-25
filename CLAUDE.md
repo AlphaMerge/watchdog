@@ -11,6 +11,7 @@ A PRTG-class infrastructure monitoring system in Node.js/TypeScript.
 | `docs/ADR-001-architecture.md` | Stack and architecture decisions with rationale                                       |
 | `docs/PLAN.md`                 | Phased roadmap with exit criteria per phase                                           |
 | `docs/TASKS.md`                | Ticket-sized backlog — **pick work from here**                                        |
+| `docs/adding-a-sensor-type.md`  | How to write a sensor type — the contract, the rules, a worked example                |
 
 Before starting a task, read its phase section in `PLAN.md` and any `WORKFLOW.MD` section it
 references. Before proposing an approach that contradicts `ADR-001`, say so explicitly and
@@ -74,10 +75,12 @@ Probes always dial **out** to the core. The local probe runs the same code as a 
 
 ## Non-negotiable design rules
 
-**Sensor types are plugins.** Every check implements the `SensorType` contract: `id`,
-`category`, `paramsSchema` (JSON Schema — it generates the UI form and validates the API),
-`channels()`, `execute(ctx)` honouring `ctx.signal`, and `costHint`. Never add a sensor type by
-extending a switch statement. Adding a type should be a one-file, half-day job.
+**Sensor types are plugins.** Every check implements the `SensorType` contract in
+`packages/sensors`: `id`, `category`, `paramsSchema` (JSON Schema — it generates the UI form,
+validates the API, and marks secrets `writeOnly`), `channels()` declaring the primary up front,
+`execute(ctx)` honouring `ctx.signal`, and `costHint`. Never add a sensor type by extending a
+switch statement. Adding a type is a one-file job — `docs/adding-a-sensor-type.md` is the guide,
+and the catalogue enforces the rules at registration rather than at runtime.
 
 **Nothing blocks the scheduler.** Every check runs in a worker or a child process, with a
 timeout and an `AbortSignal`. If a check can hang, it runs in a child process.
@@ -95,8 +98,10 @@ rollup, query and rendering as gaps. Graphs break the line; they never draw to z
 `packages/core`. Never reimplement parent-walking locally.
 
 **Credentials are write-only.** Monitored-device credentials are encrypted at rest and never
-returned by any API route, to anyone, including administrators. Check this on every new endpoint
-that touches an object.
+returned by any API route, to anyone, including administrators. Sensor parameters marked
+`writeOnly` in their type's `paramsSchema` are stripped at one place — `ObjectService.#redact` —
+so a new endpoint cannot forget; the read carries `redactedParams` instead, and the stored value
+stays where the probe can use it. Check this on every new endpoint that touches an object.
 
 **One outage, one alarm.** Dependencies, notification latency and summarisation exist for this.
 Any change that could multiply alarms needs a scenario test.

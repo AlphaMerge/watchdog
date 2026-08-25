@@ -1,3 +1,4 @@
+import { testCatalogue } from './support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
@@ -52,13 +53,14 @@ describe(
       scratch = await createScratchDatabase('api');
       h = await buildHarness(scratch.db);
       server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service: h.service,
         history: new HistoryService({ db: scratch.db, logger: silent }),
         db: scratch.db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', h.service);
       app = server.app;
@@ -634,13 +636,14 @@ describe(
       // not filtered by fast-json-stringify, so it returns whatever the handler produced. A
       // guard that has never been seen to fire is not a guard.
       const rogue = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service: h.service,
         history: new HistoryService({ db: scratch.db, logger: silent }),
         db: scratch.db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       rogue.app.get('/leaky', () => ({ secret: 'anything at all' }));
 

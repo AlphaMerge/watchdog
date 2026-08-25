@@ -131,10 +131,13 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       recording a deletion, and a foreign key would take it away with its subject. The route
       therefore has no existence check and never 404s — refusing history for something deleted
       would hide exactly the change someone came looking for.
-      **Sensor parameters by key, never by value.** A parameter can hold a credential until P-05
-      lands `writeOnly` redaction. The API already returns them verbatim, which is bad enough; a
-      long-lived table with its own retention would make a present-tense exposure permanent, and
+      **Sensor parameters by key, never by value.** A parameter could hold a credential, and a
+      long-lived table with its own retention would make a present-tense exposure permanent —
       redacting later cannot unwrite history. A test greps the whole table for a canary.
+      **Resolved by P-05:** `writeOnly` parameters are stripped at `ObjectService.#redact` before
+      the sink sees anything, so values are now recorded for the parameters that are not secrets.
+      The changed-key list is still computed on the unredacted pair, because a rotated secret
+      redacts to the same absence on both sides and would otherwise be invisible.
       **Both sinks.** `CompositeAuditSink` writes the table and the structured log, inside the
       mutation's transaction — the table is what the history tab reads, the log is the plain-text
       audit component `CAPABILITIES.MD` §9 lists and the copy that survives someone dropping the
@@ -210,7 +213,9 @@ because each is a decision rather than a defect:
       version 1 while the committed object is at 2 — and the response carries that version as its
       ETag, so a stale one answers the client's first `If-Match` PATCH with a 412.
       Channel inserts were batched into one statement while in the area: worth nothing until P-05
-      declares any channels, and worth five round trips per sensor the moment it does.
+      declared any channels, and worth five round trips per sensor from the moment it did.
+      **P-05 added one back:** the owner's version has to be re-read after the insert, because
+      the ETag trigger fires too late for the insert's own `RETURNING` to see it.
       The lever that remains is fewer *requests*, not fewer statements — a batch create endpoint,
       which the `batch()` seam already supports. Not filed: a pipelining client finishes in 5.9 s.
 - [ ] **S-15 — State-history retention that cannot lose current state** · M · S-06, M-15 ·
@@ -309,7 +314,7 @@ because each is a decision rather than a defect:
       deferred and refused counts, worker crashes, and percentiles for both queue wait and check
       duration. Skip-if-still-running is implemented; what is left for this task is surfacing all
       of it on Probe Health.
-- [ ] **P-05 — `SensorType` plugin contract and registry** · L · P-02 · Interface per ADR
+- [x] **P-05 — `SensorType` plugin contract and registry** · L · P-02 · Interface per ADR
       decision 7 (`id`, `category`, `paramsSchema`, `channels()`, `execute()`, `costHint`), startup
       registration, and a documented guide for adding a type. _Highest-leverage task in the backlog._
       **Added by S-10:** `writeOnly` redaction is what lets the audit log record parameter
@@ -325,6 +330,24 @@ because each is a decision rather than a defect:
       returned verbatim, so an operator who pastes an SNMP community into `params` has put it
       somewhere every read returns — the one credential surface S-03 could not close. Swap
       `permissiveSensorTypeGate` for the real registry in `main.ts`.
+      **P-05 outcome.** Shipped as a new workspace package, `@ms/sensors`, because both services
+      need the contract and only one may call `execute`: the core reads `paramsSchema`,
+      `channels()` and the `writeOnly` marks, the probe's pool workers load the catalogue by path.
+      One type stays one file, which is what ADR Decision 7 is for. `standardCatalogue()` is
+      **empty** — the first four types are P-08…P-11 — so the core now refuses to create any
+      sensor and says so at boot rather than accepting configuration for a check that cannot run.
+      The credential hole is closed at one boundary, `ObjectService.#redact`, so a new endpoint
+      cannot forget it; `redactedParams` carries the names so a form can still show "set".
+      Rotation stays auditable because the changed-key list is computed *before* redaction —
+      both sides otherwise redact to the same absence and a rotated secret would look like no
+      change at all. `GET /api/v1/sensor-types` publishes the schemas the add-sensor form is
+      generated from. Guide: `docs/adding-a-sensor-type.md`.
+      **Found while doing it, both now fixed:** declaring channels made sensor creation return a
+      stale `version`, because writing `channel` fires the ETag trigger after the insert returned
+      — the same trap S-16 documented for `sensor_config`. And the build-hygiene test only
+      checked compiled *tests*, so a deleted `src` module kept shipping in the tarball; widening
+      it to `src` across every package immediately found `timeseries/repository.js`, orphaned by
+      the S-12 rename and shipped ever since.
 - [ ] **P-06 — Protocol simulator harness** · L · F-02 · Mock SNMP agents, scriptable-latency
       HTTP server, SSH server, syslog sender, flow exporter. Shipped as a package, used by every
       sensor test.
@@ -333,6 +356,12 @@ because each is a decision rather than a defect:
       ADR-001.
 - [ ] **P-08 — Ping sensor** · M · P-05, P-07 · Availability, RTT, packet loss channels;
       configurable count, size, timeout.
+- [ ] **P-16 — The development toolchain has no `ping`** · S · — · `scripts/dev.sh` runs the
+      probe in `node:24-bookworm`, which ships no `iputils-ping`, and ADR-001 makes the system
+      `ping` binary the default ICMP path. P-08 therefore cannot be developed or tested in the
+      container the rest of the work happens in. Either build a thin toolchain image with the
+      package, or have the probe report a missing ICMP binary once at startup rather than as an
+      identical failure on every check. Found while standing the dev target up, not by a test.
 - [ ] **P-09 — HTTP sensor** · M · P-05 · Status code, response time, size channels; timeout,
       redirect and TLS-verification options.
 - [ ] **P-10 — Port sensor** · S · P-05 · TCP connect with timing; optional banner match.
@@ -447,8 +476,29 @@ because each is a decision rather than a defect:
 
 ## Phase 5 — Web UI
 
-- [ ] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
+- [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
       tokens, light and dark themes, served as static assets by the core.
+      **U-01 outcome.** Decision 8 named the framework and the charting libraries and left
+      *styling* and *routing* unspecified; both are now filled and recorded in an amendment to
+      that decision — Tailwind CSS 4 and React Router 7, with no component library. Design tokens
+      are CSS custom properties rather than Tailwind theme keys, because uPlot draws to a canvas
+      and cannot read a utility class but can read a custom property — so `U-05` gets the same
+      palette without a second source of truth. Every `-fg` token meets AA in both themes, and
+      `StatusBadge` gives each of the six `WORKFLOW.MD` §4 states a distinct glyph and its name,
+      so colour is never the only signal.
+      Serving is real, not planned: `api.webRoot` registers `@fastify/static`, deep links fall
+      back to the app shell while `/api/*` keeps answering JSON 404s, hashed assets are immutable
+      and `index.html` is `no-cache`. The static route is the only exemption from the
+      response-schema guard and is enumerated in `ApiServer.assetRoutes` so a test can assert
+      nothing else has crept in. `package.sh` builds and stages `dist`; `install.sh` puts it at
+      `/opt/ms/web`; an empty `webRoot` serves no UI, which is what a headless install wants.
+      **The UI says what is not true yet rather than drawing a green dial.** Every sensor reads
+      Unknown, and each empty panel names the task that fills it — `P-08` for a sensor type,
+      `R-04` for the config push, Phase 3 for the state machine.
+      **Found while building it:** the core withholds *all* parameters of an unregistered sensor
+      type (P-05's conservative fallback), and the first version of the detail page labelled them
+      "write-only" — telling an operator their timeout was a credential. The page now checks the
+      catalogue and distinguishes "set, write-only" from "withheld, type not registered".
 - [ ] **U-02 — WebSocket state stream** · L · P-12 · Subscribe to state changes by subtree;
       reconnect and resync; no full-page polling.
 - [ ] **U-03 — Device tree** · L · U-02 · Virtualised tree with rollup status colouring, live

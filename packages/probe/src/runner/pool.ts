@@ -136,7 +136,7 @@ export class CheckPool {
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#registryModule =
-      options.registryModule ?? join(import.meta.dirname, 'placeholder-registry.js');
+      options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#onResult = options.onResult;
   }
 
@@ -305,6 +305,7 @@ export class CheckPool {
         durationMs: number;
         ok: boolean;
         aborted?: boolean;
+        unknownType?: boolean;
         message: string;
         channels?: { key: string; value: number; name?: string; unit?: string }[];
       };
@@ -319,7 +320,13 @@ export class CheckPool {
         });
       } else {
         this.#failed += 1;
-        this.#emit(job, slot, result.aborted === true ? 'aborted' : 'execute', {
+        const phase: CheckPhase =
+          result.unknownType === true
+            ? 'unknown-type'
+            : result.aborted === true
+              ? 'aborted'
+              : 'execute';
+        this.#emit(job, slot, phase, {
           outcome: 'error',
           message: result.message,
           durationMs: result.durationMs,

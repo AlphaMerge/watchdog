@@ -120,6 +120,65 @@ services:
         done
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------------------
+  # Monitoring target — a Linux box to point sensors at, not a protocol simulator.
+  #
+  # snmpsim and syslog-sender each speak one protocol into the void. This is a *device*: one
+  # host answering ICMP, HTTP, SSH and SNMP at once, which is the shape the device/sensor
+  # object model is built around and the thing to develop the sensor catalogue against
+  # (P-05, then the Phase 6 transports).
+  #
+  # Ports are published on loopback purely so a developer can poke at it by hand; the probe
+  # reaches it as `target` on the compose network and needs none of them.
+  # ---------------------------------------------------------------------------------------
+  target:
+    build:
+      context: ./dev/target
+    hostname: ms-target
+    environment:
+      TARGET_SSH_USER: ${TARGET_SSH_USER:-monitor}
+      TARGET_SSH_PASSWORD: ${TARGET_SSH_PASSWORD:-monitor}
+    ports:
+      - '127.0.0.1:8081:80'
+      - '127.0.0.1:2222:22'
+      - '127.0.0.1:1162:161/udp'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1/']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------------------
+  # Web UI — the Vite dev server, for development only.
+  #
+  # In production `ms-core` serves the built assets itself from `api.webRoot`; there is no
+  # second web server to install (ADR-001 Decision 8). This exists so a developer gets hot
+  # reload without Node on the host, like everything else here.
+  #
+  # It proxies /api to the core, so the app calls the same relative paths in both environments
+  # and never needs to know which one it is running in. MS_CORE_URL points at wherever the core
+  # is: `ms-server` is the name scripts/dev-services.sh gives it on this network.
+  #
+  # Behind the `ui` profile, so `npm run dev` still brings up only the dependency services.
+  # ---------------------------------------------------------------------------------------
+  web:
+    image: node:24-bookworm
+    working_dir: /workspace
+    profiles: ['ui']
+    init: true
+    environment:
+      MS_CORE_URL: ${MS_CORE_URL:-http://ms-server:8080}
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+      NPM_CONFIG_FUND: 'false'
+    volumes:
+      - .:/workspace
+      - npm-cache:/root/.npm
+    ports:
+      - '127.0.0.1:5173:5173'
+    command: ['npm', 'run', 'dev', '--workspace', '@ms/web']
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   npm-cache:

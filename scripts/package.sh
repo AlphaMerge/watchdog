@@ -28,7 +28,7 @@ mkdir -p "${stage}" "${repo_root}/release"
 npm --prefix "${repo_root}" run build
 
 echo "==> staging application"
-for pkg in shared core probe; do
+for pkg in shared sensors core probe; do
   mkdir -p "${stage}/app/${pkg}"
   cp -R "${repo_root}/packages/${pkg}/dist" "${stage}/app/${pkg}/dist"
   cp "${repo_root}/packages/${pkg}/package.json" "${stage}/app/${pkg}/package.json"
@@ -47,7 +47,7 @@ const { join } = require('node:path');
 const [, , repoRoot, stage, version] = process.argv;
 
 const merged = {};
-for (const pkg of ['shared', 'core', 'probe']) {
+for (const pkg of ['shared', 'sensors', 'core', 'probe']) {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', pkg, 'package.json'), 'utf8'));
   for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
     // Workspace siblings are staged directly, not fetched.
@@ -67,9 +67,12 @@ NODE
 
 (cd "${stage}/app" && npm install --omit=dev --no-audit --no-fund --silent)
 
-# @ms/shared is resolved from node_modules by both services; link the staged copy in.
+# The workspace siblings are resolved from node_modules by both services; link the staged
+# copies in. @ms/sensors carries the sensor-type catalogue, which the core reads for schemas and
+# the probe's pool workers load by path.
 mkdir -p "${stage}/app/node_modules/@ms"
 ln -sfn ../../shared "${stage}/app/node_modules/@ms/shared"
+ln -sfn ../../sensors "${stage}/app/node_modules/@ms/sensors"
 
 echo "==> staging launchers, units and examples"
 mkdir -p "${stage}/bin" "${stage}/deploy" "${stage}/etc"
@@ -83,6 +86,12 @@ exec "\${MS_NODE:-node}" "\${here}/../app/${svc}/dist/src/main.js" "\$@"
 LAUNCHER
   chmod +x "${stage}/bin/ms-${svc}"
 done
+
+# The web UI, built to static assets and served by ms-core itself (ADR-001 Decision 8).
+# `api.webRoot` in core.json points at where install.sh puts this.
+echo "==> staging the web UI"
+npm --prefix "${repo_root}" run build:web
+cp -R "${repo_root}/packages/web/dist" "${stage}/web"
 
 cp -R "${repo_root}/deploy/systemd" "${stage}/deploy/systemd"
 cp -R "${repo_root}/deploy/winsw" "${stage}/deploy/winsw"

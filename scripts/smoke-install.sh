@@ -9,11 +9,26 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container=ms-smoke-install
 image=ms-smoke:bookworm
 
-tarball="${1:-$(ls -t "${repo_root}"/release/ms-*.tar.gz 2>/dev/null | head -1)}"
-[ -n "${tarball}" ] && [ -f "${tarball}" ] || {
-  echo "no release tarball found — run scripts/package.sh first" >&2
-  exit 1
-}
+# Build unless handed a specific tarball. Reusing whichever one happened to be lying around is
+# how this test silently validated a package built before the change under test — which is worse
+# than not running it, because it reports success.
+if [ "$#" -gt 0 ]; then
+  tarball="$1"
+  [ -f "${tarball}" ] || {
+    echo "no such tarball: ${tarball}" >&2
+    exit 1
+  }
+  echo "==> using the tarball given on the command line (not rebuilding)"
+else
+  echo "==> building a release tarball"
+  "${repo_root}/scripts/package.sh" >/dev/null
+  tarball="$(ls -t "${repo_root}"/release/ms-*.tar.gz 2>/dev/null | head -1)"
+  [ -n "${tarball}" ] && [ -f "${tarball}" ] || {
+    echo "scripts/package.sh produced no tarball" >&2
+    exit 1
+  }
+fi
+echo "    ${tarball}"
 
 cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -69,6 +84,18 @@ if docker exec "${container}" curl -sf http://127.0.0.1:8080/api/v1/objects/root
   echo "    GET /api/v1/objects/root: ok"
 else
   echo "    GET /api/v1/objects/root: FAILED" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+
+echo "==> asserting the core serves the web UI"
+# The UI is built by package.sh, staged into the tarball and pointed at by api.webRoot. This is
+# the only place that proves the whole chain — a build that never ran, a path install.sh did not
+# create, or a webRoot pointing somewhere else all look identical until someone opens a browser.
+if docker exec "${container}" curl -sf http://127.0.0.1:8080/ | grep -q 'id="root"'; then
+  echo "    GET /: app shell ok"
+else
+  echo "    GET /: FAILED — no app shell served" >&2
   docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
   failed=1
 fi

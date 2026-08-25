@@ -53,6 +53,12 @@ jobs:
       - name: format
         run: npm run format:check
 
+      # `npm run typecheck` is `tsc -b`, which covers the service packages only — the web app
+      # is a Vite project outside that graph and would otherwise be typechecked by nothing until
+      # the packaging job built it.
+      - name: typecheck and build the web UI
+        run: npm run build:web
+
       - name: tests
         run: npm test
 
@@ -89,8 +95,10 @@ jobs:
 
       # Unpacks the tarball on a clean Debian box with a real systemd, runs install.sh and
       # asserts both services reach "active" and stop with exit 0 (PLAN.md Phase 0 exit).
+      # Hand it the tarball the previous step built. Without an argument the script builds its
+      # own, which is the right default locally but a wasted second build here.
       - name: install smoke test
-        run: scripts/smoke-install.sh
+        run: scripts/smoke-install.sh "$(ls -t release/ms-*.tar.gz | head -1)"
 
       - uses: actions/upload-artifact@v4
         if: always()

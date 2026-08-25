@@ -12,7 +12,6 @@ import { changedParamKeys, describeCreated, diffObjects } from '../src/audit/dif
 import type { Database } from '../src/db/pool.js';
 import { LoggingAuditSink, type Actor } from '../src/objects/audit.js';
 import { ObjectRepository } from '../src/objects/repository.js';
-import { permissiveSensorTypeGate } from '../src/objects/sensor-type-gate.js';
 import { ObjectService } from '../src/objects/service.js';
 import type { ObjectDetail } from '../src/objects/types.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
@@ -23,6 +22,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { testCatalogue, testSensorTypes } from './support/sensor-types.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -91,6 +91,7 @@ describe('audit diff', () => {
       comments: '',
       sensorType: 'snmp.traffic',
       params,
+      redactedParams: [],
       version: 1,
       childCount: 0,
       createdAt: '2026-08-01T00:00:00.000Z',
@@ -132,18 +133,19 @@ describe(
         repository: new ObjectRepository(),
         resolver: new InheritanceResolver({ db, logger: silent }),
         audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(silent)]),
-        sensorTypes: permissiveSensorTypeGate,
+        sensorTypes: testSensorTypes(),
         logger: silent,
       });
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service,
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: repository,
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', service);
       app = server.app;

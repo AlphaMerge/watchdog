@@ -1,3 +1,4 @@
+import { testCatalogue } from './support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
@@ -42,13 +43,14 @@ describe(
       h = await buildHarness(db);
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service: h.service,
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', h.service);
       app = server.app;
@@ -256,13 +258,14 @@ describe(
       const first = await get(deviceId, { include: 'settings' });
 
       const upgraded = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.10',
         service: h.service,
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await upgraded.build('9.9.10', h.service);
 

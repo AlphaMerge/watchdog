@@ -1,4 +1,5 @@
 import type { Logger } from '@ms/shared';
+import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import { settingRegistry } from '../settings/registry.js';
@@ -73,16 +74,32 @@ export class ObjectService {
     this.#maxCloneObjects = options.maxCloneObjects ?? 5_000;
   }
 
+  /**
+   * The write-only boundary (CLAUDE.md: credentials are never returned by any API route, to
+   * anyone). Every `ObjectDetail` this service hands out goes through here — to a route, to the
+   * audit sink, to any caller. Only the repository sees a stored secret, and only the probe
+   * config push reads it from there.
+   *
+   * Redacting here rather than in the route means a new endpoint cannot forget to.
+   */
+  #redact(detail: ObjectDetail): ObjectDetail {
+    if (detail.kind !== 'sensor') return detail;
+    const { params, redacted } = this.#sensorTypes.redact(detail.sensorType, {
+      ...detail.params,
+    });
+    return { ...detail, params, redactedParams: redacted };
+  }
+
   // ── reads ────────────────────────────────────────────────────────────────────────────────
 
   async get(id: ObjectId): Promise<ObjectDetail> {
     const object = await this.#repo.get(this.#db, id);
     if (object === null) throw notFound(id);
-    return object;
+    return this.#redact(object);
   }
 
   async getRoot(): Promise<ObjectDetail> {
-    return this.#repo.getRoot(this.#db);
+    return this.#redact(await this.#repo.getRoot(this.#db));
   }
 
   /**
@@ -255,36 +272,44 @@ export class ObjectService {
   }
 
   async create(actor: Actor, input: CreateObjectInput): Promise<ObjectDetail> {
-    if (input.kind === 'sensor') {
-      this.#sensorTypes.assertValid(input.sensorType, input.params ?? {});
-    }
+    // Validation fills in the defaults the type declares, and what gets stored is the filled-in
+    // version — so a sensor's row is complete rather than depending on which form created it.
+    const normalised: CreateObjectInput =
+      input.kind === 'sensor'
+        ? { ...input, params: this.#sensorTypes.normalise(input.sensorType, input.params ?? {}) }
+        : input;
 
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeShared(q);
 
       // Two values, one read: the parent's kind and whether it accepts this child (S-16).
-      const parent = await this.#repo.getParentFor(q, input.parentId, input.kind);
-      if (parent === null) throw parentNotFound(input.parentId);
-      if (!parent.accepts) throw parentKindInvalid(input.kind, parent.kind);
+      const parent = await this.#repo.getParentFor(q, normalised.parentId, normalised.kind);
+      if (parent === null) throw parentNotFound(normalised.parentId);
+      if (!parent.accepts) throw parentKindInvalid(normalised.kind, parent.kind);
 
-      const created = await this.#repo.create(q, input);
+      let created = await this.#repo.create(q, normalised);
 
-      if (input.kind === 'sensor') {
-        await this.#repo.createChannels(
+      if (normalised.kind === 'sensor') {
+        const { ownerVersion } = await this.#repo.createChannels(
           q,
           created.id,
-          this.#sensorTypes.channelsFor(input.sensorType, input.params ?? {}),
+          this.#sensorTypes.channelsFor(normalised.sensorType, normalised.params ?? {}),
         );
+        // Declaring channels bumps the sensor's version by trigger, so the detail the insert
+        // returned is already a version behind. Handing that back would give the caller an ETag
+        // that 412s on its own first write.
+        if (ownerVersion !== null) created = { ...created, version: ownerVersion };
       }
 
+      const safe = this.#redact(created);
       await this.#audit.record(
         q,
         actor,
-        [{ action: 'object.created', objectId: created.id, kind: created.kind, after: created }],
+        [{ action: 'object.created', objectId: safe.id, kind: safe.kind, after: safe }],
         new Date(),
       );
 
-      return created;
+      return safe;
     });
   }
 
@@ -309,23 +334,44 @@ export class ObjectService {
         );
       }
 
-      if (patch.kind === 'sensor' && patch.params !== undefined) {
-        this.#sensorTypes.assertValid(
-          before.kind === 'sensor' ? before.sensorType : '',
-          patch.params,
-        );
-      }
+      const applied: UpdateObjectInput =
+        patch.kind === 'sensor' && patch.params !== undefined
+          ? {
+              ...patch,
+              params: this.#sensorTypes.normalise(
+                before.kind === 'sensor' ? before.sensorType : '',
+                patch.params,
+              ),
+            }
+          : patch;
 
-      const after = await this.#repo.update(q, id, patch, pre);
+      const after = await this.#repo.update(q, id, applied, pre);
 
+      // Computed on the real values, because a rotated secret redacts to the same absence on
+      // both sides and would otherwise look like no change at all.
+      const changedParams = changedParamKeys(before, after);
+
+      // Both sides redacted before they are diffed: the audit log outlives the object and has
+      // its own retention, so a secret reaching it is permanent in a way a read is not.
+      const safeBefore = this.#redact(before);
+      const safeAfter = this.#redact(after);
       await this.#audit.record(
         q,
         actor,
-        [{ action: 'object.updated', objectId: id, kind: after.kind, before, after }],
+        [
+          {
+            action: 'object.updated',
+            objectId: id,
+            kind: safeAfter.kind,
+            before: safeBefore,
+            after: safeAfter,
+            changedParams,
+          },
+        ],
         new Date(),
       );
 
-      return after;
+      return safeAfter;
     });
   }
 
@@ -368,7 +414,7 @@ export class ObjectService {
 
       const siblings = await this.#repo.siblingOrder(q, object.parentId);
       const change = reorderSiblings(siblings, id, move);
-      if (change === null) return object;
+      if (change === null) return this.#redact(object);
 
       await this.#repo.writeSiblingOrder(q, object.parentId, change.next);
 
@@ -392,7 +438,7 @@ export class ObjectService {
         new Date(),
       );
 
-      return after;
+      return this.#redact(after);
     });
   }
 
@@ -488,7 +534,7 @@ export class ObjectService {
       );
 
       return {
-        object: moved,
+        object: this.#redact(moved),
         fromParentId,
         toParentId: targetParentId,
         movedCount,
@@ -557,7 +603,7 @@ export class ObjectService {
       );
 
       return {
-        object: cloneRoot,
+        object: this.#redact(cloneRoot),
         clonedCount: copied.counts,
         droppedCredentialKinds: copied.droppedCredentialKinds as CredentialKind[],
         settingsChanged,
@@ -632,7 +678,7 @@ export class ObjectService {
             action: 'object.deleted',
             objectId: id,
             kind: object.kind,
-            before: object,
+            before: this.#redact(object),
             deleted: counts,
             destroyed: refs,
           },

@@ -5,7 +5,7 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../../sr
 import type { Database } from '../../src/db/pool.js';
 import { LoggingAuditSink } from '../../src/objects/audit.js';
 import { ObjectRepository } from '../../src/objects/repository.js';
-import { permissiveSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
+import { testCatalogue, testSensorTypes } from '../support/sensor-types.js';
 import { ObjectService } from '../../src/objects/service.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
 import { HistoryService } from '../../src/timeseries/history.js';
@@ -114,18 +114,19 @@ describe(
         repository: new ObjectRepository(),
         resolver: new InheritanceResolver({ db, logger: silent }),
         audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(silent)]),
-        sensorTypes: permissiveSensorTypeGate,
+        sensorTypes: testSensorTypes(),
         logger: silent,
       });
 
       server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0 },
+        config: { host: '127.0.0.1', port: 0, webRoot: '' },
         logger: silent,
         version: '9.9.9',
         service,
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
+        catalogue: testCatalogue(),
       });
       await server.build('9.9.9', service);
       const address = await server.start();

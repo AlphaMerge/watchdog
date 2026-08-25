@@ -238,7 +238,10 @@ describe(
         'every batch acknowledged',
       );
       const stats = service.stats();
-      assert.equal(stats.channelsCreated, sensorIds.length * keys.length);
+      // Only `jitter` is new. Since P-05 the sensor type declares `rtt` and `loss`, so they were
+      // created with the sensor and the first scan has two thirds less work to do — the point of
+      // declaring channels up front rather than discovering them from the wire.
+      assert.equal(stats.channelsCreated, sensorIds.length, 'one new channel per sensor');
       assert.equal(stats.cachedChannels, sensorIds.length * keys.length);
 
       const perMinute = (total / elapsedMs) * 60_000;

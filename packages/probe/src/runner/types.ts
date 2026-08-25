@@ -40,11 +40,18 @@ export interface ResultMeta {
 }
 
 /**
- * The seam `P-05` fills. Until the registry exists nothing can be checked, and the placeholder
- * says so by name rather than by failing to find a function.
+ * What the pool resolves a check through (P-05: `@ms/sensors`).
+ *
+ * A registry asked for a type it does not have must reject with an error carrying
+ * `code === 'UNKNOWN_SENSOR_TYPE'`. The pool reports those as the `unknown-type` phase rather
+ * than as a failing check: a missing type fails identically for ever, and counting it with
+ * genuine check failures buries a configuration error in a rate that looks like flapping.
  */
 export interface CheckRegistry {
   execute(sensorType: string, context: CheckContext): Promise<CheckExecution>;
 }
+
+/** The shape the worker sniffs for. Kept structural so a test registry need not import one. */
+export const UNKNOWN_SENSOR_TYPE = 'UNKNOWN_SENSOR_TYPE';
 
 export type { CheckResult };

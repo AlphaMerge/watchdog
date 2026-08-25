@@ -301,6 +301,33 @@ needed. Recharts is SVG and folds at that density; visx is primitives, not chart
 See the `dataviz` guidance before building any chart: consistent palette, accessible contrast,
 light and dark themes.
 
+### Amended 2026-08-25 (U-01) — the two slots this decision left open
+
+The original decision named the framework, the build tool and the charting libraries, and said
+nothing about **styling** or **routing**. `U-01` had to fill both. Neither contradicts anything
+above; both are recorded here so the next person does not have to infer them from `package.json`.
+
+| Slot     | Choice                | Why                                                                                                                                                                                        |
+| -------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Styling  | **Tailwind CSS 4**    | Utility classes keep the styling next to the markup, which matters most in the parts of this UI that are dense and repetitive — tree rows, channel tables, alarm lists. Its v4 engine is configured in CSS, so the design tokens below are plain custom properties rather than a JavaScript config the build has to interpret. |
+| Routing  | **React Router 7**    | The obvious default, and the one thing in the frontend where inventing our own would buy nothing. Used in its declarative mode; no data-router loaders, so routes stay independent of how any given page fetches.                                                                                                             |
+
+**Design tokens are CSS custom properties, not Tailwind theme keys.** Every colour, including the
+six sensor states, is defined once in `packages/web/src/index.css` against `:root` and overridden
+under `[data-theme='dark']`. Tailwind consumes them through `@theme`. The reason is that charts
+are canvas — uPlot cannot read a Tailwind class, but it can read a custom property, so `U-05`
+gets the same palette as the DOM without a second source of truth.
+
+**No component library.** Not Material, not shadcn, not Radix wholesale. The surface this product
+needs is small and unusual — a virtualised tree, a channel table, a schema-driven form — and none
+of it comes out of a component library anyway. Accessible primitives may be added *individually*
+where the WAI-ARIA pattern is genuinely hard (a combobox, a modal focus trap); pulling in a whole
+system to get a button is how a design system stops being ours.
+
+**What remains true:** the app is built to static assets and served by `ms-core` from the
+`api.webRoot` setting (empty serves no UI, which is what a headless install wants). There is no second web server in production. The Vite dev server exists only for
+development, in Docker, like everything else in `docker-compose.dev.yml`.
+
 ---
 
 ## Decision 9 — Auth: server-side sessions, argon2, TOTP

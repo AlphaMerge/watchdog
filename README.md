@@ -20,11 +20,13 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 | [`docs/PLAN.md`](docs/PLAN.md)                                 | Phased roadmap with exit criteria                                        |
 | [`docs/TASKS.md`](docs/TASKS.md)                               | Ticket-sized backlog — **pick work from here**                           |
 | [`docs/findings/`](docs/findings/)                             | Measured results that change a documented assumption                     |
+| [`docs/adding-a-sensor-type.md`](docs/adding-a-sensor-type.md) | How to write a sensor type. One file, six members.                       |
 
 ## Layout
 
 ```
 packages/shared   config loading, logging, lifecycle, the core↔probe wire protocol
+packages/sensors  the SensorType contract and the catalogue — one file per sensor type
 packages/core     ms-core  — API, storage, notifications, probe endpoint
 packages/probe    ms-probe — scheduler, check execution, protocol listeners
 packages/web      web UI (Phase 5)
@@ -68,12 +70,13 @@ wrapper — `npm install`, `npm test`, and so on.
 
 ### Development services
 
-| Service                  | Where                                                             | Notes                                             |
-| ------------------------ | ----------------------------------------------------------------- | ------------------------------------------------- |
-| PostgreSQL + TimescaleDB | `localhost:5432`                                                  | database `monitoring`, user/password `monitoring` |
-| MailHog                  | SMTP `localhost:1025`, UI [localhost:8025](http://localhost:8025) | notification sink for Phase 4                     |
-| SNMP simulator           | `localhost:1161/udp`                                              | target for the SNMP sensors in Phase 6            |
-| syslog sender            | → `localhost:1514/udp`                                            | synthetic messages for the syslog receiver        |
+| Service                  | Where                                                                  | Notes                                             |
+| ------------------------ | ---------------------------------------------------------------------- | ------------------------------------------------- |
+| PostgreSQL + TimescaleDB | `localhost:5432`                                                       | database `monitoring`, user/password `monitoring` |
+| MailHog                  | SMTP `localhost:1025`, UI [localhost:8025](http://localhost:8025)      | notification sink for Phase 4                     |
+| SNMP simulator           | `localhost:1161/udp`                                                   | target for the SNMP sensors in Phase 6            |
+| syslog sender            | → `localhost:1514/udp`                                                 | synthetic messages for the syslog receiver        |
+| monitoring target        | HTTP `localhost:8081`, SSH `localhost:2222`, SNMP `localhost:1162/udp` | a Linux box to point sensors at — see below       |
 
 The database runs with `timescaledb.license=timescale`, matching production. We depend on the
 Timescale Community licence for exactly one feature — native compression, worth about 10x on
@@ -85,6 +88,23 @@ are in [Decision 4 of ADR-001](docs/ADR-001-architecture.md) and
 Setting `TIMESCALEDB_LICENSE=apache` starts the database under the Apache-only feature set. It is
 worth doing occasionally: it makes any new dependency on a Timescale-License feature fail
 immediately, and migration 004 refuses to apply at all, with a message saying why.
+
+### The monitoring target
+
+`snmpsim` and `syslog-sender` each speak one protocol. `target` is a _device_: one Debian box
+answering ICMP, HTTP, SSH and SNMP at once, which is the shape the device/sensor object model is
+built around. It is built from [`dev/target/`](dev/target/) and the probe reaches it as `target`
+on the compose network — the published loopback ports are only so you can poke at it by hand.
+
+| Protocol | Where                              | Notes                                                      |
+| -------- | ---------------------------------- | ---------------------------------------------------------- |
+| ICMP     | `target`                           | no daemon; the container answers ping                      |
+| HTTP     | `target:80`, host `:8081`          | `/` contains `monitoring-target-ok`, `/down` returns 503   |
+| SSH      | `target:22`, host `:2222`          | user/password from `TARGET_SSH_USER`/`TARGET_SSH_PASSWORD` |
+| SNMP     | `target:161/udp`, host `:1162/udp` | v2c, community `public`                                    |
+
+Nothing checks it yet: sensor types arrive with `P-05`, and `R-04` is what tells a probe which
+sensors it owns. Until both land, a sensor object is configuration the probe never hears about.
 
 ### Running the two services locally
 
@@ -103,6 +123,28 @@ scripts/dev.sh "node packages/probe/dist/src/main.js --config dev/probe.json"
 ```
 
 `scripts/dev-e2e.sh` does both, kills the core, and shows the probe reconnecting on its own.
+
+For a long-running pair instead — the API published on loopback so a browser can reach it:
+
+```bash
+npm run dev:services
+```
+
+`stop`, `restart` and `logs` are the other arguments to `scripts/dev-services.sh`.
+
+### The web UI
+
+```bash
+npm run dev:ui
+```
+
+[localhost:5173](http://localhost:5173) — Vite with hot reload, in a container, proxying `/api`
+to the core. In production there is no dev server: `ms-core` serves the built assets itself from
+`api.webRoot` (`ADR-001` Decision 8). See [`packages/web/README.md`](packages/web/README.md).
+
+Nothing is monitored yet and the UI says so: every sensor reads Unknown until a sensor type
+exists (`P-08`), a probe is told which sensors it owns (`R-04`) and the state machine turns
+results into states (Phase 3).
 
 ## Configuration
 

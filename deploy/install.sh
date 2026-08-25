@@ -53,10 +53,15 @@ echo "==> installing MonitoringSystem ${version} to ${PREFIX}"
 
 # --- application ---------------------------------------------------------------------------
 install -d -m 0755 "${PREFIX}"
-rm -rf "${PREFIX:?}/app" "${PREFIX:?}/bin"
+rm -rf "${PREFIX:?}/app" "${PREFIX:?}/bin" "${PREFIX:?}/web"
 cp -R "${here}/app" "${PREFIX}/app"
 cp -R "${here}/bin" "${PREFIX}/bin"
 chmod +x "${PREFIX}"/bin/*
+# The web UI, served by ms-core from api.webRoot. Optional: a tarball built without it, or a
+# deliberately headless install, simply leaves webRoot empty and no UI is served.
+if [ -d "${here}/web" ]; then
+  cp -R "${here}/web" "${PREFIX}/web"
+fi
 printf '%s\n' "${version}" > "${PREFIX}/VERSION"
 
 install -d -m 0755 "${CONFDIR}"

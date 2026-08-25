@@ -3,6 +3,11 @@ node_modules/
 coverage/
 *.tsbuildinfo
 
+# Packaging staging area and the tarballs it produces. Generated, gitignored, and full of
+# minified output that `--write` would happily reformat.
+build/
+release/
+
 # Hand-authored specification documents. Prettier reflows their tables and swaps emphasis
 # markers, which makes every edit a diff full of noise. They are prose, not code.
 docs/

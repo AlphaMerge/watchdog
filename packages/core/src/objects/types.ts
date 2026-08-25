@@ -51,7 +51,17 @@ export type ObjectDetail =
       readonly kind: 'sensor';
       readonly parentId: ObjectId;
       readonly sensorType: string;
+      /**
+       * Never contains a parameter the type marked `writeOnly`. What leaves the repository is
+       * unredacted; the object service is the boundary that strips them (P-05).
+       */
       readonly params: Readonly<Record<string, unknown>>;
+      /**
+       * Names of the `writeOnly` parameters that have a value. The values are never here — a
+       * form still has to tell "set, hidden" apart from "not set", and `CredentialView` already
+       * established that a secret is absent from a read rather than masked in it.
+       */
+      readonly redactedParams: readonly string[];
     });
 
 export type ObjectOfKind<K extends ObjectKind> = Extract<ObjectDetail, { kind: K }>;

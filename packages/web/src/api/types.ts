@@ -1,0 +1,115 @@
+/**
+ * The shapes this UI reads, mirrored from the core's response schemas.
+ *
+ * Hand-written rather than generated: the core already publishes OpenAPI at
+ * `/api/v1/openapi.json`, and generating from it is worth doing once the surface stops moving.
+ * Until then a generator would be one more thing to run before every change, and these are the
+ * six shapes the whole app uses.
+ */
+
+export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
+
+/**
+ * The six v1 states of `WORKFLOW.MD` §4, plus the two `[V2]` ones the type must accommodate.
+ *
+ * Nothing produces any of these yet — the state machine is Phase 3 — so every sensor reads as
+ * `unknown` today. The union exists now so the day `sensor_state` is written, the UI is already
+ * shaped for it rather than being retrofitted.
+ */
+export type SensorState =
+  | 'up'
+  | 'warning'
+  | 'down'
+  | 'down-acknowledged'
+  | 'paused'
+  | 'unknown'
+  | 'unusual'
+  | 'down-partial';
+
+export interface ObjectSummary {
+  id: number;
+  parentId: number | null;
+  kind: ObjectKind;
+  name: string;
+  tags: string[];
+  priority: number;
+  version: number;
+  hasChildren: boolean;
+  depth?: number;
+  host?: string;
+  sensorType?: string;
+}
+
+export interface ObjectDetail extends ObjectSummary {
+  comments: string;
+  childCount: number;
+  createdAt: string;
+  updatedAt: string;
+  ipVersion?: string;
+  params?: Record<string, unknown>;
+  /** Names of `writeOnly` parameters that hold a value. Never the values (P-05). */
+  redactedParams?: string[];
+}
+
+export interface TreePage {
+  items: ObjectSummary[];
+  truncated: boolean;
+}
+
+export interface ObjectPage {
+  items: ObjectSummary[];
+  nextCursor: string | null;
+}
+
+export interface SensorTypeSummary {
+  id: string;
+  category: string;
+  costHint: 'light' | 'medium' | 'heavy';
+  paramsSchema: Record<string, unknown>;
+}
+
+export interface ChannelRecord {
+  id: number;
+  key: string;
+  name: string;
+  unit: string;
+  isPrimary: boolean;
+}
+
+export interface AuditEntry {
+  id: number;
+  at: string;
+  action: string;
+  objectId: number;
+  objectKind: ObjectKind | null;
+  actor: { kind: string; label?: string };
+  summary: Record<string, unknown>;
+  diff: { field: string; before: unknown; after: unknown }[];
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  nextBefore: string | null;
+}
+
+/** A dense series. `null` is a gap and must stay one — never draw it as zero (CLAUDE.md). */
+export interface HistoryChannel {
+  id: number;
+  key: string;
+  name: string;
+  unit: string;
+  avg: (number | null)[];
+  min: (number | null)[];
+  max: (number | null)[];
+  count: (number | null)[];
+}
+
+export interface HistorySeries {
+  from: string;
+  to: string;
+  resolutionSeconds: number;
+  bucketCount: number;
+  buckets: string[];
+  channels: HistoryChannel[];
+  segments: { table: string; from: string; to: string }[];
+}

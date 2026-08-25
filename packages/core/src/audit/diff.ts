@@ -25,9 +25,11 @@ const TRACKED = [
 ] as const;
 
 /**
- * Field-level changes between two versions of an object.
+ * Field-level changes between two versions of an object, including sensor parameters by value.
  *
- * `params` is handled separately and by key only — see `changedParamKeys`.
+ * Values are safe here **only** because the object service redacts `writeOnly` parameters out
+ * of both sides before the audit sink is ever handed them (P-05). Nothing in this file re-checks
+ * that; the boundary is `ObjectService.#redact`, and it is deliberately the single one.
  */
 export function diffObjects(before: ObjectDetail, after: ObjectDetail): FieldChange[] {
   const changes: FieldChange[] = [];
@@ -39,6 +41,7 @@ export function diffObjects(before: ObjectDetail, after: ObjectDetail): FieldCha
     if (same(b[field], a[field])) continue;
     changes.push({ field, before: b[field] ?? null, after: a[field] ?? null });
   }
+  changes.push(...paramChanges(paramsOf(before), paramsOf(after)));
   return changes;
 }
 
@@ -59,19 +62,33 @@ export function describeDeleted(before: ObjectDetail): FieldChange[] {
 /**
  * Which sensor parameters changed — **the keys, never the values**.
  *
- * `sensor_config.params` is the one field on an object that can hold a secret today: until
- * `P-05` lands `writeOnly` redaction, an operator who pastes an SNMP community into a parameter
- * has put a credential there. The API already returns those verbatim, which is bad enough; a
- * long-lived audit table with its own retention would take a present-tense exposure and make it
- * permanent, and redacting later cannot unwrite history. So the audit records *that* a
- * parameter changed, which is the auditable fact, and `P-05` can add the values once it knows
- * which ones are safe to show.
+ * Call this on *unredacted* details, and only to build the key list. It is what makes a rotated
+ * credential auditable: a `writeOnly` parameter redacts to the same absence before and after, so
+ * a diff of what the sink can see would report no change at all.
  */
 export function changedParamKeys(before: ObjectDetail, after: ObjectDetail): string[] {
-  const b = before.kind === 'sensor' ? before.params : {};
-  const a = after.kind === 'sensor' ? after.params : {};
+  const b = paramsOf(before);
+  const a = paramsOf(after);
   const keys = new Set([...Object.keys(b), ...Object.keys(a)]);
   return [...keys].filter((key) => !same(b[key], a[key])).sort();
+}
+
+function paramsOf(object: ObjectDetail): Readonly<Record<string, unknown>> {
+  return object.kind === 'sensor' ? object.params : {};
+}
+
+function paramChanges(
+  before: Readonly<Record<string, unknown>>,
+  after: Readonly<Record<string, unknown>>,
+): FieldChange[] {
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+  return keys
+    .filter((key) => !same(before[key], after[key]))
+    .map((key) => ({
+      field: `params.${key}`,
+      before: before[key] ?? null,
+      after: after[key] ?? null,
+    }));
 }
 
 function snapshot(object: ObjectDetail): FieldChange[] {
@@ -81,6 +98,7 @@ function snapshot(object: ObjectDetail): FieldChange[] {
     if (!(field in source)) continue;
     changes.push({ field, before: null, after: source[field] ?? null });
   }
+  changes.push(...paramChanges({}, paramsOf(object)));
   return changes;
 }
 

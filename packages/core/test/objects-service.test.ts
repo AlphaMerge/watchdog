@@ -420,12 +420,10 @@ describe(
         const rack = await group(g, 'Rack 4');
         const d1 = await device(rack, 'switch-01', '10.1.0.1');
         const d2 = await device(rack, 'switch-02', '10.1.0.2');
-        const s1 = await sensor(d1, 'Ping');
+        // No channel is inserted by hand any more: since P-05 the sensor type declares them,
+        // so each of these two sensors arrives with `rtt` and `loss` already attached.
+        await sensor(d1, 'Ping');
         await sensor(d2, 'Ping');
-        await scratch.db.query(
-          'INSERT INTO channel (sensor_id, key, name, is_primary) VALUES ($1, $2, $3, true)',
-          [s1, 'rtt', 'Response time'],
-        );
         await h.service.setSetting(testActor, d1, INTERVAL, 120);
         return g;
       };
@@ -440,7 +438,7 @@ describe(
         assert.equal(result.clonedCount.group, 2);
         assert.equal(result.clonedCount.device, 2);
         assert.equal(result.clonedCount.sensor, 2);
-        assert.equal(result.clonedCount.channel, 1);
+        assert.equal(result.clonedCount.channel, 4, '2 sensors x 2 declared channels');
         assert.equal(result.clonedCount.setting, 1);
         assert.notEqual(result.object.id, source);
         assert.equal(result.object.name, 'Clone of Berlin DC');
@@ -506,22 +504,26 @@ describe(
       it('gives cloned channels new ids, so a clone has no history', async () => {
         const d = await device(probeId, 'switch-01');
         const s = await sensor(d, 'Traffic');
-        await scratch.db.query(
-          'INSERT INTO channel (sensor_id, key, name, is_primary) VALUES ($1, $2, $3, true)',
-          [s, 'in', 'Traffic in'],
-        );
+        // The channels come from the sensor type now, primary flag and all.
         const sourceChannels = await h.service.channels(s);
+        assert.deepEqual(
+          sourceChannels.map((channel) => channel.key),
+          ['rtt', 'loss'],
+        );
 
         const result = await h.service.clone(testActor, s, {});
         const clonedChannels = await h.service.channels(result.object.id);
 
-        assert.equal(clonedChannels.length, 1);
+        assert.deepEqual(
+          clonedChannels.map((channel) => channel.key),
+          ['rtt', 'loss'],
+        );
         const cloned = clonedChannels[0];
         const original = sourceChannels[0];
         assert.ok(cloned !== undefined && original !== undefined);
-        assert.equal(cloned.key, 'in');
+        assert.equal(cloned.key, 'rtt');
         assert.notEqual(cloned.id, original.id, 'a new id means no inherited history');
-        assert.equal(cloned.isPrimary, true);
+        assert.equal(cloned.isPrimary, true, 'and the clone is still judged by the same channel');
       });
 
       it('refuses to clone the root or a probe', async () => {
@@ -643,11 +645,7 @@ describe(
         const g = await group(probeId, 'Doomed');
         const d = await device(g, 'switch-01');
         const s = await sensor(d, 'Ping');
-        await scratch.db.query('INSERT INTO channel (sensor_id, key, name) VALUES ($1, $2, $3)', [
-          s,
-          'rtt',
-          'Response time',
-        ]);
+        // `rtt` and `loss` come with the sensor type; nothing to insert by hand.
 
         const report = await h.service.delete(
           testActor,
@@ -657,7 +655,7 @@ describe(
         );
 
         assert.equal(report.deleted.total, 3);
-        assert.equal(report.deleted.channels, 1);
+        assert.equal(report.deleted.channels, 2, 'both declared channels went with it');
         assert.equal(report.destroyed.length, 3);
         for (const id of [g, d, s]) await rejects(() => h.service.get(id));
 

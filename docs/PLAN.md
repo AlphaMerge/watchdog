@@ -234,7 +234,8 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | --- | --- | --- |
 | P-01 hashed timing wheel | done | Monotonic-driven, phase-spread, coalescing catch-up; injected clock so dispatch is asserted rather than timed |
 | P-02 worker pool runner | done | Bounded pool, timeout that reports on time, cooperative abort with a terminate backstop, crash recycling, skip-if-still-running |
-| P-03…P-15 | not started | |
+| P-05 `SensorType` contract and registry | done | New `@ms/sensors` package; schema validation with defaults, declared channels with a primary, `writeOnly` redaction at one boundary, `GET /sensor-types`, guide in `docs/adding-a-sensor-type.md` |
+| P-03, P-04, P-06…P-16 | not started | |
 
 Two of the four exit criteria are covered by tests already: **a deliberately hung check does not
 delay any other check**, and **killing a worker mid-check loses exactly one result and recycles
@@ -247,6 +248,12 @@ The scheduler half of the throughput criterion is measured: **5,000 sensors over
 is entirely available to the worker pool and the tick's own lateness, measured at a p95 under
 250 ms against the real timer. What P-15 still has to prove is that the pool can keep up with
 those dispatches on eight cores for an hour.
+
+P-05 landed the plugin contract, which is what the rest of the phase is built from — but it
+registers **no types**: the first four are P-08…P-11. Until one of them lands the core refuses to
+create sensors and says so at boot, so nothing is monitored yet. It also closed the last
+credential surface from Phase 1: parameters marked `writeOnly` are stripped from every read at a
+single boundary, which is the one thing S-03 could not do without knowing what a parameter meant.
 
 ---
 
@@ -346,6 +353,17 @@ test it exhaustively.
 - A new user can add a device, add three sensors, set a threshold and receive an email without
   touching the API.
 - The tree stays responsive with 5,000 sensors and updates within a second of a state change.
+
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| U-01 frontend scaffold | done | React 19 + Vite 8 + Tailwind 4 + React Router 7; CSS-custom-property tokens shared with the canvas charts to come; light and dark themes; served by the core from `api.webRoot` |
+| U-02…U-11 | not started | |
+
+Pulled forward out of order, on request, and it reads honestly: with no state machine and no
+sensor types, every sensor shows Unknown and each empty panel names the task that fills it. The
+exit criteria are untouched — neither can be met before Phase 3 and `P-08`.
 
 ---
 
