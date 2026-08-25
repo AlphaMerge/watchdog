@@ -46,6 +46,8 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 5_000):
 const request = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) => ({
   sensorId,
   sensorType,
+  // Every check points somewhere; the fixtures ignore it, but the shape is the real one.
+  target: { host: '192.0.2.1', ipVersion: 'auto' as const },
   params: extra,
   timeoutMs: Number(extra['timeoutMs'] ?? 1_000),
 });

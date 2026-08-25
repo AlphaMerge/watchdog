@@ -212,9 +212,31 @@ describe('lookup', () => {
 });
 
 describe('the built-in catalogue', () => {
-  it('is empty until the first sensor type lands', () => {
-    // P-08 makes this list non-empty. Asserting it rather than leaving it implicit means the
-    // day it changes, someone is told to update the guide and this test together.
-    assert.deepEqual(standardCatalogue().ids(), []);
+  it('registers what ships, and registers it cleanly', () => {
+    // Building it at all is the assertion: `register` enforces the id format, one primary
+    // channel, no duplicate keys and no unreachable `writeOnly`, and throws on any of them. A
+    // type that breaks a rule fails here rather than on an operator's first sensor.
+    assert.deepEqual(standardCatalogue().ids(), ['icmp.ping']);
+  });
+
+  it('is sealed, so nothing can register a type after boot', () => {
+    assert.equal(standardCatalogue().sealed, true);
+  });
+
+  it('declares exactly one primary channel per shipped type', () => {
+    const catalogue = standardCatalogue();
+    for (const id of catalogue.ids()) {
+      const primary = catalogue.channelsFor(id, {}).filter((channel) => channel.isPrimary === true);
+      assert.equal(primary.length, 1, `${id} has ${String(primary.length)} primary channels`);
+    }
+  });
+
+  it('validates every shipped type against its own declared defaults', () => {
+    // A schema whose defaults do not satisfy it is a type nobody can create with an empty form.
+    const catalogue = standardCatalogue();
+    for (const id of catalogue.ids()) {
+      const result = catalogue.validate(id, {});
+      assert.ok(result.valid, `${id} rejects its own defaults`);
+    }
   });
 });

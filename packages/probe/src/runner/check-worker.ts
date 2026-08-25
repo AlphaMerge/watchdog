@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { UNKNOWN_SENSOR_TYPE, type CheckRegistry } from './types.js';
+import { UNKNOWN_SENSOR_TYPE, type CheckRegistry, type CheckTarget } from './types.js';
 
 /**
  * A pool worker.
@@ -15,6 +15,7 @@ interface RunMessage {
   jobId: string;
   sensorId: number;
   sensorType: string;
+  target: CheckTarget;
   params: Record<string, unknown>;
 }
 
@@ -52,6 +53,7 @@ async function run(message: RunMessage): Promise<void> {
   try {
     const execution = await registry.execute(message.sensorType, {
       sensorId: message.sensorId,
+      target: message.target,
       params: message.params,
       signal: controller.signal,
     });

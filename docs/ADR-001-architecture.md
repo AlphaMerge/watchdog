@@ -256,6 +256,30 @@ optional raw-socket fast path enabled by `setcap cap_net_raw+ep` on the Node bin
 privileged helper. Ping being the single most-used sensor type makes this worth doing properly
 — benchmark both paths in Phase 2.
 
+### Amended 2026-08-25 (P-08) — we spawn `ping` ourselves, not through the npm wrapper
+
+The decision above — *default to the system `ping` binary* — stands, and `P-08` implements it.
+What it does not use is the `ping` npm wrapper this row suggests. That package (1.0.0, last
+published April 2026) contains no reference to `AbortSignal` anywhere in its source, and
+CLAUDE.md requires every check to honour `ctx.signal`. A check that cannot be cancelled has its
+worker terminated on every timeout, which costs more than the wrapper saves.
+
+Spawning it ourselves is about 200 lines, and the half that carries the risk — turning three
+platforms' output into numbers — is a pure function with captured real output from Linux, BSD and
+Windows as fixtures. That matters more than the line count for the most-used sensor type there
+is. One example of why: Windows counts an ICMP "Destination host unreachable" as a *received*
+packet, so its own summary reports `Received = 2, Lost = 0 (0% loss)` for a host that is not
+there. Loss is therefore computed from timed echo replies, never from the summary line.
+
+**Still open, and still `P-07`:** the raw-socket fast path, and the measurement at 1,000 targets
+that would justify it. One number is already visible without it — `ping` waits about a second
+between packets, so the default count of 4 holds a worker for roughly three seconds. At 5,000
+sensors on a one-minute interval that is 5,000 process spawns a minute and 15,000 worker-seconds,
+which no plausible pool size absorbs. `P-07` and `P-15` are where that gets confronted; the
+sensor is written so a second implementation slots in behind the same pure parser.
+
+---
+
 **Syslog, flow and WMI are subsystems we own**, not integrations. Budget for them accordingly:
 a syslog receiver is ~150 lines of parsing plus filter rules; a NetFlow v9/IPFIX collector
 needs a template cache and is a genuine multi-week piece of work — which is why flow sensors

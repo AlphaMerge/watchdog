@@ -235,7 +235,9 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | P-01 hashed timing wheel | done | Monotonic-driven, phase-spread, coalescing catch-up; injected clock so dispatch is asserted rather than timed |
 | P-02 worker pool runner | done | Bounded pool, timeout that reports on time, cooperative abort with a terminate backstop, crash recycling, skip-if-still-running |
 | P-05 `SensorType` contract and registry | done | New `@ms/sensors` package; schema validation with defaults, declared channels with a primary, `writeOnly` redaction at one boundary, `GET /sensor-types`, guide in `docs/adding-a-sensor-type.md` |
-| P-03, P-04, P-06…P-16 | not started | |
+| P-08 ping sensor | done | System `ping` spawned directly for `AbortSignal` support; pure parser with Linux/BSD/Windows fixtures; `rtt` and `loss` channels |
+| P-16 toolchain `ping` | done | `dev/toolchain/Dockerfile`; the base image had no `ping`, so the default ICMP path could not be tested |
+| P-03, P-04, P-06, P-07, P-09…P-15 | not started | |
 
 Two of the four exit criteria are covered by tests already: **a deliberately hung check does not
 delay any other check**, and **killing a worker mid-check loses exactly one result and recycles
@@ -249,9 +251,10 @@ is entirely available to the worker pool and the tick's own lateness, measured a
 250 ms against the real timer. What P-15 still has to prove is that the pool can keep up with
 those dispatches on eight cores for an hour.
 
-P-05 landed the plugin contract, which is what the rest of the phase is built from — but it
-registers **no types**: the first four are P-08…P-11. Until one of them lands the core refuses to
-create sensors and says so at boot, so nothing is monitored yet. It also closed the last
+P-05 landed the plugin contract, which is what the rest of the phase is built from, and P-08 put
+the first type in it. Sensors can now be created and the check runs correctly against a real
+target — but nothing schedules one: `R-04` is what tells a probe which sensors it owns, so the
+wheel still has nothing to dispatch. It also closed the last
 credential surface from Phase 1: parameters marked `writeOnly` are stripped from every read at a
 single boundary, which is the one thing S-03 could not do without knowing what a parameter meant.
 

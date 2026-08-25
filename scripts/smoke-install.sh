@@ -21,7 +21,14 @@ if [ "$#" -gt 0 ]; then
   echo "==> using the tarball given on the command line (not rebuilding)"
 else
   echo "==> building a release tarball"
-  "${repo_root}/scripts/package.sh" >/dev/null
+  # package.sh needs npm. The promise everywhere else here is that Docker is the only thing you
+  # need on the host, so fall back to the toolchain container when there is no npm — otherwise
+  # this fails on exactly the machines the container exists for.
+  if command -v npm >/dev/null 2>&1; then
+    "${repo_root}/scripts/package.sh" >/dev/null
+  else
+    "${repo_root}/scripts/dev.sh" "scripts/package.sh" >/dev/null
+  fi
   tarball="$(ls -t "${repo_root}"/release/ms-*.tar.gz 2>/dev/null | head -1)"
   [ -n "${tarball}" ] && [ -f "${tarball}" ] || {
     echo "scripts/package.sh produced no tarball" >&2
@@ -84,6 +91,19 @@ if docker exec "${container}" curl -sf http://127.0.0.1:8080/api/v1/objects/root
   echo "    GET /api/v1/objects/root: ok"
 else
   echo "    GET /api/v1/objects/root: FAILED" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+
+echo "==> asserting the shipped catalogue has sensor types in it"
+# @ms/sensors is a separate workspace package staged and symlinked by package.sh. If that goes
+# wrong the core still starts and still answers — it just refuses to create any sensor, which is
+# a failure nobody would notice until an operator tried.
+if docker exec "${container}" curl -sf http://127.0.0.1:8080/api/v1/sensor-types \
+  | grep -q 'icmp.ping'; then
+  echo "    GET /api/v1/sensor-types: icmp.ping present"
+else
+  echo "    GET /api/v1/sensor-types: FAILED — the shipped catalogue is empty" >&2
   docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
   failed=1
 fi

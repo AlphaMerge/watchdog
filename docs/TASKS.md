@@ -354,14 +354,42 @@ because each is a decision rather than a defect:
 - [ ] **P-07 — ICMP spike and decision** · M · P-06 · Benchmark system-`ping` wrapper vs raw
       socket at 1,000 targets for throughput, accuracy and privilege cost. Record the outcome in
       ADR-001.
-- [ ] **P-08 — Ping sensor** · M · P-05, P-07 · Availability, RTT, packet loss channels;
+- [x] **P-08 — Ping sensor** · M · P-05, P-07 · Availability, RTT, packet loss channels;
       configurable count, size, timeout.
-- [ ] **P-16 — The development toolchain has no `ping`** · S · — · `scripts/dev.sh` runs the
+      **P-08 outcome.** Built against the ADR's already-made decision (system `ping` binary)
+      rather than waiting for P-07, which is the *benchmark* that would justify the optional
+      raw-socket path, not a prerequisite for the default one. We spawn the binary ourselves
+      instead of using the `ping` npm wrapper the ADR suggests: it exposes no `AbortSignal`, and
+      a check that cannot be cancelled has its worker terminated on every timeout. Recorded as an
+      amendment to Decision 7's dependency table.
+      **Two channels, not the three named here.** `rtt` (primary) and `loss`. Availability would
+      be a channel that can only ever hold one value: a run with no replies has no round-trip
+      time, so it throws, and CLAUDE.md is explicit that a Down sensor records *no* channel
+      values — leaving availability reading 100 on every sample it ever had. `loss` already
+      carries it.
+      **The parsing is a pure function** with real captured output from Linux, BSD and Windows as
+      fixtures, because that is where the risk is for the most-used sensor type. It found one
+      thing worth knowing: Windows counts an ICMP "Destination host unreachable" as a *received*
+      packet and reports `Received = 2, Lost = 0 (0% loss)` for a host that is not there. Loss is
+      computed from timed echo replies; believing the summary would report perfect health for an
+      unreachable target.
+      **Added for it:** `CheckContext` gained `target` — a check with no target cannot check
+      anything, and the host belongs to the parent device, not to sensor params. That surfaced
+      the probe redeclaring `CheckContext` and `CheckExecution` instead of importing them from
+      `@ms/sensors`; the copies are gone.
+      **Not yet running anywhere.** `R-04` is what tells a probe which sensors it owns, so the
+      wheel still has nothing to dispatch. The type is exercised end-to-end against loopback in
+      `packages/sensors/test/icmp-ping.test.ts`.
+- [x] **P-16 — The development toolchain has no `ping`** · S · — · `scripts/dev.sh` runs the
       probe in `node:24-bookworm`, which ships no `iputils-ping`, and ADR-001 makes the system
       `ping` binary the default ICMP path. P-08 therefore cannot be developed or tested in the
       container the rest of the work happens in. Either build a thin toolchain image with the
       package, or have the probe report a missing ICMP binary once at startup rather than as an
       identical failure on every check. Found while standing the dev target up, not by a test.
+      **Done both ways.** `dev/toolchain/Dockerfile` is `node:24-bookworm` plus `iputils-ping`
+      and `iproute2`, and the compose service builds from it — which is what let P-08 be tested
+      at all. The sensor also names the missing binary rather than failing anonymously, since a
+      probe in a minimal production container hits the same wall.
 - [ ] **P-09 — HTTP sensor** · M · P-05 · Status code, response time, size channels; timeout,
       redirect and TLS-verification options.
 - [ ] **P-10 — Port sensor** · S · P-05 · TCP connect with timing; optional banner match.

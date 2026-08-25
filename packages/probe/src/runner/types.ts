@@ -1,28 +1,26 @@
-import type { ChannelReading, CheckResult } from '@ms/shared';
+import type { CheckResult } from '@ms/shared';
+
+/**
+ * What a check is handed, and what it gives back, come from `@ms/sensors` — the package that
+ * defines the contract sensor types implement.
+ *
+ * Re-exported rather than redeclared: P-02 wrote its own copies before that package existed, and
+ * two structurally-identical interfaces in two packages is a pair that drifts. Adding
+ * `CheckTarget` for P-08 is what surfaced it — the probe's copy would have gone on compiling
+ * without the field the sensor needed.
+ */
+export type { CheckContext, CheckExecution, CheckTarget } from '@ms/sensors';
+
+import type { CheckContext, CheckExecution, CheckTarget } from '@ms/sensors';
 
 export interface CheckRequest {
   sensorId: number;
   sensorType: string;
+  /** Where the check points, resolved by the core from the sensor's parent device (R-04). */
+  target: CheckTarget;
   params: Record<string, unknown>;
   /** Hard deadline. The sensor's own `scan.timeoutMs`, resolved by the core. */
   timeoutMs: number;
-}
-
-/**
- * What a check is handed when it runs.
- *
- * `signal` is not optional and not advisory: CLAUDE.md requires every check to honour it, and a
- * check that ignores it gets its worker terminated instead — which costs more than returning.
- */
-export interface CheckContext {
-  readonly sensorId: number;
-  readonly params: Readonly<Record<string, unknown>>;
-  readonly signal: AbortSignal;
-}
-
-export interface CheckExecution {
-  channels: ChannelReading[];
-  message?: string;
 }
 
 /**

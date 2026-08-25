@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { bootstrap, describeError, probeConfigSchema, type ProbeConfig } from '@ms/shared';
 import { CheckPool } from './runner/pool.js';
+import type { CheckRequest } from './runner/types.js';
 import { TimingWheel } from './scheduler/wheel.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
@@ -37,10 +38,7 @@ async function main(): Promise<void> {
 
   // What this probe has been told to scan. Empty until the core pushes it a subtree (R-04) — a
   // probe with nothing to scan is the ordinary state of a freshly approved one, not an error.
-  const sensors = new Map<
-    number,
-    { sensorType: string; params: Record<string, unknown>; timeoutMs: number }
-  >();
+  const sensors = new Map<number, Omit<CheckRequest, 'sensorId'>>();
 
   const pool = new CheckPool({
     logger,

@@ -35,9 +35,24 @@ export interface ChannelDef {
   readonly isPrimary?: boolean;
 }
 
+/**
+ * What a check points at.
+ *
+ * It comes from the sensor's parent device, not from its own parameters: one device, one host,
+ * and moving a device re-targets every sensor under it at once. A sensor type that asked for a
+ * host in its `paramsSchema` would let the two disagree, which is how a device gets renamed and
+ * half its sensors keep checking the old address.
+ */
+export interface CheckTarget {
+  /** The device's `host`: a hostname or a literal address. Never resolved by the core. */
+  readonly host: string;
+  readonly ipVersion: 'auto' | 'v4' | 'v6';
+}
+
 /** What a check is handed when it runs. */
 export interface CheckContext {
   readonly sensorId: number;
+  readonly target: CheckTarget;
   readonly params: Readonly<Record<string, unknown>>;
   /**
    * Not optional and not advisory. CLAUDE.md requires every check to honour it; one that does

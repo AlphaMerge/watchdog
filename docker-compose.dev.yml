@@ -14,7 +14,8 @@ services:
   # `scripts/dev.sh` (or `docker compose run --rm toolchain ...`).
   # ---------------------------------------------------------------------------------------
   toolchain:
-    image: node:24-bookworm
+    build:
+      context: ./dev/toolchain
     working_dir: /workspace
     profiles: ['tools']
     init: true

@@ -2,6 +2,7 @@ export type {
   ChannelDef,
   CheckContext,
   CheckExecution,
+  CheckTarget,
   CostHint,
   JsonSchema,
   SensorType,
@@ -18,19 +19,17 @@ export {
 
 import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
+import { icmpPing } from './types/icmp-ping.js';
 
 /**
  * The types every installation gets.
  *
- * Empty on purpose: `P-05` is the contract and the registry, and the first four types are
- * `P-08` (Ping), `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS). Until one of them lands, a
- * catalogue built here registers nothing and the core refuses to create sensors — which is the
- * truth, and better than accepting configuration for a check that cannot run.
+ * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
  */
-export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [];
+export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [icmpPing];
 
 export function standardCatalogue(
   types: readonly SensorType[] = BUILT_IN_SENSOR_TYPES,

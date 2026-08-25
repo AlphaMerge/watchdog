@@ -253,6 +253,7 @@ export class CheckPool {
       jobId: job.id,
       sensorId: job.request.sensorId,
       sensorType: job.request.sensorType,
+      target: job.request.target,
       params: job.request.params,
     });
   }
