@@ -73,6 +73,7 @@ interface SummaryRow {
   host: string | null;
   sensor_type: string | null;
   state: SensorState | null;
+  paused: boolean;
 }
 
 /** Columns every detail read needs, joined to the two kind-specific side tables. */
@@ -91,6 +92,7 @@ const DETAIL_FROM = `
   LEFT JOIN sensor_config sc ON sc.object_id = o.id
   LEFT JOIN probe_config pc ON pc.object_id = o.id
   LEFT JOIN sensor_runtime sr ON sr.object_id = o.id
+  LEFT JOIN object_pause op ON op.object_id = o.id
 `;
 
 /**
@@ -100,7 +102,10 @@ const DETAIL_FROM = `
 const SUMMARY_COLUMNS = `
   o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.version, o.sort_order,
   EXISTS (SELECT 1 FROM object c WHERE c.parent_id = o.id) AS has_children,
-  dc.host, sc.type AS sensor_type, sr.state
+  dc.host, sc.type AS sensor_type, sr.state,
+  -- The clock, not just the row: a pause whose deadline has passed is not a pause, and the
+  -- sweep that deletes the row runs on a coarse timer (M-08).
+  (op.object_id IS NOT NULL AND (op.paused_until IS NULL OR op.paused_until > now())) AS paused
 `;
 
 /**
@@ -176,6 +181,7 @@ function toSummary(row: SummaryRow): ObjectSummary {
     // a group has no state, and one that read as Unknown would be indistinguishable from a
     // sensor that has never reported.
     ...(row.state === null ? {} : { state: row.state }),
+    ...(row.paused ? { paused: true } : {}),
   };
 }
 

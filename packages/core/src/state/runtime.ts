@@ -260,3 +260,63 @@ export async function readSensorState(
   const row = rows[0];
   return row === undefined ? null : toRuntime(row);
 }
+
+/**
+ * One sensor's state, changed by something that was not a result (`M-08`).
+ *
+ * A pause, a resume, an acknowledgement, a probe going away: none of them carry a reading, so
+ * none of them may touch `last_result_at` or the failure count. `reset` is the exception, and it
+ * is what §3's "resume yields Unknown" is made of — when the last pause source clears, the
+ * sensor forgets what it measured before the pause, because reporting a state the system has not
+ * checked since would be reporting something it does not know.
+ */
+export interface StateRewrite {
+  readonly sensorId: number;
+  readonly at: Date;
+  readonly state: SensorState;
+  readonly cause: SensorStateCause;
+  readonly message: string;
+  readonly since: Date;
+  readonly reset: boolean;
+}
+
+/**
+ * Moves each sensor's current row without pretending a scan happened.
+ *
+ * No `last_result_at` guard, unlike `writeRuntimes`: there is no result to be stale against, and
+ * the caller has just read these rows in this transaction.
+ */
+export async function writeStateChanges(
+  q: Queryable,
+  rewrites: readonly StateRewrite[],
+): Promise<number> {
+  if (rewrites.length === 0) return 0;
+  const rows = await q.query<{ object_id: string }>(
+    `UPDATE sensor_runtime r
+     SET state = w.state,
+         cause = w.cause,
+         message = w.message,
+         since = w.since,
+         last_result_at = CASE WHEN w.reset THEN NULL ELSE r.last_result_at END,
+         consecutive_failures = CASE WHEN w.reset THEN 0 ELSE r.consecutive_failures END,
+         -- Resuming clears any acknowledgement (WORKFLOW.MD §4 rule 5): it was a statement
+         -- about an outage nobody is watching any more.
+         acknowledged_at = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_at END,
+         acknowledged_until = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_until END
+     FROM unnest(
+       $1::bigint[], $2::sensor_state_kind[], $3::sensor_state_cause[], $4::text[],
+       $5::timestamptz[], $6::boolean[]
+     ) AS w(sensor_id, state, cause, message, since, reset)
+     WHERE r.object_id = w.sensor_id
+     RETURNING r.object_id::text AS object_id`,
+    [
+      rewrites.map((write) => write.sensorId),
+      rewrites.map((write) => write.state),
+      rewrites.map((write) => write.cause),
+      rewrites.map((write) => write.message),
+      rewrites.map((write) => write.since),
+      rewrites.map((write) => write.reset),
+    ],
+  );
+  return rows.length;
+}

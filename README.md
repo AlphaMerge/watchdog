@@ -173,6 +173,16 @@ How many consecutive failures are reported as Warning before Down is the inherit
 `scan.retryWarnings` (`M-03`): zero is immediate-down, the default is one warning interval, and a
 group can set it for everything beneath it.
 
+Any object can be **paused** (`M-08`) — indefinitely, for a duration, or until a moment, with a
+message. Pausing a device pauses every sensor beneath it, immediately: they change state in the
+request, and their probe stops being told to scan them at all. Only the object that was directly
+paused can be resumed, and the refusal names the one that can. A resumed sensor reads Unknown
+until its next scan, never the state it had before.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/objects/7/pause -H 'content-type: application/json' -d '{"minutes":15,"message":"swapping a PSU"}'
+```
+
 Before any of that, a reading is scaled by the channel's factors and passed through its spike
 filter (`M-07`): bytes become bits, centidegrees become degrees, and a wrapped counter reporting
 four billion is discarded rather than flattening the graph. The **scaled** value is what is

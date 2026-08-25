@@ -40,6 +40,8 @@ export interface ObjectSummary {
   sensorType?: string;
   /** A sensor's current state (`M-02`). Absent on other kinds, and before the first result. */
   state?: SensorState;
+  /** True when this object is itself manually paused (`M-08`), not when an ancestor is. */
+  paused?: boolean;
 }
 
 export interface ObjectDetail extends ObjectSummary {
@@ -141,6 +143,24 @@ export interface HistorySeries {
   buckets: string[];
   channels: HistoryChannel[];
   segments: { table: string; from: string; to: string }[];
+}
+
+/** `GET /objects/:id/pause` — why an object is paused, and whether this is the one to resume. */
+export interface PauseView {
+  objectId: number;
+  paused: boolean;
+  /**
+   * Whether *this* object can be resumed. A sensor under a paused device is paused and not
+   * resumable, and offering the button anyway would be offering something that does not work.
+   */
+  resumable: boolean;
+  source: 'manual' | 'parent' | null;
+  pausedAt: string | null;
+  /** `null` while paused indefinitely — until a person says otherwise. */
+  pausedUntil: string | null;
+  message: string;
+  actor: { kind: string; label: string | null } | null;
+  inheritedFrom: { objectId: number; name: string } | null;
 }
 
 /** `GET /sensors/:id/state` — the whole answer for one sensor (`M-02`). */

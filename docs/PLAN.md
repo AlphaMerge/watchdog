@@ -310,7 +310,8 @@ test it exhaustively.
 | M-05 multi-channel rollup | done | Absorbed by `M-04`: `rollUp` takes the worst channel, §2.3 in `evaluate` combines it with the query state. A result carries every channel at once, so there was no second place for it |
 | M-06 lookups | done | `packages/core/src/lookups/`; migration 009 adds `channel.lookup_id`. JSON rather than PRTG's `.ovl` XML, built-ins as TypeScript modules, operator definitions under `<dataDir>/lookups` overriding by id. A channel is judged by a lookup **or** its limits, never both |
 | M-07 scaling and spike filter | done | `packages/core/src/ingestion/scaling.ts`; no migration — the columns have been on `channel` since 001. Scale before filter, store the scaled value, and a discarded reading is a gap that decides nothing |
-| M-08…M-19 | not started | |
+| M-08 manual pause | done | Migration 010 adds `object_pause`; the per-sensor flags are derived from it on pause, resume, move and create. Any object can be paused, so the parent cascade lands here rather than in `M-12`. A paused sensor leaves its probe's configuration entirely, and a timed pause is computed from the clock and swept every 30 s |
+| M-09…M-19 | not started | |
 
 **Where Phase 3's exit criteria stand after `M-02`.**
 
@@ -319,8 +320,9 @@ test it exhaustively.
   facts × 4 channel verdicts, asserting exactly one v1 state, a cause on every one, and each
   invariant of `state-machine.md` §5. `M-16` still owns the property test over event
   *sequences*, which needs `M-12` and `M-13` to have events to shuffle.
-- *Paused states survive a core restart* — the columns are there and are read back on the first
-  result after a restart; a restart-with-a-pause scenario is testable once `M-08` can set one.
+- *Paused states survive a core restart* — **met** for manual pause: the deadline and the reason
+  are rows, not timers, and a new process reads them back with nothing in memory. Tested in
+  `pause.test.ts`.
 - *One dependency-suppressed alarm, not forty* — untouched; `M-11` and `M-17`.
 
 `M-03`, `M-04`, `M-06` and `M-07` close five of the deliverables above: "two-step failure with the

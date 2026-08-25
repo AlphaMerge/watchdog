@@ -21,6 +21,7 @@ import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import { LOOKUP_SCHEMAS } from './schemas/lookups.js';
+import { PAUSE_SCHEMAS } from './schemas/pause.js';
 import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
@@ -127,6 +128,7 @@ export class ApiServer {
       ...AUDIT_SCHEMAS,
       ...STATE_SCHEMAS,
       ...LOOKUP_SCHEMAS,
+      ...PAUSE_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 

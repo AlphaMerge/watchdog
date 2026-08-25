@@ -83,6 +83,12 @@ function TreeRow({ item }: { item: ObjectSummary }): React.JSX.Element {
         <span className="truncate font-mono text-xs text-text-muted">{item.sensorType}</span>
       )}
 
+      {item.paused === true && item.kind !== 'sensor' && (
+        <span className="rounded border border-paused-border bg-paused-bg px-1.5 py-0.5 text-xs text-paused-fg">
+          paused
+        </span>
+      )}
+
       {item.kind === 'sensor' && (
         <span className="ml-auto shrink-0">
           <StatusBadge state={item.state ?? 'unknown'} size="sm" />

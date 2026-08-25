@@ -8,6 +8,7 @@ import type {
   LookupSummary,
   HistorySeries,
   ObjectDetail,
+  PauseView,
   SettingView,
   SensorStateView,
   SensorTypeSummary,
@@ -30,6 +31,7 @@ export function ObjectDetailView(): React.JSX.Element {
   // Read separately from the object, because it is the one thing here that changes on its own:
   // the object read is conditional and a live state behind an ETag would be served stale.
   const state = useApi<SensorStateView>(isSensor ? `/sensors/${id}/state` : null);
+  const pause = useApi<PauseView>(object.status === 'ready' ? `/objects/${id}/pause` : null);
   const settings = useApi<{ settings: SettingView[] }>(
     object.status === 'ready' ? `/objects/${id}/settings` : null,
   );
@@ -50,7 +52,7 @@ export function ObjectDetailView(): React.JSX.Element {
 
   return (
     <div className="space-y-6">
-      <header className="space-y-1">
+      <header className="space-y-2">
         <Link to="/tree" className="text-sm text-accent hover:underline">
           ← Tree
         </Link>
@@ -61,6 +63,7 @@ export function ObjectDetailView(): React.JSX.Element {
             <SensorState view={state.data} />
           )}
         </div>
+        {pause.status === 'ready' && pause.data.paused && <PausedBanner view={pause.data} />}
       </header>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -465,5 +468,49 @@ function ProcessingNote({ channel }: { channel: ChannelRecord }): React.JSX.Elem
     >
       {parts.join(' ')}
     </span>
+  );
+}
+
+/**
+ * Why this object is not being monitored (`M-08`).
+ *
+ * The three things an operator needs and a colour cannot say: until when, why, and — when the
+ * pause came from somewhere else — which object to go and resume. A sensor under a paused device
+ * has nothing of its own to clear, so telling it to "resume this sensor" would be telling it to
+ * do something that does not work.
+ */
+function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
+  const until = view.pausedUntil === null ? null : new Date(view.pausedUntil);
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-paused-border bg-paused-bg px-3 py-2 text-sm text-paused-fg">
+      <span className="font-medium">
+        Paused
+        {until === null ? ' indefinitely' : ''}
+      </span>
+      {until !== null && (
+        <span>
+          until{' '}
+          <time dateTime={view.pausedUntil ?? ''} title={view.pausedUntil ?? ''}>
+            {until.toLocaleString()}
+          </time>
+        </span>
+      )}
+      {view.message !== '' && <span className="opacity-90">— {view.message}</span>}
+      {view.inheritedFrom !== null && (
+        <span>
+          by{' '}
+          <Link
+            to={`/objects/${String(view.inheritedFrom.objectId)}`}
+            className="underline underline-offset-2"
+          >
+            {view.inheritedFrom.name}
+          </Link>
+          , which is where it can be resumed
+        </span>
+      )}
+      {view.actor?.label !== null && view.actor !== null && (
+        <span className="opacity-75">({view.actor.label})</span>
+      )}
+    </div>
   );
 }

@@ -11,6 +11,7 @@ import {
 } from '../../src/objects/audit.js';
 import { ObjectRepository } from '../../src/objects/repository.js';
 import { ObjectService } from '../../src/objects/service.js';
+import { SensorStateService } from '../../src/state/service.js';
 import { testSensorTypes } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
 
@@ -62,26 +63,39 @@ export interface Harness {
   repository: ObjectRepository;
   resolver: InheritanceResolver;
   audit: CapturingAuditSink;
+  /** Present only when `buildHarness` was asked for one; `M-08`'s pauses need it. */
+  states: SensorStateService | undefined;
   rootId: number;
 }
 
-export async function buildHarness(db: Database): Promise<Harness> {
+export async function buildHarness(
+  db: Database,
+  options: { states?: boolean } = {},
+): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
 
   const repository = new ObjectRepository();
   const resolver = new InheritanceResolver({ db, logger: silent });
   const audit = new CapturingAuditSink();
+  // Opt-in, because most tests here are about the tree and would only be paying for a cache.
+  // A pause without it still writes and still stops the probe scanning — the states simply do
+  // not move, which is not a system anyone should run and is exactly what `M-08` tests.
+  const states =
+    options.states === true
+      ? new SensorStateService({ db, logger: silent, settings: resolver })
+      : undefined;
   const service = new ObjectService({
     db,
     repository,
     resolver,
     audit,
     sensorTypes: testSensorTypes(),
+    ...(states === undefined ? {} : { states }),
     logger: silent,
   });
 
   const root = await repository.getRoot(db);
-  return { service, repository, resolver, audit, rootId: root.id };
+  return { service, repository, resolver, audit, states, rootId: root.id };
 }
 
 export { LoggingAuditSink };

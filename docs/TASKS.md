@@ -625,19 +625,58 @@ because each is a decision rather than a defect:
       The invalidator now forgets a sensor's channels on **any** `channel.*` mutation, matched by
       prefix. It was a list of two action names, and `M-07` had already fallen off it before its
       own test caught the stale factor.
-- [ ] **M-08 — Manual pause** · M · M-02 · **`M-02` left the column:**
-      `sensor_runtime.paused_manually`, one row per sensor from the moment it exists. Set it and
-      re-evaluate; `clearedByResume` is what the *last* source clearing calls. Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,
-      optional message. Persists across core restart.
-      **Added by S-03:** a cloned object is created manually paused with the message
-      `cloned from #<sourceId>`, with a scenario test. All clone paths go through
-      `ObjectService.clone`, so this is one line in one place. S-03 deliberately did not invent
-      pause columns ahead of the logic that maintains them.
-- [ ] **M-09 — Schedules** · L · M-08 · Reusable schedule objects; weekly grid **and** period-list
+- [x] **M-08 — Manual pause** · M · M-02 · Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,
+      optional message. Persists across core restart. A cloned object is created manually paused
+      with the message `cloned from #<sourceId>` (`S-03`).
+
+      **M-08 outcome.** Migration 010 adds `object_pause`; `packages/core/src/state/pause.ts` is
+      the rules, `objects/pause-repository.ts` the storage and the derivation,
+      `objects/pause-expiry.ts` the sweep. `POST`/`DELETE`/`GET /objects/:id/pause`.
+
+      **Two facts, not one.** `object_pause` is what an operator asked for — one row per paused
+      object, a deadline, a message, who. `sensor_runtime`'s four flags are what that works out
+      to per sensor, derived from those rows on every pause, resume, **move** and **create**.
+      Deriving on write is a chain walk per pause instead of a chain walk per sensor per scan,
+      and it recomputes *from scratch*: clearing one pause does not mean a sensor is unpaused,
+      because another ancestor may still hold it.
+
+      **Manual pause applies to any object.** Nobody pauses a sensor during maintenance; they
+      pause the device, the group or the probe. That makes the parent cascade unavoidable here
+      rather than in `M-12`, which keeps the precedence *integration* across all four sources
+      and the exhaustive table test. The three cases a "toggle the flag" implementation misses
+      are all covered: a sensor **created** under a paused device is born paused, a subtree
+      **moved** under (or out of) one is re-derived, and a **clone** arrives paused.
+
+      **A paused sensor is not in its probe's configuration at all.** `WORKFLOW.MD §3` skips it
+      before the check is enqueued, and the cheapest way to skip a check is never to schedule it:
+      no new protocol field, no probe-side rule to keep in step with the core's four sources, and
+      a probe cannot scan something it was not told about.
+
+      **Immediately, unlike a failure policy.** `M-03` could defer to the next scan because a
+      policy is a rule about results; a pause is not. `SensorStateService.reevaluate` writes the
+      transitions inside the pause's own transaction — so the sensors change state, the log
+      records it, and the probe is told, or none of it happens.
+
+      **A timed pause is computed from the clock and swept every 30 s.** Every read is already
+      right the moment the deadline passes; the sweep exists for the three things that are writes
+      — the transition, the log entry, the config push. Not a timer per pause: a process holding
+      five thousand timers loses all of them on a restart, and a pause outliving the core is the
+      normal case rather than the exception.
+
+      Resuming is refused for an object held only by a cascade (`WORKFLOW.MD §5`), and the 409
+      names the object to resume instead — "you cannot do that" without "here is what you can do"
+      is the least useful error a UI can render. `M-12`'s "cascade-paused children cannot be
+      resumed individually" is therefore already in place for the two sources that exist.
+
+- [ ] **M-09 — Schedules** · L · M-08 · **`M-08` left the flag:**
+      `sensor_runtime.paused_by_schedule`, plus `PauseRepository.recompute` to model a second
+      derived source on, and `SensorStateService.reevaluate` to make a window opening or closing
+      take effect at the moment it does. Reusable schedule objects; weekly grid **and** period-list
       (`ww:hh:mm-ww:hh:mm`) authoring; suppress monitoring, notifications and reports.
 - [ ] **M-10 — Maintenance windows** · M · M-09 · One-off start/end datetimes; early cancel by
       setting the end to the past.
-- [ ] **M-11 — Dependencies** · L · M-08 · _Use parent_, _select object_, _master object for
+- [ ] **M-11 — Dependencies** · L · M-08 · **`M-08` left the flag:**
+      `sensor_runtime.paused_by_dependency`. _Use parent_, _select object_, _master object for
       parent device_; recursive cascade; **master keeps scanning while dependents are paused**;
       delay-after-recovery; manual/schedule pauses do not cascade via dependency.
 - [ ] **M-12 — Pause precedence integration** · M · M-08…M-11 · Parent cascade → dependency →

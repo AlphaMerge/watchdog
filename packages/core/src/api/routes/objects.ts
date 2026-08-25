@@ -15,6 +15,7 @@ import type {
   UpdateObjectInput,
 } from '../../objects/types.js';
 import { channelLimitsPatchSchema, channelProcessingPatchSchema } from '../schemas/objects.js';
+import { pauseRequestSchema, PAUSE_PRESETS } from '../schemas/pause.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
@@ -671,6 +672,90 @@ export async function objectRoutes(
         optionalIfMatch(request.headers['if-match']),
       );
       await reply.send(updated);
+    },
+  );
+
+  // ── 11b. pause (M-08) ────────────────────────────────────────────────────────────────────
+
+  app.post<{
+    Params: { id: number };
+    Body: { minutes?: number; until?: string; message?: string };
+  }>(
+    '/objects/:id/pause',
+    {
+      schema: {
+        description:
+          'Pauses an object and every sensor beneath it. Give `minutes` for a duration, `until` ' +
+          'for a moment, or neither to pause indefinitely — until a person says otherwise. ' +
+          `A UI offers ${PAUSE_PRESETS.join(', ')} minutes as presets, but any duration is ` +
+          'accepted. Takes effect immediately: the sensors change state in this request, and ' +
+          'their probe stops being told to scan them. Pausing an already-paused object replaces ' +
+          'the reason and the deadline rather than stacking, which is what extending a ' +
+          'maintenance window means.',
+        params: idParams,
+        body: pauseRequestSchema,
+        response: { 200: { $ref: 'ms:pauseView' } },
+      },
+    },
+    async (request, reply) => {
+      const { minutes, until, message } = request.body;
+      const pause =
+        minutes !== undefined
+          ? ({ kind: 'duration', minutes } as const)
+          : until !== undefined
+            ? ({ kind: 'until', until: new Date(until) } as const)
+            : ({ kind: 'indefinite' } as const);
+
+      const view = await service.pause(
+        actorFor(request),
+        request.params.id,
+        pause,
+        message ?? '',
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.send(view);
+    },
+  );
+
+  app.delete<{ Params: { id: number } }>(
+    '/objects/:id/pause',
+    {
+      schema: {
+        description:
+          'Resumes an object. Only the object that was directly paused can be resumed — a ' +
+          'sensor paused because its device is paused has nothing of its own to clear, and the ' +
+          '409 names the object to resume instead. A resumed sensor reads Unknown until its ' +
+          'next scan, never the state it had before the pause, which the system has not ' +
+          'checked since.',
+        params: idParams,
+        response: { 200: { $ref: 'ms:pauseView' } },
+      },
+    },
+    async (request, reply) => {
+      const view = await service.resume(
+        actorFor(request),
+        request.params.id,
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.send(view);
+    },
+  );
+
+  app.get<{ Params: { id: number } }>(
+    '/objects/:id/pause',
+    {
+      schema: {
+        description:
+          'Whether this object is paused, why, until when, and whether this is the one that can ' +
+          'be resumed.',
+        params: idParams,
+        response: { 200: { $ref: 'ms:pauseView' } },
+      },
+    },
+    async (request, reply) => {
+      // Never cached: a timed pause expires on its own, with no write for a validator to move.
+      void reply.header('cache-control', 'no-store');
+      await reply.send(await service.pauseState(request.params.id));
     },
   );
 

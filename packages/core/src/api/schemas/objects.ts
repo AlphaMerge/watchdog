@@ -83,6 +83,7 @@ export const objectSummarySchema = {
     host: { type: 'string' },
     sensorType: { type: 'string' },
     state: { enum: SENSOR_STATES },
+    paused: { type: 'boolean' },
     effective: { type: 'object', additionalProperties: { $ref: 'ms:resolvedSetting' } },
   },
 } as const;

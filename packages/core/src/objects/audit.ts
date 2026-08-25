@@ -131,6 +131,28 @@ export type Mutation =
       before: ChannelProcessing;
       after: ChannelProcessing;
     }
+  | {
+      /**
+       * An object was paused (`M-08`).
+       *
+       * `sensorsAffected` is the count that makes the entry answerable: "somebody paused the
+       * London group" is a different event from "somebody paused the London group and four
+       * thousand sensors stopped being monitored", and only the number distinguishes them.
+       */
+      action: 'object.paused';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      /** `null` is indefinite. */
+      until: Date | null;
+      message: string;
+      sensorsAffected: number;
+    }
+  | {
+      action: 'object.resumed';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      sensorsAffected: number;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown };
 
@@ -208,6 +230,21 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         action: mutation.action,
         objectId: mutation.objectId,
         channelKey: mutation.channelKey,
+      };
+    case 'object.paused':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        kind: mutation.kind,
+        until: mutation.until?.toISOString() ?? null,
+        sensorsAffected: mutation.sensorsAffected,
+      };
+    case 'object.resumed':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        kind: mutation.kind,
+        sensorsAffected: mutation.sensorsAffected,
       };
     case 'setting.set':
     case 'setting.reverted':

@@ -83,6 +83,13 @@ export class ProbeConfigService {
       -- is total. An inner join rather than a left one: a sensor with no device to point at is
       -- a broken row, and scanning it with an empty host would be worse than not scanning it.
       JOIN device_config dc  ON dc.object_id = s.parent_id
+      -- Paused sensors are simply not in the configuration (M-08). WORKFLOW.MD §3 skips them
+      -- before the check is enqueued, and the cheapest way to skip a check is never to schedule
+      -- it: no new protocol field, no probe-side rule to keep in step with the core's four
+      -- sources, and a probe that cannot scan something it was not told about.
+      JOIN sensor_runtime sr ON sr.object_id = s.id
+       AND NOT (sr.paused_by_parent OR sr.paused_by_dependency
+                OR sr.paused_by_schedule OR sr.paused_manually)
       ORDER BY s.id
       `,
       [probeObjectId],

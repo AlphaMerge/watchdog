@@ -5,6 +5,8 @@ import type { InheritanceResolver, ResolvedCredential } from '../settings/inheri
 import { settingRegistry } from '../settings/registry.js';
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
 import { validateTransform } from '../ingestion/scaling.js';
+import { refuseResume, resolvePause, type PauseRequest } from '../state/pause.js';
+import { PauseRepository } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
@@ -14,6 +16,7 @@ import type { SensorTypeGate } from './sensor-type-gate.js';
 import type {
   ChannelProcessing,
   ChannelRecord,
+  PauseView,
   CloneInput,
   CloneResult,
   CreateObjectInput,
@@ -46,8 +49,26 @@ export interface ObjectServiceOptions {
   audit: AuditSink;
   sensorTypes: SensorTypeGate;
   logger: Logger;
+  /**
+   * What re-decides a sensor's state when a pause changes (`M-08`).
+   *
+   * Optional so a test about the tree need not build one. Absent, a pause is still written and
+   * still stops the probe scanning — the states simply do not move until the next result, which
+   * is not a system anyone should run.
+   */
+  states?: StateReevaluator;
   /** Refuses a clone larger than this. Protects the request, not the database. */
   maxCloneObjects?: number;
+}
+
+/** Just enough of `SensorStateService` for a pause to take effect now. */
+export interface StateReevaluator {
+  reevaluate(
+    q: Queryable,
+    sensorIds: readonly number[],
+    at: Date,
+    cause: { message: string },
+  ): Promise<number>;
 }
 
 /**
@@ -65,6 +86,8 @@ export class ObjectService {
   readonly #audit: AuditSink;
   readonly #sensorTypes: SensorTypeGate;
   readonly #logger: Logger;
+  readonly #pauses = new PauseRepository();
+  readonly #states: StateReevaluator | undefined;
   readonly #maxCloneObjects: number;
 
   constructor(options: ObjectServiceOptions) {
@@ -74,6 +97,7 @@ export class ObjectService {
     this.#audit = options.audit;
     this.#sensorTypes = options.sensorTypes;
     this.#logger = options.logger.child({ component: 'objects' });
+    this.#states = options.states;
     this.#maxCloneObjects = options.maxCloneObjects ?? 5_000;
   }
 
@@ -291,6 +315,208 @@ export class ObjectService {
     });
   }
 
+  // ── pause (M-08) ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Pauses an object and everything beneath it.
+   *
+   * One transaction does four things, and the order matters: write the pause, recompute the
+   * per-sensor flags from it, re-evaluate the sensors whose flags moved, and record the
+   * mutation. The audit sink is what tells the probes (`R-04`) and clears the ingestion caches
+   * (`M-04`), and it runs inside this transaction too — so a paused sensor's probe stops
+   * scanning it and its state says Paused, or neither happens.
+   *
+   * **Immediately, not at the next scan.** `M-03` could defer a policy change because a policy
+   * is a rule about results; a pause is not. An operator pausing a device for maintenance means
+   * now, and a sensor that alarmed thirty seconds into a planned outage is the exact failure
+   * pausing exists to prevent.
+   */
+  async pause(
+    actor: Actor,
+    id: ObjectId,
+    request: PauseRequest,
+    message = '',
+    pre: Precondition = { kind: 'none' },
+  ): Promise<PauseView> {
+    const now = new Date();
+    const resolved = resolvePause(request, message, now);
+    if ('problems' in resolved) {
+      throw new ObjectError('OBJECT_INVALID', 'this pause cannot be applied', {
+        context: { objectId: id, phase: 'pause' },
+        details: { problems: resolved.problems },
+      });
+    }
+
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+      if (pre.kind === 'version' && object.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, object.version);
+      }
+      if (object.kind === 'root') {
+        // Pausing the root is pausing the installation. It would work, and it is the kind of
+        // thing somebody does by accident with a wildcard and cannot explain afterwards.
+        throw new ObjectError('OBJECT_NOT_MOVABLE', 'the root cannot be paused', {
+          context: { objectId: id, phase: 'pause' },
+        });
+      }
+
+      await this.#pauses.pause(q, id, resolved.pause, actor);
+      const affected = await this.#pauses.recompute(q, id, now);
+      const changed = await this.#states?.reevaluate(q, affected, now, { message });
+
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'object.paused',
+            objectId: id,
+            kind: object.kind,
+            until: resolved.pause.pausedUntil,
+            message,
+            sensorsAffected: changed ?? affected.length,
+          },
+        ],
+        now,
+      );
+
+      return this.#pauseView(q, id, now);
+    });
+  }
+
+  /**
+   * Resumes an object.
+   *
+   * Only the object that was *directly* paused can be resumed (`WORKFLOW.MD §5`). A sensor
+   * paused because its device is paused has nothing of its own to clear, and a resume that
+   * quietly did nothing would leave an operator believing monitoring is back when it is not —
+   * so it is refused, and the refusal names the object to resume instead.
+   */
+  async resume(
+    actor: Actor,
+    id: ObjectId,
+    pre: Precondition = { kind: 'none' },
+  ): Promise<PauseView> {
+    const now = new Date();
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+      if (pre.kind === 'version' && object.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, object.version);
+      }
+
+      const effective = await this.#pauses.effective(q, id, now);
+      const refusal = refuseResume(effective.own !== null, effective.inherited);
+      if (refusal !== null) {
+        throw new ObjectError('OBJECT_NOT_PAUSED', refusal.reason, {
+          context: { objectId: id, phase: 'pause' },
+          details: refusal.details,
+        });
+      }
+
+      await this.#pauses.resume(q, id);
+      const affected = await this.#pauses.recompute(q, id, now);
+      const changed = await this.#states?.reevaluate(q, affected, now, { message: '' });
+
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'object.resumed',
+            objectId: id,
+            kind: object.kind,
+            sensorsAffected: changed ?? affected.length,
+          },
+        ],
+        now,
+      );
+
+      return this.#pauseView(q, id, now);
+    });
+  }
+
+  /**
+   * Clears the pauses whose deadline has passed (`M-08`).
+   *
+   * A timed pause has to be *noticed* by something. Whether it is still in force is computed
+   * from the clock, so every read is already correct — but the transition to Unknown, the entry
+   * in the log, and the configuration that tells a probe to start scanning again are all writes,
+   * and nothing writes itself. Hence a sweep.
+   *
+   * Deliberately not a timer per pause: a process holding five thousand timers loses all of them
+   * on a restart, and a pause that outlives the core is the normal case rather than the
+   * exception. One periodic query over an index of the pauses that have a deadline at all costs
+   * nothing and cannot drift.
+   */
+  async expirePauses(limit = 200): Promise<{ expired: ObjectId[]; sensorsAffected: number }> {
+    const now = new Date();
+    const actor: Actor = { kind: 'system', component: 'pause-expiry' };
+
+    return this.#db.tx(async (q) => {
+      const due = await this.#pauses.expired(q, now, limit);
+      if (due.length === 0) return { expired: [], sensorsAffected: 0 };
+
+      const expired: ObjectId[] = [];
+      const mutations: Mutation[] = [];
+      let sensorsAffected = 0;
+
+      for (const pause of due) {
+        const object = await this.#repo.get(q, pause.objectId);
+        // Deleted between the read and here. The row went with it, by cascade.
+        if (object === null) continue;
+
+        await this.#pauses.resume(q, pause.objectId);
+        // Recomputed after the delete, so a sensor still held by another pause stays paused —
+        // the whole reason the flags are derived rather than toggled.
+        const affected = await this.#pauses.recompute(q, pause.objectId, now);
+        sensorsAffected += (await this.#states?.reevaluate(q, affected, now, { message: '' })) ?? 0;
+
+        expired.push(pause.objectId);
+        mutations.push({
+          action: 'object.resumed',
+          objectId: pause.objectId,
+          kind: object.kind,
+          sensorsAffected: affected.length,
+        });
+      }
+
+      if (mutations.length > 0) await this.#audit.record(q, actor, mutations, now);
+      return { expired, sensorsAffected };
+    });
+  }
+
+  /** Why this object is paused, and whether this is the one to resume. */
+  async pauseState(id: ObjectId): Promise<PauseView> {
+    const now = new Date();
+    const object = await this.#repo.get(this.#db, id);
+    if (object === null) throw notFound(id);
+    return this.#pauseView(this.#db, id, now);
+  }
+
+  async #pauseView(q: Queryable, id: ObjectId, now: Date): Promise<PauseView> {
+    const effective = await this.#pauses.effective(q, id, now);
+    const own = effective.own;
+    return {
+      objectId: id,
+      paused: own !== null || effective.inherited !== null,
+      // Only an own pause can be lifted here; everything else points at the object that can.
+      resumable: own !== null,
+      source: own !== null ? 'manual' : effective.inherited !== null ? 'parent' : null,
+      pausedAt: own?.pausedAt.toISOString() ?? null,
+      pausedUntil: own?.pausedUntil?.toISOString() ?? null,
+      // The reason, wherever it lives: an operator looking at a cascaded sensor is asking why,
+      // and the answer is on the object holding it.
+      message: own?.message ?? effective.inherited?.message ?? '',
+      actor: own === null ? null : { kind: own.actor.kind, label: own.actor.label },
+      inheritedFrom:
+        effective.inherited === null
+          ? null
+          : { objectId: effective.inherited.objectId, name: effective.inherited.name },
+    };
+  }
+
   /** Effective and own together — exactly one render of an inheritance-aware settings form. */
   async settings(id: ObjectId, asChildOf?: ObjectId): Promise<SettingView[]> {
     const object = await this.get(id);
@@ -447,12 +673,21 @@ export class ObjectService {
         if (ownerVersion !== null) created = { ...created, version: ownerVersion };
       }
 
+      // A sensor created under a paused device is paused from its first moment (M-08). Without
+      // this it would scan, alarm and record readings inside a maintenance window nobody
+      // reopened — and the operator who paused the device did so before it existed.
+      const now = new Date();
+      const affected = await this.#pauses.recompute(q, created.id, now);
+      await this.#states?.reevaluate(q, affected, now, {
+        message: 'created under a paused parent',
+      });
+
       const safe = this.#redact(created);
       await this.#audit.record(
         q,
         actor,
         [{ action: 'object.created', objectId: safe.id, kind: safe.kind, after: safe }],
-        new Date(),
+        now,
       );
 
       return safe;
@@ -661,6 +896,15 @@ export class ObjectService {
 
       const movedCount = await this.#repo.countSubtree(q, id);
 
+      // The subtree hangs somewhere else now, so which pauses reach it has changed: out from
+      // under a paused group, or into one. Recomputed for the whole moved subtree, because a
+      // move is the one operation that changes the answer without touching any pause.
+      const movedAt = new Date();
+      const affected = await this.#pauses.recompute(q, id, movedAt);
+      await this.#states?.reevaluate(q, affected, movedAt, {
+        message: 'moved under a paused parent',
+      });
+
       await this.#audit.record(
         q,
         actor,
@@ -725,6 +969,26 @@ export class ObjectService {
 
       const cloneRoot = await this.#repo.get(q, copied.cloneRootId);
       if (cloneRoot === null) throw notFound(copied.cloneRootId);
+
+      // S-03: a clone arrives manually paused. It carries its source's configuration and none
+      // of its credentials, so scanning immediately would mean a burst of authentication
+      // failures on a device an operator has not finished setting up — and the message says
+      // which object to compare it against.
+      const clonedAt = new Date();
+      await this.#pauses.pause(
+        q,
+        cloneRoot.id,
+        {
+          pausedAt: clonedAt,
+          pausedUntil: null,
+          message: `cloned from #${String(id)}`,
+        },
+        actor,
+      );
+      const clonedSensors = await this.#pauses.recompute(q, cloneRoot.id, clonedAt);
+      await this.#states?.reevaluate(q, clonedSensors, clonedAt, {
+        message: `cloned from #${String(id)}`,
+      });
 
       const bound = this.#resolver.withExecutor(q);
       const settingsChanged =

@@ -104,6 +104,15 @@ export interface ObjectSummary {
    * so this is where a live fact belongs.
    */
   readonly state?: SensorState;
+  /**
+   * True when this object is *itself* manually paused (`M-08`).
+   *
+   * Its own pause, not the effective one: a listing row is cheap because it joins one side
+   * table, and resolving each row's ancestor chain would turn a page of two hundred into two
+   * hundred walks. A sensor paused by cascade already reads `state: 'paused'`, which is what
+   * colours a tree; this is what puts the badge on the device somebody switched off.
+   */
+  readonly paused?: boolean;
   readonly effective?: Readonly<Record<string, ResolvedSetting>>;
 }
 
@@ -121,6 +130,26 @@ export interface ChannelProcessing {
   readonly decimals: number | null;
   readonly spikeMin: number | null;
   readonly spikeMax: number | null;
+}
+
+/**
+ * Why an object is paused, and whether this is the one to resume (`M-08`).
+ *
+ * `resumable` is the field a UI needs and the one a bare `paused` boolean cannot express: a
+ * sensor under a paused device is paused, and pressing resume on it must not appear to be an
+ * option. `inheritedFrom` is what the button should point at instead.
+ */
+export interface PauseView {
+  readonly objectId: ObjectId;
+  readonly paused: boolean;
+  readonly resumable: boolean;
+  readonly source: 'manual' | 'parent' | null;
+  readonly pausedAt: string | null;
+  /** `null` while paused indefinitely — until a person says otherwise. */
+  readonly pausedUntil: string | null;
+  readonly message: string;
+  readonly actor: { readonly kind: string; readonly label: string | null } | null;
+  readonly inheritedFrom: { readonly objectId: ObjectId; readonly name: string } | null;
 }
 
 export interface ChannelRecord {

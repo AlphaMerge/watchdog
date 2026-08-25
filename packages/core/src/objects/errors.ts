@@ -5,6 +5,7 @@ export type ObjectErrorCode =
   | 'CURSOR_INVALID'
   | 'CURSOR_SORT_MISMATCH'
   | 'OBJECT_NOT_FOUND'
+  | 'OBJECT_NOT_PAUSED'
   | 'OBJECT_PARENT_NOT_FOUND'
   | 'OBJECT_PARENT_INVALID'
   | 'OBJECT_CYCLE'
@@ -23,6 +24,9 @@ export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   CURSOR_INVALID: 400,
   CURSOR_SORT_MISMATCH: 400,
   OBJECT_NOT_FOUND: 404,
+  // A resume aimed at something this object does not own. 409: the request is well formed and
+  // the state of the tree is what refuses it (WORKFLOW.MD §5).
+  OBJECT_NOT_PAUSED: 409,
   OBJECT_PARENT_NOT_FOUND: 404,
   OBJECT_PARENT_INVALID: 409,
   OBJECT_CYCLE: 409,

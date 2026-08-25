@@ -15,13 +15,23 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
-import { applyResult, DEFAULT_FAILURE_POLICY, type FailurePolicy } from './machine.js';
+import {
+  applyResult,
+  clearedByResume,
+  evaluate,
+  isPaused,
+  DEFAULT_FAILURE_POLICY,
+  type FailurePolicy,
+} from './machine.js';
 import type { ChannelOutcome } from './limits.js';
 import {
   loadRuntimes,
+  writeStateChanges,
+  writeStateHistory,
   type RuntimeWrite,
   type SensorRuntime,
   type StateDecisions,
+  type StateRewrite,
   type StateTransition,
 } from './runtime.js';
 
@@ -84,6 +94,8 @@ export interface StateStats {
   resultsUnknownSensor: number;
   /** State changes recorded. This is what uptime is computed from. */
   transitions: number;
+  /** Transitions caused by something other than a result — a pause, a resume (`M-08`). */
+  reevaluations: number;
   cachedSensors: number;
   /** Failure policies resolved and held. Dropped whenever a setting or the tree moves. */
   cachedPolicies: number;
@@ -114,6 +126,7 @@ export class SensorStateService {
   #resultsStale = 0;
   #resultsUnknownSensor = 0;
   #transitions = 0;
+  #reevaluations = 0;
 
   constructor(options: SensorStateServiceOptions) {
     this.#db = options.db;
@@ -129,6 +142,7 @@ export class SensorStateService {
       resultsStale: this.#resultsStale,
       resultsUnknownSensor: this.#resultsUnknownSensor,
       transitions: this.#transitions,
+      reevaluations: this.#reevaluations,
       cachedSensors: this.#cache.size,
       cachedPolicies: this.#policies.size,
     };
@@ -283,6 +297,79 @@ export class SensorStateService {
     }
 
     return { transitions, runtimes };
+  }
+
+  /**
+   * Re-decides a set of sensors without a result, and writes what changed (`M-08`).
+   *
+   * A pause is the reason this exists. `M-03` could defer immediate effect to the next scan
+   * because a failure policy is a rule *about results*, so the next result applies it. A pause is
+   * not: an operator who pauses a device during maintenance means now, and a sensor that alarmed
+   * thirty seconds into a planned outage is the exact failure pausing exists to prevent.
+   *
+   * **Writes inside the caller's transaction**, unlike every other path here, which hands rows to
+   * the `Ingestor` to write with the readings. There are no readings to ride along with — and the
+   * flags this reads were set by the same transaction, so the state change and the pause that
+   * caused it commit together or not at all.
+   *
+   * `sensorIds` is what `PauseRepository.recompute` returned: the sensors whose flags actually
+   * moved. Pausing a group of 4,000 healthy sensors and one already-paused sensor writes 4,000
+   * transitions, not 4,001.
+   */
+  async reevaluate(
+    q: Queryable,
+    sensorIds: readonly number[],
+    at: Date,
+    cause: { message: string },
+  ): Promise<number> {
+    if (sensorIds.length === 0) return 0;
+
+    // Read through the caller's transaction, never the cache: the flags were written moments
+    // ago in this same transaction, and a cache populated before them is exactly wrong.
+    const runtimes = await loadRuntimes(q, sensorIds);
+    const transitions: StateTransition[] = [];
+    const rewrites: StateRewrite[] = [];
+
+    for (const [sensorId, runtime] of runtimes) {
+      const stillPaused = isPaused(runtime.facts.pause);
+      // §3: when the last source clears, the sensor awaits its next scan rather than returning
+      // to the state it had before the pause — which the system has not checked since.
+      const resuming = !stillPaused && runtime.state === 'paused';
+      const facts = resuming ? clearedByResume(runtime.facts) : runtime.facts;
+      const decision = evaluate(facts, this.#policies.get(sensorId) ?? this.#fallback);
+
+      if (decision.state === runtime.state && decision.cause === runtime.cause) continue;
+
+      // The operator's words on the way in; nothing to say on the way out, because the reason a
+      // sensor is Unknown after a resume is that nobody has scanned it yet.
+      const message = decision.state === 'paused' ? cause.message : '';
+      transitions.push({
+        sensorId,
+        at,
+        state: decision.state,
+        previousState: runtime.state,
+        cause: decision.cause,
+        message,
+      });
+      rewrites.push({
+        sensorId,
+        at,
+        state: decision.state,
+        cause: decision.cause,
+        message,
+        since: at,
+        reset: resuming,
+      });
+      // The cache is now behind the database. Dropping the entry costs one query on this
+      // sensor's next result and is the only thing that cannot go wrong.
+      this.#cache.delete(sensorId);
+    }
+
+    await writeStateHistory(q, transitions);
+    await writeStateChanges(q, rewrites);
+    this.#transitions += transitions.length;
+    this.#reevaluations += transitions.length;
+    return transitions.length;
   }
 
   /**

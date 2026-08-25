@@ -16,6 +16,7 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { ObjectService } from './objects/service.js';
+import { PauseExpiry } from './objects/pause-expiry.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
@@ -189,11 +190,28 @@ async function serve(): Promise<void> {
       cacheInvalidator,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
+    // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
+    // for maintenance means now, and a sensor that alarmed thirty seconds into a planned outage
+    // is the exact failure pausing exists to prevent.
+    states,
     logger,
   });
   logSensorTypes(logger, catalogue);
 
   const history = new HistoryService({ db, logger, store });
+  // Notices when a timed pause runs out. Every read already accounts for the clock; this is
+  // what turns the deadline into a transition, a log entry and a configuration push.
+  const pauseExpiry = new PauseExpiry({ service, logger });
+  pauseExpiry.start();
+  lifecycle.onShutdown({
+    name: 'pause-expiry',
+    timeoutMs: 2_000,
+    run: () => {
+      pauseExpiry.stop();
+      return Promise.resolve();
+    },
+  });
+
   const api = new ApiServer({
     config: config.api,
     logger,

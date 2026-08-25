@@ -281,6 +281,45 @@ cause simply changes from `parent` to `user`.
 | –      | ✓          | ✓        | ✓      | `paused`  | `dependency` |
 | ✓      | any        | any      | any    | `paused`  | `parent`     |
 
+### How it is stored (`M-08`)
+
+Two facts, not one. `object_pause` (migration 010) is what an operator asked for: one row per
+paused object, with a deadline (`NULL` is indefinite), a message and who did it.
+`sensor_runtime`'s four flags are what that works out to per sensor, **derived** from those rows
+on every pause, resume, move and create.
+
+Deriving on write rather than on read is the whole trade: a chain walk per pause instead of a
+chain walk per sensor per scan. It is also what makes the flags survive a restart with nothing
+in memory, and what lets `paused_by_parent` be recomputed *from scratch* — clearing one pause
+does not mean a sensor is unpaused, because another ancestor may still hold it, and an
+incremental toggle would have to walk the chain to find that out anyway.
+
+**Manual pause applies to any object, not just a sensor.** Nobody pauses a sensor during
+maintenance; they pause the device, the group, or the whole probe. A device has no state of its
+own — its sensors do — so pausing one sets `paused_by_parent` on every sensor beneath it, and the
+row is what remembers why, so a resume knows what to undo and a sensor created later inherits the
+pause it was born into.
+
+**A paused sensor is not in its probe's configuration at all.** `WORKFLOW.MD §3` skips it before
+the check is enqueued, and the cheapest way to skip a check is never to schedule it: no new
+protocol field, no probe-side rule to keep in step with the core's four sources, and a probe
+cannot scan something it was not told about. *Decided by `M-08`.*
+
+**A pause takes effect immediately, unlike a failure policy.** `M-03` could defer to the next
+scan because a policy is a rule *about results*, so the next result applies it. A pause is not:
+an operator pausing for maintenance means now, and a sensor that alarmed thirty seconds into a
+planned outage is the exact failure pausing exists to prevent. `SensorStateService.reevaluate`
+writes the transitions inside the same transaction as the pause.
+
+**A timed pause is computed from the clock and swept on a timer.** Whether a pause is still in
+force is `paused_until IS NULL OR paused_until > now()`, so every *read* is already right the
+moment the deadline passes. What needs a sweep is the three things that are writes: the
+transition to Unknown that uptime is computed from, the entry in the log, and the configuration
+that tells a probe to start scanning again. Half a minute, not a second — the shortest pause a UI
+offers is five minutes, and the lag is bounded, stated, and on the safe side: monitoring resumes
+late rather than early. Deliberately not a timer per pause: a process holding five thousand
+timers loses all of them on a restart, and a pause outliving the core is the normal case.
+
 ### Resume
 
 - **Only the object that was directly paused can be resumed** (`WORKFLOW.MD §5`). Resuming a
@@ -427,7 +466,7 @@ is waiting for one task to set it:
 
 | Input                    | Set by  | Until then                                            |
 | ------------------------ | ------- | ----------------------------------------------------- |
-| The four pause flags     | `M-08`…`M-11` | Always false. §3 is fully implemented and unreachable. |
+| The four pause flags     | ~~`M-08`~~, `M-09`…`M-11` | `parent` and `manual` are live. `schedule` and `dependency` are still always false. |
 | `acknowledged_at/until`  | `M-13`  | Always null                                           |
 | `simulated_error`        | `M-14`  | Always false                                          |
 | The channel verdict (§2.2) | ~~`M-04`, `M-06`~~ | Live: limits and lookups both produce one |

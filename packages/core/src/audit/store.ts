@@ -276,6 +276,26 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: `setting.${mutation.key}`, before: mutation.before, after: null }],
       };
 
+    case 'object.paused':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: {
+          until: mutation.until?.toISOString() ?? null,
+          message: mutation.message,
+          sensorsAffected: mutation.sensorsAffected,
+        },
+        diff: [{ field: 'paused', before: false, after: true }],
+      };
+
+    case 'object.resumed':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { sensorsAffected: mutation.sensorsAffected },
+        diff: [{ field: 'paused', before: true, after: false }],
+      };
+
     case 'channel.processing.set':
       return {
         ...base,
