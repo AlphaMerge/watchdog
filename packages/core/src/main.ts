@@ -160,7 +160,9 @@ async function serve(): Promise<void> {
   // hold them: they cache channel limits and sensor states, and an edited limit that only took
   // effect after a restart would not be the "immediate effect" M-04 promises.
   const channels = new ChannelResolver({ logger });
-  const states = new SensorStateService({ db, logger });
+  // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
+  // set "warn for three intervals" for everything beneath it, and a sensor can override.
+  const states = new SensorStateService({ db, logger, settings: resolver });
   const cacheInvalidator = new ResultCacheInvalidator({ channels, sensors: states, logger });
 
   const service = new ObjectService({

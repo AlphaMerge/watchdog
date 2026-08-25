@@ -171,6 +171,15 @@ export const TRANSITIONS: readonly Transition[] = [
     causes: ['limit', 'lookup'],
     trigger: 'recovered to a warning limit',
   },
+  {
+    // Reachable only by editing the policy: while a sensor is failing the count only rises, and
+    // a success takes it straight to Up. Added by `M-03`, whose conformance test drove it and
+    // found the table silent — the same way `M-02` found the missing same-state cause changes.
+    from: 'down',
+    to: 'warning',
+    causes: ['scan'],
+    trigger: 'the failure policy was relaxed past the current failure count',
+  },
   { from: 'down', to: 'up', causes: ['scan'], trigger: 'successful scan, limits clear' },
   { from: 'down', to: 'down_acknowledged', causes: ['user'], trigger: 'operator acknowledged' },
   {

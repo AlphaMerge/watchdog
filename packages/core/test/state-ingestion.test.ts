@@ -56,6 +56,7 @@ describe(
     let scratch: ScratchDatabase;
     let db: Database;
     let harness: Harness;
+    let probeId: number;
     let deviceId: number;
     let sensorId: number;
     let app: FastifyInstance;
@@ -76,6 +77,7 @@ describe(
         host: '192.0.2.30',
       });
       deviceId = device.id;
+      probeId = probe.id;
 
       const server = new ApiServer({
         config: { host: '127.0.0.1', port: 0, webRoot: '' },
@@ -115,7 +117,7 @@ describe(
       states: SensorStateService;
       channels: ChannelResolver;
     } {
-      const states = new SensorStateService({ db, logger: silent });
+      const states = new SensorStateService({ db, logger: silent, settings: harness.resolver });
       const channels = new ChannelResolver({ logger: silent });
       const ingestor = new Ingestor({ db: target ?? db, logger: silent, config: CONFIG });
       return {
@@ -478,6 +480,203 @@ describe(
       assert.equal(summary?.state, 'up');
       const device = await harness.service.get(deviceId);
       assert.equal('state' in device, false, 'and a device has no state to report');
+    });
+
+    // -------------------------------------------------------------------------------------
+    // The failure policy (M-03), resolved through the tree like any other setting.
+    // -------------------------------------------------------------------------------------
+
+    describe('failure policy', () => {
+      const failing = (minutes: number, id = sensorId): CheckResult =>
+        result({ sensorId: id, at: at(minutes), outcome: 'error', message: 'gone', channels: [] });
+
+      async function statesFor(outcomes: number, id = sensorId): Promise<SensorState[]> {
+        const { service, ingestor } = build();
+        await deliver(
+          service,
+          ingestor,
+          Array.from({ length: outcomes }, (_, index) => failing(index, id)),
+        );
+        return (await history(id)).map((row) => row.state);
+      }
+
+      it('warns once then goes Down, when nothing overrides the default', async () => {
+        assert.deepEqual(await statesFor(2), ['warning', 'down']);
+      });
+
+      it('goes Down on the first failure when a sensor sets zero', async () => {
+        await harness.service.setSetting(testActor, sensorId, 'scan.retryWarnings', 0, {
+          kind: 'none',
+        });
+        assert.deepEqual(
+          await statesFor(1),
+          ['down'],
+          'immediate-down, PRTG’s errorintervalsdown=0',
+        );
+      });
+
+      it('inherits the policy from an ancestor, like every other setting', async () => {
+        // Set on the *device*, read by the sensor. The whole point of the setting being
+        // inheritable: an operator tunes a flaky site once, not once per sensor.
+        await harness.service.setSetting(testActor, deviceId, 'scan.retryWarnings', 3, {
+          kind: 'none',
+        });
+        try {
+          assert.deepEqual(await statesFor(4), ['warning', 'down'], 'three warnings, one row');
+          const rows = await history();
+          assert.equal(rows[0]?.state, 'warning');
+          assert.equal(rows[1]?.state, 'down');
+          assert.equal((await runtime()).consecutive_failures, 4);
+        } finally {
+          await harness.service.clearSetting(testActor, deviceId, 'scan.retryWarnings', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('lets a sensor override what its device says', async () => {
+        await harness.service.setSetting(testActor, deviceId, 'scan.retryWarnings', 5, {
+          kind: 'none',
+        });
+        await harness.service.setSetting(testActor, sensorId, 'scan.retryWarnings', 0, {
+          kind: 'none',
+        });
+        try {
+          assert.deepEqual(await statesFor(1), ['down']);
+        } finally {
+          await harness.service.clearSetting(testActor, deviceId, 'scan.retryWarnings', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('takes effect on the next scan, without restarting the core', async () => {
+        const running = build();
+        const invalidator = new ResultCacheInvalidator({
+          channels: running.channels,
+          sensors: running.states,
+          logger: silent,
+        });
+        harness.audit.also = invalidator;
+        try {
+          // Warm the policy cache under the default, and land on Warning.
+          await deliver(running.service, running.ingestor, [failing(0)]);
+          assert.equal((await runtime()).state, 'warning');
+
+          // An ancestor's setting, changed while the cache is warm.
+          await harness.service.setSetting(testActor, deviceId, 'scan.retryWarnings', 0, {
+            kind: 'none',
+          });
+
+          const again = new Ingestor({ db, logger: silent, config: CONFIG });
+          const sameService = new IngestionService({
+            db,
+            logger: silent,
+            ingestor: again,
+            states: running.states,
+            resolver: running.channels,
+          });
+          await deliver(sameService, again, [failing(1)], 'b2');
+          assert.equal(
+            (await runtime()).state,
+            'down',
+            'the invalidator dropped a policy an ancestor’s edit made stale',
+          );
+        } finally {
+          harness.audit.also = undefined;
+          invalidator.stop();
+          await harness.service.clearSetting(testActor, deviceId, 'scan.retryWarnings', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('goes back to Warning when the policy is relaxed past the failure count', async () => {
+        // The transition M-03 found missing from the table. It is what an operator asked for:
+        // raising the threshold above the current count says "this many failures is not yet
+        // Down", and the sensor should say so at its next scan.
+        const first = build();
+        await deliver(first.service, first.ingestor, [failing(0), failing(1)]);
+        assert.equal((await runtime()).state, 'down');
+
+        await harness.service.setSetting(testActor, sensorId, 'scan.retryWarnings', 5, {
+          kind: 'none',
+        });
+        const second = build();
+        await deliver(second.service, second.ingestor, [failing(2)], 'b2');
+
+        const last = (await history()).at(-1);
+        assert.equal(last?.previous_state, 'down');
+        assert.equal(last.state, 'warning');
+        assert.equal(last.cause, 'scan');
+      });
+
+      it('re-resolves after a move, because the chain it inherits from changed', async () => {
+        // The branch that a "forget the object that changed" invalidator would miss entirely:
+        // nothing about the sensor was edited. What changed is which ancestors it has.
+        const strict = await harness.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: `strict-${String(process.hrtime.bigint())}`,
+        });
+        await harness.service.setSetting(testActor, strict.id, 'scan.retryWarnings', 0, {
+          kind: 'none',
+        });
+
+        const running = build();
+        const invalidator = new ResultCacheInvalidator({
+          channels: running.channels,
+          sensors: running.states,
+          logger: silent,
+        });
+        harness.audit.also = invalidator;
+        try {
+          // Warm the cache with the default policy, where one failure is only a Warning.
+          await deliver(running.service, running.ingestor, [failing(0)]);
+          assert.equal((await runtime()).state, 'warning');
+
+          await harness.service.move(testActor, deviceId, strict.id, { kind: 'none' });
+
+          const again = new Ingestor({ db, logger: silent, config: CONFIG });
+          const sameService = new IngestionService({
+            db,
+            logger: silent,
+            ingestor: again,
+            states: running.states,
+            resolver: running.channels,
+          });
+          await deliver(sameService, again, [failing(1)], 'b2');
+          assert.equal((await runtime()).state, 'down', 'the new branch says down immediately');
+        } finally {
+          harness.audit.also = undefined;
+          invalidator.stop();
+          // Put the device back where the rest of the suite expects it.
+          await harness.service.move(testActor, deviceId, probeId, { kind: 'none' });
+        }
+      });
+
+      it('falls back to the default when the stored value is not a count', async () => {
+        // Only reachable by hand-editing a row, and the failure it prevents is silent:
+        // `consecutiveFailures > NaN` is false for every value, so the sensor would sit at
+        // Warning for ever with nothing to look at but a sensor that never alarms.
+        await db.query(
+          `INSERT INTO object_setting (object_id, key, value)
+           VALUES ($1, 'scan.retryWarnings', '"three"'::jsonb)
+           ON CONFLICT (object_id, key) DO UPDATE SET value = EXCLUDED.value`,
+          [sensorId],
+        );
+        assert.deepEqual(await statesFor(2), ['warning', 'down'], 'the default, not silence');
+      });
+
+      it('refuses a policy the registry does not allow', async () => {
+        await assert.rejects(
+          () =>
+            harness.service.setSetting(testActor, sensorId, 'scan.retryWarnings', 99, {
+              kind: 'none',
+            }),
+          /scan\.retryWarnings/,
+        );
+      });
     });
 
     // -------------------------------------------------------------------------------------

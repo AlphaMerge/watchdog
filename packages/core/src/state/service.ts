@@ -14,6 +14,7 @@
 
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
 import { applyResult, DEFAULT_FAILURE_POLICY, type FailurePolicy } from './machine.js';
 import type { ChannelOutcome } from './limits.js';
 import {
@@ -42,10 +43,30 @@ export interface SensorResult {
   readonly channels?: ChannelOutcome | null;
 }
 
+/**
+ * Just enough of `InheritanceResolver` to resolve one key for a batch of sensors.
+ *
+ * Narrow on purpose: this module has no business knowing what else inheritance can do, and a
+ * test can satisfy this with four lines instead of a tree.
+ */
+export interface PolicySource {
+  resolveForObjects(
+    objectIds: readonly number[],
+    key: string,
+  ): Promise<Map<number, { value: unknown }>>;
+}
+
 export interface SensorStateServiceOptions {
   db: Database;
   logger: Logger;
-  /** `M-03` makes this per-sensor and inheritable. Until then, one policy for everything. */
+  /**
+   * Where the per-sensor failure policy comes from (`M-03`).
+   *
+   * Absent applies `policy` to every sensor, which is what a unit test wants and no running
+   * system does — `main.ts` passes the inheritance resolver.
+   */
+  settings?: PolicySource;
+  /** The policy for a sensor with no resolver. Also the registry default's shape. */
   policy?: FailurePolicy;
   /** Sensors held in memory. The v1 target is 5,000, so the default holds every one of them. */
   maxCached?: number;
@@ -64,6 +85,8 @@ export interface StateStats {
   /** State changes recorded. This is what uptime is computed from. */
   transitions: number;
   cachedSensors: number;
+  /** Failure policies resolved and held. Dropped whenever a setting or the tree moves. */
+  cachedPolicies: number;
 }
 
 const DEFAULT_MAX_CACHED = 20_000;
@@ -71,9 +94,21 @@ const DEFAULT_MAX_CACHED = 20_000;
 export class SensorStateService {
   readonly #db: Database;
   readonly #logger: Logger;
-  readonly #policy: FailurePolicy;
+  readonly #settings: PolicySource | undefined;
+  readonly #fallback: FailurePolicy;
   readonly #maxCached: number;
   readonly #cache = new Map<number, SensorRuntime>();
+  /**
+   * The effective failure policy per sensor.
+   *
+   * Kept apart from the runtime cache rather than folded into it, because the two are different
+   * kinds of thing with different invalidation. The runtime is a write-through cache of a table
+   * this service owns; the policy is a read-through cache of configuration anyone can change
+   * from anywhere in the tree. Conflating them would mean an edit to a group's settings forced a
+   * re-read of state that edit did not touch — and would make the write-failure rewind drop
+   * policies for no reason at all.
+   */
+  readonly #policies = new Map<number, FailurePolicy>();
 
   #resultsApplied = 0;
   #resultsStale = 0;
@@ -83,7 +118,8 @@ export class SensorStateService {
   constructor(options: SensorStateServiceOptions) {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'state' });
-    this.#policy = options.policy ?? DEFAULT_FAILURE_POLICY;
+    this.#settings = options.settings;
+    this.#fallback = options.policy ?? DEFAULT_FAILURE_POLICY;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
   }
 
@@ -94,12 +130,28 @@ export class SensorStateService {
       resultsUnknownSensor: this.#resultsUnknownSensor,
       transitions: this.#transitions,
       cachedSensors: this.#cache.size,
+      cachedPolicies: this.#policies.size,
     };
   }
 
   /** For tests, and for whatever invalidates a sensor's configuration in a later phase. */
   clear(): void {
     this.#cache.clear();
+    this.#policies.clear();
+  }
+
+  /**
+   * Forgets every resolved failure policy (`M-03`).
+   *
+   * Everything, not the objects that changed: `scan.retryWarnings` is inheritable, so setting it
+   * on a group changes it for every sensor beneath, and moving a subtree changes it for every
+   * sensor inside. Working out which sensors those are means walking the tree inside the
+   * mutation's transaction; re-resolving them means **one** query for the whole next batch,
+   * because `resolveForObjects` answers for a set. The precise version would cost more than the
+   * imprecise one.
+   */
+  forgetPolicies(): void {
+    this.#policies.clear();
   }
 
   /** The current state of a sensor as far as this process knows. Undefined if never seen. */
@@ -162,7 +214,7 @@ export class SensorStateService {
             message: result.message,
             channel: result.channels?.verdict ?? null,
           },
-          this.#policy,
+          this.#policies.get(sensorId) ?? this.#fallback,
         );
         this.#resultsApplied += 1;
         moved = true;
@@ -245,23 +297,64 @@ export class SensorStateService {
     for (const write of decisions.runtimes) this.#cache.delete(write.sensorId);
   }
 
-  /** Loads every sensor not already cached. One query for the whole batch, or none at all. */
+  /** Loads what is not already cached. One query each for the whole batch, or none at all. */
   async #warm(sensorIds: readonly number[]): Promise<void> {
-    const missing = sensorIds.filter((id) => !this.#cache.has(id));
-    if (missing.length === 0) return;
+    const runtimes = sensorIds.filter((id) => !this.#cache.has(id));
+    const policies =
+      this.#settings === undefined ? [] : sensorIds.filter((id) => !this.#policies.has(id));
+    if (runtimes.length === 0 && policies.length === 0) return;
 
-    const loaded = await this.#db.tx((q: Queryable) => loadRuntimes(q, missing));
+    // Concurrently: they are independent reads of different tables, and a cold batch should
+    // cost one round trip's latency rather than two.
+    const [loaded, resolved] = await Promise.all([
+      runtimes.length === 0
+        ? new Map<number, SensorRuntime>()
+        : this.#db.tx((q: Queryable) => loadRuntimes(q, runtimes)),
+      policies.length === 0 || this.#settings === undefined
+        ? new Map<number, { value: unknown }>()
+        : this.#settings.resolveForObjects(policies, SCAN_RETRY_WARNINGS.key),
+    ]);
+
     for (const [id, runtime] of loaded) this.#remember(id, runtime);
+    for (const [id, setting] of resolved) {
+      remember(this.#policies, id, this.#policyFrom(setting.value), this.#maxCached);
+    }
   }
 
   #remember(sensorId: number, runtime: SensorRuntime): void {
-    // Oldest-first eviction, like the channel resolver: a sensor still reporting is re-read on
-    // its next result at the cost of one query. The cache exists to make the common case free,
-    // not to be authoritative.
-    if (!this.#cache.has(sensorId) && this.#cache.size >= this.#maxCached) {
-      const oldest = this.#cache.keys().next();
-      if (!oldest.done) this.#cache.delete(oldest.value);
-    }
-    this.#cache.set(sensorId, runtime);
+    remember(this.#cache, sensorId, runtime, this.#maxCached);
   }
+
+  /**
+   * Turns a resolved setting into a policy, refusing anything that is not a count.
+   *
+   * The registry validates 0–10 on the way in, so this can only fire for a hand-edited row —
+   * and the failure it prevents is a quiet one. `consecutiveFailures > NaN` is false for every
+   * value, so a `NaN` here would hold a genuinely down sensor at Warning for ever, with nothing
+   * to look at but a sensor that never alarms.
+   */
+  #policyFrom(value: unknown): FailurePolicy {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+      return { warnFor: value };
+    }
+    this.#logger.warn(
+      { key: SCAN_RETRY_WARNINGS.key, value },
+      'ignoring an unusable failure policy and applying the default',
+    );
+    return this.#fallback;
+  }
+}
+
+/**
+ * Oldest-first eviction, like the channel resolver's.
+ *
+ * A sensor still reporting is re-read on its next result at the cost of one query. These caches
+ * exist to make the common case free, not to be authoritative.
+ */
+function remember<T>(cache: Map<number, T>, key: number, value: T, max: number): void {
+  if (!cache.has(key) && cache.size >= max) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
+  cache.set(key, value);
 }

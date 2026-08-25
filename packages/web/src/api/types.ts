@@ -118,6 +118,26 @@ export interface HistorySeries {
 }
 
 /** `GET /sensors/:id/state` — the whole answer for one sensor (`M-02`). */
+/**
+ * One inheritable setting, resolved (`S-04`).
+ *
+ * `source` is the half that matters in a UI: "60 seconds" is not the same fact as "60 seconds,
+ * because the group two levels up says so", and an operator changing the wrong object is what
+ * happens when only the value is shown.
+ */
+export interface SettingView {
+  key: string;
+  description: string;
+  effective: {
+    value: unknown;
+    source:
+      | { kind: 'own'; objectId: number }
+      | { kind: 'inherited'; objectId: number; depth: number }
+      | { kind: 'default' };
+  };
+  own: { value: unknown } | null;
+}
+
 /** A channel's thresholds (`M-04`). `null` in a threshold means it is not set. */
 export interface ChannelLimits {
   enabled: boolean;

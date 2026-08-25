@@ -482,10 +482,43 @@ because each is a decision rather than a defect:
       (`M-08`…`M-11`), the acknowledgement (`M-13`), the simulated error (`M-14`), the channel
       verdict (`M-04`/`M-06`) and probe reachability (`R-05`, and deliberately not persisted).
       `state-machine.md` §7 is the table.
-- [ ] **M-03 — Two-step failure and retry policy** · M · M-02 · **`M-02` left the shape:**
-      `FailurePolicy { warnFor }` in `state/machine.ts`, one policy for the whole system with
-      `warnFor: 1`. This makes it per-sensor and inheritable; nothing else in §2.1 moves. Per-sensor policy from
+- [x] **M-03 — Two-step failure and retry policy** · M · M-02 · Per-sensor policy from
       immediate-down through warn-N-intervals-then-down; default one warning interval.
+
+      **M-03 outcome.** No new setting: `scan.retryWarnings` (0–10, default 1) was already
+      declared in `settings/registry.ts` and inheritable — what was missing is that nothing read
+      it. `SensorStateService` now resolves it per sensor through the ordinary chain, so a group
+      can say "warn for three intervals" for everything beneath it and one sensor can override.
+
+      The policy cache is kept **apart from** the runtime cache rather than folded into it: the
+      runtime is a write-through cache of a table this service owns, the policy is a read-through
+      cache of configuration anyone can change from anywhere in the tree. Conflating them would
+      make an edit to a group force a re-read of state that edit did not touch, and would make
+      the write-failure rewind drop policies for no reason.
+
+      Invalidation is everything-at-once on `setting.set`, `setting.reverted` and `object.moved`,
+      not the objects that changed. The setting is inheritable, so working out which sensors an
+      edit affects means walking the tree inside the mutation's transaction — while re-resolving
+      them costs **one** query for the whole next batch, because `resolveForObjects` answers for
+      a set. The precise version would cost more than the imprecise one. The move case is the one
+      a "forget what changed" invalidator would miss entirely: nothing about the sensor was
+      edited, only which ancestors it has.
+
+      Two things settled in `state-machine.md` §2.1, both left open by `M-01`: **N counts scans,
+      not elapsed time** — the setting is a count of failures, and a sensor whose interval
+      changes should not silently change how long it tolerates one. And **a policy change takes
+      effect at the sensor's next scan**, like an edited limit, because the policy is a rule about
+      results. Re-evaluating on the spot needs a subtree pass that `M-08` genuinely needs (a pause
+      must not wait for a scan) and this does not.
+
+      One transition the table was silent about, found by driving the machine at it rather than
+      by reading: `down` → `warning` with cause `scan`, reachable only by relaxing the policy past
+      the current failure count. It is what the operator asked for, so the table gained it
+      (`state-machine.md` §4.2).
+
+      A stored value that is not a count falls back to the default and says so. It can only come
+      from a hand-edited row, and the failure it prevents is silent: `consecutiveFailures > NaN`
+      is false for every value, so the sensor would sit at Warning for ever.
 - [x] **M-04 — Channel limits** · M · M-02 · Upper/lower error and warning limits, custom limit
       messages, immediate effect (not subject to the two-step rule).
 

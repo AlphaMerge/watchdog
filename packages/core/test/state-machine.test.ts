@@ -248,6 +248,16 @@ describe('failure policy', () => {
     assert.deepEqual(run(['error', 'ok', 'error']).states, ['warning', 'up', 'warning']);
   });
 
+  it('goes back to Warning when the policy is relaxed past the current failure count', () => {
+    // Reachable only by editing the policy: while a sensor is failing the count only rises, and
+    // a success takes it straight to Up. An operator raising `scan.retryWarnings` above the
+    // current count is saying "this many failures is not yet Down", and the sensor should say
+    // so at its next scan (M-03).
+    const { facts: down } = run(['error', 'error']);
+    assert.equal(evaluate(down).state, 'down');
+    assert.deepEqual(evaluate(down, { warnFor: 5 }), { state: 'warning', cause: 'scan' });
+  });
+
   it('counts scans, not elapsed time', () => {
     // docs/state-machine.md §6 records the assumption; this is the test that pins it.
     const one = queryState({ kind: 'failed', consecutiveFailures: 1 }, DEFAULT_FAILURE_POLICY);
@@ -450,6 +460,8 @@ describe('invariants', () => {
         when: (from) => from === 'paused',
       },
       { name: 'probe lost', apply: (from) => evaluate({ ...from, probeReachable: false }) },
+      { name: 'policy relaxed', apply: (from) => evaluate(from, { warnFor: 9 }) },
+      { name: 'policy tightened', apply: (from) => evaluate(from, { warnFor: 0 }) },
       { name: 'simulated', apply: (from) => evaluate({ ...from, simulatedError: true }) },
     ];
 

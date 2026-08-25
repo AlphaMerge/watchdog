@@ -88,11 +88,22 @@ Per-sensor policy: `immediate` makes the first failure `down`; `warn N` holds `w
 consecutive failures before `down`. Default N = 1, giving the table above. A successful scan
 resets the counter to zero.
 
-`M-02` implements the policy as `FailurePolicy { warnFor }` with that default, and the counter
-is persisted in `sensor_runtime.consecutive_failures` — not held in memory. A restart between
-the first and second failure would otherwise silently hold a genuinely down sensor at Warning
-for another interval, which is a deploy changing what an operator is told about an outage.
-`M-03` makes the policy per-sensor and inheritable; nothing else about §2.1 moves.
+`M-03` makes it the inheritable setting `scan.retryWarnings` (0–10, default 1), resolved per
+sensor through the ordinary inheritance chain — a group can say "warn for three intervals" for
+everything beneath it, and one sensor can override. **N counts scans, not elapsed time**;
+§6 left that open and this settles it, because the setting is a count of failures and a sensor
+whose interval changes should not silently change how long it tolerates one.
+
+**A policy change takes effect at the sensor's next scan, not immediately.** The policy is a rule
+about results, so it applies to the next result — the same way an edited limit is applied when
+the next reading arrives. Re-evaluating every affected sensor on the spot needs a pass over the
+subtree, which is machinery `M-08` genuinely needs (a pause must not wait for a scan) and this
+does not. *Decided by `M-03`.*
+
+The counter is persisted in `sensor_runtime.consecutive_failures` rather than held in memory
+(`M-02`). A restart between the first and second failure would otherwise silently hold a
+genuinely down sensor at Warning for another interval, which is a deploy changing what an
+operator is told about an outage.
 
 ### 2.2 Channel state — were the readings acceptable?
 
@@ -247,6 +258,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | `warning`           | `down`              | Failure policy exhausted, or an error limit        | `scan` / `limit`       |
 | `warning`           | `up`                | Successful scan, limits clear                      | `scan`                 |
 | `down`              | `warning`           | Recovered to a warning limit only                  | `limit`                |
+| `down`              | `warning`           | The failure policy was relaxed past the failure count | `scan`              |
 | `down`              | `up`                | Successful scan, limits clear                      | `scan`                 |
 | `down`              | `down_acknowledged` | Operator acknowledges                              | `user`                 |
 | `down_acknowledged` | `down`              | Acknowledgement expired, still failing             | `user`                 |
@@ -277,7 +289,9 @@ same documents, which is why the diagram not drawing it is an omission rather th
 
 Nothing in the diagram is missing from the table.
 
-### 4.2 What `M-02` added
+### 4.2 What later tasks added
+
+**`M-02`.**
 
 One row, found by the conformance test rather than by reading: the machine moved from
 `warning` (`scan`) to `warning` (`limit`) and the table was silent about it. §5 invariant 10
@@ -285,6 +299,12 @@ already required that change to be recorded — "including one whose state is th
 if its *cause* differs" — so the omission was in the table, not in the rule. Re-entry with a new
 cause is now listed, for `up`, `warning` and `down`. It is a real event: Warning because the scan
 failed and Warning because a limit was breached are two different problems.
+
+**`M-03`.** `down` → `warning` with cause `scan`. Reachable only by editing the failure policy:
+while a sensor is failing the count only rises, and a success takes it straight to Up. Raising
+`scan.retryWarnings` above the current failure count is an operator saying "this many failures is
+not yet Down", and the sensor should say so at its next scan. Found the same way — by driving the
+machine against the table rather than by reading it.
 
 ---
 
@@ -316,8 +336,7 @@ discover later.
 
 Named so they are decisions rather than omissions:
 
-- **`M-03`** — the retry policy's exact shape: `immediate`, `warn N intervals`, and whether N is
-  counted in scans or in elapsed time. This document assumes scans.
+- ~~**`M-03`**~~ — done; §2.1 records the setting, the default and that N counts scans.
 - ~~**`M-04`**~~ — done; §2.2 records what it settled. **`M-06`** still owns lookups, which
   produce a channel state the same way a limit does and plug into the same verdict.
 - **`M-07`** — the spike filter, which discards a reading *before* §2.2 sees it.

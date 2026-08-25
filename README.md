@@ -169,6 +169,10 @@ probe's own message. A failed check records no readings at all, so a graph break
 rather than drawing it to zero. `GET /api/v1/sensors/{id}/state` is the current answer for one
 sensor; listings carry `state` so the tree can colour itself.
 
+How many consecutive failures are reported as Warning before Down is the inheritable setting
+`scan.retryWarnings` (`M-03`): zero is immediate-down, the default is one warning interval, and a
+group can set it for everything beneath it.
+
 Channels carry limits (`M-04`): upper and lower thresholds for warning and error, with a custom
 message each. They are immediate — a reading past an error limit is Down on the very first
 sample, with no two-step rule, because a disk that is 99% full is 99% full. Editing one takes

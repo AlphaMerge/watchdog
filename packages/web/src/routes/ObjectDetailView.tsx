@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type {
@@ -6,6 +7,7 @@ import type {
   ChannelRecord,
   HistorySeries,
   ObjectDetail,
+  SettingView,
   SensorStateView,
   SensorTypeSummary,
 } from '../api/types';
@@ -27,6 +29,9 @@ export function ObjectDetailView(): React.JSX.Element {
   // Read separately from the object, because it is the one thing here that changes on its own:
   // the object read is conditional and a live state behind an ETag would be served stale.
   const state = useApi<SensorStateView>(isSensor ? `/sensors/${id}/state` : null);
+  const settings = useApi<{ settings: SettingView[] }>(
+    object.status === 'ready' ? `/objects/${id}/settings` : null,
+  );
   const types = useApi<{ items: SensorTypeSummary[] }>(isSensor ? '/sensor-types' : null);
 
   // Whether the catalogue knows this sensor's type changes what withheld parameters *mean*.
@@ -76,6 +81,12 @@ export function ObjectDetailView(): React.JSX.Element {
           </dl>
 
           {detail.kind === 'sensor' && <Params detail={detail} typeKnown={typeKnown} />}
+        </Card>
+
+        <Card title="Scanning">
+          {settings.status === 'loading' && <Loading what="settings" />}
+          {settings.status === 'error' && <ErrorPanel error={settings.error} />}
+          {settings.status === 'ready' && <Scanning items={settings.data.settings} />}
         </Card>
 
         <Card title="Channels">
@@ -340,5 +351,53 @@ function LimitBand({
         <span className="rounded border border-border px-1.5 py-0.5">not enforced</span>
       )}
     </span>
+  );
+}
+
+/**
+ * The three settings that decide when and how a sensor is checked, and where each comes from.
+ *
+ * `scan.retryWarnings` is here because it is the answer to "why does this say Warning and not
+ * Down" (`M-03`), and that question is asked at exactly this page. Read-only — `U-08` generates
+ * the form and `U-09` the inherit/override control.
+ */
+function Scanning({ items }: { items: SettingView[] }): React.JSX.Element {
+  const shown = items.filter((setting) => setting.key.startsWith('scan.'));
+  if (shown.length === 0) return <Empty because="Nothing scannable here.">No scan settings.</Empty>;
+
+  return (
+    <dl className="grid grid-cols-[11rem_1fr] gap-x-4 gap-y-2 text-sm">
+      {shown.map((setting) => (
+        <Fragment key={setting.key}>
+          <dt className="font-mono text-xs text-text-muted" title={setting.description}>
+            {setting.key}
+          </dt>
+          <dd className="flex flex-wrap items-baseline gap-2 text-text">
+            <span className="font-mono">{String(setting.effective.value)}</span>
+            <SettingOrigin source={setting.effective.source} />
+          </dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+/** Where a value came from. Text, not a colour: this is the part an operator has to act on. */
+function SettingOrigin({
+  source,
+}: {
+  source: SettingView['effective']['source'];
+}): React.JSX.Element {
+  if (source.kind === 'own') return <span className="text-xs text-text-muted">set here</span>;
+  if (source.kind === 'default') {
+    return <span className="text-xs text-text-muted">registry default</span>;
+  }
+  return (
+    <Link
+      to={`/objects/${String(source.objectId)}`}
+      className="text-xs text-accent hover:underline"
+    >
+      inherited from #{source.objectId}
+    </Link>
   );
 }

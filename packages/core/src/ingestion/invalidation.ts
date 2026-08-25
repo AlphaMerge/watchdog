@@ -11,6 +11,8 @@ export interface ForgetsChannels {
 
 export interface ForgetsSensors {
   clear(): void;
+  /** Drops resolved failure policies, which any setting change or move can have altered. */
+  forgetPolicies(): void;
 }
 
 export interface ResultCacheInvalidatorOptions {
@@ -24,11 +26,12 @@ export interface ResultCacheInvalidatorOptions {
 /**
  * Keeps the result path's caches honest when configuration changes (`M-04`).
  *
- * Ingestion caches what it resolves — a channel's id, and now its limits — because at the v1
- * target of 5,000 sensors, re-reading them on every result would be 15,000 rows a minute for
- * values that change once a month. The cost of that cache is this: something has to notice when
- * one of those values is edited, or an operator lowers a threshold and nothing happens until the
- * core is restarted. "Immediate effect" is in `M-04`'s own description.
+ * Ingestion caches what it resolves — a channel's id and limits (`M-04`), a sensor's failure
+ * policy (`M-03`) — because at the v1 target of 5,000 sensors, re-reading them on every result
+ * would be tens of thousands of rows a minute for values that change once a month. The cost of
+ * that cache is this: something has to notice when one of those values is edited, or an operator
+ * lowers a threshold and nothing happens until the core is restarted. "Immediate effect" is in
+ * `M-04`'s own description.
  *
  * It rides the audit sink for the reason `R-04`'s config push does: the sink is already called
  * inside *every* mutation's transaction, so there is one place to remember rather than one per
@@ -61,6 +64,17 @@ export class ResultCacheInvalidator implements AuditSink {
     for (const mutation of mutations) {
       if (mutation.action === 'channel.limits.set') {
         this.#forgetSensor(mutation.objectId);
+      } else if (
+        mutation.action === 'setting.set' ||
+        mutation.action === 'setting.reverted' ||
+        mutation.action === 'object.moved'
+      ) {
+        // The failure policy is inheritable (M-03), so a change anywhere above a sensor changes
+        // it, and a move changes which "above" means. Everything is dropped rather than the
+        // affected subtree resolved: working out which sensors those are means walking the tree
+        // inside the mutation's own transaction, and re-resolving them costs one query for the
+        // whole next batch. The precise version would cost more than the imprecise one.
+        this.#forgetPolicies();
       } else if (mutation.action === 'object.deleted') {
         // A subtree delete can destroy thousands of sensors, and forgetting them one at a time
         // would be a scan of the whole cache per sensor inside a transaction. Dropping the lot
@@ -86,6 +100,13 @@ export class ResultCacheInvalidator implements AuditSink {
     }
     this.#later(() => {
       this.#channels.forget(sensorId);
+    });
+  }
+
+  #forgetPolicies(): void {
+    this.#sensors?.forgetPolicies();
+    this.#later(() => {
+      this.#sensors?.forgetPolicies();
     });
   }
 
