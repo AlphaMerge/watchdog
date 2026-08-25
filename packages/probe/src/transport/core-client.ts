@@ -11,6 +11,8 @@ import {
   type Logger,
   type ProbeConfig,
   type ProbeToCoreMessage,
+  type NackReason,
+  type CheckResult,
 } from '@ms/shared';
 import type { ConfigUpdate } from '../scheduler/assignments.js';
 import { Backoff } from './backoff.js';
@@ -36,6 +38,11 @@ export interface CoreClientOptions {
 
 export type { ConfigUpdate } from '../scheduler/assignments.js';
 
+/** What the core said about a batch of results. */
+export type ResultsOutcome =
+  | { kind: 'ack'; storedSamples: number; retryAfterMs: number }
+  | { kind: 'nack'; reason: NackReason; retryAfterMs: number };
+
 /**
  * The probe's side of the channel. The probe always dials **out** (WORKFLOW.MD §10), so a
  * remote site needs no inbound firewall rule.
@@ -55,6 +62,9 @@ export class CoreClient {
   #gid: string;
   /** In memory only — see the comment where it is sent. */
   #configVersion = '';
+  /** Batches offered and not yet answered. Rejected together when the link drops. */
+  readonly #inFlight = new Map<string, (outcome: ResultsOutcome) => void>();
+  #batchSeq = 0;
   #heartbeatTimer: NodeJS.Timeout | undefined;
   #reconnectTimer: NodeJS.Timeout | undefined;
   #heartbeatSeq = 0;
@@ -217,6 +227,24 @@ export class CoreClient {
         return;
       }
 
+      case 'results-ack': {
+        this.#settleBatch(message.batchId, {
+          kind: 'ack',
+          storedSamples: message.storedSamples,
+          retryAfterMs: message.retryAfterMs,
+        });
+        return;
+      }
+
+      case 'results-nack': {
+        this.#settleBatch(message.batchId, {
+          kind: 'nack',
+          reason: message.reason,
+          retryAfterMs: message.retryAfterMs,
+        });
+        return;
+      }
+
       case 'config-unchanged': {
         this.#configVersion = message.version;
         this.#logger.info({ version: message.version }, 'configuration is already current');
@@ -274,6 +302,38 @@ export class CoreClient {
     this.#heartbeatTimer.unref();
   }
 
+  get connected(): boolean {
+    return this.#state === 'connected';
+  }
+
+  /**
+   * Offers a batch of results and resolves with what the core said about it.
+   *
+   * Rejects rather than resolving when the link drops mid-flight: the caller is the spool
+   * drain, and "we do not know whether it was stored" has to keep the batch, not discard it.
+   * A duplicate write costs nothing — the core's unique index on `(channel_id, time)` makes it
+   * a no-op — while a discarded batch is a reading nothing can recover.
+   */
+  async sendResults(results: readonly CheckResult[]): Promise<ResultsOutcome> {
+    const connection = this.#connection;
+    if (connection === undefined || this.#state !== 'connected') {
+      throw new Error('not connected to the core');
+    }
+
+    this.#batchSeq += 1;
+    const batchId = `${this.#gid}-${String(this.#batchSeq)}`;
+
+    return new Promise<ResultsOutcome>((resolve, reject) => {
+      this.#inFlight.set(batchId, resolve);
+      try {
+        connection.send({ type: 'results', batchId, results: [...results] });
+      } catch (error: unknown) {
+        this.#inFlight.delete(batchId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
   /**
    * Hands a configuration change to the scheduler and tells the core what came of it.
    *
@@ -306,8 +366,35 @@ export class CoreClient {
     );
   }
 
+  #failInFlight(reason: string): void {
+    if (this.#inFlight.size === 0) return;
+    this.#logger.warn({ batches: this.#inFlight.size, reason }, 'result batches left unanswered');
+    for (const settle of this.#inFlight.values()) {
+      // Resolved as a retryable nack rather than rejected: the drain's job is to try again, and
+      // an exception would make "the link dropped" look like a bug rather than a Tuesday.
+      settle({ kind: 'nack', reason: 'unavailable', retryAfterMs: 0 });
+    }
+    this.#inFlight.clear();
+  }
+
+  #settleBatch(batchId: string, outcome: ResultsOutcome): void {
+    const waiting = this.#inFlight.get(batchId);
+    if (waiting === undefined) {
+      // A batch answered twice, or one from a previous connection. Neither is worth acting on,
+      // but neither is silent: an acknowledgement nobody is waiting for means the drain and the
+      // core disagree about what is outstanding.
+      this.#logger.warn({ batchId }, 'the core answered a batch nobody was waiting for');
+      return;
+    }
+    this.#inFlight.delete(batchId);
+    waiting(outcome);
+  }
+
   #handleClose(close: ConnectionClose): void {
     this.#clearHeartbeat();
+    // Every batch still in flight is now unanswerable. Failing them is what keeps them in the
+    // spool: an outstanding batch whose fate is unknown must be re-offered, not dropped.
+    this.#failInFlight('the connection closed before the core answered');
     this.#connection = undefined;
     this.#setState('disconnected');
     this.#logger.info({ cause: close.cause, detail: close.detail }, 'link to core closed');

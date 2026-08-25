@@ -1,0 +1,270 @@
+import { strict as assert } from 'node:assert';
+import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, beforeEach, describe, it } from 'node:test';
+import { pino } from 'pino';
+import type { CheckResult } from '@ms/shared';
+import { ResultSpool } from '../src/spool/spool.js';
+
+const silent = pino({ level: 'silent' });
+const dirs: string[] = [];
+
+after(async () => {
+  for (const dir of dirs) await rm(dir, { recursive: true, force: true });
+});
+
+async function scratch(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'ms-spool-'));
+  dirs.push(dir);
+  return dir;
+}
+
+const result = (sensorId: number): CheckResult => ({
+  sensorId,
+  at: new Date(1_700_000_000_000 + sensorId * 1_000).toISOString(),
+  outcome: 'ok',
+  message: 'fine',
+  durationMs: 2,
+  channels: [{ key: 'rtt', value: sensorId }],
+});
+
+const openSpool = (dir: string, over: { maxBytes?: number; segmentMaxBytes?: number } = {}) =>
+  ResultSpool.open({
+    dir,
+    logger: silent,
+    maxBytes: over.maxBytes ?? 1_000_000,
+    segmentMaxBytes: over.segmentMaxBytes ?? 1_000_000,
+  });
+
+describe('result spool', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await scratch();
+  });
+
+  it('gives results back in the order they were written', async () => {
+    const spool = await openSpool(dir);
+    await spool.append([result(1), result(2)]);
+    await spool.append([result(3)]);
+
+    assert.deepEqual(
+      (await spool.peek(10)).map((r) => r.sensorId),
+      [1, 2, 3],
+      'a replay out of order would write samples the core then has to sort',
+    );
+    assert.equal(spool.stats().pending, 3);
+    await spool.close();
+  });
+
+  it('keeps results until they are confirmed', async () => {
+    // A lost acknowledgement costs a duplicate write, which the core makes free with its unique
+    // index. An optimistic delete costs the reading, which nothing can recover.
+    const spool = await openSpool(dir);
+    await spool.append([result(1), result(2)]);
+
+    assert.equal((await spool.peek(10)).length, 2);
+    assert.equal((await spool.peek(10)).length, 2, 'peeking twice must not consume anything');
+
+    await spool.commit();
+    assert.deepEqual(await spool.peek(10), []);
+    assert.equal(spool.stats().pending, 0);
+    await spool.close();
+  });
+
+  it('returns no more than it was asked for, and resumes from there', async () => {
+    const spool = await openSpool(dir);
+    await spool.append([result(1), result(2), result(3), result(4)]);
+
+    assert.deepEqual(
+      (await spool.peek(2)).map((r) => r.sensorId),
+      [1, 2],
+    );
+    await spool.commit();
+    assert.deepEqual(
+      (await spool.peek(2)).map((r) => r.sensorId),
+      [3, 4],
+    );
+    await spool.commit();
+    assert.deepEqual(await spool.peek(2), []);
+    await spool.close();
+  });
+
+  // ── the property PRTG does not have ─────────────────────────────────────────────────────
+
+  it('survives a restart with everything still pending', async () => {
+    const first = await openSpool(dir);
+    await first.append([result(1), result(2), result(3)]);
+    await first.close();
+
+    const second = await openSpool(dir);
+    assert.equal(second.stats().pending, 3, 'PRTG loses all of this on a restart');
+    assert.deepEqual(
+      (await second.peek(10)).map((r) => r.sensorId),
+      [1, 2, 3],
+    );
+    await second.close();
+  });
+
+  it('resumes after a restart from what had already been confirmed', async () => {
+    const first = await openSpool(dir);
+    await first.append([result(1), result(2), result(3)]);
+    await first.peek(2);
+    await first.commit();
+    await first.close();
+
+    const second = await openSpool(dir);
+    assert.equal(second.stats().pending, 1);
+    assert.deepEqual(
+      (await second.peek(10)).map((r) => r.sensorId),
+      [3],
+    );
+    await second.close();
+  });
+
+  it('replays from the start when the cursor is unreadable', async () => {
+    // Duplicates are free — the core's unique index makes the write a no-op — so a lost cursor
+    // costs bandwidth, never data.
+    const first = await openSpool(dir);
+    await first.append([result(1), result(2)]);
+    await first.peek(2);
+    await first.commit();
+    await first.close();
+    await writeFile(join(dir, 'cursor.json'), 'not json at all', 'utf8');
+
+    const second = await openSpool(dir);
+    assert.equal(second.stats().pending, 2, 'better to re-send than to lose');
+    await second.close();
+  });
+
+  // ── crash safety ────────────────────────────────────────────────────────────────────────
+
+  it('discards a torn record at the tail and counts it', async () => {
+    const first = await openSpool(dir);
+    await first.append([result(1), result(2)]);
+    await first.close();
+
+    // A power cut between the write and its newline.
+    const [segment] = (await readdir(dir)).filter((name) => name.endsWith('.ndjson'));
+    assert.ok(segment);
+    await appendFile(join(dir, segment), '{"sensorId":3,"at":"2026', 'utf8');
+
+    const second = await openSpool(dir);
+    const stats = second.stats();
+    assert.equal(stats.pending, 2, 'the two complete records are intact');
+    assert.equal(stats.corrupt, 1, 'and the torn one is counted, not hidden');
+
+    // The heal is what matters: the next append must land on a clean boundary rather than
+    // being concatenated onto half a record.
+    await second.append([result(4)]);
+    assert.deepEqual(
+      (await second.peek(10)).map((r) => r.sensorId),
+      [1, 2, 4],
+    );
+    await second.close();
+  });
+
+  it('skips a line that does not parse rather than stalling the drain', async () => {
+    const first = await openSpool(dir);
+    await first.append([result(1)]);
+    await first.close();
+    const [segment] = (await readdir(dir)).filter((name) => name.endsWith('.ndjson'));
+    assert.ok(segment);
+    await appendFile(join(dir, segment), 'this is not json\n', 'utf8');
+
+    const second = await openSpool(dir);
+    await second.append([result(2)]);
+    assert.deepEqual(
+      (await second.peek(10)).map((r) => r.sensorId),
+      [1, 2],
+      'one bad line must not block every result behind it',
+    );
+    assert.equal(second.stats().corrupt, 1);
+    await second.close();
+  });
+
+  // ── bounded, oldest-first, counted ──────────────────────────────────────────────────────
+
+  it('evicts the oldest results when it is full, and counts them', async () => {
+    // Small segments so eviction is observable without writing megabytes.
+    const spool = await openSpool(dir, { maxBytes: 900, segmentMaxBytes: 300 });
+    for (let id = 1; id <= 40; id += 1) await spool.append([result(id)]);
+
+    const stats = spool.stats();
+    assert.ok(stats.bytes <= 900 + 300, `spool grew to ${String(stats.bytes)} bytes`);
+    assert.ok(stats.dropped > 0, 'nothing was evicted, so the bound did nothing');
+
+    // Oldest-first: what survives is the newest, which is what an operator wants after an
+    // outage — the recent history, not the beginning of it.
+    const kept = (await spool.peek(100)).map((r) => r.sensorId);
+    assert.ok(kept.length > 0);
+    assert.equal(kept.at(-1), 40, 'the newest result is always kept');
+    assert.ok((kept[0] ?? 0) > 1, 'and the oldest went first');
+    await spool.close();
+  });
+
+  it('reclaims space as results are confirmed', async () => {
+    const spool = await openSpool(dir, { segmentMaxBytes: 300 });
+    for (let id = 1; id <= 20; id += 1) await spool.append([result(id)]);
+    const before = (await readdir(dir)).filter((name) => name.endsWith('.ndjson')).length;
+    assert.ok(before > 1, 'the test needs more than one segment to reclaim');
+
+    for (let round = 0; round < 20; round += 1) {
+      if ((await spool.peek(5)).length === 0) break;
+      await spool.commit();
+    }
+
+    const afterwards = (await readdir(dir)).filter((name) => name.endsWith('.ndjson')).length;
+    assert.ok(afterwards < before, 'confirmed segments must be deleted, not just skipped');
+    assert.equal(spool.stats().pending, 0);
+    await spool.close();
+  });
+
+  it('reads across a segment boundary in one batch', async () => {
+    const spool = await openSpool(dir, { segmentMaxBytes: 200 });
+    for (let id = 1; id <= 10; id += 1) await spool.append([result(id)]);
+
+    assert.deepEqual(
+      (await spool.peek(10)).map((r) => r.sensorId),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      'a batch must not be capped by where a segment happened to end',
+    );
+    await spool.close();
+  });
+
+  // ── edges ───────────────────────────────────────────────────────────────────────────────
+
+  it('is empty and harmless before anything is written', async () => {
+    const spool = await openSpool(dir);
+    assert.deepEqual(spool.stats(), {
+      pending: 0,
+      bytes: 0,
+      segments: 0,
+      dropped: 0,
+      corrupt: 0,
+    });
+    assert.deepEqual(await spool.peek(10), []);
+    await spool.commit();
+    await spool.close();
+  });
+
+  it('ignores an empty append', async () => {
+    const spool = await openSpool(dir);
+    await spool.append([]);
+    assert.equal(spool.stats().segments, 0, 'an empty batch must not roll a segment');
+    await spool.close();
+  });
+
+  it('writes one line per result, so the file is readable with tail', async () => {
+    const spool = await openSpool(dir);
+    await spool.append([result(1), result(2)]);
+    await spool.close();
+
+    const [segment] = (await readdir(dir)).filter((name) => name.endsWith('.ndjson'));
+    assert.ok(segment);
+    const lines = (await readFile(join(dir, segment), 'utf8')).trim().split('\n');
+    assert.equal(lines.length, 2);
+    assert.equal((JSON.parse(lines[0] ?? '{}') as CheckResult).sensorId, 1);
+  });
+});

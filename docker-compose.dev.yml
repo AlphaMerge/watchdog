@@ -39,6 +39,11 @@ services:
   # ---------------------------------------------------------------------------------------
   postgres:
     image: timescale/timescaledb:latest-pg17
+    # Docker gives a container 64 MB of /dev/shm, and PostgreSQL puts parallel workers' shared
+    # memory there. A `drop_chunks` over a hypertable with a day of readings in it exhausts that
+    # and fails with "No space left on device" — which reads like a disk problem and is not one.
+    # The perf suite is what hits it; production is a native install with the host's own /dev/shm.
+    shm_size: 1gb
     command:
       - postgres
       - -c

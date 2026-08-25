@@ -1,0 +1,165 @@
+import type { CheckResult, Logger } from '@ms/shared';
+import type { ResultsOutcome } from '../transport/core-client.js';
+import type { ResultSpool } from './spool.js';
+
+/** The part of `CoreClient` a drain needs. An interface so tests need no socket. */
+export interface ResultSender {
+  readonly connected: boolean;
+  sendResults(results: readonly CheckResult[]): Promise<ResultsOutcome>;
+}
+
+export interface SpoolDrainOptions {
+  spool: ResultSpool;
+  client: ResultSender;
+  logger: Logger;
+  batchMaxRows: number;
+  /** How long to wait before looking again when there is nothing to do. */
+  idleMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface DrainStats {
+  /** Batches the core stored. */
+  sent: number;
+  /** Results the core refused as unparseable. Discarded, because they can never succeed. */
+  rejected: number;
+  /** Batches the core asked us to retry. */
+  retried: number;
+}
+
+const DEFAULT_IDLE_MS = 1_000;
+
+/**
+ * Moves spooled results to the core, oldest first (R-02).
+ *
+ * One batch in flight at a time, and nothing leaves the spool until the core says it stored it.
+ * That is what makes a dropped connection cost a duplicate write rather than a lost reading —
+ * and duplicates are free, because the core's unique index on `(channel_id, time)` makes the
+ * insert a no-op.
+ *
+ * The rate limit that stops a reconnecting probe with hours of backlog from taking down
+ * ingestion for everyone is `R-03`. What is honoured here is the signal that already exists:
+ * `retryAfterMs` on the acknowledgement, which rises before batches start being refused
+ * outright (S-07). Waiting on it is what turns backpressure into slowing down rather than into
+ * a wall.
+ */
+export class SpoolDrain {
+  readonly #spool: ResultSpool;
+  readonly #client: ResultSender;
+  readonly #logger: Logger;
+  readonly #batchMaxRows: number;
+  readonly #idleMs: number;
+  readonly #sleep: (ms: number) => Promise<void>;
+
+  #running = false;
+  #loop: Promise<void> | undefined;
+  #wake: (() => void) | undefined;
+  #stats: DrainStats = { sent: 0, rejected: 0, retried: 0 };
+
+  constructor(options: SpoolDrainOptions) {
+    this.#spool = options.spool;
+    this.#client = options.client;
+    this.#logger = options.logger.child({ component: 'spool-drain' });
+    this.#batchMaxRows = options.batchMaxRows;
+    this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
+    this.#sleep =
+      options.sleep ??
+      ((ms) =>
+        new Promise((resolve) => {
+          // unref: a probe shutting down must not wait out an idle poll.
+          setTimeout(resolve, ms).unref();
+        }));
+  }
+
+  stats(): DrainStats {
+    return { ...this.#stats };
+  }
+
+  start(): void {
+    if (this.#running) return;
+    this.#running = true;
+    this.#loop = this.#run();
+  }
+
+  async stop(): Promise<void> {
+    this.#running = false;
+    this.wake();
+    await this.#loop;
+    this.#loop = undefined;
+  }
+
+  /** Something changed — a result arrived, or the link came up. Look again now. */
+  wake(): void {
+    this.#wake?.();
+    this.#wake = undefined;
+  }
+
+  /** Resolves on the next `wake`, or after `ms`, whichever comes first. */
+  async #idle(ms: number): Promise<void> {
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        this.#wake = resolve;
+      }),
+      this.#sleep(ms),
+    ]);
+    this.#wake = undefined;
+  }
+
+  async #run(): Promise<void> {
+    while (this.#running) {
+      try {
+        const waitMs = await this.#step();
+        if (waitMs > 0) await this.#idle(waitMs);
+      } catch (error: unknown) {
+        // The loop is the probe's only path off disk. It must not be the thing that dies.
+        this.#logger.error({ err: error }, 'the spool drain hit an error; retrying');
+        await this.#idle(this.#idleMs);
+      }
+    }
+  }
+
+  /** One pass. Returns how long to wait before the next one; zero means "immediately". */
+  async #step(): Promise<number> {
+    if (!this.#client.connected) return this.#idleMs;
+
+    const batch = await this.#spool.peek(this.#batchMaxRows);
+    if (batch.length === 0) return this.#idleMs;
+
+    const outcome = await this.#client.sendResults(batch);
+
+    if (outcome.kind === 'ack') {
+      await this.#spool.commit();
+      this.#stats.sent += 1;
+      this.#logger.debug(
+        {
+          results: batch.length,
+          stored: outcome.storedSamples,
+          pending: this.#spool.stats().pending,
+        },
+        'sent a batch of spooled results',
+      );
+      // Straight back round when the core is happy; there may be a backlog behind this batch.
+      return outcome.retryAfterMs;
+    }
+
+    if (outcome.reason === 'invalid') {
+      // The one refusal that retrying cannot fix. Keeping it would jam every result behind it
+      // for ever, so it is discarded — loudly, and counted, because silently losing readings is
+      // the failure mode this whole file exists to avoid.
+      await this.#spool.commit();
+      this.#stats.rejected += batch.length;
+      this.#logger.error(
+        { results: batch.length, totalRejected: this.#stats.rejected },
+        'the core refused a batch as invalid; discarding it rather than blocking the spool',
+      );
+      return 0;
+    }
+
+    this.#stats.retried += 1;
+    this.#logger.info(
+      { reason: outcome.reason, retryAfterMs: outcome.retryAfterMs, results: batch.length },
+      'the core asked us to retry a batch',
+    );
+    return Math.max(outcome.retryAfterMs, this.#idleMs);
+  }
+}

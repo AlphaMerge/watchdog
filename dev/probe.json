@@ -11,7 +11,9 @@
     "displayName": "Development local probe",
     "spoolDir": "dev/data/spool",
     "spoolMaxBytes": 104857600,
-    "workerPoolSize": 0
+    "workerPoolSize": 0,
+    "spoolSegmentMaxBytes": 8388608,
+    "spoolBatchMaxRows": 500
   },
   "core": {
     "host": "127.0.0.1",

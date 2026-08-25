@@ -642,8 +642,33 @@ because each is a decision rather than a defect:
       one, the pending-approval queue, per-GID access keys, the source-IP allowlist, revocation,
       and making the local probe undeletable. The endpoint already re-resolves an unclaimed
       session on every push, so approving a connected probe takes effect without a restart.
-- [ ] **R-02 — Disk-backed result spool** · L · F-09 · Bounded size, oldest-first eviction,
+- [x] **R-02 — Disk-backed result spool** · L · F-09 · Bounded size, oldest-first eviction,
       dropped-result counter, crash-safe. _Beats PRTG's RAM-only 500k buffer._
+      **R-02 outcome.** Newline-delimited JSON in segments, not a binary format with length
+      prefixes and checksums. Results are already JSON on the wire, a torn line is detectable
+      without a checksum because it does not parse, and a spool an operator can read with `tail`
+      during an incident is worth more than the bytes a binary encoding saves. Segments are what
+      make eviction and reclamation O(1): delete a file rather than rewrite one.
+      **Crash safety is a boundary property.** Appends are not fsynced per record — at five
+      thousand checks a minute that would dominate the probe's cost, to protect against losing
+      the last few results to a power cut. What is protected is the case PRTG loses everything
+      to: a *process* restart. `open()` truncates a torn trailing line so the next append starts
+      clean, which is what stops one bad crash from corrupting every later read, and it counts
+      what it discarded.
+      **Nothing leaves the spool until the core says it stored the batch.** A lost acknowledgement
+      costs a duplicate write, which S-07 made free with the unique index on `(channel_id, time)`;
+      an optimistic delete costs a reading, which nothing can recover. The same reasoning makes a
+      lost or unreadable cursor safe: it replays from the start rather than skipping.
+      **One refusal is discarded rather than retried.** `invalid` is the one nack retrying cannot
+      fix, so the drain drops that batch — loudly and counted — because keeping it would jam every
+      result behind it for ever.
+      **Measured, not asserted.** The core was killed, the probe kept scanning for 100 seconds,
+      the whole process was then restarted: 12 results came back off disk, replayed as one batch,
+      24 samples stored, and the per-minute timeline shows no gap across the outage.
+      **Found while running it:** the development PostgreSQL had Docker's default 64 MB
+      `/dev/shm`, which `drop_chunks` over a day of readings exhausts — reported as "No space left
+      on device", which reads like a disk problem and is not one. `shm_size: 1gb` in
+      `docker-compose.dev.yml`. It made the rollup perf test flaky, not R-02.
 - [ ] **R-03 — Ordered replay on reconnect** · L · R-02, S-07 · Rate-limited catch-up that cannot
       stall live ingestion; ordering preserved.
       **Added by S-07:** ordering per connection is already done — the endpoint chains a probe's
@@ -652,6 +677,11 @@ because each is a decision rather than a defect:
       `retryAfterMs` rises before the queue is full. Replay itself is safe to repeat, because the
       write is `ON CONFLICT DO NOTHING` and a range landing behind a rollup watermark queues its
       own backfill in the same transaction.
+      **Added by R-02:** the drain exists and honours `retryAfterMs` on the acknowledgement, so a
+      single probe already slows down before it is refused. What is left is the limit *across*
+      probes — a hundred reconnecting at once, each politely obeying its own signal, still
+      arrives as a stampede — and a catch-up that yields to live results rather than starving
+      them.
 - [x] **R-04 — Incremental config push** · L · S-03, F-09 · Each probe receives only its own
       subtree, as deltas, with a resync path after a long disconnect.
       **R-04 outcome.** Protocol version 3: `config-set`, `config-delta`, `config-unchanged`

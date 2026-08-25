@@ -157,9 +157,13 @@ With that done, the core pushes the branch's sensors, the probe schedules them a
 running. `MS_LOG_LEVEL=debug npm run dev:services` shows each one finishing — they are logged at
 debug because at five thousand sensors a minute an info line per check is the whole journal.
 
-The results are **not stored yet**: the probe logs them and drops them, because the spool and the
-return path are `R-02` and `R-03`. Sensors therefore still read Unknown in the UI, which also
-waits on the state machine in Phase 3.
+Results are written to `dev/data/spool` before anything else touches them and drained to the core
+as it acknowledges them, so they survive the core being down and the probe being restarted
+(`R-02`). They land in the `sample` hypertable and are readable through
+`GET /api/v1/sensors/{id}/history`.
+
+Sensors still read **Unknown** in the UI: turning readings into states is the Phase 3 state
+machine, and nothing writes `sensor_state` yet.
 
 ## Configuration
 

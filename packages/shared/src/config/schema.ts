@@ -153,6 +153,13 @@ export interface ProbeConfig {
     /** Results spool to disk when the core is unreachable (WORKFLOW.MD §10). */
     spoolDir: string;
     spoolMaxBytes: number;
+    /**
+     * Segment size. Eviction and reclamation both work a whole segment at a time, so this is
+     * the granularity of both: smaller wastes less when evicting, larger costs fewer files.
+     */
+    spoolSegmentMaxBytes: number;
+    /** Results per batch offered to the core, which refuses anything over 5,000 either way. */
+    spoolBatchMaxRows: number;
     /** 0 means "derive from CPU count". */
     workerPoolSize: number;
     /**
@@ -364,6 +371,8 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'displayName',
         'spoolDir',
         'spoolMaxBytes',
+        'spoolSegmentMaxBytes',
+        'spoolBatchMaxRows',
         'workerPoolSize',
         'checkQueueMaxLength',
         'checkAbortGraceMs',
@@ -377,6 +386,14 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
           minimum: 1_048_576,
           default: 2_147_483_648,
         },
+        spoolSegmentMaxBytes: {
+          type: 'integer',
+          minimum: 4_096,
+          maximum: 1_073_741_824,
+          default: 8_388_608,
+        },
+        // The core refuses a batch over 5,000 rows, so this cannot usefully exceed it.
+        spoolBatchMaxRows: { type: 'integer', minimum: 1, maximum: 5_000, default: 500 },
         workerPoolSize: { type: 'integer', minimum: 0, maximum: 1_024, default: 0 },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },
