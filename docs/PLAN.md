@@ -305,7 +305,9 @@ test it exhaustively.
 | --- | --- | --- |
 | M-01 state and pause precedence tables | done | `docs/state-machine.md` plus `packages/core/src/state/tables.ts`; all sixteen pause combinations written out and computed, and asserted to agree |
 | M-02 core state machine | done | `packages/core/src/state/`; migration 008 adds `sensor_runtime`. Decisions ride in the readings' own transaction, so a state change and the readings that caused it commit together. Measured cost **8.3% of ingestion throughput** — 2.53M samples/min against 2.76M without, p99 write 38.8 ms against a 100 ms budget |
-| M-03…M-19 | not started | |
+| M-04 channel limits | done | `packages/core/src/state/limits.ts`; no migration — migration 001 had already provisioned `channel.limits`. Immediate in both senses: Down on the first sample past an error limit, and an edited limit acts on the next scan, because `ResultCacheInvalidator` rides the audit sink |
+| M-05 multi-channel rollup | done | Absorbed by `M-04`: `rollUp` takes the worst channel, §2.3 in `evaluate` combines it with the query state. A result carries every channel at once, so there was no second place for it |
+| M-03, M-06…M-19 | not started | |
 
 **Where Phase 3's exit criteria stand after `M-02`.**
 
@@ -317,6 +319,9 @@ test it exhaustively.
 - *Paused states survive a core restart* — the columns are there and are read back on the first
   result after a restart; a restart-with-a-pause scenario is testable once `M-08` can set one.
 - *One dependency-suppressed alarm, not forty* — untouched; `M-11` and `M-17`.
+
+`M-04` also closes the first half of "Channel limits: upper/lower error and warning, custom limit
+messages, immediate effect" in the deliverables above, and all of "Multi-channel rollup".
 
 The tables are the specification `M-02` implements against, which is the order this phase's risk
 demands: precedence is a *set* of independent sources, not a priority chain, and the sixteen-row

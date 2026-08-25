@@ -76,6 +76,7 @@ export interface ChannelRecord {
   name: string;
   unit: string;
   isPrimary: boolean;
+  limits: ChannelLimits;
 }
 
 export interface AuditEntry {
@@ -117,6 +118,17 @@ export interface HistorySeries {
 }
 
 /** `GET /sensors/:id/state` — the whole answer for one sensor (`M-02`). */
+/** A channel's thresholds (`M-04`). `null` in a threshold means it is not set. */
+export interface ChannelLimits {
+  enabled: boolean;
+  upperError: number | null;
+  upperWarning: number | null;
+  lowerWarning: number | null;
+  lowerError: number | null;
+  errorMessage: string;
+  warningMessage: string;
+}
+
 export interface SensorStateView {
   sensorId: number;
   state: SensorState;

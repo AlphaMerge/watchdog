@@ -14,12 +14,8 @@
 
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import {
-  applyResult,
-  DEFAULT_FAILURE_POLICY,
-  type ChannelVerdict,
-  type FailurePolicy,
-} from './machine.js';
+import { applyResult, DEFAULT_FAILURE_POLICY, type FailurePolicy } from './machine.js';
+import type { ChannelOutcome } from './limits.js';
 import {
   loadRuntimes,
   type RuntimeWrite,
@@ -33,9 +29,17 @@ export interface SensorResult {
   readonly sensorId: number;
   readonly at: Date;
   readonly outcome: 'ok' | 'error';
+  /** The probe's message: what the check itself had to say. */
   readonly message: string;
-  /** `M-04`'s verdict on this result's readings. Absent until limits exist. */
-  readonly channel?: ChannelVerdict | null;
+  /**
+   * What this result's readings were worth (`M-04`), or `null` when there were none to judge.
+   *
+   * Carries the verdict the layered model combines *and* the message it implies, because the
+   * two are decided together: "Response time is 812 ms, above the error limit of 500 ms" is the
+   * whole reason the sensor is Down, and recording the probe's "ok" beside it would be a
+   * history that explains nothing.
+   */
+  readonly channels?: ChannelOutcome | null;
 }
 
 export interface SensorStateServiceOptions {
@@ -150,9 +154,25 @@ export class SensorStateService {
           continue;
         }
 
-        const applied = applyResult(runtime.facts, result, this.#policy);
+        const applied = applyResult(
+          runtime.facts,
+          {
+            at: result.at,
+            outcome: result.outcome,
+            message: result.message,
+            channel: result.channels?.verdict ?? null,
+          },
+          this.#policy,
+        );
         this.#resultsApplied += 1;
         moved = true;
+
+        // Whichever side produced the state gets to explain it. The cause names that side, so
+        // there is one source of truth rather than a second rule that can disagree with it.
+        const message =
+          applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
+            ? (result.channels?.message ?? result.message)
+            : result.message;
 
         const changed =
           applied.decision.state !== runtime.state || applied.decision.cause !== runtime.cause;
@@ -163,7 +183,7 @@ export class SensorStateService {
             state: applied.decision.state,
             previousState: runtime.state,
             cause: applied.decision.cause,
-            message: result.message,
+            message,
           });
         }
 
@@ -171,7 +191,7 @@ export class SensorStateService {
           sensorId,
           state: applied.decision.state,
           cause: applied.decision.cause,
-          message: result.message,
+          message,
           // The clock on "Down for 2h 15m" starts when the state did, and does not restart
           // because the sensor failed again in the same way.
           since: changed ? result.at : runtime.since,

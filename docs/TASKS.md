@@ -486,17 +486,60 @@ because each is a decision rather than a defect:
       `FailurePolicy { warnFor }` in `state/machine.ts`, one policy for the whole system with
       `warnFor: 1`. This makes it per-sensor and inheritable; nothing else in §2.1 moves. Per-sensor policy from
       immediate-down through warn-N-intervals-then-down; default one warning interval.
-- [ ] **M-04 — Channel limits** · M · M-02 · **`M-02` left the plug point:** `ChannelVerdict`
-      in `state/machine.ts` is §2.2's output and is `null` today, so the state is the query
-      state alone. Produce one and the layered model already combines it. Upper/lower error and warning limits, custom limit
+- [x] **M-04 — Channel limits** · M · M-02 · Upper/lower error and warning limits, custom limit
       messages, immediate effect (not subject to the two-step rule).
-- [ ] **M-05 — Multi-channel state rollup** · S · M-04 · Sensor state = worst channel state
+
+      **M-04 outcome.** `packages/core/src/state/limits.ts`, pure like `machine.ts` and for the
+      same reason — the interesting cases are boundaries and combinations, both cheap to
+      enumerate against a function and expensive to arrange against a database. **No migration:**
+      migration 001 already provisioned `channel.limits` as jsonb, so this defined its shape,
+      validated it at the boundary, and normalised it on read so the response schema could stop
+      being `additionalProperties: true`.
+
+      Four decisions `WORKFLOW.MD` does not state, now in `state-machine.md` §2.2: the
+      comparison is **strict** (a reading at the limit has not exceeded it, or "at most 100%"
+      could not be expressed); **zero is a limit, not an absence**; the **worst channel decides
+      here**, because a result carries every channel at once and a limit can only be compared
+      against the reading in that same result; and the **message comes from whichever side
+      produced the state**, chosen by `cause` so there is no second rule to disagree with it.
+
+      Contradictory limits — a warning past its error limit, a lower above an upper — are refused
+      when set, with the reason. A threshold that could never fire is a mistake, and accepting it
+      silently means an operator believes they are covered when they are not.
+
+      **Immediate effect has two meanings and both are tested.** A reading past an error limit is
+      Down on the very first sample, with no two-step. And an *edited* limit acts on the next
+      scan rather than the next restart: ingestion caches what it resolves, so
+      `ResultCacheInvalidator` rides the audit sink — the same place `R-04`'s config push sits —
+      and forgets the sensor's channels. It invalidates twice, immediately and again after the
+      transaction settles, because the sink runs *inside* the transaction and a batch resolving
+      in that window would re-cache the pre-commit value. It also drops the whole cache on a
+      subtree delete, which closes a pre-existing hole: a spooled result for a deleted sensor
+      used to resolve to a channel id that no longer existed and write an orphaned reading
+      instead of being counted as a drop.
+
+      A limit change is audited (`channel.limits.set`), diffed field by field. A sensor that went
+      Down with cause `limit` is only answerable if the log says who set the limit and to what.
+- [x] **M-05 — Multi-channel state rollup** · S · M-04 · Sensor state = worst channel state
       combined with the query-failure state.
-- [ ] **M-06 — Lookups** · L · M-04 · Definition format, `SingleInt` and `Range` types,
+
+      **Absorbed by M-04, not skipped.** The worst-of-channels roll-up is `rollUp` in
+      `state/limits.ts` and the combination with the query state is §2.3 in `evaluate`, which
+      `M-02` already built. There was no second place to put it: a result carries every channel
+      the check produced, and evaluating one channel in isolation is not something the system
+      ever does. Tested in `channel-limits.test.ts` ("channel rollup") and through the pipeline
+      in `state-ingestion.test.ts`.
+- [ ] **M-06 — Lookups** · L · M-04 · **`M-04` left the plug point:** a lookup produces a
+      `ChannelBreach` the same way a limit does, and `rollUp` already combines them and picks the
+      message — what changes is `cause: 'lookup'` and where the state comes from. Definition format, `SingleInt` and `Range` types,
       `undefinedState`, custom definitions overriding built-ins by id, validation and error
       reporting.
 - [ ] **M-07 — Scaling factors and spike filter** · S · M-04 · Multiplication/division, decimal
-      places, min/max spike discard.
+      places, min/max spike discard. **`M-04` left the seam:** `IngestionService.#prepare` marks
+      the two lines it belongs between — scaling changes the value a limit is compared against,
+      and the spike filter drops a reading before it is compared at all. The columns
+      (`scale_mul`, `scale_div`, `decimals`, `spike_min`, `spike_max`) have been on `channel`
+      since migration 001, and `decimals` already formats limit messages.
 - [ ] **M-08 — Manual pause** · M · M-02 · **`M-02` left the column:**
       `sensor_runtime.paused_manually`, one row per sensor from the moment it exists. Set it and
       re-evaluate; `clearedByResume` is what the *last* source clearing calls. Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,

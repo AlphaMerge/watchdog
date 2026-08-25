@@ -1,5 +1,6 @@
 import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { rollUp, type ChannelOutcome, type ChannelReadingFacts } from '../state/limits.js';
 import type { StateDecisions } from '../state/runtime.js';
 import type { SensorResult, SensorStateService, StateStats } from '../state/service.js';
 import { ChannelResolver } from './channels.js';
@@ -7,6 +8,15 @@ import type { Ingestor, SampleRow } from './ingestor.js';
 import type { ReplayPacer } from './replay-pacer.js';
 
 export type ResultsMessage = Extract<ProbeToCoreMessage, { type: 'results' }>;
+
+/** One batch, walked once: the rows to write and what the state machine should be told. */
+interface Prepared {
+  samples: SampleRow[];
+  results: SensorResult[];
+}
+
+/** Distinguishable from `undefined`, which means "no state machine is wired". */
+const FAILED = Symbol('state-decision-failed');
 
 export interface IngestionServiceOptions {
   db: Database;
@@ -91,30 +101,22 @@ export class IngestionService {
   async acceptResults(source: string, message: ResultsMessage): Promise<CoreToProbeMessage> {
     this.#resultsReceived += message.results.length;
 
-    let usable: CheckResult[];
+    let prepared: Prepared;
     try {
-      usable = this.#usableResults(message.results);
+      prepared = await this.#prepare(message.results);
     } catch (error: unknown) {
-      // Only a programming fault can land here; a malformed message was already refused by the
-      // schema at the connection boundary.
-      this.#logger.error({ err: error, source }, 'could not read a results batch');
+      this.#logger.error({ err: error, source }, 'could not prepare a results batch for storage');
       return {
         type: 'results-nack',
         batchId: message.batchId,
-        reason: 'invalid',
-        retryAfterMs: 0,
+        reason: 'storage-error',
+        retryAfterMs: 1_000,
       };
     }
 
-    let samples: SampleRow[];
-    let decisions: StateDecisions | undefined;
-    try {
-      samples = await this.#toSamples(usable);
-      // Every result, not just the usable ones: a check that failed has no readings and is
-      // precisely the one the state machine exists for.
-      decisions = await this.#states?.decide(toSensorResults(message.results));
-    } catch (error: unknown) {
-      this.#logger.error({ err: error, source }, 'could not prepare a results batch for storage');
+    const samples = prepared.samples;
+    const decisions = await this.#decide(source, prepared.results);
+    if (decisions === FAILED) {
       return {
         type: 'results-nack',
         batchId: message.batchId,
@@ -154,17 +156,35 @@ export class IngestionService {
     };
   }
 
+  /** Runs the machine, or reports that it could not. Never throws. */
+  async #decide(
+    source: string,
+    results: readonly SensorResult[],
+  ): Promise<StateDecisions | undefined | typeof FAILED> {
+    if (this.#states === undefined) return undefined;
+    try {
+      return await this.#states.decide(results);
+    } catch (error: unknown) {
+      this.#logger.error({ err: error, source }, 'could not decide sensor states for a batch');
+      return FAILED;
+    }
+  }
+
   /**
-   * Drops what must not be stored, and counts every drop.
+   * One pass over a batch: what to store, and what it means.
+   *
+   * Both halves come out of the same walk because they read the same rows. Splitting them would
+   * resolve every channel twice — once to write the reading and once to judge it — and the
+   * second resolution could disagree with the first if a limit changed in between.
    *
    * A failed check records no channel values — "no-data is not zero" (CLAUDE.md), and a Down
    * sensor's gap is the absence of rows. The probe should already send none; enforcing it here
    * means the invariant holds even if a sensor type gets it wrong, and the count says so rather
    * than the readings quietly appearing in a graph.
    */
-  #usableResults(results: readonly CheckResult[]): CheckResult[] {
-    const usable: CheckResult[] = [];
-    for (const result of results) {
+  async #prepare(all: readonly CheckResult[]): Promise<Prepared> {
+    const withReadings: CheckResult[] = [];
+    for (const result of all) {
       this.#readingsReceived += result.channels.length;
 
       if (result.outcome === 'error') {
@@ -175,50 +195,60 @@ export class IngestionService {
         this.#discardedInvalidTime += result.channels.length;
         continue;
       }
-      if (result.channels.length > 0) usable.push(result);
+      if (result.channels.length > 0) withReadings.push(result);
     }
-    return usable;
-  }
 
-  async #toSamples(results: readonly CheckResult[]): Promise<SampleRow[]> {
-    if (results.length === 0) return [];
-
-    const resolved = await this.#db.tx((q) => this.#resolver.resolve(q, results));
-    this.#channelsCreated += resolved.created;
-    this.#discardedUnknownSensor += resolved.droppedReadings;
+    const resolved =
+      withReadings.length === 0
+        ? null
+        : await this.#db.tx((q) => this.#resolver.resolve(q, withReadings));
+    if (resolved !== null) {
+      this.#channelsCreated += resolved.created;
+      this.#discardedUnknownSensor += resolved.droppedReadings;
+    }
 
     const samples: SampleRow[] = [];
-    for (const result of results) {
+    // Keyed by the result itself rather than by sensor id: one batch can carry several scans of
+    // the same sensor, and each of them is judged on its own readings.
+    const outcomes = new Map<CheckResult, ChannelOutcome>();
+    for (const result of withReadings) {
       const at = new Date(result.at);
+      const readings: ChannelReadingFacts[] = [];
       for (const reading of result.channels) {
-        const channelId = resolved.ids.get(`${String(result.sensorId)}:${reading.key}`);
-        if (channelId === undefined) continue; // counted as dropped by the resolver
-        samples.push({ channelId, at, value: reading.value });
+        const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
+        if (channel === undefined) continue; // counted as dropped by the resolver
+        samples.push({ channelId: channel.id, at, value: reading.value });
+        readings.push({
+          key: reading.key,
+          name: channel.name,
+          unit: channel.unit,
+          value: reading.value,
+          decimals: channel.decimals,
+          limits: channel.limits,
+        });
       }
+      // M-07 belongs between these two lines: scaling changes the value a limit is compared
+      // against, and the spike filter drops a reading before it is compared at all.
+      if (readings.length > 0) outcomes.set(result, rollUp(readings));
     }
-    return samples;
-  }
-}
 
-/**
- * The state machine's view of a batch: every result, whatever its outcome, minus the ones whose
- * timestamp is not a date.
- *
- * An unparseable time is already counted as a discard by `#usableResults`; it is dropped again
- * here rather than defaulted, because a result with no usable time cannot be ordered against
- * the last one, and ordering is what makes the machine idempotent.
- */
-function toSensorResults(results: readonly CheckResult[]): SensorResult[] {
-  const usable: SensorResult[] = [];
-  for (const result of results) {
-    const at = Date.parse(result.at);
-    if (Number.isNaN(at)) continue;
-    usable.push({
-      sensorId: result.sensorId,
-      at: new Date(at),
-      outcome: result.outcome,
-      message: result.message,
-    });
+    // Every result, whatever its outcome: a check that failed has no readings and is precisely
+    // the one the state machine exists for. Only an unparseable timestamp is dropped — it is
+    // already counted above, and a result that cannot be ordered against the last one cannot be
+    // folded into a machine that is a fold over time.
+    const results: SensorResult[] = [];
+    for (const result of all) {
+      const at = Date.parse(result.at);
+      if (Number.isNaN(at)) continue;
+      results.push({
+        sensorId: result.sensorId,
+        at: new Date(at),
+        outcome: result.outcome,
+        message: result.message,
+        channels: outcomes.get(result) ?? null,
+      });
+    }
+
+    return { samples, results };
   }
-  return usable;
 }

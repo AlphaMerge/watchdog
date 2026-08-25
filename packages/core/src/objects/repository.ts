@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import type { SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
@@ -579,7 +580,7 @@ export class ObjectRepository {
       scale_mul: string;
       scale_div: string;
       decimals: number | null;
-      limits: Record<string, unknown>;
+      limits: unknown;
       spike_min: number | null;
       spike_max: number | null;
       show_in_graph: boolean;
@@ -602,12 +603,40 @@ export class ObjectRepository {
       scaleMul: row.scale_mul,
       scaleDiv: row.scale_div,
       decimals: row.decimals,
-      limits: row.limits,
+      limits: parseLimits(row.limits),
       spikeMin: row.spike_min,
       spikeMax: row.spike_max,
       showInGraph: row.show_in_graph,
       showInTable: row.show_in_table,
     }));
+  }
+
+  /** One channel by the key its sensor type gave it, or null. */
+  async channel(q: Queryable, sensorId: ObjectId, key: string): Promise<ChannelRecord | null> {
+    const all = await this.channels(q, sensorId);
+    return all.find((channel) => channel.key === key) ?? null;
+  }
+
+  /**
+   * Writes a channel's thresholds.
+   *
+   * The whole normalised object, not a merge in SQL: the merge happened in the service, against
+   * a row it read in this transaction, and doing it again in a `jsonb ||` expression would be a
+   * second implementation of the same rule that could disagree about what `null` means.
+   */
+  async setChannelLimits(
+    q: Queryable,
+    sensorId: ObjectId,
+    key: string,
+    limits: ChannelLimits,
+  ): Promise<boolean> {
+    const rows = await q.query<{ id: number }>(
+      `UPDATE channel SET limits = $3::jsonb
+       WHERE sensor_id = $1 AND key = $2
+       RETURNING id`,
+      [sensorId, key, JSON.stringify(limits)],
+    );
+    return rows.length > 0;
   }
 
   // ── tree predicates: the database's own rules, never restated in TypeScript ───────────────

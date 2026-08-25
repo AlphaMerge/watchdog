@@ -1,9 +1,25 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import { parseLimits, type ChannelLimits } from '../state/limits.js';
+
+/**
+ * A channel, resolved: its id and everything judging a reading needs (`M-04`).
+ *
+ * The limits ride along with the id because they are read on exactly the same path, at exactly
+ * the same moment, for exactly the same rows. Fetching them separately would double the queries
+ * a cold sensor costs and add a second cache to invalidate.
+ */
+export interface ResolvedChannel {
+  readonly id: number;
+  readonly name: string;
+  readonly unit: string;
+  readonly decimals: number | null;
+  readonly limits: ChannelLimits;
+}
 
 export interface ResolvedChannels {
-  /** Channel id by `sensorId:key`. */
-  ids: Map<string, number>;
+  /** Channel by `sensorId:key`. */
+  ids: Map<string, ResolvedChannel>;
   /** Channels created on this call, because this is the first result that mentioned them. */
   created: number;
   /** Readings whose sensor no longer exists. Dropped — but counted, never silently. */
@@ -34,7 +50,7 @@ const DEFAULT_MAX_CACHED = 50_000;
 export class ChannelResolver {
   readonly #logger: Logger;
   readonly #maxCached: number;
-  readonly #cache = new Map<string, number>();
+  readonly #cache = new Map<string, ResolvedChannel>();
 
   constructor(options: ChannelResolverOptions) {
     this.#logger = options.logger.child({ component: 'channel-resolver' });
@@ -50,8 +66,31 @@ export class ChannelResolver {
     this.#cache.clear();
   }
 
+  /**
+   * Forgets one sensor's channels, so the next result re-reads them.
+   *
+   * What makes an edited limit take effect on the next scan rather than on the next restart
+   * (`M-04`). Called from the audit sink, which every mutation already goes through — the same
+   * reason `R-04`'s config push rides there rather than being remembered at each write site.
+   *
+   * A scan of the whole map, because the key is `sensorId:channelKey` and a second index would
+   * be a second thing to keep in step. Limit edits are rare and the map holds the v1 target's
+   * 15,000 channels, so this is microseconds on a path nobody is timing.
+   */
+  forget(sensorId: number): number {
+    const prefix = `${String(sensorId)}:`;
+    let dropped = 0;
+    for (const key of this.#cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#cache.delete(key);
+        dropped += 1;
+      }
+    }
+    return dropped;
+  }
+
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
-    const ids = new Map<string, number>();
+    const ids = new Map<string, ResolvedChannel>();
     const missing = new Map<
       string,
       { sensorId: number; key: string; name: string; unit: string }
@@ -100,8 +139,16 @@ export class ChannelResolver {
 
     // One lookup for the whole set: it picks up both what was just created and what already
     // existed and therefore conflicted.
-    const found = await q.query<{ id: number; sensor_id: string; key: string }>(
-      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key
+    const found = await q.query<{
+      id: number;
+      sensor_id: string;
+      key: string;
+      name: string;
+      unit: string;
+      decimals: number | null;
+      limits: unknown;
+    }>(
+      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits
        FROM channel c
        JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
          ON w.sensor_id = c.sensor_id AND w.key = c.key`,
@@ -110,8 +157,15 @@ export class ChannelResolver {
 
     for (const row of found) {
       const cacheKey = `${row.sensor_id}:${row.key}`;
-      ids.set(cacheKey, row.id);
-      this.#remember(cacheKey, row.id);
+      const channel: ResolvedChannel = {
+        id: row.id,
+        name: row.name,
+        unit: row.unit,
+        decimals: row.decimals,
+        limits: parseLimits(row.limits),
+      };
+      ids.set(cacheKey, channel);
+      this.#remember(cacheKey, channel);
     }
 
     let droppedReadings = 0;
@@ -137,7 +191,7 @@ export class ChannelResolver {
     };
   }
 
-  #remember(cacheKey: string, id: number): void {
+  #remember(cacheKey: string, channel: ResolvedChannel): void {
     // Oldest-first eviction. A channel that is still being reported is re-learned on its next
     // result, at the cost of one query; the cache exists to make the common case free, not to
     // be authoritative.
@@ -145,6 +199,6 @@ export class ChannelResolver {
       const oldest = this.#cache.keys().next();
       if (!oldest.done) this.#cache.delete(oldest.value);
     }
-    this.#cache.set(cacheKey, id);
+    this.#cache.set(cacheKey, channel);
   }
 }

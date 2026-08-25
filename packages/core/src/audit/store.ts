@@ -1,5 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
+import type { ChannelLimits } from '../state/limits.js';
 import type { ObjectKind } from '../objects/types.js';
 import type { ObjectDetail } from '../objects/types.js';
 import { describeCreated, describeDeleted, diffObjects, type FieldChange } from './diff.js';
@@ -273,8 +274,34 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         // comes from an ancestor, and which ancestor is a question for the resolver.
         diff: [{ field: `setting.${mutation.key}`, before: mutation.before, after: null }],
       };
+
+    case 'channel.limits.set':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { channelKey: mutation.channelKey },
+        // Only the fields that moved, named the way the operator sees them. A diff listing all
+        // seven every time would bury the one threshold somebody changed.
+        diff: LIMIT_FIELDS.filter((field) => mutation.before[field] !== mutation.after[field]).map(
+          (field) => ({
+            field: `channel.${mutation.channelKey}.${field}`,
+            before: mutation.before[field],
+            after: mutation.after[field],
+          }),
+        ),
+      };
   }
 }
+
+const LIMIT_FIELDS = [
+  'enabled',
+  'upperError',
+  'upperWarning',
+  'lowerWarning',
+  'lowerError',
+  'errorMessage',
+  'warningMessage',
+] as const satisfies readonly (keyof ChannelLimits)[];
 
 function paramsSummary(changed: readonly string[]): Record<string, unknown> {
   return changed.length === 0 ? {} : { paramsChanged: [...changed] };

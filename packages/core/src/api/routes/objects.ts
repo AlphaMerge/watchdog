@@ -14,6 +14,8 @@ import type {
   SiblingMove,
   UpdateObjectInput,
 } from '../../objects/types.js';
+import { channelLimitsPatchSchema } from '../schemas/objects.js';
+import type { ChannelLimitsPatch } from '../../state/limits.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
 
@@ -602,6 +604,54 @@ export async function objectRoutes(
     },
     async (request, reply) => {
       await reply.send({ items: await service.channels(request.params.id) });
+    },
+  );
+
+  /**
+   * A channel's thresholds (`M-04`).
+   *
+   * `PATCH` on the channel rather than a dedicated `/limits` resource, because `M-07` adds
+   * scaling factors, decimals and the spike filter to the same row and they should not each
+   * grow an endpoint. Today `limits` is the only field it accepts, and `additionalProperties:
+   * false` says so plainly rather than ignoring the rest.
+   */
+  app.patch<{ Params: { id: number; key: string }; Body: { limits: ChannelLimitsPatch } }>(
+    '/objects/:id/channels/:key',
+    {
+      schema: {
+        description:
+          'Sets a channel’s error and warning limits. A patch: `null` clears one threshold, an ' +
+          'absent field leaves it alone. Limits are immediate — a reading past an error limit ' +
+          'sets the sensor Down on the very first sample, with no two-step rule. Limits that ' +
+          'contradict each other (a warning limit past its error limit) are refused with the ' +
+          'reason, not stored.',
+        params: {
+          type: 'object',
+          required: ['id', 'key'],
+          additionalProperties: false,
+          properties: {
+            id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+            key: { type: 'string', minLength: 1, maxLength: 100 },
+          },
+        },
+        body: {
+          type: 'object',
+          required: ['limits'],
+          additionalProperties: false,
+          properties: { limits: channelLimitsPatchSchema },
+        },
+        response: { 200: { $ref: 'ms:channelRecord' } },
+      },
+    },
+    async (request, reply) => {
+      const updated = await service.setChannelLimits(
+        actorFor(request),
+        request.params.id,
+        request.params.key,
+        request.body.limits,
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.send(updated);
     },
   );
 

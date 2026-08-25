@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { ChannelLimits } from '../state/limits.js';
 import type {
   CloneCounts,
   CountsByKind,
@@ -82,6 +83,22 @@ export type Mutation =
       /** Every destroyed object. WORKFLOW.MD §12 wants a diff, and there is no recycle bin. */
       destroyed: readonly ObjectRef[];
     }
+  | {
+      /**
+       * A channel's thresholds changed (`M-04`).
+       *
+       * Audited because a limit is what decides an alarm: a sensor that went Down with cause
+       * `limit` is answerable only if the log says who set the limit and to what. Nothing here
+       * can carry a secret — four numbers and two operator-written notes.
+       */
+      action: 'channel.limits.set';
+      /** The sensor. Channels have no identity of their own in the object tree. */
+      objectId: ObjectId;
+      kind: ObjectKind;
+      channelKey: string;
+      before: ChannelLimits;
+      after: ChannelLimits;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown };
 
@@ -151,6 +168,12 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         sourceId: mutation.sourceId,
         clonedCount: mutation.clonedCount,
+      };
+    case 'channel.limits.set':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        channelKey: mutation.channelKey,
       };
     case 'setting.set':
     case 'setting.reverted':

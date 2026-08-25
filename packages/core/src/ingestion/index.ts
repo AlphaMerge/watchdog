@@ -1,5 +1,7 @@
 export { ChannelResolver } from './channels.js';
-export type { ChannelResolverOptions, ResolvedChannels } from './channels.js';
+export type { ChannelResolverOptions, ResolvedChannel, ResolvedChannels } from './channels.js';
+export { ResultCacheInvalidator } from './invalidation.js';
+export type { ResultCacheInvalidatorOptions } from './invalidation.js';
 export { Ingestor } from './ingestor.js';
 export type {
   IngestBatch,

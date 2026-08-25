@@ -42,6 +42,10 @@ live state behind an ETag would be served stale. A sensor still reads Unknown un
 result, and again after a resume — that is the state, not a placeholder. Panels that are empty
 say which task fills them.
 
+The channel table shows each channel's configured thresholds (`M-04`), ordered the way the
+number line is, so the band a reading should stay inside reads as one thing. Read-only here —
+`U-08` generates the form.
+
 Nothing polls yet: every panel loads once. The live stream is `U-02`.
 
 ## Design system

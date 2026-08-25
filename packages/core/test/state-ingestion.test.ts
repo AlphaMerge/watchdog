@@ -3,11 +3,13 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import type { CheckResult, IngestionConfig } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
+import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { SensorStateService } from '../src/state/service.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -111,13 +113,22 @@ describe(
       service: IngestionService;
       ingestor: Ingestor;
       states: SensorStateService;
+      channels: ChannelResolver;
     } {
       const states = new SensorStateService({ db, logger: silent });
+      const channels = new ChannelResolver({ logger: silent });
       const ingestor = new Ingestor({ db: target ?? db, logger: silent, config: CONFIG });
       return {
         states,
+        channels,
         ingestor,
-        service: new IngestionService({ db, logger: silent, ingestor, states }),
+        service: new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          states,
+          resolver: channels,
+        }),
       };
     }
 
@@ -467,6 +478,223 @@ describe(
       assert.equal(summary?.state, 'up');
       const device = await harness.service.get(deviceId);
       assert.equal('state' in device, false, 'and a device has no state to report');
+    });
+
+    // -------------------------------------------------------------------------------------
+    // Channel limits (M-04). A successful check that measured something alarming.
+    // -------------------------------------------------------------------------------------
+
+    describe('channel limits', () => {
+      async function setLimits(
+        key: string,
+        limits: Record<string, unknown>,
+        id = sensorId,
+      ): Promise<{ status: number; body: Record<string, unknown> }> {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/objects/${String(id)}/channels/${key}`,
+          payload: { limits },
+        });
+        return { status: response.statusCode, body: response.json<Record<string, unknown>>() };
+      }
+
+      /** A successful check that measured `rtt`. The channel exists after the first one. */
+      const measured = (minutes: number, value: number): CheckResult =>
+        result({
+          at: at(minutes),
+          channels: [{ key: 'rtt', value, name: 'Response time', unit: 'ms' }],
+        });
+
+      it('goes Down on the very first reading past an error limit, with no two-step', async () => {
+        // WORKFLOW.MD §4 rule 2. The two-step rule exists to absorb a dropped packet; a disk
+        // that is 99% full is 99% full, and waiting another interval to say so helps nobody.
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        assert.equal((await runtime()).state, 'up');
+
+        assert.equal((await setLimits('rtt', { upperError: 500 })).status, 200);
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 812)], 'b2');
+
+        const current = await runtime();
+        assert.equal(current.state, 'down');
+        assert.equal(current.cause, 'limit');
+        assert.equal(current.consecutive_failures, 0, 'the check succeeded; the reading did not');
+        assert.equal(
+          (await history()).at(-1)?.message,
+          'Response time is 812 ms, above the error limit of 500 ms',
+        );
+      });
+
+      it('stores the reading that breached the limit, unlike a failed check', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        await setLimits('rtt', { upperError: 500 });
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 812)], 'b2');
+
+        const rows = await db.query<{ value: number }>(
+          `SELECT s.value FROM sample s JOIN channel c ON c.id = s.channel_id
+           WHERE c.sensor_id = $1 AND c.key = 'rtt' ORDER BY s.time`,
+          [sensorId],
+        );
+        assert.deepEqual(
+          rows.map((row) => row.value),
+          [10, 812],
+          'the check ran and measured something; the graph must show what it measured',
+        );
+      });
+
+      it('recovers to Warning when the reading improves into the warning band', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        await setLimits('rtt', { upperError: 500, upperWarning: 200 });
+
+        const second = build();
+        await deliver(
+          second.service,
+          second.ingestor,
+          [measured(1, 812), measured(2, 300), measured(3, 50)],
+          'b2',
+        );
+
+        assert.deepEqual(
+          (await history()).map((row) => `${row.previous_state ?? '-'}->${row.state}:${row.cause}`),
+          ['unknown->up:scan', 'up->down:limit', 'down->warning:limit', 'warning->up:scan'],
+        );
+      });
+
+      it('blames the scan, not the limit, when the check itself failed', async () => {
+        // §2.3: a failed check records no channel values, so there is nothing to compare
+        // against a limit. Carrying the last breach forward would attribute an outage to a
+        // threshold somebody set weeks ago.
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        await setLimits('rtt', { upperError: 500 });
+
+        const second = build();
+        await deliver(
+          second.service,
+          second.ingestor,
+          [
+            measured(1, 812),
+            result({ at: at(2), outcome: 'error', message: 'gone', channels: [] }),
+          ],
+          'b2',
+        );
+
+        const last = (await history()).at(-1);
+        assert.equal(last?.state, 'warning', 'the first failed scan, under the two-step rule');
+        assert.equal(last.cause, 'scan');
+        assert.equal(last.message, 'gone');
+      });
+
+      it('takes effect on the next scan, without restarting the core', async () => {
+        // The cache is what makes ingestion affordable, and the cost of a cache is that
+        // something has to notice an edit. The invalidator rides the audit sink for exactly
+        // this: an operator who lowers a threshold expects the next scan to act on it.
+        const running = build();
+        const invalidator = new ResultCacheInvalidator({
+          channels: running.channels,
+          sensors: running.states,
+          logger: silent,
+        });
+        harness.audit.also = invalidator;
+        try {
+          // Warm the cache with no limits at all.
+          await deliver(running.service, running.ingestor, [measured(0, 10)]);
+          assert.equal((await runtime()).state, 'up');
+
+          await harness.service.setChannelLimits(testActor, sensorId, 'rtt', {
+            upperError: 100,
+          });
+
+          // The *same* service, still running, with a cache that was warm before the edit.
+          const next = build();
+          next.channels.clear();
+          await deliver(next.service, next.ingestor, [measured(1, 812)], 'b2');
+          assert.equal((await runtime()).state, 'down', 'a fresh cache acts on it');
+
+          // And the one whose cache was warm when the edit happened.
+          const again = new Ingestor({ db, logger: silent, config: CONFIG });
+          const sameService = new IngestionService({
+            db,
+            logger: silent,
+            ingestor: again,
+            states: running.states,
+            resolver: running.channels,
+          });
+          await deliver(sameService, again, [measured(2, 900)], 'b3');
+          assert.equal(
+            (await runtime()).state,
+            'down',
+            'the invalidator dropped the entry the edit made stale',
+          );
+        } finally {
+          harness.audit.also = undefined;
+          invalidator.stop();
+        }
+      });
+
+      it('refuses limits that contradict each other, with the reason', async () => {
+        const response = await setLimits('rtt', { upperError: 100, upperWarning: 200 });
+        assert.equal(response.status, 400);
+        const error = response.body['error'] as { code: string; details: { problems: string[] } };
+        assert.equal(error.code, 'OBJECT_INVALID');
+        assert.ok(error.details.problems[0]?.includes('never be reached'));
+      });
+
+      it('patches one threshold without wiping the others', async () => {
+        await setLimits('rtt', { upperError: 500, upperWarning: 200, warningMessage: 'slow' });
+        const patched = await setLimits('rtt', { upperError: 900 });
+        assert.deepEqual(patched.body['limits'], {
+          enabled: true,
+          upperError: 900,
+          upperWarning: 200,
+          lowerWarning: null,
+          lowerError: null,
+          errorMessage: '',
+          warningMessage: 'slow',
+        });
+
+        const cleared = await setLimits('rtt', { upperWarning: null });
+        assert.equal(
+          (cleared.body['limits'] as { upperWarning: number | null }).upperWarning,
+          null,
+        );
+        assert.equal((cleared.body['limits'] as { upperError: number }).upperError, 900);
+      });
+
+      it('records who changed a limit and what it was', async () => {
+        // Through the real sink, into the real table: a limit is what decides an alarm, and
+        // "the sensor went Down because of a limit" is only answerable if the log says who set
+        // that limit and to what.
+        harness.audit.also = new DatabaseAuditSink();
+        try {
+          await setLimits('rtt', { upperError: 500 });
+        } finally {
+          harness.audit.also = undefined;
+        }
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(sensorId)}/audit?limit=5`,
+        });
+        const entries = response.json<{ items: { action: string; diff: unknown[] }[] }>().items;
+        const entry = entries.find((each) => each.action === 'channel.limits.set');
+        assert.ok(entry, 'a limit is what decides an alarm; the log has to say who set it');
+        assert.deepEqual(entry.diff, [
+          { field: 'channel.rtt.upperError', before: null, after: 500 },
+        ]);
+      });
+
+      it('404s for a channel the sensor does not have', async () => {
+        assert.equal((await setLimits('nonexistent', { upperError: 1 })).status, 404);
+      });
+
+      it('refuses to put limits on something that is not a sensor', async () => {
+        assert.equal((await setLimits('rtt', { upperError: 1 }, deviceId)).status, 409);
+      });
     });
 
     // -------------------------------------------------------------------------------------

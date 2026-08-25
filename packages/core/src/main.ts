@@ -19,6 +19,8 @@ import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
+import { ChannelResolver } from './ingestion/channels.js';
+import { ResultCacheInvalidator } from './ingestion/invalidation.js';
 import { Ingestor } from './ingestion/ingestor.js';
 import { IngestionService } from './ingestion/service.js';
 import { HistoryService } from './timeseries/history.js';
@@ -154,6 +156,13 @@ async function serve(): Promise<void> {
   // about what a sensor is.
   const catalogue = standardCatalogue();
 
+  // Built here rather than beside the ingestion service, because the audit sink below has to
+  // hold them: they cache channel limits and sensor states, and an edited limit that only took
+  // effect after a restart would not be the "immediate effect" M-04 promises.
+  const channels = new ChannelResolver({ logger });
+  const states = new SensorStateService({ db, logger });
+  const cacheInvalidator = new ResultCacheInvalidator({ channels, sensors: states, logger });
+
   const service = new ObjectService({
     db,
     repository: new ObjectRepository(),
@@ -165,6 +174,7 @@ async function serve(): Promise<void> {
       new DatabaseAuditSink(),
       new LoggingAuditSink(logger),
       configNotifier,
+      cacheInvalidator,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     logger,
@@ -224,9 +234,10 @@ async function serve(): Promise<void> {
     // Catch-up is paced separately from absolute queue pressure, so a fleet replaying their
     // spools cannot queue everyone else's live results behind them (R-03).
     pacer: new ReplayPacer({ config: config.ingestion.replay, logger }),
+    resolver: channels,
     // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
     // own transaction, so the two can never disagree about what happened.
-    states: new SensorStateService({ db, logger }),
+    states,
   });
 
   const probeEndpoint = new ProbeEndpoint({
@@ -243,6 +254,7 @@ async function serve(): Promise<void> {
     timeoutMs: 1_000,
     run: () => {
       configNotifier.stop();
+      cacheInvalidator.stop();
     },
   });
   lifecycle.onShutdown({

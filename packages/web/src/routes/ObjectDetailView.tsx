@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type {
   AuditPage,
+  ChannelLimits,
   ChannelRecord,
   HistorySeries,
   ObjectDetail,
@@ -88,7 +89,7 @@ export function ObjectDetailView(): React.JSX.Element {
             ) : (
               <ul className="divide-y divide-border text-sm">
                 {channels.data.items.map((channel) => (
-                  <li key={channel.id} className="flex items-center justify-between gap-3 py-2">
+                  <li key={channel.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
                     <span className="font-mono text-text">{channel.key}</span>
                     <span className="flex items-center gap-2 text-text-muted">
                       {channel.name}
@@ -99,6 +100,7 @@ export function ObjectDetailView(): React.JSX.Element {
                         </span>
                       )}
                     </span>
+                    <LimitBand limits={channel.limits} unit={channel.unit} />
                   </li>
                 ))}
               </ul>
@@ -301,6 +303,42 @@ function SensorState({ view }: { view: SensorStateView }): React.JSX.Element {
         </time>
         {view.pausedBy.length > 1 && ` · also paused by ${view.pausedBy.slice(1).join(', ')}`}
       </span>
+    </span>
+  );
+}
+
+/**
+ * The thresholds a channel is judged against (`M-04`), from the outside in.
+ *
+ * Ordered the way the number line is — lower error, lower warning, upper warning, upper error —
+ * so the band an operator wants the reading to stay inside is the gap in the middle, and reads
+ * as one thing rather than four independent facts.
+ *
+ * Read-only here. `U-08` generates the form.
+ */
+function LimitBand({
+  limits,
+  unit,
+}: {
+  limits: ChannelLimits;
+  unit: string;
+}): React.JSX.Element | null {
+  const show = (value: number): string =>
+    unit === '' ? String(value) : `${String(value)} ${unit}`;
+  const parts: string[] = [];
+  if (limits.lowerError !== null) parts.push(`error < ${show(limits.lowerError)}`);
+  if (limits.lowerWarning !== null) parts.push(`warn < ${show(limits.lowerWarning)}`);
+  if (limits.upperWarning !== null) parts.push(`warn > ${show(limits.upperWarning)}`);
+  if (limits.upperError !== null) parts.push(`error > ${show(limits.upperError)}`);
+  if (parts.length === 0) return null;
+
+  return (
+    <span className="ml-auto flex items-center gap-2 text-xs text-text-muted">
+      <span className="font-mono">{parts.join(' · ')}</span>
+      {/* Configured but not acting. Saying so beats showing thresholds that do nothing. */}
+      {!limits.enabled && (
+        <span className="rounded border border-border px-1.5 py-0.5">not enforced</span>
+      )}
     </span>
   );
 }

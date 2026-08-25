@@ -169,6 +169,60 @@ export const settingViewSchema = {
   },
 } as const;
 
+/**
+ * A channel's thresholds (`M-04`).
+ *
+ * Strict and fully required on the way out, because the repository normalises what is in the
+ * jsonb column before anything reads it. `additionalProperties: false` is doing real work here:
+ * the column is free-form, and this is what keeps a hand-edited row from serialising whatever
+ * it happens to contain into an API response.
+ */
+export const channelLimitsSchema = {
+  $id: 'ms:channelLimits',
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'enabled',
+    'upperError',
+    'upperWarning',
+    'lowerWarning',
+    'lowerError',
+    'errorMessage',
+    'warningMessage',
+  ],
+  properties: {
+    enabled: { type: 'boolean' },
+    upperError: { type: ['number', 'null'] },
+    upperWarning: { type: ['number', 'null'] },
+    lowerWarning: { type: ['number', 'null'] },
+    lowerError: { type: ['number', 'null'] },
+    errorMessage: { type: 'string' },
+    warningMessage: { type: 'string' },
+  },
+} as const;
+
+/**
+ * The body of a limits PATCH.
+ *
+ * Every field optional, and every threshold nullable: absent leaves a limit alone, `null`
+ * clears it. Non-finite numbers are refused here rather than stored — a NaN threshold compares
+ * false against everything, so it would read as "configured" and behave as "off".
+ */
+export const channelLimitsPatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    enabled: { type: 'boolean' },
+    upperError: { type: ['number', 'null'] },
+    upperWarning: { type: ['number', 'null'] },
+    lowerWarning: { type: ['number', 'null'] },
+    lowerError: { type: ['number', 'null'] },
+    errorMessage: { type: 'string', maxLength: 500 },
+    warningMessage: { type: 'string', maxLength: 500 },
+  },
+} as const;
+
 export const channelRecordSchema = {
   $id: 'ms:channelRecord',
   type: 'object',
@@ -200,7 +254,7 @@ export const channelRecordSchema = {
     scaleMul: { type: 'string' },
     scaleDiv: { type: 'string' },
     decimals: { type: ['integer', 'null'] },
-    limits: { type: 'object', additionalProperties: true },
+    limits: { $ref: 'ms:channelLimits' },
     spikeMin: { type: ['number', 'null'] },
     spikeMax: { type: ['number', 'null'] },
     showInGraph: { type: 'boolean' },
@@ -444,6 +498,7 @@ export const SHARED_SCHEMAS = [
   objectRefSchema,
   resolvedSettingSchema,
   settingViewSchema,
+  channelLimitsSchema,
   channelRecordSchema,
   credentialViewSchema,
   objectSummarySchema,

@@ -30,8 +30,22 @@ export class CapturingAuditSink implements AuditSink {
   readonly recorded: Mutation[] = [];
   /** When set, every mutation is also written to the `audit_probe` table through `q`. */
   persist = false;
+  /**
+   * A second sink to forward to, the way `CompositeAuditSink` does in production.
+   *
+   * Some things ride the audit sink rather than being called directly — `R-04`'s config push
+   * and `M-04`'s cache invalidation — and testing one means putting it where it actually sits,
+   * inside the mutation's own transaction.
+   */
+  also: AuditSink | undefined;
 
-  async record(q: Queryable, _actor: Actor, mutations: readonly Mutation[]): Promise<void> {
+  async record(
+    q: Queryable,
+    actor: Actor,
+    mutations: readonly Mutation[],
+    at: Date,
+  ): Promise<void> {
+    await this.also?.record(q, actor, mutations, at);
     this.recorded.push(...mutations);
     if (!this.persist) return;
     for (const mutation of mutations) {

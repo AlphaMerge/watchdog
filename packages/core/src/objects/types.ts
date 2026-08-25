@@ -1,7 +1,8 @@
 import type { CredentialKind, ResolvedSetting, SettingSource } from '../settings/inheritance.js';
+import type { ChannelLimits } from '../state/limits.js';
 import type { SensorState } from '../state/tables.js';
 
-export type { CredentialKind, ResolvedSetting, SensorState, SettingSource };
+export type { ChannelLimits, CredentialKind, ResolvedSetting, SensorState, SettingSource };
 
 export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
 /** Every kind the API can create. The root is seeded by migration 001 and there is only one. */
@@ -117,7 +118,14 @@ export interface ChannelRecord {
   readonly scaleMul: string;
   readonly scaleDiv: string;
   readonly decimals: number | null;
-  readonly limits: Readonly<Record<string, unknown>>;
+  /**
+   * Always the full shape, never what happens to be in the column (`M-04`).
+   *
+   * Normalising on read is what lets the response schema be strict: a reader never has to ask
+   * whether a missing key means "no limit" or "an older row", and the serialiser can drop
+   * anything that is not one of the seven fields rather than passing jsonb through untyped.
+   */
+  readonly limits: ChannelLimits;
   readonly spikeMin: number | null;
   readonly spikeMax: number | null;
   readonly showInGraph: boolean;

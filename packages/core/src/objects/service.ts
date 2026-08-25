@@ -3,6 +3,7 @@ import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import { settingRegistry } from '../settings/registry.js';
+import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
 import type { Actor, AuditSink } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
@@ -143,6 +144,79 @@ export class ObjectService {
       );
     }
     return this.#repo.channels(this.#db, id);
+  }
+
+  /**
+   * Sets a channel's limits (`M-04`).
+   *
+   * A patch, not a replacement: `null` clears one threshold and an absent field leaves it
+   * alone, so "set the upper error limit" does not silently wipe the warning limit somebody
+   * else configured. The merge happens here, against the row read in this transaction, and the
+   * result is validated as a whole — a warning limit above an error limit is only nonsense in
+   * combination, which is exactly what a field-by-field schema cannot see.
+   */
+  async setChannelLimits(
+    actor: Actor,
+    id: ObjectId,
+    key: string,
+    patch: ChannelLimitsPatch,
+    pre: Precondition = { kind: 'none' },
+  ): Promise<ChannelRecord> {
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+      if (object.kind !== 'sensor') {
+        throw new ObjectError(
+          'OBJECT_KIND_MISMATCH',
+          `only a sensor has channels; object ${String(id)} is a ${object.kind}`,
+          { context: { objectId: id, phase: 'channels' }, details: { storedKind: object.kind } },
+        );
+      }
+      if (pre.kind === 'version' && object.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, object.version);
+      }
+
+      const channel = await this.#repo.channel(q, id, key);
+      if (channel === null) {
+        throw new ObjectError('OBJECT_NOT_FOUND', `sensor ${String(id)} has no channel "${key}"`, {
+          context: { objectId: id, phase: 'channels' },
+          details: { channelKey: key },
+        });
+      }
+
+      const before = channel.limits;
+      const after = mergeLimits(before, patch);
+      const problems = validateLimits(after);
+      if (problems.length > 0) {
+        throw new ObjectError('OBJECT_INVALID', `these limits contradict each other`, {
+          context: { objectId: id, phase: 'channels' },
+          details: { channelKey: key, problems },
+        });
+      }
+
+      await this.#repo.setChannelLimits(q, id, key, after);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'channel.limits.set',
+            objectId: id,
+            kind: object.kind,
+            channelKey: key,
+            before,
+            after,
+          },
+        ],
+        new Date(),
+      );
+
+      // Re-read: the channel write fired the trigger that bumps the sensor's version, so the
+      // record read before it carries an ETag that is already stale (the trap S-16 documented).
+      const updated = await this.#repo.channel(q, id, key);
+      if (updated === null) throw notFound(id);
+      return updated;
+    });
   }
 
   /** Effective and own together — exactly one render of an inheritance-aware settings form. */

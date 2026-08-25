@@ -46,3 +46,20 @@ export type {
   SensorStateCause,
   Transition,
 } from './tables.js';
+export {
+  evaluateChannel,
+  format,
+  mergeLimits,
+  parseLimits,
+  rollUp,
+  validateLimits,
+  ALL_CLEAR,
+  NO_LIMITS,
+} from './limits.js';
+export type {
+  ChannelBreach,
+  ChannelLimits,
+  ChannelLimitsPatch,
+  ChannelOutcome,
+  ChannelReadingFacts,
+} from './limits.js';
