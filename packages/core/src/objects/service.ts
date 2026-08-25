@@ -4,6 +4,7 @@ import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import { settingRegistry } from '../settings/registry.js';
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
+import { validateTransform } from '../ingestion/scaling.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
@@ -11,6 +12,7 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type {
+  ChannelProcessing,
   ChannelRecord,
   CloneInput,
   CloneResult,
@@ -160,12 +162,20 @@ export class ObjectService {
    * deliberately **not** checked here — a sensor type can ship ahead of its lookup file, and
    * refusing the configuration would leave the operator unable to write down what they mean.
    * The unresolved id is reported instead, everywhere it shows.
+   *
+   * `processing` (`M-07`) is a patch again. Changing a scale factor does not rewrite the
+   * readings already stored, so a graph steps at the moment of the change — true of every
+   * monitoring system, and the alternative is two representations of one measurement.
    */
   async patchChannel(
     actor: Actor,
     id: ObjectId,
     key: string,
-    patch: { limits?: ChannelLimitsPatch; lookupId?: string | null },
+    patch: {
+      limits?: ChannelLimitsPatch;
+      lookupId?: string | null;
+      processing?: Partial<ChannelProcessing>;
+    },
     pre: Precondition = { kind: 'none' },
   ): Promise<ChannelRecord> {
     return this.#db.tx(async (q) => {
@@ -205,6 +215,52 @@ export class ObjectService {
         await this.#repo.setChannelLimits(q, id, key, after);
         mutations.push({
           action: 'channel.limits.set',
+          objectId: id,
+          kind: object.kind,
+          channelKey: key,
+          before,
+          after,
+        });
+      }
+
+      if (patch.processing !== undefined) {
+        const before: ChannelProcessing = {
+          scaleMul: channel.scaleMul,
+          scaleDiv: channel.scaleDiv,
+          decimals: channel.decimals,
+          spikeMin: channel.spikeMin,
+          spikeMax: channel.spikeMax,
+        };
+        // A patch, like the limits: absent leaves a field alone, `null` clears a bound. The
+        // factors have no null — "no scaling" is 1, and the column refuses zero.
+        const after: ChannelProcessing = {
+          scaleMul: patch.processing.scaleMul ?? before.scaleMul,
+          scaleDiv: patch.processing.scaleDiv ?? before.scaleDiv,
+          decimals:
+            patch.processing.decimals === undefined ? before.decimals : patch.processing.decimals,
+          spikeMin:
+            patch.processing.spikeMin === undefined ? before.spikeMin : patch.processing.spikeMin,
+          spikeMax:
+            patch.processing.spikeMax === undefined ? before.spikeMax : patch.processing.spikeMax,
+        };
+        const problems = validateTransform(
+          {
+            scaleMul: Number(after.scaleMul),
+            scaleDiv: Number(after.scaleDiv),
+            spikeMin: after.spikeMin,
+            spikeMax: after.spikeMax,
+          },
+          after.decimals,
+        );
+        if (problems.length > 0) {
+          throw new ObjectError('OBJECT_INVALID', 'these processing settings cannot be applied', {
+            context: { objectId: id, phase: 'channels' },
+            details: { channelKey: key, problems },
+          });
+        }
+        await this.#repo.setChannelProcessing(q, id, key, after);
+        mutations.push({
+          action: 'channel.processing.set',
           objectId: id,
           kind: object.kind,
           channelKey: key,

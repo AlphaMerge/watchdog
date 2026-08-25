@@ -107,6 +107,22 @@ export interface ObjectSummary {
   readonly effective?: Readonly<Record<string, ResolvedSetting>>;
 }
 
+/**
+ * Everything that happens to a reading before it is judged or shown (`M-07`).
+ *
+ * Grouped because they are configured together and audited together: the factors and the spike
+ * bounds are all numbers in the channel's own unit, and `decimals` is how many of them to show.
+ */
+export interface ChannelProcessing {
+  /** `numeric` columns. Strings on the wire — a JS number would silently lose precision. */
+  readonly scaleMul: string;
+  readonly scaleDiv: string;
+  /** `null` is automatic: as many digits as the value needs and no trailing zeros. */
+  readonly decimals: number | null;
+  readonly spikeMin: number | null;
+  readonly spikeMax: number | null;
+}
+
 export interface ChannelRecord {
   readonly id: number;
   readonly sensorId: ObjectId;

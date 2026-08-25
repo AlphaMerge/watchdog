@@ -3,6 +3,7 @@ import type { Queryable } from '../db/pool.js';
 import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
+import { parseTransform, type ReadingTransform } from './scaling.js';
 
 /**
  * A channel, resolved: its id and everything judging a reading needs (`M-04`).
@@ -17,6 +18,8 @@ export interface ResolvedChannel {
   readonly unit: string;
   readonly decimals: number | null;
   readonly limits: ChannelLimits;
+  /** Scaling and the spike filter (`M-07`), applied before anything judges the reading. */
+  readonly transform: ReadingTransform;
   /** What the channel names, whether or not this installation has it. */
   readonly lookupId: string | null;
   /** The definition, or `null` when there is none or the one it names is not loaded. */
@@ -165,9 +168,13 @@ export class ChannelResolver {
       decimals: number | null;
       limits: unknown;
       lookup_id: string | null;
+      scale_mul: string;
+      scale_div: string;
+      spike_min: number | null;
+      spike_max: number | null;
     }>(
       `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
-              c.lookup_id
+              c.lookup_id, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
        FROM channel c
        JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
          ON w.sensor_id = c.sensor_id AND w.key = c.key`,
@@ -182,6 +189,7 @@ export class ChannelResolver {
         unit: row.unit,
         decimals: row.decimals,
         limits: parseLimits(row.limits),
+        transform: parseTransform(row),
         lookupId: row.lookup_id,
         lookup: this.#lookupFor(row.lookup_id),
       };

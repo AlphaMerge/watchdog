@@ -223,6 +223,28 @@ export const channelLimitsPatchSchema = {
   },
 } as const;
 
+/**
+ * The body of a processing PATCH (`M-07`).
+ *
+ * The factors are strings because the column is `numeric` and the read serves strings; taking a
+ * number here and a string there would make a round trip lossy in one direction only. Every
+ * field is optional, and `null` clears a spike bound or returns the decimals to automatic.
+ */
+export const channelProcessingPatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    // A decimal string. `pattern` rather than `type: number`, so 0.001 survives the round trip
+    // exactly as the operator typed it.
+    scaleMul: { type: 'string', pattern: '^-?[0-9]+(\\.[0-9]+)?$', maxLength: 40 },
+    scaleDiv: { type: 'string', pattern: '^-?[0-9]+(\\.[0-9]+)?$', maxLength: 40 },
+    decimals: { type: ['integer', 'null'], minimum: 0, maximum: 10 },
+    spikeMin: { type: ['number', 'null'] },
+    spikeMax: { type: ['number', 'null'] },
+  },
+} as const;
+
 export const channelRecordSchema = {
   $id: 'ms:channelRecord',
   type: 'object',

@@ -173,6 +173,12 @@ How many consecutive failures are reported as Warning before Down is the inherit
 `scan.retryWarnings` (`M-03`): zero is immediate-down, the default is one warning interval, and a
 group can set it for everything beneath it.
 
+Before any of that, a reading is scaled by the channel's factors and passed through its spike
+filter (`M-07`): bytes become bits, centidegrees become degrees, and a wrapped counter reporting
+four billion is discarded rather than flattening the graph. The **scaled** value is what is
+stored, judged and drawn — one number, so a chart can never disagree with the alarm that fired.
+A discarded reading leaves a gap, not a zero, and decides nothing.
+
 A channel whose reading is a status code rather than a measurement is judged by a **lookup**
 (`M-06`) instead of by limits: `2` becomes "down" and Down, `1` becomes "up" and Up. Built-in
 definitions ship with the build; an operator's own go in `<dataDir>/lookups` as JSON and replace

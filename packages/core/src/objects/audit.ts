@@ -1,6 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { ChannelLimits } from '../state/limits.js';
+import type { ChannelProcessing } from './types.js';
 import type {
   CloneCounts,
   CountsByKind,
@@ -114,6 +115,22 @@ export type Mutation =
       before: string | null;
       after: string | null;
     }
+  | {
+      /**
+       * A channel's scaling, spike filter or decimal places changed (`M-07`).
+       *
+       * Everything that happens to a reading between arriving and being judged or shown. Its
+       * own action beside `channel.limits.set` and `channel.lookup.set`, because a graph that
+       * suddenly reads eight times higher is answered by knowing who changed the factor — and
+       * a diff that named only "the channel" would not answer it.
+       */
+      action: 'channel.processing.set';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      channelKey: string;
+      before: ChannelProcessing;
+      after: ChannelProcessing;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown };
 
@@ -186,6 +203,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
       };
     case 'channel.limits.set':
     case 'channel.lookup.set':
+    case 'channel.processing.set':
       return {
         action: mutation.action,
         objectId: mutation.objectId,

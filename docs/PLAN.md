@@ -309,7 +309,8 @@ test it exhaustively.
 | M-04 channel limits | done | `packages/core/src/state/limits.ts`; no migration — migration 001 had already provisioned `channel.limits`. Immediate in both senses: Down on the first sample past an error limit, and an edited limit acts on the next scan, because `ResultCacheInvalidator` rides the audit sink |
 | M-05 multi-channel rollup | done | Absorbed by `M-04`: `rollUp` takes the worst channel, §2.3 in `evaluate` combines it with the query state. A result carries every channel at once, so there was no second place for it |
 | M-06 lookups | done | `packages/core/src/lookups/`; migration 009 adds `channel.lookup_id`. JSON rather than PRTG's `.ovl` XML, built-ins as TypeScript modules, operator definitions under `<dataDir>/lookups` overriding by id. A channel is judged by a lookup **or** its limits, never both |
-| M-07…M-19 | not started | |
+| M-07 scaling and spike filter | done | `packages/core/src/ingestion/scaling.ts`; no migration — the columns have been on `channel` since 001. Scale before filter, store the scaled value, and a discarded reading is a gap that decides nothing |
+| M-08…M-19 | not started | |
 
 **Where Phase 3's exit criteria stand after `M-02`.**
 
@@ -322,10 +323,10 @@ test it exhaustively.
   result after a restart; a restart-with-a-pause scenario is testable once `M-08` can set one.
 - *One dependency-suppressed alarm, not forty* — untouched; `M-11` and `M-17`.
 
-`M-03`, `M-04` and `M-06` close four of the deliverables above: "two-step failure with the
-per-sensor retry policy", "channel limits", "multi-channel rollup", and "lookups". What is left
-in Phase 3 is the spike filter and scaling (`M-07`), the whole pause block (`M-08`…`M-12`), and
-acknowledgement onward (`M-13`…`M-17`).
+`M-03`, `M-04`, `M-06` and `M-07` close five of the deliverables above: "two-step failure with the
+per-sensor retry policy", "channel limits", "multi-channel rollup", "lookups", and "spike
+filter and scaling factors". What is left in Phase 3 is the whole pause block (`M-08`…`M-12`)
+and acknowledgement onward (`M-13`…`M-17`).
 
 The tables are the specification `M-02` implements against, which is the order this phase's risk
 demands: precedence is a *set* of independent sources, not a priority chain, and the sixteen-row

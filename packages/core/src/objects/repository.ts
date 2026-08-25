@@ -4,6 +4,7 @@ import type { SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
 import type {
+  ChannelProcessing,
   ChannelRecord,
   CloneCounts,
   CountsByKind,
@@ -638,6 +639,32 @@ export class ObjectRepository {
        WHERE sensor_id = $1 AND key = $2
        RETURNING id`,
       [sensorId, key, JSON.stringify(limits)],
+    );
+    return rows.length > 0;
+  }
+
+  /** Scaling, spike filter and decimal places (`M-07`), written as one row of settings. */
+  async setChannelProcessing(
+    q: Queryable,
+    sensorId: ObjectId,
+    key: string,
+    processing: ChannelProcessing,
+  ): Promise<boolean> {
+    const rows = await q.query<{ id: number }>(
+      `UPDATE channel
+       SET scale_mul = $3::numeric, scale_div = $4::numeric,
+           decimals = $5, spike_min = $6, spike_max = $7
+       WHERE sensor_id = $1 AND key = $2
+       RETURNING id`,
+      [
+        sensorId,
+        key,
+        processing.scaleMul,
+        processing.scaleDiv,
+        processing.decimals,
+        processing.spikeMin,
+        processing.spikeMax,
+      ],
     );
     return rows.length > 0;
   }

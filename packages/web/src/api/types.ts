@@ -77,6 +77,13 @@ export interface ChannelRecord {
   unit: string;
   isPrimary: boolean;
   limits: ChannelLimits;
+  /** `numeric` columns: strings on the wire, so a factor round-trips exactly as typed. */
+  scaleMul: string;
+  scaleDiv: string;
+  /** `null` is automatic: as many digits as the value needs, no trailing zeros. */
+  decimals: number | null;
+  spikeMin: number | null;
+  spikeMax: number | null;
   /**
    * The lookup that decides this channel's state (`M-06`), or `null`.
    *

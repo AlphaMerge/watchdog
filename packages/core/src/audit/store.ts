@@ -1,6 +1,7 @@
 import type { Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
 import type { ChannelLimits } from '../state/limits.js';
+import type { ChannelProcessing } from '../objects/types.js';
 import type { ObjectKind } from '../objects/types.js';
 import type { ObjectDetail } from '../objects/types.js';
 import { describeCreated, describeDeleted, diffObjects, type FieldChange } from './diff.js';
@@ -275,6 +276,22 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: `setting.${mutation.key}`, before: mutation.before, after: null }],
       };
 
+    case 'channel.processing.set':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { channelKey: mutation.channelKey },
+        // Only what moved. A graph that suddenly reads eight times higher is answered by one
+        // line saying scaleMul went from 1 to 8, not by five lines of unchanged settings.
+        diff: PROCESSING_FIELDS.filter(
+          (field) => mutation.before[field] !== mutation.after[field],
+        ).map((field) => ({
+          field: `channel.${mutation.channelKey}.${field}`,
+          before: mutation.before[field],
+          after: mutation.after[field],
+        })),
+      };
+
     case 'channel.lookup.set':
       return {
         ...base,
@@ -306,6 +323,14 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       };
   }
 }
+
+const PROCESSING_FIELDS = [
+  'scaleMul',
+  'scaleDiv',
+  'decimals',
+  'spikeMin',
+  'spikeMax',
+] as const satisfies readonly (keyof ChannelProcessing)[];
 
 const LIMIT_FIELDS = [
   'enabled',

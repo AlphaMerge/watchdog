@@ -598,12 +598,33 @@ because each is a decision rather than a defect:
       that uses one is a decision worth making explicitly rather than as a side effect of saving
       a file, and `GET /lookups` makes the current state visible either way. `BitField`,
       `Boolean` and `desiredValue` are `[V2]` per `CAPABILITIES.MD §1.2`.
-- [ ] **M-07 — Scaling factors and spike filter** · S · M-04, M-06 · Multiplication/division, decimal
-      places, min/max spike discard. **`M-04` left the seam:** `IngestionService.#prepare` marks
-      the two lines it belongs between — scaling changes the value a limit is compared against,
-      and the spike filter drops a reading before it is compared at all. The columns
-      (`scale_mul`, `scale_div`, `decimals`, `spike_min`, `spike_max`) have been on `channel`
-      since migration 001, and `decimals` already formats limit messages.
+- [x] **M-07 — Scaling factors and spike filter** · S · M-04, M-06 · Multiplication/division,
+      decimal places, min/max spike discard.
+
+      **M-07 outcome.** `packages/core/src/ingestion/scaling.ts`, at the seam `M-04` marked in
+      `IngestionService.#prepare`. No migration: `scale_mul`, `scale_div`, `decimals`,
+      `spike_min` and `spike_max` have been on `channel` since migration 001, with the `CHECK`
+      constraints already in place.
+
+      Three decisions, now in `state-machine.md` §2.2.0. **Scaling comes before the spike
+      filter**, because bounds and limits are all numbers an operator types in the channel's own
+      unit, and two units in one form is a bug that reads as "the filter is ignoring my
+      setting". **The scaled value is what is stored** — one number, so a chart can never
+      disagree with the alarm that fired; storing raw and scaling on read would work, since every
+      rollup aggregate is linear, but two representations of one measurement is exactly how you
+      get "the graph says 40 and the alarm says 320". The cost is that changing a factor does not
+      rewrite history, so the graph steps; that is true of every monitoring system and it is
+      visible rather than subtle. **A discarded reading is a gap, not a zero**, and decides
+      nothing about the sensor's state either — a wrapped counter must not be able to breach a
+      limit.
+
+      "Auto / all / fixed" collapses to two modes: `decimals` null is automatic (as many digits
+      as the value needs, no trailing zeros, which is what "all" would mean for a float we
+      already store at full precision) and an integer is fixed.
+
+      The invalidator now forgets a sensor's channels on **any** `channel.*` mutation, matched by
+      prefix. It was a list of two action names, and `M-07` had already fallen off it before its
+      own test caught the stale factor.
 - [ ] **M-08 — Manual pause** · M · M-02 · **`M-02` left the column:**
       `sensor_runtime.paused_manually`, one row per sensor from the moment it exists. Set it and
       re-evaluate; `clearedByResume` is what the *last* source clearing calls. Indefinite, 5m/15m/1h/3h/1d presets, until-datetime,

@@ -904,6 +904,206 @@ describe(
     });
 
     // -------------------------------------------------------------------------------------
+    // Scaling and the spike filter (M-07), between the reading arriving and being judged.
+    // -------------------------------------------------------------------------------------
+
+    describe('reading processing', () => {
+      async function setProcessing(
+        key: string,
+        processing: Record<string, unknown>,
+      ): Promise<{ status: number; body: Record<string, unknown> }> {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/objects/${String(sensorId)}/channels/${key}`,
+          payload: { processing },
+        });
+        return { status: response.statusCode, body: response.json<Record<string, unknown>>() };
+      }
+
+      const measured = (minutes: number, value: number): CheckResult =>
+        result({
+          at: at(minutes),
+          channels: [{ key: 'rtt', value, name: 'Response time', unit: 'ms' }],
+        });
+
+      async function storedRtt(): Promise<number[]> {
+        const rows = await db.query<{ value: number }>(
+          `SELECT s.value FROM sample s JOIN channel c ON c.id = s.channel_id
+           WHERE c.sensor_id = $1 AND c.key = 'rtt' ORDER BY s.time`,
+          [sensorId],
+        );
+        return rows.map((row) => row.value);
+      }
+
+      it('stores the scaled value, so nothing downstream has to scale it again', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 1_000)]);
+        assert.equal((await setProcessing('rtt', { scaleDiv: '1000' })).status, 200);
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 2_000)], 'b2');
+
+        assert.deepEqual(
+          await storedRtt(),
+          [1_000, 2],
+          'the graph steps where the factor changed, and every later reading is in the new unit',
+        );
+      });
+
+      it('judges the scaled value, so the alarm and the graph agree', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 1)]);
+        await setProcessing('rtt', { scaleMul: '8' });
+        await harness.service.patchChannel(testActor, sensorId, 'rtt', {
+          limits: { upperError: 100 },
+        });
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 20)], 'b2');
+
+        // 20 × 8 = 160, over the limit of 100. Judged raw it would have been under it.
+        assert.equal((await runtime()).state, 'down');
+        assert.equal(
+          (await history()).at(-1)?.message,
+          'Response time is 160 ms, above the error limit of 100 ms',
+        );
+        assert.deepEqual((await storedRtt()).at(-1), 160, 'and the stored value is the same 160');
+      });
+
+      it('discards a spike, leaving a gap rather than a zero', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 5)]);
+        await setProcessing('rtt', { spikeMax: 1_000 });
+
+        const second = build();
+        await deliver(
+          second.service,
+          second.ingestor,
+          [measured(1, 4_000_000_000), measured(2, 7)],
+          'b2',
+        );
+
+        assert.deepEqual(
+          await storedRtt(),
+          [5, 7],
+          'a wrapped counter must not flatten a graph, and a zero would just move the lie',
+        );
+        assert.equal(second.service.stats().discardedSpike, 1, 'counted, never silent');
+      });
+
+      it('lets a discarded spike decide nothing about the sensor’s state', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 5)]);
+        await setProcessing('rtt', { spikeMax: 1_000 });
+        await harness.service.patchChannel(testActor, sensorId, 'rtt', {
+          limits: { upperError: 100 },
+        });
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 4_000_000_000)], 'b2');
+        assert.equal(
+          (await runtime()).state,
+          'up',
+          'the reading was thrown away, so it cannot breach a limit either',
+        );
+      });
+
+      it('filters on the scaled value, because both bounds are in the channel’s unit', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 5)]);
+        await setProcessing('rtt', { scaleMul: '8', spikeMax: 5_000 });
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 1_000)], 'b2');
+        assert.deepEqual(await storedRtt(), [5], '1,000 × 8 is 8,000, over the 5,000 bound');
+      });
+
+      it('takes effect on the next scan, without restarting the core', async () => {
+        const running = build();
+        const invalidator = new ResultCacheInvalidator({
+          channels: running.channels,
+          sensors: running.states,
+          logger: silent,
+        });
+        harness.audit.also = invalidator;
+        try {
+          await deliver(running.service, running.ingestor, [measured(0, 1_000)]);
+          await harness.service.patchChannel(testActor, sensorId, 'rtt', {
+            processing: { scaleDiv: '1000' },
+          });
+
+          const again = new Ingestor({ db, logger: silent, config: CONFIG });
+          const sameService = new IngestionService({
+            db,
+            logger: silent,
+            ingestor: again,
+            states: running.states,
+            resolver: running.channels,
+          });
+          await deliver(sameService, again, [measured(1, 2_000)], 'b2');
+          assert.deepEqual(await storedRtt(), [1_000, 2]);
+        } finally {
+          harness.audit.also = undefined;
+          invalidator.stop();
+        }
+      });
+
+      it('refuses a factor of zero and an inverted spike range, with the reason', async () => {
+        const zero = await setProcessing('rtt', { scaleDiv: '0' });
+        assert.equal(zero.status, 400);
+        const inverted = await setProcessing('rtt', { spikeMin: 100, spikeMax: 10 });
+        assert.equal(inverted.status, 400);
+        const error = inverted.body['error'] as { details: { problems: string[] } };
+        assert.ok(error.details.problems[0]?.includes('every reading would be discarded'));
+      });
+
+      it('patches one field without disturbing the others', async () => {
+        await setProcessing('rtt', { scaleMul: '8', decimals: 2, spikeMax: 500 });
+        const patched = await setProcessing('rtt', { decimals: 0 });
+        assert.equal(patched.body['scaleMul'], '8');
+        assert.equal(patched.body['decimals'], 0);
+        assert.equal(patched.body['spikeMax'], 500);
+
+        const cleared = await setProcessing('rtt', { spikeMax: null, decimals: null });
+        assert.equal(cleared.body['spikeMax'], null);
+        assert.equal(cleared.body['decimals'], null, 'null is automatic, not zero');
+      });
+
+      it('shows a value to the declared precision in the message it writes', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 1)]);
+        await setProcessing('rtt', { decimals: 1 });
+        await harness.service.patchChannel(testActor, sensorId, 'rtt', {
+          limits: { upperError: 10 },
+        });
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 12.3456)], 'b2');
+        assert.equal(
+          (await history()).at(-1)?.message,
+          'Response time is 12.3 ms, above the error limit of 10.0 ms',
+        );
+      });
+
+      it('records who changed a factor, which is what answers a graph that jumped', async () => {
+        harness.audit.also = new DatabaseAuditSink();
+        try {
+          await setProcessing('rtt', { scaleMul: '8' });
+        } finally {
+          harness.audit.also = undefined;
+        }
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(sensorId)}/audit?limit=5`,
+        });
+        const entries = response.json<{ items: { action: string; diff: unknown[] }[] }>().items;
+        const entry = entries.find((each) => each.action === 'channel.processing.set');
+        assert.ok(entry);
+        assert.deepEqual(entry.diff, [{ field: 'channel.rtt.scaleMul', before: '1', after: '8' }]);
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
     // Lookups (M-06). A reading that is a status code, not a measurement.
     // -------------------------------------------------------------------------------------
 

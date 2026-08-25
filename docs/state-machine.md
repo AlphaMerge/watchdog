@@ -152,6 +152,36 @@ an upper one — are refused when they are set, with the reason. A threshold tha
 is a configuration mistake, and accepting it silently means an operator believes they are
 covered when they are not.
 
+### 2.2.0 Before anything judges it
+
+`WORKFLOW.MD §3` draws one box — "apply scaling, spike filter, lookups" — feeding "evaluate
+channel error/warning limits". `M-07` implements the first half, in
+`packages/core/src/ingestion/scaling.ts`, and the order inside it is stated here because nothing
+else states it:
+
+1. **Scale.** `value × mul ÷ div`. A device reports bytes and the operator wants bits; a
+   thermometer reports centidegrees and the operator wants degrees.
+2. **Spike filter.** Discard the reading entirely if it falls outside `[min, max]`.
+3. Only then §2.2 sees it.
+
+**Scaling comes before the spike filter**, because the bounds and the limits are all numbers an
+operator types in the channel's own unit. Two units in one form is a bug that reads as "the
+filter is ignoring my setting". *Decided by `M-07`.*
+
+**The scaled value is what is stored**, not the raw one. One number: what was written is what
+was judged is what is drawn. Storing raw and scaling on read would work — every rollup aggregate
+is linear — but it puts two representations of one measurement in the system, and that is how a
+chart says 40 while the alarm that fired says 320. The cost is that changing a factor does not
+rewrite history, so a graph steps at the moment of the change; that is true of every monitoring
+system, and it is visible rather than subtle. *Decided by `M-07`.*
+
+**A discarded reading is a gap, not a zero**, and contributes nothing to the channel's state
+either — the same rule a failed check follows. A spike filter exists because a wrapped counter
+reporting four billion would flatten a graph for a day; writing a zero in its place would simply
+move the lie, and letting it breach a limit would alarm on an artefact. Every discard is counted
+(`ResultStats.discardedSpike`), because a filter quietly eating a third of a channel's data looks
+exactly like a device that stopped reporting.
+
 ### 2.2.1 Lookups
 
 `M-06` implements them in `packages/core/src/lookups/`. `SingleInt` maps one value to one state
@@ -374,7 +404,7 @@ Named so they are decisions rather than omissions:
 
 - ~~**`M-03`**~~ — done; §2.1 records the setting, the default and that N counts scans.
 - ~~**`M-04`** / **`M-06`**~~ — done; §2.2 and §2.2.1 record what they settled.
-- **`M-07`** — the spike filter, which discards a reading *before* §2.2 sees it.
+- ~~**`M-07`**~~ — done; §2.2.0 records the order and what is stored.
 - **`M-11`** — where the "delay after dependency ends" timer lives and what restarts it if the
   master flaps during the delay.
 - **`M-15`** — the state-change log. §5 invariant 10 is what it has to record.

@@ -62,7 +62,11 @@ export class ResultCacheInvalidator implements AuditSink {
     // Nothing here awaits or touches the database: this runs inside the caller's transaction,
     // and a mutation must not get slower because a cache needed clearing.
     for (const mutation of mutations) {
-      if (mutation.action === 'channel.limits.set' || mutation.action === 'channel.lookup.set') {
+      // Any change to a channel, by prefix rather than by listing the actions. Every
+      // `channel.*` mutation carries the sensor's id, and the alternative — three names to keep
+      // in step with the union — is a list `M-07` had already fallen off before its own test
+      // caught it.
+      if (mutation.action.startsWith('channel.')) {
         this.#forgetSensor(mutation.objectId);
       } else if (
         mutation.action === 'setting.set' ||

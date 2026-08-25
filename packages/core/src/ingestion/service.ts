@@ -1,6 +1,7 @@
 import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { rollUp, type ChannelOutcome, type ChannelReadingFacts } from '../state/limits.js';
+import { transformReading } from './scaling.js';
 import type { StateDecisions } from '../state/runtime.js';
 import type { SensorResult, SensorStateService, StateStats } from '../state/service.js';
 import { ChannelResolver } from './channels.js';
@@ -41,6 +42,15 @@ export interface ResultStats {
   discardedInvalidTime: number;
   /** Readings for sensors that no longer exist — a spool replayed after a deletion. */
   discardedUnknownSensor: number;
+  /**
+   * Readings thrown away by a channel's spike filter or because they were not numbers (`M-07`).
+   *
+   * Counted, never silent: a filter that is quietly eating a third of a channel's data looks
+   * exactly like a device that stopped reporting, and only this number tells the two apart.
+   */
+  discardedReadings: number;
+  /** The subset of the above that a spike filter rejected, rather than arithmetic. */
+  discardedSpike: number;
   channelsCreated: number;
   cachedChannels: number;
   /** Absent when no state machine is wired. */
@@ -73,6 +83,8 @@ export class IngestionService {
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
   #discardedUnknownSensor = 0;
+  #discardedReadings = 0;
+  #discardedSpike = 0;
   #channelsCreated = 0;
 
   constructor(options: IngestionServiceOptions) {
@@ -91,6 +103,8 @@ export class IngestionService {
       discardedOnError: this.#discardedOnError,
       discardedInvalidTime: this.#discardedInvalidTime,
       discardedUnknownSensor: this.#discardedUnknownSensor,
+      discardedReadings: this.#discardedReadings,
+      discardedSpike: this.#discardedSpike,
       channelsCreated: this.#channelsCreated,
       cachedChannels: this.#resolver.cached,
       ...(this.#states === undefined ? {} : { state: this.#states.stats() }),
@@ -217,20 +231,32 @@ export class IngestionService {
       for (const reading of result.channels) {
         const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
         if (channel === undefined) continue; // counted as dropped by the resolver
-        samples.push({ channelId: channel.id, at, value: reading.value });
+
+        // Scaled and spike-filtered before anything else looks at it (M-07). The scaled value
+        // is what is stored *and* what is judged — one number, so a chart can never disagree
+        // with the alarm that fired.
+        const transformed = transformReading(reading.value, channel.transform);
+        if (transformed.kind === 'discarded') {
+          this.#discardedReadings += 1;
+          if (transformed.reason === 'spike') this.#discardedSpike += 1;
+          // Deliberately no sample and no fact: a discarded reading is a gap, not a zero, and
+          // it contributes nothing to the channel's state either. A wrapped counter must not
+          // decide whether a sensor is Down.
+          continue;
+        }
+
+        samples.push({ channelId: channel.id, at, value: transformed.value });
         readings.push({
           key: reading.key,
           name: channel.name,
           unit: channel.unit,
-          value: reading.value,
+          value: transformed.value,
           decimals: channel.decimals,
           limits: channel.limits,
           lookupId: channel.lookupId,
           lookup: channel.lookup,
         });
       }
-      // M-07 belongs between these two lines: scaling changes the value a limit is compared
-      // against, and the spike filter drops a reading before it is compared at all.
       if (readings.length > 0) outcomes.set(result, rollUp(readings));
     }
 

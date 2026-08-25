@@ -107,6 +107,7 @@ export function ObjectDetailView(): React.JSX.Element {
                     <span className="flex items-center gap-2 text-text-muted">
                       {channel.name}
                       {channel.unit !== '' && <span className="opacity-70">({channel.unit})</span>}
+                      <ProcessingNote channel={channel} />
                       {channel.isPrimary && (
                         <span className="rounded border border-border px-1.5 py-0.5 text-xs">
                           primary
@@ -423,7 +424,7 @@ function ChannelJudgement({
   loaded: LookupSummary[] | null;
 }): React.JSX.Element | null {
   if (channel.lookupId === null) {
-    return <LimitBand limits={channel.limits} unit={channel.unit} />;
+    return <LimitBand limits={channel.limits} unit={channel.unit} decimals={channel.decimals} />;
   }
 
   const known = loaded === null || loaded.some((lookup) => lookup.id === channel.lookupId);
@@ -435,6 +436,34 @@ function ChannelJudgement({
           not loaded
         </span>
       )}
+    </span>
+  );
+}
+
+/**
+ * What happens to a reading before anything judges it (`M-07`).
+ *
+ * Beside the unit, because that is what it changes: a channel scaled by 8 is not reporting the
+ * number the device sent, and an operator reading a graph has to know that before they compare
+ * it with anything else.
+ */
+function ProcessingNote({ channel }: { channel: ChannelRecord }): React.JSX.Element | null {
+  const parts: string[] = [];
+  if (channel.scaleMul !== '1') parts.push(`×${channel.scaleMul}`);
+  if (channel.scaleDiv !== '1') parts.push(`÷${channel.scaleDiv}`);
+  if (channel.spikeMin !== null || channel.spikeMax !== null) {
+    const low = channel.spikeMin === null ? '' : String(channel.spikeMin);
+    const high = channel.spikeMax === null ? '' : String(channel.spikeMax);
+    parts.push(`spike ${low}–${high}`);
+  }
+  if (parts.length === 0) return null;
+
+  return (
+    <span
+      className="rounded border border-border px-1.5 py-0.5 font-mono text-xs"
+      title="Applied before the reading is stored or judged"
+    >
+      {parts.join(' ')}
     </span>
   );
 }

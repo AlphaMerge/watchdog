@@ -14,8 +14,9 @@ import type {
   SiblingMove,
   UpdateObjectInput,
 } from '../../objects/types.js';
-import { channelLimitsPatchSchema } from '../schemas/objects.js';
+import { channelLimitsPatchSchema, channelProcessingPatchSchema } from '../schemas/objects.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
+import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
 
@@ -617,7 +618,11 @@ export async function objectRoutes(
    */
   app.patch<{
     Params: { id: number; key: string };
-    Body: { limits?: ChannelLimitsPatch; lookupId?: string | null };
+    Body: {
+      limits?: ChannelLimitsPatch;
+      lookupId?: string | null;
+      processing?: Partial<ChannelProcessing>;
+    };
   }>(
     '/objects/:id/channels/:key',
     {
@@ -630,7 +635,11 @@ export async function objectRoutes(
           'channel with a lookup is judged by it *instead of* its limits. Limits that ' +
           'contradict each other are refused with the reason; a `lookupId` this installation ' +
           'has not loaded is accepted and reported, because a sensor type may ship ahead of ' +
-          'its lookup file.',
+          'its lookup file. `processing` sets the scaling factors, the spike filter and the ' +
+          'decimal places — scaling is applied before anything judges the reading, and before ' +
+          'the spike filter, so both bounds and limits are numbers in the channel’s own unit. ' +
+          'Changing a factor does not rewrite readings already stored, so the graph steps at ' +
+          'the moment of the change.',
         params: {
           type: 'object',
           required: ['id', 'key'],
@@ -647,6 +656,7 @@ export async function objectRoutes(
           properties: {
             limits: channelLimitsPatchSchema,
             lookupId: { type: ['string', 'null'], minLength: 1, maxLength: 100 },
+            processing: channelProcessingPatchSchema,
           },
         },
         response: { 200: { $ref: 'ms:channelRecord' } },
