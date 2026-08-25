@@ -13,9 +13,11 @@ export const pauseViewSchema = {
   required: [
     'objectId',
     'paused',
+    'pending',
     'resumable',
     'source',
     'pausedAt',
+    'startsAt',
     'pausedUntil',
     'message',
     'inheritedFrom',
@@ -24,9 +26,13 @@ export const pauseViewSchema = {
   properties: {
     objectId: { type: 'integer' },
     paused: { type: 'boolean' },
+    /** A maintenance window that is scheduled and has not begun (`M-10`). */
+    pending: { type: 'boolean' },
     resumable: { type: 'boolean' },
     source: { enum: ['manual', 'parent', 'schedule', null] },
     pausedAt: { type: ['string', 'null'] },
+    /** When it takes effect. Later than `pausedAt` only for a maintenance window. */
+    startsAt: { type: ['string', 'null'] },
     /** `null` while paused indefinitely — until a person says otherwise. */
     pausedUntil: { type: ['string', 'null'] },
     message: { type: 'string' },
@@ -60,11 +66,16 @@ export const pauseViewSchema = {
 } as const;
 
 /**
- * How long to pause for.
+ * How long to pause for, and — for a maintenance window — from when.
  *
  * At most one of `minutes` and `until`; neither is indefinite. Any duration is accepted, not
  * only the presets — a preset list is a convenience for the common case, and an operator who
  * needs 45 minutes should not have to pick an hour and remember to come back.
+ *
+ * `from` with `until` is a maintenance window (`M-10`): the same pause, scheduled rather than
+ * immediate. It is the same endpoint because it is the same fact — one object, the same
+ * cascade, the same resume — and a second endpoint would be a second set of rules to keep in
+ * step with the first.
  */
 export const pauseRequestSchema = {
   type: 'object',
@@ -72,9 +83,14 @@ export const pauseRequestSchema = {
   properties: {
     minutes: { type: 'integer', minimum: 1, maximum: MAX_PAUSE_MINUTES },
     until: { type: 'string', minLength: 1, maxLength: 64 },
+    /** Start of a maintenance window. Requires `until`: an outage with no end is not a window. */
+    from: { type: 'string', minLength: 1, maxLength: 64 },
     message: { type: 'string', maxLength: 500 },
   },
-  not: { required: ['minutes', 'until'] },
+  // A duration and a moment are two answers to one question, and a window's start needs an end
+  // — an outage with no end is not a window, it is a pause somebody will forget about.
+  allOf: [{ not: { required: ['minutes', 'until'] } }, { not: { required: ['minutes', 'from'] } }],
+  dependencies: { from: ['until'] },
 } as const;
 
 export const PAUSE_PRESETS = PAUSE_PRESET_MINUTES;

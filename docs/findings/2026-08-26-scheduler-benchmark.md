@@ -100,18 +100,48 @@ shape of the problem Phase 6 walks into as slower sensor types arrive, and there
 independent levers — demand-driven pool sizing (`P-18`) and making the check itself cheaper
 (`ping -i 0.2` turns three seconds into under one). Both are worth having; neither is urgent.
 
-## Status
+## The sustained hour
 
-**The sustained hour is outstanding.** Every number above was measured over 30-second points.
-That is enough to choose a pool size — the curve is unambiguous and the mechanism behind it is
-arithmetic — and it is not enough to close a gate whose whole point is the word *sustained*. A
-30-second window at a 60-second interval sees each sensor fire at most once, so it cannot show a
-slow leak, a queue that grows over an hour, or a worker that degrades. The hour is running
-against the shipped default; this document gets its row when it lands.
+Every number above was measured over 30-second points. That is enough to choose a pool size — the
+curve is unambiguous and the mechanism behind it is arithmetic — and it is not enough to close a
+gate whose whole point is the word *sustained*. A 30-second window at a 60-second interval sees
+each sensor fire at most once, so it cannot show a slow leak, a queue that grows over an hour, or
+a worker that degrades.
 
-## Verdict so far
+One hour, 5,000 sensors at 60 s, 200 ms checks, against the new default of 48:
 
-**Go**, with the default changed — pending the sustained run.
+| | Measured | Budget |
+| --- | --- | --- |
+| Checks dispatched | 300,095 | 300,000 expected at this rate |
+| Checks completed | **300,095** | every one of them |
+| Refused | **0** | the pool never saturated |
+| Dispatch jitter p50 | 8 ms | — |
+| Dispatch jitter **p95** | **216 ms** | **1,000 ms** |
+| Dispatch jitter p99 | 225 ms | — |
+| — of which wheel lag p95 | 11 ms | — |
+| — of which queue wait p95 | 209 ms | — |
+| Resident memory | +515 MB | — |
+
+**Nothing degraded over the hour.** The p99 sits 9 ms above the p95, which is the signature of a
+distribution with no tail rather than one whose tail was not sampled — a queue that grew, a
+worker that leaked or a wheel that drifted would all have separated those two numbers. The
+completed count equals the dispatched count exactly: no check was dropped, deferred past its
+successor, or left in flight at the end.
+
+The split is the same one the sweep predicted. The wheel contributes 11 ms of the 216; the
+remaining 209 is a check waiting for a slot, which at 48 slots and a batch of 83 is the third
+tranche — 200 ms of predicted wait against 209 measured, over an hour rather than 30 seconds.
+
+**515 MB is the run's total resident growth, not the pool's price.** The pool's own share is the
+~290 MB the sweep attributes to it — measured properly, as the delta across pool sizes at
+identical load — and the rest is the working set of five thousand scheduled sensors held for an
+hour. Reporting the whole 515 as the cost of 48 threads would be the same over-attribution the
+sweep already corrected once, when a 704 ms figure measured under a heavier check was blamed on
+thread count alone. `P-18` is the task for the 290.
+
+## Verdict
+
+**Go**, with the default changed.
 
 The architecture holds. The hashed timing wheel dispatches five thousand sensors with a p95 lag
 under 10 ms, and the bounded worker pool is the right shape — a check that must not block the

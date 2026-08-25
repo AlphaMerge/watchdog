@@ -9,11 +9,18 @@
 
 import type { PauseSource } from './tables.js';
 
-/** How long. Exactly one of these, and nothing is indefinite. */
+/**
+ * How long, and — for a maintenance window — from when.
+ *
+ * The first three start the moment they are asked for; `window` is the one that does not, and
+ * it is the whole of `M-10`. A window is not a fifth pause source: it is a manual pause with a
+ * start, set on one object, cascading to everything beneath it, lifted by the same resume.
+ */
 export type PauseRequest =
   | { readonly kind: 'indefinite' }
   | { readonly kind: 'duration'; readonly minutes: number }
-  | { readonly kind: 'until'; readonly until: Date };
+  | { readonly kind: 'until'; readonly until: Date }
+  | { readonly kind: 'window'; readonly from: Date; readonly until: Date };
 
 /**
  * The presets a UI offers (`CAPABILITIES.MD §4`).
@@ -28,11 +35,23 @@ export const PAUSE_PRESET_MINUTES = [5, 15, 60, 180, 1440] as const;
 export const MAX_PAUSE_MINUTES = 365 * 24 * 60;
 
 export interface ResolvedPause {
+  /** When the row was written. Who-did-what-when, not when monitoring stops. */
   readonly pausedAt: Date;
+  /** When it takes effect. Equal to `pausedAt` for everything but a maintenance window. */
+  readonly startsAt: Date;
   /** `null` is indefinite. */
   readonly pausedUntil: Date | null;
   readonly message: string;
 }
+
+/**
+ * How far ahead a window may be scheduled.
+ *
+ * The same year as `MAX_PAUSE_MINUTES`, and for the same reason: a window scheduled for 2031 is
+ * a typo in a date field far more often than it is a plan, and the row would sit in the table
+ * being nothing until then.
+ */
+export const MAX_WINDOW_LEAD_MINUTES = MAX_PAUSE_MINUTES;
 
 /**
  * Turns a request into the row to store, or says why it cannot.
@@ -47,7 +66,11 @@ export function resolvePause(
   now: Date,
 ): { pause: ResolvedPause } | { problems: string[] } {
   if (request.kind === 'indefinite') {
-    return { pause: { pausedAt: now, pausedUntil: null, message } };
+    return { pause: { pausedAt: now, startsAt: now, pausedUntil: null, message } };
+  }
+
+  if (request.kind === 'window') {
+    return resolveWindow(request.from, request.until, message, now);
   }
 
   if (request.kind === 'duration') {
@@ -65,6 +88,7 @@ export function resolvePause(
     return {
       pause: {
         pausedAt: now,
+        startsAt: now,
         pausedUntil: new Date(now.getTime() + request.minutes * 60_000),
         message,
       },
@@ -77,8 +101,11 @@ export function resolvePause(
   }
   if (until.getTime() <= now.getTime()) {
     // Accepting it would create a pause that expires before anything can act on it — a sensor
-    // that flickers Paused and back for no reason an operator could explain.
-    return { problems: ['the pause deadline is already in the past'] };
+    // that flickers Paused and back for no reason an operator could explain. Ending one early
+    // is a resume, which is one action rather than two ways to spell it.
+    return {
+      problems: ['the pause deadline is already in the past; to end a pause now, resume it'],
+    };
   }
   if (until.getTime() - now.getTime() > MAX_PAUSE_MINUTES * 60_000) {
     return {
@@ -88,12 +115,70 @@ export function resolvePause(
       ],
     };
   }
-  return { pause: { pausedAt: now, pausedUntil: until, message } };
+  return { pause: { pausedAt: now, startsAt: now, pausedUntil: until, message } };
 }
 
-/** True while the pause is still in force. */
-export function pauseIsActive(pause: { pausedUntil: Date | null }, now: Date): boolean {
+/**
+ * A maintenance window: a pause that begins later and ends on its own (`M-10`).
+ *
+ * The three refusals are the three ways a date field goes wrong. A window that has already
+ * finished would be written and swept away without ever pausing anything; one with no length
+ * is a typo; and one scheduled years out is a mistyped year far more often than a plan. A start
+ * in the *past* is accepted — that is simply a pause that is already in force, which is what an
+ * operator who is late means.
+ */
+function resolveWindow(
+  from: Date,
+  until: Date,
+  message: string,
+  now: Date,
+): { pause: ResolvedPause } | { problems: string[] } {
+  if (Number.isNaN(from.getTime()) || Number.isNaN(until.getTime())) {
+    return { problems: ['a maintenance window needs two dates'] };
+  }
+  if (until.getTime() <= from.getTime()) {
+    return { problems: ['a maintenance window must end after it starts'] };
+  }
+  if (until.getTime() <= now.getTime()) {
+    return { problems: ['this maintenance window is already over'] };
+  }
+  if (from.getTime() - now.getTime() > MAX_WINDOW_LEAD_MINUTES * 60_000) {
+    return {
+      problems: [
+        `a maintenance window may not start more than ` +
+          `${String(MAX_WINDOW_LEAD_MINUTES / (24 * 60))} days from now`,
+      ],
+    };
+  }
+  if (until.getTime() - from.getTime() > MAX_PAUSE_MINUTES * 60_000) {
+    return {
+      problems: [
+        `a maintenance window may not run more than ` +
+          `${String(MAX_PAUSE_MINUTES / (24 * 60))} days; pause it indefinitely instead`,
+      ],
+    };
+  }
+  return { pause: { pausedAt: now, startsAt: from, pausedUntil: until, message } };
+}
+
+/**
+ * True while the pause is in force: started, and not yet over.
+ *
+ * Both ends, since `M-10`. A window scheduled for Saturday is a row in the table all week and
+ * pauses nothing until Saturday, and every read of a pause goes through here so that no caller
+ * has to remember the start exists.
+ */
+export function pauseIsActive(
+  pause: { startsAt: Date; pausedUntil: Date | null },
+  now: Date,
+): boolean {
+  if (pause.startsAt.getTime() > now.getTime()) return false;
   return pause.pausedUntil === null || pause.pausedUntil.getTime() > now.getTime();
+}
+
+/** True for a maintenance window that has been scheduled and has not begun (`M-10`). */
+export function pauseIsPending(pause: { startsAt: Date }, now: Date): boolean {
+  return pause.startsAt.getTime() > now.getTime();
 }
 
 /**
@@ -111,6 +196,9 @@ export function refuseResume(
   own: boolean,
   cascadedFrom: { objectId: number; name: string } | null,
 ): { reason: string; details: Record<string, unknown> } | null {
+  // `own` includes a maintenance window that has not started (`M-10`): cancelling one before it
+  // begins is the same action as ending one that has, and an operator who scheduled the wrong
+  // weekend should not have to wait for it to start before they can call it off.
   if (own) return null;
   if (cascadedFrom !== null) {
     return {

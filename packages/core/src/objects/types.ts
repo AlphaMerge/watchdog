@@ -144,6 +144,13 @@ export interface PauseView {
   readonly paused: boolean;
   readonly resumable: boolean;
   /**
+   * A maintenance window that has been scheduled and has not begun (`M-10`).
+   *
+   * `paused` is false while it is pending — nothing is paused yet — but `resumable` is true,
+   * because cancelling a window before it starts is the same action as ending one that has.
+   */
+  readonly pending: boolean;
+  /**
    * Which source is reported, in the order `WORKFLOW.MD §5` evaluates them.
    *
    * Never which source is the *only* one: the four are an independent set, and a sensor held by
@@ -152,6 +159,8 @@ export interface PauseView {
    */
   readonly source: 'manual' | 'parent' | 'schedule' | null;
   readonly pausedAt: string | null;
+  /** When it takes effect. Later than `pausedAt` only for a maintenance window (`M-10`). */
+  readonly startsAt: string | null;
   /** `null` while paused indefinitely — until a person says otherwise. */
   readonly pausedUntil: string | null;
   readonly message: string;

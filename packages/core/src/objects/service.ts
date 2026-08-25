@@ -396,6 +396,7 @@ export class ObjectService {
             action: 'object.paused',
             objectId: id,
             kind: object.kind,
+            from: resolved.pause.startsAt,
             until: resolved.pause.pausedUntil,
             message,
             sensorsAffected: changed ?? affected.length,
@@ -461,27 +462,39 @@ export class ObjectService {
   }
 
   /**
-   * Clears the pauses whose deadline has passed (`M-08`).
+   * Opens the maintenance windows that have come round and clears the pauses that have run out
+   * (`M-08`, `M-10`).
    *
-   * A timed pause has to be *noticed* by something. Whether it is still in force is computed
-   * from the clock, so every read is already correct — but the transition to Unknown, the entry
-   * in the log, and the configuration that tells a probe to start scanning again are all writes,
-   * and nothing writes itself. Hence a sweep.
+   * A pause with a time on it has to be *noticed* by something. Whether it is in force is
+   * computed from the clock, so every read is already correct — but the transition, the entry in
+   * the log, and the configuration that tells a probe to start or stop scanning are all writes,
+   * and nothing writes itself. Hence a sweep, at both ends.
    *
    * Deliberately not a timer per pause: a process holding five thousand timers loses all of them
    * on a restart, and a pause that outlives the core is the normal case rather than the
-   * exception. One periodic query over an index of the pauses that have a deadline at all costs
-   * nothing and cannot drift.
+   * exception. Two indexed queries over the rows that have a boundary at all cost nothing and
+   * cannot drift.
+   *
+   * `since` is the previous sweep. Passing the epoch — which the sweep does on its first pass
+   * after a restart — reconciles every window that opened while the core was down, without a
+   * "have I applied this yet" column that could disagree with the rows it describes.
    */
-  async expirePauses(limit = 200): Promise<{ expired: ObjectId[]; sensorsAffected: number }> {
+  async sweepPauses(
+    since: Date,
+    limit = 200,
+  ): Promise<{ expired: ObjectId[]; started: ObjectId[]; sensorsAffected: number }> {
     const now = new Date();
-    const actor: Actor = { kind: 'system', component: 'pause-expiry' };
+    const actor: Actor = { kind: 'system', component: 'pause-sweep' };
 
     return this.#db.tx(async (q) => {
       const due = await this.#pauses.expired(q, now, limit);
-      if (due.length === 0) return { expired: [], sensorsAffected: 0 };
+      const opening = await this.#pauses.startedIn(q, since, now, limit);
+      if (due.length === 0 && opening.length === 0) {
+        return { expired: [], started: [], sensorsAffected: 0 };
+      }
 
       const expired: ObjectId[] = [];
+      const started: ObjectId[] = [];
       const mutations: Mutation[] = [];
       let sensorsAffected = 0;
 
@@ -505,8 +518,33 @@ export class ObjectService {
         });
       }
 
+      for (const pause of opening) {
+        const object = await this.#repo.get(q, pause.objectId);
+        if (object === null) continue;
+
+        // One recompute per window rather than one for the whole tree, so the state history
+        // carries *this* window's message. "Quarterly patching" is what an operator reads on
+        // the sensor; a batched recompute could only have said nothing.
+        const affected = await this.#pauses.recompute(q, pause.objectId, now);
+        if (affected.length === 0) continue;
+        const changed =
+          (await this.#states?.reevaluate(q, affected, now, { message: pause.message })) ?? 0;
+        sensorsAffected += changed;
+
+        started.push(pause.objectId);
+        mutations.push({
+          action: 'object.paused',
+          objectId: pause.objectId,
+          kind: object.kind,
+          from: pause.startsAt,
+          until: pause.pausedUntil,
+          message: pause.message,
+          sensorsAffected: changed,
+        });
+      }
+
       if (mutations.length > 0) await this.#audit.record(q, actor, mutations, now);
-      return { expired, sensorsAffected };
+      return { expired, started, sensorsAffected };
     });
   }
 
@@ -525,7 +563,11 @@ export class ObjectService {
     const scheduleHolds = schedule !== null && !schedule.active;
     return {
       objectId: id,
-      paused: own !== null || effective.inherited !== null || scheduleHolds,
+      paused: effective.ownActive || effective.inherited !== null || scheduleHolds,
+      // A scheduled maintenance window counts: cancelling one before it starts is the same
+      // action as ending one that has, and an operator who picked the wrong weekend should not
+      // have to wait for it to begin (`M-10`).
+      pending: own !== null && !effective.ownActive,
       // Only an own pause can be lifted here; everything else points at the object that can.
       resumable: own !== null,
       // In the order §5 evaluates the sources — parent, dependency, schedule, manual — not in
@@ -536,10 +578,11 @@ export class ObjectService {
           ? 'parent'
           : scheduleHolds
             ? 'schedule'
-            : own !== null
+            : effective.ownActive
               ? 'manual'
               : null,
       pausedAt: own?.pausedAt.toISOString() ?? null,
+      startsAt: own?.startsAt.toISOString() ?? null,
       pausedUntil: own?.pausedUntil?.toISOString() ?? null,
       // The reason, wherever it lives: an operator looking at a cascaded sensor is asking why,
       // and the answer is on the object holding it.
@@ -1059,6 +1102,8 @@ export class ObjectService {
         cloneRoot.id,
         {
           pausedAt: clonedAt,
+          // A clone is paused from the moment it exists, not from a moment somebody picked.
+          startsAt: clonedAt,
           pausedUntil: null,
           message: `cloned from #${String(id)}`,
         },

@@ -237,7 +237,8 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | P-05 `SensorType` contract and registry | done | New `@ms/sensors` package; schema validation with defaults, declared channels with a primary, `writeOnly` redaction at one boundary, `GET /sensor-types`, guide in `docs/adding-a-sensor-type.md` |
 | P-08 ping sensor | done | System `ping` spawned directly for `AbortSignal` support; pure parser with Linux/BSD/Windows fixtures; `rtt` and `loss` channels |
 | P-16 toolchain `ping` | done | `dev/toolchain/Dockerfile`; the base image had no `ping`, so the default ICMP path could not be tested |
-| P-03, P-04, P-06, P-07, P-09…P-15 | not started | |
+| P-15 5,000-sensor benchmark | done | **Go.** One sustained hour: 300,095 checks dispatched, 300,095 completed, 0 refused, p95 dispatch jitter 216 ms against the 1,000 ms budget. It also found the shipped pool default wrong by a factor of sixteen (`docs/findings/2026-08-26-scheduler-benchmark.md`) |
+| P-03, P-04, P-06, P-07, P-09…P-14 | not started | |
 
 Two of the four exit criteria are covered by tests already: **a deliberately hung check does not
 delay any other check**, and **killing a worker mid-check loses exactly one result and recycles
@@ -248,8 +249,22 @@ The scheduler half of the throughput criterion is measured: **5,000 sensors over
 60 seconds** (`docs/findings/2026-08-25-timing-wheel-measurements.md`). Dispatch jitter is not
 ±1 s but zero — the wheel dispatches on integer ticks — so the exit criterion's 1-second budget
 is entirely available to the worker pool and the tick's own lateness, measured at a p95 under
-250 ms against the real timer. What P-15 still has to prove is that the pool can keep up with
-those dispatches on eight cores for an hour.
+250 ms against the real timer.
+
+**P-15 has now measured the other half, and the architecture gate is closed: go.** Five thousand
+sensors at 60 s for one hour on eight cores dispatched 300,095 checks and completed all 300,095,
+refusing none, at a p95 dispatch jitter of **216 ms** against the 1,000 ms budget — of which the
+wheel itself contributed 11 ms and waiting for a worker slot the other 209 ms. The p99 landed
+9 ms above the p95, which is what a distribution with no tail looks like: nothing leaked, drifted
+or degraded over the hour.
+
+What the benchmark changed was the pool, not the wheel. The shipped default was
+`availableParallelism() - 1` — a CPU-shaped number for work that is almost entirely waiting —
+and against this load it refused 21% of checks and delayed the rest by a p95 of 15.8 seconds. The
+governing quantity turned out to be the *dispatch batch*: the wheel hands over a whole second's
+worth at once, so the queue drains in tranches of `ceil(batch / slots)`. The default is now a
+flat 48, chosen from a measured sweep and recorded in
+`docs/findings/2026-08-26-scheduler-benchmark.md`.
 
 P-05 landed the plugin contract, which is what the rest of the phase is built from, and P-08 put
 the first type in it. Sensors can now be created and the check runs correctly against a real

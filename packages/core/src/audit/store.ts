@@ -321,6 +321,9 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         ...base,
         objectKind: mutation.kind,
         summary: {
+          // A window's start is what distinguishes "paused it" from "scheduled an outage for
+          // Saturday", and the two are the same action taken for very different reasons.
+          from: mutation.from.toISOString(),
           until: mutation.until?.toISOString() ?? null,
           message: mutation.message,
           sensorsAffected: mutation.sensorsAffected,

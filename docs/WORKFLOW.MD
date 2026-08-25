@@ -308,8 +308,9 @@ flowchart LR
 - A schedule assignment is an **inheritable setting** like any other: set it on a group and
   everything beneath it follows, override it on a device, or set it to none so one device inside
   a scheduled group is always watched.
-- A maintenance window is the one-off equivalent, with explicit start and end datetimes;
-  ending it early means setting the end time to the past.
+- A maintenance window is the one-off equivalent, with explicit start and end datetimes. It is a
+  manual pause that has not started yet — same object, same cascade, same resume — so nothing is
+  paused until it begins, and it is called off at any point by resuming the object it is on.
 - Schedules and dependencies are independent mechanisms and do not override each other.
 - Downtime inside a maintenance window should be excluded from uptime/SLA reporting — this is
   a frequent complaint about tools that get it wrong.

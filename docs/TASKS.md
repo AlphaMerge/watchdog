@@ -409,13 +409,11 @@ because each is a decision rather than a defect:
       utilisation, connection state, spool depth, version skew.
 - [ ] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13
       exposed for external scraping too.
-- [ ] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run: **p95
+- [x] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run: **p95
       dispatch jitter < 1 s on 8 cores**. Results recorded in the repo. _Architecture go/no-go
-      gate._ **The sustained hour is outstanding**; everything below was measured over 30-second
-      points, which is enough to choose a pool size and not enough to close a gate whose whole
-      point is that it is sustained.
+      gate._
 
-      **P-15 so far: go, with one number changed.**
+      **P-15: go, with one number changed.**
       `docs/findings/2026-08-26-scheduler-benchmark.md`, reproduced by
       `packages/probe/test/perf/scheduler-benchmark.test.ts`.
 
@@ -437,6 +435,14 @@ because each is a decision rather than a defect:
       `ceil(batch / slots)`. 48 is two tranches; 64 measured no better for 38 MB more; 128 bought
       200 ms for another 550 MB with an unstable p99; 256 was worse everywhere, the wheel's own
       lag rising to 676 ms as the threads contended with its timer.
+
+      **The sustained hour closes the gate.** 5,000 sensors at 60 s for an hour against the new
+      default: **300,095 checks dispatched, 300,095 completed, 0 refused**, p95 dispatch jitter
+      **216 ms** against the 1,000 ms budget (p50 8 ms, p99 225 ms; wheel 11 ms, queue wait
+      209 ms). The p99 sits 9 ms above the p95 — a distribution with no tail rather than one that
+      was not sampled, which is the thing 30-second points could not have shown. Resident memory
+      grew 515 MB over the hour, of which the sweep attributes ~290 MB to the pool itself and the
+      rest to the working set of five thousand scheduled sensors.
 
       Left open, with the measurement behind them: `P-18` (demand-driven pool sizing — a fixed 48
       costs ~290 MB whether the probe watches 5,000 sensors or 50) and the fact that our own
@@ -786,8 +792,47 @@ because each is a decision rather than a defect:
       Also fixed on the way past: `PauseView.source` reported a manual pause ahead of a parent
       cascade, which is the opposite of the order `WORKFLOW.MD §5` evaluates them in and the
       exact class of bug `M-01`'s tables exist to prevent.
-- [ ] **M-10 — Maintenance windows** · M · M-09 · One-off start/end datetimes; early cancel by
+- [x] **M-10 — Maintenance windows** · M · M-09 · One-off start/end datetimes; early cancel by
       setting the end to the past.
+
+      **M-10 outcome.** Migration 012 adds one column, `object_pause.starts_at`.
+      `POST /objects/:id/pause` takes `from` with `until`; `objects/pause-expiry.ts` became
+      `objects/pause-sweep.ts`, because it now opens windows as well as closing pauses.
+
+      **A window is a pause that has not started yet** — one column, not a second table and not a
+      fifth pause source. `WORKFLOW.MD §8` already called it "the one-off equivalent" of a
+      schedule, and `M-08` wrote `object_pause` expecting it: its upsert comment says "replacing
+      is extending a maintenance window". Everything a window needs was therefore already built —
+      the cascade, the resume refusal, the config push, the expiry — and a separate table would
+      have duplicated all four. `paused_at` keeps meaning when the row was written;
+      `starts_at` is when it takes effect, and every read of a pause now checks both ends.
+
+      **`effective()` returns a window that has not started; `ownActive` says whether it is in
+      force.** That split is what makes cancelling a window before it begins the same action as
+      ending one that has: `paused` is false while it is pending, `resumable` is true, and an
+      operator who booked the wrong weekend does not have to wait for it to start to call it off.
+
+      **The sweep runs at both ends, and reconciles.** It looks for pauses that ended and pauses
+      that *began* in the interval since its last pass, recomputing each under its own object so
+      the state history carries that window's message — "quarterly patching" is what an operator
+      reads on the sensor, and a batched recompute could only have said nothing. The first pass
+      after a restart looks back to the epoch, which reconciles every window that opened while the
+      core was down without a "have I applied this" column that could disagree with the rows.
+
+      **On the half minute rather than every half minute.** A window given as 22:00 should start
+      at 22:00: monitoring that runs into a planned outage is the alarm pausing exists to prevent.
+      Aligning the tick costs exactly what not aligning it costs. Lateness at the other end only
+      delays a resume, which is the safe side of the same trade.
+
+      **Early cancel is the resume, not an end time in the past.** `CAPABILITIES.MD §5` describes
+      PRTG's mechanism; ours reaches the same outcome with the action that already exists, and the
+      refusal on a past deadline now names it. Two ways to spell one operation is what `M-01`'s
+      tables exist to prevent, and `DELETE /objects/:id/pause` was already the button.
+
+      Two audit entries, deliberately: one when somebody schedules the outage, one when it
+      happens. "Who booked the change window" and "when did monitoring actually stop" are
+      different questions, and a `from` in the first is what distinguishes it from an ordinary
+      pause.
 - [ ] **M-11 — Dependencies** · L · M-08 · **`M-08` left the flag:**
       `sensor_runtime.paused_by_dependency`. _Use parent_, _select object_, _master object for
       parent device_; recursive cascade; **master keeps scanning while dependents are paused**;

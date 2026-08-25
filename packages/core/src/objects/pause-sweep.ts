@@ -1,0 +1,128 @@
+import { describeError, type Logger } from '@ms/shared';
+
+/** Just enough of `ObjectService` to run the sweep. */
+export interface SweepsPauses {
+  sweepPauses(
+    since: Date,
+    limit?: number,
+  ): Promise<{ expired: number[]; started: number[]; sensorsAffected: number }>;
+}
+
+export interface PauseSweepOptions {
+  service: SweepsPauses;
+  logger: Logger;
+  /** How often to look. Coarse on purpose — see below. */
+  intervalMs?: number;
+  batchSize?: number;
+}
+
+/** Half a minute. Fine enough for a window given to the minute, coarse enough to cost nothing. */
+const TICK = 30_000;
+
+/**
+ * Notices when a maintenance window opens and when a timed pause runs out (`M-08`, `M-10`).
+ *
+ * Every *read* of a pause already accounts for the clock, so nothing is wrong between a boundary
+ * and the sweep — the object simply is or is not paused. What the sweep is for is the three
+ * things that are writes: the transition that uptime is computed from, the entry in the log, and
+ * the configuration push that tells a probe to start or stop scanning.
+ *
+ * **Half a minute, not a second, and aligned to it.** A query a second for ever, on an
+ * installation where nothing is ever paused, is a cost nobody agreed to; but a window given as
+ * 22:00 should start at 22:00 rather than up to half a minute later, because monitoring that
+ * runs into a planned outage is the alarm pausing exists to prevent. Ticking *on* the half
+ * minute costs exactly what ticking every half minute costs and lands on the boundary instead
+ * of somewhere after it.
+ *
+ * The window's opening is the one direction where lateness matters. An expiry that fires late
+ * only means monitoring resumes late, which is the safe side of the same trade.
+ */
+export class PauseSweep {
+  readonly #service: SweepsPauses;
+  readonly #logger: Logger;
+  readonly #intervalMs: number | undefined;
+  readonly #batchSize: number;
+  #timer: NodeJS.Timeout | undefined;
+  #running = false;
+  #stopped = false;
+  /**
+   * The end of the last pass, and the start of the next one's window of interest.
+   *
+   * The epoch to begin with, on purpose: the first sweep after a restart then treats every
+   * pause already in force as newly started and recomputes it, which is what reconciles the
+   * windows that opened while the core was down. Idempotent, so it writes nothing when nothing
+   * drifted.
+   */
+  #since = new Date(0);
+
+  constructor(options: PauseSweepOptions) {
+    this.#service = options.service;
+    this.#logger = options.logger.child({ component: 'pause-sweep' });
+    this.#intervalMs = options.intervalMs;
+    this.#batchSize = options.batchSize ?? 200;
+  }
+
+  start(): void {
+    if (this.#timer !== undefined || this.#stopped) return;
+    this.#arm();
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+
+  /** One pass. Never throws: a sweep that dies takes every future sweep with it. */
+  async sweep(): Promise<number> {
+    if (this.#running) return 0;
+    this.#running = true;
+    const since = this.#since;
+    const startedAt = new Date();
+    try {
+      const report = await this.#service.sweepPauses(since, this.#batchSize);
+      // Advanced only on success, so a failed pass is retried over the same interval rather
+      // than leaving a window that opened during it unapplied for ever.
+      this.#since = startedAt;
+      if (report.expired.length > 0) {
+        this.#logger.info(
+          { objects: report.expired, sensorsAffected: report.sensorsAffected },
+          'timed pauses expired; monitoring resumed',
+        );
+      }
+      if (report.started.length > 0) {
+        this.#logger.info(
+          { objects: report.started, sensorsAffected: report.sensorsAffected },
+          'maintenance windows opened; monitoring paused',
+        );
+      }
+      return report.expired.length + report.started.length;
+    } catch (error: unknown) {
+      this.#logger.error({ err: describeError(error) }, 'the pause sweep failed; retrying');
+      return 0;
+    } finally {
+      this.#running = false;
+    }
+  }
+
+  #arm(): void {
+    if (this.#stopped) return;
+    const now = Date.now();
+    // Just past the boundary rather than on it: a window that starts at 22:00:00 is applied at
+    // 22:00:00.05, where a tick a few milliseconds early would find nothing and wait another
+    // half minute to notice.
+    const delay = this.#intervalMs ?? TICK - (now % TICK) + 50;
+    this.#timer = setTimeout(
+      () => {
+        void this.sweep().finally(() => {
+          this.#arm();
+        });
+      },
+      Math.max(50, delay),
+    );
+    // Never a reason to hold the process open for it: a boundary that has not been crossed yet
+    // will still be there after a restart, because the times are in the database and not in a
+    // timer.
+    this.#timer.unref();
+  }
+}

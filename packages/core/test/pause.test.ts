@@ -4,12 +4,14 @@ import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
-import { PauseExpiry } from '../src/objects/pause-expiry.js';
+import { PauseSweep } from '../src/objects/pause-sweep.js';
 import {
   pauseIsActive,
+  pauseIsPending,
   refuseResume,
   resolvePause,
   MAX_PAUSE_MINUTES,
+  MAX_WINDOW_LEAD_MINUTES,
   PAUSE_PRESET_MINUTES,
 } from '../src/state/pause.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -70,10 +72,83 @@ describe('resolving a pause request', () => {
     assert.ok('problems' in resolvePause({ kind: 'duration', minutes: -5 }, '', NOW));
   });
 
+  it('turns a window into a pause that has not started', () => {
+    const from = new Date(NOW.getTime() + 60 * 60_000);
+    const until = new Date(NOW.getTime() + 3 * 60 * 60_000);
+    const resolved = resolvePause({ kind: 'window', from, until }, 'quarterly patching', NOW);
+    assert.ok('pause' in resolved);
+    assert.equal(resolved.pause.startsAt.toISOString(), from.toISOString());
+    assert.equal(resolved.pause.pausedUntil?.toISOString(), until.toISOString());
+    // When it was written, not when it takes effect. The two are the same for every other kind
+    // of pause, which is exactly why the distinction is easy to lose.
+    assert.equal(resolved.pause.pausedAt.toISOString(), NOW.toISOString());
+  });
+
+  it('refuses a window that is over, backwards, or a mistyped year', () => {
+    const hour = 60 * 60_000;
+    const over = resolvePause(
+      {
+        kind: 'window',
+        from: new Date(NOW.getTime() - 2 * hour),
+        until: new Date(NOW.getTime() - hour),
+      },
+      '',
+      NOW,
+    );
+    assert.ok('problems' in over);
+    assert.ok(over.problems[0]?.includes('already over'));
+
+    const backwards = resolvePause(
+      {
+        kind: 'window',
+        from: new Date(NOW.getTime() + 2 * hour),
+        until: new Date(NOW.getTime() + hour),
+      },
+      '',
+      NOW,
+    );
+    assert.ok('problems' in backwards);
+    assert.ok(backwards.problems[0]?.includes('end after it starts'));
+
+    const distant = resolvePause(
+      {
+        kind: 'window',
+        from: new Date(NOW.getTime() + (MAX_WINDOW_LEAD_MINUTES + 1) * 60_000),
+        until: new Date(NOW.getTime() + (MAX_WINDOW_LEAD_MINUTES + 60) * 60_000),
+      },
+      '',
+      NOW,
+    );
+    assert.ok('problems' in distant);
+  });
+
+  it('accepts a window whose start is already past, which is a pause that is late', () => {
+    const resolved = resolvePause(
+      {
+        kind: 'window',
+        from: new Date(NOW.getTime() - 60_000),
+        until: new Date(NOW.getTime() + 60_000),
+      },
+      '',
+      NOW,
+    );
+    assert.ok('pause' in resolved);
+  });
+
+  it('is not in force before it starts, however far off its deadline is', () => {
+    const later = new Date(NOW.getTime() + 60_000);
+    assert.equal(pauseIsActive({ startsAt: later, pausedUntil: null }, NOW), false);
+    assert.equal(pauseIsPending({ startsAt: later }, NOW), true);
+    assert.equal(pauseIsPending({ startsAt: NOW }, NOW), false);
+  });
+
   it('is active until its deadline, and not after', () => {
-    assert.equal(pauseIsActive({ pausedUntil: null }, NOW), true);
-    assert.equal(pauseIsActive({ pausedUntil: new Date(NOW.getTime() + 1) }, NOW), true);
-    assert.equal(pauseIsActive({ pausedUntil: NOW }, NOW), false);
+    assert.equal(pauseIsActive({ startsAt: NOW, pausedUntil: null }, NOW), true);
+    assert.equal(
+      pauseIsActive({ startsAt: NOW, pausedUntil: new Date(NOW.getTime() + 1) }, NOW),
+      true,
+    );
+    assert.equal(pauseIsActive({ startsAt: NOW, pausedUntil: NOW }, NOW), false);
   });
 });
 
@@ -488,12 +563,13 @@ describe(
       // got there is not what this is about.
       await db.query(
         `UPDATE object_pause SET paused_at = now() - interval '20 minutes',
+                                 starts_at = now() - interval '20 minutes',
                                  paused_until = now() - interval '5 minutes'
          WHERE object_id = $1`,
         [deviceId],
       );
 
-      const expiry = new PauseExpiry({ service: h.service, logger: silent });
+      const expiry = new PauseSweep({ service: h.service, logger: silent });
       assert.equal(await expiry.sweep(), 1);
 
       const current = await runtimeOf(sensorId);
@@ -509,6 +585,7 @@ describe(
       await h.service.pause(testActor, deviceId, { kind: 'duration', minutes: 15 });
       await db.query(
         `UPDATE object_pause SET paused_at = now() - interval '20 minutes',
+                                 starts_at = now() - interval '20 minutes',
                                  paused_until = now() - interval '5 minutes'
          WHERE object_id = $1`,
         [deviceId],
@@ -519,7 +596,7 @@ describe(
 
     it('leaves a pause that is still in force alone', async () => {
       await h.service.pause(testActor, deviceId, { kind: 'duration', minutes: 60 });
-      const expiry = new PauseExpiry({ service: h.service, logger: silent });
+      const expiry = new PauseSweep({ service: h.service, logger: silent });
       await expiry.sweep();
       assert.equal((await runtimeOf(sensorId)).state, 'paused');
       assert.equal((await h.service.pauseState(deviceId)).paused, true);
@@ -536,10 +613,237 @@ describe(
     });
 
     // -------------------------------------------------------------------------------------
+    // Maintenance windows (M-10).
+    // -------------------------------------------------------------------------------------
+
+    describe('maintenance windows', () => {
+      /** Reach into the row rather than wait for Saturday. The times are the input. */
+      async function moveWindow(id: number, startsIn: string, endsIn: string): Promise<void> {
+        await db.query(
+          `UPDATE object_pause
+           SET starts_at = now() + $2::interval, paused_until = now() + $3::interval
+           WHERE object_id = $1`,
+          [id, startsIn, endsIn],
+        );
+      }
+
+      function nextWeek(): { from: string; until: string } {
+        const from = new Date(Date.now() + 24 * 60 * 60_000);
+        return {
+          from: from.toISOString(),
+          until: new Date(from.getTime() + 2 * 60 * 60_000).toISOString(),
+        };
+      }
+
+      it('pauses nothing until it starts', async () => {
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+        const view = await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+
+        assert.equal(view.paused, false, 'nothing is paused yet');
+        assert.equal(view.pending, true);
+        assert.equal(view.startsAt, from);
+        assert.equal(view.resumable, true, 'and it can be called off');
+        assert.equal((await runtimeOf(sensorId)).state, 'up', 'the sensor is still watched');
+      });
+
+      it('opens on time, cascading exactly as a manual pause does', async () => {
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+
+        const sweep = new PauseSweep({ service: h.service, logger: silent });
+        assert.equal(await sweep.sweep(), 1);
+
+        const current = await runtimeOf(sensorId);
+        assert.equal(current.state, 'paused');
+        assert.deepEqual(current.flags, ['parent'], 'the cascade, not a fifth source');
+        assert.equal((await runtimeOf(siblingId)).state, 'paused', 'every sensor beneath it');
+      });
+
+      it('records the window-s own message in the state history', async () => {
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+        await new PauseSweep({ service: h.service, logger: silent }).sweep();
+
+        const rows = await db.query<{ message: string }>(
+          'SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1',
+          [sensorId],
+        );
+        assert.equal(rows[0]?.message, 'quarterly patching');
+      });
+
+      it('closes on its own, like any timed pause', async () => {
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          '',
+        );
+        const sweep = new PauseSweep({ service: h.service, logger: silent });
+
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+        assert.equal(await sweep.sweep(), 1);
+        assert.equal((await runtimeOf(sensorId)).state, 'paused');
+
+        await moveWindow(deviceId, '-2 hours', '-1 minute');
+        assert.equal(await sweep.sweep(), 1);
+        const current = await runtimeOf(sensorId);
+        // §3 again: a resumed sensor awaits its next scan rather than returning to the state
+        // nothing has checked since — the window is over, not the outage.
+        assert.equal(current.state, 'unknown');
+        assert.equal(current.last_result_at, null);
+        assert.equal((await h.service.pauseState(deviceId)).paused, false);
+      });
+
+      it('sweeps once, not on every pass', async () => {
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          '',
+        );
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+
+        const sweep = new PauseSweep({ service: h.service, logger: silent });
+        assert.equal(await sweep.sweep(), 1, 'it opened');
+        assert.equal(await sweep.sweep(), 0, 'and stays open without being reopened');
+      });
+
+      it('reconciles a window that opened while the core was down', async () => {
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'overnight',
+        );
+        await moveWindow(deviceId, '-3 hours', '3 hours');
+        // Nothing applied it: no sweep has run since it was written, which is what a restart
+        // during the window looks like from the database's side.
+        assert.equal((await runtimeOf(sensorId)).state, 'unknown');
+
+        // A new process. Its first sweep looks back to the epoch, on purpose.
+        const restarted = new PauseSweep({ service: h.service, logger: silent });
+        assert.equal(await restarted.sweep(), 1);
+        assert.equal((await runtimeOf(sensorId)).state, 'paused');
+      });
+
+      it('is cancelled by resuming it, before it has started', async () => {
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          '',
+        );
+        // A resume on an object that is not paused *yet* would be refused if `own` meant "in
+        // force"; an operator who booked the wrong weekend should not have to wait for it.
+        const view = await h.service.resume(testActor, deviceId);
+        assert.equal(view.pending, false);
+        assert.equal(view.startsAt, null);
+
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+        const sweep = new PauseSweep({ service: h.service, logger: silent });
+        assert.equal(await sweep.sweep(), 0, 'and it never opens');
+      });
+
+      it('is extended by replacing it, not by stacking a second one', async () => {
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'first',
+        );
+        const longer = new Date(new Date(until).getTime() + 60 * 60_000).toISOString();
+        const view = await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(longer) },
+          'extended',
+        );
+        assert.equal(view.pausedUntil, longer);
+        assert.equal(view.message, 'extended');
+
+        const rows = await db.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM object_pause WHERE object_id = $1',
+          [deviceId],
+        );
+        assert.equal(rows[0]?.n, '1', 'one row, replaced');
+      });
+
+      it('records who scheduled it, separately from it happening', async () => {
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+        const scheduled = h.audit.recorded.filter((m) => m.action === 'object.paused');
+        assert.equal(scheduled.length, 1);
+        assert.equal(
+          scheduled[0]?.action === 'object.paused' ? scheduled[0].from.toISOString() : '',
+          from,
+        );
+
+        h.audit.recorded.length = 0;
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+        await new PauseSweep({ service: h.service, logger: silent }).sweep();
+        const opened = h.audit.recorded.filter((m) => m.action === 'object.paused');
+        assert.equal(opened.length, 1, 'and a second entry when it actually happened');
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
     // The API.
     // -------------------------------------------------------------------------------------
 
     describe('the pause endpoint', () => {
+      it('schedules a maintenance window, and refuses one with no end', async () => {
+        const from = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+        const until = new Date(Date.now() + 26 * 60 * 60_000).toISOString();
+        const created = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(deviceId)}/pause`,
+          payload: { from, until, message: 'quarterly patching' },
+        });
+        assert.equal(created.statusCode, 200);
+        const body = created.json<{ paused: boolean; pending: boolean; startsAt: string }>();
+        assert.equal(body.paused, false);
+        assert.equal(body.pending, true);
+        assert.equal(body.startsAt, from);
+
+        const endless = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(deviceId)}/pause`,
+          payload: { from },
+        });
+        assert.equal(endless.statusCode, 400, 'an outage with no end is not a window');
+      });
+
       it('pauses, reads back and resumes', async () => {
         const paused = await app.inject({
           method: 'POST',

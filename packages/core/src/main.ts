@@ -16,7 +16,7 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { ObjectService } from './objects/service.js';
-import { PauseExpiry } from './objects/pause-expiry.js';
+import { PauseSweep } from './objects/pause-sweep.js';
 import { SchedulePauses } from './schedules/pauses.js';
 import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
@@ -226,15 +226,16 @@ async function serve(): Promise<void> {
   await schedules.seedBuiltIns();
 
   const history = new HistoryService({ db, logger, store });
-  // Notices when a timed pause runs out. Every read already accounts for the clock; this is
-  // what turns the deadline into a transition, a log entry and a configuration push.
-  const pauseExpiry = new PauseExpiry({ service, logger });
-  pauseExpiry.start();
+  // Notices when a maintenance window opens and when a timed pause runs out. Every read already
+  // accounts for the clock; this is what turns a boundary into a transition, a log entry and a
+  // configuration push.
+  const pauseSweep = new PauseSweep({ service, logger });
+  pauseSweep.start();
   lifecycle.onShutdown({
-    name: 'pause-expiry',
+    name: 'pause-sweep',
     timeoutMs: 2_000,
     run: () => {
-      pauseExpiry.stop();
+      pauseSweep.stop();
       return Promise.resolve();
     },
   });

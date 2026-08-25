@@ -679,7 +679,7 @@ export async function objectRoutes(
 
   app.post<{
     Params: { id: number };
-    Body: { minutes?: number; until?: string; message?: string };
+    Body: { minutes?: number; until?: string; from?: string; message?: string };
   }>(
     '/objects/:id/pause',
     {
@@ -691,20 +691,25 @@ export async function objectRoutes(
           'accepted. Takes effect immediately: the sensors change state in this request, and ' +
           'their probe stops being told to scan them. Pausing an already-paused object replaces ' +
           'the reason and the deadline rather than stacking, which is what extending a ' +
-          'maintenance window means.',
+          'maintenance window means. ' +
+          'Give `from` with `until` for a **maintenance window** — the same pause, scheduled ' +
+          'rather than immediate. Nothing is paused until it starts; the object reads `pending` ' +
+          'until then and can be cancelled at any point by resuming it.',
         params: idParams,
         body: pauseRequestSchema,
         response: { 200: { $ref: 'ms:pauseView' } },
       },
     },
     async (request, reply) => {
-      const { minutes, until, message } = request.body;
+      const { minutes, until, from, message } = request.body;
       const pause =
-        minutes !== undefined
-          ? ({ kind: 'duration', minutes } as const)
-          : until !== undefined
-            ? ({ kind: 'until', until: new Date(until) } as const)
-            : ({ kind: 'indefinite' } as const);
+        from !== undefined && until !== undefined
+          ? ({ kind: 'window', from: new Date(from), until: new Date(until) } as const)
+          : minutes !== undefined
+            ? ({ kind: 'duration', minutes } as const)
+            : until !== undefined
+              ? ({ kind: 'until', until: new Date(until) } as const)
+              : ({ kind: 'indefinite' } as const);
 
       const view = await service.pause(
         actorFor(request),
@@ -722,11 +727,11 @@ export async function objectRoutes(
     {
       schema: {
         description:
-          'Resumes an object. Only the object that was directly paused can be resumed — a ' +
-          'sensor paused because its device is paused has nothing of its own to clear, and the ' +
-          '409 names the object to resume instead. A resumed sensor reads Unknown until its ' +
-          'next scan, never the state it had before the pause, which the system has not ' +
-          'checked since.',
+          'Resumes an object, or cancels a maintenance window it has not reached yet. Only the ' +
+          'object that was directly paused can be resumed — a sensor paused because its device ' +
+          'is paused has nothing of its own to clear, and the 409 names the object to resume ' +
+          'instead. A resumed sensor reads Unknown until its next scan, never the state it had ' +
+          'before the pause, which the system has not checked since.',
         params: idParams,
         response: { 200: { $ref: 'ms:pauseView' } },
       },

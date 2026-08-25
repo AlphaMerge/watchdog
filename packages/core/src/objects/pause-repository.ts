@@ -7,6 +7,8 @@ import type { ObjectId } from './types.js';
 export interface StoredPause {
   readonly objectId: ObjectId;
   readonly pausedAt: Date;
+  /** When it takes effect. Later than `pausedAt` only for a maintenance window (`M-10`). */
+  readonly startsAt: Date;
   readonly pausedUntil: Date | null;
   readonly message: string;
   readonly actor: { kind: string; ref: string | null; label: string | null };
@@ -14,9 +16,17 @@ export interface StoredPause {
 
 /** Why an object is paused: its own pause, or an ancestor's. */
 export interface EffectivePause {
-  /** The object's own pause, if it has one. Only this one can be resumed. */
+  /**
+   * The object's own pause, if it has one — **whether or not it is in force yet**.
+   *
+   * A maintenance window scheduled for Saturday is here all week, because the question this
+   * field answers is "does this object have a pause of its own to cancel", and the answer is
+   * yes from the moment it is scheduled. `ownActive` is the separate question of whether it is
+   * pausing anything at this instant.
+   */
   readonly own: StoredPause | null;
-  /** The nearest paused ancestor, if any. What a refused resume points at. */
+  readonly ownActive: boolean;
+  /** The nearest ancestor whose pause is *in force*. What a refused resume points at. */
   readonly inherited: {
     objectId: ObjectId;
     name: string;
@@ -31,6 +41,7 @@ const MAX_WALK_DEPTH = 1000;
 interface PauseRow {
   object_id: string;
   paused_at: Date;
+  starts_at: Date;
   paused_until: Date | null;
   message: string;
   actor_kind: string;
@@ -42,6 +53,7 @@ function toStored(row: PauseRow): StoredPause {
   return {
     objectId: Number(row.object_id),
     pausedAt: row.paused_at,
+    startsAt: row.starts_at,
     pausedUntil: row.paused_until,
     message: row.message,
     actor: { kind: row.actor_kind, ref: row.actor_ref, label: row.actor_label },
@@ -62,16 +74,27 @@ export class PauseRepository {
     const who = flatten(actor);
     await q.query(
       `INSERT INTO object_pause
-         (object_id, paused_at, paused_until, message, actor_kind, actor_ref, actor_label)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (object_id, paused_at, starts_at, paused_until, message,
+          actor_kind, actor_ref, actor_label)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (object_id) DO UPDATE SET
          paused_at = EXCLUDED.paused_at,
+         starts_at = EXCLUDED.starts_at,
          paused_until = EXCLUDED.paused_until,
          message = EXCLUDED.message,
          actor_kind = EXCLUDED.actor_kind,
          actor_ref = EXCLUDED.actor_ref,
          actor_label = EXCLUDED.actor_label`,
-      [objectId, pause.pausedAt, pause.pausedUntil, pause.message, who.kind, who.ref, who.label],
+      [
+        objectId,
+        pause.pausedAt,
+        pause.startsAt,
+        pause.pausedUntil,
+        pause.message,
+        who.kind,
+        who.ref,
+        who.label,
+      ],
     );
   }
 
@@ -101,11 +124,16 @@ export class PauseRepository {
         FROM object p JOIN chain ON p.id = chain.parent_id
         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       )
-      SELECT op.object_id::text AS object_id, op.paused_at, op.paused_until, op.message,
-             op.actor_kind, op.actor_ref, op.actor_label, chain.depth, chain.name
+      SELECT op.object_id::text AS object_id, op.paused_at, op.starts_at, op.paused_until,
+             op.message, op.actor_kind, op.actor_ref, op.actor_label, chain.depth, chain.name
       FROM chain
       JOIN object_pause op ON op.object_id = chain.id
-      WHERE op.paused_until IS NULL OR op.paused_until > $2
+      -- Expired rows are excluded here rather than left to the caller: a pause whose deadline
+      -- has passed is not a pause, and the sweep that deletes the row runs on its own clock.
+      -- A window that has not *started* is kept, because the object still owns it (M-10) --
+      -- only an ancestor's has to be in force to hold anything.
+      WHERE (op.paused_until IS NULL OR op.paused_until > $2)
+        AND (chain.depth = 0 OR op.starts_at <= $2)
       ORDER BY chain.depth
       `,
       [objectId, now],
@@ -115,6 +143,7 @@ export class PauseRepository {
     const nearest = rows.find((row) => row.depth > 0);
     return {
       own: own === undefined ? null : toStored(own),
+      ownActive: own !== undefined && own.starts_at.getTime() <= now.getTime(),
       inherited:
         nearest === undefined
           ? null
@@ -168,6 +197,9 @@ export class PauseRepository {
         FROM chain
         LEFT JOIN object_pause op
           ON op.object_id = chain.node
+         -- In force, both ends: a maintenance window scheduled for Saturday sets no flag
+         -- until Saturday (M-10).
+         AND op.starts_at <= $2
          AND (op.paused_until IS NULL OR op.paused_until > $2)
         GROUP BY chain.sensor_id
       )
@@ -202,9 +234,31 @@ export class PauseRepository {
   async anyActive(q: Queryable, now: Date): Promise<boolean> {
     const rows = await q.query<{ one: number }>(
       `SELECT 1 AS one FROM object_pause
-       WHERE paused_until IS NULL OR paused_until > $1
+       WHERE starts_at <= $1 AND (paused_until IS NULL OR paused_until > $1)
        LIMIT 1`,
       [now],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Whether any pause began or ended in `(since, now]` (`M-10`).
+   *
+   * The guard in front of the sweep's reconcile pass. Two boundaries a sweep can cross and a
+   * `LIMIT 1` over an index for each: a window opening, and a timed pause running out. An
+   * installation where nothing is paused pays that and nothing else.
+   *
+   * `since` is the previous sweep, or the epoch on the first pass after a restart — which is
+   * what makes the first sweep reconcile every window that opened while the core was down,
+   * without a "have I applied this" column that could disagree with the rows.
+   */
+  async boundaryCrossed(q: Queryable, since: Date, now: Date): Promise<boolean> {
+    const rows = await q.query<{ one: number }>(
+      `SELECT 1 AS one FROM object_pause
+       WHERE (starts_at > $1 AND starts_at <= $2)
+          OR (paused_until IS NOT NULL AND paused_until > $1 AND paused_until <= $2)
+       LIMIT 1`,
+      [since, now],
     );
     return rows.length > 0;
   }
@@ -212,7 +266,7 @@ export class PauseRepository {
   /** Every pause whose deadline has passed. What the expiry sweep acts on. */
   async expired(q: Queryable, now: Date, limit: number): Promise<StoredPause[]> {
     const rows = await q.query<PauseRow>(
-      `SELECT object_id::text AS object_id, paused_at, paused_until, message,
+      `SELECT object_id::text AS object_id, paused_at, starts_at, paused_until, message,
               actor_kind, actor_ref, actor_label
        FROM object_pause
        WHERE paused_until IS NOT NULL AND paused_until <= $1
@@ -221,6 +275,41 @@ export class PauseRepository {
       [now, limit],
     );
     return rows.map(toStored);
+  }
+
+  /**
+   * The pauses that came into force in `(since, now]` (`M-10`).
+   *
+   * What the sweep acts on at the other end from `expired`. Each is recomputed under its own
+   * object rather than the whole tree at once, so the state history records *this window's*
+   * message — "quarterly patching" is what an operator reads, and a batched recompute could
+   * only have said nothing.
+   *
+   * With `since` at the epoch this returns every pause already in force, which is exactly what
+   * the first sweep after a restart should reconcile: windows that opened while the core was
+   * down, and any drift a crash left behind.
+   */
+  async startedIn(q: Queryable, since: Date, now: Date, limit: number): Promise<StoredPause[]> {
+    const rows = await q.query<PauseRow>(
+      `SELECT object_id::text AS object_id, paused_at, starts_at, paused_until, message,
+              actor_kind, actor_ref, actor_label
+       FROM object_pause
+       WHERE starts_at > $1 AND starts_at <= $2
+         AND (paused_until IS NULL OR paused_until > $2)
+       ORDER BY starts_at
+       LIMIT $3`,
+      [since, now, limit],
+    );
+    return rows.map(toStored);
+  }
+
+  /** The root object id, which is where a whole-installation recompute starts. */
+  async rootId(q: Queryable): Promise<ObjectId | null> {
+    const rows = await q.query<{ id: string }>(
+      "SELECT id::text AS id FROM object WHERE kind = 'root' LIMIT 1",
+    );
+    const row = rows[0];
+    return row === undefined ? null : Number(row.id);
   }
 }
 

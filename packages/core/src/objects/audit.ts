@@ -142,6 +142,14 @@ export type Mutation =
       action: 'object.paused';
       objectId: ObjectId;
       kind: ObjectKind;
+      /**
+       * When it takes effect (`M-10`).
+       *
+       * Later than the entry's own timestamp for a maintenance window, and the reason the entry
+       * is worth keeping separately from the one the sweep writes when the window opens: one
+       * records who scheduled the outage and when they did it, the other that it happened.
+       */
+      from: Date;
       /** `null` is indefinite. */
       until: Date | null;
       message: string;
@@ -280,6 +288,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         action: mutation.action,
         objectId: mutation.objectId,
         kind: mutation.kind,
+        from: mutation.from.toISOString(),
         until: mutation.until?.toISOString() ?? null,
         sensorsAffected: mutation.sensorsAffected,
       };
