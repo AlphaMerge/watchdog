@@ -1,5 +1,7 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { LookupCatalogue } from '../lookups/catalogue.js';
+import type { LookupDefinition } from '../lookups/definition.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 
 /**
@@ -15,6 +17,10 @@ export interface ResolvedChannel {
   readonly unit: string;
   readonly decimals: number | null;
   readonly limits: ChannelLimits;
+  /** What the channel names, whether or not this installation has it. */
+  readonly lookupId: string | null;
+  /** The definition, or `null` when there is none or the one it names is not loaded. */
+  readonly lookup: LookupDefinition | null;
 }
 
 export interface ResolvedChannels {
@@ -29,6 +35,8 @@ export interface ResolvedChannels {
 
 export interface ChannelResolverOptions {
   logger: Logger;
+  /** Absent leaves every channel's lookup unresolved, which is how it behaved before M-06. */
+  lookups?: LookupCatalogue;
   /** Entries kept in memory. The v1 target is 15,000 channels, so the default holds them all. */
   maxCached?: number;
 }
@@ -49,16 +57,25 @@ const DEFAULT_MAX_CACHED = 50_000;
  */
 export class ChannelResolver {
   readonly #logger: Logger;
+  readonly #lookups: LookupCatalogue | undefined;
   readonly #maxCached: number;
   readonly #cache = new Map<string, ResolvedChannel>();
+  /** Lookup ids already complained about, so a missing one is one log line and not one a scan. */
+  readonly #missingLookups = new Set<string>();
 
   constructor(options: ChannelResolverOptions) {
     this.#logger = options.logger.child({ component: 'channel-resolver' });
+    this.#lookups = options.lookups;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
   }
 
   get cached(): number {
     return this.#cache.size;
+  }
+
+  /** Channels naming a lookup this installation has not loaded. Counted, never assumed away. */
+  get unresolvedLookups(): number {
+    return this.#missingLookups.size;
   }
 
   /** Forgets everything. For tests, and for whatever invalidates channels in a later phase. */
@@ -147,8 +164,10 @@ export class ChannelResolver {
       unit: string;
       decimals: number | null;
       limits: unknown;
+      lookup_id: string | null;
     }>(
-      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits
+      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
+              c.lookup_id
        FROM channel c
        JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
          ON w.sensor_id = c.sensor_id AND w.key = c.key`,
@@ -163,6 +182,8 @@ export class ChannelResolver {
         unit: row.unit,
         decimals: row.decimals,
         limits: parseLimits(row.limits),
+        lookupId: row.lookup_id,
+        lookup: this.#lookupFor(row.lookup_id),
       };
       ids.set(cacheKey, channel);
       this.#remember(cacheKey, channel);
@@ -189,6 +210,30 @@ export class ChannelResolver {
       droppedReadings,
       droppedSensors: droppedSensors.size,
     };
+  }
+
+  /**
+   * The definition a channel names, if this installation has it.
+   *
+   * A channel naming a lookup that is not loaded is judged by **nothing** — not by its limits.
+   * Falling back would put a threshold the operator did not intend in charge of the state, and
+   * the whole point of configuring a lookup is that a threshold is the wrong tool for the value.
+   * So it is counted and said once, and the channel's `lookupId` is served to the UI, which can
+   * compare it against `GET /lookups` and say so where somebody will read it.
+   */
+  #lookupFor(lookupId: string | null): LookupDefinition | null {
+    if (lookupId === null) return null;
+    const definition = this.#lookups?.get(lookupId);
+    if (definition !== undefined) return definition;
+
+    if (!this.#missingLookups.has(lookupId)) {
+      this.#missingLookups.add(lookupId);
+      this.#logger.warn(
+        { lookupId },
+        'a channel names a lookup this installation has not loaded; it will have no lookup state',
+      );
+    }
+    return null;
   }
 
   #remember(cacheKey: string, channel: ResolvedChannel): void {

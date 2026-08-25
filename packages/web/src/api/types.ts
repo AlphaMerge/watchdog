@@ -77,6 +77,25 @@ export interface ChannelRecord {
   unit: string;
   isPrimary: boolean;
   limits: ChannelLimits;
+  /**
+   * The lookup that decides this channel's state (`M-06`), or `null`.
+   *
+   * The id, not the definition. Whether this installation has it is a separate question, and
+   * `GET /lookups` answers it — a channel naming one nobody loaded is a situation an operator
+   * has to be able to see.
+   */
+  lookupId: string | null;
+}
+
+/** One entry in `GET /lookups`. */
+export interface LookupSummary {
+  id: string;
+  name: string;
+  type: 'singleInt' | 'range';
+  undefinedState: SensorState;
+  entryCount: number;
+  overridesBuiltIn?: boolean;
+  source: string;
 }
 
 export interface AuditEntry {

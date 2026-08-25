@@ -130,6 +130,14 @@ export interface ChannelRecord {
   readonly spikeMax: number | null;
   readonly showInGraph: boolean;
   readonly showInTable: boolean;
+  /**
+   * The lookup that decides this channel's state (`M-06`), or `null`.
+   *
+   * The id, not the definition: whether this installation has it is a separate question, and
+   * `GET /lookups` is where it is answered. A channel naming a lookup nobody loaded is an
+   * ordinary situation an operator has to be able to see, not one to hide by omitting the id.
+   */
+  readonly lookupId: string | null;
 }
 
 /** No secret, no key id, no length, no hash. There is no field a secret could occupy. */

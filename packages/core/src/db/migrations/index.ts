@@ -7,6 +7,7 @@ import { migration005 } from './005-audit-log.js';
 import { migration006 } from './006-sibling-order.js';
 import { migration007 } from './007-probe-identity.js';
 import { migration008 } from './008-sensor-runtime.js';
+import { migration009 } from './009-channel-lookup.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -23,6 +24,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration006,
   migration007,
   migration008,
+  migration009,
 ];
 
 export type { Migration } from './types.js';

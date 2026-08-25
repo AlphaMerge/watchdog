@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   bootstrap,
   coreConfigSchema,
@@ -19,6 +20,7 @@ import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
+import { loadLookups } from './lookups/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
 import { ResultCacheInvalidator } from './ingestion/invalidation.js';
 import { Ingestor } from './ingestion/ingestor.js';
@@ -156,10 +158,18 @@ async function serve(): Promise<void> {
   // about what a sensor is.
   const catalogue = standardCatalogue();
 
+  // Built-ins, then whatever the operator wrote under <dataDir>/lookups, later winning by id
+  // (M-06). Loaded before anything can report a reading, because a channel resolved without its
+  // lookup would be judged by nothing until the next time its cache went cold.
+  const lookups = await loadLookups({
+    directory: join(config.service.dataDir, 'lookups'),
+    logger,
+  });
+
   // Built here rather than beside the ingestion service, because the audit sink below has to
   // hold them: they cache channel limits and sensor states, and an edited limit that only took
   // effect after a restart would not be the "immediate effect" M-04 promises.
-  const channels = new ChannelResolver({ logger });
+  const channels = new ChannelResolver({ logger, lookups });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.
   const states = new SensorStateService({ db, logger, settings: resolver });
@@ -193,6 +203,7 @@ async function serve(): Promise<void> {
     db,
     audit: new AuditRepository(),
     catalogue,
+    lookups,
   });
   await api.build(VERSION, service);
   await api.start();

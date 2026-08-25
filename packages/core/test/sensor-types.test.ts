@@ -118,8 +118,25 @@ describe(
         [
           { key: 'in', primary: true },
           { key: 'out', primary: false },
+          { key: 'status', primary: false },
         ],
         'S-07 could not set this: nothing had said which channel a sensor is judged by',
+      );
+    });
+
+    it('carries the lookup a type declares onto the channel it declared it for', async () => {
+      // M-06. A type knows that its status channel is an enumeration and its counters are not,
+      // and saying so once at registration beats an operator configuring it per sensor.
+      const sensor = await createSensor({ community: 'public' });
+      const channels = await h.service.channels(sensor.id);
+
+      assert.deepEqual(
+        channels.map((channel) => [channel.key, channel.lookupId]),
+        [
+          ['in', null],
+          ['out', null],
+          ['status', 'ms.snmp.if-oper-status'],
+        ],
       );
     });
 

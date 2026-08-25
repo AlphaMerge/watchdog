@@ -5,6 +5,7 @@ import type {
   AuditPage,
   ChannelLimits,
   ChannelRecord,
+  LookupSummary,
   HistorySeries,
   ObjectDetail,
   SettingView,
@@ -33,6 +34,7 @@ export function ObjectDetailView(): React.JSX.Element {
     object.status === 'ready' ? `/objects/${id}/settings` : null,
   );
   const types = useApi<{ items: SensorTypeSummary[] }>(isSensor ? '/sensor-types' : null);
+  const lookups = useApi<{ items: LookupSummary[] }>(isSensor ? '/lookups' : null);
 
   // Whether the catalogue knows this sensor's type changes what withheld parameters *mean*.
   const typeKnown =
@@ -111,7 +113,10 @@ export function ObjectDetailView(): React.JSX.Element {
                         </span>
                       )}
                     </span>
-                    <LimitBand limits={channel.limits} unit={channel.unit} />
+                    <ChannelJudgement
+                      channel={channel}
+                      loaded={lookups.status === 'ready' ? lookups.data.items : null}
+                    />
                   </li>
                 ))}
               </ul>
@@ -399,5 +404,37 @@ function SettingOrigin({
     >
       inherited from #{source.objectId}
     </Link>
+  );
+}
+
+/**
+ * What decides this channel's state: a lookup, or its limits.
+ *
+ * One or the other, never both (`M-06`), so showing both would misrepresent what is actually in
+ * charge. A channel naming a lookup this installation has not loaded says so — that is a real
+ * situation with a real consequence (the channel reads Warning and nothing can interpret it),
+ * and it is exactly the case a UI showing only the id would hide.
+ */
+function ChannelJudgement({
+  channel,
+  loaded,
+}: {
+  channel: ChannelRecord;
+  loaded: LookupSummary[] | null;
+}): React.JSX.Element | null {
+  if (channel.lookupId === null) {
+    return <LimitBand limits={channel.limits} unit={channel.unit} />;
+  }
+
+  const known = loaded === null || loaded.some((lookup) => lookup.id === channel.lookupId);
+  return (
+    <span className="ml-auto flex items-center gap-2 text-xs text-text-muted">
+      <span className="font-mono">{channel.lookupId}</span>
+      {!known && (
+        <span className="rounded border border-warning-border bg-warning-bg px-1.5 py-0.5 text-warning-fg">
+          not loaded
+        </span>
+      )}
+    </span>
   );
 }

@@ -8,6 +8,8 @@ import type { Database, Queryable } from '../src/db/pool.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
+import type { LookupCatalogue } from '../src/lookups/catalogue.js';
+import { loadLookups } from '../src/lookups/loader.js';
 import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
@@ -56,12 +58,14 @@ describe(
     let scratch: ScratchDatabase;
     let db: Database;
     let harness: Harness;
+    let lookups: LookupCatalogue;
     let probeId: number;
     let deviceId: number;
     let sensorId: number;
     let app: FastifyInstance;
 
     before(async () => {
+      lookups = await loadLookups({ logger: silent });
       scratch = await createScratchDatabase('stateing');
       db = scratch.db;
       harness = await buildHarness(db);
@@ -88,6 +92,7 @@ describe(
         db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
+        lookups,
       });
       await server.build('9.9.9', harness.service);
       app = server.app;
@@ -118,7 +123,7 @@ describe(
       channels: ChannelResolver;
     } {
       const states = new SensorStateService({ db, logger: silent, settings: harness.resolver });
-      const channels = new ChannelResolver({ logger: silent });
+      const channels = new ChannelResolver({ logger: silent, lookups });
       const ingestor = new Ingestor({ db: target ?? db, logger: silent, config: CONFIG });
       return {
         states,
@@ -173,6 +178,7 @@ describe(
     async function runtime(id = sensorId): Promise<{
       state: SensorState;
       cause: SensorStateCause;
+      message: string;
       consecutive_failures: number;
       last_result_at: Date | null;
       since: Date;
@@ -180,11 +186,12 @@ describe(
       const rows = await db.query<{
         state: SensorState;
         cause: SensorStateCause;
+        message: string;
         consecutive_failures: number;
         last_result_at: Date | null;
         since: Date;
       }>(
-        `SELECT state, cause, consecutive_failures, last_result_at, since
+        `SELECT state, cause, message, consecutive_failures, last_result_at, since
          FROM sensor_runtime WHERE object_id = $1`,
         [id],
       );
@@ -805,8 +812,8 @@ describe(
           await deliver(running.service, running.ingestor, [measured(0, 10)]);
           assert.equal((await runtime()).state, 'up');
 
-          await harness.service.setChannelLimits(testActor, sensorId, 'rtt', {
-            upperError: 100,
+          await harness.service.patchChannel(testActor, sensorId, 'rtt', {
+            limits: { upperError: 100 },
           });
 
           // The *same* service, still running, with a cache that was warm before the edit.
@@ -893,6 +900,203 @@ describe(
 
       it('refuses to put limits on something that is not a sensor', async () => {
         assert.equal((await setLimits('rtt', { upperError: 1 }, deviceId)).status, 409);
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
+    // Lookups (M-06). A reading that is a status code, not a measurement.
+    // -------------------------------------------------------------------------------------
+
+    describe('channel lookups', () => {
+      async function setLookup(
+        key: string,
+        lookupId: string | null,
+        id = sensorId,
+      ): Promise<{ status: number; body: Record<string, unknown> }> {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/objects/${String(id)}/channels/${key}`,
+          payload: { lookupId },
+        });
+        return { status: response.statusCode, body: response.json<Record<string, unknown>>() };
+      }
+
+      /** A successful check reporting an interface status code. */
+      const reported = (minutes: number, value: number): CheckResult =>
+        result({
+          at: at(minutes),
+          channels: [{ key: 'status', value, name: 'Interface status' }],
+        });
+
+      it('goes Down on the first reading a lookup maps to down, attributed to the lookup', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        assert.equal((await runtime()).state, 'up', 'ifOperStatus 1 is up');
+
+        assert.equal((await setLookup('status', 'ms.snmp.if-oper-status')).status, 200);
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [reported(1, 2)], 'b2');
+
+        const current = await runtime();
+        assert.equal(current.state, 'down');
+        assert.equal(current.cause, 'lookup');
+        assert.equal(current.consecutive_failures, 0, 'the check succeeded; the interface did not');
+        assert.equal((await history()).at(-1)?.message, 'Interface status is 2 (down)');
+      });
+
+      it('keeps storing the reading, because the check succeeded', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        await setLookup('status', 'ms.snmp.if-oper-status');
+        const second = build();
+        await deliver(second.service, second.ingestor, [reported(1, 2)], 'b2');
+
+        const rows = await db.query<{ value: number }>(
+          `SELECT s.value FROM sample s JOIN channel c ON c.id = s.channel_id
+           WHERE c.sensor_id = $1 AND c.key = 'status' ORDER BY s.time`,
+          [sensorId],
+        );
+        assert.deepEqual(
+          rows.map((row) => row.value),
+          [1, 2],
+        );
+      });
+
+      it('names the lookup when the device returns a code it does not define', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        await setLookup('status', 'ms.snmp.if-oper-status');
+        const second = build();
+        await deliver(second.service, second.ingestor, [reported(1, 99)], 'b2');
+
+        const current = await runtime();
+        assert.equal(current.state, 'warning', 'the lookup’s undefinedState');
+        assert.equal(current.cause, 'lookup');
+        assert.equal(
+          current.message,
+          'Interface status is 99, which ms.snmp.if-oper-status does not define',
+        );
+      });
+
+      it('takes effect on the next scan, without restarting the core', async () => {
+        const running = build();
+        const invalidator = new ResultCacheInvalidator({
+          channels: running.channels,
+          sensors: running.states,
+          logger: silent,
+        });
+        harness.audit.also = invalidator;
+        try {
+          await deliver(running.service, running.ingestor, [reported(0, 2)]);
+          assert.equal((await runtime()).state, 'up', 'no lookup yet, and no limits either');
+
+          await harness.service.patchChannel(testActor, sensorId, 'status', {
+            lookupId: 'ms.snmp.if-oper-status',
+          });
+
+          const again = new Ingestor({ db, logger: silent, config: CONFIG });
+          const sameService = new IngestionService({
+            db,
+            logger: silent,
+            ingestor: again,
+            states: running.states,
+            resolver: running.channels,
+          });
+          await deliver(sameService, again, [reported(1, 2)], 'b2');
+          assert.equal((await runtime()).state, 'down', 'the cached channel was dropped');
+        } finally {
+          harness.audit.also = undefined;
+          invalidator.stop();
+        }
+      });
+
+      it('accepts a lookup nobody loaded, and says so in Warning rather than guessing', async () => {
+        // A sensor type can ship ahead of its lookup file, so refusing the configuration would
+        // leave the operator unable to write down what they mean. Falling back to the limit
+        // below would put a threshold they did not intend in charge; saying nothing would let a
+        // broken configuration read as healthy.
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        assert.equal((await setLookup('status', 'acme.not-loaded')).status, 200);
+        await harness.service.patchChannel(testActor, sensorId, 'status', {
+          limits: { upperError: 0 },
+        });
+
+        const second = build();
+        await deliver(second.service, second.ingestor, [reported(1, 2)], 'b2');
+        const current = await runtime();
+        assert.equal(current.state, 'warning', 'not Down: the limit is not in charge');
+        assert.equal(current.cause, 'lookup');
+        assert.ok(current.message.includes('acme.not-loaded'));
+        assert.equal(second.channels.unresolvedLookups, 1, 'and it is counted, not assumed away');
+      });
+
+      it('serves the id whatever the installation has, so a UI can say it is missing', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        await setLookup('status', 'acme.not-loaded');
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(sensorId)}/channels`,
+        });
+        const items = response.json<{ items: { key: string; lookupId: string | null }[] }>().items;
+        assert.equal(items.find((item) => item.key === 'status')?.lookupId, 'acme.not-loaded');
+      });
+
+      it('clears a lookup with null, putting limits back in charge', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        await setLookup('status', 'ms.snmp.if-oper-status');
+        const cleared = await setLookup('status', null);
+        assert.equal(cleared.body['lookupId'], null);
+      });
+
+      it('records who pointed a channel at which lookup', async () => {
+        const first = build();
+        await deliver(first.service, first.ingestor, [reported(0, 1)]);
+        harness.audit.also = new DatabaseAuditSink();
+        try {
+          await setLookup('status', 'ms.snmp.if-oper-status');
+        } finally {
+          harness.audit.also = undefined;
+        }
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(sensorId)}/audit?limit=5`,
+        });
+        const entries = response.json<{ items: { action: string; diff: unknown[] }[] }>().items;
+        const entry = entries.find((each) => each.action === 'channel.lookup.set');
+        assert.ok(entry);
+        assert.deepEqual(entry.diff, [
+          { field: 'channel.status.lookup', before: null, after: 'ms.snmp.if-oper-status' },
+        ]);
+      });
+
+      it('lists what loaded, so an operator can see what a channel may name', async () => {
+        const response = await app.inject({ method: 'GET', url: '/api/v1/lookups' });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{
+          items: { id: string; entryCount: number }[];
+          problems: unknown[];
+        }>();
+        assert.ok(body.items.some((item) => item.id === 'ms.snmp.if-oper-status'));
+        assert.deepEqual(body.problems, [], 'the built-ins validate');
+      });
+
+      it('serves one lookup with every entry, which is what the fix needs', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/lookups/ms.snmp.if-oper-status',
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{ entries: { value: number; text: string }[] }>();
+        assert.equal(body.entries.find((entry) => entry.value === 2)?.text, 'down');
+      });
+
+      it('404s for a lookup nobody loaded', async () => {
+        const response = await app.inject({ method: 'GET', url: '/api/v1/lookups/acme.nope' });
+        assert.equal(response.statusCode, 404);
       });
     });
 

@@ -4,7 +4,7 @@ import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import { settingRegistry } from '../settings/registry.js';
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
-import type { Actor, AuditSink } from './audit.js';
+import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
 import { versionConflict } from './repository.js';
@@ -147,19 +147,25 @@ export class ObjectService {
   }
 
   /**
-   * Sets a channel's limits (`M-04`).
+   * Changes how a channel is judged: its limits (`M-04`), its lookup (`M-06`), or both.
    *
-   * A patch, not a replacement: `null` clears one threshold and an absent field leaves it
-   * alone, so "set the upper error limit" does not silently wipe the warning limit somebody
-   * else configured. The merge happens here, against the row read in this transaction, and the
-   * result is validated as a whole — a warning limit above an error limit is only nonsense in
-   * combination, which is exactly what a field-by-field schema cannot see.
+   * Limits are a patch, not a replacement: `null` clears one threshold and an absent field
+   * leaves it alone, so "set the upper error limit" does not silently wipe the warning limit
+   * somebody else configured. The merge happens here, against the row read in this transaction,
+   * and the result is validated as a whole — a warning limit above an error limit is only
+   * nonsense in combination, which is exactly what a field-by-field schema cannot see.
+   *
+   * The lookup is a replacement, because it is one value: `null` means "judged by limits or by
+   * nothing", and a string is an id this installation may or may not have. Whether it does is
+   * deliberately **not** checked here — a sensor type can ship ahead of its lookup file, and
+   * refusing the configuration would leave the operator unable to write down what they mean.
+   * The unresolved id is reported instead, everywhere it shows.
    */
-  async setChannelLimits(
+  async patchChannel(
     actor: Actor,
     id: ObjectId,
     key: string,
-    patch: ChannelLimitsPatch,
+    patch: { limits?: ChannelLimitsPatch; lookupId?: string | null },
     pre: Precondition = { kind: 'none' },
   ): Promise<ChannelRecord> {
     return this.#db.tx(async (q) => {
@@ -184,32 +190,42 @@ export class ObjectService {
         });
       }
 
-      const before = channel.limits;
-      const after = mergeLimits(before, patch);
-      const problems = validateLimits(after);
-      if (problems.length > 0) {
-        throw new ObjectError('OBJECT_INVALID', `these limits contradict each other`, {
-          context: { objectId: id, phase: 'channels' },
-          details: { channelKey: key, problems },
+      const mutations: Mutation[] = [];
+
+      if (patch.limits !== undefined) {
+        const before = channel.limits;
+        const after = mergeLimits(before, patch.limits);
+        const problems = validateLimits(after);
+        if (problems.length > 0) {
+          throw new ObjectError('OBJECT_INVALID', `these limits contradict each other`, {
+            context: { objectId: id, phase: 'channels' },
+            details: { channelKey: key, problems },
+          });
+        }
+        await this.#repo.setChannelLimits(q, id, key, after);
+        mutations.push({
+          action: 'channel.limits.set',
+          objectId: id,
+          kind: object.kind,
+          channelKey: key,
+          before,
+          after,
         });
       }
 
-      await this.#repo.setChannelLimits(q, id, key, after);
-      await this.#audit.record(
-        q,
-        actor,
-        [
-          {
-            action: 'channel.limits.set',
-            objectId: id,
-            kind: object.kind,
-            channelKey: key,
-            before,
-            after,
-          },
-        ],
-        new Date(),
-      );
+      if (patch.lookupId !== undefined && patch.lookupId !== channel.lookupId) {
+        await this.#repo.setChannelLookup(q, id, key, patch.lookupId);
+        mutations.push({
+          action: 'channel.lookup.set',
+          objectId: id,
+          kind: object.kind,
+          channelKey: key,
+          before: channel.lookupId,
+          after: patch.lookupId,
+        });
+      }
+
+      if (mutations.length > 0) await this.#audit.record(q, actor, mutations, new Date());
 
       // Re-read: the channel write fired the trigger that bumps the sensor's version, so the
       // record read before it carries an ETag that is already stale (the trap S-16 documented).

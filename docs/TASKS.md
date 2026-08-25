@@ -562,12 +562,43 @@ because each is a decision rather than a defect:
       the check produced, and evaluating one channel in isolation is not something the system
       ever does. Tested in `channel-limits.test.ts` ("channel rollup") and through the pipeline
       in `state-ingestion.test.ts`.
-- [ ] **M-06 — Lookups** · L · M-04 · **`M-04` left the plug point:** a lookup produces a
-      `ChannelBreach` the same way a limit does, and `rollUp` already combines them and picks the
-      message — what changes is `cause: 'lookup'` and where the state comes from. Definition format, `SingleInt` and `Range` types,
+- [x] **M-06 — Lookups** · L · M-04 · Definition format, `SingleInt` and `Range` types,
       `undefinedState`, custom definitions overriding built-ins by id, validation and error
       reporting.
-- [ ] **M-07 — Scaling factors and spike filter** · S · M-04 · Multiplication/division, decimal
+
+      **M-06 outcome.** `packages/core/src/lookups/` — `definition.ts` (the shape, the mapping
+      and the rules a schema cannot express), `catalogue.ts`, `loader.ts`, `built-in.ts`.
+      Migration 009 adds `channel.lookup_id`; a sensor type may declare one per channel
+      (`ChannelDef.lookup`) and an operator may override it through the same `PATCH` that sets
+      limits.
+
+      **Not PRTG's `.ovl` XML.** `CAPABILITIES.MD §15` puts config-file compatibility out of
+      scope and every other boundary here is a JSON Schema. The concepts are PRTG's — `SingleInt`,
+      `Range`, `undefinedState`, custom overriding built-in by id — and the encoding is ours.
+      Built-ins are **TypeScript modules**, for the reason migrations are: a lookup shipped as a
+      data file is one more thing the packaging step can forget, and a missing one surfaces as a
+      sensor that never leaves Unknown. Operator definitions are JSON under `<dataDir>/lookups`.
+
+      Three decisions `CAPABILITIES.MD §1.2` leaves open, now in `state-machine.md` §2.2.1:
+      **`undefinedState` is required with no default** — whether an undocumented status code is
+      fine or a problem depends entirely on the device, so the author has to say; **a bad
+      definition is refused, not repaired**, and served with its reason by `GET /lookups`,
+      because a lookup that silently failed to load leaves its channels judged by nothing; and
+      **a channel naming a lookup nobody loaded reads `warning`**, not silence (a broken
+      configuration would read as healthy), not a fall back to limits (the reason to configure a
+      lookup is that a threshold is the wrong tool), and not `down` (the check succeeded — what
+      is broken is our ability to read the answer, the same distinction §2 draws for a lost
+      probe).
+
+      Also settled: a channel is judged by a lookup **or** its limits, never both; ranges are
+      half-open so adjacent bands neither overlap nor gap; overlapping ranges and duplicate
+      values are refused, because which entry wins would otherwise be authoring order.
+
+      **Deferred deliberately:** reloading lookups without a restart. Re-judging every channel
+      that uses one is a decision worth making explicitly rather than as a side effect of saving
+      a file, and `GET /lookups` makes the current state visible either way. `BitField`,
+      `Boolean` and `desiredValue` are `[V2]` per `CAPABILITIES.MD §1.2`.
+- [ ] **M-07 — Scaling factors and spike filter** · S · M-04, M-06 · Multiplication/division, decimal
       places, min/max spike discard. **`M-04` left the seam:** `IngestionService.#prepare` marks
       the two lines it belongs between — scaling changes the value a limit is compared against,
       and the spike filter drops a reading before it is compared at all. The columns

@@ -225,6 +225,8 @@ export class IngestionService {
           value: reading.value,
           decimals: channel.decimals,
           limits: channel.limits,
+          lookupId: channel.lookupId,
+          lookup: channel.lookup,
         });
       }
       // M-07 belongs between these two lines: scaling changes the value a limit is compared

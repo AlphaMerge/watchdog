@@ -8,6 +8,8 @@ export interface ChannelDraft {
   name: string;
   unit?: string;
   isPrimary?: boolean;
+  /** The lookup the sensor type declares for this channel (`M-06`), if any. */
+  lookup?: string;
 }
 
 /** Params fit to leave the process, and which secrets were taken out of them. */
@@ -130,6 +132,7 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
         name: def.name,
         ...(def.unit === undefined ? {} : { unit: def.unit }),
         ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
+        ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
       }));
     },
 

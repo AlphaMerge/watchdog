@@ -33,6 +33,18 @@ export interface ChannelDef {
    * At most one per sensor; the catalogue rejects a type that declares two.
    */
   readonly isPrimary?: boolean;
+  /**
+   * The lookup that turns this channel's readings into a state (`M-06`).
+   *
+   * For a channel whose value is a status code rather than a measurement: SNMP `ifOperStatus`
+   * is `1`, `2` or `7`, and "warn above 1.5" is not a threshold anybody should have to write.
+   * The core resolves the id against its lookup catalogue; a type may name one this
+   * installation has not loaded, and that is reported rather than fatal.
+   *
+   * An operator can override it per channel. The declaration is the sensible default, not a
+   * rule — the whole point of lookups being files is that a device can disagree with its RFC.
+   */
+  readonly lookup?: string;
 }
 
 /**

@@ -15,9 +15,12 @@ import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
+import { lookupRoutes } from './routes/lookups.js';
 import { stateRoutes } from './routes/state.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
+import { LookupCatalogue } from '../lookups/catalogue.js';
+import { LOOKUP_SCHEMAS } from './schemas/lookups.js';
 import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
@@ -30,6 +33,13 @@ export interface ApiServerOptions {
   db: Database;
   audit: AuditRepository;
   catalogue: SensorCatalogue;
+  /**
+   * The lookups this installation loaded (`M-06`).
+   *
+   * Optional so a test that cares about objects need not build one; an empty catalogue serves
+   * an empty list, which is the honest answer for an installation with no lookups.
+   */
+  lookups?: LookupCatalogue;
 }
 
 /**
@@ -49,6 +59,7 @@ export class ApiServer {
   readonly #db: Database;
   readonly #audit: AuditRepository;
   readonly #catalogue: SensorCatalogue;
+  readonly #lookups: LookupCatalogue;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -67,6 +78,7 @@ export class ApiServer {
     this.#db = options.db;
     this.#audit = options.audit;
     this.#catalogue = options.catalogue;
+    this.#lookups = options.lookups ?? new LookupCatalogue().seal();
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -114,6 +126,7 @@ export class ApiServer {
       ...HISTORY_SCHEMAS,
       ...AUDIT_SCHEMAS,
       ...STATE_SCHEMAS,
+      ...LOOKUP_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 
@@ -189,6 +202,7 @@ export class ApiServer {
         await scope.register(stateRoutes, { db: this.#db });
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
+        await scope.register(lookupRoutes, { lookups: this.#lookups });
       },
       { prefix: '/api/v1' },
     );

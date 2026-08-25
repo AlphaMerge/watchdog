@@ -506,10 +506,10 @@ export class ObjectRepository {
   ): Promise<{ created: number; ownerVersion: number | null }> {
     if (drafts.length === 0) return { created: 0, ownerVersion: null };
     const rows = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, is_primary)
-       SELECT $1, key, name, unit, is_primary
-       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[])
-            AS d(key, name, unit, is_primary)
+      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id)
+       SELECT $1, key, name, unit, is_primary, lookup_id
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[])
+            AS d(key, name, unit, is_primary, lookup_id)
        RETURNING id`,
       [
         sensorId,
@@ -517,6 +517,7 @@ export class ObjectRepository {
         drafts.map((draft) => draft.name),
         drafts.map((draft) => draft.unit ?? ''),
         drafts.map((draft) => draft.isPrimary ?? false),
+        drafts.map((draft) => draft.lookup ?? null),
       ],
     );
     // A primary-key lookup, and only on sensor creation.
@@ -585,9 +586,10 @@ export class ObjectRepository {
       spike_max: number | null;
       show_in_graph: boolean;
       show_in_table: boolean;
+      lookup_id: string | null;
     }>(
       `SELECT id, sensor_id, key, name, unit, is_primary, scale_mul, scale_div, decimals,
-              limits, spike_min, spike_max, show_in_graph, show_in_table
+              limits, spike_min, spike_max, show_in_graph, show_in_table, lookup_id
        FROM channel WHERE sensor_id = $1
        ORDER BY is_primary DESC, key`,
       [sensorId],
@@ -608,6 +610,7 @@ export class ObjectRepository {
       spikeMax: row.spike_max,
       showInGraph: row.show_in_graph,
       showInTable: row.show_in_table,
+      lookupId: row.lookup_id,
     }));
   }
 
@@ -635,6 +638,22 @@ export class ObjectRepository {
        WHERE sensor_id = $1 AND key = $2
        RETURNING id`,
       [sensorId, key, JSON.stringify(limits)],
+    );
+    return rows.length > 0;
+  }
+
+  /** Points a channel at a lookup, or at none (`M-06`). */
+  async setChannelLookup(
+    q: Queryable,
+    sensorId: ObjectId,
+    key: string,
+    lookupId: string | null,
+  ): Promise<boolean> {
+    const rows = await q.query<{ id: number }>(
+      `UPDATE channel SET lookup_id = $3
+       WHERE sensor_id = $1 AND key = $2
+       RETURNING id`,
+      [sensorId, key, lookupId],
     );
     return rows.length > 0;
   }

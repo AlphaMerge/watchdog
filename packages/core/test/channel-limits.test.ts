@@ -28,6 +28,8 @@ function reading(
     decimals: null,
     value,
     limits: limits(over),
+    lookupId: null,
+    lookup: null,
     ...channel,
   };
 }

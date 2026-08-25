@@ -47,6 +47,9 @@ const snmpTraffic: SensorType = {
   channels: () => [
     { key: 'in', name: 'Traffic in', unit: 'kbit/s', isPrimary: true },
     { key: 'out', name: 'Traffic out', unit: 'kbit/s' },
+    // A declared lookup (M-06). A status code is not a measurement, and this is the shape a
+    // real SNMP type has: two counters and one enumeration.
+    { key: 'status', name: 'Interface status', lookup: 'ms.snmp.if-oper-status' },
   ],
   execute: () => Promise.resolve({ channels: [] }),
 };

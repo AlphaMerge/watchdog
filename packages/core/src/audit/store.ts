@@ -275,6 +275,20 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: `setting.${mutation.key}`, before: mutation.before, after: null }],
       };
 
+    case 'channel.lookup.set':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { channelKey: mutation.channelKey },
+        diff: [
+          {
+            field: `channel.${mutation.channelKey}.lookup`,
+            before: mutation.before,
+            after: mutation.after,
+          },
+        ],
+      };
+
     case 'channel.limits.set':
       return {
         ...base,

@@ -608,23 +608,29 @@ export async function objectRoutes(
   );
 
   /**
-   * A channel's thresholds (`M-04`).
+   * How a channel is judged: its limits (`M-04`), its lookup (`M-06`), or both.
    *
-   * `PATCH` on the channel rather than a dedicated `/limits` resource, because `M-07` adds
-   * scaling factors, decimals and the spike filter to the same row and they should not each
-   * grow an endpoint. Today `limits` is the only field it accepts, and `additionalProperties:
-   * false` says so plainly rather than ignoring the rest.
+   * `PATCH` on the channel rather than a resource per field, because `M-07` adds scaling
+   * factors, decimals and the spike filter to the same row and they should not each grow an
+   * endpoint. `additionalProperties: false` says plainly which fields exist today rather than
+   * ignoring the rest.
    */
-  app.patch<{ Params: { id: number; key: string }; Body: { limits: ChannelLimitsPatch } }>(
+  app.patch<{
+    Params: { id: number; key: string };
+    Body: { limits?: ChannelLimitsPatch; lookupId?: string | null };
+  }>(
     '/objects/:id/channels/:key',
     {
       schema: {
         description:
-          'Sets a channel’s error and warning limits. A patch: `null` clears one threshold, an ' +
-          'absent field leaves it alone. Limits are immediate — a reading past an error limit ' +
-          'sets the sensor Down on the very first sample, with no two-step rule. Limits that ' +
-          'contradict each other (a warning limit past its error limit) are refused with the ' +
-          'reason, not stored.',
+          'Sets a channel’s error and warning limits, the lookup that decides its state, or ' +
+          'both. `limits` is a patch: `null` clears one threshold, an absent field leaves it ' +
+          'alone. Both are immediate — a reading past an error limit, or one a lookup maps to ' +
+          'an error, sets the sensor Down on the very first sample with no two-step rule. A ' +
+          'channel with a lookup is judged by it *instead of* its limits. Limits that ' +
+          'contradict each other are refused with the reason; a `lookupId` this installation ' +
+          'has not loaded is accepted and reported, because a sensor type may ship ahead of ' +
+          'its lookup file.',
         params: {
           type: 'object',
           required: ['id', 'key'],
@@ -636,19 +642,22 @@ export async function objectRoutes(
         },
         body: {
           type: 'object',
-          required: ['limits'],
           additionalProperties: false,
-          properties: { limits: channelLimitsPatchSchema },
+          minProperties: 1,
+          properties: {
+            limits: channelLimitsPatchSchema,
+            lookupId: { type: ['string', 'null'], minLength: 1, maxLength: 100 },
+          },
         },
         response: { 200: { $ref: 'ms:channelRecord' } },
       },
     },
     async (request, reply) => {
-      const updated = await service.setChannelLimits(
+      const updated = await service.patchChannel(
         actorFor(request),
         request.params.id,
         request.params.key,
-        request.body.limits,
+        request.body,
         optionalIfMatch(request.headers['if-match']),
       );
       await reply.send(updated);

@@ -242,6 +242,7 @@ export const channelRecordSchema = {
     'spikeMax',
     'showInGraph',
     'showInTable',
+    'lookupId',
   ],
   properties: {
     id: { type: 'integer' },
@@ -259,6 +260,7 @@ export const channelRecordSchema = {
     spikeMax: { type: ['number', 'null'] },
     showInGraph: { type: 'boolean' },
     showInTable: { type: 'boolean' },
+    lookupId: { type: ['string', 'null'] },
   },
 } as const;
 

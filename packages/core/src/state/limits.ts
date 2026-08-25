@@ -16,7 +16,9 @@
  * full, and waiting another interval to say so helps nobody.
  */
 
+import { applyLookup, type LookupDefinition } from '../lookups/definition.js';
 import { ROLLUP_SEVERITY, type RollupState } from './tables.js';
+import type { SensorStateCause } from './tables.js';
 import type { Verdict } from './machine.js';
 
 /**
@@ -151,12 +153,14 @@ export function validateLimits(limits: ChannelLimits): string[] {
   return problems;
 }
 
-/** One channel over one of its limits. */
+/** One channel that is not Up, and why. */
 export interface ChannelBreach {
   readonly key: string;
   readonly name: string;
   readonly state: Exclude<RollupState, 'up'>;
-  /** Ready to read: what the value was, which limit it crossed, and the operator's own note. */
+  /** Which of the two ways a channel state is decided produced this one. */
+  readonly cause: Extract<SensorStateCause, 'limit' | 'lookup'>;
+  /** Ready to read: what the value was, what it means, and the operator's own note. */
   readonly message: string;
 }
 
@@ -168,6 +172,25 @@ export interface ChannelReadingFacts {
   readonly value: number;
   readonly decimals: number | null;
   readonly limits: ChannelLimits;
+  /**
+   * What the channel *names*, whether or not this installation has it (`M-06`).
+   *
+   * Separate from `lookup` because the two absences mean different things, and conflating them
+   * is how a broken configuration reads as healthy. `lookupId: null` is a channel judged by its
+   * limits; `lookupId` set with `lookup` null is a channel whose operator said "judge this by
+   * that lookup" and this installation cannot.
+   */
+  readonly lookupId: string | null;
+  /**
+   * The lookup this channel is judged by, resolved.
+   *
+   * When one is present it decides the channel's state **instead of** the limits, not as well:
+   * a lookup maps discrete codes and a limit bounds a continuous range, and a channel whose
+   * value is a status code has no meaningful threshold. `WORKFLOW.MD §4` rule 2 puts both in
+   * the same sentence — "same for lookup-driven states" — so they are immediate alike, but they
+   * are not additive. *Decided by `M-06`.*
+   */
+  readonly lookup: LookupDefinition | null;
 }
 
 /**
@@ -182,6 +205,10 @@ export interface ChannelReadingFacts {
  * on equality would make "at most 100" impossible to express.
  */
 export function evaluateChannel(reading: ChannelReadingFacts): ChannelBreach | null {
+  // A lookup replaces the limits rather than joining them. See `ChannelReadingFacts.lookup`.
+  if (reading.lookup !== null) return fromLookup(reading, reading.lookup);
+  if (reading.lookupId !== null) return unresolvedLookup(reading, reading.lookupId);
+
   const { limits, value } = reading;
   if (!limits.enabled) return null;
 
@@ -215,9 +242,64 @@ function breach(
     key: reading.key,
     name: reading.name,
     state,
+    cause: 'limit',
     // The operator's own words go last, after the numbers. "Call the network team" is useless
     // without them and useful with them.
     message: custom === '' ? base : `${base} — ${custom}`,
+  };
+}
+
+/**
+ * §2.2 through a lookup (`M-06`).
+ *
+ * The message keeps the raw number *and* what it means: "Interface status is 2 (down)". Either
+ * alone is worse — the number is what the device said and what a second opinion would check
+ * against, the text is what the operator can act on, and a lookup that has been edited since
+ * makes the two disagree in a way only the pair can reveal.
+ */
+function fromLookup(
+  reading: ChannelReadingFacts,
+  definition: LookupDefinition,
+): ChannelBreach | null {
+  const match = applyLookup(definition, reading.value);
+  if (match.state === 'up') return null;
+
+  const shown = format(reading.value, reading.unit, reading.decimals);
+  return {
+    key: reading.key,
+    name: reading.name,
+    state: match.state,
+    cause: 'lookup',
+    message: match.defined
+      ? `${reading.name} is ${shown} (${match.text})`
+      : // Naming the lookup, because the fix is to add the value to it and the operator has to
+        // know which file to open.
+        `${reading.name} is ${shown}, which ${definition.id} does not define`,
+  };
+}
+
+/**
+ * A channel whose lookup this installation has not loaded (`M-06`).
+ *
+ * Warning, not silence and not a fall back to limits. Silence would let a broken configuration
+ * read as healthy, which is the failure the whole lookup path exists to avoid — a sensor that
+ * says Up because nothing could judge it is worse than one that says it does not know. Falling
+ * back would put a threshold the operator did not intend in charge, and the reason they
+ * configured a lookup is that a threshold is the wrong tool for a status code.
+ *
+ * Not Down, either: the reading arrived and the check succeeded. What is broken is this
+ * system's ability to interpret it, and saying the target is down would be a claim nothing
+ * supports — the same distinction §2 draws for a lost probe. *Decided by `M-06`.*
+ */
+function unresolvedLookup(reading: ChannelReadingFacts, lookupId: string): ChannelBreach {
+  return {
+    key: reading.key,
+    name: reading.name,
+    state: 'warning',
+    cause: 'lookup',
+    message:
+      `${reading.name} is ${format(reading.value, reading.unit, reading.decimals)}, but the ` +
+      `lookup it is judged by (${lookupId}) is not loaded`,
   };
 }
 
@@ -268,7 +350,7 @@ export function rollUp(readings: readonly ChannelReadingFacts[]): ChannelOutcome
   const listed = breaches.slice(0, MAX_LISTED).map((each) => each.message);
   const remaining = breaches.length - listed.length;
   return {
-    verdict: { state: worst.state, cause: 'limit' },
+    verdict: { state: worst.state, cause: worst.cause },
     message:
       remaining === 0
         ? listed.join('; ')

@@ -99,6 +99,21 @@ export type Mutation =
       before: ChannelLimits;
       after: ChannelLimits;
     }
+  | {
+      /**
+       * A channel was pointed at a different lookup, or at none (`M-06`).
+       *
+       * Its own action rather than a field inside `channel.limits.set`: they are the two
+       * different ways a channel's state is decided, and "who changed what this channel is
+       * judged by" is a question with two distinct answers.
+       */
+      action: 'channel.lookup.set';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      channelKey: string;
+      before: string | null;
+      after: string | null;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown };
 
@@ -170,6 +185,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         clonedCount: mutation.clonedCount,
       };
     case 'channel.limits.set':
+    case 'channel.lookup.set':
       return {
         action: mutation.action,
         objectId: mutation.objectId,

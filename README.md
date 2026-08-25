@@ -173,6 +173,12 @@ How many consecutive failures are reported as Warning before Down is the inherit
 `scan.retryWarnings` (`M-03`): zero is immediate-down, the default is one warning interval, and a
 group can set it for everything beneath it.
 
+A channel whose reading is a status code rather than a measurement is judged by a **lookup**
+(`M-06`) instead of by limits: `2` becomes "down" and Down, `1` becomes "up" and Up. Built-in
+definitions ship with the build; an operator's own go in `<dataDir>/lookups` as JSON and replace
+a built-in with the same id. `GET /api/v1/lookups` lists what loaded — and what was refused, and
+why.
+
 Channels carry limits (`M-04`): upper and lower thresholds for warning and error, with a custom
 message each. They are immediate — a reading past an error limit is Down on the very first
 sample, with no two-step rule, because a disk that is 99% full is 99% full. Editing one takes
