@@ -1,0 +1,216 @@
+import type { Logger } from '@ms/shared';
+import type { Queryable } from '../db/pool.js';
+import { DEPENDENCY_DELAY_SECONDS } from '../settings/registry.js';
+import { DependencyRepository } from './repository.js';
+
+/** Just enough of `SensorStateService` for a dependency to take effect now. */
+export interface ReevaluatesSensors {
+  reevaluate(
+    q: Queryable,
+    sensorIds: readonly number[],
+    at: Date,
+    cause: { message: string },
+  ): Promise<number>;
+}
+
+/**
+ * Just enough of `InheritanceResolver` to read the delay for a handful of masters.
+ *
+ * Narrowed to `number` rather than generic: the only key this module resolves is the delay, and
+ * a type parameter used once is a parameter that documents nothing.
+ */
+export interface ResolvesDelays {
+  resolveForObjects(
+    objectIds: readonly number[],
+    key: string,
+  ): Promise<Map<number, { value: number }>>;
+  withExecutor(q: Queryable): ResolvesDelays;
+}
+
+/** What the reactor is told about a state change. Just the three fields it reads. */
+export interface StateChange {
+  readonly sensorId: number;
+  readonly state: string;
+  /** `null` on a sensor's very first transition, which is never a recovery from Down. */
+  readonly previousState: string | null;
+}
+
+export interface DependencyPausesOptions {
+  logger: Logger;
+  settings: ResolvesDelays;
+  repository?: DependencyRepository;
+  states?: ReevaluatesSensors;
+  /**
+   * How many times the cascade may propagate before it is declared a cycle.
+   *
+   * A backstop, not the defence: `ObjectService` refuses an assignment that would close a loop.
+   * This is what stops a loop that got in some other way — a hand-edited row, a restore — from
+   * spinning inside a transaction rather than merely being wrong.
+   */
+  maxRounds?: number;
+}
+
+export interface DependencyRecompute {
+  readonly moved: number;
+  readonly transitions: number;
+  readonly rounds: number;
+}
+
+const NOTHING: DependencyRecompute = { moved: 0, transitions: 0, rounds: 0 };
+
+const DOWN_STATES = new Set(['down', 'down_acknowledged']);
+
+/**
+ * What turns a master going Down into `sensor_runtime.paused_by_dependency` (`M-11`).
+ *
+ * *One outage, one alarm*: forty sensors on an unreachable switch should produce one Down and
+ * thirty-nine Paused, not forty alarms. That is the entire purpose, and `M-17`'s scenario test is
+ * what will hold it to it.
+ *
+ * **Driven by state changes, not by a clock.** Schedules recompute on the minute because time is
+ * what moves them; a dependency moves when a master's state moves, which happens in the
+ * ingestion path thousands of times a minute. So the first thing asked of every batch is whether
+ * any sensor that changed is the master of anything — one indexed lookup — and an installation
+ * with no dependencies never gets past it.
+ *
+ * **The cascade is a fixpoint, not a recursion.** `WORKFLOW.MD §5` requires dependents of a
+ * paused dependent to pause too, and a master held by its own master is itself holding. Each
+ * round of `applyPauses` propagates one level, and the loop runs until nothing moves — bounded,
+ * so a cycle that got past the cycle check is a logged warning rather than a transaction that
+ * never returns.
+ */
+export class DependencyPauses {
+  readonly #repo: DependencyRepository;
+  readonly #states: ReevaluatesSensors | undefined;
+  readonly #settings: ResolvesDelays;
+  readonly #logger: Logger;
+  readonly #maxRounds: number;
+
+  constructor(options: DependencyPausesOptions) {
+    this.#repo = options.repository ?? new DependencyRepository();
+    this.#states = options.states;
+    this.#settings = options.settings;
+    this.#logger = options.logger.child({ component: 'dependencies' });
+    this.#maxRounds = options.maxRounds ?? 20;
+  }
+
+  /**
+   * Reacts to a batch of state changes.
+   *
+   * Runs inside the caller's transaction — the readings, the states they decided and the pauses
+   * those caused all commit together or not at all.
+   */
+  async react(
+    q: Queryable,
+    changes: readonly StateChange[],
+    now: Date,
+  ): Promise<DependencyRecompute> {
+    if (changes.length === 0) return NOTHING;
+    const masters = await this.#repo.mastersAmong(
+      q,
+      changes.map((change) => change.sensorId),
+    );
+    if (masters.length === 0) return NOTHING;
+
+    // Only the masters, and only the transitions that cross the Down boundary. A master going
+    // from Up to Warning changes nothing about what it holds.
+    const isMaster = new Set(masters);
+    const failed: number[] = [];
+    const recoveredIds: number[] = [];
+    for (const change of changes) {
+      if (!isMaster.has(change.sensorId)) continue;
+      const wasDown = change.previousState !== null && DOWN_STATES.has(change.previousState);
+      const isDown = DOWN_STATES.has(change.state);
+      if (isDown) failed.push(change.sensorId);
+      else if (wasDown) recoveredIds.push(change.sensorId);
+    }
+
+    const delays =
+      recoveredIds.length === 0
+        ? new Map<number, { value: number }>()
+        : await this.#settings
+            .withExecutor(q)
+            .resolveForObjects(recoveredIds, DEPENDENCY_DELAY_SECONDS.key);
+
+    await this.#repo.markRecoveries(
+      q,
+      recoveredIds.map((sensorId) => ({
+        sensorId,
+        delaySeconds: delays.get(sensorId)?.value ?? 0,
+      })),
+      failed,
+      now,
+    );
+
+    return this.#settle(q, now);
+  }
+
+  /**
+   * Recomputes from whatever the rows say, without being told what changed.
+   *
+   * What the sweep calls when a recovery delay runs out, and what a dependency being assigned or
+   * cleared calls. Idempotent, so nothing has to work out whether it is needed.
+   */
+  async recompute(q: Queryable, now: Date): Promise<DependencyRecompute> {
+    if (!(await this.#repo.anyWork(q))) return NOTHING;
+    return this.#settle(q, now);
+  }
+
+  /** Releases the masters whose recovery delay has elapsed, then settles. */
+  async releaseElapsed(q: Queryable, now: Date, limit = 200): Promise<DependencyRecompute> {
+    const elapsed = await this.#repo.delaysElapsed(q, now, limit);
+    if (elapsed.length === 0) return NOTHING;
+    await this.#repo.clearDelays(q, elapsed);
+    const result = await this.#settle(q, now);
+    this.#logger.info(
+      { masters: elapsed, released: result.moved },
+      'dependency recovery delays elapsed',
+    );
+    return result;
+  }
+
+  /** Rounds of `applyPauses` until nothing moves. One round propagates one level. */
+  async #settle(q: Queryable, now: Date): Promise<DependencyRecompute> {
+    let moved = 0;
+    let transitions = 0;
+    let rounds = 0;
+
+    for (; rounds < this.#maxRounds; rounds += 1) {
+      const changes = await this.#repo.applyPauses(q, now);
+      if (changes.length === 0) break;
+      moved += changes.length;
+
+      const masterIds = [
+        ...new Set(changes.map((change) => change.masterId).filter((id) => id !== null)),
+      ];
+      const names = await this.#repo.namesOf(q, masterIds);
+      // Grouped by master so the state history names the outage: "master #12 (core-switch) is
+      // Down" is an answer, and "paused by a dependency" sends an operator looking for which.
+      const grouped = new Map<number | null, number[]>();
+      for (const change of changes) {
+        const group = grouped.get(change.masterId);
+        if (group === undefined) grouped.set(change.masterId, [change.sensorId]);
+        else group.push(change.sensorId);
+      }
+      for (const [masterId, sensorIds] of grouped) {
+        const name = masterId === null ? undefined : names.get(masterId);
+        const message =
+          masterId === null
+            ? 'its master recovered'
+            : `master #${String(masterId)}${name === undefined ? '' : ` (${name})`} is Down`;
+        transitions += (await this.#states?.reevaluate(q, sensorIds, now, { message })) ?? 0;
+      }
+    }
+
+    if (rounds >= this.#maxRounds) {
+      // Not thrown: refusing the batch would stop ingestion for a configuration mistake, and the
+      // flags are still consistent with the last round that ran. Loud, because a cycle means two
+      // sensors will hold each other paused until somebody breaks it.
+      this.#logger.error(
+        { rounds },
+        'the dependency cascade did not settle; a master cycle is the likely cause',
+      );
+    }
+    return { moved, transitions, rounds };
+  }
+}

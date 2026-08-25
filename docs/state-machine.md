@@ -255,7 +255,7 @@ Four sources, evaluated in this order every tick (`WORKFLOW.MD §5`):
 | # | Source       | Cause        | Set by                                        | Cleared by                             |
 | - | ------------ | ------------ | --------------------------------------------- | -------------------------------------- |
 | 1 | Parent       | `parent`     | An ancestor being paused, cascading down      | That ancestor resuming                 |
-| 2 | Dependency   | `dependency` | A master object reaching `down`               | Master recovering, plus the delay      |
+| 2 | Dependency   | `dependency` | A master sensor reaching `down` (`M-11`)      | Master recovering, plus the delay      |
 | 3 | Schedule     | `schedule`   | A schedule's inactive window (`M-09`)         | The window ending                      |
 | 4 | Manual       | `user`       | A person, indefinitely / timed / until a date, or a maintenance window reaching its start (`M-10`) | That person, or the deadline passing   |
 
@@ -339,7 +339,10 @@ timers loses all of them on a restart, and a pause outliving the core is the nor
 - `down_acknowledged` **does** trigger it: the target is still down, and an acknowledgement is a
   statement about notifications, not about the outage. *Decided here.*
 - **The master keeps scanning while its dependents are paused.** Nothing else can detect
-  recovery. PRTG had this bug through v19.1.
+  recovery. PRTG had this bug through v19.1. `M-11` gets it from the one rule that a master is
+  excluded from its own dependency, rather than from a special case: "master object for parent
+  device" writes the master onto the *device*, so every sensor under it inherits that master —
+  including the master, which the exclusion then removes.
 - Recovery waits the configured **delay after dependency ends** before resuming dependents, so a
   flapping link does not generate an alarm storm every time it bounces.
 - The cascade is **recursive**: dependents of a paused dependent also pause.
@@ -444,8 +447,12 @@ Named so they are decisions rather than omissions:
 - ~~**`M-03`**~~ — done; §2.1 records the setting, the default and that N counts scans.
 - ~~**`M-04`** / **`M-06`**~~ — done; §2.2 and §2.2.1 record what they settled.
 - ~~**`M-07`**~~ — done; §2.2.0 records the order and what is stored.
-- **`M-11`** — where the "delay after dependency ends" timer lives and what restarts it if the
-  master flaps during the delay.
+- ~~**`M-11`**~~ — done. The delay is not a timer: it is `sensor_runtime.dependency_clear_at` on
+  the *master*, a deadline in a table that survives a restart and cannot be lost by a process
+  that dies mid-flap. A fresh failure discards it and a fresh recovery writes a new one, which is
+  what happens if the master flaps during the delay — nothing accumulates and nothing has to
+  remember the last one. A delay of zero releases the dependents in the recovery's own
+  transaction; anything longer is released by the pause sweep.
 - **`M-15`** — the state-change log. §5 invariant 10 is what it has to record.
 - **Restart.** ~~Pause state must survive a core restart~~ — done by `M-02`. The columns are on
   `sensor_runtime` (migration 008), one row per sensor, created by trigger the moment a sensor
@@ -466,7 +473,7 @@ is waiting for one task to set it:
 
 | Input                    | Set by  | Until then                                            |
 | ------------------------ | ------- | ----------------------------------------------------- |
-| The four pause flags     | ~~`M-08`~~, ~~`M-09`~~, ~~`M-10`~~, `M-11` | `parent`, `manual` and `schedule` are live. `dependency` is still always false. |
+| The four pause flags     | ~~`M-08`~~, ~~`M-09`~~, ~~`M-10`~~, ~~`M-11`~~ | All four are live. `M-12` is the exhaustive precedence test across them. |
 | `acknowledged_at/until`  | `M-13`  | Always null                                           |
 | `simulated_error`        | `M-14`  | Always false                                          |
 | The channel verdict (§2.2) | ~~`M-04`, `M-06`~~ | Live: limits and lookups both produce one |

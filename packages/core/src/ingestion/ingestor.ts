@@ -55,12 +55,38 @@ export interface IngestTarget {
   tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
 }
 
+/**
+ * What reacts to a batch's state changes (`M-11`).
+ *
+ * A master going Down pauses its dependents, and that has to happen in the transaction that
+ * recorded the master going Down — otherwise a dependent's next result arrives between the two
+ * and produces the alarm the dependency exists to suppress.
+ */
+export interface DependencyReactor {
+  react(
+    q: Queryable,
+    changes: readonly { sensorId: number; state: string; previousState: string | null }[],
+    now: Date,
+  ): Promise<{ moved: number; transitions: number }>;
+}
+
 export interface IngestorOptions {
   /** Narrower than the pool, so a test can hand it a stub that fails. */
   db: IngestTarget;
   logger: Logger;
   config: IngestionConfig;
   lateData?: LateDataSink;
+  dependencies?: DependencyReactor;
+  /**
+   * Poked after a write whose state changes moved a dependency (`M-11`).
+   *
+   * The ingestion path is the one write path that does **not** go through the audit sink — a
+   * check result is not a configuration change — so nothing else would tell the probes that a
+   * master going Down has taken its dependents out of their assignments. Without this they keep
+   * scanning sensors the core has already paused: harmless to the states, which the pause layer
+   * decides, but wasted work during exactly the outage that made the network slow.
+   */
+  onDependencyChange?: () => void;
 }
 
 export interface IngestionStats {
@@ -85,6 +111,14 @@ export interface IngestionStats {
    * a replay; a steady stream of them outside one means the two disagree about time.
    */
   staleRuntimeWrites: number;
+  /**
+   * Sensors paused or released because a master's state moved (`M-11`).
+   *
+   * On Core Health beside the rest: a number that climbs steadily means a master is flapping,
+   * which is the shape of the alarm storm dependencies exist to prevent showing up as churn
+   * instead.
+   */
+  dependencyPauses: number;
   writes: number;
   /** Write latency in milliseconds over the last 1,024 writes. */
   writeMs: { p50: number; p95: number; p99: number; max: number };
@@ -124,6 +158,9 @@ export class Ingestor {
   readonly #logger: Logger;
   readonly #config: IngestionConfig;
   readonly #lateData: LateDataSink | undefined;
+  readonly #dependencies: DependencyReactor | undefined;
+  readonly #onDependencyChange: (() => void) | undefined;
+  #dependencyPauses = 0;
 
   readonly #queue: Queued[] = [];
   readonly #latencies: number[] = [];
@@ -152,6 +189,8 @@ export class Ingestor {
     this.#logger = options.logger.child({ component: 'ingestor' });
     this.#config = options.config;
     this.#lateData = options.lateData;
+    this.#dependencies = options.dependencies;
+    this.#onDependencyChange = options.onDependencyChange;
   }
 
   /**
@@ -246,6 +285,7 @@ export class Ingestor {
       storedStateChanges: this.#storedStateChanges,
       runtimeWrites: this.#runtimeWrites,
       staleRuntimeWrites: this.#staleRuntimeWrites,
+      dependencyPauses: this.#dependencyPauses,
       writes: this.#writes,
       writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       slowingDown: this.#retryHint() > 0,
@@ -347,7 +387,7 @@ export class Ingestor {
 
     const startedAt = process.hrtime.bigint();
     try {
-      const { stored, late, changes, moved } = await this.#db.tx(async (q) => {
+      const { stored, late, changes, moved, dependents } = await this.#db.tx(async (q) => {
         // Guarded rather than relying on `unnest` of empty arrays: with no readings at all the
         // range below is (+Infinity, -Infinity), and an Invalid Date reaching the backfill
         // queue would corrupt the rollup's idea of what needs re-rolling.
@@ -373,7 +413,21 @@ export class Ingestor {
         // together or not at all (M-02).
         const appended = await writeStateHistory(q, transitions);
         const advanced = await writeRuntimes(q, [...runtimes.values()]);
-        return { stored: written, late: noted, changes: appended, moved: advanced };
+        // Last, and in the same transaction: a master's dependents must be paused by the time
+        // the master's own Down is visible. Reacting after the commit would leave a window in
+        // which a dependent's result arrives, finds itself unpaused, and raises exactly the
+        // alarm the dependency exists to suppress (M-11).
+        const dependents =
+          this.#dependencies === undefined || transitions.length === 0
+            ? 0
+            : (await this.#dependencies.react(q, transitions, new Date())).moved;
+        return {
+          stored: written,
+          late: noted,
+          changes: appended,
+          moved: advanced,
+          dependents,
+        };
       });
 
       this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);
@@ -384,6 +438,9 @@ export class Ingestor {
       this.#storedStateChanges += changes;
       this.#runtimeWrites += moved;
       this.#staleRuntimeWrites += runtimes.size - moved;
+      this.#dependencyPauses += dependents;
+      // After the commit, never inside it: the probes are told about a tree that exists.
+      if (dependents > 0) this.#onDependencyChange?.();
       if (late) {
         this.#backfillsQueued += 1;
         this.#logger.info(

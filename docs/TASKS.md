@@ -833,10 +833,62 @@ because each is a decision rather than a defect:
       happens. "Who booked the change window" and "when did monitoring actually stop" are
       different questions, and a `from` in the first is what distinguishes it from an ordinary
       pause.
-- [ ] **M-11 — Dependencies** · L · M-08 · **`M-08` left the flag:**
+- [x] **M-11 — Dependencies** · L · M-08 · **`M-08` left the flag:**
       `sensor_runtime.paused_by_dependency`. _Use parent_, _select object_, _master object for
       parent device_; recursive cascade; **master keeps scanning while dependents are paused**;
       delay-after-recovery; manual/schedule pauses do not cascade via dependency.
+
+      **M-11 outcome.** Migration 013 adds one column, `sensor_runtime.dependency_clear_at`.
+      `packages/core/src/dependencies/` holds the modes (`mode.ts`), the SQL (`repository.ts`),
+      the reactor (`pauses.ts`) and the audit-sink hook. `PUT /objects/:id/dependency`. The last
+      of `M-08`'s four flags is now set by something.
+
+      **Three modes, one setting.** `dependency.masterId` is an ordinary inheritable value, so
+      *use parent* is not defining it, *select object* is defining it, and *master object for
+      parent device* is defining it **on the parent device** rather than on the sensor. That last
+      one is the whole trick: the setting lands on the device, every sensor under it inherits
+      that sensor as their master, and the master is excluded from its own dependency — which is
+      exactly what makes it keep scanning while its dependents are paused. PRTG carried that bug
+      through v19.1, and here it falls out of one `a.master_id <> o.id` rather than a special
+      case.
+
+      **Driven by state changes, not by a clock.** A schedule recomputes on the minute because
+      time is what moves it; a dependency moves when a master's state moves, which happens in the
+      ingestion path thousands of times a minute. So the first question asked of every batch is
+      whether any sensor that changed is the master of anything — one indexed lookup — and an
+      installation with no dependencies never gets past it. The reaction runs **inside the
+      ingestor's own transaction**: a dependent whose result arrived between the master's Down
+      committing and the pause being written would raise the alarm the dependency exists to
+      suppress.
+
+      **The cascade is a fixpoint, not a recursion.** Each round of the recompute propagates one
+      level and the loop runs until nothing moves, so dependents of a paused dependent pause too.
+      Bounded, so a cycle that got in some other way is a logged error rather than a transaction
+      that never returns.
+
+      **A loop is refused where it is made.** If A's master is B and B's master is A, whichever
+      fails first pauses the other, the paused one stops scanning, and neither can ever recover:
+      a permanent outage produced by two dropdown selections with nothing able to notice it. The
+      check walks the effective-master chain and exempts the master itself, because "master for
+      parent device" puts the master inside the subtree it governs and that is not a loop.
+
+      **The delay lives in a column, not a timer** — `docs/state-machine.md §6` asked `M-11`
+      where. A deadline on the master survives a restart and cannot be lost by a process that
+      dies mid-flap, and the flap question answers itself: a fresh failure discards the deadline,
+      a fresh recovery writes a new one, nothing accumulates. A delay of **zero releases in the
+      recovery's own transaction**; a non-zero one is released by the pause sweep, which is
+      already the thing that notices deadlines.
+
+      **A master must be a sensor.** Devices and groups have no state of their own — `M-02` put
+      state on sensors — so "the device is Down" is not yet a fact anything could read. Refusing
+      is honest; accepting would create a dependency that silently never fires. Widen it when a
+      device-level rollup exists.
+
+      Only a genuine `down` or `down_acknowledged` triggers the pause, so pausing a master by
+      hand or by schedule does not cascade via dependency (`WORKFLOW.MD §5`); the acknowledged
+      case is included because an acknowledgement is a statement about notifications, not about
+      the target. `M-17`'s alarm-storm scenario is what will hold all of this to *one outage, one
+      alarm*.
 - [ ] **M-12 — Pause precedence integration** · M · M-08…M-11 · Parent cascade → dependency →
       schedule → manual, exhaustively tested. Cascade-paused children cannot be resumed
       individually, and the API says so clearly.

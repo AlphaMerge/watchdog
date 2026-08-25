@@ -22,6 +22,7 @@ export const pauseViewSchema = {
     'message',
     'inheritedFrom',
     'schedule',
+    'dependency',
   ],
   properties: {
     objectId: { type: 'integer' },
@@ -29,7 +30,7 @@ export const pauseViewSchema = {
     /** A maintenance window that is scheduled and has not begun (`M-10`). */
     pending: { type: 'boolean' },
     resumable: { type: 'boolean' },
-    source: { enum: ['manual', 'parent', 'schedule', null] },
+    source: { enum: ['manual', 'parent', 'schedule', 'dependency', null] },
     pausedAt: { type: ['string', 'null'] },
     /** When it takes effect. Later than `pausedAt` only for a maintenance window. */
     startsAt: { type: ['string', 'null'] },
@@ -59,6 +60,20 @@ export const pauseViewSchema = {
         name: { type: 'string' },
         active: { type: 'boolean' },
         nextChangeAt: { type: ['string', 'null'] },
+        definedOn: { type: 'integer' },
+      },
+    },
+    /** The master this object depends on (`M-11`), and whether it is holding it right now. */
+    dependency: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['masterId', 'masterName', 'masterState', 'holding', 'releasesAt', 'definedOn'],
+      properties: {
+        masterId: { type: 'integer' },
+        masterName: { type: 'string' },
+        masterState: { type: 'string' },
+        holding: { type: 'boolean' },
+        releasesAt: { type: ['string', 'null'] },
         definedOn: { type: 'integer' },
       },
     },

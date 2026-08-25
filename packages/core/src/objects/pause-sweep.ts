@@ -5,7 +5,12 @@ export interface SweepsPauses {
   sweepPauses(
     since: Date,
     limit?: number,
-  ): Promise<{ expired: number[]; started: number[]; sensorsAffected: number }>;
+  ): Promise<{
+    expired: number[];
+    started: number[];
+    released: number;
+    sensorsAffected: number;
+  }>;
 }
 
 export interface PauseSweepOptions {
@@ -14,13 +19,22 @@ export interface PauseSweepOptions {
   /** How often to look. Coarse on purpose — see below. */
   intervalMs?: number;
   batchSize?: number;
+  /**
+   * Poked after a sweep that moved something, so probes learn in the same second.
+   *
+   * A pause expiring or a window opening writes an audit entry, and the config push rides that.
+   * A dependency's recovery delay elapsing writes none — no operator did anything — so without
+   * this the probes would not be told until some later change happened to poke them (`M-11`).
+   */
+  onChanged?: () => void;
 }
 
 /** Half a minute. Fine enough for a window given to the minute, coarse enough to cost nothing. */
 const TICK = 30_000;
 
 /**
- * Notices when a maintenance window opens and when a timed pause runs out (`M-08`, `M-10`).
+ * Notices when a maintenance window opens, when a timed pause runs out, and when a dependency's
+ * recovery delay elapses (`M-08`, `M-10`, `M-11`).
  *
  * Every *read* of a pause already accounts for the clock, so nothing is wrong between a boundary
  * and the sweep — the object simply is or is not paused. What the sweep is for is the three
@@ -42,6 +56,7 @@ export class PauseSweep {
   readonly #logger: Logger;
   readonly #intervalMs: number | undefined;
   readonly #batchSize: number;
+  readonly #onChanged: (() => void) | undefined;
   #timer: NodeJS.Timeout | undefined;
   #running = false;
   #stopped = false;
@@ -60,6 +75,7 @@ export class PauseSweep {
     this.#logger = options.logger.child({ component: 'pause-sweep' });
     this.#intervalMs = options.intervalMs;
     this.#batchSize = options.batchSize ?? 200;
+    this.#onChanged = options.onChanged;
   }
 
   start(): void {
@@ -96,7 +112,15 @@ export class PauseSweep {
           'maintenance windows opened; monitoring paused',
         );
       }
-      return report.expired.length + report.started.length;
+      if (report.released > 0) {
+        this.#logger.info(
+          { released: report.released },
+          'dependency recovery delays elapsed; monitoring resumed',
+        );
+      }
+      const moved = report.expired.length + report.started.length + report.released;
+      if (moved > 0) this.#onChanged?.();
+      return moved;
     } catch (error: unknown) {
       this.#logger.error({ err: describeError(error) }, 'the pause sweep failed; retrying');
       return 0;

@@ -157,7 +157,7 @@ export interface PauseView {
    * a schedule and by an operator is held by both. `resumable` is what says whether this object
    * is the one a resume would act on.
    */
-  readonly source: 'manual' | 'parent' | 'schedule' | null;
+  readonly source: 'manual' | 'parent' | 'schedule' | 'dependency' | null;
   readonly pausedAt: string | null;
   /** When it takes effect. Later than `pausedAt` only for a maintenance window (`M-10`). */
   readonly startsAt: string | null;
@@ -179,6 +179,22 @@ export interface PauseView {
     readonly active: boolean;
     readonly nextChangeAt: string | null;
     /** The object the assignment is on — the one to change to lift it. */
+    readonly definedOn: ObjectId;
+  } | null;
+  /**
+   * The master this object depends on, if any (`M-11`).
+   *
+   * `holding` is the question an operator is really asking — "is this paused because something
+   * else is down, and what" — and `masterName` is what makes the answer actionable. A master
+   * never holds itself, which is what keeps it scanning while its dependents wait.
+   */
+  readonly dependency: {
+    readonly masterId: ObjectId;
+    readonly masterName: string;
+    readonly masterState: string;
+    readonly holding: boolean;
+    /** When the recovery delay releases the dependents, or `null` if none is running. */
+    readonly releasesAt: string | null;
     readonly definedOn: ObjectId;
   } | null;
 }

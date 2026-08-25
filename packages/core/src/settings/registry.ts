@@ -74,11 +74,52 @@ export const SCHEDULE_ID: SettingDefinition<number | null> = {
     'Null means always.',
 };
 
+/**
+ * The master object this one depends on (`M-11`).
+ *
+ * Inheritable like everything else, which is what gives `WORKFLOW.MD §5`'s three modes without
+ * three mechanisms: *use parent* is not defining it, *select object* is defining it, and
+ * *master object for parent device* is defining it on the parent device rather than on the
+ * sensor. A `null` of one's own means "depend on nothing", which is how one sensor is exempted
+ * from a dependency its device carries.
+ *
+ * The master must be a **sensor**. Devices and groups have no state of their own in this model —
+ * `M-02` put state on sensors — so "the device is Down" is not yet a fact anything could read.
+ * Widening this is a change to make when a device-level rollup exists, not before.
+ */
+export const DEPENDENCY_MASTER_ID: SettingDefinition<number | null> = {
+  key: 'dependency.masterId',
+  schema: { type: ['integer', 'null'], minimum: 1 },
+  default: null,
+  description:
+    'The sensor whose going Down pauses this object and everything beneath it. Null means it ' +
+    'depends on nothing.',
+};
+
+/**
+ * How long dependents stay paused after the master recovers (`M-11`).
+ *
+ * Zero by default, and zero means *now*: the dependents are released in the transaction that
+ * recorded the recovery. A non-zero delay exists for one reason — a flapping link that bounces
+ * every few seconds would otherwise generate an alarm storm on every bounce — and it is paid for
+ * with monitoring that resumes late, so it is opt-in.
+ */
+export const DEPENDENCY_DELAY_SECONDS: SettingDefinition<number> = {
+  key: 'dependency.delaySeconds',
+  schema: { type: 'integer', minimum: 0, maximum: 86_400 },
+  default: 0,
+  description:
+    'Seconds to keep dependents paused after the master recovers, so a flapping master does ' +
+    'not produce an alarm on every bounce.',
+};
+
 const DEFINITIONS: readonly SettingDefinition<unknown>[] = [
   SCAN_INTERVAL_SECONDS,
   SCAN_TIMEOUT_MS,
   SCAN_RETRY_WARNINGS,
   SCHEDULE_ID,
+  DEPENDENCY_MASTER_ID,
+  DEPENDENCY_DELAY_SECONDS,
 ];
 
 const ajv = new Ajv({ allErrors: true, strict: false });

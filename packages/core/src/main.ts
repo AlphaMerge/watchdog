@@ -17,6 +17,9 @@ import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { ObjectService } from './objects/service.js';
 import { PauseSweep } from './objects/pause-sweep.js';
+import { DependencyPauses } from './dependencies/pauses.js';
+import { DependencyRepository } from './dependencies/repository.js';
+import { DependencySync } from './dependencies/sync.js';
 import { SchedulePauses } from './schedules/pauses.js';
 import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
@@ -187,6 +190,17 @@ async function serve(): Promise<void> {
   const schedulePauses = new SchedulePauses({ logger, states });
   const scheduleSync = new ScheduleSync({ pauses: schedulePauses, logger });
 
+  // The last of M-08's four flags. Driven by state changes rather than by a clock, so it hangs
+  // off the ingestor's transaction as well as the audit sink (M-11).
+  const dependencyRepository = new DependencyRepository();
+  const dependencyPauses = new DependencyPauses({
+    logger,
+    settings: resolver,
+    repository: dependencyRepository,
+    states,
+  });
+  const dependencySync = new DependencySync({ pauses: dependencyPauses, logger });
+
   const service = new ObjectService({
     db,
     repository: new ObjectRepository(),
@@ -200,6 +214,7 @@ async function serve(): Promise<void> {
       configNotifier,
       cacheInvalidator,
       scheduleSync,
+      dependencySync,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
@@ -209,6 +224,8 @@ async function serve(): Promise<void> {
     // Read-only: the pause view has to be able to say "held by the office-hours schedule", and
     // a schedule pauses through `sensor_runtime` rather than through `object_pause` (M-09).
     schedules: new ScheduleRepository(),
+    dependencies: dependencyRepository,
+    dependencyDelays: dependencyPauses,
     logger,
   });
   logSensorTypes(logger, catalogue);
@@ -221,6 +238,7 @@ async function serve(): Promise<void> {
     new LoggingAuditSink(logger),
     configNotifier,
     scheduleSync,
+    dependencySync,
   ]);
   const schedules = new ScheduleService({ db, audit: scheduleAudit, logger });
   await schedules.seedBuiltIns();
@@ -229,7 +247,13 @@ async function serve(): Promise<void> {
   // Notices when a maintenance window opens and when a timed pause runs out. Every read already
   // accounts for the clock; this is what turns a boundary into a transition, a log entry and a
   // configuration push.
-  const pauseSweep = new PauseSweep({ service, logger });
+  const pauseSweep = new PauseSweep({
+    service,
+    logger,
+    onChanged: () => {
+      configNotifier.flush();
+    },
+  });
   pauseSweep.start();
   lifecycle.onShutdown({
     name: 'pause-sweep',
@@ -300,6 +324,15 @@ async function serve(): Promise<void> {
     logger,
     config: config.ingestion,
     lateData: housekeeper,
+    // In the write's own transaction: a master's dependents must be paused by the time the
+    // master's Down is visible, or a dependent's next result raises the alarm the dependency
+    // exists to suppress (M-11).
+    dependencies: dependencyPauses,
+    // And afterwards, the probes: a check result is not a configuration change, so this is the
+    // one write path the audit sink does not cover.
+    onDependencyChange: () => {
+      configNotifier.flush();
+    },
   });
   lifecycle.onShutdown({
     name: 'ingestion',

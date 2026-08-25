@@ -11,6 +11,8 @@ import {
 } from '../../src/objects/audit.js';
 import { ObjectRepository } from '../../src/objects/repository.js';
 import { ObjectService } from '../../src/objects/service.js';
+import { DependencyPauses } from '../../src/dependencies/pauses.js';
+import { DependencyRepository } from '../../src/dependencies/repository.js';
 import { ScheduleRepository } from '../../src/schedules/repository.js';
 import { SensorStateService } from '../../src/state/service.js';
 import { testSensorTypes } from './sensor-types.js';
@@ -66,6 +68,8 @@ export interface Harness {
   audit: CapturingAuditSink;
   /** Present only when `buildHarness` was asked for one; `M-08`'s pauses need it. */
   states: SensorStateService | undefined;
+  /** The dependency reactor the service was wired with, when states were asked for (`M-11`). */
+  dependencies: DependencyPauses | undefined;
   rootId: number;
 }
 
@@ -85,6 +89,13 @@ export async function buildHarness(
     options.states === true
       ? new SensorStateService({ db, logger: silent, settings: resolver })
       : undefined;
+  // Built here rather than in each test, because the pause sweep releases dependency delays and
+  // a harness whose sweep could not would let that regress unnoticed (`M-11`).
+  const dependencies =
+    states === undefined
+      ? undefined
+      : new DependencyPauses({ logger: silent, settings: resolver, states });
+
   const service = new ObjectService({
     db,
     repository,
@@ -92,14 +103,18 @@ export async function buildHarness(
     audit,
     sensorTypes: testSensorTypes(),
     ...(states === undefined ? {} : { states }),
+    ...(dependencies === undefined ? {} : { dependencyDelays: dependencies }),
     // Read-only, and unconditional: the pause view has to be able to say a schedule is holding
     // an object (`M-09`), and a harness that could not would let that regress unnoticed.
     schedules: new ScheduleRepository(),
+    // Read-only and unconditional, for the same reason: the pause view has to be able to say a
+    // master is holding an object (`M-11`), and refusing a dependency loop is not optional.
+    dependencies: new DependencyRepository(),
     logger: silent,
   });
 
   const root = await repository.getRoot(db);
-  return { service, repository, resolver, audit, states, rootId: root.id };
+  return { service, repository, resolver, audit, states, dependencies, rootId: root.id };
 }
 
 export { LoggingAuditSink };

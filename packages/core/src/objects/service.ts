@@ -2,7 +2,13 @@ import type { Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
-import { settingRegistry, SCHEDULE_ID } from '../settings/registry.js';
+import {
+  settingRegistry,
+  DEPENDENCY_DELAY_SECONDS,
+  DEPENDENCY_MASTER_ID,
+  SCHEDULE_ID,
+} from '../settings/registry.js';
+import { resolveDependencyMode, type DependencyMode } from '../dependencies/mode.js';
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
 import { validateTransform } from '../ingestion/scaling.js';
 import { refuseResume, resolvePause, type PauseRequest } from '../state/pause.js';
@@ -66,8 +72,38 @@ export interface ObjectServiceOptions {
    * says Paused. Nothing here writes; `ScheduleSync` owns that.
    */
   schedules?: ScheduleLookup;
+  /**
+   * What the pause view asks "is a master holding this object", and what refuses an assignment
+   * that would close a loop (`M-11`).
+   */
+  dependencies?: DependencyLookup;
+  /** What releases a dependency's recovery delay when it runs out (`M-11`). */
+  dependencyDelays?: ReleasesDependencyDelays;
   /** Refuses a clone larger than this. Protects the request, not the database. */
   maxCloneObjects?: number;
+}
+
+/** Just enough of `DependencyPauses` for the pause sweep to release an elapsed delay. */
+export interface ReleasesDependencyDelays {
+  releaseElapsed(q: Queryable, now: Date, limit?: number): Promise<{ moved: number }>;
+}
+
+/** Just enough of `DependencyRepository` for the object service's two questions. */
+export interface DependencyLookup {
+  effectiveFor(
+    q: Queryable,
+    objectId: ObjectId,
+  ): Promise<{ masterId: number; definedOn: ObjectId } | null>;
+  stateOf(
+    q: Queryable,
+    sensorId: number,
+    now: Date,
+  ): Promise<{ sensorId: number; state: string; clearAt: Date | null } | null>;
+  wouldCycle(
+    q: Queryable,
+    objectId: ObjectId,
+    masterId: ObjectId,
+  ): Promise<{ path: number[] } | null>;
 }
 
 /** Just enough of `ScheduleRepository` for the pause view to name the schedule. */
@@ -110,6 +146,8 @@ export class ObjectService {
   readonly #pauses = new PauseRepository();
   readonly #states: StateReevaluator | undefined;
   readonly #schedules: ScheduleLookup | undefined;
+  readonly #dependencies: DependencyLookup | undefined;
+  readonly #dependencyDelays: ReleasesDependencyDelays | undefined;
   readonly #maxCloneObjects: number;
 
   constructor(options: ObjectServiceOptions) {
@@ -121,6 +159,8 @@ export class ObjectService {
     this.#logger = options.logger.child({ component: 'objects' });
     this.#states = options.states;
     this.#schedules = options.schedules;
+    this.#dependencies = options.dependencies;
+    this.#dependencyDelays = options.dependencyDelays;
     this.#maxCloneObjects = options.maxCloneObjects ?? 5_000;
   }
 
@@ -482,15 +522,24 @@ export class ObjectService {
   async sweepPauses(
     since: Date,
     limit = 200,
-  ): Promise<{ expired: ObjectId[]; started: ObjectId[]; sensorsAffected: number }> {
+  ): Promise<{
+    expired: ObjectId[];
+    started: ObjectId[];
+    released: number;
+    sensorsAffected: number;
+  }> {
     const now = new Date();
     const actor: Actor = { kind: 'system', component: 'pause-sweep' };
 
     return this.#db.tx(async (q) => {
       const due = await this.#pauses.expired(q, now, limit);
       const opening = await this.#pauses.startedIn(q, since, now, limit);
+      // A dependency's recovery delay is a deadline like any other, so it is swept here rather
+      // than by a third timer. A delay of zero never reaches this: it is released in the
+      // transaction that recorded the master's recovery (`M-11`).
+      const released = (await this.#dependencyDelays?.releaseElapsed(q, now, limit))?.moved ?? 0;
       if (due.length === 0 && opening.length === 0) {
-        return { expired: [], started: [], sensorsAffected: 0 };
+        return { expired: [], started: [], released, sensorsAffected: 0 };
       }
 
       const expired: ObjectId[] = [];
@@ -544,8 +593,74 @@ export class ObjectService {
       }
 
       if (mutations.length > 0) await this.#audit.record(q, actor, mutations, now);
-      return { expired, started, sensorsAffected };
+      return { expired, started, released, sensorsAffected };
     });
+  }
+
+  /**
+   * Sets an object's dependency in one call (`M-11`).
+   *
+   * The three modes of `WORKFLOW.MD §5` are three places to write one setting, and *master
+   * object for parent device* writes it on a different object from the one the request names —
+   * which the generic settings endpoint cannot express. Everything else goes through
+   * `setSetting`, so the validation, the audit entry and the recompute are the same ones.
+   */
+  async setDependency(
+    actor: Actor,
+    id: ObjectId,
+    mode: DependencyMode,
+    masterId: ObjectId | undefined,
+    delaySeconds: number | undefined,
+    pre: Precondition = { kind: 'none' },
+  ): Promise<PauseView> {
+    const subject = await this.#repo.get(this.#db, id);
+    if (subject === null) throw notFound(id);
+    const parent =
+      subject.parentId === null ? null : await this.#repo.get(this.#db, subject.parentId);
+
+    const resolved = resolveDependencyMode(
+      mode,
+      {
+        id,
+        kind: subject.kind,
+        parentId: subject.parentId,
+        parentKind: parent?.kind ?? null,
+      },
+      masterId,
+    );
+    if ('problems' in resolved) {
+      throw new ObjectError('OBJECT_INVALID', 'this dependency cannot be set', {
+        context: { objectId: id, phase: 'dependency' },
+        details: { problems: resolved.problems },
+      });
+    }
+
+    // Leaving "master object for parent device" has to undo what entering it did, or the mode
+    // is a one-way door: the setting lives on the device, so clearing the sensor's own value
+    // would leave it master of a device it no longer claims to be. A single dropdown that
+    // cannot be changed back is worse than not offering the mode.
+    // A sensor's parent is always a device; the hierarchy trigger enforces it, and the type
+    // knows, so there is nothing to check for null here.
+    if (mode !== 'device' && subject.kind === 'sensor') {
+      const parentOwn = await this.#resolver.own(subject.parentId);
+      if (parentOwn[DEPENDENCY_MASTER_ID.key] === id) {
+        await this.clearSetting(actor, subject.parentId, DEPENDENCY_MASTER_ID.key);
+      }
+    }
+
+    const { targetId, masterId: value } = resolved.write;
+    if (value === undefined) {
+      await this.clearSetting(actor, targetId, DEPENDENCY_MASTER_ID.key, pre);
+    } else {
+      await this.setSetting(actor, targetId, DEPENDENCY_MASTER_ID.key, value, pre);
+    }
+    if (delaySeconds !== undefined) {
+      // On the object that carries the dependency, not the one the request named — otherwise a
+      // delay set alongside "master object for parent device" would land on the sensor and be
+      // inherited by nothing.
+      await this.setSetting(actor, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
+    }
+    return this.pauseState(id);
   }
 
   /** Why this object is paused, and whether this is the one to resume. */
@@ -561,9 +676,12 @@ export class ObjectService {
     const own = effective.own;
     const schedule = await this.#scheduleView(q, id, now);
     const scheduleHolds = schedule !== null && !schedule.active;
+    const dependency = await this.#dependencyView(q, id, now);
+    const dependencyHolds = dependency !== null && dependency.holding;
     return {
       objectId: id,
-      paused: effective.ownActive || effective.inherited !== null || scheduleHolds,
+      paused:
+        effective.ownActive || effective.inherited !== null || scheduleHolds || dependencyHolds,
       // A scheduled maintenance window counts: cancelling one before it starts is the same
       // action as ending one that has, and an operator who picked the wrong weekend should not
       // have to wait for it to begin (`M-10`).
@@ -576,11 +694,13 @@ export class ObjectService {
       source:
         effective.inherited !== null
           ? 'parent'
-          : scheduleHolds
-            ? 'schedule'
-            : effective.ownActive
-              ? 'manual'
-              : null,
+          : dependencyHolds
+            ? 'dependency'
+            : scheduleHolds
+              ? 'schedule'
+              : effective.ownActive
+                ? 'manual'
+                : null,
       pausedAt: own?.pausedAt.toISOString() ?? null,
       startsAt: own?.startsAt.toISOString() ?? null,
       pausedUntil: own?.pausedUntil?.toISOString() ?? null,
@@ -593,7 +713,82 @@ export class ObjectService {
           ? null
           : { objectId: effective.inherited.objectId, name: effective.inherited.name },
       schedule,
+      dependency,
     };
+  }
+
+  /** The master in effect on an object, and whether it is holding it right now. */
+  async #dependencyView(q: Queryable, id: ObjectId, now: Date): Promise<PauseView['dependency']> {
+    if (this.#dependencies === undefined) return null;
+    const assignment = await this.#dependencies.effectiveFor(q, id);
+    if (assignment === null) return null;
+    const master = await this.#dependencies.stateOf(q, assignment.masterId, now);
+    // An assignment pointing at something with no runtime row: deleted, or never a sensor. The
+    // dependents are not paused either, so reporting no dependency is the honest answer.
+    if (master === null) return null;
+    const names = await this.#repo.get(q, assignment.masterId);
+    return {
+      masterId: assignment.masterId,
+      masterName: names?.name ?? '',
+      masterState: master.state,
+      // A master never holds itself; that exclusion is what keeps it scanning.
+      holding:
+        assignment.masterId !== id &&
+        (master.state === 'down' ||
+          master.state === 'down_acknowledged' ||
+          (master.clearAt !== null && master.clearAt.getTime() > now.getTime())),
+      releasesAt: master.clearAt?.toISOString() ?? null,
+      definedOn: assignment.definedOn,
+    };
+  }
+
+  /**
+   * Refuses a master that does not exist, is not a sensor, or would close a loop (`M-11`).
+   *
+   * The loop is the one that matters. If A's master is B and B's master is A, whichever goes
+   * Down first pauses the other; the paused one stops scanning, so it can never recover, and
+   * neither can the first. That is a permanent outage produced by two dropdown selections, with
+   * nothing in the system able to notice it — so it is refused where it is made rather than
+   * detected where it bites.
+   */
+  async #assertUsableMaster(q: Queryable, id: ObjectId, masterId: number): Promise<void> {
+    if (masterId === id) {
+      throw new ObjectError('OBJECT_INVALID', 'an object cannot depend on itself', {
+        context: { objectId: id, phase: 'settings' },
+        details: { key: DEPENDENCY_MASTER_ID.key },
+      });
+    }
+    const master = await this.#repo.get(q, masterId);
+    if (master === null) {
+      throw new ObjectError('OBJECT_INVALID', `no object ${String(masterId)} to depend on`, {
+        context: { objectId: id, phase: 'settings' },
+        details: { key: DEPENDENCY_MASTER_ID.key, masterId },
+      });
+    }
+    if (master.kind !== 'sensor') {
+      // Devices and groups have no state of their own — M-02 put state on sensors — so "the
+      // device is Down" is not a fact anything could read yet. Refusing is honest; accepting
+      // would create a dependency that silently never fires.
+      throw new ObjectError(
+        'OBJECT_INVALID',
+        `a master must be a sensor; #${String(masterId)} is a ${master.kind}`,
+        {
+          context: { objectId: id, phase: 'settings' },
+          details: { key: DEPENDENCY_MASTER_ID.key, masterId, masterKind: master.kind },
+        },
+      );
+    }
+    const cycle = await this.#dependencies?.wouldCycle(q, id, masterId);
+    if (cycle != null) {
+      throw new ObjectError(
+        'OBJECT_CYCLE',
+        'that dependency would form a loop, and a loop of masters can never recover',
+        {
+          context: { objectId: id, phase: 'settings' },
+          details: { key: DEPENDENCY_MASTER_ID.key, masterId, path: cycle.path },
+        },
+      );
+    }
   }
 
   /** The schedule in effect on an object, evaluated against the same clock as the pause. */
@@ -699,6 +894,10 @@ export class ObjectService {
             details: { key, scheduleId: value },
           });
         }
+      }
+
+      if (key === DEPENDENCY_MASTER_ID.key && typeof value === 'number') {
+        await this.#assertUsableMaster(q, id, value);
       }
 
       const bound = this.#resolver.withExecutor(q);

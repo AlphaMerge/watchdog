@@ -764,6 +764,56 @@ export async function objectRoutes(
     },
   );
 
+  // ── 11c. dependency (M-11) ───────────────────────────────────────────────────────────────
+
+  app.put<{
+    Params: { id: number };
+    Body: {
+      mode: 'parent' | 'object' | 'device' | 'none';
+      masterId?: number;
+      delaySeconds?: number;
+    };
+  }>(
+    '/objects/:id/dependency',
+    {
+      schema: {
+        description:
+          'Sets what this object depends on. `parent` inherits from above, `object` names a ' +
+          'master sensor, `none` depends on nothing, and `device` makes **this sensor** the ' +
+          'master for its parent device — which is what auto-discovery sets on a Ping sensor, ' +
+          'and what pauses the rest of a device when it stops answering. ' +
+          'A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); ' +
+          'pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents ' +
+          'paused after the master recovers, so a flapping link does not alarm on every bounce. ' +
+          'A dependency that would form a loop is refused: a loop of masters can never recover.',
+        params: idParams,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['mode'],
+          properties: {
+            mode: { enum: ['parent', 'object', 'device', 'none'] },
+            masterId: { type: 'integer', minimum: 1 },
+            delaySeconds: { type: 'integer', minimum: 0, maximum: 86_400 },
+          },
+        },
+        response: { 200: { $ref: 'ms:pauseView' } },
+      },
+    },
+    async (request, reply) => {
+      const { mode, masterId, delaySeconds } = request.body;
+      const view = await service.setDependency(
+        actorFor(request),
+        request.params.id,
+        mode,
+        masterId,
+        delaySeconds,
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.send(view);
+    },
+  );
+
   // ── 12. settings ─────────────────────────────────────────────────────────────────────────
   app.get<{ Params: { id: number }; Querystring: { asChildOf?: number } }>(
     '/objects/:id/settings',
