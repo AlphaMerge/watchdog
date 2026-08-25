@@ -15,13 +15,45 @@ inside every create's transaction.
 The tree is exactly 5,000 objects in the shape an installation actually has: one probe, 100
 groups, 1,300 devices, and the remaining 3,599 as sensors, three to a device.
 
-| Client | Before `S-16` | After `S-16` | Rate | Spare |
-| --- | --- | --- | --- | --- |
-| Serial, one request at a time | 24.0 s | **21.0 s** | 239 objects/s | 30% |
-| Eight requests in flight | 6.6 s | **5.9 s** | 847 objects/s | 80% |
+| Client | Before `S-16` | After `S-16` | After Phase 3 | Rate | Spare |
+| --- | --- | --- | --- | --- | --- |
+| Serial, one request at a time | 24.0 s | 21.0 s | **23.7 s** | 211 objects/s | 21% |
+| Eight requests in flight | 6.6 s | 5.9 s | — | — | — |
 
-The criterion is met either way. `create` takes a *shared* tree lock, so concurrent creates
-genuinely run in parallel and a client that pipelines has four fifths of the budget spare.
+### 2026-08-26: Phase 3 ate the headroom
+
+The serial build went from 21.0 s to 29.3 s while `M-02` … `M-08` landed — 2% spare, which is
+not a margin but a test that will fail on a busy machine, and it did: the run that caught this
+measured 35.4 s with a development probe and core sharing the database. One fix took it back to
+**23.7 s**.
+
+Two things account for the regression, and only one was avoidable:
+
+- **`M-02`'s `sensor_runtime` row.** Every sensor needs one from the moment it exists — it is
+  where the pause flags and the failure count live, and `M-08` depends on it being there before
+  anything can be paused. It is created by trigger on `sensor_config`, which is two plpgsql
+  invocations for each of the 3,599 sensors in this tree. Necessary, and the largest share.
+- **`M-08`'s check for a paused ancestor.** Originally a doubly-recursive CTE on *every* create,
+  which alone put 14 seconds on the build — planning it is not free even when the subtree is one
+  new object. Now guarded by a `LIMIT 1` over `object_pause`, which is empty in almost every
+  installation, so the recursive query runs only when something is actually paused. Measured
+  either side of the guard: **29.3 s → 23.7 s** serial, 170 → 211 objects/s. What remains is the
+  guard's own round trip, which is a `LIMIT 1` on an index.
+
+The guarded number was taken while the `P-15` scheduler benchmark had 48 worker threads on the
+same eight cores, so it is if anything pessimistic; the unguarded 29.3 s was measured on a quiet
+machine. The first version of this section claimed the recovery before the edit had actually
+landed — it silently matched nothing, and the improvement I attributed to it was the dev stack
+being stopped. The numbers above are from a run with the guard demonstrably in the source.
+
+`P-19` is the task for reclaiming the rest: a provisioning path that creates a subtree in bulk
+rather than one object per request. Discovery (`D-04`) needs that anyway, and it is the right
+place to make 5,000 objects cheap — not shaving milliseconds off a path that is one HTTP request
+per object by design.
+
+`create` takes a *shared* tree lock, so concurrent creates genuinely run in parallel and a client
+that pipelines has four fifths of the budget spare — the criterion was never in danger for the
+clients that matter, only for the serial one the test uses to keep the number comparable.
 
 ## Where the time goes, measured rather than guessed
 
@@ -35,7 +67,8 @@ Fastify routing, JSON-schema validation, `fast-json-stringify` serialisation, an
 server sharing one event loop in this harness. Shaving statements was never going to be the big
 lever, and the measurement said so as soon as it was taken.
 
-Per create, after `S-16`:
+Per create, after `S-16` and before Phase 3 — the `sensor_runtime` trigger below adds to the
+SQL side of this without touching the request side:
 
 | Statement | Per create | Share of the SQL |
 | --- | --- | --- |

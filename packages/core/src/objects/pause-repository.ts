@@ -187,6 +187,28 @@ export class PauseRepository {
     return rows.map((row) => Number(row.object_id));
   }
 
+  /**
+   * Whether anything in the installation is paused at all.
+   *
+   * The guard in front of `recompute`. That query is two recursive CTEs and an `UPDATE … FROM`,
+   * and planning it is not free even when the subtree is one new object — measured at roughly
+   * 2.8 ms a create, which turned a 5,000-object tree build from 21 s into 35 s and broke
+   * `P-04`'s budget. This is a `LIMIT 1` over a table that is empty in almost every
+   * installation and never large in any of them.
+   *
+   * It answers the only question that matters on the create and move paths: if nothing is
+   * paused, nothing can cascade, and there is no work to do.
+   */
+  async anyActive(q: Queryable, now: Date): Promise<boolean> {
+    const rows = await q.query<{ one: number }>(
+      `SELECT 1 AS one FROM object_pause
+       WHERE paused_until IS NULL OR paused_until > $1
+       LIMIT 1`,
+      [now],
+    );
+    return rows.length > 0;
+  }
+
   /** Every pause whose deadline has passed. What the expiry sweep acts on. */
   async expired(q: Queryable, now: Date, limit: number): Promise<StoredPause[]> {
     const rows = await q.query<PauseRow>(

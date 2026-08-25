@@ -676,11 +676,19 @@ export class ObjectService {
       // A sensor created under a paused device is paused from its first moment (M-08). Without
       // this it would scan, alarm and record readings inside a maintenance window nobody
       // reopened — and the operator who paused the device did so before it existed.
+      //
+      // Guarded, because provisioning is a hot path and this is not: `recompute` is two
+      // recursive CTEs whose *planning* is not free even for a subtree of one new object, and
+      // paying it five thousand times is what `P-04`'s budget notices. If nothing anywhere is
+      // paused, nothing can cascade, and `anyActive` is a LIMIT 1 over a table that is empty in
+      // almost every installation.
       const now = new Date();
-      const affected = await this.#pauses.recompute(q, created.id, now);
-      await this.#states?.reevaluate(q, affected, now, {
-        message: 'created under a paused parent',
-      });
+      if (await this.#pauses.anyActive(q, now)) {
+        const affected = await this.#pauses.recompute(q, created.id, now);
+        await this.#states?.reevaluate(q, affected, now, {
+          message: 'created under a paused parent',
+        });
+      }
 
       const safe = this.#redact(created);
       await this.#audit.record(
@@ -899,11 +907,14 @@ export class ObjectService {
       // The subtree hangs somewhere else now, so which pauses reach it has changed: out from
       // under a paused group, or into one. Recomputed for the whole moved subtree, because a
       // move is the one operation that changes the answer without touching any pause.
+      // Guarded by the same reasoning as the create path.
       const movedAt = new Date();
-      const affected = await this.#pauses.recompute(q, id, movedAt);
-      await this.#states?.reevaluate(q, affected, movedAt, {
-        message: 'moved under a paused parent',
-      });
+      if (await this.#pauses.anyActive(q, movedAt)) {
+        const affected = await this.#pauses.recompute(q, id, movedAt);
+        await this.#states?.reevaluate(q, affected, movedAt, {
+          message: 'moved under a paused parent',
+        });
+      }
 
       await this.#audit.record(
         q,

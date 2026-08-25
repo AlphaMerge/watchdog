@@ -1,4 +1,3 @@
-import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -97,6 +96,42 @@ interface Slot {
  * running is skipped and counted (`WORKFLOW.MD` §3), which costs nothing to decide because the
  * wheel has already scheduled the next one.
  */
+/**
+ * How many checks may run at once when nothing says otherwise.
+ *
+ * **Not derived from the core count, deliberately.** It used to be `availableParallelism() - 1`,
+ * on the reasoning that one core should be left for the event loop that owns the wheel, the
+ * transport and the spool. That is right about the event loop and wrong about the pool: a check
+ * is not CPU work. ICMP, SNMP and HTTP checks spend nearly all of their time awaiting a packet,
+ * so a worker holds a *slot* while using almost no CPU, and the number of cores has nothing to
+ * do with how many packets are in the air.
+ *
+ * `P-15` measured what governs it instead (`docs/findings/2026-08-26-scheduler-benchmark.md`).
+ * The wheel dispatches **once a second, handing over a whole second's batch at once** — at the
+ * v1 target of 5,000 sensors on a 60-second interval that is 83 sensors in one go. So the queue
+ * drains in tranches of `ceil(batch / slots)`, and the wait a sensor sees is
+ * `(tranches - 1) x checkDuration`. The measured curve is exactly that shape: 32 slots is three
+ * tranches and a p95 of 405 ms; 48 is two and 213 ms; 128 takes the whole batch at once and 7 ms.
+ *
+ * 48 is where that stops being worth paying for. 64 measured no better and cost 38 MB more; 128
+ * bought 200 ms for another 550 MB and its p99 was unstable at 510 ms; 256 was worse everywhere,
+ * with the wheel's own lag rising to 676 ms as the threads contended with its timer. The old
+ * default of 7 refused 21% of checks and delayed the rest by a p95 of **16 seconds**, against an
+ * exit criterion of one.
+ *
+ * The tie-break against 32 is how slow a check mix survives it: three tranches breaches the
+ * one-second budget at about a 500 ms check, two at about a second. Real HTTP checks routinely
+ * exceed 500 ms.
+ *
+ * It costs about 6.5 MB a worker — roughly 290 MB at this size, whether the probe is watching
+ * five thousand sensors or fifty. That is the price of a fixed default, and `P-18` is the task
+ * for making it demand-driven so a small probe stops paying for slots it never uses. Until then,
+ * `probe.workerPoolSize` is the setting.
+ */
+export function defaultPoolSize(): number {
+  return 48;
+}
+
 export class CheckPool {
   readonly #logger: Logger;
   readonly #size: number;
@@ -128,11 +163,7 @@ export class CheckPool {
 
   constructor(options: CheckPoolOptions) {
     this.#logger = options.logger.child({ component: 'check-pool' });
-    // One core left for the event loop that owns the wheel, the transport and the spool.
-    this.#size =
-      options.size !== undefined && options.size > 0
-        ? options.size
-        : Math.max(1, availableParallelism() - 1);
+    this.#size = options.size !== undefined && options.size > 0 ? options.size : defaultPoolSize();
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#registryModule =

@@ -409,9 +409,51 @@ because each is a decision rather than a defect:
       utilisation, connection state, spool depth, version skew.
 - [ ] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13
       exposed for external scraping too.
-- [ ] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run:
-      **p95 dispatch jitter < 1 s on 8 cores**. Results recorded in the repo. _Architecture
-      go/no-go gate — do not proceed to Phase 3 without it._
+- [ ] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run: **p95
+      dispatch jitter < 1 s on 8 cores**. Results recorded in the repo. _Architecture go/no-go
+      gate._ **The sustained hour is outstanding**; everything below was measured over 30-second
+      points, which is enough to choose a pool size and not enough to close a gate whose whole
+      point is that it is sustained.
+
+      **P-15 so far: go, with one number changed.**
+      `docs/findings/2026-08-26-scheduler-benchmark.md`, reproduced by
+      `packages/probe/test/perf/scheduler-benchmark.test.ts`.
+
+      Jitter is measured **end to end** — due to check-started — because a sensor whose check sat
+      in a queue for four seconds fired four seconds late whatever the wheel did. The checks
+      sleep rather than burn CPU, because that is what a real check does.
+
+      **The wheel is not the bottleneck at any pool size that matters**: its own p95 lag stayed
+      between 4 and 10 ms against a 1,000 ms budget, including in the runs where end-to-end
+      jitter was sixteen seconds. `ADR-001` Decision 2 is vindicated against a real timer and
+      real load, not just `P-01`'s simulated clock.
+
+      **The pool default was wrong by a factor of sixteen**, and this is what found it. It was
+      `availableParallelism() - 1` — a CPU-shaped number for work that is not CPU-bound — which
+      refused 21% of checks and delayed the rest by a p95 of **15.8 s**. Changed to a flat 48,
+      chosen from a measured sweep, and *not* derived from the core count: the governing quantity
+      is the **dispatch batch**, because the wheel fires once a second and hands over a whole
+      second's worth at once. 83 sensors in one go, draining in tranches of
+      `ceil(batch / slots)`. 48 is two tranches; 64 measured no better for 38 MB more; 128 bought
+      200 ms for another 550 MB with an unstable p99; 256 was worse everywhere, the wheel's own
+      lag rising to 676 ms as the threads contended with its timer.
+
+      Left open, with the measurement behind them: `P-18` (demand-driven pool sizing — a fixed 48
+      costs ~290 MB whether the probe watches 5,000 sensors or 50) and the fact that our own
+      `icmp.ping` is a three-second check, which at the v1 target would want 250 slots. Neither
+      is urgent; both are what Phase 6 walks into.
+- [ ] **P-18 — Demand-driven worker pool sizing** · M · P-15 · Grow the check pool when the queue
+      is persistently non-empty and shrink it when idle, within a configured bound, so a probe
+      pays for the slots its workload needs rather than for a fixed default. `P-15` measured the
+      cost of getting it wrong in both directions: 7 slots refused 21% of checks and delayed the
+      rest by 15.8 s, while a flat 48 costs ~290 MB of resident memory on a probe watching fifty
+      sensors. The sweep in `scheduler-benchmark.test.ts` is the harness to prove it against.
+- [ ] **P-19 — Bulk provisioning path** · M · S-16, D-04 · Create a subtree in one request rather
+      than one object per request. `docs/findings/2026-08-25-tree-build-measurement.md` records
+      the serial 5,000-object build eroding from 21.0 s to 29.3 s across Phase 3, recovered to
+      23.7 s by guarding `M-08`'s ancestor query. What remains is per-object work that is
+      genuinely needed (`M-02`'s `sensor_runtime` row); the answer is to stop paying an HTTP
+      request and a transaction for each of five thousand objects, which discovery needs anyway.
 
 ## Phase 3 — State machine
 

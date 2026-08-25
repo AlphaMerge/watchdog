@@ -2,8 +2,9 @@ import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
+import { availableParallelism } from 'node:os';
 import type { CheckResult } from '@ms/shared';
-import { CheckPool, type ResultMeta } from '../src/runner/index.js';
+import { CheckPool, defaultPoolSize, type ResultMeta } from '../src/runner/index.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -263,5 +264,48 @@ describe('check pool', () => {
     assert.equal(entry.result.outcome, 'error');
     assert.match(entry.result.message, /test\.nonexistent/, 'names the type it could not find');
     assert.deepEqual(entry.result.channels, [], 'a failed check records no channel values');
+  });
+});
+
+/**
+ * The number `P-15` changed, and why.
+ *
+ * A value test alone would pass just as happily on the old default; what these pin is the
+ * *reasoning* — that the pool is sized by checks in flight rather than by cores, which is the
+ * thing the benchmark disproved and the thing a later refactor could quietly undo.
+ */
+describe('the default pool size', () => {
+  it('is not derived from the core count', () => {
+    // The thing `P-15` disproved. The old default was `cores - 1`, which is what a CPU-bound
+    // pool wants; a check holds a slot while awaiting a packet and uses almost no CPU, so the
+    // machine's width has nothing to do with how many packets are in the air.
+    assert.notEqual(defaultPoolSize(), Math.max(1, availableParallelism() - 1));
+    assert.equal(
+      defaultPoolSize(),
+      new CheckPool({ logger: silent, onResult: () => undefined }).size,
+      'and the pool actually uses it',
+    );
+  });
+
+  it('drains the v1 target’s dispatch batch in at most two tranches', () => {
+    // The arithmetic the default exists to satisfy, and the shape the sweep measured. The wheel
+    // hands over a whole second at once — 5,000 sensors on a 60-second interval is 83 — and the
+    // wait a sensor sees is (tranches - 1) x check duration. Two tranches keeps a one-second
+    // budget intact up to a check of about a second; three breaches it at about 500 ms, which
+    // an ordinary HTTP check exceeds.
+    const batch = Math.ceil(5_000 / 60);
+    const tranches = Math.ceil(batch / defaultPoolSize());
+    assert.ok(
+      tranches <= 2,
+      `${String(defaultPoolSize())} slots leaves ${String(tranches)} tranches for a batch of ` +
+        String(batch),
+    );
+  });
+
+  it('does not pay for slots the measurement showed were not worth it', () => {
+    // 64 measured no better than 48 and cost 38 MB more; 128 bought 200 ms for another 550 MB
+    // with an unstable p99; 256 was worse everywhere. A default that drifts upward without a
+    // measurement behind it is how a probe quietly starts needing a gigabyte.
+    assert.ok(defaultPoolSize() <= 64);
   });
 });

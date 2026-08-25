@@ -1,4 +1,4 @@
-export { CheckPool } from './pool.js';
+export { CheckPool, defaultPoolSize } from './pool.js';
 export type { CheckPoolOptions, PoolStats, SubmitOutcome } from './pool.js';
 export type {
   CheckContext,

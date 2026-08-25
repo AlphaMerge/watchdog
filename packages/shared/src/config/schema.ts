@@ -180,7 +180,14 @@ export interface ProbeConfig {
      * than by batch size (R-03).
      */
     spoolCatchUpMaxRows: number;
-    /** 0 means "derive from CPU count". */
+    /**
+     * Checks that may run at once. 0 derives it from the machine.
+     *
+     * Slots, not cores: a check spends nearly all of its time awaiting a packet, so this bounds
+     * *concurrency* rather than CPU. The derived default is four per core with a floor of 16,
+     * measured by `P-15` — see `docs/findings/2026-08-26-scheduler-benchmark.md` for what the
+     * old core-count default cost, and for the point where more workers start to hurt.
+     */
     workerPoolSize: number;
     /**
      * Checks that may wait for a worker before further ones are refused.

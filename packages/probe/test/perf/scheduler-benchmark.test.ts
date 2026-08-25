@@ -1,0 +1,329 @@
+import { strict as assert } from 'node:assert';
+import { availableParallelism } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { after, describe, it } from 'node:test';
+import { pino } from 'pino';
+import { CheckPool, defaultPoolSize } from '../../src/runner/pool.js';
+import { phaseFor, TimingWheel } from '../../src/scheduler/wheel.js';
+
+/**
+ * The architecture go/no-go gate (`P-15`).
+ *
+ * `PLAN.md` Phase 2's exit criterion, and `CLAUDE.md`'s instruction not to build Phase 3 on an
+ * unmeasured scheduler: **5,000 sensors at 60 s on 8 cores, p95 dispatch jitter under 1 s,
+ * sustained**. `WORKFLOW.MD §3` states the same constraint in the form that matters to an
+ * operator — "a 60-second sensor must fire every 60 seconds ±1 s under full load".
+ *
+ * **Dispatch jitter is measured end to end**, from the instant a sensor was *due* to the instant
+ * its check actually began running in a worker. Two things contribute and both are real:
+ *
+ *   - the wheel firing its tick late, and
+ *   - the check waiting for a free worker once it was submitted.
+ *
+ * Measuring only the first would be measuring a `setTimeout`, which is not what the criterion is
+ * about: a sensor whose check sat in a queue for four seconds fired four seconds late, whatever
+ * the wheel did. The two are also reported separately, because they have completely different
+ * fixes — one is a timer problem and the other is a pool-sizing problem.
+ *
+ * **The checks sleep rather than burn CPU**, because that is what a real check does. ICMP, SNMP
+ * and HTTP checks spend nearly all of their time waiting for a packet, and a worker holding a
+ * slot while it waits is the actual constraint on this system — not arithmetic. A CPU-burning
+ * check would model nothing that exists and would make the pool look CPU-bound when it is not.
+ *
+ * Runs a short soak by default so it can live in the suite. `MS_BENCH_MINUTES=60` runs the
+ * criterion's full hour; the committed measurement below was taken that way.
+ */
+
+const silent = pino({ level: 'silent' });
+const FIXTURES = fileURLToPath(new URL('../support/check-fixtures.js', import.meta.url));
+
+/** The criterion, verbatim. */
+const SENSORS = 5_000;
+const INTERVAL_SECONDS = 60;
+const P95_BUDGET_MS = 1_000;
+const REQUIRED_CORES = 8;
+
+/**
+ * How long a modelled check takes.
+ *
+ * 200 ms is an ordinary SNMP round trip on a LAN and a fast HTTP check. It is also the number
+ * that decides everything else: 5,000 sensors on a 60-second interval is 83 checks a second, so
+ * 83 × 0.2 = **17 checks in flight at any moment**. A pool smaller than that cannot keep up, no
+ * matter how precise the wheel is.
+ */
+const CHECK_MS = 200;
+
+const minutes = Number(process.env['MS_BENCH_MINUTES'] ?? '1.5');
+const durationMs = minutes * 60_000;
+
+interface Sample {
+  /** Due → check started, in milliseconds. The criterion's number. */
+  jitterMs: number;
+  /** The wheel's own contribution: due → the tick that dispatched it. */
+  wheelMs: number;
+  /** The pool's: submitted → a worker picked it up. */
+  waitMs: number;
+}
+
+function percentile(sorted: number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.floor(fraction * sorted.length));
+  return Number((sorted[index] ?? 0).toFixed(1));
+}
+
+interface Run {
+  label: string;
+  checkMs: number;
+  poolSize: number;
+  /**
+   * Resident memory the pool cost, in MB.
+   *
+   * Worker threads share the process's RSS, so the difference across `pool.start()` is the whole
+   * of what N workers cost — and it is the other half of the sizing decision. Jitter says how
+   * many slots the workload wants; this says what they are worth paying.
+   */
+  rssMb: number;
+  dispatched: number;
+  completed: number;
+  deferred: number;
+  refused: number;
+  jitter: { p50: number; p95: number; p99: number; max: number };
+  wheel: { p50: number; p95: number; p99: number; max: number };
+  wait: { p50: number; p95: number; p99: number; max: number };
+}
+
+/**
+ * One sustained run: a real wheel, a real pool, five thousand sensors.
+ *
+ * Nothing here is a stub. The wheel is armed on its own timer and the pool spawns real worker
+ * threads that import a real registry module; the only synthetic part is what the check does
+ * when it gets there, and it sleeps for the reason above.
+ */
+async function soak(options: {
+  label: string;
+  poolSize: number;
+  queueMaxLength: number;
+  checkMs: number;
+  forMs: number;
+}): Promise<Run> {
+  const { label, poolSize, queueMaxLength, checkMs, forMs } = options;
+  const pool = new CheckPool({
+    logger: silent,
+    size: poolSize,
+    queueMaxLength,
+    registryModule: FIXTURES,
+    onResult: (result, meta) => {
+      const wheelMs = lateBySensor.get(result.sensorId);
+      if (wheelMs === undefined) return;
+      lateBySensor.delete(result.sensorId);
+      // Due -> dispatched, plus dispatched -> a worker picked it up. Nothing about how long the
+      // check itself took: a slow check is not a late one.
+      samples.push({ jitterMs: wheelMs + meta.waitMs, wheelMs, waitMs: meta.waitMs });
+    },
+  });
+
+  const samples: Sample[] = [];
+  /** How late each in-flight sensor's tick was, by sensor id. */
+  const lateBySensor = new Map<number, number>();
+
+  // The wheel takes its epoch in its constructor, so this is that instant to within the
+  // microseconds it takes to call the constructor — three orders of magnitude under the budget
+  // being measured. Tick N is ideally due at `epoch + N seconds`; everything after that is late.
+  const epochNs = process.hrtime.bigint();
+  const wheel = new TimingWheel({
+    logger: silent,
+    onDue: (due, tick) => {
+      const idealNs = epochNs + BigInt(tick) * 1_000_000_000n;
+      const wheelMs = Number(process.hrtime.bigint() - idealNs) / 1e6;
+      for (const sensorId of due) {
+        lateBySensor.set(sensorId, wheelMs);
+        pool.submit({
+          sensorId,
+          sensorType: 'test.slow',
+          target: { host: '192.0.2.1', ipVersion: 'auto' },
+          params: { delayMs: checkMs },
+          timeoutMs: 30_000,
+        });
+      }
+    },
+  });
+
+  for (let id = 1; id <= SENSORS; id += 1) {
+    wheel.add({ id, intervalSeconds: INTERVAL_SECONDS });
+  }
+  // The phase spread is what stops five thousand sensors firing on the same second. Asserted
+  // rather than assumed: without it this measures a stampede and nothing else.
+  const perSecond = new Map<number, number>();
+  for (let id = 1; id <= SENSORS; id += 1) {
+    const phase = phaseFor(id, INTERVAL_SECONDS);
+    perSecond.set(phase, (perSecond.get(phase) ?? 0) + 1);
+  }
+  const busiest = Math.max(...perSecond.values());
+  assert.ok(
+    busiest < SENSORS / 10,
+    `the phase spread put ${String(busiest)} sensors on one second; this would measure a stampede`,
+  );
+
+  const rssBefore = process.memoryUsage().rss;
+  await pool.start();
+  // After the workers have imported their registry and settled, not the instant they spawned.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const rssMb = Number(((process.memoryUsage().rss - rssBefore) / (1024 * 1024)).toFixed(1));
+  wheel.start();
+  const startedAt = process.hrtime.bigint();
+  await new Promise((resolve) => setTimeout(resolve, forMs));
+  wheel.stop();
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+  // Let what is in flight finish, so the last interval's checks are not counted as missing.
+  await new Promise((resolve) => setTimeout(resolve, checkMs * 4));
+  const poolStats = pool.stats();
+  const wheelStats = wheel.stats();
+  await pool.stop();
+
+  const at = (pick: (sample: Sample) => number) => {
+    const sorted = samples.map(pick).sort((a, b) => a - b);
+    return {
+      p50: percentile(sorted, 0.5),
+      p95: percentile(sorted, 0.95),
+      p99: percentile(sorted, 0.99),
+      max: percentile(sorted, 1),
+    };
+  };
+
+  process.stdout.write(
+    `\n    ${label}: ${String(Math.round(elapsedMs / 1000))}s, pool ${String(poolStats.size)}, ` +
+      `${String(samples.length)} checks completed of ${String(wheelStats.dispatched)} dispatched, ` +
+      `${String(poolStats.refused)} refused\n`,
+  );
+
+  return {
+    label,
+    checkMs,
+    rssMb,
+    poolSize: poolStats.size,
+    dispatched: wheelStats.dispatched,
+    completed: samples.length,
+    deferred: poolStats.deferred,
+    refused: poolStats.refused,
+    jitter: at((sample) => sample.jitterMs),
+    wheel: at((sample) => sample.wheelMs),
+    wait: at((sample) => sample.waitMs),
+  };
+}
+
+function report(runs: Run[]): string {
+  const row = (run: Run): string =>
+    `      ${run.label.padEnd(26)} ${String(run.checkMs).padStart(4)} ms check  ` +
+    `pool ${String(run.poolSize).padStart(3)}  ` +
+    `jitter p50 ${run.jitter.p50.toFixed(0).padStart(5)} ms  ` +
+    `p95 ${run.jitter.p95.toFixed(0).padStart(6)} ms  ` +
+    `p99 ${run.jitter.p99.toFixed(0).padStart(6)} ms  ` +
+    `(wheel p95 ${run.wheel.p95.toFixed(0)} ms, wait p95 ${run.wait.p95.toFixed(0)} ms)  ` +
+    `rss +${run.rssMb.toFixed(0).padStart(4)} MB  refused ${String(run.refused)}`;
+  return runs.map(row).join('\n');
+}
+
+describe('scheduler benchmark (P-15)', () => {
+  const runs: Run[] = [];
+
+  after(() => {
+    process.stdout.write(
+      `\n    measured: ${String(SENSORS)} sensors at ${String(INTERVAL_SECONDS)}s, ` +
+        `${String(CHECK_MS)} ms checks, ${String(availableParallelism())} cores, ` +
+        `${String(minutes)} minutes per run\n` +
+        `    dispatch jitter is due -> check started; the budget is p95 under ` +
+        `${String(P95_BUDGET_MS)} ms\n${report(runs)}\n`,
+    );
+  });
+
+  it('has the cores the criterion is stated for', () => {
+    // Not a skip: a number measured on four cores is not the number the gate asks for, and
+    // recording it as though it were would be worse than not measuring at all.
+    assert.ok(
+      availableParallelism() >= REQUIRED_CORES,
+      `the criterion is stated for ${String(REQUIRED_CORES)} cores; this machine has ` +
+        String(availableParallelism()),
+    );
+  });
+
+  it('sustains 5,000 sensors with a pool sized for the work in flight', async () => {
+    // The gate, measured against the size an operator actually gets. Hardcoding a number here
+    // would measure a configuration nobody runs; `defaultPoolSize()` is what `P-15` set and
+    // what the sweep below chose. The queue is deliberately generous, so a refusal cannot hide
+    // the delay this is measuring.
+    const run = await soak({
+      label: `shipped default (${String(defaultPoolSize())})`,
+      poolSize: 0,
+      queueMaxLength: 50_000,
+      checkMs: CHECK_MS,
+      forMs: durationMs,
+    });
+    runs.push(run);
+
+    assert.ok(run.completed > 0, 'checks ran');
+    assert.equal(run.refused, 0, 'nothing was refused, so the queue is not hiding a delay');
+    assert.ok(
+      run.jitter.p95 < P95_BUDGET_MS,
+      `p95 dispatch jitter was ${run.jitter.p95.toFixed(0)} ms, budget ${String(P95_BUDGET_MS)} ms`,
+    );
+  });
+
+  it('shows what the old core-count default did with the same load', async () => {
+    // `availableParallelism() - 1`, which is what this shipped until `P-15` measured it, with
+    // the shipped queue length so the refusals are the real ones. Kept as a regression guard
+    // and as the evidence for the change: a number nobody can reproduce is a number nobody
+    // should have acted on.
+    const run = await soak({
+      label: `old default (${String(Math.max(1, availableParallelism() - 1))})`,
+      poolSize: Math.max(1, availableParallelism() - 1),
+      queueMaxLength: 1_000,
+      checkMs: CHECK_MS,
+      forMs: Math.min(durationMs, 90_000),
+    });
+    runs.push(run);
+    assert.ok(run.completed > 0, 'checks ran');
+    assert.ok(
+      run.jitter.p95 > P95_BUDGET_MS,
+      'the old default failed the criterion; if this passes, the model no longer reflects the ' +
+        'workload and the default should be reconsidered rather than trusted',
+    );
+  });
+
+  it('sweeps pool sizes, which is how the default was chosen', async (t) => {
+    // Off by default: seven sizes is three and a half minutes, and the answer only changes when
+    // the workload does. `MS_BENCH_SWEEP=1` runs it, and the curve is what
+    // `docs/findings/2026-08-26-scheduler-benchmark.md` records.
+    if (process.env['MS_BENCH_SWEEP'] !== '1') {
+      t.skip('set MS_BENCH_SWEEP=1 to run the pool-size sweep');
+      return;
+    }
+    for (const poolSize of [7, 16, 24, 32, 48, 64, 128, 256]) {
+      runs.push(
+        await soak({
+          label: `sweep pool ${String(poolSize)}`,
+          poolSize,
+          queueMaxLength: 50_000,
+          checkMs: CHECK_MS,
+          forMs: 30_000,
+        }),
+      );
+    }
+  });
+
+  it('shows what the sensor type we actually ship would need', async () => {
+    // `icmp.ping` sends four packets a second apart, so a real one takes about three seconds.
+    // 83 a second at 3 s each is 250 in flight — an order of magnitude more than the 200 ms
+    // model above, and the number that decides whether a worker-thread pool is the right shape
+    // for I/O-bound checks at all. Short, and diagnostic.
+    const run = await soak({
+      label: 'icmp.ping-shaped',
+      poolSize: 256,
+      queueMaxLength: 50_000,
+      checkMs: 3_000,
+      forMs: Math.min(durationMs, 90_000),
+    });
+    runs.push(run);
+    assert.ok(run.completed > 0, 'checks ran');
+  });
+});

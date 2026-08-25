@@ -209,7 +209,8 @@ describe(
           `${rate(serialMs).padStart(18)}  ${headroom(serialMs).padStart(10)}\n` +
           `      8 in flight     ${(concurrentMs / 1_000).toFixed(1).padStart(5)} s  ` +
           `${rate(concurrentMs).padStart(18)}  ${headroom(concurrentMs).padStart(10)}\n` +
-          `      a create is 1.55 ms of SQL; the rest of each object is the request layer\n`,
+          `      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row\n` +
+          `      (M-02) and a guard against a paused ancestor (M-08) — see P-19\n`,
       );
 
       assert.ok(
