@@ -1,0 +1,277 @@
+# Sensor state and pause precedence
+
+The tables `M-02` onwards are built against, written before the code on purpose (`M-01`).
+`PLAN.md` names precedence bugs between the four pause sources as Phase 3's principal risk, and
+the exit criterion is a property test proving no sequence of events reaches an undefined state.
+Neither is achievable against a state machine whose rules only exist in its own implementation.
+
+Reviewed against [`WORKFLOW.MD §4`](WORKFLOW.MD) (state machine) and `§5` (dependency and pause).
+Where this document is more specific than `WORKFLOW.MD`, it is filling a gap that would otherwise
+be filled by whoever wrote the code first; those places are marked **decided here**.
+
+---
+
+## 1. Vocabulary
+
+Both enums already exist in the database, from migration `003`. This document does not invent
+vocabulary; it says what the values mean and when each is used.
+
+### States — `sensor_state_kind`
+
+| State                | Meaning                                                                  | v1  |
+| -------------------- | ------------------------------------------------------------------------ | --- |
+| `unknown`            | No current reading. Newly created, just resumed, or its probe is gone.   | yes |
+| `up`                 | Last scan succeeded and every channel is within its limits.              | yes |
+| `warning`            | A warning limit is breached, or the first consecutive scan failure.      | yes |
+| `down`               | An error limit is breached, or the failure policy has been exhausted.    | yes |
+| `down_acknowledged`  | `down`, with notifications suppressed by an operator. Still scanning.    | yes |
+| `paused`             | Monitoring suppressed. No scans, no notifications, no uptime accrual.    | yes |
+| `unusual`            | Reading deviates from a historic baseline.                              | V2  |
+| `down_partial`       | Down on some cluster nodes and not others.                              | V2  |
+
+`unusual` and `down_partial` are `[V2]`. The type accommodates them so the column never has to
+change; **no v1 transition produces either**, and a test asserts that.
+
+### Causes — `sensor_state_cause`
+
+Every state change records why. Without it a history tab says a sensor went Down and leaves the
+operator to guess whether that was the target, a threshold someone edited, or a dependency.
+
+| Cause        | Set by                                                          |
+| ------------ | --------------------------------------------------------------- |
+| `scan`       | The check itself succeeded or failed                            |
+| `limit`      | A channel crossed a configured limit                            |
+| `lookup`     | A channel's value mapped to a state through a lookup            |
+| `user`       | A person: manual pause, resume, acknowledgement                 |
+| `schedule`   | A schedule's inactive window                                    |
+| `dependency` | A master object went Down                                       |
+| `parent`     | An ancestor was paused, cascading down                          |
+| `probe`      | The probe owning this sensor is unreachable                     |
+| `simulated`  | An operator forced an error to test a notification chain        |
+
+---
+
+## 2. How a state is computed
+
+Not a flat matrix of state × event. The inputs are layered, and a layered model is both what the
+system actually does and far harder to get subtly wrong than an 8 × 15 grid nobody can check by
+eye. Evaluated **in this order**, first match wins:
+
+| # | Condition                             | Result              | Cause                            |
+| - | ------------------------------------- | ------------------- | -------------------------------- |
+| 1 | Any pause source active               | `paused`            | the first active source (§3)     |
+| 2 | Simulated error set                   | `down`              | `simulated`                      |
+| 3 | Owning probe unreachable              | `unknown`           | `probe`                          |
+| 4 | No reading since creation or resume   | `unknown`           | `scan`                           |
+| 5 | Otherwise                             | worst of §2.1, §2.2 | whichever produced the worst     |
+
+**Pause beats everything**, including a simulated error and a lost probe: it is an explicit
+instruction to stop monitoring, and a paused sensor that reported Down because its probe went
+away would be an alarm from something an operator switched off. *Decided here* — `WORKFLOW.MD`
+does not order pause against probe loss.
+
+**A lost probe is `unknown`, not `down`.** `WORKFLOW.MD §12` is explicit: we do not know whether
+the target is up, and saying Down would be a claim the system cannot support. One alarm comes
+from Probe Health (`R-05`), not from every sensor behind it.
+
+### 2.1 Query state — did the check run?
+
+From the result's `outcome`, with the two-step rule (`M-03`).
+
+| Consecutive failures | State     | Cause  |
+| -------------------- | --------- | ------ |
+| 0 (last scan ok)     | `up`      | `scan` |
+| 1                    | `warning` | `scan` |
+| 2 or more            | `down`    | `scan` |
+
+Per-sensor policy: `immediate` makes the first failure `down`; `warn N` holds `warning` for N
+consecutive failures before `down`. Default N = 1, giving the table above. A successful scan
+resets the counter to zero.
+
+### 2.2 Channel state — were the readings acceptable?
+
+From limits (`M-04`) and lookups (`M-06`). **Immediate**: the two-step rule does not apply, so a
+channel crossing an error limit is `down` on the very first sample (`WORKFLOW.MD §4` rule 2).
+
+| Worst channel                | State     | Cause             |
+| ---------------------------- | --------- | ----------------- |
+| Any channel over its error limit   | `down`    | `limit` or `lookup` |
+| Any channel over its warning limit | `warning` | `limit` or `lookup` |
+| All channels within limits         | `up`      | `scan`            |
+
+### 2.3 Combining them
+
+`state = worst(query, channel)` where `down` > `warning` > `up`. The cause is taken from
+whichever side produced the worst state; when both produce it, the **channel** cause wins,
+because "the response time exceeded 500 ms" tells an operator more than "the scan failed".
+*Decided here.*
+
+**A failed scan has no channel state.** A check that failed records no channel values at all
+(CLAUDE.md: no-data is not zero), so there is nothing to compare against a limit and §2.2 is not
+evaluated — the state is the query state alone. Carrying the *previous* channel state forward
+would keep a stale limit breach alive across an outage and attribute an outage to a threshold.
+*Decided here.*
+
+### 2.4 Acknowledgement
+
+Applied last, and only to `down`:
+
+| Situation                                                   | State               | Cause  |
+| ----------------------------------------------------------- | ------------------- | ------ |
+| Computed state is `down` and an acknowledgement is active   | `down_acknowledged` | `user` |
+| Computed state is anything else                             | that state          | as-is  |
+
+- **Suppresses notifications, not monitoring** (`WORKFLOW.MD §4` rule 4). The sensor keeps
+  scanning, and its readings keep being stored.
+- **Cleared by** recovery to any non-`down` state, by expiry, and by resume (rule 5).
+- On expiry while still failing, the state returns to `down` with cause `user` — the change an
+  operator needs to see is that the acknowledgement lapsed, not that the target is still down.
+  *Decided here.*
+
+---
+
+## 3. Pause precedence
+
+Four sources, evaluated in this order every tick (`WORKFLOW.MD §5`):
+
+| # | Source       | Cause        | Set by                                        | Cleared by                             |
+| - | ------------ | ------------ | --------------------------------------------- | -------------------------------------- |
+| 1 | Parent       | `parent`     | An ancestor being paused, cascading down      | That ancestor resuming                 |
+| 2 | Dependency   | `dependency` | A master object reaching `down`               | Master recovering, plus the delay      |
+| 3 | Schedule     | `schedule`   | A schedule's inactive window                  | The window ending                      |
+| 4 | Manual       | `user`       | A person, indefinitely / timed / until a date | That person, or the timer expiring     |
+
+### The rule
+
+The four are **independent flags, not a priority chain**. A sensor is `paused` if *any* is set.
+Precedence decides only which cause is *reported* — the first active source in the order above.
+
+This is the distinction the risk in `PLAN.md` is about. If precedence were a chain, resuming the
+highest-precedence source would resume the sensor; because they are a set, it does not. A sensor
+paused by both its parent and by hand stays paused when the parent resumes, and the reported
+cause simply changes from `parent` to `user`.
+
+| Parent | Dependency | Schedule | Manual | State     | Cause        |
+| ------ | ---------- | -------- | ------ | --------- | ------------ |
+| –      | –          | –        | –      | not paused | —           |
+| –      | –          | –        | ✓      | `paused`  | `user`       |
+| –      | –          | ✓        | –      | `paused`  | `schedule`   |
+| –      | –          | ✓        | ✓      | `paused`  | `schedule`   |
+| –      | ✓          | –        | –      | `paused`  | `dependency` |
+| –      | ✓          | –        | ✓      | `paused`  | `dependency` |
+| –      | ✓          | ✓        | –      | `paused`  | `dependency` |
+| –      | ✓          | ✓        | ✓      | `paused`  | `dependency` |
+| ✓      | any        | any      | any    | `paused`  | `parent`     |
+
+### Resume
+
+- **Only the object that was directly paused can be resumed** (`WORKFLOW.MD §5`). Resuming a
+  child that is paused by cascade is refused, with a reason — not silently ignored.
+- Resuming clears **that source only**. The others are unaffected.
+- When the last source clears, the sensor becomes `unknown` with cause `scan`, not its previous
+  state: it awaits its next scan, and reporting a state measured before the pause would be
+  reporting something the system has not checked since.
+- Resuming clears any acknowledgement (`WORKFLOW.MD §4` rule 5).
+
+### Dependency, specifically
+
+- **Only a genuine `down` triggers dependency pausing.** A master that is paused — manually, by
+  schedule, by its own parent — does *not* pause its dependents by dependency. The ordinary
+  hierarchical cascade still applies if the master happens to be their ancestor, which it usually
+  is not.
+- `down_acknowledged` **does** trigger it: the target is still down, and an acknowledgement is a
+  statement about notifications, not about the outage. *Decided here.*
+- **The master keeps scanning while its dependents are paused.** Nothing else can detect
+  recovery. PRTG had this bug through v19.1.
+- Recovery waits the configured **delay after dependency ends** before resuming dependents, so a
+  flapping link does not generate an alarm storm every time it bounces.
+- The cascade is **recursive**: dependents of a paused dependent also pause.
+
+---
+
+## 4. Transitions
+
+Derived from §2 and §3 rather than authored separately — two hand-maintained lists disagree
+eventually, and the one that is wrong is always the one not under test. Listed here so a reviewer
+can check the model against `WORKFLOW.MD §4`'s diagram.
+
+| From                | To                  | Trigger                                            | Cause                  |
+| ------------------- | ------------------- | -------------------------------------------------- | ---------------------- |
+| _(created)_         | `unknown`           | Sensor created                                     | `scan`                 |
+| `unknown`           | `up`                | First successful scan, limits clear                | `scan`                 |
+| `unknown`           | `warning`           | First scan fails, or first reading breaches warning | `scan` / `limit`      |
+| `unknown`           | `down`              | First reading breaches an error limit              | `limit` / `lookup`     |
+| `up`                | `warning`           | Scan failed (1st), or a warning limit breached     | `scan` / `limit`       |
+| `up`                | `down`              | An error limit breached, or `immediate` policy     | `limit` / `scan`       |
+| `warning`           | `down`              | Failure policy exhausted, or an error limit        | `scan` / `limit`       |
+| `warning`           | `up`                | Successful scan, limits clear                      | `scan`                 |
+| `down`              | `warning`           | Recovered to a warning limit only                  | `limit`                |
+| `down`              | `up`                | Successful scan, limits clear                      | `scan`                 |
+| `down`              | `down_acknowledged` | Operator acknowledges                              | `user`                 |
+| `down_acknowledged` | `down`              | Acknowledgement expired, still failing             | `user`                 |
+| `down_acknowledged` | `up` / `warning`    | Recovered                                          | `scan` / `limit`       |
+| any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
+| `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
+| any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
+| any but `paused`    | `down`              | Simulated error set                                | `simulated`            |
+
+**Not in v1:** every transition into or out of `unusual` and `down_partial`.
+
+### 4.1 What this adds to the diagram in `WORKFLOW.MD §4`
+
+Every edge in that diagram appears above. These do not appear in it, and are listed so the
+review is auditable rather than asserted — each is required by a rule stated elsewhere in the
+same documents, which is why the diagram not drawing it is an omission rather than a decision.
+
+| Added                              | Required by                                                        |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `unknown` → `down`                 | §4 rule 2: limit-driven states are immediate, including the first reading |
+| `down` → `warning`                 | Recovery is not all-or-nothing; a sensor can improve without clearing |
+| `down_acknowledged` → `warning`    | Same, and the acknowledgement clears either way (§4 rule 5)         |
+| `unknown` → `paused`               | The diagram pauses only from Up/Warning/Down; a sensor can be paused before its first scan |
+| `down_acknowledged` → `paused`     | Same                                                                |
+| any → `unknown` on probe loss      | §12: a probe's sensors go Unknown, not Down — we do not know        |
+| any → `down` on simulated error    | `PLAN.md` Phase 3: a simulated error state for testing chains       |
+
+Nothing in the diagram is missing from the table.
+
+---
+
+## 5. Invariants
+
+What `M-02`'s property test asserts. Each is here because it is cheap to state and expensive to
+discover later.
+
+1. **Totality.** Every combination of inputs produces exactly one state. No sequence of events
+   reaches an undefined state — Phase 3's exit criterion.
+2. **Determinism.** The same inputs produce the same state and the same cause, in any order of
+   evaluation.
+3. **No v1 path reaches `unusual` or `down_partial`.**
+4. **Pause dominates.** If any pause source is active the state is `paused`, whatever else is
+   true — including a lost probe, a simulated error and an active acknowledgement.
+5. **Pause is a set, not a chain.** Clearing one source never resumes a sensor that another
+   source still holds.
+6. **Cause is always attributable.** No state change is recorded without a cause that names
+   something an operator can act on.
+7. **`down_acknowledged` implies down.** It is only ever reachable from a computed `down`.
+8. **Resume yields `unknown`.** Never the pre-pause state.
+9. **A failed scan produces no channel-derived state**, because it produced no channel values.
+10. **Uptime comes from these transitions, not from samples** (CLAUDE.md), so every change must
+    be recorded — including one whose state is the same as the last if its *cause* differs.
+
+---
+
+## 6. Left for the tasks that follow
+
+Named so they are decisions rather than omissions:
+
+- **`M-03`** — the retry policy's exact shape: `immediate`, `warn N intervals`, and whether N is
+  counted in scans or in elapsed time. This document assumes scans.
+- **`M-04` / `M-06`** — how a channel's own state is derived. §2.2 takes it as given.
+- **`M-07`** — the spike filter, which discards a reading *before* §2.2 sees it.
+- **`M-11`** — where the "delay after dependency ends" timer lives and what restarts it if the
+  master flaps during the delay.
+- **`M-15`** — the state-change log. §5 invariant 10 is what it has to record.
+- **Restart.** Pause state must survive a core restart (Phase 3 exit criterion). It is
+  configuration, so it belongs in the object tree rather than in `sensor_state`, which is
+  history. *Decided here*; the column is `M-02`'s to add.

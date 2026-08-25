@@ -415,9 +415,35 @@ because each is a decision rather than a defect:
 
 ## Phase 3 — State machine
 
-- [ ] **M-01 — Write the state and pause precedence tables** · S · — · Document every transition
+- [x] **M-01 — Write the state and pause precedence tables** · S · — · Document every transition
       and the evaluation order of the four pause sources _before_ writing code. Reviewed against
       `WORKFLOW.MD §4–5`.
+      **M-01 outcome.** `docs/state-machine.md` is the specification, and
+      `packages/core/src/state/tables.ts` is the same thing as data — no state machine, just the
+      tables `M-02` implements against, so the spec cannot be mistranscribed into it.
+      **A layered model, not a matrix.** Pause → simulated → probe → no-reading → worst(query,
+      channel) → acknowledgement, first match winning. An 8 × 15 grid is neither what the system
+      does nor something a reviewer can check by eye; the transition list in §4 is derived from
+      the layers rather than authored beside them, because two hand-maintained lists disagree
+      eventually and the wrong one is always the one not under test.
+      **The pause sources are a set, not a priority chain.** A sensor is paused while *any* is
+      set; the order only decides which cause is reported. That is the distinction `PLAN.md`
+      names as this phase's principal risk: as a chain, resuming the parent would resume a sensor
+      somebody had also paused by hand. All sixteen combinations are written out *and* computed
+      from the rule, and a test asserts the two agree — two derivations catch a mistake in
+      either, one checked against itself catches nothing.
+      **Decided here, and marked as such in the document:** pause beats a lost probe and a
+      simulated error; a failed scan produces no channel-derived state, because it produced no
+      channel values; the channel cause wins a tie with the scan cause, because "response time
+      over 500 ms" tells an operator more than "the scan failed"; `down_acknowledged` still
+      triggers dependency pausing, because an acknowledgement is a statement about notifications
+      and not about the outage; an expired acknowledgement reports cause `user`.
+      **Seven transitions the `WORKFLOW.MD §4` diagram does not draw** are listed with what
+      requires each, so the review is auditable rather than asserted. Nothing in the diagram is
+      missing from the table.
+      **16 tests**, including two that read the enums back out of a migrated database: a state
+      the code can produce and the column cannot store is a write that fails while recording an
+      outage.
 - [ ] **M-02 — Core state machine** · L · M-01, P-05 · The six v1 states (Up, Warning, Down,
       Down (Acknowledged), Paused, Unknown), all transitions between them, cause attribution on
       every change. Unusual and Down (Partial) are `[V2]`; leave room in the type for them.

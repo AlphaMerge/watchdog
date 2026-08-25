@@ -299,6 +299,17 @@ down`); default is one warning interval.
 **Risks.** Precedence bugs between the four pause sources. Write the precedence table first,
 test it exhaustively.
 
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| M-01 state and pause precedence tables | done | `docs/state-machine.md` plus `packages/core/src/state/tables.ts`; all sixteen pause combinations written out and computed, and asserted to agree |
+| M-02…M-19 | not started | |
+
+The tables are the specification `M-02` implements against, which is the order this phase's risk
+demands: precedence is a *set* of independent sources, not a priority chain, and the sixteen-row
+table is exhaustive rather than representative.
+
 ---
 
 ## Phase 4 — Notifications
