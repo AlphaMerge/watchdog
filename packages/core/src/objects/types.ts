@@ -39,7 +39,17 @@ interface ObjectBase {
  */
 export type ObjectDetail =
   | (ObjectBase & { readonly kind: 'root'; readonly parentId: null })
-  | (ObjectBase & { readonly kind: 'probe'; readonly parentId: ObjectId })
+  | (ObjectBase & {
+      readonly kind: 'probe';
+      readonly parentId: ObjectId;
+      /**
+       * The connected probe that owns this branch, or `null` while it is unclaimed.
+       *
+       * Not a secret and not an access key: it identifies which installation scans this subtree,
+       * which is why R-04 can read it and R-01 can still own how one is issued and revoked.
+       */
+      readonly gid: string | null;
+    })
   | (ObjectBase & { readonly kind: 'group'; readonly parentId: ObjectId })
   | (ObjectBase & {
       readonly kind: 'device';
@@ -125,14 +135,14 @@ export interface SettingView {
 // ── inputs ─────────────────────────────────────────────────────────────────────────────────
 
 export type CreateObjectInput =
-  | {
+  | ({
       kind: 'probe';
       parentId: ObjectId;
       name: string;
       tags?: string[];
       priority?: Priority;
       comments?: string;
-    }
+    } & ProbeFields)
   | {
       kind: 'group';
       parentId: ObjectId;
@@ -162,6 +172,12 @@ export type CreateObjectInput =
       comments?: string;
     };
 
+/** Fields only a `probe` has. Split out because both create and update carry them. */
+export interface ProbeFields {
+  /** Binds this branch to a connected probe. R-01 replaces setting it by hand with enrolment. */
+  gid?: string | null;
+}
+
 /**
  * `kind` is required so the JSON-Schema discriminator can pick a branch, and is checked
  * against the stored kind. `parentId` is absent — reparenting is `move`. `sensorType` is
@@ -170,12 +186,19 @@ export type CreateObjectInput =
  */
 export type UpdateObjectInput =
   | {
-      kind: 'root' | 'probe' | 'group';
+      kind: 'root' | 'group';
       name?: string;
       tags?: string[];
       priority?: Priority;
       comments?: string;
     }
+  | ({
+      kind: 'probe';
+      name?: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    } & ProbeFields)
   | {
       kind: 'device';
       name?: string;

@@ -55,6 +55,7 @@ export type {
   ProbeToCoreMessage,
   ProtocolMessage,
   RejectCode,
+  SensorAssignment,
 } from './protocol/messages.js';
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';

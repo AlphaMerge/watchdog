@@ -114,6 +114,8 @@ export const objectDetailSchema = {
     // device
     host: { type: 'string' },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
+    // probe
+    gid: { type: ['string', 'null'] },
     // sensor
     sensorType: { type: 'string' },
     /**
@@ -239,6 +241,14 @@ export const createObjectSchema = {
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
     sensorType: { type: 'string', pattern: '^[a-z0-9]+(\\.[a-z0-9-]+)+$', maxLength: 100 },
     params: { type: 'object', additionalProperties: true },
+    gid: {
+      type: ['string', 'null'],
+      minLength: 1,
+      maxLength: 128,
+      description:
+        'Binds this probe branch to a connected probe. R-01 replaces setting it by hand with ' +
+        'an enrolment flow; until then it is how a probe is told which subtree it owns.',
+    },
   },
   allOf: [
     {
@@ -254,6 +264,11 @@ export const createObjectSchema = {
     {
       if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
       then: { not: { anyOf: [{ required: ['host'] }, { required: ['sensorType'] }] } },
+    },
+    // Only a probe branch can be claimed by a probe. Rejecting it here means no handler has to.
+    {
+      if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
+      then: { not: { required: ['gid'] } },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
@@ -284,11 +299,20 @@ export const updateObjectSchema = {
     host: { type: 'string', minLength: 1, maxLength: 255 },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
     params: { type: 'object', additionalProperties: true },
+    // Null releases the claim, which is how a branch is handed to a replacement installation.
+    gid: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
   },
   allOf: [
     {
       if: { properties: { kind: { enum: ['root', 'probe', 'group'] } }, required: ['kind'] },
       then: { not: { anyOf: [{ required: ['host'] }, { required: ['params'] }] } },
+    },
+    {
+      if: {
+        properties: { kind: { enum: ['root', 'group', 'device', 'sensor'] } },
+        required: ['kind'],
+      },
+      then: { not: { required: ['gid'] } },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },

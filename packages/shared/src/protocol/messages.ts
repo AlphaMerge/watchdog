@@ -4,10 +4,10 @@ import { AppError } from '../errors/app-error.js';
 /**
  * The core↔probe wire protocol.
  *
- * Phase 0 carried a versioned handshake and a heartbeat; version 2 adds check results and their
- * acknowledgement (S-07). Configuration deltas and the rest of spool replay arrive later as new
- * members of these unions — which is why they are discriminated unions rather than one message
- * type with optional fields.
+ * Phase 0 carried a versioned handshake and a heartbeat; version 2 added check results and their
+ * acknowledgement (S-07); version 3 adds the configuration push (R-04). The rest of spool replay
+ * arrives later as new members of these unions — which is why they are discriminated unions
+ * rather than one message type with optional fields.
  */
 
 /**
@@ -16,8 +16,11 @@ import { AppError } from '../errors/app-error.js';
  * Version 2 added `results`, `results-ack` and `results-nack`. A version-2 probe talking to a
  * version-1 core would send results the core cannot parse, so the bump is what turns that into
  * a clean rejection at the handshake instead of a dropped connection later.
+ *
+ * Version 3 added the configuration push (R-04). The core will not send `config-*` to a peer
+ * below 3 — an older probe simply scans nothing, which is what it did before the push existed.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /**
  * The oldest peer version this build still understands.
@@ -27,6 +30,24 @@ export const PROTOCOL_VERSION = 2;
  * point of negotiating at all.
  */
 export const MIN_PROTOCOL_VERSION = 1;
+
+/**
+ * One sensor a probe has been told to scan, with everything needed to scan it.
+ *
+ * Self-contained on purpose: the probe holds no copy of the object tree and does no lookups of
+ * its own. `target` comes from the sensor's parent device and `intervalSeconds` from the
+ * resolved settings chain — both are the core's to work out, so that moving a device or changing
+ * an inherited interval is one recomputation in one place rather than a rule the probe has to
+ * reimplement and keep in step.
+ */
+export interface SensorAssignment {
+  sensorId: number;
+  sensorType: string;
+  params: Record<string, unknown>;
+  target: { host: string; ipVersion: 'auto' | 'v4' | 'v6' };
+  intervalSeconds: number;
+  timeoutMs: number;
+}
 
 /** A single channel's reading inside a check result. */
 export interface ChannelReading {
@@ -81,6 +102,16 @@ export type ProbeToCoreMessage =
       displayName: string;
       agentVersion: string;
       accessKey: string;
+      /**
+       * Fingerprint of the configuration this probe is currently running, or `''` if it has
+       * none. The core answers `config-unchanged` when it matches, which is what stops a
+       * reconnect after a blip from re-sending five thousand assignments that did not change.
+       *
+       * Held in memory, deliberately not persisted: a restarted probe has no configuration to
+       * keep the fingerprint of, so persisting one would only let it claim to be up to date
+       * while scanning nothing.
+       */
+      configVersion?: string;
     }
   | { type: 'heartbeat'; seq: number; sentAt: string }
   | {
@@ -93,6 +124,12 @@ export type ProbeToCoreMessage =
        */
       batchId: string;
       results: CheckResult[];
+    }
+  | {
+      type: 'config-ack';
+      version: string;
+      /** How many assignments the probe now has scheduled. The core logs any disagreement. */
+      scheduled: number;
     }
   | { type: 'bye'; reason: string };
 
@@ -129,6 +166,19 @@ export type CoreToProbeMessage =
       reason: NackReason;
       retryAfterMs: number;
     }
+  /** The whole assignment set. Sent on connect, and whenever a delta would be larger. */
+  | { type: 'config-set'; version: string; sensors: SensorAssignment[] }
+  /**
+   * What changed since the version the probe is holding.
+   *
+   * Only ever sent to a probe the core has already sent a `config-set` to *on this connection*:
+   * a delta is relative to state the core knows the peer has, and the core only knows that while
+   * the session is alive. After a disconnect the answer is a snapshot or `config-unchanged`,
+   * never a delta against a guess.
+   */
+  | { type: 'config-delta'; version: string; upserted: SensorAssignment[]; removed: number[] }
+  /** The probe's fingerprint already matches. Nothing to send, and nothing to apply. */
+  | { type: 'config-unchanged'; version: string }
   | { type: 'bye'; reason: string };
 
 export type ProtocolMessage = ProbeToCoreMessage | CoreToProbeMessage;
@@ -157,6 +207,9 @@ const probeToCoreSchema = {
         displayName: { type: 'string', minLength: 1, maxLength: 240 },
         agentVersion: { type: 'string', maxLength: 64 },
         accessKey: { type: 'string', maxLength: 512 },
+        // Optional, not required: a version-2 probe does not send one, and its hello must still
+        // validate rather than being refused for speaking the version it advertised.
+        configVersion: { type: 'string', maxLength: 128 },
       },
       required: ['type', 'protocolVersion', 'gid', 'displayName', 'agentVersion', 'accessKey'],
       additionalProperties: false,
@@ -215,6 +268,15 @@ const probeToCoreSchema = {
     },
     {
       properties: {
+        type: { const: 'config-ack' },
+        version: { type: 'string', maxLength: 128 },
+        scheduled: { type: 'integer', minimum: 0 },
+      },
+      required: ['type', 'version', 'scheduled'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
         type: { const: 'bye' },
         reason: { type: 'string', maxLength: 512 },
       },
@@ -222,6 +284,35 @@ const probeToCoreSchema = {
       additionalProperties: false,
     },
   ],
+} as const;
+
+/**
+ * One assignment on the wire.
+ *
+ * `params` is `additionalProperties: true` because a sensor type's own `paramsSchema` is what
+ * validates it, and that schema lives in the catalogue rather than here. What this bounds is the
+ * shape and the size — a peer is a boundary even when it is our own code (CLAUDE.md).
+ */
+const sensorAssignmentSchema = {
+  type: 'object',
+  properties: {
+    sensorId: { type: 'integer', minimum: 1 },
+    sensorType: { type: 'string', minLength: 1, maxLength: 100 },
+    params: { type: 'object', additionalProperties: true },
+    target: {
+      type: 'object',
+      properties: {
+        host: { type: 'string', maxLength: 255 },
+        ipVersion: { type: 'string', enum: ['auto', 'v4', 'v6'] },
+      },
+      required: ['host', 'ipVersion'],
+      additionalProperties: false,
+    },
+    intervalSeconds: { type: 'integer', minimum: 1, maximum: 86400 },
+    timeoutMs: { type: 'integer', minimum: 100, maximum: 3600000 },
+  },
+  required: ['sensorId', 'sensorType', 'params', 'target', 'intervalSeconds', 'timeoutMs'],
+  additionalProperties: false,
 } as const;
 
 const coreToProbeSchema = {
@@ -288,6 +379,39 @@ const coreToProbeSchema = {
         retryAfterMs: { type: 'integer', minimum: 0 },
       },
       required: ['type', 'batchId', 'reason', 'retryAfterMs'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'config-set' },
+        version: { type: 'string', maxLength: 128 },
+        sensors: {
+          type: 'array',
+          // The same bound as a result batch, and for the same reason: refused by the schema
+          // with a message rather than by the decoder with a socket reset.
+          maxItems: 5000,
+          items: sensorAssignmentSchema,
+        },
+      },
+      required: ['type', 'version', 'sensors'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'config-delta' },
+        version: { type: 'string', maxLength: 128 },
+        upserted: { type: 'array', maxItems: 5000, items: sensorAssignmentSchema },
+        removed: { type: 'array', maxItems: 5000, items: { type: 'integer', minimum: 1 } },
+      },
+      required: ['type', 'version', 'upserted', 'removed'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'config-unchanged' },
+        version: { type: 'string', maxLength: 128 },
+      },
+      required: ['type', 'version'],
       additionalProperties: false,
     },
     {

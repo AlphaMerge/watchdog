@@ -25,6 +25,8 @@ import { HistoryService } from './timeseries/history.js';
 import { SqlTimeSeriesStore } from './timeseries/store.js';
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
+import { ProbeConfigService } from './probes/config.js';
+import { ConfigChangeNotifier } from './probes/notifier.js';
 import { VERSION } from './version.js';
 
 const USAGE = `ms-core ${VERSION}
@@ -142,6 +144,10 @@ async function serve(): Promise<void> {
   }
 
   const resolver = new InheritanceResolver({ db, logger });
+
+  // Rides the audit sink, which every mutation already goes through, so no new mutation path
+  // has to remember to tell the probes about itself (R-04).
+  const configNotifier = new ConfigChangeNotifier({ logger });
   // Registered once, then sealed: a type appearing later would mean two probes disagreeing
   // about what a sensor is.
   const catalogue = standardCatalogue();
@@ -153,7 +159,11 @@ async function serve(): Promise<void> {
     // Both, inside every mutation's own transaction: the table is what the history tab reads
     // and what S-10 made queryable, and the log is the plain-text audit component
     // CAPABILITIES.MD §9 lists — the copy that survives someone dropping the database.
-    audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
+    audit: new CompositeAuditSink([
+      new DatabaseAuditSink(),
+      new LoggingAuditSink(logger),
+      configNotifier,
+    ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     logger,
   });
@@ -212,8 +222,17 @@ async function serve(): Promise<void> {
     logger,
     coreVersion: VERSION,
     results: ingestion,
+    probeConfig: new ProbeConfigService({ db, resolver }),
   });
+  configNotifier.attach(probeEndpoint);
   await probeEndpoint.start();
+  lifecycle.onShutdown({
+    name: 'config-push',
+    timeoutMs: 1_000,
+    run: () => {
+      configNotifier.stop();
+    },
+  });
   lifecycle.onShutdown({
     name: 'probe-endpoint',
     timeoutMs: 5_000,

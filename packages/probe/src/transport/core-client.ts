@@ -12,6 +12,7 @@ import {
   type ProbeConfig,
   type ProbeToCoreMessage,
 } from '@ms/shared';
+import type { ConfigUpdate } from '../scheduler/assignments.js';
 import { Backoff } from './backoff.js';
 
 export type LinkState = 'disconnected' | 'connecting' | 'handshaking' | 'connected';
@@ -22,8 +23,18 @@ export interface CoreClientOptions {
   agentVersion: string;
   /** Reported on Probe Health (P-13) and used by the spool to decide whether to drain. */
   onStateChange?: (state: LinkState) => void;
+  /**
+   * What to scan, as the core sees it (R-04).
+   *
+   * The client applies nothing itself — it owns the socket, not the scheduler. It hands over
+   * what arrived and reports back how many assignments the scheduler ended up holding, which is
+   * what the core acknowledges against.
+   */
+  onConfig?: (config: ConfigUpdate) => number;
   random?: () => number;
 }
+
+export type { ConfigUpdate } from '../scheduler/assignments.js';
 
 /**
  * The probe's side of the channel. The probe always dials **out** (WORKFLOW.MD §10), so a
@@ -42,6 +53,8 @@ export class CoreClient {
   #socket: TLSSocket | undefined;
   #state: LinkState = 'disconnected';
   #gid: string;
+  /** In memory only — see the comment where it is sent. */
+  #configVersion = '';
   #heartbeatTimer: NodeJS.Timeout | undefined;
   #reconnectTimer: NodeJS.Timeout | undefined;
   #heartbeatSeq = 0;
@@ -177,6 +190,10 @@ export class CoreClient {
       displayName: config.probe.displayName,
       agentVersion,
       accessKey: config.core.accessKey,
+      // What this process is already running. Empty after a restart, which is correct: there is
+      // no configuration in memory to keep, so claiming to be current would mean scanning
+      // nothing while telling the core everything was fine.
+      configVersion: this.#configVersion,
     });
   }
 
@@ -197,6 +214,27 @@ export class CoreClient {
           'connected to core',
         );
         this.#startHeartbeat(message.heartbeatIntervalMs);
+        return;
+      }
+
+      case 'config-unchanged': {
+        this.#configVersion = message.version;
+        this.#logger.info({ version: message.version }, 'configuration is already current');
+        return;
+      }
+
+      case 'config-set': {
+        this.#applyConfig({ kind: 'set', version: message.version, sensors: message.sensors });
+        return;
+      }
+
+      case 'config-delta': {
+        this.#applyConfig({
+          kind: 'delta',
+          version: message.version,
+          upserted: message.upserted,
+          removed: message.removed,
+        });
         return;
       }
 
@@ -234,6 +272,38 @@ export class CoreClient {
       });
     }, intervalMs);
     this.#heartbeatTimer.unref();
+  }
+
+  /**
+   * Hands a configuration change to the scheduler and tells the core what came of it.
+   *
+   * The acknowledgement carries the count the scheduler ended up holding, not the count that was
+   * sent: if the two disagree the core logs it, which is how a delta applied against a different
+   * starting state stops being invisible.
+   */
+  #applyConfig(update: ConfigUpdate): void {
+    const apply = this.#options.onConfig;
+    if (apply === undefined) return;
+
+    let scheduled: number;
+    try {
+      scheduled = apply(update);
+    } catch (error: unknown) {
+      // Refusing to update the version is what makes this recoverable: the next reconnect
+      // presents the old fingerprint, the core sees a mismatch, and a full snapshot is sent.
+      this.#logger.error(
+        { ...describeError(error), version: update.version },
+        'could not apply the configuration',
+      );
+      return;
+    }
+
+    this.#configVersion = update.version;
+    this.#connection?.send({ type: 'config-ack', version: update.version, scheduled });
+    this.#logger.info(
+      { version: update.version, scheduled, kind: update.kind },
+      'applied configuration',
+    );
   }
 
   #handleClose(close: ConnectionClose): void {

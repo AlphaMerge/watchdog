@@ -52,6 +52,7 @@ interface ObjectRow {
   ip_version: string | null;
   sensor_type: string | null;
   params: Record<string, unknown> | null;
+  probe_gid: string | null;
 }
 
 interface SummaryRow {
@@ -76,13 +77,15 @@ const DETAIL_COLUMNS = `
   o.version, o.created_at, o.updated_at,
   (SELECT count(*) FROM object c WHERE c.parent_id = o.id) AS child_count,
   dc.host, dc.ip_version,
-  sc.type AS sensor_type, sc.params
+  sc.type AS sensor_type, sc.params,
+  pc.gid AS probe_gid
 `;
 
 const DETAIL_FROM = `
   FROM object o
   LEFT JOIN device_config dc ON dc.object_id = o.id
   LEFT JOIN sensor_config sc ON sc.object_id = o.id
+  LEFT JOIN probe_config pc ON pc.object_id = o.id
 `;
 
 /**
@@ -121,7 +124,12 @@ function toDetail(row: ObjectRow): ObjectDetail {
     case 'root':
       return { ...base, kind: 'root', parentId: null };
     case 'probe':
-      return { ...base, kind: 'probe', parentId: Number(row.parent_id) };
+      return {
+        ...base,
+        kind: 'probe',
+        parentId: Number(row.parent_id),
+        gid: row.probe_gid ?? null,
+      };
     case 'group':
       return { ...base, kind: 'group', parentId: Number(row.parent_id) };
     case 'device':
@@ -759,7 +767,13 @@ export class ObjectRepository {
     );
     const id = Number(rows[0]?.id);
 
-    if (input.kind === 'device') {
+    if (input.kind === 'probe') {
+      // Always a row, so reads never have to tell "unclaimed" from "no row at all".
+      await q.query('INSERT INTO probe_config (object_id, gid) VALUES ($1, $2)', [
+        id,
+        input.gid ?? null,
+      ]);
+    } else if (input.kind === 'device') {
       await q.query('INSERT INTO device_config (object_id, host, ip_version) VALUES ($1, $2, $3)', [
         id,
         input.host,
@@ -816,6 +830,17 @@ export class ObjectRepository {
       values,
     );
     if (updated.length === 0) await this.#explainFailedPrecondition(q, id, pre);
+
+    if (patch.kind === 'probe' && patch.gid !== undefined) {
+      // Upsert: a probe object created before migration 007 has a row, but one created by a
+      // path that predates this write would not, and a missing row must not silently drop a
+      // claim. The unique index is what rejects a gid another branch already holds.
+      await q.query(
+        `INSERT INTO probe_config (object_id, gid) VALUES ($1, $2)
+         ON CONFLICT (object_id) DO UPDATE SET gid = EXCLUDED.gid`,
+        [id, patch.gid],
+      );
+    }
 
     if (patch.kind === 'device' && (patch.host !== undefined || patch.ipVersion !== undefined)) {
       const deviceSets: string[] = [];

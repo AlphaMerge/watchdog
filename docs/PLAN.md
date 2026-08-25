@@ -440,6 +440,19 @@ exit criteria are untouched — neither can be met before Phase 3 and `P-08`.
 - Version skew between core and probe is detected and reported rather than silently
   misbehaving.
 
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| R-04 incremental config push | done | Protocol 3; content-addressed fingerprint on the handshake, deltas within a session, snapshot or `config-unchanged` after a disconnect; change detection rides the audit sink |
+| R-01…R-03, R-05…R-08 | not started | R-04 added the storage half of R-01: `probe_config.gid`, one branch per probe |
+
+Pulled forward out of order, on request, and it closed the loop the previous phases had left
+open: with `P-08` providing a sensor type and `R-04` telling a probe which sensors it owns, the
+system scans a real target on a schedule for the first time. What it still cannot do is *keep*
+the results — the probe logs them and drops them, because the spool and the return path are
+`R-02` and `R-03`.
+
 ---
 
 ## Phase 9 — Users, RBAC and security

@@ -142,9 +142,24 @@ npm run dev:ui
 to the core. In production there is no dev server: `ms-core` serves the built assets itself from
 `api.webRoot` (`ADR-001` Decision 8). See [`packages/web/README.md`](packages/web/README.md).
 
-Nothing is monitored yet and the UI says so: every sensor reads Unknown until a sensor type
-exists (`P-08`), a probe is told which sensors it owns (`R-04`) and the state machine turns
-results into states (Phase 3).
+### Making it actually scan something
+
+A probe branch has to be claimed by the probe that connects, or it is told to scan nothing:
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/api/v1/objects/2 -H 'content-type: application/json' -H "if-match: $(curl -sSI http://127.0.0.1:8080/api/v1/objects/2 | grep -i ^etag: | tr -d '\r' | cut -d' ' -f2)" -d '{"kind":"probe","gid":"dev-local-probe"}'
+```
+
+`dev-local-probe` is the GID in `dev/probe.json`. `R-01` replaces claiming a branch by hand with
+an enrolment flow; until then this is how a probe is told which subtree is its own.
+
+With that done, the core pushes the branch's sensors, the probe schedules them and checks start
+running. `MS_LOG_LEVEL=debug npm run dev:services` shows each one finishing — they are logged at
+debug because at five thousand sensors a minute an info line per check is the whole journal.
+
+The results are **not stored yet**: the probe logs them and drops them, because the spool and the
+return path are `R-02` and `R-03`. Sensors therefore still read Unknown in the UI, which also
+waits on the state machine in Phase 3.
 
 ## Configuration
 

@@ -120,6 +120,19 @@ else
   failed=1
 fi
 
+echo "==> asserting the probe was told what to scan"
+# A fresh install has no branch claiming this probe's GID, so the configuration it receives is
+# empty — but it must *receive* one. This is the only place that proves protocol 3, the config
+# service and the probe's side of it all line up in the packaged layout rather than in the
+# development tree.
+if docker exec "${container}" journalctl -u ms-probe --no-pager | grep -q 'applied configuration'; then
+  echo "    configuration push: ok"
+else
+  echo "    configuration push: FAILED — the probe was never sent a configuration" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+
 echo "==> asserting the data lifecycle ran"
 # The housekeeping loop is what rolls up, compresses and drops. It runs on a timer inside the
 # service, so a packaging or migration fault that leaves it dead would otherwise show up as

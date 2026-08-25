@@ -49,8 +49,11 @@ case "${1:-start}" in
 
     # MS_API__HOST overrides the config file's 127.0.0.1: inside a container that would bind
     # the container's own loopback, and no published port could reach it.
+    # MS_LOG_LEVEL=debug is how you see individual checks finishing: the probe logs each one at
+    # debug, because at 5,000 sensors a minute an info line per check is the whole journal.
     docker compose -f "${compose_file}" run -d --name "${name}" \
       -e MS_API__HOST=0.0.0.0 \
+      -e "MS_SERVICE__LOG_LEVEL=${MS_LOG_LEVEL:-info}" \
       -p 127.0.0.1:8080:8080 \
       toolchain \
       'node packages/core/dist/src/main.js --config dev/core.json & sleep 3; exec node packages/probe/dist/src/main.js --config dev/probe.json' \

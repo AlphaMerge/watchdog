@@ -636,6 +636,12 @@ because each is a decision rather than a defect:
       R-01 must also make the local probe undeletable, matching PRTG. S-03 already refuses to
       *clone* a probe, because a cloned probe is either a duplicate GID or a placeholder no
       installation can claim.
+      **Added by R-04:** the storage exists — `probe_config.gid`, one branch per probe, enforced
+      by a partial unique index — and `PATCH /objects/{id} {kind:'probe', gid}` claims a branch by
+      hand. What is left for this task is everything around it: issuing a GID rather than typing
+      one, the pending-approval queue, per-GID access keys, the source-IP allowlist, revocation,
+      and making the local probe undeletable. The endpoint already re-resolves an unclaimed
+      session on every push, so approving a connected probe takes effect without a restart.
 - [ ] **R-02 — Disk-backed result spool** · L · F-09 · Bounded size, oldest-first eviction,
       dropped-result counter, crash-safe. _Beats PRTG's RAM-only 500k buffer._
 - [ ] **R-03 — Ordered replay on reconnect** · L · R-02, S-07 · Rate-limited catch-up that cannot
@@ -646,8 +652,39 @@ because each is a decision rather than a defect:
       `retryAfterMs` rises before the queue is full. Replay itself is safe to repeat, because the
       write is `ON CONFLICT DO NOTHING` and a range landing behind a rollup watermark queues its
       own backfill in the same transaction.
-- [ ] **R-04 — Incremental config push** · L · S-03, F-09 · Each probe receives only its own
+- [x] **R-04 — Incremental config push** · L · S-03, F-09 · Each probe receives only its own
       subtree, as deltas, with a resync path after a long disconnect.
+      **R-04 outcome.** Protocol version 3: `config-set`, `config-delta`, `config-unchanged`
+      from the core, `config-ack` back, and a `configVersion` fingerprint on `hello`. The
+      fingerprint is content-addressed rather than a counter — derived from the answer itself, so
+      it cannot drift from what a probe should be running the way a stored sequence can. It is
+      what makes the resync path cheap: a probe that reconnects after a blip presents the
+      fingerprint it holds, and a match costs one message instead of five thousand assignments.
+      Held in memory and deliberately not persisted, because a restarted probe has nothing to
+      keep the fingerprint *of*.
+      **Deltas only against state we know the peer has.** A delta is sent only when the core has
+      already sent that session a snapshot; after a disconnect the answer is a snapshot or
+      `config-unchanged`, never a delta against a guess. A snapshot is sent instead whenever the
+      upserts alone would be no smaller — removals are integers and are not weighed against whole
+      assignments.
+      **Change detection rides the audit sink**, which every mutation already passes through, so
+      no new mutation path has to remember to tell the probes about itself. It marks *all*
+      connected probes for recomputation rather than resolving which one was affected: a spurious
+      recomputation is free because the push compares fingerprints and sends nothing when they
+      match, and resolving the ancestor would mean a query inside the mutation's own transaction —
+      the cost S-16 removed.
+      **It needed the storage half of R-01.** A `probe` object and a connected probe were
+      unrelated things; migration 007 adds `probe_config.gid` with a partial unique index, so one
+      branch has one probe and one probe has one branch. `TASKS.md` already recorded that
+      enrolment would replace creating a probe by `POST /objects`; approval queues, per-GID access
+      keys, source-IP allowlists and revocation are still R-01's.
+      **Found while wiring it:** a session resolved its branch once, at the handshake — so
+      approving a probe that had *already connected* did nothing until it restarted, which is the
+      ordinary enrolment sequence. An unclaimed session now re-resolves on every push. There is a
+      test named for it.
+      **Verified end to end:** with the development probe bound, the core pushed two assignments,
+      the wheel scheduled them, and `icmp.ping` ran against `ms-target` on its own. Adding a third
+      sensor to the live tree arrived as a delta of one upsert.
 - [ ] **R-05 — Probe offline handling** · M · R-01, M-02 · One alarm for the probe; its sensors go
       Unknown, not Down.
 - [ ] **R-06 — Version skew detection** · M · F-09 · Core and probe negotiate a protocol version;

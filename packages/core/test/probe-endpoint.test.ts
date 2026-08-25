@@ -13,8 +13,10 @@ import {
   type CoreConfig,
   type CoreToProbeMessage,
   type ProbeToCoreMessage,
+  type SensorAssignment,
 } from '@ms/shared';
 import { ProbeEndpoint, type ResultReceiver } from '../src/transport/probe-endpoint.js';
+import { fingerprint, type ProbeAssignments } from '../src/probes/config.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -607,3 +609,228 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     assert.equal(endpoint.connectedProbes.length, 0);
   });
 });
+
+/**
+ * The configuration push (R-04), over a real mutual-TLS connection.
+ *
+ * The source is a stub rather than the database: `probe-config.test.ts` proves the query and the
+ * fingerprint against real rows, and what is left to prove here is the conversation — which
+ * message a probe gets, and when.
+ */
+describe(
+  'ProbeEndpoint configuration push',
+  { skip: opensslAvailable ? false : 'openssl is not available' },
+  () => {
+    let dir: string;
+
+    before(() => {
+      dir = mkdtempSync(join(tmpdir(), 'ms-tls-cfg-'));
+      generateCerts(dir);
+    });
+
+    const sensor = (id: number, over: Partial<SensorAssignment> = {}): SensorAssignment => ({
+      sensorId: id,
+      sensorType: 'icmp.ping',
+      params: { count: 4 },
+      target: { host: `192.0.2.${String(id)}`, ipVersion: 'auto' },
+      intervalSeconds: 60,
+      timeoutMs: 30_000,
+      ...over,
+    });
+
+    /** A source whose answer the test can change between pushes. */
+    class StubSource {
+      claimed: number | null = 7;
+      sensors: SensorAssignment[] = [];
+      touched: number[] = [];
+
+      probeObjectFor(): Promise<number | null> {
+        return Promise.resolve(this.claimed);
+      }
+      assignmentsFor(): Promise<ProbeAssignments> {
+        return Promise.resolve({ version: fingerprint(this.sensors), sensors: [...this.sensors] });
+      }
+      touch(objectId: number): Promise<void> {
+        this.touched.push(objectId);
+        return Promise.resolve();
+      }
+    }
+
+    async function withProbe(
+      source: StubSource,
+      body: (probe: TestProbe, endpoint: ProbeEndpoint) => Promise<void>,
+      helloOverrides: Partial<Extract<ProbeToCoreMessage, { type: 'hello' }>> = {},
+    ): Promise<void> {
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+        probeConfig: source,
+      });
+      const address = await endpoint.start();
+      try {
+        const probe = await TestProbe.connect(dir, address.port);
+        probe.send(hello(helloOverrides));
+        await probe.waitFor((m) => m.type === 'welcome');
+        await body(probe, endpoint);
+        probe.close();
+      } finally {
+        await endpoint.stop();
+      }
+    }
+
+    it('sends the whole assignment set on connect', async () => {
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(source, async (probe) => {
+        const message = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(message.type === 'config-set');
+        assert.deepEqual(
+          message.sensors.map((s) => s.sensorId),
+          [1, 2],
+        );
+        assert.equal(message.version, fingerprint(source.sensors));
+        assert.deepEqual(source.touched, [7], 'and records that the probe was seen');
+      });
+    });
+
+    it('sends nothing but a confirmation when the probe is already current', async () => {
+      // The reconnect-after-a-blip case, and the whole reason the handshake carries a
+      // fingerprint: re-sending five thousand unchanged assignments is pure waste.
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(
+        source,
+        async (probe) => {
+          const message = await probe.waitFor((m) => m.type === 'config-unchanged');
+          assert.ok(message.type === 'config-unchanged');
+          assert.equal(
+            probe.received.some((m) => m.type === 'config-set'),
+            false,
+            'a snapshot was sent to a probe that did not need one',
+          );
+        },
+        { configVersion: fingerprint([sensor(1), sensor(2)]) },
+      );
+    });
+
+    it('sends an empty configuration to a probe no branch has claimed', async () => {
+      // A freshly installed probe, before R-01 enrols it. Not an error, and not silence: a
+      // probe that is told nothing cannot tell "no sensors" from "the core did not answer".
+      const source = new StubSource();
+      source.claimed = null;
+      source.sensors = [sensor(1)];
+
+      await withProbe(source, async (probe) => {
+        const message = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(message.type === 'config-set');
+        assert.deepEqual(message.sensors, []);
+        assert.deepEqual(source.touched, [], 'nothing to touch');
+      });
+    });
+
+    it('sends a delta when the configuration changes under a live connection', async () => {
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2), sensor(3)];
+
+      await withProbe(source, async (probe, endpoint) => {
+        await probe.waitFor((m) => m.type === 'config-set');
+
+        source.sensors = [sensor(1), sensor(2, { intervalSeconds: 30 }), sensor(4)];
+        endpoint.pushConfig(7);
+
+        const message = await probe.waitFor((m) => m.type === 'config-delta');
+        assert.ok(message.type === 'config-delta');
+        assert.deepEqual(
+          message.upserted.map((s) => s.sensorId).sort(),
+          [2, 4],
+          'sensor 1 did not change and must not be re-sent',
+        );
+        assert.deepEqual(message.removed, [3]);
+      });
+    });
+
+    it('resends in full when the delta would be no smaller', async () => {
+      // A change that touches everything is cheaper to state as a snapshot than as a list of
+      // upserts covering the same rows.
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(source, async (probe, endpoint) => {
+        await probe.waitFor((m) => m.type === 'config-set');
+        probe.received.length = 0;
+
+        source.sensors = [sensor(1, { intervalSeconds: 10 }), sensor(2, { intervalSeconds: 10 })];
+        endpoint.pushConfig(7);
+
+        const message = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(message.type === 'config-set');
+        assert.equal(message.sensors.length, 2);
+      });
+    });
+
+    it('says nothing when a push finds nothing changed', async () => {
+      const source = new StubSource();
+      source.sensors = [sensor(1)];
+
+      await withProbe(source, async (probe, endpoint) => {
+        await probe.waitFor((m) => m.type === 'config-set');
+        probe.received.length = 0;
+
+        endpoint.pushConfig(7);
+        // A change elsewhere in the tree recomputes every connected probe; the ones whose
+        // fingerprint did not move must not be told anything at all.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        assert.deepEqual(
+          probe.received.filter((m) => m.type.startsWith('config-')),
+          [],
+        );
+      });
+    });
+
+    it('reaches a probe that was enrolled after it had already connected', async () => {
+      // The ordinary enrolment sequence (R-01): a probe installs itself, connects, and waits to
+      // be approved. If the session only resolved its branch at the handshake, approving it
+      // would do nothing until someone restarted the probe.
+      const source = new StubSource();
+      source.claimed = null;
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(source, async (probe, endpoint) => {
+        const empty = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(empty.type === 'config-set');
+        assert.deepEqual(empty.sensors, [], 'nothing to scan until a branch claims it');
+        probe.received.length = 0;
+
+        source.claimed = 7;
+        endpoint.pushAllConfigs();
+
+        const message = await probe.waitFor((m) => m.type.startsWith('config-'));
+        assert.ok(message.type === 'config-set' || message.type === 'config-delta');
+        const scheduled = message.type === 'config-set' ? message.sensors : message.upserted;
+        assert.deepEqual(scheduled.map((s) => s.sensorId).sort(), [1, 2]);
+        assert.deepEqual(source.touched, [7], 'and the claim was recorded when it appeared');
+      });
+    });
+
+    it('sends no configuration at all to a probe too old to understand it', async () => {
+      const source = new StubSource();
+      source.sensors = [sensor(1)];
+
+      await withProbe(
+        source,
+        async (probe) => {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          assert.deepEqual(
+            probe.received.filter((m) => m.type.startsWith('config-')),
+            [],
+            'a version-2 probe would fail to parse it',
+          );
+        },
+        { protocolVersion: 2 },
+      );
+    });
+  },
+);

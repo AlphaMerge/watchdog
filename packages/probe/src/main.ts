@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { bootstrap, describeError, probeConfigSchema, type ProbeConfig } from '@ms/shared';
 import { CheckPool } from './runner/pool.js';
-import type { CheckRequest } from './runner/types.js';
+import { AssignmentStore } from './scheduler/assignments.js';
 import { TimingWheel } from './scheduler/wheel.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
@@ -20,25 +20,6 @@ async function main(): Promise<void> {
     },
     'probe configured',
   );
-
-  const coreClient = new CoreClient({
-    config,
-    logger,
-    agentVersion: VERSION,
-    onStateChange: (state) => {
-      logger.info({ linkState: state }, 'link state changed');
-    },
-  });
-  coreClient.start();
-  lifecycle.onShutdown({
-    name: 'core-client',
-    timeoutMs: 5_000,
-    run: () => coreClient.stop(),
-  });
-
-  // What this probe has been told to scan. Empty until the core pushes it a subtree (R-04) — a
-  // probe with nothing to scan is the ordinary state of a freshly approved one, not an error.
-  const sensors = new Map<number, Omit<CheckRequest, 'sensorId'>>();
 
   const pool = new CheckPool({
     logger,
@@ -63,12 +44,22 @@ async function main(): Promise<void> {
     logger,
     onDue: (due) => {
       for (const sensorId of due) {
-        const sensor = sensors.get(sensorId);
-        if (sensor === undefined) continue;
-        pool.submit({ sensorId, ...sensor });
+        const assignment = assignments.get(sensorId);
+        if (assignment === undefined) continue;
+        pool.submit({
+          sensorId,
+          sensorType: assignment.sensorType,
+          target: assignment.target,
+          params: assignment.params,
+          timeoutMs: assignment.timeoutMs,
+        });
       }
     },
   });
+  // Constructed before the wheel is started: `onDue` closes over this binding, and a tick that
+  // fired first would find it in the temporal dead zone.
+  const assignments = new AssignmentStore(wheel);
+
   wheel.start();
   lifecycle.onShutdown({
     name: 'scheduler',
@@ -77,6 +68,22 @@ async function main(): Promise<void> {
       wheel.stop();
       logger.info({ scheduler: wheel.stats(), pool: pool.stats() }, 'scheduler stopped');
     },
+  });
+
+  const coreClient = new CoreClient({
+    config,
+    logger,
+    agentVersion: VERSION,
+    onStateChange: (state) => {
+      logger.info({ linkState: state }, 'link state changed');
+    },
+    onConfig: (update) => assignments.apply(update),
+  });
+  coreClient.start();
+  lifecycle.onShutdown({
+    name: 'core-client',
+    timeoutMs: 5_000,
+    run: () => coreClient.stop(),
   });
 
   // Phase 2 continues here: the child-process runner (P-03), the listeners and the disk spool

@@ -15,7 +15,9 @@ import {
   type Logger,
   type ProbeToCoreMessage,
   type RejectCode,
+  type SensorAssignment,
 } from '@ms/shared';
+import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
 
 /**
  * Whatever stores check results. `IngestionService` is it; the endpoint takes the interface so
@@ -28,12 +30,26 @@ export interface ResultReceiver {
   ): Promise<CoreToProbeMessage>;
 }
 
+/**
+ * Where a probe's assignments come from (R-04). An interface for the same reason as
+ * `ResultReceiver`: the transport stays testable without a database, and the config service
+ * never learns about sockets.
+ */
+export interface ProbeConfigSource {
+  /** The probe object this GID owns, or null while it is unclaimed. */
+  probeObjectFor(gid: string): Promise<number | null>;
+  assignmentsFor(probeObjectId: number): Promise<ProbeAssignments>;
+  touch(objectId: number): Promise<void>;
+}
+
 export interface ProbeEndpointOptions {
   config: CoreConfig['probeEndpoint'];
   logger: Logger;
   coreVersion: string;
   /** Absent until ingestion is wired up; results are then refused with `unavailable`. */
   results?: ResultReceiver;
+  /** Absent until R-04 is wired; probes then receive nothing and scan nothing. */
+  probeConfig?: ProbeConfigSource;
 }
 
 export interface ConnectedProbe {
@@ -57,6 +73,19 @@ interface ProbeSession {
    * progress, which is backpressure that costs nothing to implement.
    */
   pending: Promise<void>;
+  /** What this peer speaks. Config is only sent to version 3 and above. */
+  protocolVersion: number;
+  /** The branch this probe owns, or null while its GID is unclaimed (R-01 enrols it). */
+  probeObjectId: number | null;
+  /**
+   * The configuration this session has been told to run, and its fingerprint.
+   *
+   * Per session, deliberately not persisted: a delta is relative to state we know the peer has,
+   * and we only know that while the connection is alive. After a disconnect the answer is a
+   * snapshot or `config-unchanged`, never a delta against a guess.
+   */
+  sentVersion: string | null;
+  sentSensors: readonly SensorAssignment[];
 }
 
 /** Constant-time comparison, so a wrong key cannot be found one character at a time. */
@@ -233,6 +262,21 @@ export class ProbeEndpoint {
         case 'results':
           this.#queueResults(message, connection, logger, session);
           return session;
+        case 'config-ack':
+          if (message.version !== session.sentVersion) {
+            // Not fatal — the next push corrects it — but a probe running a configuration the
+            // core did not send is worth a line rather than a silent divergence.
+            logger.warn(
+              { acked: message.version, sent: session.sentVersion },
+              'probe acknowledged a configuration version the core did not send',
+            );
+          } else {
+            logger.info(
+              { version: message.version, scheduled: message.scheduled },
+              'probe applied its configuration',
+            );
+          }
+          return session;
         case 'bye':
           logger.info({ reason: message.reason }, 'probe disconnecting');
           connection.close(`peer said bye: ${message.reason}`);
@@ -335,6 +379,10 @@ export class ProbeEndpoint {
         lastHeartbeatAt: null,
       },
       pending: Promise.resolve(),
+      protocolVersion: hello.protocolVersion,
+      probeObjectId: null,
+      sentVersion: null,
+      sentSensors: [],
     };
     this.#sessions.set(gid, session);
 
@@ -355,7 +403,139 @@ export class ProbeEndpoint {
       },
       'probe connected',
     );
+
+    // Fire and forget, chained behind anything already queued for this probe: the handshake
+    // must not wait on a database round trip, and a heartbeat answered late is a connection
+    // torn down for being idle.
+    this.#queueConfig(session, logger, hello.configVersion ?? '');
+
     return session;
+  }
+
+  /**
+   * Works out what this probe should be scanning and sends it whatever it does not already have.
+   *
+   * One path for both cases. `presented` is the fingerprint from a handshake, or `undefined`
+   * when this is a push into a live session — the only differences being that a handshake gets
+   * an explicit `config-unchanged` where a push stays silent, and that a session with nothing
+   * sent yet gets a snapshot because there is nothing to diff against.
+   *
+   * Never awaited by the message loop: a database round trip must not delay the heartbeat that
+   * keeps the connection from being declared idle.
+   */
+  #queueConfig(session: ProbeSession, logger: Logger, presented?: string): void {
+    const source = this.#options.probeConfig;
+    if (source === undefined) return;
+    if (session.protocolVersion < 3) {
+      if (presented !== undefined) {
+        logger.info(
+          { protocolVersion: session.protocolVersion },
+          'probe is too old for configuration push; it will scan nothing',
+        );
+      }
+      return;
+    }
+
+    session.pending = session.pending.then(async () => {
+      try {
+        // Re-resolved while unclaimed, because enrolment happens *after* a probe connects
+        // (R-01): a session that found no branch at the handshake is exactly the one that might
+        // have been given one since. Once claimed, it is not looked up again.
+        if (session.probeObjectId === null) {
+          session.probeObjectId = await source.probeObjectFor(session.info.gid);
+          if (session.probeObjectId !== null) {
+            await source.touch(session.probeObjectId);
+            logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
+          } else if (presented !== undefined) {
+            // Not an error: an unenrolled probe is the ordinary state of a freshly installed
+            // one. Saying so once at the handshake beats silence, which a probe cannot tell
+            // apart from a core that never answered.
+            logger.info(
+              { gid: session.info.gid },
+              'no probe object claims this GID; sending an empty configuration',
+            );
+          }
+        }
+
+        const assignments =
+          session.probeObjectId === null
+            ? EMPTY_ASSIGNMENTS
+            : await source.assignmentsFor(session.probeObjectId);
+
+        const held = presented ?? session.sentVersion;
+        if (assignments.version === held) {
+          session.sentVersion = assignments.version;
+          session.sentSensors = assignments.sensors;
+          if (presented !== undefined) {
+            session.connection.send({ type: 'config-unchanged', version: assignments.version });
+            logger.info({ version: assignments.version }, 'probe configuration is already current');
+          }
+          return;
+        }
+
+        // Nothing sent on this connection yet means nothing to diff against: a delta is only
+        // ever relative to state we know the peer has.
+        const delta =
+          session.sentVersion === null
+            ? null
+            : diffAssignments(session.sentSensors, assignments.sensors);
+
+        session.sentVersion = assignments.version;
+        session.sentSensors = assignments.sensors;
+
+        // Only the upserts are weighed against the snapshot: a removal is an integer, an upsert
+        // is a whole assignment, and counting them alike would turn "one sensor deleted from a
+        // set of three" into a full resend.
+        const worthADelta =
+          delta !== null &&
+          !(delta.upserted.length >= assignments.sensors.length && assignments.sensors.length > 0);
+
+        if (delta !== null && worthADelta) {
+          session.connection.send({ type: 'config-delta', version: assignments.version, ...delta });
+          logger.info(
+            {
+              version: assignments.version,
+              upserted: delta.upserted.length,
+              removed: delta.removed.length,
+            },
+            'sent a configuration delta',
+          );
+          return;
+        }
+
+        session.connection.send({
+          type: 'config-set',
+          version: assignments.version,
+          sensors: [...assignments.sensors],
+        });
+        logger.info(
+          { version: assignments.version, sensors: assignments.sensors.length },
+          'sent probe configuration',
+        );
+      } catch (error: unknown) {
+        // A probe with no configuration scans nothing, which is visible; a probe that never
+        // learns why is not. The connection stays up: results and heartbeats are unaffected.
+        logger.error(
+          { ...describeError(error), gid: session.info.gid },
+          'could not build this probe\u2019s configuration',
+        );
+      }
+    });
+  }
+
+  /** Every connected probe. Unchanged configurations send nothing at all. */
+  pushAllConfigs(): void {
+    for (const session of this.#sessions.values()) {
+      this.#queueConfig(session, this.#options.logger.child({ probeGid: session.info.gid }));
+    }
+  }
+
+  /** One branch, for a caller that knows which one changed. */
+  pushConfig(probeObjectId: number): void {
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId !== probeObjectId) continue;
+      this.#queueConfig(session, this.#options.logger.child({ probeGid: session.info.gid }));
+    }
   }
 
   #handleClose(close: ConnectionClose, session: ProbeSession | undefined, logger: Logger): void {
