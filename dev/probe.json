@@ -1,0 +1,29 @@
+{
+  "service": {
+    "name": "ms-probe",
+    "dataDir": "dev/data",
+    "logLevel": "info",
+    "logPretty": false,
+    "shutdownTimeoutMs": 5000
+  },
+  "probe": {
+    "gid": "dev-local-probe",
+    "displayName": "Development local probe",
+    "spoolDir": "dev/data/spool",
+    "spoolMaxBytes": 104857600,
+    "workerPoolSize": 0
+  },
+  "core": {
+    "host": "127.0.0.1",
+    "port": 23560,
+    "accessKey": "dev-access-key",
+    "tls": {
+      "certFile": "dev/tls/probe.crt",
+      "keyFile": "dev/tls/probe.key",
+      "caFile": "dev/tls/ca.crt"
+    },
+    "reconnectMinDelayMs": 500,
+    "reconnectMaxDelayMs": 4000,
+    "heartbeatIntervalMs": 2000
+  }
+}

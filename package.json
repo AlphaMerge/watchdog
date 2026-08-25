@@ -1,0 +1,39 @@
+{
+  "name": "monitoring-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PRTG-class infrastructure monitoring system",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/core",
+    "packages/probe",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "build:web": "npm run build --workspace @ms/web",
+    "clean": "tsc -b --clean && rm -rf packages/*/dist packages/web/dist",
+    "typecheck": "tsc -b --pretty",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "docker compose -f docker-compose.dev.yml up -d",
+    "dev:down": "docker compose -f docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

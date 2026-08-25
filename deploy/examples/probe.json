@@ -1,0 +1,31 @@
+{
+  "service": {
+    "name": "ms-probe",
+    "dataDir": "/var/lib/ms-probe",
+    "logLevel": "info",
+    "logPretty": false,
+    "shutdownTimeoutMs": 20000
+  },
+  "probe": {
+    "gid": "",
+    "displayName": "Local probe",
+    "spoolDir": "/var/lib/ms-probe/spool",
+    "spoolMaxBytes": 2147483648,
+    "workerPoolSize": 0,
+    "checkQueueMaxLength": 1000,
+    "checkAbortGraceMs": 2000
+  },
+  "core": {
+    "host": "127.0.0.1",
+    "port": 23560,
+    "accessKey": "",
+    "tls": {
+      "certFile": "/etc/ms/tls/probe.crt",
+      "keyFile": "/etc/ms/tls/probe.key",
+      "caFile": "/etc/ms/tls/ca.crt"
+    },
+    "reconnectMinDelayMs": 1000,
+    "reconnectMaxDelayMs": 60000,
+    "heartbeatIntervalMs": 10000
+  }
+}

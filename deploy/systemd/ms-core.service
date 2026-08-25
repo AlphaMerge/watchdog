@@ -1,0 +1,78 @@
+# MonitoringSystem core server.
+#
+# Production is a standalone native service (CLAUDE.md hard constraint 1). No container
+# runtime, no orchestrator. Install with deploy/install.sh.
+
+[Unit]
+Description=MonitoringSystem core server
+Documentation=file:/opt/ms/docs
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# Type=notify so systemd learns about readiness from the process rather than guessing, and so
+# WatchdogSec has something to watch. NotifyAccess=all is required because Node cannot write to
+# an AF_UNIX SOCK_DGRAM socket and we reach $NOTIFY_SOCKET through the systemd-notify helper
+# (see packages/shared/src/lifecycle/systemd.ts).
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=60
+
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5s
+
+User=ms-core
+Group=ms-core
+
+Environment=NODE_ENV=production
+Environment=MS_CONFIG_FILE=/etc/ms/core.json
+ExecStart=/opt/ms/bin/ms-core
+
+WorkingDirectory=/var/lib/ms-core
+StateDirectory=ms-core
+LogsDirectory=ms-core
+RuntimeDirectory=ms-core
+
+# The database password is delivered as a credential rather than an environment variable; the
+# config loader dereferences *__FROM_FILE. Create it with:
+#   systemd-creds encrypt --name=db-password plaintext /etc/ms/db-password.cred
+#LoadCredentialEncrypted=db-password:/etc/ms/db-password.cred
+#Environment=MS_DATABASE__PASSWORD__FROM_FILE=%d/db-password
+
+# Graceful shutdown: SIGTERM, drain, exit. Must exceed service.shutdownTimeoutMs (default 20s).
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+
+# --- Hardening ---------------------------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ReadWritePaths=/var/lib/ms-core /var/log/ms-core
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# V8 needs writable-executable pages for its JIT; this one cannot be enabled.
+MemoryDenyWriteExecute=no
+
+# --- Resource limits ---------------------------------------------------------------------
+# Sized for the v1 target of 5,000 sensors on 8 cores / 16 GB (CAPABILITIES.MD §13).
+# Raise on larger installations; MemoryMax is a hard stop, MemoryHigh throttles first.
+MemoryHigh=6G
+MemoryMax=8G
+TasksMax=4096
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

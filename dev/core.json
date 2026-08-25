@@ -1,0 +1,36 @@
+{
+  "service": {
+    "name": "ms-core",
+    "dataDir": "dev/data",
+    "logLevel": "info",
+    "logPretty": false,
+    "shutdownTimeoutMs": 5000
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "database": {
+    "host": "postgres",
+    "port": 5432,
+    "database": "monitoring",
+    "user": "monitoring",
+    "password": "monitoring",
+    "ssl": false,
+    "poolSize": 10,
+    "connectTimeoutMs": 10000,
+    "autoMigrate": true
+  },
+  "probeEndpoint": {
+    "host": "127.0.0.1",
+    "port": 23560,
+    "tls": {
+      "certFile": "dev/tls/core.crt",
+      "keyFile": "dev/tls/core.key",
+      "caFile": "dev/tls/ca.crt"
+    },
+    "accessKeys": ["dev-access-key"],
+    "handshakeTimeoutMs": 10000,
+    "heartbeatIntervalMs": 2000
+  }
+}

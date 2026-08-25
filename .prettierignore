@@ -1,0 +1,9 @@
+dist/
+node_modules/
+coverage/
+*.tsbuildinfo
+
+# Hand-authored specification documents. Prettier reflows their tables and swaps emphasis
+# markers, which makes every edit a diff full of noise. They are prose, not code.
+docs/
+CLAUDE.md

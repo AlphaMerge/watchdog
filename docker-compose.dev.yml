@@ -1,0 +1,125 @@
+# Development environment only.
+#
+# CLAUDE.md hard constraint 2: Docker is for development. Production runs `ms-core` and
+# `ms-probe` as native services under systemd (Linux) or WinSW (Windows), and nothing in
+# `packages/` may require a container runtime. These services exist so a developer gets
+# PostgreSQL/TimescaleDB, a mail sink, protocol simulators and a pinned Node toolchain
+# without installing any of them on the host.
+
+name: monitoring-system-dev
+
+services:
+  # ---------------------------------------------------------------------------------------
+  # Toolchain — the Node runtime for build, test and lint. Not started by `up`; used through
+  # `scripts/dev.sh` (or `docker compose run --rm toolchain ...`).
+  # ---------------------------------------------------------------------------------------
+  toolchain:
+    image: node:24-bookworm
+    working_dir: /workspace
+    profiles: ['tools']
+    init: true
+    environment:
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+      NPM_CONFIG_FUND: 'false'
+      CI: 'true'
+      # Integration tests reach PostgreSQL by service name on the compose network. They skip
+      # themselves when nothing is listening, so `npm test` still works with the stack down.
+      MS_TEST_DB_HOST: postgres
+    volumes:
+      - .:/workspace
+      - npm-cache:/root/.npm
+    entrypoint: ['/bin/bash', '-lc']
+    command: ['node --version']
+
+  # ---------------------------------------------------------------------------------------
+  # PostgreSQL + TimescaleDB — the only always-on service dependency (CLAUDE.md constraint 3).
+  # Stay inside the Apache-2.0 feature set: hypertables, continuous aggregates, native
+  # compression, retention policies (CLAUDE.md constraint 4).
+  # ---------------------------------------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg17
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_connections=200
+      # Timescale Community, matching production (CLAUDE.md constraint 4, ADR-001 Decision 4
+      # amendment). We accept that licence for native compression only — 12.5x on disk with no
+      # Apache substitute — and write rollups, retention and their scheduler ourselves.
+      #
+      # Set TIMESCALEDB_LICENSE=apache to check that nothing has quietly grown a dependency on
+      # another Timescale-License feature: continuous aggregates, add_job, add_retention_policy
+      # and time_bucket_gapfill all fail loudly under it.
+      - -c
+      - timescaledb.license=${TIMESCALEDB_LICENSE:-timescale}
+    environment:
+      POSTGRES_DB: monitoring
+      POSTGRES_USER: monitoring
+      POSTGRES_PASSWORD: monitoring
+      TIMESCALEDB_TELEMETRY: 'off'
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U monitoring -d monitoring']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------------------
+  # MailHog — SMTP sink for the notification workstream (Phase 4, N-07/N-15).
+  # SMTP on 1025, web UI on http://localhost:8025
+  # ---------------------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
+    healthcheck:
+      test: ['CMD', '/bin/sh', '-c', 'nc -z 127.0.0.1 1025']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------------------
+  # SNMP simulator — a target for the SNMP workstream (Phase 6, T-01…T-06). Replaced by our
+  # own harness in P-06; this is enough to develop against in the meantime.
+  # ---------------------------------------------------------------------------------------
+  snmpsim:
+    image: tandrup/snmpsim:latest
+    ports:
+      - '127.0.0.1:1161:161/udp'
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------------------
+  # Syslog sender — emits a message every few seconds at the probe's syslog listener
+  # (Phase 6, T-20). Points at the host by default; override SYSLOG_TARGET to aim elsewhere.
+  # ---------------------------------------------------------------------------------------
+  syslog-sender:
+    image: alpine:3.20
+    environment:
+      SYSLOG_TARGET: ${SYSLOG_TARGET:-host.docker.internal}
+      SYSLOG_PORT: ${SYSLOG_PORT:-1514}
+      SYSLOG_INTERVAL: ${SYSLOG_INTERVAL:-5}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        i=0
+        while true; do
+          i=$$((i + 1))
+          pri=$$((16 * 8 + i % 8))
+          printf '<%s>1 %s dev-host ms-devsim %s - - synthetic syslog message %s\n' \
+            "$$pri" "$$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$$$" "$$i" \
+            | nc -u -w1 "$$SYSLOG_TARGET" "$$SYSLOG_PORT" || true
+          sleep "$$SYSLOG_INTERVAL"
+        done
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  npm-cache:

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows service definition for the MonitoringSystem core, wrapped by WinSW.
+
+  WinSW (MIT, actively maintained) rather than node-windows, which has sat at 1.0.0-beta.8
+  since 2022 (ADR-001 Decision 10). Install with:
+
+      ms-probe.exe install
+      ms-probe.exe start
+
+  where ms-probe.exe is a copy of WinSW.exe sitting next to this file.
+-->
+<service>
+  <id>ms-probe</id>
+  <name>MonitoringSystem Probe</name>
+  <description>MonitoringSystem probe: scheduler, check execution, protocol listeners.</description>
+
+  <executable>%BASE%\runtime\node.exe</executable>
+  <arguments>"%BASE%\app\probe\dist\src\main.js"</arguments>
+  <workingdirectory>%ProgramData%\MonitoringSystem\probe</workingdirectory>
+
+  <env name="NODE_ENV" value="production" />
+  <env name="MS_CONFIG_FILE" value="%ProgramData%\MonitoringSystem\probe.json" />
+
+  <!-- Graceful shutdown. WinSW has no SIGTERM: stopparentfirst plus a generous timeout lets
+       the process run its drain path before Windows terminates it. Keep stoptimeout above
+       service.shutdownTimeoutMs. -->
+  <stoptimeout>60 sec</stoptimeout>
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <depend>Tcpip</depend>
+
+  <!-- Restart=on-failure, Windows edition. -->
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="15 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- The service writes structured JSON to stdout; roll it daily and keep two weeks. -->
+  <log mode="roll-by-time">
+    <logpath>%ProgramData%\MonitoringSystem\logs\probe</logpath>
+    <pattern>yyyyMMdd</pattern>
+    <autoRollAtTime>00:00:00</autoRollAtTime>
+    <keepFiles>14</keepFiles>
+  </log>
+
+  <priority>Normal</priority>
+</service>

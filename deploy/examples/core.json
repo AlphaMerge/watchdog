@@ -1,0 +1,59 @@
+{
+  "service": {
+    "name": "ms-core",
+    "dataDir": "/var/lib/ms-core",
+    "logLevel": "info",
+    "logPretty": false,
+    "shutdownTimeoutMs": 20000
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "database": "monitoring",
+    "user": "monitoring",
+    "password": "",
+    "ssl": false,
+    "poolSize": 20,
+    "connectTimeoutMs": 10000,
+    "autoMigrate": true
+  },
+  "ingestion": {
+    "queueMaxRows": 200000,
+    "batchMaxRows": 1000,
+    "batchMaxDelayMs": 250,
+    "slowDownAtPercent": 50,
+    "retryAfterMs": 1000
+  },
+  "housekeeping": {
+    "enabled": true,
+    "intervalSeconds": 300,
+    "rollupLagSeconds": 120,
+    "retention": {
+      "rawDays": 40,
+      "fiveMinuteDays": 365,
+      "hourlyDays": 730,
+      "dailyDays": 3650,
+      "auditDays": 730
+    },
+    "compression": {
+      "rawAfterDays": 7,
+      "fiveMinuteAfterDays": 30
+    }
+  },
+  "probeEndpoint": {
+    "host": "0.0.0.0",
+    "port": 23560,
+    "tls": {
+      "certFile": "/etc/ms/tls/core.crt",
+      "keyFile": "/etc/ms/tls/core.key",
+      "caFile": "/etc/ms/tls/ca.crt"
+    },
+    "accessKeys": [],
+    "handshakeTimeoutMs": 10000,
+    "heartbeatIntervalMs": 10000
+  }
+}

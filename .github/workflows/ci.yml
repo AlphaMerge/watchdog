@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  build:
+    name: build, lint and tests
+    runs-on: ubuntu-latest
+
+    # The database integration tests skip themselves when nothing is listening, which would
+    # quietly mean no coverage in CI. Give them a real PostgreSQL.
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17
+        env:
+          POSTGRES_DB: monitoring
+          POSTGRES_USER: monitoring
+          POSTGRES_PASSWORD: monitoring
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U monitoring -d monitoring"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: format
+        run: npm run format:check
+
+      - name: tests
+        run: npm test
+
+      # A skipped integration suite looks identical to a passing one in the summary line.
+      - name: assert the database tests actually ran
+        run: |
+          output="$(npm test --workspace @ms/core 2>&1)"
+          echo "$output"
+          if echo "$output" | grep -q 'no PostgreSQL reachable'; then
+            echo "::error::database integration tests skipped in CI" >&2
+            exit 1
+          fi
+
+      # install.sh runs as root on an operator's box; a shell bug there is an outage.
+      - name: shellcheck
+        run: shellcheck -S warning scripts/*.sh deploy/install.sh
+
+  install-smoke:
+    name: install smoke test on a clean box
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: package
+        run: scripts/package.sh
+
+      # Unpacks the tarball on a clean Debian box with a real systemd, runs install.sh and
+      # asserts both services reach "active" and stop with exit 0 (PLAN.md Phase 0 exit).
+      - name: install smoke test
+        run: scripts/smoke-install.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-tarball
+          path: release/*.tar.gz
+          retention-days: 7
+
+  dev-environment:
+    name: dev compose comes up
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: start dependency services
+        run: docker compose -f docker-compose.dev.yml up -d --wait postgres mailhog
+
+      - name: TimescaleDB is present and the licence is pinned
+        run: |
+          docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -U monitoring -d monitoring -tAc \
+            "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname='timescaledb'"
+          docker compose -f docker-compose.dev.yml exec -T postgres \
+            psql -U monitoring -d monitoring -tAc "SHOW timescaledb.license"
+
+      - name: tear down
+        if: always()
+        run: docker compose -f docker-compose.dev.yml down -v

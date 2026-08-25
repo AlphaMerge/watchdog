@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows service definition for the MonitoringSystem core, wrapped by WinSW.
+
+  WinSW (MIT, actively maintained) rather than node-windows, which has sat at 1.0.0-beta.8
+  since 2022 (ADR-001 Decision 10). Install with:
+
+      ms-core.exe install
+      ms-core.exe start
+
+  where ms-core.exe is a copy of WinSW.exe sitting next to this file.
+-->
+<service>
+  <id>ms-core</id>
+  <name>MonitoringSystem Core</name>
+  <description>MonitoringSystem core server: API, web UI, ingestion, notifications.</description>
+
+  <executable>%BASE%\runtime\node.exe</executable>
+  <arguments>"%BASE%\app\core\dist\src\main.js"</arguments>
+  <workingdirectory>%ProgramData%\MonitoringSystem\core</workingdirectory>
+
+  <env name="NODE_ENV" value="production" />
+  <env name="MS_CONFIG_FILE" value="%ProgramData%\MonitoringSystem\core.json" />
+
+  <!-- Graceful shutdown. WinSW has no SIGTERM: stopparentfirst plus a generous timeout lets
+       the process run its drain path before Windows terminates it. Keep stoptimeout above
+       service.shutdownTimeoutMs. -->
+  <stoptimeout>45 sec</stoptimeout>
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <depend>Tcpip</depend>
+
+  <!-- Restart=on-failure, Windows edition. -->
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="15 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- The service writes structured JSON to stdout; roll it daily and keep two weeks. -->
+  <log mode="roll-by-time">
+    <logpath>%ProgramData%\MonitoringSystem\logs\core</logpath>
+    <pattern>yyyyMMdd</pattern>
+    <autoRollAtTime>00:00:00</autoRollAtTime>
+    <keepFiles>14</keepFiles>
+  </log>
+
+  <priority>Normal</priority>
+</service>

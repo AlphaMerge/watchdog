@@ -1,0 +1,386 @@
+import { describeError, type IngestionConfig, type Logger } from '@ms/shared';
+import type { Queryable } from '../db/pool.js';
+
+/** One channel reading, resolved to a channel id and ready to write. */
+export interface SampleRow {
+  channelId: number;
+  at: Date;
+  value: number;
+}
+
+export interface IngestBatch {
+  /** Where it came from — a probe gid, or `local`. For logs and per-source metrics. */
+  source: string;
+  samples: readonly SampleRow[];
+}
+
+export type IngestOutcome =
+  | { accepted: true; storedSamples: number; retryAfterMs: number }
+  | {
+      accepted: false;
+      reason: 'queue-full' | 'shutting-down' | 'storage-error';
+      retryAfterMs: number;
+    };
+
+/**
+ * Told about every range of readings that lands, so the rollup can correct itself.
+ *
+ * The `Housekeeper` implements this: it enqueues a backfill window when — and only when — the
+ * readings precede a bucket it has already materialised, which is what a probe replaying its
+ * disk spool looks like (R-03). Without it those readings sit in raw, correct and invisible,
+ * until retention drops them.
+ *
+ * It takes the `Queryable` so it joins the write's own transaction. That is the difference
+ * between a guarantee and a hope: the readings and the promise to re-roll them commit together,
+ * and a crash in between cannot leave one without the other.
+ */
+export interface LateDataSink {
+  noteWrittenRange(q: Queryable, from: Date, to: Date): Promise<boolean>;
+}
+
+/** Just enough of `Database` to run one transaction — the whole of what ingestion needs. */
+export interface IngestTarget {
+  tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
+}
+
+export interface IngestorOptions {
+  /** Narrower than the pool, so a test can hand it a stub that fails. */
+  db: IngestTarget;
+  logger: Logger;
+  config: IngestionConfig;
+  lateData?: LateDataSink;
+}
+
+export interface IngestionStats {
+  /** Readings waiting to be written. The number Core Health watches (P-12). */
+  queuedRows: number;
+  queuedBatches: number;
+  acceptedBatches: number;
+  /** Batches turned away because the queue was full. Never silently dropped, always counted. */
+  refusedBatches: number;
+  refusedRows: number;
+  failedBatches: number;
+  storedSamples: number;
+  /** Readings that were already there — normal during a replay, suspicious otherwise. */
+  duplicateSamples: number;
+  writes: number;
+  /** Write latency in milliseconds over the last 1,024 writes. */
+  writeMs: { p50: number; p95: number; p99: number; max: number };
+  /** True while acknowledgements are carrying a slow-down hint. */
+  slowingDown: boolean;
+  backfillsQueued: number;
+}
+
+interface Queued {
+  batch: IngestBatch;
+  settle: (outcome: IngestOutcome) => void;
+}
+
+/** Write durations kept for the percentile the exit criterion is stated in. */
+const LATENCY_WINDOW = 1_024;
+
+/**
+ * The core's write path for check results.
+ *
+ * Three properties, in the order they matter:
+ *
+ * **Bounded.** The queue has a row limit. Past it, batches are refused with a reason and a
+ * retry delay rather than accepted into a heap that grows until the process dies. Refusing is
+ * the safe answer because the probe has not been acknowledged and still holds the batch in its
+ * disk spool (R-02) — the backlog belongs on the probe's disk, not in our memory.
+ *
+ * **Visible.** Every refusal, duplicate and failure is counted (CLAUDE.md: "backpressure is
+ * visible, never silent... never drop without counting"). `stats()` is what Core Health reads.
+ *
+ * **Idempotent.** Writes are `ON CONFLICT DO NOTHING` against the unique index S-05 put on
+ * `(channel_id, time)`, so a probe that resends after a lost acknowledgement costs a duplicate
+ * write and nothing else. That is what lets the acknowledgement mean "durably stored" without
+ * any exactly-once machinery on the wire.
+ */
+export class Ingestor {
+  readonly #db: IngestTarget;
+  readonly #logger: Logger;
+  readonly #config: IngestionConfig;
+  readonly #lateData: LateDataSink | undefined;
+
+  readonly #queue: Queued[] = [];
+  readonly #latencies: number[] = [];
+
+  #queuedRows = 0;
+  #flushing = false;
+  #timer: NodeJS.Timeout | undefined;
+  #stopping = false;
+  #idle: Promise<void> | undefined;
+  #idleResolve: (() => void) | undefined;
+
+  #acceptedBatches = 0;
+  #refusedBatches = 0;
+  #refusedRows = 0;
+  #failedBatches = 0;
+  #storedSamples = 0;
+  #duplicateSamples = 0;
+  #writes = 0;
+  #backfillsQueued = 0;
+
+  constructor(options: IngestorOptions) {
+    this.#db = options.db;
+    this.#logger = options.logger.child({ component: 'ingestor' });
+    this.#config = options.config;
+    this.#lateData = options.lateData;
+  }
+
+  /**
+   * Offers a batch. Resolves once the readings are committed, or once the batch has been
+   * refused.
+   *
+   * Never rejects: the caller always has an answer to send back to the probe, and a thrown
+   * exception here would leave a probe waiting for an acknowledgement that never came.
+   */
+  async submit(batch: IngestBatch): Promise<IngestOutcome> {
+    const rows = batch.samples.length;
+
+    if (this.#stopping) {
+      this.#refuse(rows);
+      return { accepted: false, reason: 'shutting-down', retryAfterMs: this.#config.retryAfterMs };
+    }
+
+    // An empty batch is not an error — a probe whose checks all failed has readings for none of
+    // them — and it must still be acknowledged, or the probe will offer it again for ever.
+    if (rows === 0) {
+      this.#acceptedBatches += 1;
+      return { accepted: true, storedSamples: 0, retryAfterMs: this.#retryHint() };
+    }
+
+    if (this.#queuedRows + rows > this.#config.queueMaxRows) {
+      this.#refuse(rows);
+      this.#logger.warn(
+        { source: batch.source, rows, queuedRows: this.#queuedRows, refused: this.#refusedBatches },
+        'ingestion queue is full, refusing a batch',
+      );
+      return { accepted: false, reason: 'queue-full', retryAfterMs: this.#config.retryAfterMs };
+    }
+
+    this.#queuedRows += rows;
+    this.#acceptedBatches += 1;
+
+    const outcome = new Promise<IngestOutcome>((resolve) => {
+      this.#queue.push({ batch, settle: resolve });
+    });
+
+    this.#schedule();
+    return outcome;
+  }
+
+  /**
+   * Stops accepting work and writes what is already queued.
+   *
+   * Everything in the queue has been promised durability, so draining is not optional: a probe
+   * waiting on an acknowledgement would otherwise resend the batch, which is survivable, but a
+   * local caller with no spool would simply lose it.
+   */
+  async stop(): Promise<void> {
+    this.#stopping = true;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    if (this.#queue.length > 0 || this.#flushing) {
+      this.#schedule(true);
+      await this.#idlePromise();
+    }
+    this.#logger.info(
+      { storedSamples: this.#storedSamples, refusedBatches: this.#refusedBatches },
+      'ingestion stopped',
+    );
+  }
+
+  stats(): IngestionStats {
+    const sorted = [...this.#latencies].sort((a, b) => a - b);
+    const at = (fraction: number): number => {
+      if (sorted.length === 0) return 0;
+      const index = Math.min(sorted.length - 1, Math.floor(fraction * sorted.length));
+      return Number((sorted[index] ?? 0).toFixed(3));
+    };
+    return {
+      queuedRows: this.#queuedRows,
+      queuedBatches: this.#queue.length,
+      acceptedBatches: this.#acceptedBatches,
+      refusedBatches: this.#refusedBatches,
+      refusedRows: this.#refusedRows,
+      failedBatches: this.#failedBatches,
+      storedSamples: this.#storedSamples,
+      duplicateSamples: this.#duplicateSamples,
+      writes: this.#writes,
+      writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
+      slowingDown: this.#retryHint() > 0,
+      backfillsQueued: this.#backfillsQueued,
+    };
+  }
+
+  #refuse(rows: number): void {
+    this.#refusedBatches += 1;
+    this.#refusedRows += rows;
+  }
+
+  /**
+   * How long a probe should wait before offering more.
+   *
+   * Zero until the queue passes the slow-down mark, then the configured delay. Gradual on
+   * purpose: a system that only ever says "full, go away" has already built the backlog it is
+   * complaining about.
+   */
+  #retryHint(): number {
+    const mark = (this.#config.queueMaxRows * this.#config.slowDownAtPercent) / 100;
+    return this.#queuedRows >= mark ? this.#config.retryAfterMs : 0;
+  }
+
+  #schedule(immediate = false): void {
+    if (this.#flushing) return;
+    if (this.#timer !== undefined) return;
+
+    // Full batch, or told to go now: no reason to wait for company.
+    if (immediate || this.#queuedRows >= this.#config.batchMaxRows) {
+      void this.#flush();
+      return;
+    }
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      void this.#flush();
+    }, this.#config.batchMaxDelayMs);
+    this.#timer.unref();
+  }
+
+  async #flush(): Promise<void> {
+    if (this.#flushing) return;
+    this.#flushing = true;
+    try {
+      while (this.#queue.length > 0) {
+        await this.#writeOne();
+      }
+    } finally {
+      this.#flushing = false;
+      if (this.#queue.length === 0) this.#settleIdle();
+      else this.#schedule();
+    }
+  }
+
+  /** Takes up to `batchMaxRows` worth of queued batches and writes them in one statement. */
+  async #writeOne(): Promise<void> {
+    const taken: Queued[] = [];
+    let rows = 0;
+    while (this.#queue.length > 0) {
+      const next = this.#queue[0];
+      if (next === undefined) break;
+      // Always take at least one, even if a single batch is larger than the target size —
+      // otherwise an oversized batch would sit at the head of the queue for ever.
+      if (taken.length > 0 && rows + next.batch.samples.length > this.#config.batchMaxRows) break;
+      this.#queue.shift();
+      taken.push(next);
+      rows += next.batch.samples.length;
+    }
+    if (taken.length === 0) return;
+
+    const times: Date[] = [];
+    const channelIds: number[] = [];
+    const values: number[] = [];
+    let oldest = Number.POSITIVE_INFINITY;
+    let newest = Number.NEGATIVE_INFINITY;
+    for (const queued of taken) {
+      for (const sample of queued.batch.samples) {
+        times.push(sample.at);
+        channelIds.push(sample.channelId);
+        values.push(sample.value);
+        const at = sample.at.getTime();
+        if (at < oldest) oldest = at;
+        if (at > newest) newest = at;
+      }
+    }
+
+    const startedAt = process.hrtime.bigint();
+    try {
+      const { stored, late } = await this.#db.tx(async (q) => {
+        const written = await q.query<{ channel_id: number; time: Date }>(
+          `INSERT INTO sample (time, channel_id, value)
+           SELECT * FROM unnest($1::timestamptz[], $2::int[], $3::float8[])
+           ON CONFLICT (channel_id, time) DO NOTHING
+           RETURNING channel_id, time`,
+          [times, channelIds, values],
+        );
+        // In the same transaction, deliberately. If this fails the readings roll back with it —
+        // which is the right way round: the probe still holds the batch and will offer it again,
+        // whereas committed readings with no backfill queued would leave the rollup silently
+        // wrong with nothing left to notice it.
+        const noted =
+          this.#lateData === undefined
+            ? false
+            : await this.#lateData.noteWrittenRange(q, new Date(oldest), new Date(newest));
+        return { stored: written, late: noted };
+      });
+
+      this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);
+      this.#queuedRows -= rows;
+      this.#writes += 1;
+      this.#storedSamples += stored.length;
+      this.#duplicateSamples += rows - stored.length;
+      if (late) {
+        this.#backfillsQueued += 1;
+        this.#logger.info(
+          { from: new Date(oldest).toISOString(), to: new Date(newest).toISOString() },
+          'readings landed behind the rollup watermark, backfill queued',
+        );
+      }
+
+      // Which rows landed, so each batch is told the truth about its own readings rather than a
+      // share of the write's total. Duplicates are normal on replay and worth reporting exactly.
+      const landed = new Set(stored.map((row) => key(row.channel_id, row.time)));
+      const retryAfterMs = this.#retryHint();
+      for (const queued of taken) {
+        // Counted once per distinct reading: a batch that repeats (channel, time) writes one
+        // row, and reporting two would overstate what was stored.
+        const counted = new Set<string>();
+        for (const sample of queued.batch.samples) {
+          const id = key(sample.channelId, sample.at);
+          if (landed.has(id)) counted.add(id);
+        }
+        queued.settle({ accepted: true, storedSamples: counted.size, retryAfterMs });
+      }
+    } catch (error: unknown) {
+      this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);
+      this.#queuedRows -= rows;
+      this.#failedBatches += taken.length;
+      this.#logger.error(
+        { err: describeError(error), batches: taken.length, rows },
+        'ingestion write failed',
+      );
+      // The rows are gone from our queue but not from the probe's spool: it was never
+      // acknowledged, so it will offer them again. Nothing is lost, and the failure is counted.
+      for (const queued of taken) {
+        queued.settle({
+          accepted: false,
+          reason: 'storage-error',
+          retryAfterMs: this.#config.retryAfterMs,
+        });
+      }
+    }
+  }
+
+  #record(ms: number): void {
+    this.#latencies.push(ms);
+    if (this.#latencies.length > LATENCY_WINDOW) this.#latencies.shift();
+  }
+
+  #idlePromise(): Promise<void> {
+    this.#idle ??= new Promise<void>((resolve) => {
+      this.#idleResolve = resolve;
+    });
+    return this.#idle;
+  }
+
+  #settleIdle(): void {
+    this.#idleResolve?.();
+    this.#idle = undefined;
+    this.#idleResolve = undefined;
+  }
+}
+
+function key(channelId: number, at: Date): string {
+  return `${String(channelId)}:${String(at.getTime())}`;
+}

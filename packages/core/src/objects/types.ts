@@ -1,0 +1,312 @@
+import type { CredentialKind, ResolvedSetting, SettingSource } from '../settings/inheritance.js';
+
+export type { CredentialKind, ResolvedSetting, SettingSource };
+
+export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
+/** Every kind the API can create. The root is seeded by migration 001 and there is only one. */
+export type WritableKind = Exclude<ObjectKind, 'root'>;
+export type Priority = 1 | 2 | 3 | 4 | 5;
+export type IpVersion = 'auto' | 'v4' | 'v6';
+
+/**
+ * `object.id` is `bigint`; `pg` hands it back as a string and the repository narrows at its
+ * edge. Safe below 2^53 — at a million objects a day that is roughly 24,000 years.
+ */
+export type ObjectId = number;
+
+export interface ObjectRef {
+  readonly id: ObjectId;
+  readonly kind: ObjectKind;
+  readonly name: string;
+}
+
+interface ObjectBase {
+  readonly id: ObjectId;
+  readonly name: string;
+  readonly tags: readonly string[];
+  readonly priority: Priority;
+  readonly comments: string;
+  /** Monotonic and clock-independent — the ETag validator. Bumped by trigger, never by hand. */
+  readonly version: number;
+  readonly childCount: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * Discriminated on `kind`. A group has no host, so `host?: string` would be a lie the compiler
+ * cannot catch (CLAUDE.md: discriminated unions over optional-field soup).
+ */
+export type ObjectDetail =
+  | (ObjectBase & { readonly kind: 'root'; readonly parentId: null })
+  | (ObjectBase & { readonly kind: 'probe'; readonly parentId: ObjectId })
+  | (ObjectBase & { readonly kind: 'group'; readonly parentId: ObjectId })
+  | (ObjectBase & {
+      readonly kind: 'device';
+      readonly parentId: ObjectId;
+      readonly host: string;
+      readonly ipVersion: IpVersion;
+    })
+  | (ObjectBase & {
+      readonly kind: 'sensor';
+      readonly parentId: ObjectId;
+      readonly sensorType: string;
+      readonly params: Readonly<Record<string, unknown>>;
+    });
+
+export type ObjectOfKind<K extends ObjectKind> = Extract<ObjectDetail, { kind: K }>;
+
+/** The two-hundred-rows-a-page shape. Deliberately narrower than `ObjectDetail`. */
+export interface ObjectSummary {
+  readonly id: ObjectId;
+  readonly parentId: ObjectId | null;
+  readonly kind: ObjectKind;
+  readonly name: string;
+  readonly tags: readonly string[];
+  readonly priority: Priority;
+  readonly version: number;
+  /** An `EXISTS`, not a count: a disclosure triangle needs a boolean. */
+  readonly hasChildren: boolean;
+  readonly depth?: number;
+  readonly host?: string;
+  readonly sensorType?: string;
+  readonly effective?: Readonly<Record<string, ResolvedSetting>>;
+}
+
+export interface ChannelRecord {
+  readonly id: number;
+  readonly sensorId: ObjectId;
+  readonly key: string;
+  readonly name: string;
+  readonly unit: string;
+  readonly isPrimary: boolean;
+  /** `numeric` columns. Strings on the wire — a JS number would silently lose precision. */
+  readonly scaleMul: string;
+  readonly scaleDiv: string;
+  readonly decimals: number | null;
+  readonly limits: Readonly<Record<string, unknown>>;
+  readonly spikeMin: number | null;
+  readonly spikeMax: number | null;
+  readonly showInGraph: boolean;
+  readonly showInTable: boolean;
+}
+
+/** No secret, no key id, no length, no hash. There is no field a secret could occupy. */
+export interface CredentialView {
+  readonly kind: CredentialKind;
+  readonly publicParams: Readonly<Record<string, unknown>>;
+  readonly source: SettingSource;
+  readonly updatedAt: string;
+}
+
+export interface SettingView {
+  readonly key: string;
+  readonly description: string;
+  readonly schema: Readonly<Record<string, unknown>>;
+  readonly effective: { readonly value: unknown; readonly source: SettingSource };
+  /**
+   * `null` means no override. Distinct from `{ value: 60 }`, which means "overridden to the
+   * same value the parent happens to have" — the override toggle is on in one case and off in
+   * the other, so these must not collapse into one another.
+   */
+  readonly own: { readonly value: unknown } | null;
+}
+
+// ── inputs ─────────────────────────────────────────────────────────────────────────────────
+
+export type CreateObjectInput =
+  | {
+      kind: 'probe';
+      parentId: ObjectId;
+      name: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    }
+  | {
+      kind: 'group';
+      parentId: ObjectId;
+      name: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    }
+  | {
+      kind: 'device';
+      parentId: ObjectId;
+      name: string;
+      host: string;
+      ipVersion?: IpVersion;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    }
+  | {
+      kind: 'sensor';
+      parentId: ObjectId;
+      name: string;
+      sensorType: string;
+      params?: Record<string, unknown>;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    };
+
+/**
+ * `kind` is required so the JSON-Schema discriminator can pick a branch, and is checked
+ * against the stored kind. `parentId` is absent — reparenting is `move`. `sensorType` is
+ * absent — a sensor's type is immutable, because changing it would keep the channel rows and
+ * their history while the measurement underneath them changed meaning.
+ */
+export type UpdateObjectInput =
+  | {
+      kind: 'root' | 'probe' | 'group';
+      name?: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+    }
+  | {
+      kind: 'device';
+      name?: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+      host?: string;
+      ipVersion?: IpVersion;
+    }
+  | {
+      kind: 'sensor';
+      name?: string;
+      tags?: string[];
+      priority?: Priority;
+      comments?: string;
+      params?: Record<string, unknown>;
+    };
+
+export interface CloneInput {
+  targetParentId?: ObjectId;
+  name?: string;
+}
+
+export type Precondition = { kind: 'none' } | { kind: 'version'; expected: number };
+
+export type DeleteExpectation = { kind: 'leafOnly' } | { kind: 'exact'; descendants: number };
+
+export interface ObjectFilter {
+  readonly parentId?: ObjectId;
+  readonly kinds?: readonly ObjectKind[];
+  /** Matched case-folded, per CAPABILITIES.MD §1. */
+  readonly tags?: readonly string[];
+  readonly q?: string;
+  readonly host?: string;
+  readonly priorityMin?: Priority;
+}
+
+/**
+ * `manual` is the operator's own arrangement within a parent (S-14), falling back to name for
+ * siblings nobody has arranged. It only means anything inside one parent, so a listing that
+ * asks for it has to name the parent.
+ */
+export type ListSort = 'name' | 'id' | 'manual';
+
+/** Where a reorder puts an object among its siblings. */
+export type SiblingMove = 'up' | 'down' | 'first' | 'last';
+
+export interface Page<T> {
+  readonly items: readonly T[];
+  readonly nextCursor: string | null;
+}
+
+export interface DecodedCursor {
+  readonly v: 1;
+  readonly sort: ListSort;
+  readonly name: string | null;
+  /**
+   * The `sort_order` of the last row on the page, for `sort=manual`. Null both for the other
+   * sorts and for a row that has never been arranged — which is a position in the ordering, not
+   * a missing value, so the keyset predicate has to handle it as one.
+   */
+  readonly order: number | null;
+  readonly id: ObjectId;
+}
+
+export interface PageRequest {
+  readonly limit: number;
+  readonly sort: ListSort;
+  readonly cursor: DecodedCursor | null;
+}
+
+export interface SubtreeOptions {
+  readonly maxDepth: number;
+  readonly limit: number;
+  readonly kinds?: readonly ObjectKind[];
+}
+
+export interface SubtreeResult {
+  readonly items: readonly ObjectSummary[];
+  readonly truncated: boolean;
+}
+
+// ── reports ────────────────────────────────────────────────────────────────────────────────
+
+export interface CountsByKind {
+  readonly probe: number;
+  readonly group: number;
+  readonly device: number;
+  readonly sensor: number;
+  readonly total: number;
+  readonly channels: number;
+  readonly credentialSets: number;
+}
+
+export interface DeleteReport {
+  readonly id: ObjectId;
+  readonly kind: ObjectKind;
+  readonly name: string;
+  readonly deleted: CountsByKind;
+  /** The full pre-delete enumeration, handed to the audit sink. Not in the HTTP response. */
+  readonly destroyed: readonly ObjectRef[];
+}
+
+export interface SettingChange {
+  readonly key: string;
+  readonly before: ResolvedSetting;
+  readonly after: ResolvedSetting;
+}
+
+export interface CredentialChange {
+  readonly kind: CredentialKind;
+  readonly before: 'own' | 'inherited' | 'none';
+  readonly after: 'own' | 'inherited' | 'none';
+}
+
+export interface MoveResult {
+  readonly object: ObjectDetail;
+  readonly fromParentId: ObjectId;
+  readonly toParentId: ObjectId;
+  readonly movedCount: number;
+  readonly probeChanged: { from: ObjectRef | null; to: ObjectRef | null } | null;
+  readonly settingsChanged: readonly SettingChange[];
+  readonly credentialsChanged: readonly CredentialChange[];
+}
+
+export interface CloneCounts {
+  readonly group: number;
+  readonly device: number;
+  readonly sensor: number;
+  readonly channel: number;
+  readonly setting: number;
+  readonly total: number;
+}
+
+export interface CloneResult {
+  readonly object: ObjectDetail;
+  readonly clonedCount: CloneCounts;
+  /**
+   * Kinds only, never values. Says in the 201 why the clone cannot authenticate yet, instead
+   * of leaving it to be discovered as a Down sensor twenty minutes later.
+   */
+  readonly droppedCredentialKinds: readonly CredentialKind[];
+  readonly settingsChanged: readonly SettingChange[];
+}
