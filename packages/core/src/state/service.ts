@@ -266,8 +266,17 @@ export class SensorStateService {
 
         // Whichever side produced the state gets to explain it. The cause names that side, so
         // there is one source of truth rather than a second rule that can disagree with it.
-        const message =
-          applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
+        //
+        // **Including when that side is a person.** A forced or acknowledged sensor keeps being
+        // scanned — the force changes what its readings *mean*, not whether it takes any — and
+        // the check that runs a second later still reports "2/2 replies". Letting that overwrite
+        // the message left a sensor reading "Down — 2/2 replies, min 0.072 ms", which is a row
+        // an operator cannot make sense of and which `U-06` puts on the home screen. The rule is
+        // `operatorDecided`, the same one `reevaluate` uses; the difference is that there are no
+        // fresh operator words here, so what is already stored is what stays.
+        const message = operatorDecided(applied.decision)
+          ? runtime.message
+          : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
             ? (result.channels?.message ?? result.message)
             : result.message;
 

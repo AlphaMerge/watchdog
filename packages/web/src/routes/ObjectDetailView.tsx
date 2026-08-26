@@ -219,6 +219,14 @@ function Header({
           />
         )}
         {own !== undefined && <SinceAndCause live={own} />}
+        {/* The alarms view scopes to a subtree; this is how somebody gets there from an object
+            rather than by editing a query string. */}
+        <Link
+          to={`/alarms?objectId=${String(detail.id)}`}
+          className="ml-auto shrink-0 text-xs text-accent hover:underline"
+        >
+          Alarms here →
+        </Link>
       </div>
       {pause?.paused === true && <PausedBanner view={pause} />}
     </header>

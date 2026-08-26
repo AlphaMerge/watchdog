@@ -322,5 +322,47 @@ describe(
       assert.equal(entry.message, 'quarterly chain test');
       assert.equal(entry.sensorsAffected, 2);
     });
+
+    it('keeps the operator words when the next scan comes back healthy', async () => {
+      // A forced sensor is still scanned — the force changes what its readings *mean*, not
+      // whether it takes any. Letting that scan's message through left the sensor reading
+      // "Down — 2/2 replies, min 0.072 ms", which is a row nobody can make sense of and which
+      // U-06 puts on the operator's home screen.
+      await h.service.simulateError(testActor, sensorId, true, 'testing the chain');
+      assert.equal((await runtimeOf(sensorId)).message, 'testing the chain');
+
+      await report([
+        {
+          sensorId,
+          at: new Date(NOW.getTime() + 60_000),
+          outcome: 'ok',
+          message: '2/2 replies, min 0.072 ms',
+          channels: null,
+        },
+      ]);
+
+      const after = await runtimeOf(sensorId);
+      assert.equal(after.state, 'down');
+      assert.equal(after.cause, 'simulated');
+      assert.equal(after.message, 'testing the chain', 'the operator still owns the explanation');
+    });
+
+    it('hands the message back to the probe as soon as the force is lifted', async () => {
+      await h.service.simulateError(testActor, sensorId, true, 'testing the chain');
+      await h.service.simulateError(testActor, sensorId, false);
+      await report([
+        {
+          sensorId,
+          at: new Date(NOW.getTime() + 120_000),
+          outcome: 'ok',
+          message: '2/2 replies, min 0.072 ms',
+          channels: null,
+        },
+      ]);
+
+      const after = await runtimeOf(sensorId);
+      assert.equal(after.state, 'up');
+      assert.equal(after.message, '2/2 replies, min 0.072 ms');
+    });
   },
 );

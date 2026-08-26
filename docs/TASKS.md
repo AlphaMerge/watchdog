@@ -1037,6 +1037,13 @@ because each is a decision rather than a defect:
       rather than only the Down ones: forcing a Down is not a statement about the current state.
       `M-17`'s alarm-storm scenario is what wants the subtree form. The API description says
       plainly that this fires the real chain at real people.
+
+      **Corrected by U-06.** "It keeps being scanned" had a consequence nobody had looked at: the
+      scan that ran a second later overwrote the runtime *message* with the probe's, so a forced
+      sensor read "Down — 2/2 replies, min 0.072 ms". Invisible until the alarms view put the
+      message on the operator's home screen. `SensorStateService` now consults `operatorDecided`
+      on the result path — the same rule `reevaluate` already used — and keeps the operator's
+      words for as long as the operator's action is what decides the state.
 - [x] **M-15 — State-change log** · M · M-02, S-10 · Every transition with previous state, new
       state, message and cause.
 
@@ -2417,8 +2424,58 @@ because each is a decision rather than a defect:
       same detail on focus as on hover; the canvas is `aria-hidden` and not focusable, and the
       table view is the reachable equivalent the same guidance names. `U-11` is where a focusable
       crosshair belongs if it is wanted at all.
-- [ ] **U-06 — Alarms view** · M · U-02, M-13 · Severity filters, branch scoping, priority and
+- [x] **U-06 — Alarms view** · M · U-02, M-13 · Severity filters, branch scoping, priority and
       duration sorting, inline acknowledge/pause/resume.
+
+      **U-06 outcome.** `GET /api/v1/alarms`, `AlarmService`, and the view at `/alarms` — second
+      in the nav, before the tree, because `WORKFLOW.MD §7` calls it the operator's home screen.
+
+      **What counts as an alarm is named, not derived.** The five states `WORKFLOW.MD §7` lists,
+      and two deliberate absences. **Paused is not an alarm**: somebody switched it off on
+      purpose, and a list that reports deliberate silence is the list an operator learns to scroll
+      past — which is how the real alarm underneath it gets missed. **Unknown is not one either**:
+      it means nothing has scanned this yet, true of every sensor in a fresh installation and of
+      every sensor for one interval after a resume. A gap in coverage, not a fault.
+
+      **The index for this was created eleven tickets ago.** Migration 008 added
+      `sensor_runtime_not_up_idx` — partial, on the states that are not Up — naming `U-06` in its
+      comment, because in a healthy installation the answer is a handful of rows out of thousands
+      and a sequential scan to find them would be the one query that got slower as the product
+      succeeded. This is the read that uses it.
+
+      **The ancestry walk goes up from the alarms, not down from the root.** Scoping to a branch
+      and naming each alarm's place are the same question — is this object in the chain, what are
+      the chain's names — so one upward walk from a few dozen alarming sensors answers both. A
+      downward walk would touch every object in the installation on a view that refetches whenever
+      anything changes state.
+
+      **The severity chips count what they hide.** The state filter is applied *after* the scope,
+      not before, so a reader filtered to errors-only is still told there are three warnings. The
+      first version filtered in the scan and the counts silently agreed with the filter — caught
+      by its own test, which is what that test was for.
+
+      **The list is the server's answer; the stream is only the prompt.** Sorting by priority then
+      duration, scoping, counting: one query, not a second implementation in the browser. What
+      `U-02` contributes is knowing *when* to ask again, debounced by 400 ms so a switch taking
+      forty sensors down is one request rather than forty. Verified live: forcing an error put a
+      row on screen with no reload, and clearing it took the row away and reset every chip.
+
+      **Inline actions, because the alternative is forty round trips.** Acknowledge with the
+      `CAPABILITIES.MD §5.3` presets, un-acknowledge, and pause — the same endpoints the detail
+      page calls, nothing newly authorised. A refused action says so in the row: leaving it
+      unchanged would read as a click that did not register, and the operator would click again.
+
+      **A real defect in `M-14`, found because this view puts the message on the front page.** A
+      forced sensor keeps being scanned — the force changes what its readings *mean*, not whether
+      it takes any — and the result path overwrote the runtime message with the probe's. So a
+      simulated outage read **"Down — 2/2 replies, min 0.072 ms"**, which is a row nobody can make
+      sense of. The rule already existed and was already named: `operatorDecided`, which
+      `reevaluate` consults and the result path did not. It does now, and keeps what is stored
+      rather than blanking it, because there are no fresh operator words at that moment. Two
+      tests, both of which fail against the old behaviour.
+
+      Filters live in the URL, so "look at the Berlin alarms" is a link somebody sends; the
+      object detail page links to its own scope.
 - [ ] **U-07 — Logs view** · M · M-15 · PRTG's category structure: status changes, system events,
       object history; filters and paging.
 - [ ] **U-08 — Schema-driven settings forms** · L · P-05, U-01 · Forms generated from each sensor

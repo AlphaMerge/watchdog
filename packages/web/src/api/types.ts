@@ -306,3 +306,36 @@ export interface StateLogPage {
 export interface AncestorsView {
   items: { id: number; kind: ObjectKind; name: string }[];
 }
+
+/**
+ * One sensor in an alarm state (`U-06`).
+ *
+ * The five states `WORKFLOW.MD §7` names, and only those: paused is deliberate silence and
+ * unknown is a gap in coverage, and reporting either as a fault is how a list becomes one an
+ * operator scrolls past.
+ */
+export interface Alarm {
+  sensorId: number;
+  sensorName: string;
+  state: SensorState;
+  cause: string;
+  message: string;
+  /** When the sensor entered this state. The duration is `now - since`. */
+  since: string;
+  /** 1 (lowest) to 5 (highest). */
+  priority: number;
+  /** Root first, sensor last — ids and names in step, so each step can be a link. */
+  path: number[];
+  pathNames: string[];
+  acknowledged: boolean;
+  acknowledgedUntil: string | null;
+  consecutiveFailures: number;
+}
+
+export interface AlarmPage {
+  items: Alarm[];
+  /** How many matched before the limit, so a truncated list can say what it is not showing. */
+  total: number;
+  /** Per state across the whole scope, ignoring the state filter — the chips' own numbers. */
+  counts: Partial<Record<SensorState, number>>;
+}

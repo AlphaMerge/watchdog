@@ -52,6 +52,46 @@ export async function request<T>(path: string, signal?: AbortSignal): Promise<T>
   return (await response.json()) as T;
 }
 
+/**
+ * A write.
+ *
+ * Separate from `request` rather than a method parameter on it, because the two have different
+ * obligations: a read can be retried freely and a write cannot, and every caller of this one has
+ * to decide what to do when it fails. Nothing here retries on its own.
+ */
+export async function send<T>(
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}${path}`, {
+      method,
+      headers:
+        body === undefined
+          ? { accept: 'application/json' }
+          : { accept: 'application/json', 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    throw new ApiError(0, 'UNREACHABLE', 'the core is not reachable', undefined);
+  }
+
+  if (!response.ok) {
+    const failed = (await response.json().catch(() => ({}))) as ErrorBody;
+    throw new ApiError(
+      response.status,
+      failed.error?.code ?? 'HTTP_ERROR',
+      failed.error?.message ?? `${String(response.status)} ${response.statusText}`,
+      failed.error?.correlationId,
+    );
+  }
+  // A 204 has no body to parse, and asking for one would turn a success into an error.
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
 export type Loadable<T> =
   { status: 'loading' } | { status: 'ready'; data: T } | { status: 'error'; error: ApiError };
 

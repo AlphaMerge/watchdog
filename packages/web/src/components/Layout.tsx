@@ -3,6 +3,9 @@ import { useTheme } from '../theme/useTheme';
 
 const NAV = [
   { to: '/', label: 'Overview', end: true },
+  // Second, and before the tree: `WORKFLOW.MD §7` calls the alarms view the operator's home
+  // screen, and the thing somebody opens this product to look at belongs near the front.
+  { to: '/alarms', label: 'Alarms', end: false },
   { to: '/tree', label: 'Tree', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
 ];

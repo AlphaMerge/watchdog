@@ -11,6 +11,7 @@ import type { ObjectService } from '../objects/service.js';
 import type { AuditRepository } from '../audit/store.js';
 import type { Database } from '../db/pool.js';
 import type { HistoryService } from '../timeseries/history.js';
+import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
 import { auditRoutes } from './routes/audit.js';
@@ -20,6 +21,7 @@ import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { stateRoutes } from './routes/state.js';
+import { alarmRoutes, ALARM_SCHEMAS } from './routes/alarms.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
 import type { DeliveryHealthReader } from '../notifications/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
@@ -112,6 +114,7 @@ export class ApiServer {
   readonly #logger: Logger;
   readonly #history: HistoryService;
   readonly #stateLog: StateLogService;
+  readonly #alarms: AlarmService;
   readonly #db: Database;
   readonly #audit: AuditRepository;
   readonly #catalogue: SensorCatalogue;
@@ -140,6 +143,7 @@ export class ApiServer {
     // Built here rather than injected: it is a query over one table with no configuration, and
     // a second constructor argument for it would be ceremony (`M-15`).
     this.#stateLog = new StateLogService({ db: options.db, logger: this.#logger });
+    this.#alarms = new AlarmService({ db: options.db, logger: this.#logger });
     this.#db = options.db;
     this.#audit = options.audit;
     this.#catalogue = options.catalogue;
@@ -197,6 +201,7 @@ export class ApiServer {
       ...HISTORY_SCHEMAS,
       ...AUDIT_SCHEMAS,
       ...STATE_SCHEMAS,
+      ...ALARM_SCHEMAS,
       ...LOOKUP_SCHEMAS,
       ...PAUSE_SCHEMAS,
       ...SCHEDULE_SCHEMAS,
@@ -288,6 +293,7 @@ export class ApiServer {
         await scope.register(historyRoutes, { history: this.#history });
         await scope.register(stateRoutes, { db: this.#db });
         await scope.register(stateLogRoutes, { log: this.#stateLog });
+        alarmRoutes(scope, { alarms: this.#alarms });
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
         await scope.register(lookupRoutes, { lookups: this.#lookups });
