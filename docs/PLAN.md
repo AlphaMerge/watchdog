@@ -311,8 +311,13 @@ down`); default is one warning interval.
   invariants after every step. It found two live defects in the acknowledgement layer and four
   transitions `M-01`'s tables did not describe.
 - Scenario tests: unplugging a simulated switch produces **one** dependency-suppressed alarm,
-  not forty.
-- Paused states survive a core restart.
+  not forty. **Met** (`M-17`): with forty sensors behind the switch, one ends Down and forty end
+  Paused by dependency, the probe drops to a single check, and only one Down has no successor.
+  The forty transient Downs the same batch produces are superseded within one millisecond, in
+  the transaction that recorded them.
+- Paused states survive a core restart. **Met** (`M-08`): the flags are on `sensor_runtime`,
+  derived from `object_pause` on write, and `pause.test.ts` rebuilds the service against the same
+  database to prove nothing was held in memory.
 
 **Risks.** Precedence bugs between the four pause sources. Write the precedence table first,
 test it exhaustively.
@@ -329,15 +334,24 @@ test it exhaustively.
 | M-06 lookups | done | `packages/core/src/lookups/`; migration 009 adds `channel.lookup_id`. JSON rather than PRTG's `.ovl` XML, built-ins as TypeScript modules, operator definitions under `<dataDir>/lookups` overriding by id. A channel is judged by a lookup **or** its limits, never both |
 | M-07 scaling and spike filter | done | `packages/core/src/ingestion/scaling.ts`; no migration — the columns have been on `channel` since 001. Scale before filter, store the scaled value, and a discarded reading is a gap that decides nothing |
 | M-08 manual pause | done | Migration 010 adds `object_pause`; the per-sensor flags are derived from it on pause, resume, move and create. Any object can be paused, so the parent cascade lands here rather than in `M-12`. A paused sensor leaves its probe's configuration entirely, and a timed pause is computed from the clock and swept every 30 s |
-| M-09…M-19 | not started | |
+| M-09 schedules | done | Migration 011 adds `schedule`; the assignment is an ordinary inheritable setting, so one resolver serves it. Both authoring modes normalise to one canonical form, each schedule carries a time zone, and the sweep runs on the wall-clock minute rather than on a computed deadline |
+| M-10 maintenance windows | done | Migration 012 adds `object_pause.starts_at`. A window is a pause that has not started yet — one column, not a fifth source — and cancelling one before it begins is the same resume that ends one in progress |
+| M-11 dependencies | done | Migration 013 adds `sensor_runtime.dependency_clear_at`. Driven by state changes, inside the ingestor's own transaction; the cascade is a bounded fixpoint; a loop is refused where it is made, because a loop of masters can never recover. The master keeps scanning by the one rule that it is excluded from its own dependency |
+| M-12 pause precedence integration | done | All sixteen combinations against a real tree, arranged through the mechanism that really sets each flag. Clearing the sources one at a time walks the reported cause down `parent → dependency → schedule → user` with the sensor Paused at every step |
+| M-13 acknowledgement | done | Migration 014 records who. Works on a sensor or on everything Down beneath a container. Found that `M-02` cleared acknowledgements only in the cache, so a restart brought a silenced alarm back silenced |
+| M-14 simulated error | done | No migration — `M-02` left the column and the layer. Loud rather than expiring, and a forced sensor keeps being scanned, so lifting the force returns it to the truth with no scan in between |
+| M-15 state-change log | done | `GET /state-log`, scoped to a branch or a sensor. Duration is measured against the real next transition rather than the next one on the page |
+| M-16 property-based state machine tests | done | `fast-check` over event *sequences*. Found two live defects in the acknowledgement layer and four transitions `M-01`'s tables did not describe |
+| M-17 alarm-storm scenario | done | One Down, forty Paused, one check left on the probe. Found that the dependency's pause collided with the Down that caused it and was silently dropped, leaving history and runtime disagreeing about a sensor uptime is computed from |
 
 **Where Phase 3's exit criteria stand after `M-02`.**
 
 - *No sequence of events reaches an undefined state* — the whole input space is enumerated in
   `state-machine.test.ts`: 16 pause combinations × simulated × probe × acknowledged × 5 scan
   facts × 4 channel verdicts, asserting exactly one v1 state, a cause on every one, and each
-  invariant of `state-machine.md` §5. `M-16` still owns the property test over event
-  *sequences*, which needs `M-12` and `M-13` to have events to shuffle.
+  invariant of `state-machine.md` §5. `M-16` has since added the property test over event
+  *sequences*, which is where the fold's history-dependent rules live and where two live
+  acknowledgement defects turned up.
 - *Paused states survive a core restart* — **met** for manual pause: the deadline and the reason
   are rows, not timers, and a new process reads them back with nothing in memory. Tested in
   `pause.test.ts`.

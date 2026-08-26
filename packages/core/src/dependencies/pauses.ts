@@ -27,12 +27,40 @@ export interface ResolvesDelays {
   withExecutor(q: Queryable): ResolvesDelays;
 }
 
-/** What the reactor is told about a state change. Just the three fields it reads. */
+/** What the reactor is told about a state change. Just the fields it reads. */
 export interface StateChange {
   readonly sensorId: number;
   readonly state: string;
   /** `null` on a sensor's very first transition, which is never a recovery from Down. */
   readonly previousState: string | null;
+  /** When the transition happened. See `after`. */
+  readonly at?: Date;
+}
+
+/**
+ * A moment strictly later than every transition this reaction is responding to.
+ *
+ * `sensor_state` is keyed on `(sensor_id, time)` and inserts with `ON CONFLICT DO NOTHING`, so a
+ * pause written at the same instant as the Down that caused it is **silently dropped** — leaving
+ * the history saying Down while `sensor_runtime` says Paused. Uptime is computed from the
+ * history (`CLAUDE.md`), so the two disagreeing is a corrupted SLA rather than a cosmetic
+ * glitch.
+ *
+ * In production the wall clock is already past the result's timestamp and the collision does not
+ * arise; it takes a probe whose clock runs a little ahead, or a replay, to line them up. That is
+ * exactly the sort of thing that happens once and is never reproduced, so the ordering is made
+ * true by construction instead: the pause was *caused* by the Down, so it happened after it.
+ *
+ * Found by `M-17`'s scenario test, which drove the reaction at the result's own timestamp and
+ * watched forty dependents keep a Down in the history that nothing would ever supersede.
+ */
+export function reactionTime(changes: readonly StateChange[], now: Date): Date {
+  let latest = now.getTime();
+  for (const change of changes) {
+    const at = change.at?.getTime();
+    if (at !== undefined && at >= latest) latest = at + 1;
+  }
+  return latest === now.getTime() ? now : new Date(latest);
 }
 
 export interface DependencyPausesOptions {
@@ -112,6 +140,10 @@ export class DependencyPauses {
     );
     if (masters.length === 0) return NOTHING;
 
+    // Strictly after the transitions being reacted to, or the pause collides with the Down that
+    // caused it and the history loses one of them.
+    const reactedAt = reactionTime(changes, now);
+
     // Only the masters, and only the transitions that cross the Down boundary. A master going
     // from Up to Warning changes nothing about what it holds.
     const isMaster = new Set(masters);
@@ -139,10 +171,10 @@ export class DependencyPauses {
         delaySeconds: delays.get(sensorId)?.value ?? 0,
       })),
       failed,
-      now,
+      reactedAt,
     );
 
-    return this.#settle(q, now);
+    return this.#settle(q, reactedAt);
   }
 
   /**

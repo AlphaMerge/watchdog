@@ -1092,8 +1092,42 @@ because each is a decision rather than a defect:
 
       Also extracted `isStaleResult` out of the ingestion fold, so the at-least-once property
       exercises the rule production uses rather than a second copy of it.
-- [ ] **M-17 — Alarm-storm scenario test** · M · M-11 · A simulated switch failure produces one
+- [x] **M-17 — Alarm-storm scenario test** · M · M-11 · A simulated switch failure produces one
       dependency-suppressed alarm, not one per downstream sensor.
+
+      **M-17 outcome.** `packages/core/test/alarm-storm.test.ts` builds the topology `PLAN.md`
+      describes — a switch, its Ping sensor as master for its device, and eight servers of five
+      sensors each behind it — unplugs the switch, and counts. Forty downstream sensors, so
+      "not forty" is literal.
+
+      **What it asserts.** One sensor ends Down with cause `scan`; forty end Paused with cause
+      `dependency`; the probe's configuration drops to exactly one check, on the master, because
+      a master that stopped being scanned could never report its own recovery. On the way back
+      up, the master recovers and the forty return to Unknown rather than to a state nothing has
+      checked since. And the other half of *one outage, one alarm*: a single server failing
+      behind a healthy switch still alarms, because a dependency must not swallow an outage that
+      is genuinely its own.
+
+      **The measurement `N-15` needs.** The forty dependents fail in the same batch that takes
+      the master Down, so each does record a Down — decided against facts that the dependency
+      reaction, later in the same transaction, then supersedes. That is truthful: the check did
+      fail, and the system then attributed the failure to the master. What matters is that none
+      of them *stands*: exactly one Down has no successor, and the superseded ones last **one
+      millisecond**, inside a transaction nothing outside ever observed. Notification latency of
+      any usable length is four orders of magnitude longer, which is why `N-15` will find no
+      message — and `CLAUDE.md` names latency as one of the three mechanisms for exactly this.
+
+      **One real bug found and fixed.** The dependency's `paused` transition was written at the
+      same instant as the Down that caused it, and `sensor_state` is keyed on
+      `(sensor_id, time)` with `ON CONFLICT DO NOTHING` — so it was **silently dropped**, leaving
+      the history saying Down while `sensor_runtime` said Paused. Uptime is computed from the
+      history, so that is a corrupted SLA rather than an untidy log. In production the wall clock
+      is normally a little past the result and the collision does not arise; it takes a probe
+      whose clock runs slightly ahead, or a replay, to line them up — the sort of thing that
+      happens once and is never reproduced. `reactionTime` now makes the ordering true by
+      construction: the pause was *caused* by the Down, so it is recorded after it. The scenario
+      drives both at the same instant deliberately, so the hazard is exercised rather than
+      avoided by luck.
 
 ## Phase 4 — Notifications
 

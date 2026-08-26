@@ -65,7 +65,12 @@ export interface IngestTarget {
 export interface DependencyReactor {
   react(
     q: Queryable,
-    changes: readonly { sensorId: number; state: string; previousState: string | null }[],
+    changes: readonly {
+      sensorId: number;
+      state: string;
+      previousState: string | null;
+      at?: Date;
+    }[],
     now: Date,
   ): Promise<{ moved: number; transitions: number }>;
 }

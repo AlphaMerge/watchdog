@@ -186,6 +186,11 @@ export async function writeStateHistory(
        $1::timestamptz[], $2::bigint[], $3::sensor_state_kind[],
        $4::sensor_state_kind[], $5::sensor_state_cause[], $6::text[]
      )
+     -- Two transitions for one sensor at one instant is not something the system should
+     -- produce: the second is dropped, and then sensor_state and sensor_runtime disagree about
+     -- what the sensor is, which makes uptime wrong rather than merely untidy. The callers keep
+     -- their timestamps apart (see reactionTime in dependencies/pauses.ts); this stays as a
+     -- backstop, and the row count comes back so a drop cannot pass unnoticed.
      ON CONFLICT (sensor_id, time) DO NOTHING
      RETURNING sensor_id::text AS sensor_id`,
     [
