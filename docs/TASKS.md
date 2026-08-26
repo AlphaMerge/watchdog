@@ -1379,8 +1379,60 @@ because each is a decision rather than a defect:
       **Verified live.** A trigger with a four-second latency and an eight-second escalation,
       against the running service: the initial notification landed at +4s and the escalation at
       +8s from the state change, on the second.
-- [ ] **N-05 — Notification templates** · M · N-01 · Template objects with method, content,
+- [x] **N-05 — Notification templates** · M · N-01 · Template objects with method, content,
       recipients, priority.
+
+      **N-05 outcome.** `notification_template` (migration `018`), a method registry with the
+      five `[V1]` delivery methods, and a service whose most important job is what it *does not*
+      return. Nothing here sends anything: `N-06` substitutes the placeholders, `N-07` onwards
+      deliver, `N-11` decides what is folded into a digest.
+
+      **A library object, like a schedule.** Many triggers reference one template and none
+      contains it, so it has no parent, no inheritance and no place in the tree. Methods are
+      declared the way sensor types and trigger kinds are — one JSON Schema per method that
+      generates the form, validates the API, documents the field and marks the secrets — so
+      `[V2]`'s SMS, syslog, SNMP-trap, SNS and MQTT methods are a one-file job.
+
+      **A Slack webhook URL is a credential, and is treated as one.** Anybody holding it can post
+      to the channel, with no other authentication. So it is `writeOnly` in its schema, collected
+      at load, and stripped at exactly one place — `TemplateService.#view` — the arrangement
+      `CLAUDE.md` mandates for monitored-device credentials and for the same reason: a new
+      endpoint cannot forget what it never sees. Three further locks, each of which would be the
+      last line if the others failed: the response schemas name only the fields that may go out,
+      so `fast-json-stringify` cannot serialise a stray one; the one-line summary is built from
+      the *redacted* copy, because a summary is the likeliest place for a secret to escape by
+      accident; and the audit log records the name and the method and never the settings, because
+      a log is read by more people, kept for longer, and exported. The test asserts against the
+      **raw response body** rather than the parsed object, which is the only version of that
+      assertion that catches a field nobody thought to check.
+
+      **The generic webhook's URL stays visible; Slack's and Teams' do not.** Not an
+      inconsistency — a generic webhook's address is usually just an address, and an operator has
+      to be able to see where their alarms are going, so anything secret goes in `secretHeaders`
+      instead. A system that hid every URL would make templates unreviewable; one that showed a
+      bearer token would leak it.
+
+      **An edit that does not resend a secret keeps it.** The failure this prevents is mundane and
+      total: the form was rendered from a redacted read, so a faithful PUT carries no webhook URL,
+      and treating that as "remove it" would break the template every time somebody fixed a typo
+      in a subject line. An explicit `null` clears it — absence and instruction are different
+      things, and a merge that collapsed them would make one of them unreachable. Changing the
+      *method* carries nothing across: a Slack URL is not a webhook's secret headers.
+
+      **Deleting a template a trigger names is refused, with the list.** A trigger names its
+      templates inside a `jsonb` document, so no foreign key can enforce the reference —
+      `CAPABILITIES.MD §5.2`'s "used by" lookup is the query that stands in for one, and it asks
+      `triggerKinds.templatesIn` rather than SQL, so a new trigger kind cannot be missed. For the
+      same reason there is deliberately **no** foreign key from `notification_request.template_id`:
+      `N-02` decided a trigger may name a template that does not exist and that refusing to record
+      the obligation would lose it rather than surface it. Adding the key now would have quietly
+      reversed that.
+
+      **One real bug the tests found.** `redactedSettings` reported a schema *default* — the
+      webhook method's empty `secretHeaders: {}` — as though a secret were set. A form reading it
+      would have said "configured, not shown" about a credential nobody had ever entered, which is
+      an invitation to retype something that does not exist. The field is now removed always and
+      *reported* only when it held something.
 - [ ] **N-06 — Placeholder substitution** · M · N-05 · `%sensor`, `%device`, `%group`, `%probe`,
       `%status`, `%laststatus`, `%lastmessage`, `%lastvalue`, `%datetime`, `%since`, `%linksensor`,
       `%priority`, `%comments`, `%objecttags`, `%host`, `%location`. Case-insensitive. Unknown

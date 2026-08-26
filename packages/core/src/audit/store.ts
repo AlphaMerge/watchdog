@@ -279,6 +279,29 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         ],
       };
 
+    case 'template.created':
+    case 'template.updated':
+    case 'template.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        // The name and the method, and nothing else. The settings carry webhook URLs and secret
+        // headers, and an audit log is the wrong place to keep a copy of a credential no API
+        // will return — a log is read by more people, kept for longer, and exported.
+        summary: {
+          templateId: mutation.templateId,
+          name: mutation.name,
+          method: mutation.method,
+        },
+        diff: [
+          {
+            field: `template.${String(mutation.templateId)}`,
+            before: mutation.action === 'template.created' ? null : mutation.name,
+            after: mutation.action === 'template.deleted' ? null : mutation.name,
+          },
+        ],
+      };
+
     case 'schedule.created':
       return {
         ...base,

@@ -20,11 +20,13 @@ import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { stateRoutes } from './routes/state.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
+import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { ScheduleService } from '../schedules/service.js';
+import type { TemplateService } from '../notifications/templates.js';
 import type { TriggerService } from '../triggers/service.js';
 import { LOOKUP_SCHEMAS } from './schemas/lookups.js';
 import { PAUSE_SCHEMAS } from './schemas/pause.js';
@@ -64,6 +66,13 @@ export interface ApiServerOptions {
    * nothing would ever notify anybody.
    */
   triggers?: TriggerService;
+  /**
+   * Notification templates (`N-05`).
+   *
+   * Optional for the same reason as the schedules and the triggers, and absent for the same
+   * effect: not registered rather than empty.
+   */
+  templates?: TemplateService;
 }
 
 /**
@@ -87,6 +96,7 @@ export class ApiServer {
   readonly #lookups: LookupCatalogue;
   readonly #schedules: ScheduleService | undefined;
   readonly #triggers: TriggerService | undefined;
+  readonly #templates: TemplateService | undefined;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -111,6 +121,7 @@ export class ApiServer {
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#schedules = options.schedules;
     this.#triggers = options.triggers;
+    this.#templates = options.templates;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -163,6 +174,7 @@ export class ApiServer {
       ...SCHEDULE_SCHEMAS,
       ...STATE_LOG_SCHEMAS,
       ...TRIGGER_SCHEMAS,
+      ...TEMPLATE_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 
@@ -245,6 +257,9 @@ export class ApiServer {
         }
         if (this.#triggers !== undefined) {
           await scope.register(triggerRoutes, { triggers: this.#triggers });
+        }
+        if (this.#templates !== undefined) {
+          await scope.register(templateRoutes, { templates: this.#templates });
         }
       },
       { prefix: '/api/v1' },

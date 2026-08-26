@@ -16,6 +16,7 @@ import { migration014 } from './014-acknowledgement.js';
 import { migration015 } from './015-notification-triggers.js';
 import { migration016 } from './016-notification-alarms.js';
 import { migration017 } from './017-threshold-alarms.js';
+import { migration018 } from './018-notification-templates.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -41,6 +42,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration015,
   migration016,
   migration017,
+  migration018,
 ];
 
 export type { Migration } from './types.js';

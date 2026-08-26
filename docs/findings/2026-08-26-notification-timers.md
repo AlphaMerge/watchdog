@@ -49,10 +49,13 @@ the alarms — the same sequence and the same order that ingestion uses.
 | Recovery — **cancelling all 2,000**             | 74 ms  |
 | Firing 4,000 due steps after an hour            | 189 ms |
 
-**Timers held by the process: 2 idle, 2 with 2,000 chains pending, 2 after they all cancelled.**
-(Two, not one, because the test runner holds one of its own; the point is that the number does
-not move.) That is the claim, and it is structural rather than careful: there is nothing in the
-design that could allocate a timer per sensor.
+**Timers held by the process: 2 idle, 2 with 2,000 chains pending, 1–2 after they all
+cancelled.** (Two, not one, because the test runner holds one of its own. The count sometimes
+reads one lower after the fact, because between cycles the scheduler is momentarily holding no
+timer at all — which is why the assertion is "never more than idle" rather than equality: an
+equality would be asserting when the sample was taken rather than what the design does.) That is
+the claim, and it is structural rather than careful: there is nothing in the design that could
+allocate a timer per sensor.
 
 The last row is a restart after a long outage. An hour is past both the five-minute initial
 latency and the thirty-minute escalation, so each chain owes two notifications — 4,000 steps,

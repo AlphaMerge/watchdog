@@ -4,6 +4,7 @@ import { ObjectError } from '../objects/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { QueryError } from '../timeseries/query.js';
+import { MethodError } from '../notifications/methods.js';
 import { TriggerError } from '../triggers/definition.js';
 
 export interface HttpErrorBody {
@@ -69,6 +70,12 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
 
   if (error instanceof SettingError) {
     return envelope(400, error.code, error.message, { ...error.context });
+  }
+
+  if (error instanceof MethodError) {
+    // A template whose settings failed its method's schema, or a method this build does not
+    // have (`N-05`). The problems go out: a credential form that just refuses is unusable.
+    return envelope(400, error.code, error.message, { ...error.context }, { ...error.details });
   }
 
   if (error instanceof TriggerError) {

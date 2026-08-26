@@ -224,6 +224,27 @@ export type Mutation =
        */
       previousSummary?: string;
     }
+  | {
+      /**
+       * A notification template was created, changed or removed (`N-05`).
+       *
+       * `objectId` is null because a template is not in the object tree: it is a library object
+       * that many triggers reference and none contains — the same shape as a schedule.
+       *
+       * Audited because a template decides what leaves the building and who receives it.
+       * Somebody changing an address is redirecting every alarm that names this template, and
+       * the name and the method are what make the entry readable. **The settings are not
+       * recorded**: they carry the webhook URLs and the secret headers, and an audit log is
+       * exactly the wrong place to keep a copy of a credential that no API will return.
+       */
+      action: 'template.created' | 'template.updated' | 'template.deleted';
+      // Null for the reason a schedule's is, and typed so every consumer that reads `objectId`
+      // off a mutation keeps compiling.
+      objectId: null;
+      templateId: number;
+      name: string;
+      method: string;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
@@ -393,6 +414,15 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         triggerId: mutation.triggerId,
         triggerKind: mutation.triggerKind,
+      };
+    case 'template.created':
+    case 'template.updated':
+    case 'template.deleted':
+      return {
+        action: mutation.action,
+        templateId: mutation.templateId,
+        name: mutation.name,
+        method: mutation.method,
       };
     case 'schedule.created':
     case 'schedule.deleted':

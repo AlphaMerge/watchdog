@@ -43,3 +43,24 @@ export {
   type AlarmSchedulerStats,
 } from './scheduler.js';
 export { TriggerSync, type TriggerSyncOptions } from './sync.js';
+export {
+  notificationMethods,
+  MethodError,
+  MethodRegistry,
+  EMAIL_METHOD,
+  WEBHOOK_METHOD,
+  SLACK_METHOD,
+  TEAMS_METHOD,
+  PROGRAM_METHOD,
+  type NotificationMethod,
+} from './methods.js';
+export {
+  TemplateRepository,
+  TemplateService,
+  type Recipient,
+  type StoredTemplate,
+  type TemplateInput,
+  type TemplateServiceOptions,
+  type TemplateUse,
+  type TemplateView,
+} from './templates.js';

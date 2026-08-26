@@ -186,9 +186,18 @@ describe(
           `${String(SENSORS)} pending, ${String(clearedTimers)} after\n`,
       );
 
-      // The claim, stated three ways.
-      assert.equal(armedTimers, idleTimers, 'no timer is created per pending notification');
-      assert.equal(clearedTimers, idleTimers, 'and none is leaked when they all cancel');
+      // The claim: the count never *grows* with the number of pending notifications. Not
+      // equality — between cycles the scheduler is momentarily holding no timer at all, so a
+      // sample taken then legitimately reads one fewer, and asserting equality would be
+      // asserting when the sample was taken rather than what the design does.
+      assert.ok(
+        armedTimers <= idleTimers,
+        `${String(armedTimers)} timers with ${String(SENSORS)} pending, ${String(idleTimers)} idle`,
+      );
+      assert.ok(
+        clearedTimers <= idleTimers,
+        `${String(clearedTimers)} timers after cancelling, ${String(idleTimers)} idle`,
+      );
       for (const [label, ms] of [
         ['arming', armAt],
         ['holding', worstHold],
@@ -208,6 +217,10 @@ describe(
 
       // Long past every initial latency, which is what a restart after an outage looks like.
       const when = tick(60);
+      // Stopped first: the scheduler started in the previous measurement is still cycling, and a
+      // sweep that arrives while one is in flight returns zero rather than re-entering. Timing a
+      // deterministic sweep means being the only one running it.
+      scheduler.stop();
       const startedAt = process.hrtime.bigint();
       const fired = await scheduler.sweep(when);
       const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;

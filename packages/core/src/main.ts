@@ -28,6 +28,7 @@ import { ScheduleSync } from './schedules/sync.js';
 import { AlarmEngine } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
+import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
@@ -280,6 +281,15 @@ async function serve(): Promise<void> {
     logger,
   });
 
+  // What is sent, and how (N-05). Audited and logged like everything else; no sync, because a
+  // template edit changes nothing about what is currently standing — only what a message will
+  // say when one is next delivered.
+  const templates = new TemplateService({
+    db,
+    audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
+    logger,
+  });
+
   const history = new HistoryService({ db, logger, store });
   // Notices when a maintenance window opens and when a timed pause runs out. Every read already
   // accounts for the clock; this is what turns a boundary into a transition, a log entry and a
@@ -351,6 +361,7 @@ async function serve(): Promise<void> {
     lookups,
     schedules,
     triggers,
+    templates,
   });
   await api.build(VERSION, service);
   await api.start();
