@@ -452,7 +452,8 @@ causally one outage, summarisation collapses what is merely simultaneous.
 | U-01 frontend scaffold | done | React 19 + Vite 8 + Tailwind 4 + React Router 7; CSS-custom-property tokens shared with the canvas charts to come; light and dark themes; served by the core from `api.webRoot` |
 | U-02 WebSocket state stream | done | `GET /api/v1/stream`, subscribe by subtree, snapshot then changes; published from `writeStateHistory` through a new `Queryable.afterCommit`, so nothing provisional reaches a screen. Resync is "subscribe again"; a subscriber that falls behind is cut off and counted rather than quietly trimmed. The tree is live and polls nothing |
 | U-03 device tree | done | Shape fetched a level at a time and cached, states streamed, rollup computed from the stream alone — so a collapsed branch shows the colour of an outage inside it without its children ever being loaded. Virtualised; measured at **5,200 rows flattened and 5,000 states rolled up in 4.4 ms**, the shape the exit criteria name. Search and tag filtering are server-side and inheritance-aware |
-| U-04…U-11 | not started | |
+| U-04 sensor detail page | done | Six URL-addressable tabs over one page that also serves devices and groups. Needed one new endpoint, `GET /sensors/{id}/values`: a reading older than three scan intervals is **withheld** rather than shown as current, so a sensor that stopped reporting shows nothing while a genuine zero still shows 0. State is streamed and readings are polled — the only polling in the app, for the one thing a stream is the wrong shape for |
+| U-05…U-11 | not started | |
 
 Pulled forward out of order, on request, and it reads honestly: with no state machine and no
 sensor types, every sensor shows Unknown and each empty panel names the task that fills it. The

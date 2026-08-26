@@ -520,5 +520,72 @@ describe(
       const left = await db.query<{ count: string }>('SELECT count(*) AS count FROM audit_log');
       assert.equal(left[0]?.count, '20');
     });
+
+    // ---------------------------------------------------------------------------------------
+    // Ordering. Found by U-04's history tab, which showed yesterday's entries above today's.
+    // ---------------------------------------------------------------------------------------
+
+    describe('ordering and paging', () => {
+      /** Entries at chosen ids, so the digit boundary is in the test rather than in the luck. */
+      async function place(ids: readonly number[]): Promise<void> {
+        await db.query(
+          // OVERRIDING SYSTEM VALUE because `id` is GENERATED ALWAYS — which is right for the
+          // column and is exactly why the ids a real installation ends up with are not something
+          // a test can choose by accident.
+          `INSERT INTO audit_log
+             (id, at, action, object_id, object_kind, actor_kind, actor_ref, actor_label,
+              summary, diff)
+           OVERRIDING SYSTEM VALUE
+           SELECT n, $2::timestamptz + make_interval(secs => n), 'object.updated', $1,
+                  'probe', 'system', '', '', '{}'::jsonb, '[]'::jsonb
+           FROM unnest($3::bigint[]) AS n`,
+          [probeId, new Date('2026-01-01T00:00:00Z'), [...ids]],
+        );
+      }
+
+      it('returns entries newest first, whatever the ids look like as text', async () => {
+        // The defect this exists to catch: the select list casts `id` to text, and an unqualified
+        // `ORDER BY id` binds to that output column — so entry 9 sorted above entry 253 and the
+        // log read as though it had jumped back in time. The ids are placed rather than grown,
+        // because with fewer than ten entries lexicographic and numeric order agree and the bug
+        // hides.
+        await place([3, 9, 25, 100, 253]);
+        const listed = await entries(probeId);
+        assert.deepEqual(
+          listed.map((entry) => Number(entry.id)),
+          [253, 100, 25, 9, 3],
+        );
+        const times = listed.map((entry) => Date.parse(entry.at));
+        assert.deepEqual(
+          times,
+          [...times].sort((a, b) => b - a),
+          'and newest first',
+        );
+      });
+
+      it('pages without skipping or repeating an entry', async () => {
+        // The cursor compares numerically (`id < $n`) while the sort was lexicographic, so the
+        // two disagreed at a page boundary: entries were dropped and others came back twice.
+        // Placed ids again, spanning three digit widths, so the disagreement is guaranteed.
+        await place([3, 9, 25, 100, 253, 1_000, 1_001]);
+        const seen: number[] = [];
+        let before: string | undefined;
+        for (let page = 0; page < 6; page += 1) {
+          const batch = await db.tx((q) =>
+            repository.list(q, {
+              objectId: probeId,
+              limit: 3,
+              ...(before === undefined ? {} : { before }),
+            }),
+          );
+          if (batch.length === 0) break;
+          seen.push(...batch.map((entry) => Number(entry.id)));
+          before = batch[batch.length - 1]?.id;
+        }
+
+        assert.deepEqual(seen, [1_001, 1_000, 253, 100, 25, 9, 3]);
+        assert.equal(new Set(seen).size, seen.length, 'and nothing twice');
+      });
+    });
   },
 );

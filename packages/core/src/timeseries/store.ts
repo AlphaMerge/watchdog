@@ -20,6 +20,13 @@ export interface ChannelRef {
   unit: string;
 }
 
+/** The newest reading one channel has, inside a bounded lookback. */
+export interface LatestValue {
+  channelId: number;
+  at: Date;
+  value: number;
+}
+
 /**
  * Every way this system touches time-series data (S-12).
  *
@@ -74,6 +81,10 @@ export interface TimeSeriesStore {
       bucketSeconds: number;
     },
   ): Promise<SeriesRow[]>;
+  latestValues(
+    q: Queryable,
+    options: { channelIds: readonly number[]; notBefore: Date },
+  ): Promise<LatestValue[]>;
   horizon(q: Queryable, days: number): Promise<Date>;
   reapCandidates(q: Queryable, limit: number): Promise<number[]>;
   reapChannels(q: Queryable, channelIds: readonly number[]): Promise<number>;
@@ -431,6 +442,35 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
       min: row.lo,
       max: row.hi,
     }));
+  }
+
+  /**
+   * The newest reading each channel has, provided it is recent enough to still mean anything.
+   *
+   * **Bounded, and the bound is the design rather than an optimisation.** A channel table showing
+   * "Response time: 0.4 ms" beside a sensor that has been Down for two days is the same lie as a
+   * graph drawing a gap to zero — CLAUDE.md's rule is that no-data is not zero, and a stale
+   * reading dressed as a current one is no-data wearing a number. Nothing older than `notBefore`
+   * is returned at all, so a caller cannot show one by accident; the absence is the answer.
+   *
+   * It is also what keeps this cheap. `sample` is a hypertable, and an unbounded
+   * newest-per-channel scan on a channel that stopped reporting walks back through every chunk
+   * that ever existed. With the bound, `(channel_id, time)` serves it — a backwards index scan
+   * per channel, stopping at the boundary.
+   */
+  async latestValues(
+    q: Queryable,
+    options: { channelIds: readonly number[]; notBefore: Date },
+  ): Promise<LatestValue[]> {
+    if (options.channelIds.length === 0) return [];
+    const rows = await q.query<{ channel_id: number; time: Date; value: number }>(
+      `SELECT DISTINCT ON (channel_id) channel_id, time, value
+       FROM sample
+       WHERE channel_id = ANY($1::int[]) AND time >= $2
+       ORDER BY channel_id, time DESC`,
+      [[...options.channelIds], options.notBefore],
+    );
+    return rows.map((row) => ({ channelId: row.channel_id, at: row.time, value: row.value }));
   }
 
   /** `now()` from the database, so every horizon is measured against the data's own clock. */

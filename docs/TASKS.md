@@ -123,6 +123,12 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       plot a line to the floor by accident (S-08). What is left for this task is the UI side —
       graphs breaking the line rather than joining across a null — plus a scenario test that
       walks a gap end to end from a Down sensor to a rendered chart.
+      **Half done by U-04:** the history panel draws a column per bucket and a gap is *not
+      rendered* — not a zero-height bar, which would still be a mark on the baseline. `extentOf`
+      skips nulls, so a gap cannot pull the scale to zero either, and that is unit-tested. U-04
+      also extended the rule to *current* values: a reading older than three scan intervals is
+      withheld rather than shown, because a stale number is no-data wearing a value. What remains
+      is the same rule in `U-05`'s uPlot panels and the end-to-end scenario test.
 - [x] **S-10 — Audit log** · M · S-03 · Every create/update/delete recorded with actor,
       timestamp and diff; queryable per object.
       **S-10 outcome:** migration 005, `packages/core/src/audit/`, and
@@ -2262,8 +2268,80 @@ because each is a decision rather than a defect:
       **`StateStream.close()` was permanent**, so React StrictMode's mount/unmount/mount left the
       tree saying "Connecting…" forever. `subscribe()` clears the flag; the double-invoke found
       a real bug, which is what it is for.
-- [ ] **U-04 — Sensor detail page** · L · U-02, S-08 · Live graph, channel table, historic tabs
+- [x] **U-04 — Sensor detail page** · L · U-02, S-08 · Live graph, channel table, historic tabs
       (2d/30d/365d), log, settings, triggers.
+
+      **U-04 outcome.** Six tabs — overview, history, log, settings, triggers, changes — over one
+      page that works for a device and a group as well as a sensor, minus the tabs those kinds do
+      not have. The tab is in the URL, because "look at the triggers on this sensor" is a thing
+      one person sends another and a tab held in component state cannot be linked to.
+
+      **The one endpoint this needed: `GET /sensors/{id}/values`.** A channel table needs current
+      readings and nothing served them — `/objects/{id}/channels` is configuration and
+      `/sensors/{id}/history` is a range. It is `DISTINCT ON (channel_id)` against the
+      `(channel_id, time)` index, behind `TimeSeriesStore` like every other time-series read
+      (`S-12`).
+
+      **A reading older than the window is withheld, not shown with a timestamp beside it.** This
+      is the same rule as "no-data is not zero", one step further out: a number on a screen is
+      read as current whatever is printed next to it, and a sensor that has been Down for a day
+      showing its last healthy figure is precisely the failure this system exists to prevent. So
+      the value is `null` and the table says "no recent reading". A genuine zero — packet loss of
+      0% — prints as `0`, and the two are visibly different rather than both being blank.
+
+      **The window is three scan intervals, resolved through the inheritance resolver.** A
+      constant would have to be either too short for a daily check — reporting every one of its
+      channels as silent between scans — or long enough to call a minute-interval sensor's
+      hour-old reading current. Three, because one is too tight to survive a single missed scan,
+      and by four the failure policy has taken the sensor to Down anyway (`M-03`). The interval is
+      usually set on the device or the group, so it goes through the resolver rather than reading
+      the sensor's own row — parent-walking happens in one place (`CLAUDE.md`).
+
+      **State is streamed, readings are polled, and the split is deliberate.** `U-02` carries state
+      changes, which is what the badge needs and what has to be immediate — verified live: a
+      simulated error turned the header red with its message inline, no reload. Channel *values*
+      change every scan whether or not the state does, and a frame per reading per sensor would be
+      a stream nobody could keep up with. So the table refreshes on an interval, paused while the
+      tab is hidden. It is the only thing in this app that polls.
+
+      **Found while building it — a real `U-02` bug.** The stream's snapshot entries carry `since`
+      and its `state` frames carry `at`; the client declared both as one shape, so every
+      timestamp after a reconnect was `undefined` and the header read "since Invalid Date". The
+      tree never noticed because it shows no timestamps. **The test fixture had the same mistake
+      in it**, which is why the suite agreed: it sent `at` on a snapshot entry, so a fixture
+      written from the same wrong assumption as the code confirmed the code. The fixture now
+      mirrors what the core actually sends, the two shapes are declared separately so the
+      conversion has to exist, and the conversion is tested.
+
+      **Also found: the plot's own geometry became a reading.** A packet-loss channel that has
+      only ever read 0 has no range to scale against, so the scale is padded — and the label
+      quoted the padded scale, announcing "-1 % to 1 %" about a channel that has never been
+      anything but zero. Measured range and drawing scale are now two separate numbers; a flat
+      series reads "steady at 0 %".
+
+      **The graph is not uPlot yet**, and that is `U-05`'s line rather than a shortfall here: this
+      draws a column per bucket with the min-max band and the average, so the gap rule is enforced
+      and visible from the first day the page exists — a gap is *not rendered*, never a
+      zero-height bar on the baseline. Verified against real data: a 2-day range showed 441 of 961
+      buckets as gaps with holes in the right places, and a 365-day range came back assembled from
+      `sample_1h + sample_5m + sample`, which is `S-08`'s three-tier stitch visible in the UI.
+
+      **And a second core bug, found by looking at the Changes tab: the audit log was sorted as
+      text.** `SELECT id::text, … ORDER BY id DESC` — and in PostgreSQL an unqualified name in
+      `ORDER BY` binds to the *output* column first, which that cast had just made a string. So
+      entry 9 sorted above entry 253 and the history read as though it had jumped back in time.
+      Worse, the keyset cursor compares numerically (`id < $n`), so it and the sort disagreed and
+      paging silently skipped entries and repeated others. Invisible while every id has the same
+      number of digits, which is why nothing caught it for ten tickets. Fixed by qualifying the
+      sort; the same shadowing was in `NotificationRepository.sensorsUnder`, where it decided
+      which sensors survived a truncation, and is fixed too. The regression tests place ids across
+      three digit widths rather than growing them, because with grown ids the bug hides — both
+      tests were confirmed to fail against the old SQL.
+
+      Settings name the object a value came from rather than its id, resolved against the
+      breadcrumb the page already loaded — an inheritable value can only come from an ancestor.
+      The tab strip has roving tabindex and arrow-key navigation per the ARIA practice, checked in
+      the browser: only the selected tab takes a tab stop.
 - [ ] **U-05 — Time-series charts** · L · U-04 · uPlot panels per the `dataviz` guidance;
       gap-aware rendering (breaks, never a line to zero); themed; accessible.
 - [ ] **U-06 — Alarms view** · M · U-02, M-13 · Severity filters, branch scoping, priority and

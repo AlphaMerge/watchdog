@@ -5,7 +5,11 @@ import type { FastifyInstance } from 'fastify';
 import { AuditRepository } from '../src/audit/store.js';
 import { ApiServer } from '../src/api/server.js';
 import type { Database } from '../src/db/pool.js';
-import { HistoryService, type SensorHistory } from '../src/timeseries/history.js';
+import {
+  HistoryService,
+  type SensorHistory,
+  type SensorValues,
+} from '../src/timeseries/history.js';
 import { Housekeeper } from '../src/timeseries/housekeeper.js';
 import {
   createScratchDatabase,
@@ -387,6 +391,134 @@ describe(
       const span = new Date(body.to).getTime() - new Date(body.from).getTime();
       assert.ok(Math.abs(span - 2 * DAY_MS) <= body.resolutionSeconds * 1_000);
       assert.deepEqual(body.adjustments, []);
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // Current values (U-04). The fixture readings sit three days in the past, which is exactly
+    // the case that matters: a channel table must not present them as what the sensor reads now.
+    // ---------------------------------------------------------------------------------------
+
+    describe('current values', () => {
+      async function record(channelId: number, value: number, agoMs: number): Promise<void> {
+        await db.query('INSERT INTO sample (time, channel_id, value) VALUES ($1, $2, $3)', [
+          new Date(Date.now() - agoMs),
+          channelId,
+          value,
+        ]);
+      }
+
+      function valueOf(result: SensorValues, key: string) {
+        const channel = result.channels.find((c) => c.key === key);
+        assert.ok(channel, `expected a ${key} channel`);
+        return channel;
+      }
+
+      it('withholds a reading older than the window rather than showing it as current', async () => {
+        // Every fixture reading is three days old and the interval is the default 60s, so the
+        // window is three minutes. Showing 7 ms here would tell an operator the sensor is fine.
+        const values = await history.latestForSensor(sensorId);
+        assert.equal(values.intervalSeconds, 60);
+        assert.equal(valueOf(values, 'rtt').value, null);
+        assert.equal(valueOf(values, 'rtt').at, null);
+        assert.equal(valueOf(values, 'loss').value, null);
+      });
+
+      it('reports a recent reading, and when it was taken', async () => {
+        await record(rtt, 12.5, 30_000);
+        const values = await history.latestForSensor(sensorId);
+        const channel = valueOf(values, 'rtt');
+        assert.equal(channel.value, 12.5);
+        assert.ok(channel.at !== null);
+        assert.ok(Date.now() - new Date(channel.at).getTime() < 60_000);
+        // The other channel is still silent, and silence is not zero.
+        assert.equal(valueOf(values, 'loss').value, null);
+      });
+
+      it('keeps a genuine zero distinct from no reading', async () => {
+        // The whole point of the null. Packet loss of 0% is the healthiest possible answer and
+        // must not be indistinguishable from a channel nothing has reported.
+        await record(loss, 0, 30_000);
+        const values = await history.latestForSensor(sensorId);
+        assert.equal(valueOf(values, 'loss').value, 0);
+        assert.equal(valueOf(values, 'rtt').value, null);
+      });
+
+      it('takes the newest reading when there are several inside the window', async () => {
+        await record(rtt, 99, 120_000);
+        await record(rtt, 11, 20_000);
+        assert.equal(valueOf(await history.latestForSensor(sensorId), 'rtt').value, 11);
+      });
+
+      it('widens the window for a sensor that is scanned rarely', async () => {
+        // A daily check reporting "no data" between scans would be wrong every hour of the day
+        // but one, which is why the window is a multiple of the interval and not a constant.
+        await harness.service.setSetting(testActor, sensorId, 'scan.intervalSeconds', 3_600, {
+          kind: 'none',
+        });
+        try {
+          await record(rtt, 42, 90 * MINUTE);
+          const values = await history.latestForSensor(sensorId);
+          assert.equal(values.intervalSeconds, 3_600);
+          assert.equal(valueOf(values, 'rtt').value, 42, 'inside three hours');
+        } finally {
+          await harness.service.clearSetting(testActor, sensorId, 'scan.intervalSeconds', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('inherits the interval rather than walking the tree itself', async () => {
+        // The interval is normally set on the device or the group, so a resolver that only read
+        // the sensor's own row would compute the window from the registry default and quietly
+        // report a slow sensor as silent.
+        const sensor = await harness.service.get(sensorId);
+        assert.ok(sensor.parentId !== null);
+        await harness.service.setSetting(testActor, sensor.parentId, 'scan.intervalSeconds', 900, {
+          kind: 'none',
+        });
+        try {
+          const values = await history.latestForSensor(sensorId);
+          assert.equal(values.intervalSeconds, 900);
+        } finally {
+          await harness.service.clearSetting(testActor, sensor.parentId, 'scan.intervalSeconds', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('reports no channels for a sensor that has none, rather than failing', async () => {
+        const values = await history.latestForSensor(otherSensorId);
+        assert.equal(values.sensorId, otherSensorId);
+        assert.equal(values.channels.length, 2, 'the type declares them from creation (P-05)');
+        assert.deepEqual(
+          values.channels.map((c) => c.value),
+          [null, null],
+        );
+      });
+
+      it('serves the route, keeping the nulls through serialisation', async () => {
+        await record(rtt, 3.25, 10_000);
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/sensors/${String(sensorId)}/values`,
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<SensorValues>();
+        assert.equal(valueOf(body, 'rtt').value, 3.25);
+        // A response schema is also the serialisation filter: a nullable field described as a
+        // plain number would come back as 0, which is the one number this must never invent.
+        assert.equal(valueOf(body, 'loss').value, null);
+        assert.equal(valueOf(body, 'loss').at, null);
+      });
+
+      it('is a 404 for something that is not a sensor', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/sensors/${String(harness.rootId)}/values`,
+        });
+        assert.equal(response.statusCode, 404);
+        assert.equal(response.json<{ error: { code: string } }>().error.code, 'OBJECT_NOT_FOUND');
+      });
     });
   },
 );

@@ -99,4 +99,46 @@ export const sensorHistorySchema = {
   },
 } as const;
 
-export const HISTORY_SCHEMAS = [queryAdjustmentSchema, historyChannelSchema, sensorHistorySchema];
+/**
+ * A channel's current reading (`U-04`).
+ *
+ * `value` and `at` are nullable together, and the null is load-bearing: it is how the API says
+ * "nothing recent", as distinct from a reading of zero. Anything that flattened one into the
+ * other here would undo the rule the whole storage layer is built around.
+ */
+export const channelValueSchema = {
+  $id: 'ms:channelValue',
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'key', 'name', 'unit', 'value', 'at'],
+  properties: {
+    id: { type: 'integer' },
+    key: { type: 'string' },
+    name: { type: 'string' },
+    unit: { type: 'string' },
+    value: { type: ['number', 'null'] },
+    at: { type: ['string', 'null'] },
+  },
+} as const;
+
+export const sensorValuesSchema = {
+  $id: 'ms:sensorValues',
+  type: 'object',
+  additionalProperties: false,
+  required: ['sensorId', 'readAt', 'notBefore', 'intervalSeconds', 'channels'],
+  properties: {
+    sensorId: { type: 'integer' },
+    readAt: { type: 'string' },
+    notBefore: { type: 'string' },
+    intervalSeconds: { type: 'integer' },
+    channels: { type: 'array', items: { $ref: 'ms:channelValue' } },
+  },
+} as const;
+
+export const HISTORY_SCHEMAS = [
+  queryAdjustmentSchema,
+  historyChannelSchema,
+  sensorHistorySchema,
+  channelValueSchema,
+  sensorValuesSchema,
+];

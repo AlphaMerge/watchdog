@@ -55,6 +55,14 @@ function harness(retryMs: readonly number[] = [10, 20]) {
   return { stream, sockets, timers, latest, fire };
 }
 
+/**
+ * A snapshot exactly as the core sends one.
+ *
+ * The timestamp field is `since`, not `at` — a snapshot entry describes the state a sensor is
+ * *in*, while a `state` frame describes a change. This fixture said `at` once, which is how a
+ * mistake in the client survived: a fixture written from the same wrong assumption as the code
+ * agrees with it perfectly.
+ */
 const SNAPSHOT = {
   type: 'snapshot',
   seq: 7,
@@ -68,7 +76,7 @@ const SNAPSHOT = {
       state: 'up',
       cause: 'scan',
       message: '',
-      at: 'x',
+      since: '2026-08-26T10:00:00.000Z',
     },
     {
       sensorId: 11,
@@ -77,7 +85,7 @@ const SNAPSHOT = {
       state: 'down',
       cause: 'scan',
       message: '',
-      at: 'x',
+      since: '2026-08-26T09:00:00.000Z',
     },
   ],
 };
@@ -108,6 +116,25 @@ describe('the live state stream', () => {
     expect([...stream.states.keys()]).toEqual([10]);
     latest().deliver({ ...SNAPSHOT, entries: [SNAPSHOT.entries[1]] });
     expect([...stream.states.keys()]).toEqual([11]);
+  });
+
+  it("reads a snapshot entry's `since` as the instant the state began", () => {
+    // The two frames name the same instant differently, and a page that shows "since ..." gets
+    // "Invalid Date" if the client assumes one shape for both.
+    const { stream, latest } = harness();
+    stream.subscribe(1);
+    latest().open();
+    latest().deliver(SNAPSHOT);
+    expect(stream.states.get(10)?.at).toBe('2026-08-26T10:00:00.000Z');
+    expect(stream.states.get(11)?.at).toBe('2026-08-26T09:00:00.000Z');
+  });
+
+  it('drops a snapshot entry that carries no state rather than inventing one', () => {
+    const { stream, latest } = harness();
+    stream.subscribe(1);
+    latest().open();
+    latest().deliver({ ...SNAPSHOT, entries: [{ sensorId: 10, sensorName: 'Ping' }] });
+    expect(stream.states.size).toBe(0);
   });
 
   it('applies a state change over the snapshot', () => {

@@ -53,6 +53,23 @@ export async function historyRoutes(
 ): Promise<void> {
   const { history } = options;
 
+  app.get<{ Params: { id: number } }>(
+    '/sensors/:id/values',
+    {
+      schema: {
+        description:
+          "Each channel's current reading, for a sensor detail page's channel table. " +
+          'A `null` value means no reading inside the window, which is a gap and never a zero: ' +
+          'the window is three scan intervals (at least a minute), so a sensor that has stopped ' +
+          'reporting shows nothing rather than its last healthy figure dressed as current. ' +
+          '`at` is when the reading shown was actually taken.',
+        params: idParams,
+        response: { 200: { $ref: 'ms:sensorValues' } },
+      },
+    },
+    async (request) => history.latestForSensor(request.params.id),
+  );
+
   app.get<{ Params: { id: number }; Querystring: HistoryQuery }>(
     '/sensors/:id/history',
     {

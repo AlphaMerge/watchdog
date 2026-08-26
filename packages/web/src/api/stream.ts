@@ -10,6 +10,14 @@ export interface LiveState {
   readonly state: SensorState;
   readonly cause: string;
   readonly message: string;
+  /**
+   * When this state began.
+   *
+   * One field, from two differently-named ones on the wire: a `state` frame calls it `at`
+   * — the moment the change happened — and a snapshot entry calls it `since` — the moment the
+   * state it is still in began. Same instant, read from two directions, and the conversion
+   * happens once, below.
+   */
   readonly at: string;
 }
 
@@ -37,10 +45,27 @@ export interface StateStreamOptions {
 
 const DEFAULT_RETRY_MS = [500, 1_000, 2_000, 5_000, 10_000] as const;
 
+/**
+ * A snapshot entry, which is **not** a `LiveState`.
+ *
+ * Declaring it as one is how "since Invalid Date" got onto the sensor page: the frames differ by
+ * exactly one field name, nothing on the wire is checked at compile time, and a tree that shows
+ * no timestamps never noticed. The shape is written out so the conversion below has to exist.
+ */
+interface SnapshotEntry {
+  sensorId?: number;
+  sensorName?: string;
+  path?: number[];
+  state?: SensorState;
+  cause?: string;
+  message?: string;
+  since?: string;
+}
+
 interface ServerFrame {
   type?: string;
   seq?: number;
-  entries?: LiveState[];
+  entries?: SnapshotEntry[];
   reason?: string;
   sensorId?: number;
   sensorName?: string;
@@ -49,7 +74,6 @@ interface ServerFrame {
   cause?: string;
   message?: string;
   at?: string;
-  since?: string;
 }
 
 /**
@@ -201,7 +225,18 @@ export class StateStream {
         // Wholesale, never merged: a snapshot is the truth about the subtree, and merging would
         // leave a sensor that has since been deleted sitting in the map for ever.
         const next = new Map<number, LiveState>();
-        for (const entry of frame.entries ?? []) next.set(entry.sensorId, entry);
+        for (const entry of frame.entries ?? []) {
+          if (entry.sensorId === undefined || entry.state === undefined) continue;
+          next.set(entry.sensorId, {
+            sensorId: entry.sensorId,
+            sensorName: entry.sensorName ?? '',
+            path: entry.path ?? [],
+            state: entry.state,
+            cause: entry.cause ?? '',
+            message: entry.message ?? '',
+            at: entry.since ?? '',
+          });
+        }
         this.#replace(next);
         return;
       }

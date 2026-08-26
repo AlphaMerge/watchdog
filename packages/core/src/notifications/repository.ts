@@ -428,7 +428,9 @@ export class AlarmRepository {
         UNION ALL
         SELECT c.id, c.kind FROM object c JOIN subtree ON c.parent_id = subtree.id
       )
-      SELECT id::text AS id FROM subtree WHERE kind = 'sensor' ORDER BY id LIMIT $2
+      -- Qualified: an unqualified ORDER BY resolves to the output column, which is text here,
+      -- so the cap would keep an arbitrary lexicographic slice rather than the lowest ids.
+      SELECT subtree.id::text AS id FROM subtree WHERE kind = 'sensor' ORDER BY subtree.id LIMIT $2
       `,
       [objectId, limit],
     );

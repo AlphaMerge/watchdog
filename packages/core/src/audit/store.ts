@@ -71,11 +71,16 @@ export class AuditRepository {
       summary: Record<string, unknown>;
       diff: FieldChange[];
     }>(
-      `SELECT id::text, at, action, object_id::text, object_kind,
+      // ORDER BY is qualified, and it has to be. An unqualified name in ORDER BY resolves
+      // against the *output* columns first, and this select list casts `id` to text — so
+      // `ORDER BY id DESC` sorted lexicographically, putting entry 9 above entry 253 and
+      // breaking the keyset cursor, which compares numerically. Silent until the ids crossed a
+      // digit boundary, and then wrong for ever after.
+      `SELECT audit_log.id::text AS id, at, action, object_id::text AS object_id, object_kind,
               actor_kind, actor_ref, actor_label, summary, diff
        FROM audit_log
        ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY id DESC
+       ORDER BY audit_log.id DESC
        LIMIT ${limit}`,
       values,
     );

@@ -46,6 +46,13 @@ export interface ObjectSummary {
 
 export interface ObjectDetail extends ObjectSummary {
   comments: string;
+  /**
+   * Whether triggers defined above this object reach it (`N-16`).
+   *
+   * Worth surfacing because switching it off is silent otherwise: the triggers tab would simply
+   * show fewer rows, with nothing saying why.
+   */
+  inheritsTriggers: boolean;
   childCount: number;
   createdAt: string;
   updatedAt: string;
@@ -135,14 +142,29 @@ export interface HistoryChannel {
   count: (number | null)[];
 }
 
+/** What the query rules changed about the request, and why (`S-08`). */
+export interface QueryAdjustment {
+  kind: 'range-shortened' | 'resolution-coarsened';
+  reason: string;
+}
+
 export interface HistorySeries {
+  sensorId: number;
   from: string;
   to: string;
   resolutionSeconds: number;
   bucketCount: number;
+  /** Which table served the bulk of the range. */
+  source: string;
   buckets: string[];
   channels: HistoryChannel[];
+  /** More than one entry means a rollup was behind and the tail came from below it. */
   segments: { table: string; from: string; to: string }[];
+  /**
+   * Shown, not swallowed. A 365-day range silently averaged over an hour looks like a sensor
+   * that stopped fluctuating, and an operator has no way to tell that from the picture.
+   */
+  adjustments: QueryAdjustment[];
 }
 
 /** `GET /objects/:id/pause` — why an object is paused, and whether this is the one to resume. */
@@ -211,4 +233,73 @@ export interface SensorStateView {
   acknowledged: boolean;
   acknowledgedUntil?: string | null;
   simulatedError: boolean;
+}
+
+/** `GET /sensors/:id/values` — what each channel reads *now* (`U-04`). */
+export interface ChannelValue {
+  id: number;
+  key: string;
+  name: string;
+  unit: string;
+  /**
+   * `null` is "nothing recent", and it is not a zero.
+   *
+   * The core withholds a reading older than three scan intervals rather than dressing it as
+   * current, so this null carries real information: the channel has stopped reporting.
+   */
+  value: number | null;
+  at: string | null;
+}
+
+export interface SensorValues {
+  sensorId: number;
+  readAt: string;
+  notBefore: string;
+  /** The interval the window was derived from, so "no recent reading" can say how recent. */
+  intervalSeconds: number;
+  channels: ChannelValue[];
+}
+
+/**
+ * One trigger in effect on an object (`N-01`).
+ *
+ * `inherited` and `definedOn` are the two halves a UI has to show together: a trigger can only
+ * be edited where it is defined, and an inherited one does *not* displace a nearer one — both
+ * fire. That is the opposite of how an inherited setting behaves, so saying which is which is
+ * not decoration.
+ */
+export interface TriggerView {
+  id: number;
+  kind: string;
+  kindName: string;
+  settings: Record<string, unknown>;
+  enabled: boolean;
+  summary: string;
+  inherited: boolean;
+  definedOn: { objectId: number; name: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One state transition (`M-15`). */
+export interface StateLogEntry {
+  at: string;
+  sensorId: number;
+  sensorName: string;
+  state: SensorState;
+  previousState: SensorState | null;
+  cause: string;
+  message: string;
+  /** How long the *previous* state lasted. `null` on the newest entry — it has not ended. */
+  durationMs: number | null;
+}
+
+export interface StateLogPage {
+  items: StateLogEntry[];
+  nextBefore: string | null;
+}
+
+/** `GET /objects/:id/ancestors` — root first, the object's parent last. */
+export interface AncestorsView {
+  items: { id: number; kind: ObjectKind; name: string }[];
 }
