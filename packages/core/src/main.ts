@@ -32,6 +32,7 @@ import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
+import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { DeliveryLoop } from './notifications/delivery/loop.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
@@ -382,11 +383,20 @@ async function serve(): Promise<void> {
   // link-local only: a monitoring system posts to things inside its own network all day, and a
   // guard that refused them would be switched off.
   const webhook = new WebhookTransport({ config: config.notifications.webhook, logger });
+  // Slack and Teams (N-09), through the same guard and the same policy: they are incoming-webhook
+  // URLs like any other, and a self-hosted Mattermost accepting Slack's document is a common
+  // enough target that exempting them would have been the wrong call.
+  const chat = config.notifications.webhook;
   const dispatcher = new NotificationDispatcher({
     db,
     logger,
     contexts: messageContexts,
-    transports: [email, webhook],
+    transports: [
+      email,
+      webhook,
+      slackTransport({ config: chat, logger }),
+      teamsTransport({ config: chat, logger }),
+    ],
   });
   const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
   wakeDelivery.poke = () => {

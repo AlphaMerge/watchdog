@@ -17,6 +17,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { messageContext } from './support/messages.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -72,6 +73,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     recipients: [{ kind: 'address', value: 'ops@example.test' }],
     priority: 3,
     settings: { format: 'plain', senderOverride: null },
+    context: messageContext(),
     ...overrides,
   };
 }

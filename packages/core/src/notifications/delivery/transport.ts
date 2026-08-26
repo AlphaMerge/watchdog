@@ -1,4 +1,4 @@
-import type { Escaping } from '../placeholders.js';
+import type { Escaping, MessageContext } from '../placeholders.js';
 import type { Recipient } from '../templates.js';
 
 /** A message, rendered and ready to send. */
@@ -13,6 +13,15 @@ export interface OutgoingMessage {
   readonly priority: number;
   /** The method's own settings, already validated and still holding their secrets. */
   readonly settings: Readonly<Record<string, unknown>>;
+  /**
+   * The facts the subject and body were rendered from.
+   *
+   * Redundant for a method that sends prose, and load-bearing for one that sends a document: a
+   * Slack attachment needs the *state* to pick a colour and the sensor id to build a link, and
+   * neither can be recovered from a string an operator wrote. `N-09` is what this is for; email
+   * ignores it.
+   */
+  readonly context: MessageContext;
 }
 
 /**
@@ -34,6 +43,10 @@ export type DeliveryResult =
  * is the same for every method, so a transport is handed a finished message and asked only
  * whether it went. `N-08`'s webhook, `N-09`'s Slack and Teams and `N-10`'s program each add one
  * of these and nothing else.
+ *
+ * The one thing a transport may do beyond sending is *arrange*: `N-09`'s cards put the same
+ * rendered subject and body into a document with a colour and a link. That is why the message
+ * carries its context as well as its text — a formatter needs the facts, not only the prose.
  */
 export interface DeliveryTransport {
   /** The `NotificationMethod` id this serves. */

@@ -14,6 +14,7 @@ import {
 import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { substitute, type MessageContext } from '../src/notifications/placeholders.js';
+import { messageContext } from './support/messages.js';
 import { silent } from './support/tree.js';
 
 function config(overrides: Partial<WebhookConfig> = {}): WebhookConfig {
@@ -29,6 +30,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     recipients: [],
     priority: 3,
     settings: { url: 'http://127.0.0.1/hook', verb: 'POST', contentType: 'application/json' },
+    context: messageContext(),
     ...overrides,
   };
 }

@@ -169,6 +169,7 @@ export class NotificationDispatcher {
               recipients: row.t_recipients ?? [],
               priority: row.t_priority ?? 3,
               settings,
+              context,
             });
 
       await this.#record(requestId, row.attempts + 1, result, now);

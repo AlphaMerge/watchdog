@@ -1623,8 +1623,60 @@ because each is a decision rather than a defect:
       occasional connection under that load — which the transport correctly reports as retryable.
       Asserting one attempt was asserting the relay was not busy; it now dispatches until it
       lands, which is the behaviour the transport actually promises.
-- [ ] **N-09 — Slack and Teams delivery** · M · N-08 · Formatted messages with status colour and
+- [x] **N-09 — Slack and Teams delivery** · M · N-08 · Formatted messages with status colour and
       a link back to the sensor.
+
+      **N-09 outcome.** Both services are one `ChatTransport` parameterised by a `ChatFormat`,
+      because they differ only in the shape of the document: each posts JSON to an
+      incoming-webhook URL through the guard `N-08` already built. Writing them as two classes
+      would have duplicated the guard, the pinning, the redirect handling and the status reading
+      to gain nothing — so `N-08`'s HTTP half was lifted out into `GuardedHttpClient` first, and
+      `WebhookTransport` is now a settings parser sitting on top of it.
+
+      **The transport is handed the facts, not only the prose.** `OutgoingMessage` gained its
+      `MessageContext`. A card needs the *state* to pick a colour and the sensor id to build a
+      link, and neither can be recovered from a string an operator wrote — a formatter that tried
+      to parse them back out of the rendered subject would be guessing. Email ignores the field.
+
+      **Colour is never the only signal.** Every card carries the glyph, the word and the colour
+      together. One in eight men has some form of colour blindness, chat clients recolour
+      everything in dark mode, and a phone's notification banner shows no colour at all — WCAG
+      2.1 1.4.1 says this about our own UI and the reasoning does not stop at the boundary of
+      software we did not write. Two states are kept off the traffic light entirely: `unusual` is
+      violet, and `paused` is grey, because the alarm that arrives *because* somebody paused a
+      sensor must not look like an outage. `down_acknowledged` still reads "Down (acknowledged)":
+      acknowledging stops the repeats, it does not fix the thing.
+
+      **A fourth escaping, for the same reason `N-08` needed the third.** Slack renders `<`, `>`
+      and `&` as syntax, so a probe reporting `got <html> not a reply` would otherwise arrive with
+      a piece missing and a link nobody wrote. `mrkdwn` escaping joins `json` and `form`, and —
+      as before — it applies to *substituted values* only, so a template written as `*%sensor* is
+      down` still arrives bold. Verified live: a simulated error containing `<ms-target> & the
+      "backup" path` reached the sink as `&lt;ms-target&gt; &amp;` with the quotes intact.
+
+      **Teams has two wire formats and the URL does not say which.** Microsoft retired Office 365
+      connectors in favour of Power Automate workflows: a workflow URL takes an Adaptive Card
+      inside a `message` envelope, a surviving connector URL takes a bare `MessageCard` and
+      rejects the envelope with a 400 whose body says nothing useful. The two are
+      indistinguishable by inspection, so `format` is a field on the method rather than a guess,
+      defaulting to the shape Microsoft still hands out. Both were sent and read back live.
+
+      **The URL is the credential, and is treated as one everywhere.** Anybody holding a Slack or
+      Teams incoming-webhook URL can post to that channel with no other authentication — the
+      secret is the path, not the host. It is `writeOnly` in the method schema, `describe()`
+      returns a constant so the summary cannot leak it, and no error message contains it: a
+      failure reports the host and the status, which is what an operator can act on. Confirmed
+      against the running stack — five deliveries, and `/hook/` appears nowhere in the journal.
+
+      **Verified live end to end.** Templates on both methods against an HTTP sink on the dev
+      network: Down arrived red with a linked title, the recovery arrived green saying "was down",
+      and switching the Teams template to `messageCard` without re-supplying the URL kept the
+      secret and changed the document. Five requests, `sent` on the first attempt each.
+
+      **One thing the live output showed that no test would have.** A recovery renders
+      `%lastmessage` as nothing, so the operator's body began with a blank line. The card now
+      trims it — leading whitespace in a chat message carries nothing, and the alternative was a
+      message that opens with an empty row every time something comes back up.
 - [ ] **N-10 — Execute program delivery** · M · P-03, N-05 · Sandboxed, timed out, output
       captured to the log.
 - [ ] **N-11 — Summarisation engine** · L · N-05 · All six modes, default _first down and up

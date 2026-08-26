@@ -127,7 +127,12 @@ export const WEBHOOK_METHOD: NotificationMethod = {
 };
 
 /** Slack and Teams differ only in name: both are an incoming-webhook URL and a message. */
-function chatMethod(id: string, name: string, service: string): NotificationMethod {
+function chatMethod(
+  id: string,
+  name: string,
+  service: string,
+  extra: Record<string, unknown> = {},
+): NotificationMethod {
   return {
     id,
     name,
@@ -148,6 +153,7 @@ function chatMethod(id: string, name: string, service: string): NotificationMeth
          */
         webhookUrl: { type: 'string', writeOnly: true, minLength: 1, maxLength: 2000 },
         timeoutMs: { type: 'integer', minimum: 100, maximum: 120_000, default: 10_000 },
+        ...extra,
       },
     },
     describe() {
@@ -158,7 +164,18 @@ function chatMethod(id: string, name: string, service: string): NotificationMeth
 }
 
 export const SLACK_METHOD = chatMethod('slack', 'Slack message', 'Slack');
-export const TEAMS_METHOD = chatMethod('teams', 'Microsoft Teams message', 'Teams');
+export const TEAMS_METHOD = chatMethod('teams', 'Microsoft Teams message', 'Teams', {
+  /**
+   * Which document this webhook URL expects (`N-09`).
+   *
+   * Microsoft retired Office 365 connectors and replaced them with Power Automate workflows.
+   * A workflow URL takes an Adaptive Card inside a `message` envelope; a surviving connector
+   * URL takes a bare `MessageCard` and rejects the envelope with a 400 whose body says nothing
+   * useful. The two are indistinguishable by inspection, so which one this is has to be stated
+   * rather than guessed, and it defaults to the one Microsoft still hands out.
+   */
+  format: { type: 'string', enum: ['adaptiveCard', 'messageCard'], default: 'adaptiveCard' },
+});
 
 /**
  * Execute a program or script (`CAPABILITIES.MD §5.2`).

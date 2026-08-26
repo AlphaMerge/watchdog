@@ -135,10 +135,7 @@ export const PLACEHOLDERS = define([
     // Falls back to the bare id when nothing has been configured. A link built from what the
     // core *binds* to would point at a loopback address nobody receiving the alarm can reach,
     // which is worse than no link at all because it looks like one.
-    resolve: (c) =>
-      c.publicUrl === ''
-        ? `sensor ${String(c.sensorId)}`
-        : `${c.publicUrl.replace(/\/+$/, '')}/objects/${String(c.sensorId)}`,
+    resolve: (c) => sensorLink(c) ?? `sensor ${String(c.sensorId)}`,
   },
   {
     name: 'sitename',
@@ -146,6 +143,18 @@ export const PLACEHOLDERS = define([
     resolve: (c) => c.siteName,
   },
 ]);
+
+/**
+ * A URL for the sensor, or null when this installation has no externally reachable one.
+ *
+ * Null rather than a fallback string, because a caller that builds a link *element* — `N-09`'s
+ * card button — needs to leave it out entirely rather than render a button pointing at prose.
+ * `%linksensor` supplies the prose itself.
+ */
+export function sensorLink(context: MessageContext): string | null {
+  if (context.publicUrl === '') return null;
+  return `${context.publicUrl.replace(/\/+$/, '')}/objects/${String(context.sensorId)}`;
+}
 
 /** Every placeholder name this build knows, for an error message and for a form's help text. */
 export function placeholderNames(): string[] {
@@ -179,7 +188,7 @@ const TOKEN = /%(%|[A-Za-z]+)/g;
  * The escaping belongs to substitution rather than to the transport, because only substitution
  * knows which characters came from a *value* and which the operator typed as syntax.
  */
-export type Escaping = 'none' | 'json' | 'form';
+export type Escaping = 'none' | 'json' | 'form' | 'mrkdwn';
 
 function escapeWith(escaping: Escaping, value: string): string {
   switch (escaping) {
@@ -192,7 +201,19 @@ function escapeWith(escaping: Escaping, value: string): string {
       return JSON.stringify(value).slice(1, -1);
     case 'form':
       return encodeURIComponent(value);
+    case 'mrkdwn':
+      // Slack's three reserved characters, and only these three — its own documentation names
+      // them. `<` opens a link, so a probe reporting `<html> not expected` would otherwise
+      // produce a message with a piece missing and a link nobody wrote. The operator's own
+      // `*bold*` and `<url|label>` survive, because escaping happens per substituted value
+      // rather than over the finished text.
+      return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
+}
+
+/** The same three, for a string the transport itself puts into mrkdwn syntax. */
+export function escapeMrkdwn(value: string): string {
+  return escapeWith('mrkdwn', value);
 }
 
 /** What a substitution produced, and what it could not. */
