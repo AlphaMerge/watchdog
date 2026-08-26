@@ -253,3 +253,11 @@ Enforced by `npm run lint`, not by review:
 - Errors carry context: the object, the phase, the underlying cause
 
 See [`CLAUDE.md`](CLAUDE.md) for the full set and the hard constraints behind them.
+
+## Infrastructure
+
+This repo has no dedicated GCP project.
+
+Estate-wide notes — what runs where, which project owns which DNS zone, and
+runbooks for undeleting a project or moving a DNS zone — live in
+[AlphaMerge/infrastructure](https://github.com/AlphaMerge/infrastructure).
