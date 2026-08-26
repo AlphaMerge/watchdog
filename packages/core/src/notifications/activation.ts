@@ -105,6 +105,8 @@ export class TemplateActivation {
 /** What goes in `last_error` for a discarded notification, which is not an error. */
 export function discardReason(suppression: Suppression): string {
   const until =
-    suppression.activeAt === null ? '' : `; it is active again at ${suppression.activeAt.toISOString()}`;
+    suppression.activeAt === null
+      ? ''
+      : `; it is active again at ${suppression.activeAt.toISOString()}`;
   return `discarded: the template is outside its "${suppression.scheduleName}" schedule${until}`;
 }

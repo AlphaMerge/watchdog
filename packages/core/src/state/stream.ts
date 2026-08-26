@@ -320,10 +320,7 @@ export class StateBroadcaster {
       [sensorIds],
     );
     return new Map(
-      rows.map((row) => [
-        Number(row.sensor_id),
-        { name: row.name, path: row.path.map(Number) },
-      ]),
+      rows.map((row) => [Number(row.sensor_id), { name: row.name, path: row.path.map(Number) }]),
     );
   }
 }

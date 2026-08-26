@@ -47,8 +47,16 @@ describe('the retry backoff', () => {
     // waits all started at the same failure, so they all expire at the same instant — a
     // thundering herd aimed at a service that has just proved it is fragile.
     const jittered: RetryPolicy = { ...PLAIN, jitter: 0.5 };
-    assert.equal(retryDelayMs(jittered, 3, () => 0), 2_000, 'half the wait at the low end');
-    assert.equal(retryDelayMs(jittered, 3, () => 1), 4_000, 'the whole wait at the high end');
+    assert.equal(
+      retryDelayMs(jittered, 3, () => 0),
+      2_000,
+      'half the wait at the low end',
+    );
+    assert.equal(
+      retryDelayMs(jittered, 3, () => 1),
+      4_000,
+      'the whole wait at the high end',
+    );
     for (const random of [0.1, 0.37, 0.9]) {
       const delay = retryDelayMs(jittered, 3, () => random);
       assert.ok(delay >= 2_000 && delay <= 4_000, `${String(delay)} is outside the band`);

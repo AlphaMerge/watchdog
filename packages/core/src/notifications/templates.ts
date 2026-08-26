@@ -55,10 +55,7 @@ export interface StoredTemplate {
 }
 
 /** A template as it is written: everything the row owns, and nothing it merely joins. */
-export type TemplateWrite = Omit<
-  StoredTemplate,
-  'id' | 'scheduleName' | 'createdAt' | 'updatedAt'
->;
+export type TemplateWrite = Omit<StoredTemplate, 'id' | 'scheduleName' | 'createdAt' | 'updatedAt'>;
 
 /** What a client sends. Absent fields on an update keep what is stored. */
 export interface TemplateInput {
@@ -204,10 +201,7 @@ export class TemplateRepository {
     return rows.map(toStored);
   }
 
-  async create(
-    q: Queryable,
-    write: TemplateWrite,
-  ): Promise<number> {
+  async create(q: Queryable, write: TemplateWrite): Promise<number> {
     const rows = await q.query<{ id: string }>(
       `INSERT INTO notification_template
          (name, description, method, settings, subject, body, recipients, priority, enabled,
@@ -233,11 +227,7 @@ export class TemplateRepository {
     return Number(rows[0]?.id ?? 0);
   }
 
-  async update(
-    q: Queryable,
-    id: number,
-    write: TemplateWrite,
-  ): Promise<void> {
+  async update(q: Queryable, id: number, write: TemplateWrite): Promise<void> {
     await q.query(
       `UPDATE notification_template
        SET name = $2, description = $3, method = $4, settings = $5::jsonb, subject = $6,

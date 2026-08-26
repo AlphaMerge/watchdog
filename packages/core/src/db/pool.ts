@@ -256,11 +256,7 @@ export class ClientQueryable implements Queryable {
   readonly #description: string;
   readonly #onCommit: ((fn: () => void) => void) | undefined;
 
-  constructor(
-    client: PoolClient,
-    description: string,
-    onCommit?: (fn: () => void) => void,
-  ) {
+  constructor(client: PoolClient, description: string, onCommit?: (fn: () => void) => void) {
     this.#client = client;
     this.#description = description;
     this.#onCommit = onCommit;

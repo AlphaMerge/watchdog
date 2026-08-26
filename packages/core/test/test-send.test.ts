@@ -192,8 +192,9 @@ describe(
 
     it('reports a refusal with the reason rather than throwing', async () => {
       const templateId = await template();
-      const report = await testerWith(recorder(() => ({ ok: false, retryable: false })).transport)
-        .send(testActor, { templateId, sensorId });
+      const report = await testerWith(
+        recorder(() => ({ ok: false, retryable: false })).transport,
+      ).send(testActor, { templateId, sensorId });
       assert.equal(report.delivered, false);
       assert.equal(report.error, 'the relay refused it');
       assert.equal(report.retryable, false);

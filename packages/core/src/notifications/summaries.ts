@@ -129,11 +129,10 @@ export class SummaryRepository {
     decision: Disposition,
     windowId: number | null,
   ): Promise<void> {
-    await q.query(`UPDATE notification_request SET disposition = $2, summary_id = $3 WHERE id = $1`, [
-      requestId,
-      decision,
-      windowId,
-    ]);
+    await q.query(
+      `UPDATE notification_request SET disposition = $2, summary_id = $3 WHERE id = $1`,
+      [requestId, decision, windowId],
+    );
   }
 
   /** Closes every window whose time is up, and says which they were. */

@@ -30,9 +30,7 @@
       "keyFile": "dev/tls/core.key",
       "caFile": "dev/tls/ca.crt"
     },
-    "accessKeys": [
-      "dev-access-key"
-    ],
+    "accessKeys": ["dev-access-key"],
     "handshakeTimeoutMs": 10000,
     "heartbeatIntervalMs": 2000
   },

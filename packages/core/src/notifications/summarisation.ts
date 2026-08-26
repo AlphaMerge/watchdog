@@ -24,9 +24,7 @@ export type SummarisationMode = (typeof SUMMARISATION_MODES)[number];
 export const DEFAULT_SUMMARISATION: SummarisationMode = 'first-down-and-up';
 
 export function isSummarisationMode(value: unknown): value is SummarisationMode {
-  return (
-    typeof value === 'string' && (SUMMARISATION_MODES as readonly string[]).includes(value)
-  );
+  return typeof value === 'string' && (SUMMARISATION_MODES as readonly string[]).includes(value);
 }
 
 export function describeSummarisationModes(): { id: SummarisationMode; description: string }[] {

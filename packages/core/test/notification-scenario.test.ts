@@ -230,31 +230,32 @@ describe(
      * it here asserts what a mail client would actually show.
      */
     function decodeSubject(raw: string): string {
-      return raw
-        // Adjacent encoded words are separated by whitespace that is not part of the text.
-        .replace(/\?=\s+=\?/g, '?==?')
-        .replace(/=\?utf-8\?q\?([^?]*)\?=/gi, (_match, text: string) => {
-          const bytes: number[] = [];
-          for (let index = 0; index < text.length; index += 1) {
-            const character = text.charAt(index);
-            if (character === '_') {
-              bytes.push(0x20);
-            } else if (character === '=' && index + 2 < text.length) {
-              bytes.push(Number.parseInt(text.slice(index + 1, index + 3), 16));
-              index += 2;
-            } else {
-              bytes.push(character.charCodeAt(0));
+      return (
+        raw
+          // Adjacent encoded words are separated by whitespace that is not part of the text.
+          .replace(/\?=\s+=\?/g, '?==?')
+          .replace(/=\?utf-8\?q\?([^?]*)\?=/gi, (_match, text: string) => {
+            const bytes: number[] = [];
+            for (let index = 0; index < text.length; index += 1) {
+              const character = text.charAt(index);
+              if (character === '_') {
+                bytes.push(0x20);
+              } else if (character === '=' && index + 2 < text.length) {
+                bytes.push(Number.parseInt(text.slice(index + 1, index + 3), 16));
+                index += 2;
+              } else {
+                bytes.push(character.charCodeAt(0));
+              }
             }
-          }
-          return Buffer.from(bytes).toString('utf8');
-        });
+            return Buffer.from(bytes).toString('utf8');
+          })
+      );
     }
 
     async function mailFor(address: string): Promise<string[]> {
-      const response = await fetch(
-        `${MAILHOG_API}/search?kind=to&query=${address}&limit=200`,
-        { signal: AbortSignal.timeout(10_000) },
-      );
+      const response = await fetch(`${MAILHOG_API}/search?kind=to&query=${address}&limit=200`, {
+        signal: AbortSignal.timeout(10_000),
+      });
       assert.ok(response.ok, 'MailHog did not answer');
       const found = (await response.json()) as {
         items: { Content: { Headers: Record<string, string[]> } }[];
@@ -365,7 +366,9 @@ describe(
         `digest subjects were ${digests.join(' | ')}`,
       );
       assert.ok(
-        digests.some((subject) => subject.startsWith('Acme production: 25 notifications — 25 down')),
+        digests.some((subject) =>
+          subject.startsWith('Acme production: 25 notifications — 25 down'),
+        ),
         'and each says what is in it',
       );
 

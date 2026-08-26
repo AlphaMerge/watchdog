@@ -98,7 +98,10 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
   it('bounds what it keeps without blocking the program that writes it', async () => {
     // A program writing a gigabyte must not be buffered, and must not be left stuck on a full
     // pipe either — that would turn a chatty program into a hang.
-    const file = await script('loud.sh', 'i=0; while [ $i -lt 4000 ]; do echo 0123456789; i=$((i+1)); done; exit 0');
+    const file = await script(
+      'loud.sh',
+      'i=0; while [ $i -lt 4000 ]; do echo 0123456789; i=$((i+1)); done; exit 0',
+    );
     const result = await run(file, { maxOutputBytes: 1024 });
     assert.ok(result.outcome === 'exited', `outcome was ${result.outcome}`);
     assert.equal(result.code, 0, 'the program ran to completion');

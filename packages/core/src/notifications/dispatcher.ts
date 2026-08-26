@@ -251,7 +251,6 @@ export class NotificationDispatcher {
     return claimed.length + digested;
   }
 
-
   async close(): Promise<void> {
     for (const transport of this.#transports.values()) await transport.close?.();
   }

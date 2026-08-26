@@ -1,6 +1,12 @@
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
-import { describeError, runProgram, type Logger, type ProgramConfig, type ProgramRun } from '@ms/shared';
+import {
+  describeError,
+  runProgram,
+  type Logger,
+  type ProgramConfig,
+  type ProgramRun,
+} from '@ms/shared';
 import { PROGRAM_METHOD } from '../methods.js';
 import { substitute, type Escaping, type MessageContext } from '../placeholders.js';
 import type { DeliveryResult, DeliveryTransport, OutgoingMessage } from './transport.js';
@@ -92,7 +98,9 @@ export class ProgramTransport implements DeliveryTransport {
    * with the directory's characters (`/opt/ms/programs-evil`) is not inside it. The last one is
    * why the comparison is against `directory + sep` rather than a prefix.
    */
-  async #resolve(name: string): Promise<{ ok: true; file: string } | { ok: false; reason: string }> {
+  async #resolve(
+    name: string,
+  ): Promise<{ ok: true; file: string } | { ok: false; reason: string }> {
     if (this.#config.directory === '') {
       return {
         ok: false,
@@ -103,7 +111,10 @@ export class ProgramTransport implements DeliveryTransport {
     }
     if (name === '') return { ok: false, reason: 'no program was named' };
     if (isAbsolute(name)) {
-      return { ok: false, reason: `"${name}" is an absolute path; name a file in the programs directory` };
+      return {
+        ok: false,
+        reason: `"${name}" is an absolute path; name a file in the programs directory`,
+      };
     }
 
     let root: string;
@@ -203,7 +214,10 @@ function factEnvironment(context: MessageContext): Record<string, string> {
     MS_LAST_VALUE: context.lastValue === null ? '' : String(context.lastValue),
     MS_DATETIME: context.at.toISOString(),
     MS_SINCE: context.since.toISOString(),
-    MS_LINK: context.publicUrl === '' ? '' : `${context.publicUrl.replace(/\/+$/, '')}/objects/${String(context.sensorId)}`,
+    MS_LINK:
+      context.publicUrl === ''
+        ? ''
+        : `${context.publicUrl.replace(/\/+$/, '')}/objects/${String(context.sensorId)}`,
     MS_SITE: context.siteName,
   };
 }
@@ -259,7 +273,11 @@ function classify(name: string, run: ProgramRun): DeliveryResult {
         error: `${name} did not finish within ${took} and was ${run.hardKilled ? 'killed' : 'stopped'}`,
       };
     case 'signalled':
-      return { ok: false, retryable: true, error: `${name} was ended by ${run.signal}${excerpt(run)}` };
+      return {
+        ok: false,
+        retryable: true,
+        error: `${name} was ended by ${run.signal}${excerpt(run)}`,
+      };
     case 'failed':
       return {
         ok: false,

@@ -47,7 +47,14 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
   });
 
   function config(overrides: Partial<ProgramConfig> = {}): ProgramConfig {
-    return { directory: dir, maxOutputBytes: 4096, killGraceMs: 500, uid: -1, gid: -1, ...overrides };
+    return {
+      directory: dir,
+      maxOutputBytes: 4096,
+      killGraceMs: 500,
+      uid: -1,
+      gid: -1,
+      ...overrides,
+    };
   }
 
   function transport(overrides: Partial<ProgramConfig> = {}): ProgramTransport {
@@ -126,7 +133,10 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
         message({ settings: { path: 'args.sh', args: ['%sensor', '%status', '%device'] } }),
       );
       assert.ok(result.ok, result.ok ? '' : result.error);
-      assert.equal(await readFile(join(dir, 'record.txt'), 'utf8'), '[Ping]\n[down]\n[edge-router]\n');
+      assert.equal(
+        await readFile(join(dir, 'record.txt'), 'utf8'),
+        '[Ping]\n[down]\n[edge-router]\n',
+      );
     });
 
     it('puts the secret arguments after the visible ones, as the schema promises', async () => {
@@ -237,7 +247,10 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
     });
 
     it('keeps only what it was told to keep of a chatty program', async () => {
-      await script('loud.sh', 'i=0; while [ $i -lt 2000 ]; do echo 0123456789; i=$((i+1)); done; exit 0');
+      await script(
+        'loud.sh',
+        'i=0; while [ $i -lt 2000 ]; do echo 0123456789; i=$((i+1)); done; exit 0',
+      );
       const result = await transport({ maxOutputBytes: 512 }).send(
         message({ settings: { path: 'loud.sh' } }),
       );
@@ -253,11 +266,14 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
     /** A real logger writing to an array, so the assertions are about what is actually emitted. */
     function capturing(): { logger: Logger; lines: Record<string, unknown>[] } {
       const lines: Record<string, unknown>[] = [];
-      const logger = pino({ level: 'trace' }, {
-        write: (chunk: string) => {
-          lines.push(JSON.parse(chunk) as Record<string, unknown>);
+      const logger = pino(
+        { level: 'trace' },
+        {
+          write: (chunk: string) => {
+            lines.push(JSON.parse(chunk) as Record<string, unknown>);
+          },
         },
-      });
+      );
       return { logger, lines };
     }
 

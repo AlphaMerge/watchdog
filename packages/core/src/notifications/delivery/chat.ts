@@ -206,10 +206,7 @@ const SLACK_FORMAT: ChatFormat = {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: clamp(
-            `${card.style.glyph} *${card.style.label}*\n${heading}`,
-            SLACK_TEXT_LIMIT,
-          ),
+          text: clamp(`${card.style.glyph} *${card.style.label}*\n${heading}`, SLACK_TEXT_LIMIT),
         },
       },
     ];

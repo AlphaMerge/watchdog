@@ -292,10 +292,9 @@ describe(
 
       await dispatcher.dispatch(INSIDE);
       assert.equal(seen.length, 1, 'the first one, immediately');
-      await db.query(
-        "UPDATE notification_summary SET due_at = $1 WHERE closed_at IS NULL",
-        [new Date(INSIDE.getTime() - 1000)],
-      );
+      await db.query('UPDATE notification_summary SET due_at = $1 WHERE closed_at IS NULL', [
+        new Date(INSIDE.getTime() - 1000),
+      ]);
       await dispatcher.dispatch(INSIDE);
       assert.equal(seen.length, 2);
       assert.match(String(seen[1]?.subject), /2 notifications/);
@@ -306,9 +305,8 @@ describe(
     // ---------------------------------------------------------------------------------------
 
     it('refuses a schedule that is not there, in words rather than a constraint name', async () => {
-      await assert.rejects(
-        template({ scheduleId: 999_999 }),
-        (error: unknown) => /no schedule 999999/.test((error as Error).message),
+      await assert.rejects(template({ scheduleId: 999_999 }), (error: unknown) =>
+        /no schedule 999999/.test((error as Error).message),
       );
     });
 
@@ -317,9 +315,8 @@ describe(
       // This is the same refusal with the template's name in it.
       const scheduleId = await officeHours();
       await template({ scheduleId });
-      await assert.rejects(
-        schedules.delete(testActor, scheduleId),
-        (error: unknown) => /notification template/.test((error as Error).message),
+      await assert.rejects(schedules.delete(testActor, scheduleId), (error: unknown) =>
+        /notification template/.test((error as Error).message),
       );
     });
 

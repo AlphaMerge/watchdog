@@ -373,8 +373,10 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     await h.service.update(
       testActor,
       objectId,
-      { kind: objectId === deviceId || objectId === otherDeviceId ? 'device' : 'group',
-        inheritsTriggers: inherits },
+      {
+        kind: objectId === deviceId || objectId === otherDeviceId ? 'device' : 'group',
+        inheritsTriggers: inherits,
+      },
       { kind: 'none' },
     );
   }

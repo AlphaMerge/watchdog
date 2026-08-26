@@ -226,7 +226,10 @@ describe('the chat transports', () => {
     const attachments = posted()['attachments'] as { blocks: { text?: { text: string } }[] }[];
     const heading = attachments[0]?.blocks[0]?.text?.text ?? '';
     assert.match(heading, /\*Down\*/);
-    assert.match(heading, /<https:\/\/ms\.example\.test\/objects\/42\|Ping on edge-router is down>/);
+    assert.match(
+      heading,
+      /<https:\/\/ms\.example\.test\/objects\/42\|Ping on edge-router is down>/,
+    );
   });
 
   it('cuts an over-long body rather than earning a 400 for ever', async () => {

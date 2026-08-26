@@ -45,8 +45,11 @@ export type ProgramRun =
   | ({ readonly outcome: 'exited'; readonly code: number } & ProgramOutput)
   | ({ readonly outcome: 'signalled'; readonly signal: string } & ProgramOutput)
   | ({ readonly outcome: 'timeout'; readonly hardKilled: boolean } & ProgramOutput)
-  | ({ readonly outcome: 'failed'; readonly code: string; readonly message: string } &
-      ProgramOutput);
+  | ({
+      readonly outcome: 'failed';
+      readonly code: string;
+      readonly message: string;
+    } & ProgramOutput);
 
 const DEFAULT_GRACE_MS = 5_000;
 
