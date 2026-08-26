@@ -19,6 +19,7 @@
   "dependencies": {
     "@ms/shared": "0.1.0",
     "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1"
+    "ajv-formats": "^3.0.1",
+    "net-snmp": "3.26.3"
   }
 }

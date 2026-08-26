@@ -501,6 +501,13 @@ sitting**, and until it has, treat the criterion as unproven rather than met.
 - Every type has unit tests against the simulator harness and a documented parameter schema.
 - Adding a new sensor type is demonstrably a one-file, half-day job.
 
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| T-01 SNMP session layer | done | Credentials, OIDs, session and pool under `packages/sensors/src/support/snmp/`. `net-snmp` is **isolated rather than vendored** — one importing file and an ~80-line declaration bounding the replacement cost — and it turns out to need no native code at all, which corrects Decision 10 (ADR-001 amended). Credentials are an argument to the layer, not something it reads from `params`, so `A-05` is a change of caller; until `A-05` lands a community string is per-sensor, which is the scheduling risk `A-05`'s own note predicted. A walk fails rather than spins on a non-increasing OID and fails rather than truncates at its bound; `Counter64` stays `bigint` for `T-02`; abort cancels the request, never the shared session. Tested over a real socket against a hand-written misbehaving agent (the SNMP half of `P-06`, early) plus `net-snmp`'s own agent for a genuine v3 authPriv conversation |
+| T-02…T-11 | not started | |
+
 ---
 
 ## Phase 7 — Auto-discovery and templates

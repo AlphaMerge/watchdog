@@ -2715,8 +2715,57 @@ because each is a decision rather than a defect:
 
 ## Phase 6 — Sensor breadth
 
-- [ ] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
+- [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
+
+      **T-01 outcome.** `packages/sensors/src/support/snmp/` — credentials, OIDs, a session and a
+      pool. Nothing here is a sensor type; `T-02`…`T-06` are, and they all sit on this.
+
+      **Isolated, not vendored, and the ADR is amended rather than ignored.** The row this task
+      quotes says "vendor a fork" against a single-maintainer risk. Measured: `net-snmp` 3.26.3 is
+      MIT, published April 2026, and its entire tree is `asn1-ber` and `smart-buffer` — no native
+      code anywhere, which also corrects ADR-001's Decision 10 claim that it needs one. What
+      replaces vendoring is a boundary: `session.ts` is the only file in `packages/` that imports
+      it, and `net-snmp.d.ts` declares the whole surface used in about eighty lines. That file is
+      the inventory, so the replacement cost is bounded at one module — and carrying 15,000 lines
+      of somebody else's USM implementation today would forfeit the upstream fixes that are the
+      reason to use a maintained library.
+
+      **Credentials are an argument, not something this reads out of `params`** — which is what
+      makes `A-05` a change of caller rather than a rewrite. `credential_set` has existed since
+      migration 001 and `InheritanceResolver.resolveCredentials` already walks it; what is missing
+      is the write and decrypt half. **`A-05`'s own note says it must be pulled forward or
+      credentialed sensors are unusable, and `T-01` is where that becomes real**: until it lands,
+      an SNMP sensor carries its own community string, so forty sensors on a router hold forty
+      copies and rotating one means editing forty. The transport is correct either way.
+
+      **Three things a well-behaved agent will not do, and all three are handled.** A walk fails
+      rather than spins when an agent answers with an OID that does not increase; fails rather
+      than truncates at `maxVarbinds`, because a table quietly missing its tail reads as a device
+      that lost interfaces; and stops at the subtree edge by comparing OIDs *arc by arc*, since
+      `1.3.6.1.2.1.2` is not a prefix of `1.3.6.1.2.1.25` but its text is.
+
+      **`Counter64` stays a `bigint` and an `OctetString` stays a `Buffer`.** `ifHCInOctets` is
+      the counter that exists to go past 2^53, which is exactly where a `number` starts dropping
+      low bits — `T-02` computes deltas across wraps from these. An `OctetString` is bytes: a MAC
+      address is not UTF-8.
+
+      **Abort cancels the request, never the session.** The socket belongs to every sensor on the
+      device, so closing it because one check timed out would fail the others mid-flight. The wait
+      is abandoned and net-snmp's callback lands later on a settled promise.
+
+      **Tested against a real socket, not a mock.** `test/support/snmp-agent.ts` is a hand-written
+      v1/v2c responder — the SNMP half of `P-06` arriving early — because what a session layer
+      needs tested is an agent that misbehaves on demand: silent, dropping the first datagram,
+      walking backwards, returning an error-status. v3 goes the other way and uses `net-snmp`'s
+      own agent, because USM is engine discovery, key localisation and a cipher, and a
+      reimplementation in a test would only prove two halves of one mistake agree. authPriv with
+      SHA and AES succeeds; wrong auth key, wrong priv key, wrong protocol and unknown user all
+      fail, which is what gives the success its meaning. 51 tests.
+
+      **Not done here:** the `paramsSchema` fragment is written and tested but no sensor type uses
+      it yet, and the pool exposes `stats()` in the shape the wheel and worker pool use but
+      nothing collects it until `P-13`.
 - [ ] **T-02 — SNMP Traffic sensor** · L · T-01 · In/out/sum channels, 32- vs 64-bit counters,
       wrap and reset detection, interface selection at add time.
 - [ ] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and

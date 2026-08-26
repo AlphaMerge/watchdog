@@ -175,6 +175,46 @@ If the type shells out, it belongs in a child process, not a worker (`P-03`) —
 
 ---
 
+## Shared transports
+
+Some protocols are too big to re-derive per type, so they live once under
+`packages/sensors/src/support/` and a type imports what it needs from inside `execute`.
+
+**SNMP** (`support/snmp/`, built by `T-01`) is the worked example:
+
+```ts
+async execute(context: CheckContext): Promise<CheckExecution> {
+  const { readCredentials, withSnmp, numberOf } = await import('../support/snmp/index.js');
+  const credentials = readCredentials(context.params);
+
+  return withSnmp(
+    { host: context.target.host, port: Number(context.params['port'] ?? 161) },
+    credentials,
+    { timeoutMs: Number(context.params['timeoutMs'] ?? 5000) },
+    async (session) => {
+      const [varbind] = await session.get([String(context.params['oid'])], context.signal);
+      const value = varbind === undefined ? null : numberOf(varbind);
+      if (value === null) throw new Error(`${context.target.host} has no value at that OID`);
+      return { channels: [{ key: 'value', value }] };
+    },
+  );
+}
+```
+
+Four things it gives you that are easy to get wrong alone:
+
+- **`snmpParamsSchema(own, required)`** composes your parameters with the credential and
+  transport ones. Use it rather than copying the fields — every secret in it has to stay a plain
+  property, because the catalogue refuses a `writeOnly` inside a combinator, and the natural
+  shape for SNMP credentials *is* a union.
+- **`withSnmp` pools the session per device** and always releases it. Forty sensors on one router
+  share one UDP socket instead of opening forty.
+- **Abort cancels the request, not the session** — which is why you must not call `close()` on a
+  session you borrowed.
+- **`Counter64` is a `bigint` and an `OctetString` is a `Buffer`.** `numberOf` and `stringOf`
+  convert when you want them to; neither returns `0` for a missing value, because a Down sensor
+  records no value at all.
+
 ## Related
 
 - `docs/ADR-001-architecture.md` — Decision 7, and why this is a plugin contract

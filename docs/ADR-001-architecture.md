@@ -233,7 +233,7 @@ Verified maintenance status as of 2026-08-24:
 
 | Protocol                | Choice                                                                                | Status                                              | Risk                              |
 | ----------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------- | --------------------------------- |
-| SNMP v1/v2c/v3, traps   | `net-snmp` 3.26.3                                                                     | Active (Apr 2026), sessions + trap receiver + agent | Single maintainer — vendor a fork |
+| SNMP v1/v2c/v3, traps   | `net-snmp` 3.26.3                                                                     | Active (Apr 2026), sessions + trap receiver + agent | Single maintainer — isolated, see below |
 | SSH                     | `ssh2` 1.17.0                                                                         | Active (Aug 2025), de facto standard                | Low                               |
 | MQTT                    | `mqtt` 5.15.2                                                                         | Active                                              | Low                               |
 | Modbus                  | `modbus-serial` 8.0.25                                                                | Active                                              | Low                               |
@@ -277,6 +277,29 @@ between packets, so the default count of 4 holds a worker for roughly three seco
 sensors on a one-minute interval that is 5,000 process spawns a minute and 15,000 worker-seconds,
 which no plausible pool size absorbs. `P-07` and `P-15` are where that gets confronted; the
 sensor is written so a second implementation slots in behind the same pure parser.
+
+### Amended 2026-08-27 (T-01) — `net-snmp` is isolated rather than vendored
+
+The row above records the SNMP risk as "single maintainer" and names vendoring a fork as the
+mitigation. `T-01` does not vendor it, and this is what replaced that.
+
+**Two things measured while building it.** `net-snmp` 3.26.3 is MIT, was last published in April
+2026, and its whole dependency tree is `asn1-ber` 1.2.2 and `smart-buffer` 4.2.0 — two packages
+with no dependencies of their own and no native code between them. So the thing being carried is
+three pure-JavaScript packages, not a build toolchain, and the cost of *not* vendoring is
+correspondingly small.
+
+**What replaces vendoring is a boundary.** `packages/sensors/src/support/snmp/session.ts` is the
+only file in `packages/` that imports `net-snmp`, and `net-snmp.d.ts` beside it declares the
+whole surface we use in about eighty lines — six functions, one interface, five constant tables.
+That file is the inventory: it bounds the replacement cost at "one module" instead of "a search
+through the repository", and it is checked by the compiler, so a use that drifts outside it stops
+the build.
+
+Vendoring stays the answer if the package is abandoned or a fix is needed that upstream will not
+take. Doing it *now* would mean carrying ~15,000 lines of somebody else's protocol code, and its
+security-sensitive USM half, against a risk that has not materialised — while giving up the
+upstream fixes that are the reason to depend on a maintained library at all.
 
 ---
 
@@ -403,8 +426,11 @@ administrators. This is a deliberate improvement on PRTG, which keeps them in a 
 | Development        | Docker Compose: Postgres+TimescaleDB, MailHog, an SNMP simulator, a syslog generator, a flow exporter                                                |
 
 **Node SEA** (single executable applications) is at stability 1.1 — Active Development, with
-manual handling required for native addons. We have several (`net-snmp` deps, `argon2`,
-`better-sqlite3` if used). Revisit when it stabilises. `pkg` is deprecated by Vercel; `nexe`
+manual handling required for native addons. We have `argon2`, and `better-sqlite3` if it is ever
+used. **`net-snmp` is not one of them** — measured while building `T-01`: `net-snmp` 3.26.3
+depends only on `asn1-ber` and `smart-buffer`, neither of which has a `gypfile` or any
+dependency of its own. Three pure-JavaScript packages, so the SNMP stack costs the installer
+nothing. Revisit when SEA stabilises. `pkg` is deprecated by Vercel; `nexe`
 has been in beta for years. Neither is an option.
 
 ---
