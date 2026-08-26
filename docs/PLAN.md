@@ -459,11 +459,21 @@ causally one outage, summarisation collapses what is merely simultaneous.
 | U-08 schema-driven forms | done | A form built from `paramsSchema`, wired into editing a sensor and into a new add-sensor flow. Found the defect that made it possible at all: `params` is replaced on update and a read never returns a credential, so any read-modify-write deleted every secret silently — `carryWriteOnly` is the mirror of redaction and sits beside it. A field the controls cannot draw becomes a JSON box rather than nothing, for the same reason |
 | U-09 inheritance-aware controls | done | Override toggle per setting, reusing `U-08`'s controls. Needed `SettingView.inherited` — the setting resolved *at the parent* — because a view carrying only the effective value could show what reverting does only by doing it. Overridden-to-the-same-value stays a distinct state: the toggle reads `own`, never a comparison, so a deliberate pin does not silently become a follower |
 | U-10 notification configuration UI | done | Template editor and trigger editor, both generated from schemas the core already publishes — the third and fourth use of `U-08`'s generator. Needed `POST /templates/preview`, because a live preview of the *stored* template shows the old subject line while the operator types a new one; the draft runs through the same parse every write uses, so an unsaveable draft is refused rather than half-rendered. Inherited triggers are read-only with their source and the note that they fire as well as the local ones. `seedDefaults` replaced three copies of a top-level-only seeding loop that silently dropped nested defaults |
-| U-11 | not started | |
+| U-11 accessibility and responsive pass | done | Measured in the browser across nine routes and both themes, not asserted. Three real defects, each systemic rather than local: `role="tree"` with no arrow keys at all — now the ARIA pattern with a roving tab stop, which takes the tree from ~15,000 tab stops at the 5,000-sensor target to one; `--ms-border` at 1.23:1 under every input, against 1.4.11's 3:1, so control edges moved to a second grey clearing 3:1 on all six surfaces; and 41 controls whose `focus:outline-none focus-visible:ring-2` left them with **no** focus indicator under forced colors, since a ring is a box-shadow. Also: per-route document titles and focus-on-navigation (2.4.2), reflow at 320px, and a 24px floor on control height |
 
-Pulled forward out of order, on request, and it reads honestly: with no state machine and no
-sensor types, every sensor shows Unknown and each empty panel names the task that fills it. The
-exit criteria are untouched — neither can be met before Phase 3 and `P-08`.
+Pulled forward out of order, on request. It began reading honestly rather than well: with no
+state machine and no sensor types, every sensor showed Unknown and each empty panel named the
+task that would fill it. Phase 3 and `P-08` have since landed underneath it, so the panels carry
+real data and every task in the phase is done.
+
+**Exit criteria.** The second is measured: `5,200 rows flattened and 5,000 states rolled up in
+4.4 ms` (`U-03`, re-measured every run by `tree-model.test.ts`), against a budget of a second,
+and the tree is pushed rather than polled so a state change arrives in one WebSocket frame. The
+first — a new user adding a device, three sensors and a threshold and receiving an email without
+touching the API — now has every piece it needs on screen (`U-08` adds sensors, `U-09` sets
+inheritable settings, `U-10` writes the template and the trigger), and each has been driven end
+to end in the browser on its own ticket. **It has not been walked start to finish as one
+sitting**, and until it has, treat the criterion as unproven rather than met.
 
 ---
 

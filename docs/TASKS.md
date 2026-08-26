@@ -2657,8 +2657,61 @@ because each is a decision rather than a defect:
       the subject line, sent a test that arrived in 64 ms carrying `N-14`'s notes, attached it to
       a trigger, had the delete refused with the link, and read an inherited threshold trigger on
       the sensor showing "from ms-target".
-- [ ] **U-11 — Accessibility and responsive pass** · M · U-03…U-10 · WCAG 2.1 AA, keyboard
+- [x] **U-11 — Accessibility and responsive pass** · M · U-03…U-10 · WCAG 2.1 AA, keyboard
       navigation, touch targets, no horizontal body scroll.
+
+      **U-11 outcome.** A pass over the nine routes in both themes, measured in the browser
+      rather than reasoned about: a script walked every rendered node computing contrast against
+      the surface actually behind it, listed everything narrower or shorter than 24px, and
+      reported any element crossing the viewport's right edge that no ancestor scrolls.
+
+      **The tree announced itself as a tree and had no arrow keys**, which is worse than not
+      claiming to be one: `role="tree"` tells a screen-reader user the arrows walk the branches,
+      and they walked nothing. It is now the ARIA pattern — up and down, right to open then
+      descend, left to close then climb, Home and End, Enter to open the object — with a roving
+      tab stop. That collapsed the tree from one tab stop per row *plus* one per expander and one
+      per link to exactly **one**, whatever the row count; at the 5,000-sensor target the old
+      shape was about 15,000 stops. The decision half is a pure function, `treeCommand`, because
+      "left closes an open branch, and climbs from a shut one" is the pair that gets swapped.
+
+      **A roving tab stop needs the row to survive the rows changing.** Collapsing a branch takes
+      rows away underneath the active index, and an index past the end means nothing carries
+      `tabIndex={0}` — a tree with no way back in from the keyboard at all. `keepActive` follows
+      the object id and clamps when it has gone; verified live by collapsing a branch from the
+      mouse while the keyboard sat three levels inside it.
+
+      **`--ms-border` was 1.23:1 under every input in the light theme.** WCAG 1.4.11 holds the
+      boundary of a user interface component to 3:1, and the divider grey was never going to meet
+      it. `--ms-control-border` is a second grey for the edge of anything pressable — one value
+      that clears 3:1 on all six surfaces (worst case 3.57 light, 3.74 dark) — and dividers keep
+      the old one, because a rule between table rows is decoration and the criterion does not
+      reach it. Three destructive buttons wearing `border-down-border` at 1.9:1 moved to
+      `border-down-fg` for the same reason.
+
+      **Forty-one controls had no focus indicator in forced-colors mode**, and it looked fine
+      everywhere else. They carried `focus:outline-none focus-visible:ring-2` — and a ring is a
+      `box-shadow`, which Windows High Contrast drops, so those controls had removed the outline
+      and put the indicator somewhere that mode does not paint. They now use the one base
+      `:focus-visible` rule, which is an outline, and it takes `Highlight` under forced colors.
+      A focused row insets its outline: at the full width of a scrolling viewport the default
+      2px offset is clipped, leaving a single line that reads as a divider.
+
+      **The document title never changed** — nine routes, all "MonitoringSystem" (WCAG 2.4.2) —
+      and focus stayed on the link that was clicked, so a screen-reader user got no announcement
+      that the page had changed. `PageTitle` owns the `h1`, the title and the focus together,
+      because a route cannot then set one and forget another. It moves focus on a *route* change
+      only: not on first load, where focus belongs at the top with the skip link, and not on a
+      re-render, where it would yank a keyboard user out of the control they are using every time
+      data arrives.
+
+      **The header nav pushed every page 60px wider than a 375px viewport.** One flex row of six
+      links that could not wrap, so `1.4.10` failed identically on all of them; the tree's two
+      filter inputs did the same at 320px. Both reflow now. Touch targets under 24px were the
+      small controls, so the floor is one base rule rather than a class on each: a `text-xs`
+      button with `py-1` measures 22px, and the next one written would have too.
+
+      Measured after: no horizontal document scroll on any route at 320px, no text or control
+      boundary under its threshold in either theme, and nothing pressable under 24px.
 
 ## Phase 6 — Sensor breadth
 

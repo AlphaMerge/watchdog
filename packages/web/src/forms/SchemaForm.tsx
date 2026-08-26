@@ -260,7 +260,7 @@ function WriteOnly({
           onChange={(event) => {
             onValue(event.target.value === '' ? undefined : event.target.value);
           }}
-          className="w-64 rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+          className="w-64 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
         />
         {isSet && (
           <button
@@ -270,7 +270,7 @@ function WriteOnly({
               onValue(undefined);
               onReplace(field.path, false);
             }}
-            className="rounded border border-border px-2 py-1 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
           >
             Keep the current one
           </button>
@@ -293,7 +293,7 @@ function WriteOnly({
         onClick={() => {
           onReplace(field.path, true);
         }}
-        className="rounded border border-border px-2 py-1 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
       >
         Replace
       </button>
@@ -302,7 +302,7 @@ function WriteOnly({
           type="button"
           disabled={disabled}
           onClick={onClear}
-          className="rounded border border-border px-2 py-1 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
         >
           Clear
         </button>

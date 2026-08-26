@@ -14,6 +14,7 @@ import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs, type TabDefinition } from '../components/Tabs';
 import { formatDuration } from './detail/StateLogPanel';
+import { PageTitle } from '../components/PageTitle';
 
 const PAGE = 100;
 
@@ -80,7 +81,7 @@ export function LogsView(): React.JSX.Element {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-text">Logs</h1>
+      <PageTitle title="Logs" />
 
       <Tabs
         tabs={TABS}
@@ -205,7 +206,7 @@ function MoreButton({
         type="button"
         disabled={loading}
         onClick={more}
-        className="rounded border border-border px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
       >
         {loading ? 'Loading…' : 'Load more'}
       </button>
@@ -267,7 +268,7 @@ function StatusChanges({
                     for (const entry of next) search.append('state', entry);
                   });
                 }}
-                className={`rounded border px-1 py-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                className={`rounded border px-1 py-0.5 ${
                   on ? 'border-accent' : 'border-transparent opacity-60 hover:opacity-100'
                 }`}
               >
@@ -418,10 +419,10 @@ function ObjectHistory({
                     for (const entry of next) search.append('category', entry);
                   });
                 }}
-                className={`rounded border px-2 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                className={`rounded border px-2 py-1 text-xs ${
                   on
                     ? 'border-accent bg-surface-muted text-text'
-                    : 'border-border text-text-muted hover:text-text'
+                    : 'border-control text-text-muted hover:text-text'
                 }`}
               >
                 {category}
@@ -537,10 +538,10 @@ function SystemEvents({
                   for (const entry of next) search.append('status', entry);
                 });
               }}
-              className={`rounded border px-2 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`rounded border px-2 py-1 text-xs ${
                 on
                   ? 'border-accent bg-surface-muted text-text'
-                  : 'border-border text-text-muted hover:text-text'
+                  : 'border-control text-text-muted hover:text-text'
               }`}
             >
               {status}
@@ -640,7 +641,7 @@ function ScopeChip({
           search.delete('objectId');
         });
       }}
-      className="rounded border border-border px-2 py-1 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
     >
       Scoped to #{objectId} — show everything
     </button>

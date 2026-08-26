@@ -16,6 +16,7 @@ import type {
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { SchemaForm } from '../forms/SchemaForm';
 import { seedDefaults, type JsonSchema } from '../forms/schema';
+import { PageTitle } from '../components/PageTitle';
 
 /** How long to wait after a keystroke before asking the core what the draft renders as. */
 const PREVIEW_DEBOUNCE_MS = 500;
@@ -66,13 +67,13 @@ export function TemplatesView(): React.JSX.Element {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold text-text">Notification templates</h1>
+        <PageTitle title="Notification templates" />
         <button
           type="button"
           onClick={() => {
             open(null);
           }}
-          className="ml-auto rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="ml-auto rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast"
         >
           New template
         </button>
@@ -105,7 +106,7 @@ export function TemplatesView(): React.JSX.Element {
                   onClick={() => {
                     open(template.id);
                   }}
-                  className="text-sm font-medium text-accent hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="text-sm font-medium text-accent hover:underline"
                 >
                   {template.name}
                 </button>
@@ -230,7 +231,7 @@ function Editor({
                 });
                 setReplacing(new Set());
               }}
-              className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
             >
               {methods.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -296,7 +297,7 @@ function Editor({
                 setDraft({ ...draft, priority });
               }}
             />
-            <label className="flex items-center gap-1.5 text-sm text-text-muted">
+            <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
               <input
                 type="checkbox"
                 checked={draft.enabled ?? true}
@@ -319,7 +320,7 @@ function Editor({
                 onChange={(event) => {
                   setDraft({ ...draft, summarisation: event.target.value });
                 }}
-                className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+                className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
               >
                 {modes.data.items.map((mode) => (
                   <option key={mode.id} value={mode.id}>
@@ -353,7 +354,7 @@ function Editor({
                     scheduleId: event.target.value === '' ? null : Number(event.target.value),
                   });
                 }}
-                className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+                className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
               >
                 <option value="">always</option>
                 {schedules.data.items.map((schedule) => (
@@ -371,7 +372,7 @@ function Editor({
                     onChange={(event) => {
                       setDraft({ ...draft, whenInactive: event.target.value });
                     }}
-                    className="ml-2 rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+                    className="ml-2 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
                   >
                     <option value="queue">queued until the window opens</option>
                     <option value="discard">discarded</option>
@@ -385,7 +386,7 @@ function Editor({
             <button
               type="submit"
               disabled={saving || draft.name.trim() === ''}
-              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
             >
               {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
             </button>
@@ -393,7 +394,7 @@ function Editor({
               type="button"
               disabled={saving}
               onClick={onCancel}
-              className="rounded border border-border px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
             >
               Cancel
             </button>
@@ -519,7 +520,7 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
               onChange={(event) => {
                 setSensorId(Number(event.target.value));
               }}
-              className="rounded border border-border bg-surface px-1.5 py-0.5 text-xs text-text"
+              className="rounded border border-control bg-surface px-1.5 py-0.5 text-xs text-text"
             >
               {sensors.data.items.map((sensor) => (
                 <option key={sensor.id} value={sensor.id}>
@@ -591,7 +592,7 @@ function TestSend({ template }: { template: TemplateView }): React.JSX.Element {
               setSending(false);
             });
         }}
-        className="rounded border border-border px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
       >
         {sending ? 'Sending…' : 'Send a test'}
       </button>
@@ -634,7 +635,7 @@ function Delete({
         onClick={() => {
           setConfirming(true);
         }}
-        className="ml-auto rounded border border-down-border px-3 py-1 text-sm text-down-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="ml-auto rounded border border-down-fg px-3 py-1 text-sm text-down-fg"
       >
         Delete
       </button>
@@ -670,7 +671,7 @@ function Delete({
             setConfirming(false);
             setFailed(null);
           }}
-          className="rounded border border-border px-2 py-1 text-text-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-2 py-1 text-text-muted"
         >
           Close
         </button>
@@ -694,7 +695,7 @@ function Delete({
               );
             });
         }}
-        className="rounded border border-down-border bg-down-bg px-2 py-1 text-xs text-down-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
       >
         Yes, delete
       </button>
@@ -704,7 +705,7 @@ function Delete({
           setConfirming(false);
           setFailed(null);
         }}
-        className="rounded border border-border px-2 py-1 text-xs text-text-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-2 py-1 text-xs text-text-muted"
       >
         Keep it
       </button>
@@ -760,14 +761,14 @@ function Recipients({
               next[index] = { ...recipient, value: event.target.value };
               onChange(next);
             }}
-            className="w-64 rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+            className="w-64 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
           />
           <button
             type="button"
             onClick={() => {
               onChange(items.filter((_, at) => at !== index));
             }}
-            className="rounded border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
           >
             Remove
           </button>
@@ -778,7 +779,7 @@ function Recipients({
         onClick={() => {
           onChange([...items, { kind: 'address', value: '' }]);
         }}
-        className="rounded border border-border px-2 py-1 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
       >
         Add a recipient
       </button>
@@ -825,7 +826,7 @@ function TextField({
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        className="w-full rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+        className="w-full rounded border border-control bg-surface px-2 py-1 text-sm text-text"
       />
     </div>
   );
@@ -853,7 +854,7 @@ function TextArea({
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        className="w-full rounded border border-border bg-surface px-2 py-1 font-mono text-sm text-text"
+        className="w-full rounded border border-control bg-surface px-2 py-1 font-mono text-sm text-text"
       />
     </div>
   );
@@ -887,7 +888,7 @@ function NumberField({
         onChange={(event) => {
           onChange(Number(event.target.value));
         }}
-        className="w-24 rounded border border-border bg-surface px-2 py-1 text-sm tabular-nums text-text"
+        className="w-24 rounded border border-control bg-surface px-2 py-1 text-sm tabular-nums text-text"
       />
     </div>
   );

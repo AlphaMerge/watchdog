@@ -3,6 +3,7 @@ import { useApi } from '../api/client';
 import type { ObjectDetail, SensorState, SensorTypeSummary, TreePage } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
+import { PageTitle } from '../components/PageTitle';
 
 interface OpenApi {
   info: { version: string };
@@ -38,7 +39,7 @@ export function Overview(): React.JSX.Element {
   if (root.status === 'error') {
     return (
       <div className="space-y-4">
-        <h1 className="text-xl font-semibold text-text">Overview</h1>
+        <PageTitle title="Overview" />
         <ErrorPanel error={root.error} retry={root.reload} />
       </div>
     );
@@ -64,7 +65,7 @@ export function Overview(): React.JSX.Element {
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="text-xl font-semibold text-text">Overview</h1>
+        <PageTitle title="Overview" />
         {api.status === 'ready' && (
           <p className="font-mono text-xs text-text-muted">core {api.data.info.version}</p>
         )}

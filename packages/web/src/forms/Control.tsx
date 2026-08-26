@@ -27,8 +27,7 @@ function optionOf(value: unknown): string {
   return String(value);
 }
 
-const INPUT_CLASS =
-  'rounded border bg-surface px-2 py-1 text-sm text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent';
+const INPUT_CLASS = 'rounded border bg-surface px-2 py-1 text-sm text-text';
 
 export function SchemaControl({
   id,
@@ -49,7 +48,11 @@ export function SchemaControl({
   onValue: (next: unknown) => void;
   onBlur: () => void;
 }): React.JSX.Element {
-  const border = invalid ? 'border-down-border' : 'border-border';
+  // `-fg` and not `-border` for the invalid case: the pale border tint is 1.7:1 on the light
+  // surface, and an error outline is a state indicator, which WCAG 1.4.11 holds to 3:1. The
+  // message underneath and `aria-invalid` carry it too — this is the one a sighted mouse user
+  // sees first.
+  const border = invalid ? 'border-down-fg' : 'border-control';
   const shared = {
     id,
     disabled,
@@ -67,7 +70,10 @@ export function SchemaControl({
         onChange={(event) => {
           onValue(event.target.checked);
         }}
-        className="h-4 w-4"
+        // 24 square, which is WCAG 2.5.8's minimum. The checkboxes elsewhere sit inside their
+        // own label and inherit its target; this one is labelled from outside by `SchemaForm`,
+        // so the box is all there is to hit.
+        className="h-6 w-6"
       />
     );
   }

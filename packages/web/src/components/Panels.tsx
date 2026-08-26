@@ -70,7 +70,7 @@ export function ErrorPanel({
         <button
           type="button"
           onClick={retry}
-          className="mt-3 rounded border border-down-border px-2 py-1 font-medium hover:bg-surface"
+          className="mt-3 rounded border border-down-fg px-2 py-1 font-medium hover:bg-surface"
         >
           Try again
         </button>

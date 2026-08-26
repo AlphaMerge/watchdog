@@ -6,6 +6,7 @@ import type { Alarm, AlarmPage, SensorState } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from './detail/StateLogPanel';
+import { PageTitle } from '../components/PageTitle';
 
 /**
  * The severities, worst first — the same five `WORKFLOW.MD §7` names and the core returns.
@@ -91,7 +92,7 @@ export function AlarmsView(): React.JSX.Element {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold text-text">Alarms</h1>
+        <PageTitle title="Alarms" />
         <LiveDot status={live.status} />
         {showing !== null && (
           <span className="text-sm text-text-muted">
@@ -206,8 +207,8 @@ function Filters({
               onClick={() => {
                 toggle(severity.state);
               }}
-              className={`flex items-center gap-1.5 rounded border px-2 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                on ? 'border-accent bg-surface-muted text-text' : 'border-border text-text-muted'
+              className={`flex items-center gap-1.5 rounded border px-2 py-1 text-sm ${
+                on ? 'border-accent bg-surface-muted text-text' : 'border-control text-text-muted'
               }`}
             >
               {/* The badge carries the colour and the word, so the chip is never colour alone. */}
@@ -218,7 +219,7 @@ function Filters({
         })}
       </div>
 
-      <label className="flex items-center gap-1.5 text-sm text-text-muted">
+      <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
         <input
           type="checkbox"
           checked={hideAcknowledged}
@@ -232,7 +233,7 @@ function Filters({
         Hide acknowledged
       </label>
 
-      <label className="flex items-center gap-1.5 text-sm text-text-muted">
+      <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
         Sort
         <select
           value={sort}
@@ -241,7 +242,7 @@ function Filters({
               query.set('sort', event.target.value);
             });
           }}
-          className="rounded border border-border bg-surface px-1.5 py-1 text-sm text-text"
+          className="rounded border border-control bg-surface px-1.5 py-1 text-sm text-text"
         >
           <option value="priority">priority, then duration</option>
           <option value="duration">duration</option>
@@ -256,7 +257,7 @@ function Filters({
               query.delete('objectId');
             });
           }}
-          className="rounded border border-border px-2 py-1 text-sm text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
         >
           Scoped to #{scope} — show everything
         </button>
@@ -427,7 +428,7 @@ function Actions({
           onClick={() => {
             act(() => send('DELETE', `/objects/${id}/acknowledge`));
           }}
-          className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         >
           Un-acknowledge
         </button>
@@ -443,7 +444,7 @@ function Actions({
             send('POST', `/objects/${id}/pause`, { message: 'paused from the alarms list' }),
           );
         }}
-        className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         title="Stops scanning it entirely — the alarm leaves this list because nothing is watching"
       >
         Pause
@@ -469,7 +470,7 @@ function AcknowledgeMenu({
         onClick={() => {
           act(() => send('POST', `/objects/${id}/acknowledge`, { message: 'acknowledged' }));
         }}
-        className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         title="Silences notifications until it recovers. It stays on this list."
       >
         Acknowledge
@@ -489,7 +490,7 @@ function AcknowledgeMenu({
             send('POST', `/objects/${id}/acknowledge`, { minutes, message: 'acknowledged' }),
           );
         }}
-        className="rounded border border-border bg-surface px-1 py-0.5 text-xs text-text-muted disabled:opacity-50"
+        className="rounded border border-control bg-surface px-1 py-0.5 text-xs text-text-muted disabled:opacity-50"
       >
         <option value="">for…</option>
         {PRESETS.map((preset) => (

@@ -29,7 +29,12 @@ export function Layout(): React.JSX.Element {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
           <span className="text-sm font-semibold tracking-tight text-text">MonitoringSystem</span>
 
-          <nav aria-label="Sections" className="flex items-center gap-1">
+          {/*
+            Wraps rather than overflows. Six links do not fit 375px, and a header that pushed the
+            document 60px wider made *every* page scroll sideways — WCAG 1.4.10 asks for reflow
+            at 320px, and the thing that broke it was the same on all of them.
+          */}
+          <nav aria-label="Sections" className="flex flex-wrap items-center gap-1">
             {NAV.map((item) => (
               <NavLink
                 key={item.to}
@@ -48,13 +53,20 @@ export function Layout(): React.JSX.Element {
             ))}
           </nav>
 
+          {/*
+            The name stays "Dark theme" and `aria-pressed` carries the state. It used to read
+            "Light theme" when off and "Dark theme" when on, which is a toggle whose label
+            changes underneath the state it is reporting: a screen reader announced "Light
+            theme, not pressed", and both halves have to be read together to work out that
+            pressing it turns the lights *off*. One name, one state.
+          */}
           <button
             type="button"
             onClick={toggle}
             aria-pressed={theme === 'dark'}
-            className="ml-auto rounded border border-border px-2.5 py-1.5 text-sm text-text-muted hover:text-text"
+            className="ml-auto rounded border border-control px-2.5 py-1.5 text-sm text-text-muted hover:text-text"
           >
-            {theme === 'dark' ? 'Dark' : 'Light'} theme
+            Dark theme
           </button>
         </div>
       </header>

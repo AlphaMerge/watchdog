@@ -1,6 +1,7 @@
 import { useApi } from '../api/client';
 import type { SensorTypeSummary } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { PageTitle } from '../components/PageTitle';
 
 /**
  * The catalogue, straight from `GET /sensor-types` — the same document `U-08` will generate the
@@ -12,7 +13,7 @@ export function SensorTypesView(): React.JSX.Element {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-text">Sensor types</h1>
+      <PageTitle title="Sensor types" />
 
       {types.status === 'loading' && <Loading what="the catalogue" />}
       {types.status === 'error' && <ErrorPanel error={types.error} retry={types.reload} />}

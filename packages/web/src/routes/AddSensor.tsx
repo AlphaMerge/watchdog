@@ -6,6 +6,7 @@ import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
 import { allProblems, type FieldProblem } from '../forms/validate';
+import { PageTitle } from '../components/PageTitle';
 
 /**
  * Adding a sensor (`U-08`).
@@ -106,9 +107,9 @@ export function AddSensor(): React.JSX.Element {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold text-text">
+      <PageTitle title={`Add a sensor to ${parent.data.name}`}>
         Add a sensor to <span className="font-normal text-text-muted">{parent.data.name}</span>
-      </h1>
+      </PageTitle>
 
       <Card>
         <form
@@ -129,7 +130,7 @@ export function AddSensor(): React.JSX.Element {
               onChange={(event) => {
                 setName(event.target.value);
               }}
-              className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
             />
           </div>
 
@@ -144,7 +145,7 @@ export function AddSensor(): React.JSX.Element {
               onChange={(event) => {
                 pickType(event.target.value);
               }}
-              className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
             >
               <option value="">Choose a type…</option>
               {catalogue.map((type) => (
@@ -184,7 +185,7 @@ export function AddSensor(): React.JSX.Element {
             <button
               type="submit"
               disabled={saving || !ready}
-              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
             >
               {saving ? 'Creating…' : 'Create sensor'}
             </button>
@@ -194,7 +195,7 @@ export function AddSensor(): React.JSX.Element {
               onClick={() => {
                 void navigate(`/objects/${String(parent.data.id)}`);
               }}
-              className="rounded border border-border px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
             >
               Cancel
             </button>

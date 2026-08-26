@@ -143,7 +143,7 @@ function Setting({
       <p className="text-xs text-text-muted">{setting.description}</p>
 
       <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-xs text-text-muted">
+        <label className="flex min-h-6 items-center gap-1.5 text-xs text-text-muted">
           <input
             type="checkbox"
             checked={overridden}
@@ -177,7 +177,7 @@ function Setting({
                   }),
                 );
               }}
-              className="rounded border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40"
             >
               {busy ? 'Saving…' : 'Save'}
             </button>

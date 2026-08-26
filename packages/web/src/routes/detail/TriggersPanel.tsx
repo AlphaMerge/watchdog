@@ -78,7 +78,7 @@ export function TriggersPanel({
                 setAdding(true);
                 setEditing(null);
               }}
-              className="rounded border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
             >
               + Add a trigger
             </button>
@@ -183,7 +183,7 @@ function OwnRow({
           <button
             type="button"
             onClick={onEdit}
-            className="rounded border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
           >
             Edit
           </button>
@@ -202,7 +202,7 @@ function OwnRow({
                       );
                     });
                 }}
-                className="rounded border border-down-border bg-down-bg px-2 py-0.5 text-xs text-down-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="rounded border border-down-border bg-down-bg px-2 py-0.5 text-xs text-down-fg"
               >
                 Yes, delete
               </button>
@@ -211,7 +211,7 @@ function OwnRow({
                 onClick={() => {
                   setConfirming(false);
                 }}
-                className="rounded border border-border px-2 py-0.5 text-xs text-text-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="rounded border border-control px-2 py-0.5 text-xs text-text-muted"
               >
                 Keep
               </button>
@@ -222,7 +222,7 @@ function OwnRow({
               onClick={() => {
                 setConfirming(true);
               }}
-              className="rounded border border-border px-2 py-0.5 text-xs text-down-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded border border-control px-2 py-0.5 text-xs text-down-fg"
             >
               Delete
             </button>
@@ -351,7 +351,7 @@ function TriggerForm({
             setKindId(event.target.value);
             setSettings(seedFrom(picked));
           }}
-          className="w-full max-w-md rounded border border-border bg-surface px-2 py-1 text-sm text-text"
+          className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
         >
           {kinds.map((entry) => (
             <option key={entry.id} value={entry.id}>
@@ -392,7 +392,7 @@ function TriggerForm({
         </p>
       )}
 
-      <label className="flex items-center gap-1.5 text-sm text-text-muted">
+      <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
         <input
           type="checkbox"
           checked={enabled}
@@ -408,7 +408,7 @@ function TriggerForm({
         <button
           type="submit"
           disabled={saving}
-          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           {saving ? 'Saving…' : trigger === undefined ? 'Add trigger' : 'Save trigger'}
         </button>
@@ -416,7 +416,7 @@ function TriggerForm({
           type="button"
           disabled={saving}
           onClick={onCancel}
-          className="rounded border border-border px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
         >
           Cancel
         </button>

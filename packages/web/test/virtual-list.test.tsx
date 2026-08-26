@@ -9,7 +9,7 @@ function rows(count: number): number[] {
   return Array.from({ length: count }, (_, index) => index);
 }
 
-function renderList(count: number, overscan = 0) {
+function renderList(count: number, overscan = 0, activeIndex?: number) {
   return render(
     <VirtualList
       items={rows(count)}
@@ -22,6 +22,7 @@ function renderList(count: number, overscan = 0) {
       itemRole="treeitem"
       itemProps={(item) => ({ 'aria-level': (item % 3) + 1 })}
       render={(item) => <span>row {item}</span>}
+      {...(activeIndex === undefined ? {} : { activeIndex })}
     />,
   );
 }
@@ -73,5 +74,46 @@ describe('VirtualList', () => {
   it('renders nothing rather than an empty row for an empty list', () => {
     renderList(0);
     expect(screen.queryAllByRole('treeitem')).toHaveLength(0);
+  });
+});
+
+describe('the tab stop', () => {
+  it('is the container when no row is active, so a plain list is one stop', () => {
+    renderList(50);
+    expect(screen.getByRole('tree').getAttribute('tabindex')).toBe('0');
+    for (const row of screen.getAllByRole('treeitem')) {
+      expect(row.hasAttribute('tabindex')).toBe(false);
+    }
+  });
+
+  it('roves to the active row, and the container gives its stop up', () => {
+    // Both halves matter. A container that kept `tabIndex={0}` alongside a roving row would put
+    // two stops on one widget, and Tab would land on the box where the arrow keys do nothing.
+    renderList(50, 0, 3);
+    expect(screen.getByRole('tree').hasAttribute('tabindex')).toBe(false);
+    const stops = screen
+      .getAllByRole('treeitem')
+      .map((row) => row.getAttribute('tabindex'))
+      .filter((value) => value === '0');
+    expect(stops).toHaveLength(1);
+  });
+
+  it('puts it on the active row and takes it off every other', () => {
+    renderList(50, 0, 3);
+    const rendered = screen.getAllByRole('treeitem');
+    expect(rendered[3]?.getAttribute('tabindex')).toBe('0');
+    expect(rendered[0]?.getAttribute('tabindex')).toBe('-1');
+    expect(rendered[4]?.getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('leaves exactly one stop even when the active row is scrolled out of the window', () => {
+    // The row for index 400 is not rendered at all. Nothing may carry `tabIndex={0}` in its
+    // place: two stops would be a second way into the widget with no way to tell them apart.
+    renderList(5000, 0, 400);
+    const stops = screen
+      .getAllByRole('treeitem')
+      .filter((row) => row.getAttribute('tabindex') === '0');
+    expect(stops).toHaveLength(0);
+    expect(screen.getByRole('tree').hasAttribute('tabindex')).toBe(false);
   });
 });

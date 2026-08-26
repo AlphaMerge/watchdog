@@ -12,9 +12,18 @@
  * (U-05). A canvas cannot read a utility class, but `getComputedStyle` reads these, so the
  * charts and the DOM share one palette instead of two that drift.
  *
- * Contrast: every `-fg` token meets WCAG 2.1 AA (4.5:1) against its own surface, in both themes.
- * Colour is never the only signal — see `StatusBadge`, which pairs each state with a distinct
- * glyph and its name (WCAG 1.4.1).
+ * Contrast: every `-fg` token meets WCAG 2.1 AA (4.5:1) against its own surface, in both themes,
+ * and `--ms-control-border` meets 1.4.11's 3:1 for the edge of anything pressable — the two are
+ * different criteria and `--ms-border` only ever satisfied the first, which is why there are now
+ * two greys. Colour is never the only signal: `StatusBadge` pairs each state with a distinct
+ * glyph and its name (WCAG 1.4.1), and a `-border` tint on one of those badges is decoration
+ * that the label already carries, not the state indicator itself.
+ *
+ * Measured, not asserted (`U-11`): a script over every rendered node on every route computed the
+ * ratio of each text colour against the surface actually behind it, and of each control's border
+ * against the surface it sits on, in both themes. It found `--ms-border` at 1.23:1 under every
+ * input and select in the light theme, and a `border-down-border` on three destructive buttons
+ * at 1.9:1. Text passed everywhere and still does.
  */
 
 @theme inline {
@@ -22,6 +31,7 @@
   --color-surface: var(--ms-surface);
   --color-surface-muted: var(--ms-surface-muted);
   --color-border: var(--ms-border);
+  --color-control: var(--ms-control-border);
   --color-text: var(--ms-text);
   --color-text-muted: var(--ms-text-muted);
   --color-accent: var(--ms-accent);
@@ -59,6 +69,22 @@
   --ms-surface: #ffffff;
   --ms-surface-muted: #f1f5f9;
   --ms-border: #e2e8f0;
+  /*
+   * The edge of anything you can type in or press — and *not* the same grey as a divider.
+   *
+   * WCAG 1.4.11 wants 3:1 for the boundary of a user interface component, and `--ms-border` is
+   * 1.23:1 on white: fine for a rule between table rows, which is decoration, and not fine for
+   * the thing that tells you where an input begins. Measured against every surface a control
+   * sits on, in both themes, worst case first:
+   *
+   *   light  #f1f5f9 3.57  ·  #f8fafc 3.73  ·  #ffffff 3.91
+   *   dark   #1e293b 3.74  ·  #111827 4.54  ·  #0b1220 4.79
+   *
+   * One value serves both themes, which is why there is no override below: it is a mid slate,
+   * dark enough to read on the light surfaces and light enough to read on the dark ones. Re-run
+   * the numbers before changing it — the worst case is always the *muted* surface.
+   */
+  --ms-control-border: #748296;
   --ms-text: #0f172a;
   --ms-text-muted: #475569;
   --ms-accent: #2563eb;
@@ -243,12 +269,60 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Visible focus is a WCAG 2.4.7 requirement and the thing most often removed by a reset.
-     `:focus-visible` keeps it off mouse clicks and on for keyboard users. */
+  /*
+   * Visible focus is a WCAG 2.4.7 requirement and the thing most often removed by a reset.
+   * `:focus-visible` keeps it off mouse clicks and on for keyboard users.
+   *
+   * **One rule, and an `outline` rather than a ring.** Forty-one controls used to carry
+   * `focus:outline-none focus-visible:ring-2` instead, which looks the same and is not: a ring
+   * is a `box-shadow`, and Windows High Contrast mode drops box shadows. Those controls had
+   * removed the outline and put the indicator somewhere that mode does not paint, so a
+   * forced-colors user had no focus indicator at all on precisely the forty-one things worth
+   * focusing. An outline is drawn in forced-colors, and `Highlight` is the system's own colour
+   * for it.
+   *
+   * 5.17:1 against the light surface and 6.98:1 against the dark one, both past 1.4.11's 3:1.
+   */
   :focus-visible {
     outline: 2px solid var(--ms-accent);
     outline-offset: 2px;
     border-radius: 2px;
+  }
+
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline-color: Highlight;
+    }
+  }
+
+  /*
+   * A focused row inside a scrolling list draws its outline *inside* itself.
+   *
+   * The default 2px offset puts the ring outside the row, and a row is the full width of the
+   * viewport it scrolls in, so the left and right edges land under `overflow-y: auto` and are
+   * clipped away — leaving a single blue line along one edge that reads as a divider rather
+   * than as focus. Inset by the same amount and the whole ring is visible.
+   */
+  .ms-roving-row:focus-visible {
+    outline-offset: -2px;
+  }
+
+  /*
+   * A pressable thing is at least 24px tall (WCAG 2.5.8).
+   *
+   * Here rather than on each control, because the ones that missed were the *small* ones — a
+   * `text-xs` button with `py-1` measures 22px, and there is no reason to expect the next one
+   * written to be different. A minimum cannot shrink anything, so the controls that were already
+   * bigger are untouched.
+   *
+   * Checkboxes and radios are excluded: their size is their appearance, and they take their
+   * target from the label wrapped round them instead.
+   */
+  button,
+  select,
+  textarea,
+  input:not([type='checkbox']):not([type='radio']) {
+    min-height: 1.5rem;
   }
 
   /* Respect a user who has asked the operating system for less motion (WCAG 2.3.3). */

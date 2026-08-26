@@ -62,7 +62,7 @@ export function Tabs({ tabs, active, onSelect, label }: TabsProps): React.JSX.El
             onClick={() => {
               onSelect(tab.id);
             }}
-            className={`-mb-px rounded-t border-b-2 px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+            className={`-mb-px rounded-t border-b-2 px-3 py-2 text-sm ${
               selected
                 ? 'border-accent font-medium text-text'
                 : 'border-transparent text-text-muted hover:text-text'

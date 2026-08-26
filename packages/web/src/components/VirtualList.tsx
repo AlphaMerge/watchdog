@@ -23,6 +23,23 @@ export interface VirtualListProps<T> {
   readonly itemRole: 'treeitem' | 'listitem' | 'option';
   /** Per-row ARIA the caller has to supply — `aria-level` for a tree, and nothing for a list. */
   readonly itemProps?: (item: T, index: number) => React.AriaAttributes;
+  /**
+   * The row that holds the tab stop, for a list the keyboard walks (`U-11`).
+   *
+   * Supplying it switches the component from one tab stop on the container to a *roving* one:
+   * that row is `tabIndex={0}`, every other row is `-1`, and the arrow keys the caller
+   * implements move it. Leave it undefined for a list that is only scrolled, which keeps the
+   * container focusable and every row out of the tab order.
+   */
+  readonly activeIndex?: number;
+  readonly onKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+  /**
+   * A row took focus by some route other than the arrow keys — a click, or Tab arriving on it.
+   *
+   * Without this the roving stop and the caller's idea of "where am I" drift apart, and the
+   * first arrow key after a click jumps back to wherever the keyboard last was.
+   */
+  readonly onItemFocus?: (index: number) => void;
 }
 
 const DEFAULT_OVERSCAN = 8;
@@ -57,9 +74,13 @@ export function VirtualList<T>({
   role,
   itemRole,
   itemProps,
+  activeIndex,
+  onKeyDown,
+  onItemFocus,
 }: VirtualListProps<T>): React.JSX.Element {
   const [scrollTop, setScrollTop] = useState(0);
   const viewport = useRef<HTMLDivElement>(null);
+  const roving = activeIndex !== undefined;
 
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     setScrollTop(event.currentTarget.scrollTop);
@@ -77,6 +98,32 @@ export function VirtualList<T>({
     }
   }, [items.length, rowHeight, height]);
 
+  /*
+   * Focus the active row — after scrolling it into the window, because it may not exist yet.
+   *
+   * This is the one place virtualisation and the keyboard actually collide. `End` on a
+   * five-thousand-row tree names a row that is not in the DOM, so `focus()` has nothing to call.
+   * Setting `scrollTop` first re-renders the window around it; the effect then runs again with
+   * the row mounted and moves focus. Two passes, and both are cheap.
+   *
+   * **Only when focus is already inside the list.** Otherwise arriving on the page — or a state
+   * update while the operator is typing in the search box — would yank focus into the tree.
+   */
+  useEffect(() => {
+    const element = viewport.current;
+    if (element === null || activeIndex === undefined) return;
+    if (!element.contains(document.activeElement)) return;
+
+    const top = activeIndex * rowHeight;
+    if (top < element.scrollTop) element.scrollTop = top;
+    else if (top + rowHeight > element.scrollTop + height) {
+      element.scrollTop = top + rowHeight - height;
+    }
+
+    const row = element.querySelector<HTMLElement>(`[data-index="${String(activeIndex)}"]`);
+    row?.focus({ preventScroll: true });
+  }, [activeIndex, rowHeight, height, scrollTop]);
+
   const window = visibleRange({ count: items.length, rowHeight, height, scrollTop, overscan });
   const visible = items.slice(window.start, window.end);
 
@@ -88,16 +135,29 @@ export function VirtualList<T>({
       className={`overflow-y-auto ${className ?? ''}`}
       role={role}
       aria-label={label}
-      tabIndex={0}
+      // With a roving tab stop the container must not be one too, or Tab lands on the box and
+      // then again on the row inside it, and the arrow keys do nothing on the first of those.
+      tabIndex={roving ? undefined : 0}
+      onKeyDown={onKeyDown}
     >
       <div style={{ height: `${String(window.start * rowHeight)}px` }} aria-hidden="true" />
       {visible.map((item, offset) => (
         <div
           key={keyOf(item, window.start + offset)}
+          data-index={window.start + offset}
+          className={roving ? 'ms-roving-row' : undefined}
           style={{ height: `${String(rowHeight)}px` }}
           role={itemRole}
           aria-posinset={window.start + offset + 1}
           aria-setsize={items.length}
+          {...(roving
+            ? {
+                tabIndex: window.start + offset === activeIndex ? 0 : -1,
+                onFocus: () => {
+                  onItemFocus?.(window.start + offset);
+                },
+              }
+            : {})}
           {...itemProps?.(item, window.start + offset)}
         >
           {render(item, window.start + offset)}

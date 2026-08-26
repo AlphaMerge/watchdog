@@ -23,6 +23,7 @@ import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
+import { PageTitle } from '../components/PageTitle';
 
 /** How often the channel table re-reads its values. */
 const VALUES_POLL_MS = 15_000;
@@ -218,7 +219,7 @@ function Header({
         <span aria-hidden="true" className="text-text-muted">
           {KIND_GLYPH[detail.kind] ?? '·'}
         </span>
-        <h1 className="text-xl font-semibold text-text">{detail.name}</h1>
+        <PageTitle title={detail.name} />
         <span className="text-xs uppercase tracking-wide text-text-muted">{detail.kind}</span>
         {state !== undefined && (
           <StatusBadge

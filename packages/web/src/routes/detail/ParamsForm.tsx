@@ -130,7 +130,7 @@ export function ParamsForm({
         <button
           type="submit"
           disabled={saving || !dirty || problems.length > 0}
-          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Save parameters'}
         </button>
@@ -143,7 +143,7 @@ export function ParamsForm({
             setServerProblems([]);
             setFailed(null);
           }}
-          className="rounded border border-border px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
         >
           Discard changes
         </button>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { request, useApi, ApiError } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
 import type { ObjectDetail, ObjectPage, ObjectSummary, SensorState } from '../api/types';
@@ -14,6 +14,8 @@ import {
   type TreeRowModel,
   type TreeState,
 } from '../tree/model';
+import { PageTitle } from '../components/PageTitle';
+import { keepActive, treeCommand } from '../tree/keyboard';
 
 const KIND_GLYPH: Record<string, string> = {
   root: '⌂',
@@ -54,9 +56,14 @@ export function TreeView(): React.JSX.Element {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold text-text">Tree</h1>
+        <PageTitle title="Tree" />
         <StreamIndicator status={live.status} />
-        <div className="ml-auto flex items-center gap-2">
+        {/*
+          Wraps and shrinks. `w-56` + `w-32` + a gap is 376px, which does not fit the 320px
+          WCAG 1.4.10 asks for reflow at — and `ml-auto` on a row that cannot wrap pushed the
+          pair off the right edge rather than dropping them onto their own line.
+        */}
+        <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
           <label className="sr-only" htmlFor="tree-search">
             Search objects
           </label>
@@ -68,7 +75,7 @@ export function TreeView(): React.JSX.Element {
               setQuery(event.target.value);
             }}
             placeholder="Search names and hosts"
-            className="w-56 rounded border border-border bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            className="min-w-0 flex-1 rounded border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
           />
           <label className="sr-only" htmlFor="tree-tag">
             Filter by tag
@@ -81,7 +88,7 @@ export function TreeView(): React.JSX.Element {
               setTag(event.target.value);
             }}
             placeholder="tag"
-            className="w-32 rounded border border-border bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            className="w-24 min-w-0 rounded border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
           />
         </div>
       </div>
@@ -185,6 +192,44 @@ function Branches({
   const worst = useMemo(() => rollup(live.values()), [live]);
   const rows = useMemo(() => flatten(tree, rootId), [tree, rootId]);
 
+  const navigate = useNavigate();
+  const [active, setActive] = useState(0);
+
+  // Follow the row rather than the index. Collapsing a branch takes rows away underneath the
+  // active one, and an index left pointing past the end would leave the tree with no tab stop
+  // at all — a roving one is the only way back in with a keyboard.
+  const activeId = rows[active]?.object.id;
+  useEffect(() => {
+    setActive((held) => keepActive(rows, activeId, held));
+    // Deliberately keyed on the rows alone: recomputing when `activeId` changes would fight the
+    // arrow keys, which change it on purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
+
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const command = treeCommand(event.key, rows, active);
+      if (command.kind === 'none') return;
+      // Only once something is actually going to happen: an unhandled key still belongs to the
+      // browser, and swallowing Home/End on a tree that has not been entered would be a trap.
+      event.preventDefault();
+
+      switch (command.kind) {
+        case 'move':
+          setActive(command.index);
+          break;
+        case 'expand':
+        case 'collapse':
+          toggle(command.row.object);
+          break;
+        case 'activate':
+          void navigate(`/objects/${String(command.row.object.id)}`);
+          break;
+      }
+    },
+    [rows, active, toggle, navigate],
+  );
+
   if (failed !== null) {
     return (
       <ErrorPanel
@@ -226,6 +271,9 @@ function Branches({
           'aria-level': row.depth + 1,
           ...(row.expandable ? { 'aria-expanded': row.expanded } : {}),
         })}
+        activeIndex={active}
+        onKeyDown={onKeyDown}
+        onItemFocus={setActive}
         render={(row) => (
           <TreeRow
             row={row}
@@ -236,7 +284,8 @@ function Branches({
         )}
       />
       <p className="mt-3 text-xs text-text-muted">
-        {rows.length.toLocaleString()} rows shown. Children load when a branch is opened.
+        {rows.length.toLocaleString()} rows shown. Children load when a branch is opened. Arrow keys
+        walk the tree; Enter opens the selected object.
       </p>
     </Card>
   );
@@ -269,12 +318,16 @@ function TreeRow({
           // No `aria-expanded` here: it is on the row's `treeitem`, and a control claiming to be
           // the expandable thing inside a row that already says so is announced twice.
           aria-label={`${row.expanded ? 'Collapse' : 'Expand'} ${object.name}`}
-          className="w-5 shrink-0 rounded text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          // Out of the tab order, with the row: a tree is one tab stop and the arrow keys walk
+          // it. Left in the DOM as a button because it is still the mouse target, and because
+          // `aria-label` on a `span` would be a control that announces itself and does nothing.
+          tabIndex={-1}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-muted hover:text-text"
         >
           {row.loading ? '⋯' : row.expanded ? '▾' : '▸'}
         </button>
       ) : (
-        <span className="w-5 shrink-0" aria-hidden="true" />
+        <span className="w-6 shrink-0" aria-hidden="true" />
       )}
 
       <span aria-hidden="true" className="w-4 shrink-0 text-center text-text-muted">
@@ -283,6 +336,7 @@ function TreeRow({
 
       <Link
         to={`/objects/${String(object.id)}`}
+        tabIndex={-1}
         className="truncate text-sm font-medium text-text hover:text-accent hover:underline"
       >
         {object.name}

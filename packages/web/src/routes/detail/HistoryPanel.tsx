@@ -70,10 +70,10 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
                 onClick={() => {
                   setRange(entry.id);
                 }}
-                className={`rounded border px-2 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                className={`rounded border px-2 py-1 text-sm ${
                   entry.id === range
                     ? 'border-accent bg-surface-muted font-medium text-text'
-                    : 'border-border text-text-muted hover:text-text'
+                    : 'border-control text-text-muted hover:text-text'
                 }`}
               >
                 {entry.label}
@@ -88,7 +88,7 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
           onClick={() => {
             setAsTable((held) => !held);
           }}
-          className="rounded border border-border px-2 py-1 text-sm text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
         >
           {asTable ? 'Show charts' : 'Show table'}
         </button>
