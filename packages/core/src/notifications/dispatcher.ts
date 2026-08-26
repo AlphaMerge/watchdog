@@ -134,7 +134,16 @@ export class NotificationDispatcher {
       // sensor has been deleted. Missing means the row was not in the batch, which cannot happen.
       if (context === undefined) continue;
 
-      const rendered = render({ subject: row.t_subject ?? '', body: row.t_body ?? '' }, context);
+      const transport = this.#transports.get(row.t_method ?? '');
+      const settings = row.t_settings ?? {};
+      // Asked before rendering, because escaping is part of substitution: only substitution
+      // knows which characters came from a value and which the operator typed as syntax.
+      const escaping = transport?.bodyEscaping?.(settings) ?? 'none';
+      const rendered = render(
+        { subject: row.t_subject ?? '', body: row.t_body ?? '' },
+        context,
+        escaping,
+      );
       if (rendered.unknown.length > 0) {
         // `N-06` refuses these when a template is saved, so reaching this means a template
         // written by a build that knew a name this one does not. The message still goes — with
@@ -145,7 +154,6 @@ export class NotificationDispatcher {
         );
       }
 
-      const transport = this.#transports.get(row.t_method ?? '');
       const result =
         transport === undefined
           ? ({
@@ -160,7 +168,7 @@ export class NotificationDispatcher {
               body: rendered.body,
               recipients: row.t_recipients ?? [],
               priority: row.t_priority ?? 3,
-              settings: row.t_settings ?? {},
+              settings,
             });
 
       await this.#record(requestId, row.attempts + 1, result, now);

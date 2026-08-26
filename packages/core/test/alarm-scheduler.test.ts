@@ -190,6 +190,17 @@ describe(
       return rows.map((row) => ({ nextDueAt: row.next_due_at, suppressed: row.suppressed }));
     }
 
+    /**
+     * One sweep, driven by a scheduler nobody started.
+     *
+     * A stopped scheduler refuses to sweep — see `AlarmScheduler.sweep` — so asking the one this
+     * test just stopped would return zero without looking at a single row, and every assertion
+     * built on it would hold for the wrong reason.
+     */
+    async function freshSweep(now: Date): Promise<number> {
+      return new AlarmScheduler({ db, engine, logger: silent }).sweep(now);
+    }
+
     async function downTrigger(settings: Record<string, unknown> = {}): Promise<number> {
       const created = await triggers.create(testActor, deviceId, {
         kind: 'state',
@@ -283,8 +294,11 @@ describe(
       // A sweep an hour into the future, rather than a wait long enough to outlive the
       // escalation. Deterministic: if anything were still armed it would be long overdue and
       // would fire, so "nothing fires" is a statement about the rows and not about the clock.
+      //
+      // A *fresh* scheduler drives it. A stopped one refuses to sweep at all, which would make
+      // this assertion pass without looking at anything.
       scheduler.stop();
-      assert.equal(await scheduler.sweep(hence(3_600_000)), 0);
+      assert.equal(await freshSweep(hence(3_600_000)), 0);
       assert.equal(await requests(), 2, 'the initial and the recovery, and nothing else');
     });
 
@@ -302,7 +316,7 @@ describe(
       await scan([sensorId], true);
       assert.deepEqual(await alarmsStanding(), []);
       scheduler.stop();
-      assert.equal(await scheduler.sweep(hence(3_600_000)), 0);
+      assert.equal(await freshSweep(hence(3_600_000)), 0);
       assert.equal(await requests(), 0);
     });
 
@@ -328,7 +342,7 @@ describe(
       // An hour into the future, where the escalation and every repeat would be long overdue.
       // A suppressed alarm has no due time, so there is nothing for the sweep to find.
       scheduler.stop();
-      assert.equal(await scheduler.sweep(hence(3_600_000)), 0, 'nothing escalated');
+      assert.equal(await freshSweep(hence(3_600_000)), 0, 'nothing escalated');
       assert.equal(await requests(), 1);
 
       scheduler.start();

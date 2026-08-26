@@ -192,7 +192,11 @@ export class AlarmScheduler {
    * Returns how many steps it fired, for tests and for the stats.
    */
   async sweep(now = new Date()): Promise<number> {
-    if (this.#running) return 0;
+    // A stopped scheduler fires nothing. Without this a timer that had already fired when
+    // `stop()` was called goes on to sweep afterwards — which during shutdown means sending a
+    // notification the process is in the middle of abandoning, and in a test means one instance
+    // quietly doing another instance's work.
+    if (this.#stopped || this.#running) return 0;
     this.#running = true;
     this.#sweeps += 1;
     try {

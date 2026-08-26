@@ -15,6 +15,7 @@ export type {
   SmtpConfig,
   SmtpRelay,
   TlsConfig,
+  WebhookConfig,
 } from './config/schema.js';
 
 export { createLogger } from './logging/logger.js';

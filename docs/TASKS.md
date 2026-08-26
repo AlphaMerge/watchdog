@@ -1566,8 +1566,63 @@ because each is a decision rather than a defect:
       honest placeholder for a backoff policy, rather than a policy pretending to be one. Failures
       are logged at `error` because `WORKFLOW.MD §6` says a delivery failure is itself an alarm;
       putting that on Core Health is `N-13`'s half.
-- [ ] **N-08 — HTTP action / webhook delivery** · M · N-05 · Method, URL, headers, templated
+- [x] **N-08 — HTTP action / webhook delivery** · M · N-05 · Method, URL, headers, templated
       body, timeout, TLS options, SSRF guard.
+
+      **N-08 outcome.** `WebhookTransport` plus a pure address policy in `ssrf.ts`, and one
+      addition to `N-06` that turned out to matter more than the transport: **substitution now
+      escapes for the syntax it is landing in.**
+
+      **The escaping is the bug nobody would have found.** An operator writes
+      `{"message": "%lastmessage"}`, a probe reports `unexpected " in response`, and the document
+      that goes out is not JSON at all. The endpoint rejects it — or worse, parses it into
+      something else — and it happens only for the checks whose messages contain a quote, which
+      is to say the interesting ones. `substitute` and `render` now take an `Escaping`, the
+      transport declares which one its content type needs, and only *substituted values* are
+      escaped: the braces and quotes the operator typed are the document's structure. Verified
+      live with a check message containing a quote; the body arrived as valid JSON.
+
+      **`node:http` rather than `fetch`, for one reason: the guard.** A guard that resolves a
+      hostname, decides it is acceptable and then hands the *name* to a client has checked
+      nothing — the client resolves it again, and a DNS answer with a one-second TTL can point
+      somewhere else by then. That is DNS rebinding. Here the name is resolved once, **every**
+      address it returned is judged (not the first — a name resolving to one public and one
+      link-local address reaches the link-local one as soon as the resolver reorders them), and
+      the connection is pinned to a verified address through the request's own `lookup` hook.
+      `fetch` has no equivalent seam.
+
+      **The default policy blocks link-local and nothing else, deliberately.** A monitoring system
+      lives *inside* the network it watches: an internal ticketing system, a self-hosted chat
+      server, a script on the same machine are all ordinary webhook targets, and a guard that
+      refused them would be switched off within the hour — a worse outcome than a narrower guard
+      nobody disables. What it does block is the one range that is never a legitimate target and
+      is a known credential-theft vector: `169.254.169.254` and its IPv6 equivalents, where every
+      cloud provider parks the metadata service that hands out IAM credentials to anything that
+      asks. `private` and `none` are available; multicast is refused under all three, because a
+      POST to it is a mistake rather than a configuration. Verified live: pointing a template at
+      the metadata address failed on the first attempt with a reason an operator can act on.
+
+      **Redirects are followed by hand**, because every hop is a new host that has to be judged
+      again — a public endpoint redirecting inward is the redirect-based SSRF the guard exists
+      for. A hop to a different origin does **not** carry the secret headers: a bearer token that
+      follows a redirect to somebody else's host has been given to that host, which is the
+      distinction `curl` draws between `--location` and `--location-trusted`. And a redirect
+      becomes a GET with no body, because reposting it is how one webhook becomes two deliveries.
+
+      **A defect found by an intermittent test.** `AlarmScheduler.sweep` had no `stopped` check,
+      so a timer that had already fired when `stop()` was called went on to sweep afterwards.
+      In a test that meant one scheduler quietly doing another's work — which is how it showed up,
+      as `fired: 0` beside a notification that had definitely been sent. In production it means a
+      notification going out during shutdown, from a component the process is in the middle of
+      abandoning. Fixing it revealed that three tests had been asserting "a sweep found nothing"
+      against a *stopped* scheduler, which now passes without looking at a row; they drive a fresh
+      one instead.
+
+      **One test relaxed rather than papered over.** The real-SMTP test asserted a first-attempt
+      success. MailHog is a small Go binary sharing a host with a dozen test files and drops the
+      occasional connection under that load — which the transport correctly reports as retryable.
+      Asserting one attempt was asserting the relay was not busy; it now dispatches until it
+      lands, which is the behaviour the transport actually promises.
 - [ ] **N-09 — Slack and Teams delivery** · M · N-08 · Formatted messages with status colour and
       a link back to the sensor.
 - [ ] **N-10 — Execute program delivery** · M · P-03, N-05 · Sandboxed, timed out, output

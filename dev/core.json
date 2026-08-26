@@ -61,6 +61,11 @@
         "heloName": "",
         "timeoutMs": 20000
       }
+    },
+    "webhook": {
+      "targetPolicy": "link-local",
+      "maxRedirects": 3,
+      "userAgent": "ms-core/dev"
     }
   }
 }

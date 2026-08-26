@@ -1,3 +1,4 @@
+import type { Escaping } from '../placeholders.js';
 import type { Recipient } from '../templates.js';
 
 /** A message, rendered and ready to send. */
@@ -37,6 +38,15 @@ export type DeliveryResult =
 export interface DeliveryTransport {
   /** The `NotificationMethod` id this serves. */
   readonly method: string;
+  /**
+   * How a substituted value has to be escaped for this method's body.
+   *
+   * Asked per message, because it can depend on the settings: the same webhook transport sends
+   * JSON to one endpoint and form-encoded to another. Absent means plain text, which is what an
+   * email body is. See `Escaping` in `placeholders.ts` for why this is not the transport's job
+   * to do itself — only substitution knows which characters came from a value.
+   */
+  bodyEscaping?(settings: Readonly<Record<string, unknown>>): Escaping;
   send(message: OutgoingMessage): Promise<DeliveryResult>;
   /** Releases whatever it holds open. Called at shutdown. */
   close?(): Promise<void>;

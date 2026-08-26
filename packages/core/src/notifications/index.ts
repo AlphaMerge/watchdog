@@ -80,6 +80,7 @@ export {
   PLACEHOLDERS,
   type MessageContext,
   type RenderedMessage,
+  type Escaping,
   type Substitution,
 } from './placeholders.js';
 export {
@@ -95,3 +96,14 @@ export {
 } from './delivery/transport.js';
 export { EmailTransport, type EmailTransportOptions } from './delivery/email.js';
 export { DeliveryLoop, type DeliveryLoopOptions } from './delivery/loop.js';
+export { WebhookTransport, type WebhookTransportOptions } from './delivery/webhook.js';
+export {
+  isLinkLocal,
+  isPrivate,
+  refuses,
+  refusedAddresses,
+  sameOrigin,
+  schemeAllowed,
+  type TargetPolicy,
+  type TargetRefusal,
+} from './delivery/ssrf.js';

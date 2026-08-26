@@ -184,6 +184,26 @@ export interface SmtpConfig {
   fallback: SmtpRelay;
 }
 
+/**
+ * HTTP action delivery (`N-08`).
+ *
+ * The interesting field is `targetPolicy`, and the interesting thing about it is that the default
+ * is *not* "block everything private". A monitoring system lives inside the network it watches —
+ * an internal ticketing system, a self-hosted chat server, a script on the same machine are all
+ * ordinary webhook targets — and a guard that refused them would be switched off within the hour,
+ * which is a worse outcome than a narrower guard nobody disables.
+ *
+ * `link-local` blocks the one range that is never a legitimate webhook target and is a known
+ * credential-theft vector: `169.254.169.254` and its IPv6 equivalents, where every cloud provider
+ * parks the instance-metadata service that hands out IAM credentials to anything that asks.
+ */
+export interface WebhookConfig {
+  targetPolicy: 'link-local' | 'private' | 'none';
+  /** How many redirects to follow. Zero refuses them outright. */
+  maxRedirects: number;
+  userAgent: string;
+}
+
 export interface CoreConfig {
   service: ServiceConfig;
   api: {
@@ -211,6 +231,8 @@ export interface CoreConfig {
     siteName: string;
     /** The relay email is sent through (`N-07`). */
     smtp: SmtpConfig;
+    /** What an HTTP action may reach, and how it behaves (`N-08`). */
+    webhook: WebhookConfig;
   };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
@@ -405,6 +427,21 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             // Nothing by default: a fallback nobody configured must not quietly become a second
             // attempt against the same host.
             fallback: relaySchema(0),
+          },
+        },
+        webhook: {
+          type: 'object',
+          default: {} as WebhookConfig,
+          additionalProperties: false,
+          required: ['targetPolicy', 'maxRedirects', 'userAgent'],
+          properties: {
+            targetPolicy: {
+              type: 'string',
+              enum: ['link-local', 'private', 'none'],
+              default: 'link-local',
+            },
+            maxRedirects: { type: 'integer', minimum: 0, maximum: 10, default: 3 },
+            userAgent: { type: 'string', default: 'ms-core' },
           },
         },
       },

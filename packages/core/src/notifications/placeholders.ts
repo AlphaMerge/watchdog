@@ -167,6 +167,34 @@ export function describePlaceholders(): { name: string; description: string }[] 
  */
 const TOKEN = /%(%|[A-Za-z]+)/g;
 
+/**
+ * How a substituted value has to be escaped to survive the syntax around it.
+ *
+ * A subject line is plain text and needs nothing. A JSON webhook body is not: an operator writes
+ * `{"message": "%lastmessage"}` and a probe reports `unexpected " in response`, and the document
+ * that goes out is not JSON at all. The failure is silent from here — the endpoint rejects it, or
+ * worse parses it into something else — and it happens only for the checks whose messages contain
+ * a quote, which is to say the interesting ones.
+ *
+ * The escaping belongs to substitution rather than to the transport, because only substitution
+ * knows which characters came from a *value* and which the operator typed as syntax.
+ */
+export type Escaping = 'none' | 'json' | 'form';
+
+function escapeWith(escaping: Escaping, value: string): string {
+  switch (escaping) {
+    case 'none':
+      return value;
+    case 'json':
+      // The inside of a JSON string: quotes, backslashes and control characters, and nothing
+      // else. `JSON.stringify` is the encoder the language already ships and agrees with every
+      // parser; the slice drops the quotes it adds, which the operator's template supplies.
+      return JSON.stringify(value).slice(1, -1);
+    case 'form':
+      return encodeURIComponent(value);
+  }
+}
+
 /** What a substitution produced, and what it could not. */
 export interface Substitution {
   readonly text: string;
@@ -186,17 +214,22 @@ export interface Substitution {
  * that reads correctly and has lost a fact; leaving it produces one an operator can look at and
  * immediately see what is wrong with.
  */
-export function substitute(text: string, context: MessageContext): Substitution {
+export function substitute(
+  text: string,
+  context: MessageContext,
+  escaping: Escaping = 'none',
+): Substitution {
   const unknown = new Set<string>();
   const substituted = text.replace(TOKEN, (match, name: string) => {
     // `%%` is a literal per cent. Without it there would be no way to write one before a word.
+    // Not escaped: it is the operator's own text, not a value read out of the system.
     if (name === '%') return '%';
     const placeholder = PLACEHOLDERS.get(name.toLowerCase());
     if (placeholder === undefined) {
       unknown.add(name.toLowerCase());
       return match;
     }
-    return placeholder.resolve(context);
+    return escapeWith(escaping, placeholder.resolve(context));
   });
   return { text: substituted, unknown: [...unknown] };
 }
@@ -229,9 +262,12 @@ export interface RenderedMessage {
 export function render(
   template: { readonly subject: string; readonly body: string },
   context: MessageContext,
+  escaping: Escaping = 'none',
 ): RenderedMessage {
+  // The subject is never escaped, whatever the body needs. It is a header or a title in every
+  // method that has one, and JSON-escaping a subject line would put backslashes in an email.
   const subject = substitute(template.subject, context);
-  const body = substitute(template.body, context);
+  const body = substitute(template.body, context, escaping);
   return {
     subject: subject.text,
     body: body.text,

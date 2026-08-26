@@ -31,6 +31,7 @@ import { TriggerSync } from './notifications/sync.js';
 import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
+import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { DeliveryLoop } from './notifications/delivery/loop.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
@@ -377,11 +378,15 @@ async function serve(): Promise<void> {
       'no SMTP relay is configured; email notifications will queue and fail until one is set',
     );
   }
+  // The method that covers most integrations (N-08). Its SSRF guard defaults to blocking
+  // link-local only: a monitoring system posts to things inside its own network all day, and a
+  // guard that refused them would be switched off.
+  const webhook = new WebhookTransport({ config: config.notifications.webhook, logger });
   const dispatcher = new NotificationDispatcher({
     db,
     logger,
     contexts: messageContexts,
-    transports: [email],
+    transports: [email, webhook],
   });
   const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
   wakeDelivery.poke = () => {

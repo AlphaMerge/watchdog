@@ -217,12 +217,15 @@ describe(
 
       // Long past every initial latency, which is what a restart after an outage looks like.
       const when = tick(60);
-      // Stopped first: the scheduler started in the previous measurement is still cycling, and a
-      // sweep that arrives while one is in flight returns zero rather than re-entering. Timing a
-      // deterministic sweep means being the only one running it.
+      // The scheduler started in the previous measurement is still cycling, and a sweep that
+      // arrives while one is in flight returns zero rather than re-entering. Timing a
+      // deterministic sweep means being the only one running it: stop that one, and drive a
+      // fresh one by hand. Unstarted is not stopped — a scheduler nobody started still sweeps
+      // when asked, which is exactly what a measurement wants.
       scheduler.stop();
+      const measured = new AlarmScheduler({ db, engine, logger: silent });
       const startedAt = process.hrtime.bigint();
-      const fired = await scheduler.sweep(when);
+      const fired = await measured.sweep(when);
       const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
 
       // eslint-disable-next-line no-console -- the measurement is the point of this file

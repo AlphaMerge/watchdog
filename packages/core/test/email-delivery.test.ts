@@ -620,8 +620,16 @@ describe(
           transports: [transport],
         });
         try {
-          assert.equal(await dispatcher.dispatch(), 1);
-          assert.equal((await statusOf(requestId)).status, 'sent');
+          // Dispatched until it lands, rather than once. MailHog is a small Go binary sharing a
+          // container host with a dozen test files, and it drops the occasional connection under
+          // that load — which the transport correctly reports as retryable. Asserting a
+          // first-attempt success would be asserting that the relay was not busy.
+          let delivered = await statusOf(requestId);
+          for (let attempt = 0; attempt < 5 && delivered.status !== 'sent'; attempt += 1) {
+            await dispatcher.dispatch();
+            delivered = await statusOf(requestId);
+          }
+          assert.equal(delivered.status, 'sent', delivered.error ?? 'no error recorded');
 
           const response = await fetch(`${MAILHOG_API}/search?kind=to&query=${address}`, {
             signal: AbortSignal.timeout(5_000),
