@@ -47,6 +47,7 @@ interface ObjectRow {
   tags: string[];
   priority: number;
   comments: string;
+  inherits_triggers: boolean;
   version: number;
   created_at: Date;
   updated_at: Date;
@@ -78,7 +79,7 @@ interface SummaryRow {
 
 /** Columns every detail read needs, joined to the two kind-specific side tables. */
 const DETAIL_COLUMNS = `
-  o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.comments,
+  o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.comments, o.inherits_triggers,
   o.version, o.created_at, o.updated_at,
   (SELECT count(*) FROM object c WHERE c.parent_id = o.id) AS child_count,
   dc.host, dc.ip_version,
@@ -124,6 +125,7 @@ function toDetail(row: ObjectRow): ObjectDetail {
     tags: row.tags,
     priority: row.priority as Priority,
     comments: row.comments,
+    inheritsTriggers: row.inherits_triggers,
     version: row.version,
     childCount: Number(row.child_count),
     createdAt: row.created_at.toISOString(),
@@ -901,6 +903,9 @@ export class ObjectRepository {
     if (patch.tags !== undefined) sets.push(`tags = ${add(patch.tags)}`);
     if (patch.priority !== undefined) sets.push(`priority = ${add(patch.priority)}`);
     if (patch.comments !== undefined) sets.push(`comments = ${add(patch.comments)}`);
+    if (patch.inheritsTriggers !== undefined) {
+      sets.push(`inherits_triggers = ${add(patch.inheritsTriggers)}`);
+    }
 
     // One statement guards the whole patch, whether or not it changes a column on `object`.
     //
@@ -1061,13 +1066,16 @@ export class ObjectRepository {
     for (let depth = 0; depth <= maxDepth; depth += 1) {
       await q.query(
         `
-        INSERT INTO object (id, parent_id, kind, name, tags, priority, comments)
+        INSERT INTO object
+          (id, parent_id, kind, name, tags, priority, comments, inherits_triggers)
         OVERRIDING SYSTEM VALUE
         SELECT m.new_id,
                CASE WHEN m.depth = 0 THEN $1 ELSE pm.new_id END,
                o.kind,
                CASE WHEN m.depth = 0 THEN $2 ELSE o.name END,
-               o.tags, o.priority, o.comments
+               -- The fence copies with the object (N-16): a clone of a lab device is still a
+               -- lab device, and one that started notifying nobody must not start notifying.
+               o.tags, o.priority, o.comments, o.inherits_triggers
         FROM clone_map m
         JOIN object o ON o.id = m.src_id
         LEFT JOIN clone_map pm ON pm.src_id = o.parent_id

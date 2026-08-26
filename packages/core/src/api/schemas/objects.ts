@@ -100,6 +100,7 @@ export const objectDetailSchema = {
     'tags',
     'priority',
     'comments',
+    'inheritsTriggers',
     'version',
     'childCount',
     'createdAt',
@@ -113,6 +114,8 @@ export const objectDetailSchema = {
     tags: { type: 'array', items: { type: 'string' } },
     priority: { type: 'integer' },
     comments: { type: 'string' },
+    /** False fences this object off from its ancestors' notification triggers (`N-16`). */
+    inheritsTriggers: { type: 'boolean' },
     version: { type: 'integer' },
     childCount: { type: 'integer' },
     createdAt: { type: 'string' },
@@ -380,6 +383,10 @@ export const updateObjectSchema = {
   properties: {
     kind: { enum: OBJECT_KINDS },
     ...objectFields,
+    // Patch-only, and deliberately not on the create schema: nobody creates a device already
+    // knowing it should notify nobody. It is a decision somebody makes about a subtree that
+    // already exists.
+    inheritsTriggers: { type: 'boolean' },
     host: { type: 'string', minLength: 1, maxLength: 255 },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
     params: { type: 'object', additionalProperties: true },

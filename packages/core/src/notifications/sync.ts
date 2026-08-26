@@ -76,6 +76,14 @@ function affected(mutation: Mutation): ObjectId | null {
     // bounded, unlike a create.
     case 'object.moved':
       return mutation.objectId;
+    // `N-16`'s fence going up or coming down changes which triggers reach a whole subtree, so
+    // it moves standing alarms exactly the way editing a trigger does. Only when it *changed*:
+    // an edit reaches this sink on every rename, and reconciling a subtree because somebody
+    // fixed a typo is the regression `M-08` paid for once already.
+    case 'object.updated':
+      return mutation.before.inheritsTriggers === mutation.after.inheritsTriggers
+        ? null
+        : mutation.objectId;
     default:
       return null;
   }

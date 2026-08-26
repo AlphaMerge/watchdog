@@ -20,6 +20,7 @@ import { migration018 } from './018-notification-templates.js';
 import { migration019 } from './019-notification-delivery.js';
 import { migration020 } from './020-notification-summaries.js';
 import { migration021 } from './021-template-schedules.js';
+import { migration022 } from './022-trigger-inheritance.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -49,6 +50,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration019,
   migration020,
   migration021,
+  migration022,
 ];
 
 export type { Migration } from './types.js';

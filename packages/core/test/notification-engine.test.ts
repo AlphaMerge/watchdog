@@ -484,6 +484,34 @@ describe(
       assert.deepEqual(await queued(), [], 'and nothing recovered, so nobody was told');
     });
 
+    it('stands alarms down when a subtree is fenced off from its triggers', async () => {
+      // `N-16`. Fencing a subtree off is the same kind of change as deleting the trigger, for
+      // the sensors below it: what was watching them no longer does, so a chain in progress is a
+      // chain nobody asked for.
+      await downTrigger(h.rootId);
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(10));
+      assert.equal((await standing()).length, 1);
+
+      await h.service.update(
+        testActor,
+        deviceId,
+        { kind: 'device', inheritsTriggers: false },
+        { kind: 'none' },
+      );
+      assert.deepEqual(await standing(), [], 'the root’s trigger no longer reaches it');
+      assert.deepEqual(await queued(), [], 'and nothing recovered, so nobody was told');
+
+      await h.service.update(
+        testActor,
+        deviceId,
+        { kind: 'device', inheritsTriggers: true },
+        { kind: 'none' },
+      );
+      const armed = await standing();
+      assert.equal(armed.length, 1, 'taking the fence down arms the outage that is still running');
+    });
+
     it('applies an inherited trigger to every sensor beneath it', async () => {
       await downTrigger(h.rootId);
       await scan([sensorId, otherSensorId], false, T0);

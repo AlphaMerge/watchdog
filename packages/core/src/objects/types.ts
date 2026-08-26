@@ -28,6 +28,15 @@ interface ObjectBase {
   readonly tags: readonly string[];
   readonly priority: Priority;
   readonly comments: string;
+  /**
+   * Whether this object's ancestors' notification triggers reach it (`N-16`).
+   *
+   * False fences it off: its own triggers still apply, and so do those of everything beneath it,
+   * but nothing from above. "Keep monitoring this, but do not notify about it" — a lab, a
+   * staging rack, a customer still being onboarded. Meaningless on the root, which has no
+   * ancestors, and accepted there rather than special-cased.
+   */
+  readonly inheritsTriggers: boolean;
   /** Monotonic and clock-independent — the ETag validator. Bumped by trigger, never by hand. */
   readonly version: number;
   readonly childCount: number;
@@ -338,6 +347,7 @@ export type UpdateObjectInput =
       tags?: string[];
       priority?: Priority;
       comments?: string;
+      inheritsTriggers?: boolean;
     }
   | ({
       kind: 'probe';
@@ -345,6 +355,7 @@ export type UpdateObjectInput =
       tags?: string[];
       priority?: Priority;
       comments?: string;
+      inheritsTriggers?: boolean;
     } & ProbeFields)
   | {
       kind: 'device';
@@ -352,6 +363,7 @@ export type UpdateObjectInput =
       tags?: string[];
       priority?: Priority;
       comments?: string;
+      inheritsTriggers?: boolean;
       host?: string;
       ipVersion?: IpVersion;
     }
@@ -361,6 +373,7 @@ export type UpdateObjectInput =
       tags?: string[];
       priority?: Priority;
       comments?: string;
+      inheritsTriggers?: boolean;
       params?: Record<string, unknown>;
     };
 

@@ -66,6 +66,11 @@ const COLUMNS = `
  *
  * Ordered nearest-first, so a UI can render "this object" above "inherited from London" without
  * sorting, and so the engine sees the most specific rule first.
+ *
+ * **`object.inherits_triggers` is where a walk stops** (`N-16`). Both directions honour it and
+ * both must, because they answer the same question from opposite ends: the tab walks up from a
+ * sensor and the engine walks down from a trigger, and a fence one of them ignored would put a
+ * notification on a page that says no notification applies.
  */
 export class TriggerRepository {
   async get(q: Queryable, id: number): Promise<StoredTrigger | null> {
@@ -116,12 +121,14 @@ export class TriggerRepository {
     const rows = await q.query<TriggerRow & { origin: string; depth: number; owner_name: string }>(
       `
       WITH RECURSIVE chain AS (
-        SELECT o.id AS origin, o.id, o.parent_id, o.name, 0 AS depth
+        SELECT o.id AS origin, o.id, o.parent_id, o.name, o.inherits_triggers, 0 AS depth
         FROM object o WHERE o.id = ANY($1::bigint[])
         UNION ALL
-        SELECT chain.origin, p.id, p.parent_id, p.name, chain.depth + 1
+        SELECT chain.origin, p.id, p.parent_id, p.name, p.inherits_triggers, chain.depth + 1
         FROM object p JOIN chain ON p.id = chain.parent_id
-        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+        -- The fence (N-16): a node that does not inherit is still visited, so its own triggers
+        -- count, and the climb stops there rather than reaching its parent.
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)} AND chain.inherits_triggers
       )
       SELECT ${COLUMNS}, chain.origin::text AS origin, chain.depth, chain.name AS owner_name
       FROM chain
@@ -151,8 +158,9 @@ export class TriggerRepository {
    *
    * Resolved **downward** from each trigger to the objects beneath it, the way `M-09` and `M-11`
    * resolve theirs and for the same reason: an installation has a handful of triggers and five
-   * thousand sensors, so walking from the triggers is the cheap direction. Unlike those two,
-   * nothing stops the descent — a nearer trigger adds to the set rather than replacing it.
+   * thousand sensors, so walking from the triggers is the cheap direction. Unlike those two, a
+   * nearer trigger adds to the set rather than replacing it — the only thing that stops the
+   * descent is `N-16`'s fence.
    */
   async effectiveForSensors(
     q: Queryable,
@@ -172,7 +180,9 @@ export class TriggerRepository {
 
         SELECT covered.trigger_id, c.id, covered.depth + 1
         FROM object c JOIN covered ON c.parent_id = covered.node
-        WHERE covered.depth < ${String(MAX_WALK_DEPTH)}
+        -- The same fence, from the other end: a child that does not inherit is not covered, and
+        -- neither is anything below it, because the descent never reaches it.
+        WHERE covered.depth < ${String(MAX_WALK_DEPTH)} AND c.inherits_triggers
       )
       SELECT ${COLUMNS}, covered.node::text AS sensor_id, covered.depth
       FROM covered

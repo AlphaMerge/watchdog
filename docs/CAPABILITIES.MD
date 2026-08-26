@@ -311,6 +311,13 @@ both its own and every inherited trigger.
 | **Volume trigger**    | Channel, volume threshold, scale, period (hour/day/week/month), notification                                                                                                                                                           | `[V2]` |
 | **Change trigger**    | Fires when a monitored value changes (sensor-type dependent)                                                                                                                                                                           | `[V2]` |
 
+Inheritance accumulates: a child's triggers add to its ancestors' rather than replacing them, so
+a trigger on the root and one on a device both fire. One flag opts out of it.
+
+| Capability                       | Notes                                                                                                                                                                                                                                                                                        | Scope  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Per-object trigger inheritance   | An object can be fenced off from its ancestors' triggers entirely: its own still apply, and so do those of everything beneath it, but nothing from above. This is the only way to say "keep monitoring this, but do not notify about it" — a lab, a staging rack, a customer being onboarded | `[V1]` |
+
 ### 5.2 Notification templates
 
 A template defines _what is sent and how_. PRTG's setup chain is:

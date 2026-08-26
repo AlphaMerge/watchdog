@@ -2019,12 +2019,55 @@ because each is a decision rather than a defect:
       Decide whether a simulated error should be acknowledgeable (a layer-2 result that still
       falls through to layer 6), or whether the API should refuse the acknowledgement and say
       why. Either way `docs/state-machine.md §2` and `M-01`'s tables move with it.
-- [ ] **N-16 — Per-object trigger inheritance toggle** · S · N-01 · PRTG lets an object opt out
+- [x] **N-16 — Per-object trigger inheritance toggle** · S · N-01 · PRTG lets an object opt out
       of its ancestors' notification triggers entirely. `N-01` deliberately did not build it: it
       is not in `CAPABILITIES.MD`, and a trigger can already be switched off where it is defined.
       Decide whether an operator ever needs "this device notifies nobody, whatever the root says"
       — and if so, whether the toggle belongs on the object or is better served by a state
       trigger with no template. Mark the scope in `CAPABILITIES.MD` either way.
+
+      **N-16 outcome: decided yes, and built.** `CAPABILITIES.MD §5.1` now carries the row,
+      marked `[V1]`.
+
+      **The decision.** The need is "keep monitoring this, but do not notify about it" — a lab, a
+      staging rack, a customer still being onboarded. Nothing in the system says that. A pause and
+      a schedule both stop the *monitoring*, which throws away the graphs and the uptime an
+      operator still wants. Switching a trigger off where it is defined switches it off for
+      everybody. `N-12`'s activation schedule is per template and time-based, not per subtree.
+      Defining the triggers lower down instead of on the root works until somebody adds a group
+      and forgets, which is a silently unmonitored subtree — the failure mode inheritance exists
+      to prevent.
+
+      **The suggested alternative provably does not work.** "A state trigger with no template" on
+      the device would *add* a silent chain beside the root's noisy one, because trigger
+      inheritance **accumulates** (`N-01`) rather than choosing the nearest. There is no way to
+      write "and nothing from above" with the pieces that existed.
+
+      **A column on `object`, not an inheritable setting**, and that is the interesting part.
+      `CLAUDE.md` says inheritable settings go through one resolver — but a setting resolves to
+      the nearest ancestor that defines it, so a group set to "do not inherit" would make every
+      descendant resolve "do not inherit", and each of them would then also ignore *the group's
+      own* triggers. That is the opposite of what was asked for. What is wanted is a fence at one
+      object, and a fence is a property of the object it stands on.
+
+      **Both walks honour it, and a test asserts they agree.** The tab walks up from a sensor and
+      the engine walks down from a trigger; a fence one of them ignored would put a notification
+      on a page that says no notification applies. Upward, the fenced node is still visited — its
+      own triggers count — and the climb stops there. Downward, a child that does not inherit is
+      never added, so the descent cannot pass through it. Same rule, opposite directions.
+
+      **Flipping it moves standing alarms**, through the same `TriggerSync` hook a trigger edit
+      uses, and only when it actually changed: that sink sees every rename, and reconciling a
+      subtree because somebody fixed a typo is the regression `M-08` paid for once already.
+
+      **Patch-only, and it clones.** Nobody creates a device already knowing it should notify
+      nobody, so it is not on the create schema; a clone of a lab device is still a lab device, so
+      it copies. The change is in the audit diff, because who gets told about a subtree is
+      exactly the sort of thing somebody needs to find afterwards.
+
+      Verified live: a root trigger reaching a sensor, the device fenced off, the effective set
+      dropping to zero and a simulated outage queueing nothing at all; then the fence down, the
+      trigger back, and the outage arriving in MailHog.
 
 ## Phase 5 — Web UI
 

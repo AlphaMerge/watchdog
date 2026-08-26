@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
+import { diffObjects } from '../src/audit/diff.js';
 import type { Database } from '../src/db/pool.js';
 import type { Mutation } from '../src/objects/audit.js';
 import {
@@ -215,6 +216,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     // behaviour under test and exactly why each test has to start from none.
     await db.query('DELETE FROM notification_trigger');
     audited.length = 0;
+    h.audit.recorded.length = 0;
 
     const probe = await h.service.create(testActor, {
       kind: 'probe',
@@ -360,6 +362,97 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
         `the batch and the tab should agree about ${String(id)}`,
       );
     }
+  });
+
+  // -----------------------------------------------------------------------------------------
+  // `N-16`: fencing a subtree off from its ancestors' triggers.
+  // -----------------------------------------------------------------------------------------
+
+  /** Turns the fence on or off for one object. */
+  async function fence(objectId: number, inherits: boolean): Promise<void> {
+    await h.service.update(
+      testActor,
+      objectId,
+      { kind: objectId === deviceId || objectId === otherDeviceId ? 'device' : 'group',
+        inheritsTriggers: inherits },
+      { kind: 'none' },
+    );
+  }
+
+  it('stops the walk at an object that does not inherit', async () => {
+    // The case the flag exists for: a lab inside a production tree. Keep monitoring it, keep the
+    // graphs and the uptime, and stop telling anybody about it.
+    await triggers.create(testActor, h.rootId, downTrigger);
+    await triggers.create(testActor, groupId, loadTrigger);
+    assert.equal((await triggers.effectiveFor(sensorId)).length, 2);
+
+    await fence(deviceId, false);
+    assert.deepEqual(
+      await triggers.effectiveFor(sensorId),
+      [],
+      'nothing above the fence reaches the sensor',
+    );
+    assert.equal(
+      (await triggers.effectiveFor(otherSensorId)).length,
+      2,
+      'and the branch beside it is untouched',
+    );
+  });
+
+  it('keeps the fenced object’s own triggers, and its subtree’s', async () => {
+    // The flag says where the climb stops, not that this object notifies nobody. A lab team
+    // that wants its own alarms and none of production's is the whole point.
+    await triggers.create(testActor, h.rootId, downTrigger);
+    await fence(deviceId, false);
+    const own = await triggers.create(testActor, deviceId, loadTrigger);
+
+    const effective = await triggers.effectiveFor(sensorId);
+    assert.deepEqual(
+      effective.map((trigger) => trigger.id),
+      [own.id],
+      'the fence’s own trigger still reaches the sensor beneath it',
+    );
+  });
+
+  it('agrees in both directions, which is the only way the tab and the engine can', async () => {
+    // The tab walks up from a sensor and the engine walks down from a trigger. A fence one of
+    // them ignored would put a notification on a page that says no notification applies.
+    await triggers.create(testActor, h.rootId, downTrigger);
+    await triggers.create(testActor, groupId, loadTrigger);
+    await triggers.create(testActor, deviceId, {
+      kind: 'state',
+      settings: { state: 'warning' },
+    });
+    await fence(deviceId, false);
+
+    for (const id of [sensorId, otherSensorId]) {
+      const tab = (await triggers.effectiveFor(id)).map((trigger) => trigger.id).sort();
+      const batch = ((await repo.effectiveForSensors(db, [id])).get(id) ?? [])
+        .map((trigger) => trigger.id)
+        .sort();
+      assert.deepEqual(batch, tab, `the batch and the tab should agree about ${String(id)}`);
+    }
+  });
+
+  it('lets the fence come down again', async () => {
+    await triggers.create(testActor, h.rootId, downTrigger);
+    await fence(deviceId, false);
+    assert.equal((await triggers.effectiveFor(sensorId)).length, 0);
+    await fence(deviceId, true);
+    assert.equal((await triggers.effectiveFor(sensorId)).length, 1, 'and everything comes back');
+  });
+
+  it('records the change, because who gets told is worth finding afterwards', async () => {
+    await fence(deviceId, false);
+    const change = h.audit.recorded
+      .flatMap((mutation) => (mutation.action === 'object.updated' ? [mutation] : []))
+      .at(-1);
+    assert.ok(change !== undefined, 'nothing was audited');
+    assert.equal(change.before.inheritsTriggers, true);
+    assert.equal(change.after.inheritsTriggers, false);
+    assert.deepEqual(diffObjects(change.before, change.after), [
+      { field: 'inheritsTriggers', before: true, after: false },
+    ]);
   });
 
   it('serves a disabled trigger to the tab and withholds it from the engine', async () => {

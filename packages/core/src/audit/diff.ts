@@ -19,6 +19,9 @@ const TRACKED = [
   'tags',
   'priority',
   'comments',
+  // Who gets told about this subtree is exactly the sort of change somebody needs to be able to
+  // find afterwards (`N-16`).
+  'inheritsTriggers',
   'host',
   'ipVersion',
   'sensorType',
