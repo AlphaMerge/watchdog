@@ -463,7 +463,10 @@ Named so they are decisions rather than omissions:
   what happens if the master flaps during the delay — nothing accumulates and nothing has to
   remember the last one. A delay of zero releases the dependents in the recovery's own
   transaction; anything longer is released by the pause sweep.
-- **`M-15`** — the state-change log. §5 invariant 10 is what it has to record.
+- ~~**`M-15`**~~ — done. `GET /state-log` reads what `M-02` has been writing, scoped to a branch
+  or a sensor, filtered by state and cause, with each transition's duration measured against the
+  real next one rather than the next one on the page. Invariant 10 is what makes a cause change
+  visible there even when the state did not move.
 - **Restart.** ~~Pause state must survive a core restart~~ — done by `M-02`. The columns are on
   `sensor_runtime` (migration 008), one row per sensor, created by trigger the moment a sensor
   exists so that a later task's `UPDATE ... SET paused_manually = true` cannot silently match

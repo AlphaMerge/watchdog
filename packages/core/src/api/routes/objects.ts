@@ -52,6 +52,16 @@ interface ListQuery {
 const asArray = (value: string | string[] | undefined): string[] =>
   value === undefined ? [] : Array.isArray(value) ? value : [value];
 
+const OBJECT_KINDS = ['root', 'probe', 'group', 'device', 'sensor'] as const;
+
+/** One kind or several, both validated against the same list. */
+const KIND_FILTER = {
+  oneOf: [
+    { enum: [...OBJECT_KINDS] },
+    { type: 'array', items: { enum: [...OBJECT_KINDS] }, maxItems: OBJECT_KINDS.length },
+  ],
+} as const;
+
 /** Until accounts exist (A-01), every actor is the caller's address — in exactly one place. */
 function actorFor(request: FastifyRequest): Actor {
   return { kind: 'anonymous', remoteAddress: request.ip };
@@ -99,11 +109,11 @@ const listQuery = {
     parentId: { type: 'integer', minimum: 1 },
     // Enumerated here so an unknown kind is a 400 from the boundary rather than a 500 from
     // PostgreSQL failing to cast it to object_kind.
-    kind: {
-      type: ['string', 'array'],
-      items: { enum: ['root', 'probe', 'group', 'device', 'sensor'] },
-      enum: ['root', 'probe', 'group', 'device', 'sensor'],
-    },
+    // `oneOf`, not a top-level `enum` beside `items`: Fastify gives a string for one occurrence
+    // and an array for several, and an `enum` is checked against the *whole* value — so the
+    // array form failed validation and `?kind=device&kind=sensor` was a 400, even though the
+    // handler has always called `asArray` on it. Found by `M-15`, which needed the same shape.
+    kind: KIND_FILTER,
     tag: { type: ['string', 'array'], items: { type: 'string' }, maxLength: 100 },
     q: { type: 'string', maxLength: 500 },
     host: { type: 'string', maxLength: 255 },
@@ -121,11 +131,11 @@ const treeQuery = {
   properties: {
     maxDepth: { type: 'integer', minimum: 1, maximum: 20, default: 3 },
     limit: { type: 'integer', minimum: 1, maximum: 5000, default: 1000 },
-    kind: {
-      type: ['string', 'array'],
-      items: { enum: ['root', 'probe', 'group', 'device', 'sensor'] },
-      enum: ['root', 'probe', 'group', 'device', 'sensor'],
-    },
+    // `oneOf`, not a top-level `enum` beside `items`: Fastify gives a string for one occurrence
+    // and an array for several, and an `enum` is checked against the *whole* value — so the
+    // array form failed validation and `?kind=device&kind=sensor` was a 400, even though the
+    // handler has always called `asArray` on it. Found by `M-15`, which needed the same shape.
+    kind: KIND_FILTER,
     effective: { type: ['string', 'array'], items: { type: 'string' } },
   },
 } as const;

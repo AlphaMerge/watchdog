@@ -1003,8 +1003,43 @@ because each is a decision rather than a defect:
       rather than only the Down ones: forcing a Down is not a statement about the current state.
       `M-17`'s alarm-storm scenario is what wants the subtree form. The API description says
       plainly that this fires the real chain at real people.
-- [ ] **M-15 — State-change log** · M · M-02, S-10 · Every transition with previous state, new
+- [x] **M-15 — State-change log** · M · M-02, S-10 · Every transition with previous state, new
       state, message and cause.
+
+      **M-15 outcome.** No migration: `M-02` has written every transition to `sensor_state`
+      since it landed, because `CLAUDE.md` computes uptime from state history rather than from
+      samples — the rows had to exist whether or not anybody read them. This is the reading.
+      `packages/core/src/timeseries/state-log.ts` and `GET /state-log`.
+
+      **One route, scoped, not two that drift.** `CAPABILITIES.MD §8`'s Logs view and the sensor
+      detail page's log tab are the same query with a different `objectId`: a sensor id gives
+      that sensor's log, a group id gives everything beneath it, and no id gives the
+      installation. Filters on `state` and `cause`, both repeatable, and on a time range.
+
+      **Duration is computed, not stored, and measured against the real next transition.** A
+      transition's row cannot know how long the state lasted — the answer arrives with the next
+      one, and storing it would mean going back to update an append-only hypertable. The obvious
+      implementation is a window function over the page, which is free and wrong: it makes a
+      state's duration depend on where the page boundary fell, so the same transition reads
+      "28 minutes" or "still running" according to how the client paged. A lateral join on
+      `(sensor_id, time)` costs one index seek per row and is stable. `null` means the state the
+      sensor is still in, and only that.
+
+      **History outlives its sensor.** The join to `object` is a left join on purpose: the
+      transition most worth reading may be the last one a deleted sensor made. The name comes
+      back empty rather than the row disappearing.
+
+      Two bugs found on the way, both fixed here:
+
+      - **`/objects?kind=a&kind=b` was a 400.** The schema put an `enum` beside `items`, and an
+        `enum` is checked against the *whole* value — so the array Fastify builds from two
+        occurrences failed validation, while the handler behind it had always called `asArray`
+        and the service had a passing test for the multi-kind filter. `oneOf` covers both shapes
+        and validates both; there is now an HTTP-level test, which is the level the bug lived at.
+      - **A test-helper throw could hang the runner.** `createScratchDatabase` validated the
+        database name *after* connecting its admin client, so a prefix it refused left an open
+        socket and a run that hung for ever instead of failing. Validated before anything opens
+        now. (The prefix it refused was mine: `state-log`, with a hyphen.)
 - [ ] **M-16 — Property-based state machine tests** · L · M-12, M-13 · No event sequence reaches
       an undefined state; invariants hold under shuffled and duplicated events.
 - [ ] **M-17 — Alarm-storm scenario test** · M · M-11 · A simulated switch failure produces one

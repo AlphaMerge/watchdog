@@ -692,6 +692,25 @@ describe(
       assert.equal(body.error.code, 'OBJECT_INVALID');
     });
 
+    it('takes a repeated kind filter, which the handler has always expected', async () => {
+      // The schema used to put an `enum` beside `items`, and an enum is checked against the
+      // *whole* value — so the array Fastify builds from two occurrences failed validation and
+      // `?kind=a&kind=b` was a 400, while the service behind it had a passing test for exactly
+      // that filter. Found while building `M-15`'s state and cause filters.
+      const one = await get('/api/v1/objects?kind=device&limit=5');
+      assert.equal(one.statusCode, 200);
+      const several = await get('/api/v1/objects?kind=device&kind=sensor&limit=5');
+      assert.equal(several.statusCode, 200, several.body);
+      const kinds = new Set(
+        several.json<{ items: { kind: string }[] }>().items.map((item) => item.kind),
+      );
+      assert.ok([...kinds].every((kind) => kind === 'device' || kind === 'sensor'));
+
+      // And one bad value in a repeat is still refused.
+      const bad = await get('/api/v1/objects?kind=device&kind=widget');
+      assert.equal(bad.statusCode, 400);
+    });
+
     it('rejects a cursor whose id is not a usable position', async () => {
       const hostile = Buffer.from(
         JSON.stringify({ v: 1, sort: 'name', name: 'x', id: 1e308 }),

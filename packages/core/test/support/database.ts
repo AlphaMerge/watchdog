@@ -61,6 +61,10 @@ export interface ScratchDatabase {
 export async function createScratchDatabase(prefix: string): Promise<ScratchDatabase> {
   const config = testDatabaseConfig();
   const name = `ms_test_${prefix}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  // Checked before anything is opened. Doing it at the point of use left the admin client
+  // connected when the throw happened, and an open socket keeps the loop alive for ever — so a
+  // prefix with a hyphen in it produced a test run that hung instead of one that failed.
+  const quoted = quoteIdentifier(name);
 
   const admin = new Client({
     host: config.host,
@@ -70,7 +74,7 @@ export async function createScratchDatabase(prefix: string): Promise<ScratchData
     password: config.password,
   });
   await admin.connect();
-  await admin.query(`CREATE DATABASE ${quoteIdentifier(name)}`);
+  await admin.query(`CREATE DATABASE ${quoted}`);
   await admin.end();
 
   const db = new Database({ config, logger: silentLogger, databaseOverride: name });
@@ -88,7 +92,7 @@ export async function createScratchDatabase(prefix: string): Promise<ScratchData
         password: config.password,
       });
       await cleanup.connect();
-      await cleanup.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(name)} WITH (FORCE)`);
+      await cleanup.query(`DROP DATABASE IF EXISTS ${quoted} WITH (FORCE)`);
       await cleanup.end();
     },
   };
@@ -96,7 +100,10 @@ export async function createScratchDatabase(prefix: string): Promise<ScratchData
 
 function quoteIdentifier(name: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
-    throw new Error(`refusing to use an unsafe database identifier: ${name}`);
+    throw new Error(
+      `refusing to use an unsafe database identifier: ${name} — ` +
+        'a scratch prefix must be lower-case letters, digits and underscores',
+    );
   }
   return `"${name}"`;
 }
