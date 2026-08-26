@@ -28,6 +28,7 @@ import { ScheduleSync } from './schedules/sync.js';
 import { AlarmEngine } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
+import { MessageContextLoader } from './notifications/context.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
@@ -284,8 +285,17 @@ async function serve(): Promise<void> {
   // What is sent, and how (N-05). Audited and logged like everything else; no sync, because a
   // template edit changes nothing about what is currently standing — only what a message will
   // say when one is next delivered.
+  // What a message is built from (N-06). Constructed here so the installation-wide facts — the
+  // public URL a link has to use and what this installation is called — are read once, from the
+  // config, rather than guessed at delivery time.
+  const messageContexts = new MessageContextLoader({
+    settings: resolver,
+    publicUrl: config.notifications.publicUrl,
+    siteName: config.notifications.siteName,
+  });
   const templates = new TemplateService({
     db,
+    contexts: messageContexts,
     audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
     logger,
   });

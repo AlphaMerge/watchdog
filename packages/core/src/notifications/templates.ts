@@ -4,7 +4,14 @@ import type { Actor, AuditSink } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import type { ObjectId } from '../objects/types.js';
 import { triggerKinds } from '../triggers/definition.js';
+import type { MessageContextLoader } from './context.js';
 import { MethodError, notificationMethods } from './methods.js';
+import {
+  placeholderNames,
+  render,
+  unknownPlaceholdersIn,
+  type MessageContext,
+} from './placeholders.js';
 
 /** Who a message goes to. Only `address` resolves until `A-01` and `A-02` exist. */
 export interface Recipient {
@@ -66,6 +73,16 @@ export interface TemplateView {
   readonly summarisable: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** What a template would say about one sensor right now (`N-06`). */
+export interface RenderedPreview {
+  readonly templateId: number;
+  readonly sensorId: ObjectId;
+  readonly subject: string;
+  readonly body: string;
+  /** Placeholder names this build did not know. Empty for anything it accepted on the way in. */
+  readonly unknown: readonly string[];
 }
 
 /** One trigger that names a template, for `CAPABILITIES.MD §5.2`'s "used by" lookup. */
@@ -243,6 +260,13 @@ export interface TemplateServiceOptions {
   audit: AuditSink;
   logger: Logger;
   repository?: TemplateRepository;
+  /**
+   * What builds the facts a message is written from (`N-06`).
+   *
+   * Absent means `preview` is unavailable rather than wrong — a preview rendered against an
+   * empty context would show an operator a message that is nothing like the one they will get.
+   */
+  contexts?: MessageContextLoader;
 }
 
 /**
@@ -257,12 +281,14 @@ export class TemplateService {
   readonly #repo: TemplateRepository;
   readonly #audit: AuditSink;
   readonly #logger: Logger;
+  readonly #contexts: MessageContextLoader | undefined;
 
   constructor(options: TemplateServiceOptions) {
     this.#db = options.db;
     this.#repo = options.repository ?? new TemplateRepository();
     this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'templates' });
+    this.#contexts = options.contexts;
   }
 
   async list(): Promise<TemplateView[]> {
@@ -279,6 +305,59 @@ export class TemplateService {
   async usedBy(id: number): Promise<TemplateUse[]> {
     await this.get(id);
     return this.#repo.usedBy(this.#db, id);
+  }
+
+  /**
+   * What this template would say about one sensor, right now (`N-06`).
+   *
+   * The reason placeholder substitution is worth building rather than merely specifying: an
+   * operator writing `%device / %sensor: %lastmessage` has no way to know whether that reads
+   * well until they see it against something real, and finding out from the first genuine
+   * outage is finding out too late. Read-only, and rendered against the sensor's actual state
+   * rather than an invented one — `N-14`'s send-test uses the same rendering.
+   */
+  async preview(id: number, sensorId: ObjectId): Promise<RenderedPreview> {
+    const stored = await this.#repo.get(this.#db, id);
+    if (stored === null) throw notFound(id);
+    if (this.#contexts === undefined) {
+      throw new ObjectError('OBJECT_INVALID', 'this build cannot preview a template', {
+        context: { templateId: id, phase: 'templates' },
+      });
+    }
+
+    const now = new Date();
+    const runtime = await this.#db.query<{ state: string; message: string }>(
+      'SELECT state, message FROM sensor_runtime WHERE object_id = $1',
+      [sensorId],
+    );
+    const current = runtime[0];
+    if (current === undefined) {
+      throw new ObjectError('OBJECT_NOT_FOUND', `no sensor ${String(sensorId)}`, {
+        context: { objectId: sensorId, phase: 'templates' },
+      });
+    }
+
+    const contexts = await this.#contexts.loadFor(
+      this.#db,
+      [
+        {
+          // Not a queued notification: nothing is owed, and nothing is written. The id is only
+          // a key into the map the loader returns.
+          id: 0,
+          sensorId,
+          at: now,
+          state: current.state as MessageContext['state'],
+          message: current.message,
+          observed: null,
+        },
+      ],
+      now,
+    );
+    const context = contexts.get(0);
+    if (context === undefined) throw notFound(id);
+
+    const rendered = render(stored, context);
+    return { templateId: id, sensorId, ...rendered };
   }
 
   async create(actor: Actor, input: TemplateInput): Promise<TemplateView> {
@@ -420,13 +499,35 @@ export class TemplateService {
       }
     }
 
+    const subject = input.subject ?? before?.subject ?? '';
+    const body = input.body ?? before?.body ?? '';
+    // `N-06`: unknown placeholders are reported, never silently blanked. This is the moment
+    // somebody is looking at the text and can fix it — a message that quietly loses
+    // `%lastvlaue` reads perfectly, says nothing, and nobody finds out until it matters.
+    const unknown = [
+      ...new Set([...unknownPlaceholdersIn(subject), ...unknownPlaceholdersIn(body)]),
+    ];
+    if (unknown.length > 0) {
+      throw new MethodError(
+        'this template uses placeholders this build does not know',
+        { method: method.id },
+        [
+          ...unknown.map((name) => `%${name} is not a placeholder`),
+          `known placeholders: ${placeholderNames()
+            .map((name) => `%${name}`)
+            .join(', ')}`,
+          'write %% for a literal per cent sign',
+        ],
+      );
+    }
+
     return {
       name: input.name,
       description: input.description ?? before?.description ?? '',
       method: method.id,
       settings,
-      subject: input.subject ?? before?.subject ?? '',
-      body: input.body ?? before?.body ?? '',
+      subject,
+      body,
       recipients,
       priority: input.priority ?? before?.priority ?? 3,
       enabled: input.enabled ?? before?.enabled ?? true,

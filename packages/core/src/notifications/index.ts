@@ -61,6 +61,24 @@ export {
   type StoredTemplate,
   type TemplateInput,
   type TemplateServiceOptions,
+  type RenderedPreview,
   type TemplateUse,
   type TemplateView,
 } from './templates.js';
+export {
+  MessageContextLoader,
+  type LocationSource,
+  type MessageContextLoaderOptions,
+  type PendingNotification,
+} from './context.js';
+export {
+  describePlaceholders,
+  placeholderNames,
+  render,
+  substitute,
+  unknownPlaceholdersIn,
+  PLACEHOLDERS,
+  type MessageContext,
+  type RenderedMessage,
+  type Substitution,
+} from './placeholders.js';

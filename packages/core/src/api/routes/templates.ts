@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Actor } from '../../objects/audit.js';
 import { notificationMethods } from '../../notifications/methods.js';
+import { describePlaceholders } from '../../notifications/placeholders.js';
 import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
 
 export interface TemplateRouteOptions {
@@ -115,6 +116,31 @@ const templateInputSchema = {
   },
 } as const;
 
+const placeholderSchema = {
+  $id: 'ms:placeholder',
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'description'],
+  properties: {
+    name: { type: 'string' },
+    description: { type: 'string' },
+  },
+} as const;
+
+const previewSchema = {
+  $id: 'ms:templatePreview',
+  type: 'object',
+  additionalProperties: false,
+  required: ['templateId', 'sensorId', 'subject', 'body', 'unknown'],
+  properties: {
+    templateId: { type: 'integer' },
+    sensorId: { type: 'integer' },
+    subject: { type: 'string' },
+    body: { type: 'string' },
+    unknown: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
+
 const usedBySchema = {
   $id: 'ms:templateUsedBy',
   type: 'object',
@@ -140,7 +166,14 @@ const usedBySchema = {
   },
 } as const;
 
-export const TEMPLATE_SCHEMAS = [templateSchema, methodSchema, templateInputSchema, usedBySchema];
+export const TEMPLATE_SCHEMAS = [
+  templateSchema,
+  methodSchema,
+  templateInputSchema,
+  placeholderSchema,
+  previewSchema,
+  usedBySchema,
+];
 
 /**
  * Notification templates (`N-05`).
@@ -183,6 +216,30 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         summarisable: method.summarisable,
       })),
     }),
+  );
+
+  app.get(
+    '/notification-placeholders',
+    {
+      schema: {
+        tags: ['templates'],
+        summary: 'The placeholders a template’s subject and body may use',
+        description:
+          'Case-insensitive: `%Sensor` and `%SENSOR` are `%sensor`. A name this build does not ' +
+          'know is refused when the template is saved rather than blanked when it is sent — a ' +
+          'message that quietly loses a fact reads perfectly and says nothing. Write `%%` for a ' +
+          'literal per cent sign.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: { $ref: 'ms:placeholder' } } },
+          },
+        },
+      },
+    },
+    () => ({ items: describePlaceholders() }),
   );
 
   app.get(
@@ -235,6 +292,30 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       templateId: request.params.id,
       items: await templates.usedBy(request.params.id),
     }),
+  );
+
+  app.get<{ Params: { id: number }; Querystring: { sensorId: number } }>(
+    '/templates/:id/preview',
+    {
+      schema: {
+        tags: ['templates'],
+        summary: 'What this template would say about one sensor, right now',
+        description:
+          'Rendered against the sensor’s actual state, not an invented one. An operator writing ' +
+          '`%device / %sensor: %lastmessage` has no way to know whether that reads well until ' +
+          'they see it against something real, and finding out from the first genuine outage is ' +
+          'finding out too late. Nothing is sent and nothing is written.',
+        params: idParams,
+        querystring: {
+          type: 'object',
+          required: ['sensorId'],
+          additionalProperties: false,
+          properties: { sensorId: { type: 'integer', minimum: 1 } },
+        },
+        response: { 200: { $ref: 'ms:templatePreview' } },
+      },
+    },
+    async (request) => templates.preview(request.params.id, request.query.sensorId),
   );
 
   app.post<{ Body: TemplateInput }>(

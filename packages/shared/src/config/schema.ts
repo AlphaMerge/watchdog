@@ -140,6 +140,20 @@ export interface CoreConfig {
      */
     webRoot: string;
   };
+  /** What a notification needs to know about this installation (`N-06`). */
+  notifications: {
+    /**
+     * The externally reachable base URL of the web UI, for `%linksensor`.
+     *
+     * Not derivable from `api.host` and `api.port`: the core usually listens on a loopback or a
+     * private address behind a reverse proxy, and a link built from what it binds to would be a
+     * link nobody receiving the alarm can open. Empty renders `%linksensor` as the bare object
+     * id, which is honest — better than a URL that 404s.
+     */
+    publicUrl: string;
+    /** What this installation is called, for `%sitename`. */
+    siteName: string;
+  };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
   housekeeping: HousekeepingConfig;
@@ -250,7 +264,15 @@ const tlsSchema: JSONSchemaType<TlsConfig> = {
 export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
   type: 'object',
   additionalProperties: false,
-  required: ['service', 'api', 'database', 'ingestion', 'housekeeping', 'probeEndpoint'],
+  required: [
+    'service',
+    'api',
+    'notifications',
+    'database',
+    'ingestion',
+    'housekeeping',
+    'probeEndpoint',
+  ],
   properties: {
     service: serviceSchema('ms-core', '/var/lib/ms-core'),
     api: {
@@ -262,6 +284,16 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
         port: { type: 'integer', minimum: 1, maximum: 65_535, default: 8080 },
         webRoot: { type: 'string', default: '' },
+      },
+    },
+    notifications: {
+      type: 'object',
+      default: {} as CoreConfig['notifications'],
+      additionalProperties: false,
+      required: ['publicUrl', 'siteName'],
+      properties: {
+        publicUrl: { type: 'string', default: '' },
+        siteName: { type: 'string', default: 'MonitoringSystem' },
       },
     },
     database: {

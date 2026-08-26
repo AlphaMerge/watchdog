@@ -1433,10 +1433,67 @@ because each is a decision rather than a defect:
       would have said "configured, not shown" about a credential nobody had ever entered, which is
       an invitation to retype something that does not exist. The field is now removed always and
       *reported* only when it held something.
-- [ ] **N-06 — Placeholder substitution** · M · N-05 · `%sensor`, `%device`, `%group`, `%probe`,
+- [x] **N-06 — Placeholder substitution** · M · N-05 · `%sensor`, `%device`, `%group`, `%probe`,
       `%status`, `%laststatus`, `%lastmessage`, `%lastvalue`, `%datetime`, `%since`, `%linksensor`,
       `%priority`, `%comments`, `%objecttags`, `%host`, `%location`. Case-insensitive. Unknown
       placeholders reported, not silently blanked.
+
+      **N-06 outcome.** `placeholders.ts` is the substitution and the seventeen names `§5.2`
+      lists; `context.ts` is where their values come from. A test asserts the list against the
+      scope contract by name, because a placeholder quietly dropped from a build is a template
+      that stops working.
+
+      **"Reported, not silently blanked" is enforced twice, and the first one matters most.** A
+      template naming an unknown placeholder is **refused when it is saved**, with the list of
+      valid names — the only moment somebody is looking at the text and can fix it. A message
+      that quietly loses `%lastvlaue` reads perfectly, says nothing, and nobody finds out until
+      the night it mattered. For anything already stored, substitution leaves the token exactly as
+      written and reports it, so a message an older build produced is one an operator can look at
+      and immediately see what is wrong with.
+
+      **Parsing rules.** A name is `%` and the *letters* that follow it, so "CPU at 90% used"
+      survives untouched and `%sensor1` is `%sensor` followed by a 1. `%%` is a literal per cent,
+      which is the only way to write one immediately before a word. Substituted values are output,
+      never re-scanned: a check message reading "disk at 90%full" cannot become a placeholder.
+
+      **Case-insensitive at the table, not at each lookup.** Names are lower-cased once when the
+      table is built, so `%Sensor`, `%SENSOR` and `%sensor` are one entry rather than three code
+      paths — and an operator capitalising the first word of a sentence is not punished for
+      correct English.
+
+      **Where the values come from.** `MessageContextLoader` builds a batch of contexts in two
+      queries however many notifications there are, which is what `N-11` will ask for when it
+      assembles a digest of twenty-five. The ancestry is one recursive walk rather than four
+      joins, because "the nearest device above this sensor" is not a fixed depth — groups nest,
+      so a sensor may be four levels below its probe or ten, and the test builds probe → group →
+      group → device → sensor to prove `%group` names the *nearest* one.
+
+      **Three decisions worth naming.** `%location` is a new inheritable setting
+      (`object.location`) rather than a column, so it resolves through the one resolver like
+      everything else — a site set on a group reaches every device beneath it, and `[V2]`'s maps
+      will read the same value rather than a second one that could disagree. `%linksensor` needs
+      an externally reachable base URL that cannot be derived from what the core *binds* to — a
+      link built from a loopback address is worse than no link, because it looks like one — so
+      it is configuration (`notifications.publicUrl`), and empty renders the bare object id.
+      Dates are ISO 8601 UTC: a locale-formatted date needs a locale and a timezone nobody has
+      been asked for, and "03/04" read in the wrong country is a date two months out.
+
+      **A correctness fix found by looking at the live output.** `%objecttags` first rendered the
+      sensor's *own* tags. `CAPABILITIES.MD §1` makes "tags + inherited parent tags" a v1
+      capability and the object *filter* already resolves them that way — so a message would have
+      shown a different set of tags from the search that found the sensor. It now resolves the
+      inherited set, sorted.
+
+      **Shipped with something that calls it.** `GET /templates/:id/preview?sensorId=N` renders a
+      template against a sensor's actual state. Without it `N-06` would be code nothing runs until
+      `N-07`, and an operator writing `%device / %sensor: %lastmessage` has no way to know whether
+      it reads well until they see it against something real. `N-14`'s send-test uses the same
+      rendering.
+
+      **And the same trap, for the third time.** A backtick inside a SQL template literal — this
+      time in a comment reading `` `device_config` `` — ended the string and produced
+      `ReferenceError: device_config is not defined` from a line that looked like SQL. The
+      memory note about it exists precisely because the error never points at the backtick.
 - [ ] **N-07 — Email delivery** · L · N-05 · SMTP relay with port, auth (none/SMTP/SASL), TLS
       negotiation, sender and HELO override, primary + fallback relay. HTML and plain bodies.
 - [ ] **N-08 — HTTP action / webhook delivery** · M · N-05 · Method, URL, headers, templated

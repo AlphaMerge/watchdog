@@ -75,6 +75,25 @@ export const SCHEDULE_ID: SettingDefinition<number | null> = {
 };
 
 /**
+ * Where this object physically is (`N-06`).
+ *
+ * An ordinary inheritable setting and nothing more: a site set on a group applies to every
+ * device beneath it, a device overrides it, and `%location` in a notification resolves whatever
+ * the sensor inherits. That is PRTG's behaviour and it costs one declaration, because the
+ * resolver already does the walking — there is no column, no migration and no second lookup.
+ *
+ * `[V2]`'s maps will read the same value rather than a second one that could disagree.
+ */
+export const OBJECT_LOCATION: SettingDefinition<string> = {
+  key: 'object.location',
+  schema: { type: 'string', maxLength: 500 },
+  default: '',
+  description:
+    'Where this object is — a site, a rack, an address. Inherited downward, and available to ' +
+    'notifications as %location.',
+};
+
+/**
  * The master object this one depends on (`M-11`).
  *
  * Inheritable like everything else, which is what gives `WORKFLOW.MD §5`'s three modes without
@@ -120,6 +139,7 @@ const DEFINITIONS: readonly SettingDefinition<unknown>[] = [
   SCHEDULE_ID,
   DEPENDENCY_MASTER_ID,
   DEPENDENCY_DELAY_SECONDS,
+  OBJECT_LOCATION,
 ];
 
 const ajv = new Ajv({ allErrors: true, strict: false });
