@@ -20,6 +20,7 @@ import {
   clearedByResume,
   evaluate,
   isPaused,
+  operatorDecided,
   DEFAULT_FAILURE_POLICY,
   type FailurePolicy,
 } from './machine.js';
@@ -28,6 +29,7 @@ import { canAcknowledge, type ResolvedAcknowledgement } from './acknowledgement.
 import {
   loadRuntimes,
   writeAcknowledgements,
+  writeSimulatedErrors,
   writeStateChanges,
   writeStateHistory,
   type RuntimeWrite,
@@ -346,12 +348,12 @@ export class SensorStateService {
 
       if (decision.state === runtime.state && decision.cause === runtime.cause) continue;
 
-      // The operator's words when the operator's action is what decided the state — a pause or
-      // an acknowledgement — and nothing on the way out, because the reason a sensor is Unknown
-      // after a resume is that nobody has scanned it yet. `CAPABILITIES.MD §5.3` requires the
-      // acknowledgement message to become the sensor's last message, and this is where it does.
-      const message =
-        decision.state === 'paused' || decision.state === 'down_acknowledged' ? cause.message : '';
+      // The operator's words when the operator's action is what decided the state, and nothing
+      // on the way out — the reason a sensor is Unknown after a resume is that nobody has
+      // scanned it yet. `CAPABILITIES.MD §5.3` requires an acknowledgement's message to become
+      // the sensor's last message; a pause's and a simulated error's are wanted for the same
+      // reason, which is that a sensor showing an unexplained state is the thing to avoid.
+      const message = operatorDecided(decision) ? cause.message : '';
       transitions.push({
         sensorId,
         at,
@@ -379,6 +381,37 @@ export class SensorStateService {
     this.#transitions += transitions.length;
     this.#reevaluations += transitions.length;
     return transitions.length;
+  }
+
+  /**
+   * Forces a sensor Down, or lifts the force (`M-14`).
+   *
+   * Two writes in one transaction and in this order, exactly as an acknowledgement is: the
+   * column §2 reads, then the state it implies. Nothing is refused by state — a simulated error
+   * is not a statement about what the sensor is doing, it is an instruction to ignore that.
+   *
+   * A pause still beats it (§2 layer 1), which is deliberate: pausing is an explicit instruction
+   * to stop monitoring, and a sensor an operator switched off should not start paging people
+   * because somebody else was testing a notification chain.
+   */
+  async simulate(
+    q: Queryable,
+    sensorIds: readonly number[],
+    simulated: boolean,
+    message: string,
+    at: Date,
+  ): Promise<{ changed: number[]; transitions: number }> {
+    if (sensorIds.length === 0) return { changed: [], transitions: 0 };
+
+    const moved = await writeSimulatedErrors(q, sensorIds, simulated);
+    if (moved === 0) return { changed: [], transitions: 0 };
+    // Every sensor asked for, not only the ones whose column moved: re-evaluating one already
+    // in the requested state costs a comparison and writes nothing, and working out which is
+    // which would mean a second read of what was just written.
+    for (const sensorId of sensorIds) this.#cache.delete(sensorId);
+
+    const transitions = await this.reevaluate(q, sensorIds, at, { message });
+    return { changed: [...sensorIds], transitions };
   }
 
   /**

@@ -216,6 +216,15 @@ export interface AcknowledgementView {
   readonly message: string;
 }
 
+/** What forcing a simulated error on one object did (`M-14`). */
+export interface SimulatedErrorView {
+  readonly objectId: ObjectId;
+  readonly simulated: boolean;
+  /** The sensors forced. On a container this is every sensor beneath it, not only the Down ones. */
+  readonly sensors: readonly ObjectId[];
+  readonly message: string;
+}
+
 export interface ChannelRecord {
   readonly id: number;
   readonly sensorId: ObjectId;

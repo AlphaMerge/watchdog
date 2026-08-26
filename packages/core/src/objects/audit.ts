@@ -186,6 +186,21 @@ export type Mutation =
       kind: ObjectKind;
       sensorsAffected: number;
     }
+  | {
+      /**
+       * An operator forced sensors Down, or lifted the force (`M-14`).
+       *
+       * The most consequential button in the system: a simulated error fires the real
+       * notification chain at real people, which is exactly what it is for. "Who did this, to
+       * how many sensors, and what did they say they were testing" is the entry.
+       */
+      action: 'sensor.simulatedError';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      simulated: boolean;
+      message: string;
+      sensorsAffected: number;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
@@ -338,6 +353,13 @@ function summarise(mutation: Mutation): Record<string, unknown> {
       return {
         action: mutation.action,
         objectId: mutation.objectId,
+        sensorsAffected: mutation.sensorsAffected,
+      };
+    case 'sensor.simulatedError':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        simulated: mutation.simulated,
         sensorsAffected: mutation.sensorsAffected,
       };
     case 'schedule.created':

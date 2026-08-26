@@ -17,7 +17,7 @@ import {
   type AcknowledgeRequest,
   type ResolvedAcknowledgement,
 } from '../state/acknowledgement.js';
-import { downSensorsIn } from '../state/runtime.js';
+import { downSensorsIn, sensorsIn } from '../state/runtime.js';
 import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
 import { PauseRepository, flattenActor } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
@@ -28,6 +28,7 @@ import type { ObjectRepository } from './repository.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type {
   AcknowledgementView,
+  SimulatedErrorView,
   ChannelProcessing,
   ChannelRecord,
   PauseView,
@@ -140,6 +141,13 @@ export interface StateReevaluator {
     actor: { kind: string; label: string | null },
     at: Date,
   ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }>;
+  simulate(
+    q: Queryable,
+    sensorIds: readonly number[],
+    simulated: boolean,
+    message: string,
+    at: Date,
+  ): Promise<{ changed: number[]; transitions: number }>;
 }
 
 /**
@@ -698,6 +706,84 @@ export class ObjectService {
       await this.setSetting(actor, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
     }
     return this.pauseState(id);
+  }
+
+  // ── simulated error (M-14) ───────────────────────────────────────────────────────────────
+
+  /**
+   * Forces sensors Down to test a notification chain end to end (`M-14`).
+   *
+   * **This pages real people.** That is the point — a chain nobody has ever seen fire is a chain
+   * nobody knows works — but it is also why it is audited, why the message becomes the sensor's
+   * last message, and why the state reads with cause `simulated` rather than `scan`: a forced
+   * Down must never be mistakable for a real one, in the UI or in the log.
+   *
+   * On a sensor, or on anything above one, in which case **every** sensor beneath it is forced —
+   * not only those that are Down, because forcing a Down is not a statement about the current
+   * state. `M-17`'s alarm-storm scenario is what wants the subtree form.
+   *
+   * Deliberately without a deadline, unlike a pause or an acknowledgement. Those need one
+   * because a forgotten pause looks exactly like a healthy sensor; a forgotten simulated error
+   * looks like a screaming one, with `simulated` written on it in three places. The thing that
+   * makes it safe is that it is loud, not that it expires.
+   */
+  async simulateError(
+    actor: Actor,
+    id: ObjectId,
+    simulated: boolean,
+    message = '',
+  ): Promise<SimulatedErrorView> {
+    const now = new Date();
+    const states = this.#states;
+    if (states === undefined) {
+      throw new ObjectError('OBJECT_INVALID', 'this installation decides no sensor states', {
+        context: { objectId: id, phase: 'simulate' },
+      });
+    }
+
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+
+      const targets = object.kind === 'sensor' ? [id] : await sensorsIn(q, id);
+      if (targets.length === 0) {
+        throw new ObjectError('OBJECT_INVALID', 'there are no sensors here to force', {
+          context: { objectId: id, phase: 'simulate' },
+        });
+      }
+
+      const result = await states.simulate(q, targets, simulated, message, now);
+      if (result.changed.length > 0) {
+        await this.#audit.record(
+          q,
+          actor,
+          [
+            {
+              action: 'sensor.simulatedError',
+              objectId: id,
+              kind: object.kind,
+              simulated,
+              message,
+              sensorsAffected: result.changed.length,
+            },
+          ],
+          now,
+        );
+        this.#logger.warn(
+          { objectId: id, simulated, sensors: result.changed.length },
+          simulated
+            ? 'sensors forced Down to test a notification chain'
+            : 'simulated errors cleared',
+        );
+      }
+
+      return {
+        objectId: id,
+        simulated,
+        sensors: result.changed,
+        message,
+      };
+    });
   }
 
   // ── acknowledgement (M-13) ───────────────────────────────────────────────────────────────

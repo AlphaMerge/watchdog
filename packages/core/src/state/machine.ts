@@ -122,6 +122,18 @@ export function pauseCause(flags: PauseFlags): SensorStateCause | null {
   return null;
 }
 
+/**
+ * Whether an operator's own action is what decided this state.
+ *
+ * The three that are: a pause, an acknowledgement and a simulated error. Their message is the
+ * operator's words and belongs on the sensor, where anyone looking at it will read it first; a
+ * state a *reading* decided already carries the check's own message, and a state that decided
+ * itself — Unknown after a resume — has nothing to say beyond that nobody has scanned it.
+ */
+export function operatorDecided(decision: Decision): boolean {
+  return decision.state === 'paused' || decision.cause === 'user' || decision.cause === 'simulated';
+}
+
 export function isPaused(flags: PauseFlags): boolean {
   return PAUSE_SOURCES.some((source) => flags[source]);
 }

@@ -326,6 +326,52 @@ export async function downSensorsIn(q: Queryable, rootId: number): Promise<numbe
   return rows.map((row) => Number(row.object_id));
 }
 
+/**
+ * Every sensor beneath an object.
+ *
+ * Unlike `downSensorsIn`, this filters on nothing: a simulated error (`M-14`) is applied to what
+ * an operator selected, whatever state it happens to be in, because forcing a Down is not a
+ * statement about the current one.
+ */
+export async function sensorsIn(q: Queryable, rootId: number): Promise<number[]> {
+  const rows = await q.query<{ object_id: string }>(
+    `
+    WITH RECURSIVE subtree AS (
+      SELECT o.id, o.kind, 0 AS depth FROM object o WHERE o.id = $1
+      UNION ALL
+      SELECT c.id, c.kind, subtree.depth + 1
+      FROM object c JOIN subtree ON c.parent_id = subtree.id
+      WHERE subtree.depth < 1000
+    )
+    SELECT id::text AS object_id FROM subtree WHERE kind = 'sensor' ORDER BY id
+    `,
+    [rootId],
+  );
+  return rows.map((row) => Number(row.object_id));
+}
+
+/**
+ * Sets or clears the simulated-error flag (`M-14`).
+ *
+ * Its own statement rather than a field on `writeStateChanges`, for the reason acknowledgements
+ * have one: §2 reads the column to decide the state, so the fact has to be in the row before
+ * the machine is asked what it means.
+ */
+export async function writeSimulatedErrors(
+  q: Queryable,
+  sensorIds: readonly number[],
+  simulated: boolean,
+): Promise<number> {
+  if (sensorIds.length === 0) return 0;
+  const rows = await q.query<{ object_id: string }>(
+    `UPDATE sensor_runtime SET simulated_error = $2
+     WHERE object_id = ANY($1::bigint[]) AND simulated_error IS DISTINCT FROM $2
+     RETURNING object_id::text AS object_id`,
+    [sensorIds, simulated],
+  );
+  return rows.length;
+}
+
 /** An acknowledgement to write, or `null` to clear one (`M-13`). */
 export interface AcknowledgementWrite {
   readonly sensorId: number;

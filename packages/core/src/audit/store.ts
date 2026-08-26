@@ -359,6 +359,20 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: 'acknowledged', before: true, after: false }],
       };
 
+    case 'sensor.simulatedError':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { message: mutation.message, sensorsAffected: mutation.sensorsAffected },
+        diff: [
+          {
+            field: 'simulatedError',
+            before: !mutation.simulated,
+            after: mutation.simulated,
+          },
+        ],
+      };
+
     case 'channel.processing.set':
       return {
         ...base,

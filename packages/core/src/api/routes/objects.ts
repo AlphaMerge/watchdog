@@ -825,6 +825,58 @@ export async function objectRoutes(
     },
   );
 
+  // ── 11e. simulated error (M-14) ──────────────────────────────────────────────────────────
+
+  app.post<{ Params: { id: number }; Body: { message?: string } }>(
+    '/objects/:id/simulate-error',
+    {
+      schema: {
+        description:
+          'Forces sensors Down so a notification chain can be tested end to end. ' +
+          '**This fires the real chain at real people** — which is the point, since a chain ' +
+          'nobody has seen fire is a chain nobody knows works. The sensor reads Down with cause ' +
+          '`simulated`, never `scan`, so a forced outage cannot be mistaken for a real one; the ' +
+          'message becomes its last message; the action is audited. On a device or a group this ' +
+          'forces **every** sensor beneath it, whatever state it was in. Pausing still wins, so ' +
+          'a sensor somebody switched off will not start paging anyone.',
+        params: idParams,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { message: { type: 'string', maxLength: 500 } },
+        },
+        response: { 200: { $ref: 'ms:simulatedErrorView' } },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(
+        await service.simulateError(
+          actorFor(request),
+          request.params.id,
+          true,
+          request.body.message,
+        ),
+      );
+    },
+  );
+
+  app.delete<{ Params: { id: number } }>(
+    '/objects/:id/simulate-error',
+    {
+      schema: {
+        description:
+          'Lifts a simulated error. The sensors return to what they actually measure straight ' +
+          'away — unlike a resume, which yields Unknown, because a forced sensor never stopped ' +
+          'being scanned: the force changes what its readings *mean*, not whether it takes any.',
+        params: idParams,
+        response: { 200: { $ref: 'ms:simulatedErrorView' } },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(await service.simulateError(actorFor(request), request.params.id, false));
+    },
+  );
+
   // ── 11c. dependency (M-11) ───────────────────────────────────────────────────────────────
 
   app.put<{

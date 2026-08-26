@@ -151,6 +151,20 @@ export const acknowledgementViewSchema = {
   },
 } as const;
 
+export const simulatedErrorViewSchema = {
+  $id: 'ms:simulatedErrorView',
+  type: 'object',
+  additionalProperties: false,
+  required: ['objectId', 'simulated', 'sensors', 'message'],
+  properties: {
+    objectId: { type: 'integer' },
+    simulated: { type: 'boolean' },
+    /** On a container, every sensor beneath it — not only the ones that were Down. */
+    sensors: { type: 'array', items: { type: 'integer' } },
+    message: { type: 'string' },
+  },
+} as const;
+
 export const PAUSE_PRESETS = PAUSE_PRESET_MINUTES;
 export const ACK_PRESETS = ACK_PRESET_MINUTES;
-export const PAUSE_SCHEMAS = [pauseViewSchema, acknowledgementViewSchema];
+export const PAUSE_SCHEMAS = [pauseViewSchema, acknowledgementViewSchema, simulatedErrorViewSchema];

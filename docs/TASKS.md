@@ -973,9 +973,36 @@ because each is a decision rather than a defect:
       Left for `A-03`: "permission grantable to read-only users". There are no accounts yet
       (`A-01`), and every actor is still the caller's address; the route is the one place the
       permission will attach.
-- [ ] **M-14 — Simulated error state** · S · M-02 · **`M-02` left the column and the layer:**
+- [x] **M-14 — Simulated error state** · S · M-02 · **`M-02` left the column and the layer:**
       `sensor_runtime.simulated_error`, evaluated below pause and above everything else. Force a sensor Down to test notification
       chains end to end.
+
+      **M-14 outcome.** No migration — `M-02` left the column and §2 layer 2 already reads it.
+      `SensorStateService.simulate` is the write, `POST`/`DELETE /objects/:id/simulate-error` the
+      API.
+
+      **Loud, not expiring.** A pause and an acknowledgement both take an optional deadline
+      because a forgotten one looks exactly like a healthy sensor. A forgotten simulated error
+      looks like a *screaming* one, with `simulated` written on it in the state, the transition
+      and the audit entry — so what makes it safe is that it cannot be mistaken for a real
+      outage, not that it lapses. A deadline was considered and left out for that reason rather
+      than overlooked.
+
+      **It keeps being scanned.** Only the four pause flags remove a sensor from its probe's
+      configuration, so a forced sensor goes on measuring — the force changes what its readings
+      *mean*, not whether it takes any. That is why lifting one returns it to the truth
+      immediately instead of yielding Unknown the way a resume does: there is nothing to wait
+      for.
+
+      **Everything downstream behaves as it would in a real outage**, which is the point of a
+      chain test: the transition is recorded in `sensor_state`, and a master forced Down pauses
+      its dependents exactly as a real failure would. Pausing still wins (§2 layer 1) — a sensor
+      somebody switched off must not start paging people because somebody else was testing.
+
+      On a sensor, or on anything above one, in which case **every** sensor beneath it is forced
+      rather than only the Down ones: forcing a Down is not a statement about the current state.
+      `M-17`'s alarm-storm scenario is what wants the subtree form. The API description says
+      plainly that this fires the real chain at real people.
 - [ ] **M-15 — State-change log** · M · M-02, S-10 · Every transition with previous state, new
       state, message and cause.
 - [ ] **M-16 — Property-based state machine tests** · L · M-12, M-13 · No event sequence reaches
