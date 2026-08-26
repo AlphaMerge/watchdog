@@ -200,7 +200,16 @@ describe(
       h.states?.forget({
         transitions: [],
         runtimes: [
-          { sensorId: id, at: NOW, state, cause, message: '', since: NOW, consecutiveFailures: 0 },
+          {
+            sensorId: id,
+            at: NOW,
+            state,
+            cause,
+            message: '',
+            since: NOW,
+            consecutiveFailures: 0,
+            acknowledged: false,
+          },
         ],
       });
     }

@@ -199,6 +199,23 @@ export interface PauseView {
   } | null;
 }
 
+/**
+ * What acknowledging one object did (`M-13`).
+ *
+ * Both lists, because acknowledging a device acts on what is Down beneath it and an operator
+ * needs to know how many alarms that turned out to be — and which sensors were not Down, since
+ * those are the ones that will still alarm.
+ */
+export interface AcknowledgementView {
+  readonly objectId: ObjectId;
+  readonly acknowledged: readonly ObjectId[];
+  readonly refused: readonly ObjectId[];
+  readonly acknowledgedAt: string | null;
+  /** `null` is indefinite: until it recovers, or somebody clears it. */
+  readonly acknowledgedUntil: string | null;
+  readonly message: string;
+}
+
 export interface ChannelRecord {
   readonly id: number;
   readonly sensorId: ObjectId;

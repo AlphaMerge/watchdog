@@ -161,6 +161,31 @@ export type Mutation =
       kind: ObjectKind;
       sensorsAffected: number;
     }
+  | {
+      /**
+       * An operator acknowledged an alarm (`M-13`).
+       *
+       * Audited because it is the one action that makes a system deliberately stop telling
+       * anybody about an outage. "Who silenced this, when, for how long, and what did they say
+       * they were doing about it" is the whole reason the entry exists.
+       *
+       * `objectId` is what the operator clicked — a sensor, or a device whose Down sensors were
+       * acknowledged together — and `sensorsAffected` is how many alarms that turned out to be.
+       */
+      action: 'sensor.acknowledged';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      /** `null` is indefinite: until it recovers, or somebody clears it. */
+      until: Date | null;
+      message: string;
+      sensorsAffected: number;
+    }
+  | {
+      action: 'sensor.acknowledgementCleared';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      sensorsAffected: number;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
@@ -302,6 +327,19 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'setting.set':
     case 'setting.reverted':
       return { action: mutation.action, objectId: mutation.objectId, key: mutation.key };
+    case 'sensor.acknowledged':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        until: mutation.until?.toISOString() ?? null,
+        sensorsAffected: mutation.sensorsAffected,
+      };
+    case 'sensor.acknowledgementCleared':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        sensorsAffected: mutation.sensorsAffected,
+      };
     case 'schedule.created':
     case 'schedule.deleted':
       return {

@@ -61,6 +61,10 @@ export function stateRoutes(app: FastifyInstance, options: StateRoutesOptions): 
         pausedBy: PAUSE_SOURCES.filter((source) => facts.pause[source]),
         acknowledged: facts.acknowledged,
         acknowledgedUntil: facts.acknowledgedUntil?.toISOString() ?? null,
+        // Who silenced the alarm (`M-13`). On the state read rather than only in the audit log,
+        // for the reason the pause view carries an actor: an operator looking at a red sensor
+        // that is not paging anybody should not have to go searching for who decided that.
+        acknowledgedBy: runtime.acknowledgedBy ?? null,
         simulatedError: facts.simulatedError,
       };
     },

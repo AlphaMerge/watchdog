@@ -20,6 +20,13 @@ export interface SensorRuntime {
   readonly message: string;
   readonly since: Date;
   /**
+   * Who acknowledged the alarm (`M-13`), when anybody has.
+   *
+   * Absent on the batch read, which selects only what the machine needs — this is for the one
+   * sensor a person is looking at.
+   */
+  readonly acknowledgedBy?: { readonly kind: string; readonly label: string | null } | null;
+  /**
    * The machine's inputs. `probeReachable` is **not** persisted — it is a live fact about a
    * connection, and a value read from a table would be a claim about the past.
    */
@@ -56,6 +63,15 @@ export interface RuntimeWrite {
   readonly message: string;
   readonly since: Date;
   readonly consecutiveFailures: number;
+  /**
+   * Whether the acknowledgement survived this result (`M-13`).
+   *
+   * The machine clears one on recovery and on expiry (§2.4), and until `M-13` that clearing
+   * lived only in the cached facts — so the columns stayed set, and a cache eviction or a
+   * restart brought a silenced alarm back silenced. A result never *sets* an acknowledgement, so
+   * `false` here means clear the columns and `true` means leave them exactly as they are.
+   */
+  readonly acknowledged: boolean;
 }
 
 /** What one batch of results decided. Both halves are written in the readings' transaction. */
@@ -78,6 +94,9 @@ interface RuntimeRow {
   paused_manually: boolean;
   acknowledged_at: Date | null;
   acknowledged_until: Date | null;
+  /** Only the single-sensor read selects these; the hot path does not need them (`M-13`). */
+  acknowledged_by_kind?: string | null;
+  acknowledged_by_label?: string | null;
   simulated_error: boolean;
 }
 
@@ -95,6 +114,10 @@ function toRuntime(row: RuntimeRow): SensorRuntime {
     cause: row.cause,
     message: row.message,
     since: row.since,
+    acknowledgedBy:
+      row.acknowledged_by_kind == null
+        ? null
+        : { kind: row.acknowledged_by_kind, label: row.acknowledged_by_label ?? null },
     facts: {
       pause: {
         parent: row.paused_by_parent,
@@ -201,11 +224,18 @@ export async function writeRuntimes(
          message = w.message,
          since = w.since,
          consecutive_failures = w.consecutive_failures,
-         last_result_at = w.at
+         last_result_at = w.at,
+         -- Only ever cleared here. §2.4 clears an acknowledgement on a recovery a reading
+         -- decided and on expiry, and both of those arrive as a result; nothing about a result
+         -- can create one.
+         acknowledged_at = CASE WHEN w.acknowledged THEN r.acknowledged_at END,
+         acknowledged_until = CASE WHEN w.acknowledged THEN r.acknowledged_until END,
+         acknowledged_by_kind = CASE WHEN w.acknowledged THEN r.acknowledged_by_kind END,
+         acknowledged_by_label = CASE WHEN w.acknowledged THEN r.acknowledged_by_label END
      FROM unnest(
        $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
-       $5::text[], $6::timestamptz[], $7::int[]
-     ) AS w(sensor_id, at, state, cause, message, since, consecutive_failures)
+       $5::text[], $6::timestamptz[], $7::int[], $8::boolean[]
+     ) AS w(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged)
      WHERE r.object_id = w.sensor_id
        AND (r.last_result_at IS NULL OR w.at > r.last_result_at)
      RETURNING r.object_id::text AS object_id`,
@@ -217,6 +247,7 @@ export async function writeRuntimes(
       writes.map((write) => write.message),
       writes.map((write) => write.since),
       writes.map((write) => write.consecutiveFailures),
+      writes.map((write) => write.acknowledged),
     ],
   );
   return rows.length;
@@ -251,6 +282,8 @@ export async function readSensorState(
             coalesce(r.paused_manually, false) AS paused_manually,
             r.acknowledged_at,
             r.acknowledged_until,
+            r.acknowledged_by_kind,
+            r.acknowledged_by_label,
             coalesce(r.simulated_error, false) AS simulated_error
      FROM object o
      LEFT JOIN sensor_runtime r ON r.object_id = o.id
@@ -259,6 +292,82 @@ export async function readSensorState(
   );
   const row = rows[0];
   return row === undefined ? null : toRuntime(row);
+}
+
+/**
+ * The sensors beneath an object that are currently Down (`M-13`).
+ *
+ * What "acknowledge this device" acts on. A **snapshot, not a rule**: it covers what is Down at
+ * the moment somebody clicks, and a sensor that fails an hour later is a new alarm nobody has
+ * looked at yet. Anything else would be an acknowledgement that silences outages that had not
+ * happened when it was written.
+ *
+ * `down_acknowledged` is included so that extending or re-wording an existing acknowledgement
+ * over a whole device is the same call as making one.
+ */
+export async function downSensorsIn(q: Queryable, rootId: number): Promise<number[]> {
+  const rows = await q.query<{ object_id: string }>(
+    `
+    WITH RECURSIVE subtree AS (
+      SELECT o.id, 0 AS depth FROM object o WHERE o.id = $1
+      UNION ALL
+      SELECT c.id, subtree.depth + 1
+      FROM object c JOIN subtree ON c.parent_id = subtree.id
+      WHERE subtree.depth < 1000
+    )
+    SELECT r.object_id::text AS object_id
+    FROM subtree
+    JOIN sensor_runtime r ON r.object_id = subtree.id
+    WHERE r.state IN ('down', 'down_acknowledged')
+    ORDER BY r.object_id
+    `,
+    [rootId],
+  );
+  return rows.map((row) => Number(row.object_id));
+}
+
+/** An acknowledgement to write, or `null` to clear one (`M-13`). */
+export interface AcknowledgementWrite {
+  readonly sensorId: number;
+  readonly acknowledgedAt: Date | null;
+  readonly acknowledgedUntil: Date | null;
+  readonly actorKind: string | null;
+  readonly actorLabel: string | null;
+}
+
+/**
+ * Writes or clears acknowledgements.
+ *
+ * Separate from `writeStateChanges` because the two are written in one transaction but decided
+ * in the wrong order to combine: the columns have to be there before the machine is asked what
+ * they mean, since it is `acknowledged_at` that turns a computed `down` into `down_acknowledged`
+ * (§2.4). So this writes the fact, and the re-evaluation that follows writes the state.
+ */
+export async function writeAcknowledgements(
+  q: Queryable,
+  writes: readonly AcknowledgementWrite[],
+): Promise<number> {
+  if (writes.length === 0) return 0;
+  const rows = await q.query<{ object_id: string }>(
+    `UPDATE sensor_runtime r
+     SET acknowledged_at = w.acknowledged_at,
+         acknowledged_until = w.acknowledged_until,
+         acknowledged_by_kind = w.actor_kind,
+         acknowledged_by_label = w.actor_label
+     FROM unnest(
+       $1::bigint[], $2::timestamptz[], $3::timestamptz[], $4::text[], $5::text[]
+     ) AS w(sensor_id, acknowledged_at, acknowledged_until, actor_kind, actor_label)
+     WHERE r.object_id = w.sensor_id
+     RETURNING r.object_id::text AS object_id`,
+    [
+      writes.map((write) => write.sensorId),
+      writes.map((write) => write.acknowledgedAt),
+      writes.map((write) => write.acknowledgedUntil),
+      writes.map((write) => write.actorKind),
+      writes.map((write) => write.actorLabel),
+    ],
+  );
+  return rows.length;
 }
 
 /**
@@ -302,7 +411,9 @@ export async function writeStateChanges(
          -- Resuming clears any acknowledgement (WORKFLOW.MD §4 rule 5): it was a statement
          -- about an outage nobody is watching any more.
          acknowledged_at = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_at END,
-         acknowledged_until = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_until END
+         acknowledged_until = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_until END,
+         acknowledged_by_kind = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_kind END,
+         acknowledged_by_label = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_label END
      FROM unnest(
        $1::bigint[], $2::sensor_state_kind[], $3::sensor_state_cause[], $4::text[],
        $5::timestamptz[], $6::boolean[]

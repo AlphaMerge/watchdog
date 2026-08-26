@@ -12,8 +12,14 @@ import { resolveDependencyMode, type DependencyMode } from '../dependencies/mode
 import { mergeLimits, validateLimits, type ChannelLimitsPatch } from '../state/limits.js';
 import { validateTransform } from '../ingestion/scaling.js';
 import { refuseResume, resolvePause, type PauseRequest } from '../state/pause.js';
+import {
+  resolveAcknowledgement,
+  type AcknowledgeRequest,
+  type ResolvedAcknowledgement,
+} from '../state/acknowledgement.js';
+import { downSensorsIn } from '../state/runtime.js';
 import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
-import { PauseRepository } from './pause-repository.js';
+import { PauseRepository, flattenActor } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
@@ -21,6 +27,7 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type {
+  AcknowledgementView,
   ChannelProcessing,
   ChannelRecord,
   PauseView,
@@ -118,7 +125,7 @@ export interface ScheduleLookup {
   ): Promise<{ id: number; name: string; definition: ScheduleDefinition } | null>;
 }
 
-/** Just enough of `SensorStateService` for a pause to take effect now. */
+/** Just enough of `SensorStateService` for a pause or an acknowledgement to take effect now. */
 export interface StateReevaluator {
   reevaluate(
     q: Queryable,
@@ -126,6 +133,13 @@ export interface StateReevaluator {
     at: Date,
     cause: { message: string },
   ): Promise<number>;
+  acknowledge(
+    q: Queryable,
+    sensorIds: readonly number[],
+    acknowledgement: ResolvedAcknowledgement | null,
+    actor: { kind: string; label: string | null },
+    at: Date,
+  ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }>;
 }
 
 /**
@@ -684,6 +698,125 @@ export class ObjectService {
       await this.setSetting(actor, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
     }
     return this.pauseState(id);
+  }
+
+  // ── acknowledgement (M-13) ───────────────────────────────────────────────────────────────
+
+  /**
+   * Acknowledges an alarm, suppressing its notifications without touching its monitoring.
+   *
+   * **On a sensor, or on anything above one.** Nobody wants to acknowledge forty alarms one at a
+   * time when a switch fails, so acknowledging a device or a group covers every sensor beneath
+   * it that is Down *at that moment*. A snapshot rather than a rule: a sensor that fails an hour
+   * later is a new alarm nobody has looked at, and silencing it would be the opposite of what
+   * was meant.
+   *
+   * Refused when nothing under the object is Down. §2.4 applies the layer only to `down`, so an
+   * acknowledgement written anywhere else would sit silently and suppress the next outage.
+   */
+  async acknowledge(
+    actor: Actor,
+    id: ObjectId,
+    request: AcknowledgeRequest,
+    message = '',
+  ): Promise<AcknowledgementView> {
+    const now = new Date();
+    const resolved = resolveAcknowledgement(request, message, now);
+    if ('problems' in resolved) {
+      throw new ObjectError('OBJECT_INVALID', 'this acknowledgement cannot be applied', {
+        context: { objectId: id, phase: 'acknowledge' },
+        details: { problems: resolved.problems },
+      });
+    }
+    return this.#applyAcknowledgement(actor, id, resolved.acknowledgement, now);
+  }
+
+  /**
+   * Withdraws an acknowledgement.
+   *
+   * Not in `CAPABILITIES.MD §5.3`, which lists only the three things that clear one on their own
+   * — recovery, expiry and pause-then-resume. None of those is "I acknowledged the wrong
+   * sensor", and pause-then-resume as the only undo costs the sensor its failure count and
+   * leaves it Unknown, which is a worse outcome than the mistake. One call, the same write path,
+   * and the audit log records both halves.
+   */
+  async clearAcknowledgement(actor: Actor, id: ObjectId): Promise<AcknowledgementView> {
+    return this.#applyAcknowledgement(actor, id, null, new Date());
+  }
+
+  async #applyAcknowledgement(
+    actor: Actor,
+    id: ObjectId,
+    acknowledgement: ResolvedAcknowledgement | null,
+    now: Date,
+  ): Promise<AcknowledgementView> {
+    const states = this.#states;
+    if (states === undefined) {
+      throw new ObjectError('OBJECT_INVALID', 'this installation decides no sensor states', {
+        context: { objectId: id, phase: 'acknowledge' },
+      });
+    }
+
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+
+      const targets = object.kind === 'sensor' ? [id] : await downSensorsIn(q, id);
+      if (targets.length === 0) {
+        throw new ObjectError(
+          'OBJECT_NOT_PAUSED',
+          acknowledgement === null
+            ? 'nothing here has an acknowledgement to clear'
+            : 'nothing here is Down to acknowledge',
+          { context: { objectId: id, phase: 'acknowledge' } },
+        );
+      }
+
+      const who = flattenActor(actor);
+      const result = await states.acknowledge(q, targets, acknowledgement, who, now);
+      if (result.acknowledged.length === 0) {
+        throw new ObjectError(
+          'OBJECT_NOT_PAUSED',
+          'only a Down sensor can be acknowledged; this one is not',
+          {
+            context: { objectId: id, phase: 'acknowledge' },
+            details: { refused: result.refused },
+          },
+        );
+      }
+
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          acknowledgement === null
+            ? {
+                action: 'sensor.acknowledgementCleared',
+                objectId: id,
+                kind: object.kind,
+                sensorsAffected: result.acknowledged.length,
+              }
+            : {
+                action: 'sensor.acknowledged',
+                objectId: id,
+                kind: object.kind,
+                until: acknowledgement.acknowledgedUntil,
+                message: acknowledgement.message,
+                sensorsAffected: result.acknowledged.length,
+              },
+        ],
+        now,
+      );
+
+      return {
+        objectId: id,
+        acknowledged: result.acknowledged,
+        refused: result.refused,
+        acknowledgedAt: acknowledgement?.acknowledgedAt.toISOString() ?? null,
+        acknowledgedUntil: acknowledgement?.acknowledgedUntil?.toISOString() ?? null,
+        message: acknowledgement?.message ?? '',
+      };
+    });
   }
 
   /** Why this object is paused, and whether this is the one to resume. */

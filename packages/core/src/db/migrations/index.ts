@@ -12,6 +12,7 @@ import { migration010 } from './010-object-pause.js';
 import { migration011 } from './011-schedules.js';
 import { migration012 } from './012-maintenance-window.js';
 import { migration013 } from './013-dependencies.js';
+import { migration014 } from './014-acknowledgement.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -33,6 +34,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration011,
   migration012,
   migration013,
+  migration014,
 ];
 
 export type { Migration } from './types.js';

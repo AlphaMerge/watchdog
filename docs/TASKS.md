@@ -926,11 +926,53 @@ because each is a decision rather than a defect:
 
       Checked by mutation rather than assumed: inverting the view's parent/dependency precedence
       fails five of the twenty-five, which is the shape a real regression would have.
-- [ ] **M-13 — Acknowledgement** · M · M-02 · **`M-02` left the columns and the transitions:**
+- [x] **M-13 — Acknowledgement** · M · M-02 · **`M-02` left the columns and the transitions:**
       `acknowledged_at` / `acknowledged_until`, expiry against the result clock, and clearing on
       a recovery that a reading decided. What is missing is the API, the presets and who did it. Down (Acknowledged) state, until-options, message
       stored as last message, expiry back to Down, cleared by pause+resume, permission grantable to
       read-only users.
+
+      **M-13 outcome.** Migration 014 adds `acknowledged_by_kind` / `acknowledged_by_label`.
+      `packages/core/src/state/acknowledgement.ts` is the rules,
+      `SensorStateService.acknowledge` the write, `POST`/`DELETE /objects/:id/acknowledge` the
+      API.
+
+      **`M-02` left a hole, and this task's first test fell into it.** The machine cleared an
+      acknowledgement on recovery and on expiry — but only in the cached facts. `RuntimeWrite`
+      carried no acknowledgement field, so `writeRuntimes` never touched the columns: a sensor
+      that recovered still had `acknowledged_at` set in the database, and a cache eviction or a
+      restart brought the silenced alarm back silenced. `RuntimeWrite.acknowledged` now carries
+      it, and the write only ever *clears* — nothing about a result can create an
+      acknowledgement. Live-correct, restart-correct, and it was invisible to `M-02`'s own tests
+      because those asserted the facts the machine returned rather than the row it left behind.
+
+      **Acknowledging works on anything above a sensor.** Nobody wants to click forty times when
+      a switch fails, so acknowledging a device or a group covers every sensor beneath it that is
+      Down **at that moment** — a snapshot, not a rule. A sensor that fails an hour later is a new
+      alarm nobody has looked at, and silencing it would be the opposite of what was meant.
+      Refused when nothing beneath is Down, because §2.4 applies the layer only to `down` and an
+      acknowledgement stored anywhere else would sit silently and suppress the *next* outage.
+
+      **The message becomes the sensor's last message** (`CAPABILITIES.MD §5.3`). That needed one
+      change in `reevaluate`, which blanked the message for anything that was not a pause: it now
+      carries the operator's words whenever the operator's action is what decided the state, and
+      blanks them otherwise — the reason a sensor is Unknown after a resume is that nobody has
+      scanned it.
+
+      **A fourth way to clear one, beyond the spec.** `CAPABILITIES.MD §5.3` lists recovery,
+      expiry and pause-then-resume; all three are *events*, and none of them is "I acknowledged
+      the wrong sensor". Pause-then-resume as the only undo costs the sensor its failure count
+      and leaves it Unknown, which is a worse outcome than the mistake. `DELETE
+      /objects/:id/acknowledge` is one call on the same write path, both halves audited. Added to
+      `CAPABILITIES.MD` rather than left as an undocumented extra.
+
+      **Who, on the state read.** Two columns, deliberately absent from the batch read that
+      ingestion uses — the audit log has more detail, but an operator looking at a red sensor
+      that is not paging anybody should not have to go searching for who decided that.
+
+      Left for `A-03`: "permission grantable to read-only users". There are no accounts yet
+      (`A-01`), and every actor is still the caller's address; the route is the one place the
+      permission will attach.
 - [ ] **M-14 — Simulated error state** · S · M-02 · **`M-02` left the column and the layer:**
       `sensor_runtime.simulated_error`, evaluated below pause and above everything else. Force a sensor Down to test notification
       chains end to end.

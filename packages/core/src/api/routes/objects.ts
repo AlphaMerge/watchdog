@@ -15,7 +15,12 @@ import type {
   UpdateObjectInput,
 } from '../../objects/types.js';
 import { channelLimitsPatchSchema, channelProcessingPatchSchema } from '../schemas/objects.js';
-import { pauseRequestSchema, PAUSE_PRESETS } from '../schemas/pause.js';
+import {
+  acknowledgeRequestSchema,
+  ACK_PRESETS,
+  pauseRequestSchema,
+  PAUSE_PRESETS,
+} from '../schemas/pause.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
@@ -761,6 +766,62 @@ export async function objectRoutes(
       // Never cached: a timed pause expires on its own, with no write for a validator to move.
       void reply.header('cache-control', 'no-store');
       await reply.send(await service.pauseState(request.params.id));
+    },
+  );
+
+  // ── 11d. acknowledgement (M-13) ──────────────────────────────────────────────────────────
+
+  app.post<{
+    Params: { id: number };
+    Body: { minutes?: number; until?: string; message?: string };
+  }>(
+    '/objects/:id/acknowledge',
+    {
+      schema: {
+        description:
+          'Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications stop, ' +
+          'and monitoring carries on exactly as before. Give `minutes` for a duration, `until` ' +
+          'for a moment, or neither to acknowledge indefinitely. ' +
+          `A UI offers ${ACK_PRESETS.join(', ')} minutes as presets. ` +
+          'On a device or a group this acknowledges every sensor beneath it that is Down **at ' +
+          'this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm. ' +
+          'The message becomes the sensor’s last message. It clears on recovery, on expiry, on ' +
+          'pause-then-resume, or by DELETE.',
+        params: idParams,
+        body: acknowledgeRequestSchema,
+        response: { 200: { $ref: 'ms:acknowledgementView' } },
+      },
+    },
+    async (request, reply) => {
+      const { minutes, until, message } = request.body;
+      const acknowledgement =
+        minutes !== undefined
+          ? ({ kind: 'duration', minutes } as const)
+          : until !== undefined
+            ? ({ kind: 'until', until: new Date(until) } as const)
+            : ({ kind: 'indefinite' } as const);
+
+      await reply.send(
+        await service.acknowledge(actorFor(request), request.params.id, acknowledgement, message),
+      );
+    },
+  );
+
+  app.delete<{ Params: { id: number } }>(
+    '/objects/:id/acknowledge',
+    {
+      schema: {
+        description:
+          'Withdraws an acknowledgement, so the alarm reads Down again and notifications ' +
+          'resume. The three things that clear one on their own — recovery, expiry and ' +
+          'pause-then-resume — are all events; this is the one for "I acknowledged the wrong ' +
+          'sensor".',
+        params: idParams,
+        response: { 200: { $ref: 'ms:acknowledgementView' } },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(await service.clearAcknowledgement(actorFor(request), request.params.id));
     },
   );
 

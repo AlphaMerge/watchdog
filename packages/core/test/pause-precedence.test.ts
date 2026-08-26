@@ -190,6 +190,7 @@ describe(
             message: '',
             since: OUTSIDE,
             consecutiveFailures: 0,
+            acknowledged: false,
           },
         ],
       });

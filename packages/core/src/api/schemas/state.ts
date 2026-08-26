@@ -14,6 +14,7 @@ export const sensorStateSchema = {
     'consecutiveFailures',
     'pausedBy',
     'acknowledged',
+    'acknowledgedBy',
     'simulatedError',
   ],
   properties: {
@@ -35,6 +36,13 @@ export const sensorStateSchema = {
     pausedBy: { type: 'array', items: { enum: PAUSE_SOURCES } },
     acknowledged: { type: 'boolean' },
     acknowledgedUntil: { type: ['string', 'null'] },
+    /** Who acknowledged it (`M-13`). No secret can occupy either field. */
+    acknowledgedBy: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['kind', 'label'],
+      properties: { kind: { type: 'string' }, label: { type: ['string', 'null'] } },
+    },
     simulatedError: { type: 'boolean' },
   },
 } as const;

@@ -1,4 +1,5 @@
 import { PAUSE_PRESET_MINUTES, MAX_PAUSE_MINUTES } from '../../state/pause.js';
+import { ACK_PRESET_MINUTES, MAX_ACK_MINUTES } from '../../state/acknowledgement.js';
 
 /**
  * Why an object is paused (`M-08`).
@@ -108,5 +109,48 @@ export const pauseRequestSchema = {
   dependencies: { from: ['until'] },
 } as const;
 
+/**
+ * How long to acknowledge for (`M-13`).
+ *
+ * The same shape as a pause request minus the window: an acknowledgement is about an outage that
+ * is happening now, so there is nothing to schedule.
+ */
+export const acknowledgeRequestSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    minutes: { type: 'integer', minimum: 1, maximum: MAX_ACK_MINUTES },
+    until: { type: 'string', minLength: 1, maxLength: 64 },
+    message: { type: 'string', maxLength: 500 },
+  },
+  not: { required: ['minutes', 'until'] },
+} as const;
+
+export const acknowledgementViewSchema = {
+  $id: 'ms:acknowledgementView',
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'objectId',
+    'acknowledged',
+    'refused',
+    'acknowledgedAt',
+    'acknowledgedUntil',
+    'message',
+  ],
+  properties: {
+    objectId: { type: 'integer' },
+    /** The sensors this acted on. Acknowledging a device covers what is Down beneath it. */
+    acknowledged: { type: 'array', items: { type: 'integer' } },
+    /** Sensors that were not Down, and so will still alarm. */
+    refused: { type: 'array', items: { type: 'integer' } },
+    acknowledgedAt: { type: ['string', 'null'] },
+    /** `null` is indefinite — until it recovers, or somebody clears it. */
+    acknowledgedUntil: { type: ['string', 'null'] },
+    message: { type: 'string' },
+  },
+} as const;
+
 export const PAUSE_PRESETS = PAUSE_PRESET_MINUTES;
-export const PAUSE_SCHEMAS = [pauseViewSchema];
+export const ACK_PRESETS = ACK_PRESET_MINUTES;
+export const PAUSE_SCHEMAS = [pauseViewSchema, acknowledgementViewSchema];

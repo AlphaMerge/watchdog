@@ -357,6 +357,7 @@ Template features:
 | Acknowledgement message stored as the sensor's last message                      | `[V1]` |
 | Expiry reverts to plain Down and notifications resume                            | `[V1]` |
 | Pause-then-resume clears the acknowledgement                                     | `[V1]` |
+| Withdraw an acknowledgement directly, for the one it was applied to by mistake   | `[V1]` |
 | Permission to acknowledge grantable to read-only users                           | `[V1]` |
 
 ---

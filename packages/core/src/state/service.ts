@@ -24,8 +24,10 @@ import {
   type FailurePolicy,
 } from './machine.js';
 import type { ChannelOutcome } from './limits.js';
+import { canAcknowledge, type ResolvedAcknowledgement } from './acknowledgement.js';
 import {
   loadRuntimes,
+  writeAcknowledgements,
   writeStateChanges,
   writeStateHistory,
   type RuntimeWrite,
@@ -276,6 +278,10 @@ export class SensorStateService {
         since: runtime.since,
         consecutiveFailures:
           runtime.facts.scan.kind === 'failed' ? runtime.facts.scan.consecutiveFailures : 0,
+        // Carried to the row rather than left in the cache: the machine clears an
+        // acknowledgement on recovery and on expiry, and a clearing that only ever happened in
+        // memory would come back the moment the cache went cold (`M-13`).
+        acknowledged: runtime.facts.acknowledged,
       });
     }
 
@@ -340,9 +346,12 @@ export class SensorStateService {
 
       if (decision.state === runtime.state && decision.cause === runtime.cause) continue;
 
-      // The operator's words on the way in; nothing to say on the way out, because the reason a
-      // sensor is Unknown after a resume is that nobody has scanned it yet.
-      const message = decision.state === 'paused' ? cause.message : '';
+      // The operator's words when the operator's action is what decided the state — a pause or
+      // an acknowledgement — and nothing on the way out, because the reason a sensor is Unknown
+      // after a resume is that nobody has scanned it yet. `CAPABILITIES.MD §5.3` requires the
+      // acknowledgement message to become the sensor's last message, and this is where it does.
+      const message =
+        decision.state === 'paused' || decision.state === 'down_acknowledged' ? cause.message : '';
       transitions.push({
         sensorId,
         at,
@@ -370,6 +379,66 @@ export class SensorStateService {
     this.#transitions += transitions.length;
     this.#reevaluations += transitions.length;
     return transitions.length;
+  }
+
+  /**
+   * Acknowledges an alarm, or clears an acknowledgement (`M-13`).
+   *
+   * Two writes in one transaction, in this order: the columns §2.4 reads, then the state they
+   * imply. It cannot be one write, because the machine is what turns a computed `down` into
+   * `down_acknowledged` and it has to see the fact before it can be asked about it.
+   *
+   * Refuses anything that is not Down. §2.4 applies the layer only to `down`, so an
+   * acknowledgement stored on an Up sensor would sit there silently and suppress the *next*
+   * outage — the opposite of what the operator meant, and invisible until it happened.
+   */
+  async acknowledge(
+    q: Queryable,
+    sensorIds: readonly number[],
+    acknowledgement: ResolvedAcknowledgement | null,
+    actor: { kind: string; label: string | null },
+    at: Date,
+  ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }> {
+    if (sensorIds.length === 0) return { acknowledged: [], refused: [], transitions: 0 };
+
+    const runtimes = await loadRuntimes(q, sensorIds);
+    const acknowledged: number[] = [];
+    const refused: number[] = [];
+    for (const sensorId of sensorIds) {
+      const runtime = runtimes.get(sensorId);
+      if (runtime === undefined) {
+        refused.push(sensorId);
+        continue;
+      }
+      // Clearing is allowed from any state: an acknowledgement on a sensor that has since been
+      // paused is still an acknowledgement somebody may want to withdraw.
+      if (acknowledgement !== null && !canAcknowledge(runtime.state)) {
+        refused.push(sensorId);
+        continue;
+      }
+      acknowledged.push(sensorId);
+    }
+    if (acknowledged.length === 0) return { acknowledged, refused, transitions: 0 };
+
+    await writeAcknowledgements(
+      q,
+      acknowledged.map((sensorId) => ({
+        sensorId,
+        acknowledgedAt: acknowledgement?.acknowledgedAt ?? null,
+        acknowledgedUntil: acknowledgement?.acknowledgedUntil ?? null,
+        actorKind: acknowledgement === null ? null : actor.kind,
+        actorLabel: acknowledgement === null ? null : actor.label,
+      })),
+    );
+    // The cache holds the pre-acknowledgement facts, and `reevaluate` reads through `q` rather
+    // than through it — but the entries have to go, or the next result would decide against
+    // facts that are one write out of date.
+    for (const sensorId of acknowledged) this.#cache.delete(sensorId);
+
+    const transitions = await this.reevaluate(q, acknowledged, at, {
+      message: acknowledgement?.message ?? '',
+    });
+    return { acknowledged, refused, transitions };
   }
 
   /**

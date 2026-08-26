@@ -71,7 +71,7 @@ function toStored(row: PauseRow): StoredPause {
 export class PauseRepository {
   /** Writes or replaces an object's pause. Replacing is extending a maintenance window. */
   async pause(q: Queryable, objectId: ObjectId, pause: ResolvedPause, actor: Actor): Promise<void> {
-    const who = flatten(actor);
+    const who = flattenActor(actor);
     await q.query(
       `INSERT INTO object_pause
          (object_id, paused_at, starts_at, paused_until, message,
@@ -313,7 +313,17 @@ export class PauseRepository {
   }
 }
 
-function flatten(actor: Actor): { kind: string; ref: string | null; label: string | null } {
+/**
+ * An actor as the storage layer records it: kind, a reference, and something readable.
+ *
+ * Exported because `M-13` records the same three fields on an acknowledgement, and two
+ * flattenings of one union would eventually disagree about what a token's label is.
+ */
+export function flattenActor(actor: Actor): {
+  kind: string;
+  ref: string | null;
+  label: string | null;
+} {
   switch (actor.kind) {
     case 'user':
       return { kind: 'user', ref: String(actor.userId), label: actor.login };

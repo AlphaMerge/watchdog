@@ -339,6 +339,26 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: 'paused', before: true, after: false }],
       };
 
+    case 'sensor.acknowledged':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: {
+          until: mutation.until?.toISOString() ?? null,
+          message: mutation.message,
+          sensorsAffected: mutation.sensorsAffected,
+        },
+        diff: [{ field: 'acknowledged', before: false, after: true }],
+      };
+
+    case 'sensor.acknowledgementCleared':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { sensorsAffected: mutation.sensorsAffected },
+        diff: [{ field: 'acknowledged', before: true, after: false }],
+      };
+
     case 'channel.processing.set':
       return {
         ...base,
