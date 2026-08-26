@@ -158,6 +158,25 @@ describe('layered evaluation', () => {
       expect: { state: 'down', cause: 'simulated' },
     },
     {
+      // `N-17`. A forced error exists to rehearse a notification chain end to end, and
+      // acknowledging is the step in that chain an operator most wants to be sure of.
+      name: 'a simulated error can be acknowledged, because that is what it is for',
+      facts: facts({ simulatedError: true, acknowledged: true }),
+      expect: { state: 'down_acknowledged', cause: 'user' },
+    },
+    {
+      // It short-circuits layers 3 to 5 exactly as before: only the acknowledgement is applied.
+      name: 'an acknowledged simulated error still ignores the probe and the readings',
+      facts: facts({
+        simulatedError: true,
+        acknowledged: true,
+        probeReachable: false,
+        scan: { kind: 'ok' },
+        channel: CHANNELS_CLEAR,
+      }),
+      expect: { state: 'down_acknowledged', cause: 'user' },
+    },
+    {
       name: 'a successful scan within limits is up',
       facts: facts({ scan: { kind: 'ok' }, channel: CHANNELS_CLEAR }),
       expect: { state: 'up', cause: 'scan' },
@@ -315,6 +334,35 @@ describe('acknowledgement', () => {
     assert.equal(before.decision.state, 'down_acknowledged', 'still inside the window');
     const at = applyResult(acknowledged, { ...failed, at: later(5) });
     assert.equal(at.decision.state, 'down', 'and lapsed exactly on it');
+  });
+
+  it('suppresses a simulated error too, and reports it lapsing as the operator’s', () => {
+    // `N-17`. The acknowledgement was genuinely suppressing that Down, so its lapsing is a
+    // change an operator can see — which is what `user` names. Before `N-17` the sensor stayed
+    // plainly `down` throughout and there was nothing to lapse.
+    const forced: SensorFacts = {
+      ...acknowledgedDown(later(5)),
+      simulatedError: true,
+    };
+    assert.deepEqual(evaluate(forced), { state: 'down_acknowledged', cause: 'user' });
+
+    const applied = applyResult(forced, { ...ok, at: later(6) });
+    assert.deepEqual(
+      applied.decision,
+      { state: 'down', cause: 'user' },
+      'the suppression ended; the forced outage did not',
+    );
+    assert.equal(applied.facts.acknowledged, false);
+  });
+
+  it('is not cleared by recovery while a simulated error still stands', () => {
+    // A successful scan under a forced error is not a recovery from anything: the sensor is
+    // Down because an operator said so, and clearing the acknowledgement would un-suppress a
+    // rehearsal that is still running.
+    const forced: SensorFacts = { ...acknowledgedDown(null), simulatedError: true };
+    const applied = applyResult(forced, { ...ok, at: later(10) });
+    assert.equal(applied.decision.state, 'down_acknowledged');
+    assert.equal(applied.facts.acknowledged, true);
   });
 
   it('is not cleared by a lost probe, which is not recovery', () => {

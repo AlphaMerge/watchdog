@@ -176,7 +176,17 @@ export function evaluate(
   if (paused !== null) return { state: 'paused', cause: paused };
 
   // 2. A forced error, for testing a notification chain (M-14).
-  if (facts.simulatedError) return { state: 'down', cause: 'simulated' };
+  //
+  //    Acknowledgeable, and that is `N-17`'s decision. The purpose of a simulated error is to
+  //    rehearse a notification chain end to end, and acknowledging is a step in that chain —
+  //    the one an operator most wants to be sure of, because it is what stops the repeats at
+  //    three in the morning. Layer 2 says "behave as though this were down"; `down_acknowledged`
+  //    is how a Down behaves once somebody has acknowledged it, so refusing it here would make
+  //    the rehearsal unfaithful at exactly the step worth rehearsing.
+  //
+  //    It still short-circuits layers 3 to 5: a forced outage ignores the probe and the
+  //    readings. Only the acknowledgement layer is applied.
+  if (facts.simulatedError) return acknowledged({ state: 'down', cause: 'simulated' }, facts);
 
   // 3. A lost probe is Unknown, never Down: we do not know whether the target is up, and saying
   //    Down would be a claim the system cannot support (WORKFLOW.MD §12). The one alarm comes
@@ -195,10 +205,20 @@ export function evaluate(
 
   // 6. Acknowledgement is applied last and only to Down. Suppressing notifications is all it
   //    does; the sensor keeps scanning and its readings keep being stored.
-  if (combined.state === 'down' && facts.acknowledged) {
-    return { state: 'down_acknowledged', cause: 'user' };
-  }
-  return combined;
+  return acknowledged(combined, facts);
+}
+
+/**
+ * §2.4 — the acknowledgement layer, in one place because two layers reach it.
+ *
+ * Layer 5 arrives here with a reading's verdict and layer 2 with a forced one (`N-17`). One
+ * function rather than two copies of the rule: a second copy is how "acknowledging works, except
+ * on the path nobody tested" happens.
+ */
+function acknowledged(verdict: Verdict, facts: StateFacts): Decision {
+  return verdict.state === 'down' && facts.acknowledged
+    ? { state: 'down_acknowledged', cause: 'user' }
+    : verdict;
 }
 
 /** What the machine carries between results. The persisted half of it is `sensor_runtime`. */
@@ -283,30 +303,25 @@ export function applyResult(
 
   const evaluated = evaluate(next, policy);
 
-  // Whether this reading is what decided the state at all. Layers 1 to 3 of §2 short-circuit
-  // above it, and two rules below both turn on the difference.
-  const decidedByReading = !isPaused(next.pause) && !next.simulatedError && next.probeReachable;
-
   // An acknowledgement that has just lapsed reports `user`, not `scan`. The target being down
   // is not news — the sensor was already Down (Acknowledged); what changed, and what an
   // operator has to see, is that the suppression ended.
   //
-  // Two conditions on that, both found by `M-16`'s table property and both the same mistake:
-  // the override was claiming to explain a change nobody could have seen.
+  // Two conditions, and between them they are `M-16`'s lesson: the override must not claim to
+  // explain a change nobody could have seen.
   //
-  // The suppression has to have been *in effect*, which is what §2.4's "the sensor was already
-  // Down (Acknowledged)" means. An acknowledgement sitting on a sensor that read Unknown —
-  // because its probe was away, or because the Down it was made against came from a simulated
-  // error that has since been lifted — silenced nothing, so its lapsing ends nothing.
+  // The suppression has to have been *in effect* — §2.4's "the sensor was already Down
+  // (Acknowledged)". An acknowledgement sitting on a sensor that read Unknown silenced nothing,
+  // so its lapsing ends nothing.
   //
-  // And this reading has to be what decided the state. A sensor held Down by a simulated error
-  // is Down for that reason, and `M-14` promises a forced outage is never mistakable for
-  // anything else.
+  // And the sensor has to be visibly Down now, which is also what excludes the layers that
+  // short-circuit above the reading: a paused sensor evaluates to `paused` and one whose probe
+  // is away to `unknown`, so neither reaches this. A sensor held Down by a *simulated* error
+  // does reach it, and should: since `N-17` the acknowledgement was genuinely suppressing that
+  // Down, so its lapsing is exactly the change `user` names.
   const wasSuppressed = expired && evaluate(facts, policy).state === 'down_acknowledged';
   const decision: Decision =
-    wasSuppressed && decidedByReading && evaluated.state === 'down'
-      ? { state: 'down', cause: 'user' }
-      : evaluated;
+    wasSuppressed && evaluated.state === 'down' ? { state: 'down', cause: 'user' } : evaluated;
 
   return { facts: clearedByRecovery(next, decision), decision };
 }

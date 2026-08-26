@@ -420,6 +420,47 @@ describe(
       );
     });
 
+    it('lets an operator rehearse the whole chain against a simulated error', async () => {
+      // `M-14`'s own purpose, and `N-17`'s reason for existing: "test a notification chain end
+      // to end". Before `N-17` the acknowledgement was accepted, recorded and ignored, so the
+      // one step an operator most wants to rehearse — does acknowledging really stop the
+      // repeats? — was the one step that could not be rehearsed.
+      await downTrigger(deviceId, {
+        escalationLatencySeconds: 600,
+        escalationTemplateId: ESCALATION,
+        repeatMinutes: 5,
+        recoveryTemplateId: RECOVERY,
+      });
+
+      // On a sensor that is actually working, which is the realistic flow and the one that can
+      // finish: lifting the force on a sensor nothing has ever scanned leaves it Unknown, and
+      // Unknown is not a recovery — the system does not know the target is fine.
+      await scan([sensorId], true, T0);
+
+      // Against the real clock, not `T0`: `simulateError` and `acknowledge` are the calls that
+      // take no timestamp, because production has no synthetic clock and they stamp `new Date()`.
+      await h.service.simulateError(testActor, sensorId, true, 'rehearsal');
+      const forcedAt = Date.now();
+      const after = (seconds: number): Date => new Date(forcedAt + seconds * 1000);
+
+      assert.equal(await sweep(after(1)), 1, 'the forced outage armed and fired');
+
+      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'rehearsing');
+      const [held] = await standing();
+      assert.ok(held !== undefined, 'the alarm still stands');
+      assert.equal(held.suppressed, true, 'and is suppressed, exactly as a real one would be');
+      assert.equal(await sweep(after(700)), 0, 'so the escalation never comes');
+      assert.equal(await sweep(after(4_000)), 0, 'nor any repeat');
+
+      // Lifting the force is the recovery, the same way a successful scan would be.
+      await h.service.simulateError(testActor, sensorId, false);
+      assert.deepEqual(
+        (await queued()).map((request) => request.reason),
+        ['initial', 'recovery'],
+        'and the recovery still fires — the whole chain, without breaking anything real',
+      );
+    });
+
     // ---------------------------------------------------------------------------------------
     // Configuration changes.
     // ---------------------------------------------------------------------------------------

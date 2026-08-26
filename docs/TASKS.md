@@ -2011,7 +2011,7 @@ because each is a decision rather than a defect:
       **breaks outright on pg@9**. A transaction is one client and therefore one wire, so the
       `Promise.all` bought no parallelism at all; it is now three awaits. The deprecation is gone
       from the whole core suite.
-- [ ] **N-17 — Acknowledging a simulated error does nothing** · S · M-14, N-02 · `evaluate`
+- [x] **N-17 — Acknowledging a simulated error does nothing** · S · M-14, N-02 · `evaluate`
       returns at layer 2 for a simulated error, so acknowledgement — layer 6 — never runs. The
       API accepts the acknowledgement, records it, and the sensor stays `down` with cause
       `simulated`, which makes `M-14`'s own purpose ("test a notification chain end to end")
@@ -2019,6 +2019,43 @@ because each is a decision rather than a defect:
       Decide whether a simulated error should be acknowledgeable (a layer-2 result that still
       falls through to layer 6), or whether the API should refuse the acknowledgement and say
       why. Either way `docs/state-machine.md §2` and `M-01`'s tables move with it.
+
+      **N-17 outcome: acknowledgeable.** `docs/state-machine.md §2` and `§2.4` and `M-01`'s
+      transition table have moved with it.
+
+      **The decision, and the argument that settles it.** Layer 2 says *behave as though this were
+      down*. `down_acknowledged` is how a Down behaves once somebody has acknowledged it, so
+      refusing the acknowledgement made the simulation unfaithful at exactly the step worth
+      rehearsing — "does acknowledging really stop the repeats at three in the morning" is the
+      question an operator wants answered before the night it matters. The alternative the ticket
+      offered, having the API refuse and say why, would have left `M-14` unable to complete its
+      own stated purpose and put a special case on a route that otherwise treats every Down alike.
+
+      **What did *not* change.** Layer 1 still beats it: a pause is an instruction to stop
+      monitoring, and a paused sensor is nobody's alarm. It still short-circuits layers 3 to 5 — a
+      forced outage ignores the probe and the readings. Only §2.4 is now applied to it, through a
+      helper both layers call, because a second copy of the rule is how "acknowledging works,
+      except on the path nobody tested" happens.
+
+      **One new transition and one simplification.** `down_acknowledged → down` gained the cause
+      `simulated`, for withdrawing an acknowledgement while the force still stands: the sensor is
+      Down for that reason and no other, and `M-14` promises a forced outage says so. And the
+      expiry override in `applyResult` lost its `decidedByReading` guard, which turned out to be
+      redundant *and* now wrong — `evaluated.state === 'down'` already excludes a paused sensor
+      (`paused`) and one whose probe is away (`unknown`), and a simulated Down should reach it,
+      because since this change the acknowledgement really was suppressing something.
+
+      **`M-16`'s carve-out was revisited rather than left standing.** §2.4 said an acknowledgement
+      lapsing on "one held Down by a simulated error ended nothing an operator could see". That
+      was true when the acknowledgement did nothing there; it is not true now, so the clause is
+      gone and the reasoning is written down in its place.
+
+      Verified live, and the state log reads as the rehearsal it is meant to be: `down/simulated`
+      → `down_acknowledged/user` → withdrawn back to `down/simulated` → acknowledged again →
+      force lifted → `up/scan` with the acknowledgement cleared. And in
+      `notification-engine.test.ts`, the whole chain: the forced outage fires its initial
+      notification, acknowledging suppresses the escalation *and* the repeats, and lifting the
+      force fires the recovery — which is `M-14`'s purpose, finally completable.
 - [x] **N-16 — Per-object trigger inheritance toggle** · S · N-01 · PRTG lets an object opt out
       of its ancestors' notification triggers entirely. `N-01` deliberately did not build it: it
       is not in `CAPABILITIES.MD`, and a trigger can already be switched off where it is defined.

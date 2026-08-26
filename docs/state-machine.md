@@ -60,7 +60,7 @@ eye. Evaluated **in this order**, first match wins:
 | # | Condition                             | Result              | Cause                            |
 | - | ------------------------------------- | ------------------- | -------------------------------- |
 | 1 | Any pause source active               | `paused`            | the first active source (§3)     |
-| 2 | Simulated error set (`M-14`)          | `down`              | `simulated`                      |
+| 2 | Simulated error set (`M-14`)          | `down` → §2.4       | `simulated`                      |
 | 3 | Owning probe unreachable              | `unknown`           | `probe`                          |
 | 4 | No reading since creation or resume   | `unknown`           | `scan`                           |
 | 5 | Otherwise                             | worst of §2.1, §2.2 | whichever produced the worst     |
@@ -69,6 +69,18 @@ eye. Evaluated **in this order**, first match wins:
 instruction to stop monitoring, and a paused sensor that reported Down because its probe went
 away would be an alarm from something an operator switched off. *Decided here* — `WORKFLOW.MD`
 does not order pause against probe loss.
+
+**A simulated error is acknowledgeable, and nothing else about layer 2 changes.** It still
+short-circuits layers 3 to 5 — a forced outage ignores the probe and the readings — but its
+verdict then goes through §2.4 exactly as a real `down` does, so an acknowledged one reads
+`down_acknowledged` with cause `user`. *Decided by `N-17`.* The reason is `M-14`'s own purpose:
+a simulated error exists to rehearse a notification chain end to end, and acknowledging is the
+step in that chain an operator most wants to be sure of, because it is what stops the repeats at
+three in the morning. Layer 2 says "behave as though this were down"; `down_acknowledged` is how
+a Down behaves once somebody has acknowledged it, so refusing it would have made the rehearsal
+unfaithful at exactly the step worth rehearsing. Withdrawing the acknowledgement while the force
+still stands returns the sensor to `down` with cause `simulated` — it is Down for that reason and
+for no other, and `M-14` promises a forced outage says so.
 
 **A lost probe is `unknown`, not `down`.** `WORKFLOW.MD §12` is explicit: we do not know whether
 the target is up, and saying Down would be a claim the system cannot support. One alarm comes
@@ -241,10 +253,14 @@ Applied last, and only to `down`:
   healthy sensor, where it silenced the next genuine failure.
 - On expiry while still failing, the state returns to `down` with cause `user` — the change an
   operator needs to see is that the acknowledgement lapsed, not that the target is still down.
-  *Decided here.* Only when the suppression was actually in effect and the reading decided the
-  state: an acknowledgement lapsing on a sensor that read Unknown, or one held Down by a
-  simulated error, ended nothing an operator could see, and naming `user` there would put the
-  wrong cause on a state whose whole purpose is to be unmistakable (`M-16`).
+  *Decided here.* Only when the suppression was actually in effect **and the sensor is visibly
+  `down` now**: an acknowledgement lapsing on a sensor that read Unknown ended nothing an operator
+  could see, and naming `user` there would put the wrong cause on a state whose whole purpose is
+  to be unmistakable (`M-16`). The second condition is also what excludes the layers that
+  short-circuit above the reading — a paused sensor evaluates to `paused` and one whose probe is
+  away to `unknown`, so neither reaches the override. A sensor held Down by a *simulated* error
+  does reach it, and should: since `N-17` the acknowledgement was genuinely suppressing that
+  Down, so its lapsing is exactly the change `user` names.
 - **"Recovery" means a reading decided the state.** Layers 1 to 3 short-circuit before the
   reading is looked at, so a sensor that reads `unknown` because its probe went away has not
   recovered from anything, and clearing the acknowledgement there would un-suppress an outage

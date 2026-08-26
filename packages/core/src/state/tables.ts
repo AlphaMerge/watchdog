@@ -198,10 +198,12 @@ export const TRANSITIONS: readonly Transition[] = [
     // `user` when the acknowledgement lapsed — the change an operator has to see is that the
     // suppression ended, not that the target is still down. The reading's own cause when it was
     // *withdrawn* (`M-13`), because then nothing about the outage changed and naming `user`
-    // would claim the operator caused the Down rather than un-silenced it.
+    // would claim the operator caused the Down rather than un-silenced it. `simulated` when the
+    // withdrawal happened while a forced error was standing (`N-17`): the sensor is Down for
+    // that reason and for no other, and `M-14` promises a forced outage says so.
     from: 'down_acknowledged',
     to: 'down',
-    causes: ['user', 'scan', 'limit', 'lookup'],
+    causes: ['user', 'scan', 'limit', 'lookup', 'simulated'],
     trigger: 'the acknowledgement expired or was withdrawn while the sensor was still failing',
   },
   {
