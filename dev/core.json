@@ -33,5 +33,34 @@
     "accessKeys": ["dev-access-key"],
     "handshakeTimeoutMs": 10000,
     "heartbeatIntervalMs": 2000
+  },
+  "notifications": {
+    "publicUrl": "http://127.0.0.1:8080",
+    "siteName": "Dev installation",
+    "smtp": {
+      "sender": "monitoring@dev.test",
+      "primary": {
+        "host": "mailhog",
+        "port": 1025,
+        "security": "none",
+        "verifyCertificate": true,
+        "auth": "none",
+        "user": "",
+        "password": "",
+        "heloName": "ms-core.dev",
+        "timeoutMs": 5000
+      },
+      "fallback": {
+        "host": "",
+        "port": 0,
+        "security": "starttls",
+        "verifyCertificate": true,
+        "auth": "none",
+        "user": "",
+        "password": "",
+        "heloName": "",
+        "timeoutMs": 20000
+      }
+    }
   }
 }

@@ -29,6 +29,9 @@ import { AlarmEngine } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
 import { MessageContextLoader } from './notifications/context.js';
+import { EmailTransport } from './notifications/delivery/email.js';
+import { NotificationDispatcher } from './notifications/dispatcher.js';
+import { DeliveryLoop } from './notifications/delivery/loop.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
@@ -195,10 +198,16 @@ async function serve(): Promise<void> {
   // moment the scheduler exists. A scheduler that sleeps until the next due time has to be told
   // when something arms an alarm with a nearer one (N-04).
   const wakeAlarms = { poke: (): void => {} };
+  // The same arrangement for delivery: the engine queues a notification and the loop that sends
+  // it is built later, so the reference is filled in the moment it exists (N-07).
+  const wakeDelivery = { poke: (): void => {} };
   const alarms = new AlarmEngine({
     logger,
     onArmed: () => {
       wakeAlarms.poke();
+    },
+    onQueued: () => {
+      wakeDelivery.poke();
     },
   });
   const states = new SensorStateService({ db, logger, settings: resolver, alarms });
@@ -356,6 +365,35 @@ async function serve(): Promise<void> {
     run: () => {
       alarmScheduler.stop();
       return Promise.resolve();
+    },
+  });
+
+  // What turns a queued obligation into a message somebody receives (N-07). Email is the only
+  // transport so far; N-08 to N-10 add the rest, and a method with no transport leaves its
+  // requests queued rather than failing them.
+  const email = new EmailTransport({ config: config.notifications.smtp, logger });
+  if (!email.configured) {
+    logger.warn(
+      'no SMTP relay is configured; email notifications will queue and fail until one is set',
+    );
+  }
+  const dispatcher = new NotificationDispatcher({
+    db,
+    logger,
+    contexts: messageContexts,
+    transports: [email],
+  });
+  const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
+  wakeDelivery.poke = () => {
+    deliveryLoop.wake();
+  };
+  deliveryLoop.start();
+  lifecycle.onShutdown({
+    name: 'notification-delivery',
+    timeoutMs: 5_000,
+    run: async () => {
+      deliveryLoop.stop();
+      await dispatcher.close();
     },
   });
 

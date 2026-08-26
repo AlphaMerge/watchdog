@@ -1494,8 +1494,78 @@ because each is a decision rather than a defect:
       time in a comment reading `` `device_config` `` — ended the string and produced
       `ReferenceError: device_config is not defined` from a line that looked like SQL. The
       memory note about it exists precisely because the error never points at the backtick.
-- [ ] **N-07 — Email delivery** · L · N-05 · SMTP relay with port, auth (none/SMTP/SASL), TLS
+- [x] **N-07 — Email delivery** · L · N-05 · SMTP relay with port, auth (none/SMTP/SASL), TLS
       negotiation, sender and HELO override, primary + fallback relay. HTML and plain bodies.
+
+      **N-07 outcome.** Four pieces: migration `019` records what happened to a queued
+      notification, `NotificationDispatcher` turns obligations into messages, `EmailTransport`
+      sends them, and `DeliveryLoop` decides when. Verified against MailHog — a real ESMTP
+      conversation, not a stub agreeing with itself — and end to end against the running service:
+      a forced Down produced a delivered email **in the same second**, first attempt.
+
+      **`nodemailer` for the SMTP itself**, per `ADR-001` Decision 6, which named it and rated the
+      ecosystem alive. An ESMTP client with STARTTLS, four SASL mechanisms, MIME encoding and
+      dot-stuffing is a great deal of well-trodden protocol to get subtly wrong, and unlike
+      syslog or NetFlow this is not a gap we have to fill ourselves. Version **9**, not the 7 that
+      `npm install nodemailer` first resolved to: that one carries six high-severity advisories,
+      three of them CRLF injection into headers.
+
+      **Which is why headers are sanitised here as well.** A subject is built from a sensor's name
+      and a probe's own message, and neither is under this system's control — a check reporting
+      `ETIMEDOUT\r\nBcc: someone@else` would otherwise be writing headers. Nodemailer encodes
+      them properly and has still had three advisories against separate fields, which is the
+      argument for doing it *as well as* rather than *instead of*. One regex, applied to the
+      subject, the sender, every address and the HELO name.
+
+      **Claim, render, send, record — and the order is the design.** The claim is a short
+      transaction that increments the attempt count and pushes the next attempt into the future
+      *before* anything is sent; the send is not in a transaction at all. The alternative puts a
+      relay's timeout in charge of a database connection and holds a row lock for the length of
+      it. That makes delivery **at-least-once**, deliberately: a crash between the send and the
+      record sends the message again. For an alarm system that is the right way round — a
+      duplicate alarm is an annoyance, a lost one is the failure the whole subsystem exists to
+      prevent — and the attempt count is on the row, so a duplicate is explainable.
+
+      **Primary then fallback.** Paessler's own advice is two delivery paths per trigger; this is
+      the cheaper half, and one relay going down must not silence an installation. When they all
+      fail, every relay's reason is recorded rather than the last: "primary refused the address,
+      fallback timed out" is a diagnosis, and "timed out" alone sends somebody to the wrong
+      machine. Retryable if *any* relay might work later — one permanent rejection does not make
+      the whole thing permanent.
+
+      **SMTP already classifies failures**, which is why the protocol has two failure classes: a
+      4xx is "not now" and a 5xx is "not ever". A connection error with no code is transient far
+      more often than not. Trying a permanently rejected address for ever is how a queue fills
+      with something nobody will receive; giving up on a timeout is how an outage goes unreported
+      because the network hiccuped.
+
+      **What is *not* failed.** A method with no transport yet (`N-08` to `N-10`) and a template
+      switched off both leave their requests queued and counted, not failed — marking them
+      undeliverable would throw away real obligations, and `CAPABILITIES.MD §5.2`'s activation
+      schedules make "collect and send when reactivated" a first-class choice (`N-12`). A request
+      whose template is *gone* does fail, with a reason: migration `018` deliberately allowed a
+      trigger to name a template that does not exist, and this is where an operator finds out.
+
+      **`DeliveryLoop`, not `AlarmScheduler`.** The temptation was to reuse `N-04`'s waiting
+      machinery, and the shapes are genuinely different: that one sleeps until a due time it reads
+      from a table and runs its sweep *inside* a transaction. Delivery has no due times of its own
+      — a notification becomes deliverable the moment something queues it — and an SMTP
+      conversation inside a transaction is the thing the dispatcher exists to avoid. What it does
+      reuse is the pattern: sleep long, be woken by the engine that queued the work, treat the
+      sleep as a safety net rather than a schedule.
+
+      **Configuration, not an API resource.** The relay holds a password, is set once per
+      installation by whoever runs the service, and a file the operating system protects is a
+      better place for a credential than a table any administrator can read. It also means
+      `MS_NOTIFICATIONS__SMTP__PRIMARY__PASSWORD__FROM_FILE` works out of the box, which is how
+      systemd's `LoadCredential=` and Docker secrets deliver one without putting it in the
+      environment. `bootstrap` logs the config *path* and never the config, so nothing leaks into
+      the journal.
+
+      **Left for `N-13`.** The retry delay is flat and the attempt bound is a constant — the
+      honest placeholder for a backoff policy, rather than a policy pretending to be one. Failures
+      are logged at `error` because `WORKFLOW.MD §6` says a delivery failure is itself an alarm;
+      putting that on Core Health is `N-13`'s half.
 - [ ] **N-08 — HTTP action / webhook delivery** · M · N-05 · Method, URL, headers, templated
       body, timeout, TLS options, SSRF guard.
 - [ ] **N-09 — Slack and Teams delivery** · M · N-08 · Formatted messages with status colour and

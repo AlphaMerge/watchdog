@@ -12,6 +12,8 @@ export type {
   LogLevel,
   ProbeConfig,
   ServiceConfig,
+  SmtpConfig,
+  SmtpRelay,
   TlsConfig,
 } from './config/schema.js';
 

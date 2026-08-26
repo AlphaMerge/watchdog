@@ -128,6 +128,62 @@ export interface IngestionConfig {
   };
 }
 
+/**
+ * One SMTP relay (`N-07`, `CAPABILITIES.MD §5.2`).
+ *
+ * Configuration rather than an API resource, and deliberately: it holds a password, it is set
+ * once per installation by whoever runs the service, and a file the operating system protects is
+ * a better place for a credential than a table any administrator can read.
+ */
+export interface SmtpRelay {
+  /** Empty disables this relay. An installation with no primary sends no email at all. */
+  host: string;
+  port: number;
+  /**
+   * How TLS is negotiated.
+   *
+   * `starttls` is the common case — connect in the clear on 587 and upgrade — and `tls` is
+   * implicit TLS on 465. `none` exists because a relay on localhost is a real deployment, and
+   * refusing it would push operators towards disabling certificate checks instead, which is
+   * worse.
+   */
+  security: 'none' | 'starttls' | 'tls';
+  /**
+   * Whether the relay's certificate must verify.
+   *
+   * Separate from `security` because they fail differently: an unverified certificate on an
+   * encrypted connection is a weaker guarantee, not none, and an operator with an internal CA
+   * needs to be able to say so without dropping to plaintext.
+   */
+  verifyCertificate: boolean;
+  /** `none`, or the SASL mechanism to force. `auto` lets the relay's EHLO decide. */
+  auth: 'none' | 'auto' | 'plain' | 'login' | 'cram-md5';
+  user: string;
+  password: string;
+  /**
+   * What this host calls itself in EHLO.
+   *
+   * Some relays refuse a HELO that does not resolve, and a container's hostname rarely does.
+   * Empty uses the machine's own name.
+   */
+  heloName: string;
+  timeoutMs: number;
+}
+
+export interface SmtpConfig {
+  /** Where mail is sent from, unless a template overrides it. */
+  sender: string;
+  primary: SmtpRelay;
+  /**
+   * Tried when the primary fails, and only then.
+   *
+   * Paessler's own advice is two delivery paths per trigger; this is the cheaper half of it —
+   * one relay going down should not silence an installation. A fallback with an empty host is no
+   * fallback, which is the default.
+   */
+  fallback: SmtpRelay;
+}
+
 export interface CoreConfig {
   service: ServiceConfig;
   api: {
@@ -153,6 +209,8 @@ export interface CoreConfig {
     publicUrl: string;
     /** What this installation is called, for `%sitename`. */
     siteName: string;
+    /** The relay email is sent through (`N-07`). */
+    smtp: SmtpConfig;
   };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
@@ -261,6 +319,48 @@ const tlsSchema: JSONSchemaType<TlsConfig> = {
   },
 };
 
+/**
+ * One relay's shape.
+ *
+ * A function rather than a constant because `JSONSchemaType` will not let two properties share
+ * one schema object, and because the primary and the fallback differ in exactly one default: an
+ * unconfigured fallback has no port either, so an operator who sets only a host gets an error
+ * rather than a silent attempt on 587.
+ */
+function relaySchema(defaultPort: number): JSONSchemaType<SmtpRelay> {
+  return {
+    type: 'object',
+    default: {} as SmtpRelay,
+    additionalProperties: false,
+    required: [
+      'host',
+      'port',
+      'security',
+      'verifyCertificate',
+      'auth',
+      'user',
+      'password',
+      'heloName',
+      'timeoutMs',
+    ],
+    properties: {
+      host: { type: 'string', default: '' },
+      port: { type: 'integer', minimum: 0, maximum: 65_535, default: defaultPort },
+      security: { type: 'string', enum: ['none', 'starttls', 'tls'], default: 'starttls' },
+      verifyCertificate: { type: 'boolean', default: true },
+      auth: {
+        type: 'string',
+        enum: ['none', 'auto', 'plain', 'login', 'cram-md5'],
+        default: 'none',
+      },
+      user: { type: 'string', default: '' },
+      password: { type: 'string', default: '' },
+      heloName: { type: 'string', default: '' },
+      timeoutMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 20_000 },
+    },
+  };
+}
+
 export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
   type: 'object',
   additionalProperties: false,
@@ -290,10 +390,23 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as CoreConfig['notifications'],
       additionalProperties: false,
-      required: ['publicUrl', 'siteName'],
+      required: ['publicUrl', 'siteName', 'smtp'],
       properties: {
         publicUrl: { type: 'string', default: '' },
         siteName: { type: 'string', default: 'MonitoringSystem' },
+        smtp: {
+          type: 'object',
+          default: {} as SmtpConfig,
+          additionalProperties: false,
+          required: ['sender', 'primary', 'fallback'],
+          properties: {
+            sender: { type: 'string', default: '' },
+            primary: relaySchema(587),
+            // Nothing by default: a fallback nobody configured must not quietly become a second
+            // attempt against the same host.
+            fallback: relaySchema(0),
+          },
+        },
       },
     },
     database: {

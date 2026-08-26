@@ -53,6 +53,15 @@ export interface AlarmEngineOptions {
    * is an after-commit hook threaded through every path that can arm an alarm.
    */
   onArmed?: () => void;
+  /**
+   * Poked whenever a notification request is queued (`N-07`).
+   *
+   * `DeliveryLoop.wake` in production. Same contract as `onArmed` and the same caveat: it fires
+   * inside the queueing transaction, so a pass prompted by it may find nothing yet — which is
+   * one indexed query on a partial index, against a notification that would otherwise wait for
+   * the loop's idle heartbeat.
+   */
+  onQueued?: () => void;
 }
 
 /** What a reaction did. Every field is a counter Core Health will want (`M-18`, `N-13`). */
@@ -97,6 +106,7 @@ export class AlarmEngine {
   readonly #maxReconciled: number;
   readonly #valueLookbackMs: number;
   readonly #onArmed: (() => void) | undefined;
+  readonly #onQueued: (() => void) | undefined;
   #queued = 0;
   #fired = 0;
   /**
@@ -117,6 +127,7 @@ export class AlarmEngine {
     this.#maxReconciled = options.maxReconciled ?? DEFAULT_MAX_RECONCILED;
     this.#valueLookbackMs = options.valueLookbackMs ?? DEFAULT_VALUE_LOOKBACK_MS;
     this.#onArmed = options.onArmed;
+    this.#onQueued = options.onQueued;
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -213,6 +224,7 @@ export class AlarmEngine {
     // later, never sooner, and a scheduler already asleep for longer than it needs is not a
     // problem worth a query.
     if (arm.length > 0) this.#onArmed?.();
+    if (result.queued > 0) this.#onQueued?.();
     return result;
   }
 
@@ -306,6 +318,7 @@ export class AlarmEngine {
     }
 
     const queued = await this.#alarms.queue(q, requests);
+    if (queued > 0) this.#onQueued?.();
     await this.#alarms.advance(q, advance);
     const stale = await this.#alarms.clear(q, clear);
     this.#fired += advance.length;

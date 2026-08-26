@@ -82,3 +82,16 @@ export {
   type RenderedMessage,
   type Substitution,
 } from './placeholders.js';
+export {
+  NotificationDispatcher,
+  type DispatchStats,
+  type NotificationDispatcherOptions,
+} from './dispatcher.js';
+export {
+  headerSafe,
+  type DeliveryResult,
+  type DeliveryTransport,
+  type OutgoingMessage,
+} from './delivery/transport.js';
+export { EmailTransport, type EmailTransportOptions } from './delivery/email.js';
+export { DeliveryLoop, type DeliveryLoopOptions } from './delivery/loop.js';
