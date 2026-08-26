@@ -195,20 +195,79 @@ export function pauseIsPending(pause: { startsAt: Date }, now: Date): boolean {
 export function refuseResume(
   own: boolean,
   cascadedFrom: { objectId: number; name: string } | null,
+  heldBy: HeldBy = {},
 ): { reason: string; details: Record<string, unknown> } | null {
   // `own` includes a maintenance window that has not started (`M-10`): cancelling one before it
   // begins is the same action as ending one that has, and an operator who scheduled the wrong
   // weekend should not have to wait for it to start before they can call it off.
   if (own) return null;
+
+  // In the order §5 evaluates the sources, so the refusal names the one that would still be
+  // holding the object even if every source below it were lifted.
   if (cascadedFrom !== null) {
     return {
       reason:
         `this object is paused because #${String(cascadedFrom.objectId)} ` +
         `("${cascadedFrom.name}") is paused; resume that instead`,
-      details: { pausedBy: cascadedFrom.objectId, pausedByName: cascadedFrom.name },
+      details: {
+        source: 'parent',
+        pausedBy: cascadedFrom.objectId,
+        pausedByName: cascadedFrom.name,
+      },
     };
   }
-  return { reason: 'this object is not paused', details: {} };
+  if (heldBy.dependency != null) {
+    const master = heldBy.dependency;
+    return {
+      reason:
+        `this object is paused because its master #${String(master.masterId)} ` +
+        `("${master.masterName}") is Down; it resumes when the master recovers`,
+      details: {
+        source: 'dependency',
+        masterId: master.masterId,
+        masterName: master.masterName,
+        definedOn: master.definedOn,
+      },
+    };
+  }
+  if (heldBy.schedule != null) {
+    const schedule = heldBy.schedule;
+    return {
+      reason:
+        `this object is outside the "${schedule.name}" schedule; it resumes when the window ` +
+        `opens${schedule.nextChangeAt === null ? '' : ` at ${schedule.nextChangeAt}`}`,
+      details: {
+        source: 'schedule',
+        scheduleId: schedule.scheduleId,
+        scheduleName: schedule.name,
+        definedOn: schedule.definedOn,
+        nextChangeAt: schedule.nextChangeAt,
+      },
+    };
+  }
+  return { reason: 'this object is not paused', details: { source: null } };
+}
+
+/**
+ * The sources a resume cannot lift, for the refusal to name (`M-12`).
+ *
+ * Without these, an object held by a schedule or a dependency would be told "this object is not
+ * paused" — which is both wrong and the least useful thing to say to somebody looking at a blue
+ * sensor. `WORKFLOW.MD §5` requires the UI to make a cascade legible rather than silently
+ * ignoring clicks, and only two of the four sources are a cascade *of pauses*.
+ */
+export interface HeldBy {
+  readonly schedule?: {
+    readonly scheduleId: number;
+    readonly name: string;
+    readonly nextChangeAt: string | null;
+    readonly definedOn: number;
+  } | null;
+  readonly dependency?: {
+    readonly masterId: number;
+    readonly masterName: string;
+    readonly definedOn: number;
+  } | null;
 }
 
 /** The four flags, as stored on `sensor_runtime`. */

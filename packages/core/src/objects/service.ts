@@ -471,7 +471,30 @@ export class ObjectService {
       }
 
       const effective = await this.#pauses.effective(q, id, now);
-      const refusal = refuseResume(effective.own !== null, effective.inherited);
+      // The refusal names whichever source is actually holding it, not just the ones that are
+      // rows in `object_pause` — an object held by a schedule or a dependency told "this object
+      // is not paused" is both wrong and the least useful thing to say (`M-12`).
+      const schedule = await this.#scheduleView(q, id, now);
+      const dependency = await this.#dependencyView(q, id, now);
+      const refusal = refuseResume(effective.own !== null, effective.inherited, {
+        schedule:
+          schedule === null || schedule.active
+            ? null
+            : {
+                scheduleId: schedule.id,
+                name: schedule.name,
+                nextChangeAt: schedule.nextChangeAt,
+                definedOn: schedule.definedOn,
+              },
+        dependency:
+          dependency === null || !dependency.holding
+            ? null
+            : {
+                masterId: dependency.masterId,
+                masterName: dependency.masterName,
+                definedOn: dependency.definedOn,
+              },
+      });
       if (refusal !== null) {
         throw new ObjectError('OBJECT_NOT_PAUSED', refusal.reason, {
           context: { objectId: id, phase: 'pause' },

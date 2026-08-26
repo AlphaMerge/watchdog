@@ -889,9 +889,43 @@ because each is a decision rather than a defect:
       case is included because an acknowledgement is a statement about notifications, not about
       the target. `M-17`'s alarm-storm scenario is what will hold all of this to *one outage, one
       alarm*.
-- [ ] **M-12 — Pause precedence integration** · M · M-08…M-11 · Parent cascade → dependency →
+- [x] **M-12 — Pause precedence integration** · M · M-08…M-11 · Parent cascade → dependency →
       schedule → manual, exhaustively tested. Cascade-paused children cannot be resumed
       individually, and the API says so clearly.
+
+      **M-12 outcome.** `packages/core/test/pause-precedence.test.ts` arranges all sixteen
+      combinations against a real tree, through the mechanism that really sets each flag — a row
+      in `object_pause`, a master going Down, a window closing, an operator clicking pause — and
+      **never writes a flag by hand**. For each it asserts the four flags, the state, the reported
+      cause, the pause view's `source`, and that the sensor is in its probe's configuration iff it
+      is not paused.
+
+      **Why this is not what `M-01` and `M-02` already tested.** Those are one derivation checked
+      against itself: `state-tables.test.ts` checks the table against the rule it was written
+      from, and `state-machine.test.ts` drives the pure evaluator over the same table. Neither can
+      see whether the four *mechanisms* produce the flags the table describes, which is the thing
+      `PLAN.md` names as Phase 3's principal risk — four independent recomputes, each written in a
+      different task, each convinced it owns a column.
+
+      **The property the risk is about, tested directly.** Turn all four on, then clear them one
+      at a time: the sensor stays Paused through every step and the reported cause walks down
+      `parent → dependency → schedule → user`. If precedence were a priority chain rather than an
+      independent set, lifting the top source would have resumed it.
+
+      **Two interactions the sixteen rows cannot express**, both tested separately. Pausing a
+      group that *contains* a dependency's master releases that dependency — a paused master is
+      not a Down master (`WORKFLOW.MD §5`), which is the opposite of what "pause the group" sounds
+      like it should do. And resuming the object that was directly paused does not resume a sensor
+      another source still holds; the cause moves, the pause does not lift.
+
+      **The API now says which source it is.** `refuseResume` only knew about `object_pause`
+      rows, so an object held by a schedule or a dependency was told "this object is not paused" —
+      wrong, and the least useful thing to say to somebody looking at a blue sensor. The 409 now
+      names the holder in the same order §5 evaluates them, with the group to resume, the master
+      to wait for, or the time the window opens, and a machine-readable `source` beside it.
+
+      Checked by mutation rather than assumed: inverting the view's parent/dependency precedence
+      fails five of the twenty-five, which is the shape a real regression would have.
 - [ ] **M-13 — Acknowledgement** · M · M-02 · **`M-02` left the columns and the transitions:**
       `acknowledged_at` / `acknowledged_until`, expiry against the result clock, and clearing on
       a recovery that a reading decided. What is missing is the API, the presets and who did it. Down (Acknowledged) state, until-options, message

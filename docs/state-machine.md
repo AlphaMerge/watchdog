@@ -269,6 +269,10 @@ highest-precedence source would resume the sensor; because they are a set, it do
 paused by both its parent and by hand stays paused when the parent resumes, and the reported
 cause simply changes from `parent` to `user`.
 
+`M-12` tests exactly that against a real tree: all four turned on, then cleared one at a time,
+with the reported cause walking down `parent → dependency → schedule → user` and the sensor
+Paused at every step.
+
 | Parent | Dependency | Schedule | Manual | State     | Cause        |
 | ------ | ---------- | -------- | ------ | --------- | ------------ |
 | –      | –          | –        | –      | not paused | —           |
@@ -473,7 +477,7 @@ is waiting for one task to set it:
 
 | Input                    | Set by  | Until then                                            |
 | ------------------------ | ------- | ----------------------------------------------------- |
-| The four pause flags     | ~~`M-08`~~, ~~`M-09`~~, ~~`M-10`~~, ~~`M-11`~~ | All four are live. `M-12` is the exhaustive precedence test across them. |
+| The four pause flags     | ~~`M-08`~~…~~`M-12`~~ | All four are live, and `pause-precedence.test.ts` arranges all sixteen combinations through the real mechanisms. |
 | `acknowledged_at/until`  | `M-13`  | Always null                                           |
 | `simulated_error`        | `M-14`  | Always false                                          |
 | The channel verdict (§2.2) | ~~`M-04`, `M-06`~~ | Live: limits and lookups both produce one |
