@@ -75,6 +75,12 @@
       "killGraceMs": 5000,
       "uid": -1,
       "gid": -1
+    },
+    "retry": {
+      "firstDelaySeconds": 30,
+      "maxDelaySeconds": 300,
+      "maxAttempts": 6,
+      "staleAfterSeconds": 300
     }
   }
 }

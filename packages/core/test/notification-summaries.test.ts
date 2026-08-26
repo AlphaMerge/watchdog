@@ -168,7 +168,8 @@ describe(
         logger: silent,
         contexts,
         transports: [transport as never],
-        retryDelayMs: 0,
+        retry: { firstDelayMs: 0, maxDelayMs: 0 },
+        leaseMs: 0,
       });
     }
 

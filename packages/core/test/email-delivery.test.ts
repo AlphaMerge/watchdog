@@ -422,7 +422,11 @@ describe(
         logger: silent,
         contexts,
         transports: [transport as never],
-        retryDelayMs: options.retryDelayMs ?? 0,
+        // No wait between attempts, so a test can drive several in a row. `leaseMs` matters as
+        // much as the backoff: the claim writes the lease, so anything above zero would put the
+        // next attempt in the future whatever the retry policy said.
+        retry: { firstDelayMs: options.retryDelayMs ?? 0, maxDelayMs: options.retryDelayMs ?? 0 },
+        leaseMs: 0,
         maxAttempts: options.maxAttempts ?? 5,
       });
     }
@@ -626,11 +630,11 @@ describe(
           contexts,
           transports: [transport],
           // Zero, and load-bearing: the loop below cannot retry anything through the default
-          // sixty-second delay, because a deferred request's `next_attempt_at` is a minute away
-          // and the very next `dispatch()` claims nothing. This test was relaxed in `N-08` to
-          // "dispatch until it lands" and then went on failing under load for exactly that
-          // reason.
-          retryDelayMs: 0,
+          // backoff, because a deferred request's `next_attempt_at` is a minute away and the very
+          // next `dispatch()` claims nothing. This test was relaxed in `N-08` to "dispatch until
+          // it lands" and then went on failing under load for exactly that reason.
+          retry: { firstDelayMs: 0, maxDelayMs: 0 },
+          leaseMs: 0,
         });
         try {
           // Dispatched until it lands, rather than once. MailHog is a small Go binary sharing a

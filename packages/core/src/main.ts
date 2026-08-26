@@ -31,6 +31,7 @@ import { TriggerSync } from './notifications/sync.js';
 import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
+import { DeliveryHealthReader } from './notifications/health.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { ProgramTransport } from './notifications/delivery/program.js';
@@ -401,6 +402,20 @@ async function serve(): Promise<void> {
       // without one a template could name any path on the machine.
       new ProgramTransport({ config: config.notifications.program, logger }),
     ],
+    // Growing waits with half of each randomised (N-13). A relay that refused one message will
+    // refuse the next one a second later, and a relay coming back from an hour's outage must not
+    // meet every deferred message at the same instant.
+    retry: {
+      firstDelayMs: config.notifications.retry.firstDelaySeconds * 1_000,
+      maxDelayMs: config.notifications.retry.maxDelaySeconds * 1_000,
+      maxAttempts: config.notifications.retry.maxAttempts,
+    },
+  });
+  // Read from the queue rather than counted in memory, so a core that restarted five minutes ago
+  // does not report a clean sheet over a queue full of undelivered alarms (N-13). `P-12` turns
+  // the same reader into channels on the Core Health sensor.
+  const deliveryHealth = new DeliveryHealthReader({
+    staleAfterMs: config.notifications.retry.staleAfterSeconds * 1_000,
   });
   const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
   wakeDelivery.poke = () => {
@@ -429,6 +444,7 @@ async function serve(): Promise<void> {
     schedules,
     triggers,
     templates,
+    deliveryHealth,
   });
   await api.build(VERSION, service);
   await api.start();

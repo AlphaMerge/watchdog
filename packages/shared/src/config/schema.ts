@@ -236,6 +236,31 @@ export interface ProgramConfig {
   gid: number;
 }
 
+/**
+ * When a failed notification is tried again, and when delivery counts as broken (`N-13`).
+ *
+ * The waits grow — a relay that refused one message will refuse the next one a second later, and
+ * hammering it is how a delivery problem becomes a delivery problem *and* a rate-limit problem.
+ * Half of each wait is randomised, which is not decoration: a relay that was down for an hour
+ * comes back to a queue whose waits all started at the same failure and would otherwise all
+ * expire at the same instant.
+ */
+export interface DeliveryRetryConfig {
+  /** The wait after the first failure. Each further failure doubles it, up to the maximum. */
+  firstDelaySeconds: number;
+  maxDelaySeconds: number;
+  /** After this many attempts a notification is given up on and reported as never delivered. */
+  maxAttempts: number;
+  /**
+   * How long an attempted, still-undelivered notification may wait before delivery is Down.
+   *
+   * Attempted, deliberately: a notification queued a second ago has not waited for anything, and
+   * one that has been tried five times over twenty minutes is a relay that is not coming back on
+   * its own.
+   */
+  staleAfterSeconds: number;
+}
+
 export interface CoreConfig {
   service: ServiceConfig;
   api: {
@@ -267,6 +292,8 @@ export interface CoreConfig {
     webhook: WebhookConfig;
     /** Where a notification program may live, and how it is bounded (`N-10`). */
     program: ProgramConfig;
+    /** How a failed delivery backs off, and when delivery is broken (`N-13`). */
+    retry: DeliveryRetryConfig;
   };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
@@ -491,6 +518,21 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             killGraceMs: { type: 'integer', minimum: 0, maximum: 60_000, default: 5_000 },
             uid: { type: 'integer', minimum: -1, default: -1 },
             gid: { type: 'integer', minimum: -1, default: -1 },
+          },
+        },
+        retry: {
+          type: 'object',
+          default: {} as DeliveryRetryConfig,
+          additionalProperties: false,
+          required: ['firstDelaySeconds', 'maxDelaySeconds', 'maxAttempts', 'staleAfterSeconds'],
+          properties: {
+            firstDelaySeconds: { type: 'integer', minimum: 1, maximum: 3_600, default: 60 },
+            maxDelaySeconds: { type: 'integer', minimum: 1, maximum: 86_400, default: 900 },
+            // Ten attempts over roughly an hour and a half. Long enough for a relay restart or a
+            // certificate renewal, short enough that a permanently wrong address does not sit in
+            // the queue for a week.
+            maxAttempts: { type: 'integer', minimum: 1, maximum: 100, default: 10 },
+            staleAfterSeconds: { type: 'integer', minimum: 60, maximum: 86_400, default: 900 },
           },
         },
       },

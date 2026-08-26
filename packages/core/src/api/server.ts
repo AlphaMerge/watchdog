@@ -20,7 +20,9 @@ import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { stateRoutes } from './routes/state.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
+import type { DeliveryHealthReader } from '../notifications/health.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
+import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
@@ -73,6 +75,13 @@ export interface ApiServerOptions {
    * effect: not registered rather than empty.
    */
   templates?: TemplateService;
+  /**
+   * How delivery is going (`N-13`).
+   *
+   * Optional like the rest, and for the same reason: a build with no notification subsystem
+   * should 404 rather than report that everything is fine.
+   */
+  deliveryHealth?: DeliveryHealthReader;
 }
 
 /**
@@ -97,6 +106,7 @@ export class ApiServer {
   readonly #schedules: ScheduleService | undefined;
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
+  readonly #deliveryHealth: DeliveryHealthReader | undefined;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -122,6 +132,7 @@ export class ApiServer {
     this.#schedules = options.schedules;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
+    this.#deliveryHealth = options.deliveryHealth;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -175,6 +186,7 @@ export class ApiServer {
       ...STATE_LOG_SCHEMAS,
       ...TRIGGER_SCHEMAS,
       ...TEMPLATE_SCHEMAS,
+      ...NOTIFICATION_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 
@@ -260,6 +272,12 @@ export class ApiServer {
         }
         if (this.#templates !== undefined) {
           await scope.register(templateRoutes, { templates: this.#templates });
+        }
+        if (this.#deliveryHealth !== undefined) {
+          await scope.register(notificationRoutes, {
+            db: this.#db,
+            health: this.#deliveryHealth,
+          });
         }
       },
       { prefix: '/api/v1' },

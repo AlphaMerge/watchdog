@@ -7,6 +7,7 @@ export { coreConfigSchema, probeConfigSchema } from './config/schema.js';
 export type {
   CoreConfig,
   DatabaseConfig,
+  DeliveryRetryConfig,
   HousekeepingConfig,
   IngestionConfig,
   LogLevel,

@@ -6,6 +6,7 @@ import type { NotificationReason } from './chain.js';
 import type { MessageContextLoader, PendingNotification } from './context.js';
 import { notificationMethods } from './methods.js';
 import { render, substitute, type MessageContext } from './placeholders.js';
+import { DEFAULT_RETRY, exhausted, retryDelayMs, type RetryPolicy } from './retry.js';
 import { SummaryRepository } from './summaries.js';
 import {
   countKinds,
@@ -27,21 +28,23 @@ export interface NotificationDispatcherOptions {
   transports: readonly DeliveryTransport[];
   /** How many messages one pass sends. */
   batchSize?: number;
+  /** How a failed delivery backs off before it is tried again (`N-13`). */
+  retry?: Partial<RetryPolicy>;
   /**
-   * How long to wait before trying a failed delivery again.
+   * How long a claimed message is left alone before somebody else may try it.
    *
-   * A flat delay, and `N-13` is where it becomes a backoff. Flat is the honest placeholder: it
-   * retries, it does not hammer, and it is one constant rather than a policy pretending to be
-   * one.
+   * A **lease**, not a retry delay, and the distinction is what `N-13` separated. The claim
+   * happens before the send and the send happens outside the transaction, so a core that dies
+   * mid-conversation leaves a row that looks claimed and is not being worked on. The lease is
+   * how long that row waits before another pass picks it up, and it has to be longer than the
+   * slowest transport's own timeout — `N-10`'s programs may run for five minutes — or a slow
+   * send would be re-sent while it was still in flight.
    */
-  retryDelayMs?: number;
-  /**
-   * How many times a delivery is attempted before it is given up on.
-   *
-   * `N-13` owns the real policy. This bound exists so a permanently undeliverable message —
-   * an address the relay will never accept — cannot occupy the queue for ever.
-   */
+  leaseMs?: number;
+  /** Overrides `retry.maxAttempts`, kept because it reads better at a call site. */
   maxAttempts?: number;
+  /** Randomness for the backoff jitter. Swapped in tests. */
+  random?: () => number;
   /** How many digests one pass sends. Each is one window, and may be several messages. */
   maxDigests?: number;
 }
@@ -90,8 +93,7 @@ interface ClaimRow {
 }
 
 const DEFAULT_BATCH = 25;
-const DEFAULT_RETRY_MS = 60_000;
-const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_LEASE_MS = 300_000;
 const DEFAULT_MAX_DIGESTS = 5;
 const DEFAULT_WINDOW_SECONDS = 900;
 /** How many held requests one digest may cover. Above the split cap, so a big storm still splits. */
@@ -122,8 +124,9 @@ export class NotificationDispatcher {
   readonly #contexts: MessageContextLoader;
   readonly #transports = new Map<string, DeliveryTransport>();
   readonly #batchSize: number;
-  readonly #retryDelayMs: number;
-  readonly #maxAttempts: number;
+  readonly #retry: RetryPolicy;
+  readonly #leaseMs: number;
+  readonly #random: () => number;
   readonly #maxDigests: number;
   readonly #summaries = new SummaryRepository();
   readonly #activation = new TemplateActivation();
@@ -144,8 +147,13 @@ export class NotificationDispatcher {
     this.#contexts = options.contexts;
     for (const transport of options.transports) this.#transports.set(transport.method, transport);
     this.#batchSize = options.batchSize ?? DEFAULT_BATCH;
-    this.#retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_MS;
-    this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.#retry = {
+      ...DEFAULT_RETRY,
+      ...options.retry,
+      ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+    };
+    this.#leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+    this.#random = options.random ?? Math.random;
     this.#maxDigests = options.maxDigests ?? DEFAULT_MAX_DIGESTS;
   }
 
@@ -320,6 +328,8 @@ export class NotificationDispatcher {
           FOR UPDATE OF r SKIP LOCKED
         )
         UPDATE notification_request r
+        -- A lease, not a retry delay: this is how long the row waits if this process dies
+        -- between the claim and the record. The real backoff is written by #record.
         SET attempts = r.attempts + 1, next_attempt_at = $4
         FROM claimed
         WHERE r.id = claimed.id
@@ -339,7 +349,7 @@ export class NotificationDispatcher {
           now,
           this.methods,
           limit,
-          new Date(now.getTime() + this.#retryDelayMs),
+          new Date(now.getTime() + this.#leaseMs),
           [...suppressed],
           ...extra,
         ],
@@ -544,23 +554,37 @@ export class NotificationDispatcher {
     }
 
     // Out of attempts, or a failure no amount of waiting fixes.
-    const givingUp = !result.retryable || attempts >= this.#maxAttempts;
+    const givingUp = !result.retryable || exhausted(this.#retry, attempts);
     if (givingUp) this.#stats.failed += 1;
     else this.#stats.deferred += 1;
 
+    // The backoff is written here rather than at claim time, because only here is the attempt
+    // count that shapes it known to have been used. The claim wrote a lease; this replaces it.
+    const delayMs = givingUp ? 0 : retryDelayMs(this.#retry, attempts, this.#random);
     await this.#db.query(
       `UPDATE notification_request
-       SET status = $3, last_error = $2, next_attempt_at = CASE WHEN $3 = 'failed' THEN NULL
-                                                               ELSE next_attempt_at END
+       SET status = $3, last_error = $2, next_attempt_at = $4
        WHERE id = $1`,
-      [requestId, result.error, givingUp ? 'failed' : 'pending'],
+      [
+        requestId,
+        result.error,
+        givingUp ? 'failed' : 'pending',
+        givingUp ? null : new Date(now.getTime() + delayMs),
+      ],
     );
 
     // A failed notification is itself an alarm (`WORKFLOW.MD §6`), so it is logged at the level
-    // that says so. `N-13` is what puts it on Core Health.
-    this.#logger[givingUp ? 'error' : 'warn'](
-      { requestId, attempts, retryable: result.retryable },
-      givingUp ? 'notification could not be delivered' : 'notification delivery failed; retrying',
+    // that says so, with everything an operator needs to act without opening the database.
+    if (givingUp) {
+      this.#logger.error(
+        { requestId, attempts, retryable: result.retryable, err: result.error },
+        'notification could not be delivered and will not be tried again',
+      );
+      return;
+    }
+    this.#logger.warn(
+      { requestId, attempts, retryInMs: delayMs, err: result.error },
+      'notification delivery failed; retrying',
     );
   }
 

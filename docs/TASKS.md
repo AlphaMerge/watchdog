@@ -412,6 +412,14 @@ because each is a decision rather than a defect:
       fired, wakes, idle wakes and when it intends to look again. `AlarmEngine.stats` adds queued
       requests and the steps that fired with no template configured, which is what an operator
       wondering why a trigger is silent needs to see.
+      **Added by N-13:** `DeliveryHealthReader` is the notification half, and is already served
+      at `GET /notification-health` so an operator has an answer before this ticket lands. The
+      channels it should become: pending notifications, of those how many are being retried, the
+      age of the oldest undelivered one (the number that goes wrong first), notifications given up
+      on in the last hour, and discards. Its `status` already applies the rule this sensor wants —
+      Down when an alarm was given up on or when one has been undeliverable past
+      `notifications.retry.staleAfterSeconds`. Read it rather than recomputing, so the sensor and
+      the API cannot disagree about whether delivery is working.
       **Added by S-06:** the housekeeping loop is a subsystem with a queue, so CLAUDE.md requires
       it to report here. The channels that matter are rollup lag per tier — `now()` minus
       `rollup_watermark.watermark`, which is the number that goes wrong first and silently — plus
@@ -1865,8 +1873,68 @@ because each is a decision rather than a defect:
       worked, because its dispatcher used the default sixty-second retry delay, so the very next
       `dispatch()` in the loop claimed nothing. It now uses `retryDelayMs: 0`, which is what makes
       the relaxation actually retry.
-- [ ] **N-13 — Delivery retry and failure surfacing** · M · N-07 · Backoff retry; failures
+- [x] **N-13 — Delivery retry and failure surfacing** · M · N-07 · Backoff retry; failures
       logged and raised on Core Health; the alarm itself is never lost.
+
+      **N-13 outcome.** `retry.ts` is the policy, `health.ts` reads whether delivery is working,
+      `log.ts` answers "what happened to my alarm", and `GET /notification-health` and
+      `GET /notification-requests` serve both. No migration: `N-02`'s indexes already covered
+      every question these ask, which the migration test found by refusing a duplicate index name.
+
+      **A lease and a backoff are two different things, and `N-07` conflated them.** The claim
+      happens before the send and the send happens outside the transaction, so a core that dies
+      mid-conversation leaves a row that looks claimed and is not being worked on. That row needs
+      a **lease** — how long before somebody else may try it, necessarily longer than the slowest
+      transport's own timeout, since `N-10`'s programs may run for five minutes. A *failed*
+      attempt needs a **backoff**, which depends on the attempt count and is therefore only
+      knowable once the attempt has happened. So the claim writes a lease and the record replaces
+      it. Conflating them is why the old flat sixty seconds was simultaneously too short for a
+      lease and too rigid for a retry — and why the real-SMTP test could never retry (`N-12`).
+
+      **Half of each wait is randomised, and that is not decoration.** A relay that was down for
+      an hour comes back to a queue whose waits all started at the same failure and would
+      otherwise all expire at the same instant — a thundering herd aimed at a service that has
+      just proved it is fragile. The exponent is also capped *before* the multiplication, because
+      `2 ** 400` is `Infinity` and no `timestamptz` will take it.
+
+      **Health is read from the queue, never counted in memory.** `DispatchStats` counts what this
+      *process* has done since it started, which is the wrong answer twice over: a core that
+      restarted five minutes ago reports a clean sheet over a queue full of undelivered alarms,
+      and one that has been up for a month reports failures from three weeks ago. The obligations
+      are rows, so the health of the subsystem is a query — and a test drives it through a fresh
+      reader for exactly that reason.
+
+      **Three states, and what each one means.** `down` when an alarm was **given up on** — that
+      is the failure the whole subsystem exists to prevent — or when something attempted has been
+      undeliverable longer than `staleAfterSeconds`, because a relay that has refused the same
+      message for twenty minutes is not coming back on its own. `warning` while anything is being
+      retried. A `discarded` notification (`N-12`) affects nothing: an operator asked for it to be
+      thrown away, and counting it as a fault would send them looking for a relay problem that
+      does not exist.
+
+      **"The alarm itself is never lost" needed a route, not a policy.** `notification_request`
+      has recorded the answer since `N-07` and nothing could ask: the only question anyone put to
+      the table was the dispatcher's "what is owed". `WORKFLOW.MD §6` says a delivery failure must
+      be surfaced rather than disappearing into a log file, and a failure nobody can query has
+      disappeared into a log file however carefully it was written. The log pages by descending
+      id rather than by offset, because notifications arrive while somebody is reading and an
+      offset page would show a row twice or not at all.
+
+      **The health query is bounded, `lastDeliveredAt` included.** "Nothing has been delivered in
+      the last hour" is a health answer; "the last delivery was in March" is a history question,
+      and answering it would mean scanning a year of delivered rows every time a UI polls.
+
+      **Verified live against the dev stack:** a webhook pointed at a refused port and a program
+      template naming a file that is not there. Health went to `down` — _"1 notification(s) were
+      given up on"_ plus the program's own ENOENT — with the webhook counted separately as
+      `retrying`, and the earlier `N-12` discard sitting in its own column without affecting the
+      status. The log showed all four statuses side by side, and the webhook's `nextAttemptAt`
+      moved from ~20 s to ~68 s between attempts.
+
+      **What `P-12` still owes.** "Raised on Core Health" needs the Core Health sensor, which does
+      not exist yet. `DeliveryHealthReader` is what it should read — shared, so the sensor and the
+      API cannot end up disagreeing about whether delivery is working — and the note on `P-12`
+      says which channels to make from it.
 - [ ] **N-14 — Send test notification** · S · N-05 · Per-template action with a full result
       report.
 - [ ] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
