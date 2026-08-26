@@ -37,5 +37,9 @@ export {
   type SensorStanding,
 } from './repository.js';
 export { AlarmEngine, type AlarmEngineOptions, type AlarmReaction } from './engine.js';
-export { AlarmSweep, type AlarmSweepOptions } from './sweep.js';
+export {
+  AlarmScheduler,
+  type AlarmSchedulerOptions,
+  type AlarmSchedulerStats,
+} from './scheduler.js';
 export { TriggerSync, type TriggerSyncOptions } from './sync.js';

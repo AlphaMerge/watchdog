@@ -26,7 +26,7 @@ import { ScheduleService } from './schedules/service.js';
 import { ScheduleSweep } from './schedules/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
 import { AlarmEngine } from './notifications/engine.js';
-import { AlarmSweep } from './notifications/sweep.js';
+import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
@@ -188,7 +188,17 @@ async function serve(): Promise<void> {
   // What arms and stands down notification chains (N-02). Built before the state service,
   // because that service is one of the two places that tells it a sensor moved -- the other is
   // the ingestor, below.
-  const alarms = new AlarmEngine({ logger });
+  // The engine pokes the scheduler when it arms an alarm, and the scheduler drives the engine —
+  // so one of the two references is late by construction. This is the late one, filled in the
+  // moment the scheduler exists. A scheduler that sleeps until the next due time has to be told
+  // when something arms an alarm with a nearer one (N-04).
+  const wakeAlarms = { poke: (): void => {} };
+  const alarms = new AlarmEngine({
+    logger,
+    onArmed: () => {
+      wakeAlarms.poke();
+    },
+  });
   const states = new SensorStateService({ db, logger, settings: resolver, alarms });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.
@@ -312,16 +322,19 @@ async function serve(): Promise<void> {
     },
   });
 
-  // Fires notification chains as they fall due. A tick a second until N-04 replaces it with a
-  // wait on the next due time; every due time is absolute and in the table, so a sweep that runs
-  // late sends late rather than not at all.
-  const alarmSweep = new AlarmSweep({ db, engine: alarms, logger });
-  alarmSweep.start();
+  // Fires notification chains as they fall due (N-04). One timer for the whole installation,
+  // sleeping until the next due time: the due times themselves are rows, so a scheduler that
+  // dies, restarts or sleeps too long sends late rather than not at all.
+  const alarmScheduler = new AlarmScheduler({ db, engine: alarms, logger });
+  wakeAlarms.poke = () => {
+    alarmScheduler.wake();
+  };
+  alarmScheduler.start();
   lifecycle.onShutdown({
-    name: 'alarm-sweep',
+    name: 'alarm-scheduler',
     timeoutMs: 2_000,
     run: () => {
-      alarmSweep.stop();
+      alarmScheduler.stop();
       return Promise.resolve();
     },
   });

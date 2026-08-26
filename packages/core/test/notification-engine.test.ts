@@ -4,7 +4,7 @@ import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { AlarmEngine } from '../src/notifications/engine.js';
 import { AlarmRepository } from '../src/notifications/repository.js';
-import { AlarmSweep } from '../src/notifications/sweep.js';
+import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { TriggerSync } from '../src/notifications/sync.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
@@ -612,7 +612,7 @@ describe(
       await scan([sensorId, otherSensorId], false, T0);
       await scan([sensorId, otherSensorId], false, at(10));
 
-      const sweeper = new AlarmSweep({ db, engine: bounded, logger: silent, intervalMs: 60_000 });
+      const sweeper = new AlarmScheduler({ db, engine: bounded, logger: silent });
       const fired = await sweeper.sweep(at(11));
       assert.equal(fired, 2, 'both, in two rounds, without waiting for the next tick');
       assert.equal((await queued()).length, 2);

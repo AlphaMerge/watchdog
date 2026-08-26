@@ -44,6 +44,15 @@ export interface AlarmEngineOptions {
    * that the lookup stays inside the newest chunk or two of a hypertable chunked by the day.
    */
   valueLookbackMs?: number;
+  /**
+   * Poked whenever a reaction armed an alarm (`N-04`).
+   *
+   * `AlarmScheduler.wake` in production: it sleeps until the next due time, and an alarm armed
+   * with a nearer one has to end that sleep. Called inside the arming transaction, before the
+   * commit that may never happen — a spurious wake costs one indexed query, and the alternative
+   * is an after-commit hook threaded through every path that can arm an alarm.
+   */
+  onArmed?: () => void;
 }
 
 /** What a reaction did. Every field is a counter Core Health will want (`M-18`, `N-13`). */
@@ -87,6 +96,7 @@ export class AlarmEngine {
   readonly #maxPerSweep: number;
   readonly #maxReconciled: number;
   readonly #valueLookbackMs: number;
+  readonly #onArmed: (() => void) | undefined;
   #queued = 0;
   #fired = 0;
   /**
@@ -106,6 +116,7 @@ export class AlarmEngine {
     this.#maxPerSweep = options.maxPerSweep ?? DEFAULT_MAX_PER_SWEEP;
     this.#maxReconciled = options.maxReconciled ?? DEFAULT_MAX_RECONCILED;
     this.#valueLookbackMs = options.valueLookbackMs ?? DEFAULT_VALUE_LOOKBACK_MS;
+    this.#onArmed = options.onArmed;
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -198,6 +209,10 @@ export class AlarmEngine {
     await this.#alarms.arm(q, arm);
     await this.#alarms.advance(q, advance);
     await this.#alarms.clear(q, clear);
+    // Only when something was armed: a reaction that cleared alarms has made the next due time
+    // later, never sooner, and a scheduler already asleep for longer than it needs is not a
+    // problem worth a query.
+    if (arm.length > 0) this.#onArmed?.();
     return result;
   }
 

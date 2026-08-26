@@ -400,6 +400,10 @@ because each is a decision rather than a defect:
       **Added by S-07:** `Ingestor.stats()` and `IngestionService.stats()` carry the ingestion
       half of ADR decision 11 — queue depth, refused and failed batches, duplicate readings, and
       write latency percentiles over the last 1,024 writes.
+      **Added by N-04:** `AlarmScheduler.stats` carries the notification half — sweeps, steps
+      fired, wakes, idle wakes and when it intends to look again. `AlarmEngine.stats` adds queued
+      requests and the steps that fired with no template configured, which is what an operator
+      wondering why a trigger is silent needs to see.
       **Added by S-06:** the housekeeping loop is a subsystem with a queue, so CLAUDE.md requires
       it to report here. The channels that matter are rollup lag per tier — `now()` minus
       `rollup_watermark.watermark`, which is the number that goes wrong first and silently — plus
@@ -1314,8 +1318,67 @@ because each is a decision rather than a defect:
       counts, enumerated values — and treacherous for a computed float. That is the operator's
       choice to make, and a system that quietly compared within an epsilon would fire on a value
       the operator can see is different.
-- [ ] **N-04 — Latency timer engine** · L · N-02 · Timers cancel on recovery and on
+- [x] **N-04 — Latency timer engine** · L · N-02 · Timers cancel on recovery and on
       acknowledgement; survive a restart; no leaks across thousands of sensors.
+
+      **N-04 outcome.** `AlarmScheduler` replaces the tick `N-02` shipped as a placeholder. One
+      timer for the whole installation, sleeping until the next due time. Measured:
+      `docs/findings/2026-08-26-notification-timers.md`.
+
+      **There are no timers, and that is the design.** The obvious reading of the ticket is a
+      `setTimeout` per pending notification, cancelled on recovery and on acknowledgement. At the
+      v1 target — 5,000 sensors each carrying an initial, an escalation and a repeat — that is
+      **15,000 live handles**, every one a closure holding a sensor id, every cancellation a
+      chance to leak one, and all of them gone after a restart with nothing to rebuild them from.
+      `N-02` had already put the due time in a row, so the cancellations this ticket asks for are
+      the `DELETE`s and `UPDATE`s that already happen for other reasons: an alarm that recovers is
+      removed, an acknowledged one has its `next_due_at` set to null. "No leaks" is structural
+      rather than careful. What was left for `N-04` is the one timer that decides when to look.
+
+      **Three things end a sleep**, and the third is the interesting one. The due time arriving;
+      `wake()`, which the engine calls whenever it arms an alarm; and a 60-second cap. The cap is
+      the safety net rather than the schedule — a wait only a poke can end is a wait one lost poke
+      turns into silence, and the failure mode of a notification system that goes quiet is that
+      nobody notices. It is also what bounds a wall-clock jump: due times are `timestamptz`
+      because they are data, the sleep is a monotonic timer because it is scheduling
+      (`CLAUDE.md`), and capping the delay means a clock that moves under us costs a minute rather
+      than a night.
+
+      **`wake()` is deliberately allowed to be spurious.** It fires inside the arming
+      transaction, before a commit that may never happen, so a rolled-back batch pokes a scheduler
+      that then finds nothing. That costs one indexed query. The alternative is threading an
+      after-commit hook through the ingestion write, `reevaluate` and every audited mutation — and
+      forgetting one means a notification that waits a minute for no reason.
+
+      **Measured, at 2,000 sensors under one root trigger.** Arming 2,000 chains: 145 ms.
+      Holding them inside their latency: 53 ms — the steady state of a large outage, and the
+      figure to watch, because it is the work repeated every scan interval for as long as the
+      outage lasts. Cancelling all 2,000: 74 ms. Firing 4,000 due steps after an hour's backlog:
+      189 ms, drained in one wake across two rounds. **Timers held: 2 idle, 2 with 2,000 chains
+      pending, 2 after they all cancelled** — the claim, asserted rather than asserted about.
+
+      **One real bug, found by a flaky test rather than by reasoning.** `wake()` fires inside
+      the arming transaction, and the design note said a spurious wake was harmless — one wasted
+      query. That was half right: a wake that arrives *early* is not harmless. The scheduler can
+      sweep, read and find nothing before the commit lands, then sleep the full 60-second cap
+      with the alarm committed and overdue, because nothing is left to poke it again. It showed
+      up as a 20-second timeout about one full-suite run in four. A wake that finds nothing is
+      now re-checked rather than believed — twice, at 250 ms and 1 s. Both halves are tested,
+      and the second test is the interesting one: it runs the same forced race against a
+      scheduler configured with no re-checks and asserts it *does* sleep through the commit, so
+      the fix is demonstrated rather than described. `wake()` is also now a no-op before
+      `start()`, because a scheduler nobody started sweeping because something poked it is a
+      second scheduler nobody knows is running.
+
+      **One test rewritten after it proved the wrong thing.** The promptness check originally
+      timed the round trip and asserted under a second, which measures PostgreSQL on a loaded
+      machine rather than the scheduler. It now asserts through the sleep the scheduler was
+      holding: if it is asleep for the full cap and the notification arrives anyway, the wake is
+      the only thing that could have sent it. Load-independent, and a sharper claim.
+
+      **Verified live.** A trigger with a four-second latency and an eight-second escalation,
+      against the running service: the initial notification landed at +4s and the escalation at
+      +8s from the state change, on the second.
 - [ ] **N-05 — Notification templates** · M · N-01 · Template objects with method, content,
       recipients, priority.
 - [ ] **N-06 — Placeholder substitution** · M · N-05 · `%sensor`, `%device`, `%group`, `%probe`,
