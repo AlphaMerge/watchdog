@@ -405,8 +405,15 @@ describe(
 
       // Un-acknowledged: the sensor is plainly Down again, and the operator who was putting the
       // escalation off should get it rather than a second initial notification.
+      //
+      // Swept relative to the *real* clock, not `T0`. Acknowledging and clearing are the two
+      // calls in this file that take no timestamp — production has no synthetic clock, so they
+      // stamp `new Date()` — and the chain resumes from when the acknowledgement was lifted. A
+      // sweep at `at(810)` therefore only fired while the wall clock happened to be behind
+      // 09:00Z, which is how this passed all morning and failed after lunch.
       await h.service.clearAcknowledgement(testActor, sensorId);
-      await sweep(at(810));
+      const lifted = Date.now();
+      await sweep(new Date(lifted + 700_000));
       assert.deepEqual(
         (await queued()).map((request) => request.reason),
         ['initial', 'escalation'],

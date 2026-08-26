@@ -178,12 +178,18 @@ export const TEAMS_METHOD = chatMethod('teams', 'Microsoft Teams message', 'Team
 });
 
 /**
- * Execute a program or script (`CAPABILITIES.MD §5.2`).
+ * Execute a program or script (`CAPABILITIES.MD §5.2`, delivered by `N-10`).
  *
- * `P-03`'s sandbox is what will actually run it; this is the declaration. Arguments carry
- * `N-06`'s placeholders like any other content, and `secretArgs` is for the ones that are a
- * password — a script told to authenticate somewhere has to be given the secret, and it must not
- * come back out of the API afterwards.
+ * The escape hatch: whatever an installation needs that no built-in method covers is a script.
+ * Which also makes it the one method where a template is close to being code, so `path` is a
+ * **file name inside the configured programs directory**, never a path of its own choosing —
+ * otherwise permission to edit a notification would be permission to run anything as the service
+ * account. `notifications.program.directory` is empty by default and the method does nothing
+ * until an operator sets it.
+ *
+ * Arguments carry `N-06`'s placeholders like any other content, and `secretArgs` is for the ones
+ * that are a password — a script told to authenticate somewhere has to be given the secret, and
+ * it must not come back out of the API afterwards.
  */
 export const PROGRAM_METHOD: NotificationMethod = {
   id: 'program',
@@ -196,6 +202,12 @@ export const PROGRAM_METHOD: NotificationMethod = {
     additionalProperties: false,
     required: ['path'],
     properties: {
+      /**
+       * A file name inside `notifications.program.directory`.
+       *
+       * Relative, and it stays relative: an absolute path, a `..`, or a symlink leading out of
+       * the directory are all refused when the notification runs.
+       */
       path: { type: 'string', minLength: 1, maxLength: 1000 },
       args: {
         type: 'array',
@@ -203,7 +215,14 @@ export const PROGRAM_METHOD: NotificationMethod = {
         items: { type: 'string', maxLength: 2000 },
         default: [],
       },
-      /** Appended after `args`, and never returned. */
+      /**
+       * Appended after `args`, and never returned by any route.
+       *
+       * Write-only in the API, and still an argument on a command line: on Linux any local user
+       * can read `/proc/<pid>/cmdline` while the program runs. That is what an argument is, and
+       * it is why the same facts are also handed to the program in its environment — a script
+       * that reads `MS_*` needs no secret on its command line at all.
+       */
       secretArgs: {
         type: 'array',
         writeOnly: true,

@@ -11,6 +11,7 @@ export type {
   IngestionConfig,
   LogLevel,
   ProbeConfig,
+  ProgramConfig,
   ServiceConfig,
   SmtpConfig,
   SmtpRelay,
@@ -60,5 +61,8 @@ export type {
   RejectCode,
   SensorAssignment,
 } from './protocol/messages.js';
+export { runProgram } from './process/run.js';
+export type { ProgramRun, ProgramRunOptions } from './process/run.js';
+
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';

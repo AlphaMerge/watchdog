@@ -204,6 +204,38 @@ export interface WebhookConfig {
   userAgent: string;
 }
 
+/**
+ * Running a program as a notification (`N-10`).
+ *
+ * **`directory` is the whole security model, and it is not optional.** Without it, anybody who
+ * can create a notification template can name any path on the machine and have the core run it
+ * as the service account — an editor permission becomes code execution. So a template names a
+ * file *inside* this directory and nothing else: no absolute paths, no `..`, and the resolved
+ * real path has to still be under it, because a symlink is a path too. Empty disables the method
+ * outright, which is the default: an installation that has not deliberately set this up cannot
+ * run programs at all.
+ */
+export interface ProgramConfig {
+  /** Where notification programs live. Empty disables the method. */
+  directory: string;
+  /** Bytes of stdout and of stderr kept and logged. */
+  maxOutputBytes: number;
+  /** How long a timed-out program has to end on `SIGTERM` before `SIGKILL`. */
+  killGraceMs: number;
+  /**
+   * POSIX uid and gid to run a program as. `-1` leaves it as the service account.
+   *
+   * `-1` because that is what POSIX itself means by "do not change this one" — `setresuid` has
+   * always read it that way — rather than a sentinel invented here. Only usable by a core that
+   * has the privilege to change user, which a correctly installed one does not; it is here
+   * because a hardened installation may want notification scripts to be *less* privileged than
+   * the service, and asking for it without the privilege fails loudly with EPERM rather than
+   * quietly running as the service account.
+   */
+  uid: number;
+  gid: number;
+}
+
 export interface CoreConfig {
   service: ServiceConfig;
   api: {
@@ -233,6 +265,8 @@ export interface CoreConfig {
     smtp: SmtpConfig;
     /** What an HTTP action may reach, and how it behaves (`N-08`). */
     webhook: WebhookConfig;
+    /** Where a notification program may live, and how it is bounded (`N-10`). */
+    program: ProgramConfig;
   };
   database: DatabaseConfig;
   ingestion: IngestionConfig;
@@ -442,6 +476,21 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             },
             maxRedirects: { type: 'integer', minimum: 0, maximum: 10, default: 3 },
             userAgent: { type: 'string', default: 'ms-core' },
+          },
+        },
+        program: {
+          type: 'object',
+          default: {} as ProgramConfig,
+          additionalProperties: false,
+          required: ['directory', 'maxOutputBytes', 'killGraceMs', 'uid', 'gid'],
+          properties: {
+            // Empty by default: running programs is opt-in, and an installation that has not
+            // set this up deliberately cannot run one at all.
+            directory: { type: 'string', default: '' },
+            maxOutputBytes: { type: 'integer', minimum: 0, maximum: 1_048_576, default: 8192 },
+            killGraceMs: { type: 'integer', minimum: 0, maximum: 60_000, default: 5_000 },
+            uid: { type: 'integer', minimum: -1, default: -1 },
+            gid: { type: 'integer', minimum: -1, default: -1 },
           },
         },
       },

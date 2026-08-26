@@ -300,6 +300,14 @@ because each is a decision rather than a defect:
       Left for R-02/R-03: results are logged rather than spooled and sent.
 - [ ] **P-03 — Child-process runner** · M · P-02 · For shell-outs and user scripts: separate
       process, hard kill timer, resource limits, optional separate OS user.
+      **Added by N-10:** `runProgram` in `@ms/shared` already does the bounded-execution half —
+      `spawn` with no shell, a `SIGTERM`-then-`SIGKILL` timeout against the whole **process
+      group** (a script that backgrounds something otherwise outlives its own kill), output
+      bounded but still drained so a chatty program cannot hang on a full pipe, a built rather
+      than inherited environment, and optional `uid`/`gid`. It is in `shared` rather than in
+      `core` precisely so this task and `T-19` use it instead of writing a second one. What is
+      left here is the probe's side: the `CheckPool`-shaped submit/callback contract, and
+      resource limits beyond a timeout.
       **Added by P-02:** the pool's contract is the shape to copy — submit returns immediately,
       results arrive by callback, the deadline settles the result rather than waiting for the
       process, and a process that will not die on `SIGTERM` is killed the way a worker that
@@ -1677,8 +1685,69 @@ because each is a decision rather than a defect:
       `%lastmessage` as nothing, so the operator's body began with a blank line. The card now
       trims it — leading whitespace in a chat message carries nothing, and the alternative was a
       message that opens with an empty row every time something comes back up.
-- [ ] **N-10 — Execute program delivery** · M · P-03, N-05 · Sandboxed, timed out, output
+- [x] **N-10 — Execute program delivery** · M · P-03, N-05 · Sandboxed, timed out, output
       captured to the log.
+
+      **N-10 outcome.** `runProgram` in `@ms/shared` plus `ProgramTransport` in the core.
+
+      **Built without `P-03`, and deliberately not around it.** The dependency was on the probe's
+      child-process runner, which does not exist yet — but it could not have been reused anyway,
+      because a notification runs in `ms-core` and `P-03` runs in `ms-probe`. What the two do
+      share is the hard part, so the runner went into `@ms/shared`: no shell, a hard timeout, a
+      built environment, bounded output. `P-03` and `T-19` should adopt it rather than write a
+      second one, and the note on `P-03` says so.
+
+      **This is the most dangerous method in the subsystem, and the design is mostly about
+      that.** A template is data an operator edits through an API. If `path` could name any file,
+      then permission to edit a notification would be permission to run anything as the service
+      account — a privilege escalation with a form in front of it. So a template names a file
+      *inside* `notifications.program.directory`, the **resolved real path** has to still be under
+      it, and the directory is empty by default, which switches the method off entirely. Four ways
+      out are closed and each is tested: an absolute path, a `..`, a symlink pointing out, and a
+      sibling directory whose name merely starts with the same characters. Verified live —
+      `../core.json` failed permanently with "resolves outside the programs directory".
+
+      **Never through a shell, which is the whole of the injection defence.** An argument carries
+      `%lastmessage` and a check message is whatever a monitored device said, so a shell would
+      turn `; rm -rf /` in an SNMP description into a command. `spawn` with an argv array makes
+      that a string instead. The escaping problem `N-08` had to solve for a JSON document simply
+      does not arise, which is why `bodyEscaping` is `none`. Confirmed live with exactly that
+      message.
+
+      **The environment is built, not inherited.** `MS_NOTIFICATIONS__SMTP__PRIMARY__PASSWORD`
+      and `MS_DATABASE__PASSWORD` are supported overrides (`N-07`), so a script in the programs
+      directory would otherwise be able to read the relay password out of its own environment.
+      It gets an allowlist of what a program needs to *run*, and the alarm's facts as `MS_*` —
+      which also means a script needs no arguments at all, and the template can name the program
+      and nothing else. The body arrives on stdin, because a check message can be longer than the
+      platform's argv limit.
+
+      **The process group, not the process.** A timeout sends `SIGTERM` to the group and `SIGKILL`
+      after the grace period; Windows has no group to signal, so the tree goes down with
+      `taskkill /T`. A mutation test earned this: with a plain single-process kill, the "runs too
+      long" test went from 300 ms to the full 30 s, because killing `/bin/sh` leaves its `sleep`
+      holding the stdout pipe open. A script that backgrounds `curl` and exits would have left it
+      running for ever.
+
+      **A non-zero exit is not retried, and that is a decision rather than an oversight.** The
+      program is a side effect — it opens a ticket, sends an SMS, pulls a lever — and running it
+      five more times because it reported a problem is how one alarm becomes five tickets. It
+      said no; that is an answer. A timeout *is* retried, because the program never got to say
+      anything, and a script that can be run twice is a script that will behave.
+
+      **`secretArgs` is honest about what it is now.** Write-only in the API and still an argument
+      on a command line, where any local user can read `/proc/<pid>/cmdline` while the program
+      runs. The schema says so, the log records the program's name and never its arguments, and
+      the `MS_*` environment is the way to avoid needing a secret on the command line at all. A
+      test asserts against the serialised log line, so nothing reaches the journal by accident.
+
+      **An unrelated failure fixed on the way through.** `notification-engine.test.ts` asserted a
+      resumed escalation by sweeping at a synthetic `T0 + 810s`, while `acknowledge` and
+      `clearAcknowledgement` are the two calls in that file that take no timestamp — production
+      has no synthetic clock, so they stamp `new Date()`. The chain resumes from the real moment
+      the acknowledgement was lifted, so the test passed all morning and failed every afternoon
+      once the wall clock passed 09:00Z. It now sweeps relative to the clock the service actually
+      used.
 - [ ] **N-11 — Summarisation engine** · L · N-05 · All six modes, default _first down and up
       immediately then summarise_; configurable window; digest caps with overflow splitting;
       Slack/Teams/webhook/script always immediate.

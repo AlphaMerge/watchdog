@@ -30,7 +30,9 @@
       "keyFile": "dev/tls/core.key",
       "caFile": "dev/tls/ca.crt"
     },
-    "accessKeys": ["dev-access-key"],
+    "accessKeys": [
+      "dev-access-key"
+    ],
     "handshakeTimeoutMs": 10000,
     "heartbeatIntervalMs": 2000
   },
@@ -66,6 +68,13 @@
       "targetPolicy": "link-local",
       "maxRedirects": 3,
       "userAgent": "ms-core/dev"
+    },
+    "program": {
+      "directory": "dev/notifications",
+      "maxOutputBytes": 8192,
+      "killGraceMs": 5000,
+      "uid": -1,
+      "gid": -1
     }
   }
 }

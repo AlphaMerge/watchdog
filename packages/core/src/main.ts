@@ -33,6 +33,7 @@ import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
+import { ProgramTransport } from './notifications/delivery/program.js';
 import { DeliveryLoop } from './notifications/delivery/loop.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
@@ -396,6 +397,9 @@ async function serve(): Promise<void> {
       webhook,
       slackTransport({ config: chat, logger }),
       teamsTransport({ config: chat, logger }),
+      // The escape hatch (N-10). Off until an operator configures a programs directory, because
+      // without one a template could name any path on the machine.
+      new ProgramTransport({ config: config.notifications.program, logger }),
     ],
   });
   const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
