@@ -115,10 +115,20 @@ export interface LookupSummary {
 }
 
 export interface AuditEntry {
-  id: number;
+  /**
+   * `bigint`, so a string on the wire — a JS number stops being exact at 2^53, and this is also
+   * the paging cursor, so a rounded one would page to the wrong place.
+   */
+  id: string;
   at: string;
   action: string;
-  objectId: number;
+  /**
+   * `null` on an entry about something that was never an object — a schedule, a template.
+   *
+   * Not null merely because the object was deleted: the audit log has no foreign key precisely
+   * so a deletion's own entry survives its subject (`S-10`), and that entry keeps the id.
+   */
+  objectId: number | null;
   objectKind: ObjectKind | null;
   actor: { kind: string; label?: string };
   summary: Record<string, unknown>;
@@ -338,4 +348,34 @@ export interface AlarmPage {
   total: number;
   /** Per state across the whole scope, ignoring the state filter — the chips' own numbers. */
   counts: Partial<Record<SensorState, number>>;
+}
+
+/** One notification the dispatcher handled (`N-13`), for the Logs view's system-events third. */
+export interface NotificationRequestView {
+  id: number;
+  at: string;
+  sensorId: number;
+  sensorName: string | null;
+  templateId: number | null;
+  templateName: string | null;
+  method: string | null;
+  triggerKind: string | null;
+  reason: string | null;
+  state: SensorState | null;
+  message: string;
+  /**
+   * `failed` is an alarm nobody received; `discarded` is one an activation schedule threw away
+   * on purpose (`N-12`). Not the same thing, and a log that conflated them would hide the first.
+   */
+  status: string;
+  disposition: string | null;
+  attempts: number;
+  deliveredAt: string | null;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+}
+
+export interface NotificationRequestPage {
+  items: NotificationRequestView[];
+  nextBefore: number | null;
 }

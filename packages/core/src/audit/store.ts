@@ -19,11 +19,39 @@ export interface AuditEntry {
 }
 
 export interface AuditQuery {
+  /**
+   * One object, exactly — never a subtree.
+   *
+   * A subtree scope would have to walk `object` to find the descendants, and the entry most
+   * worth reading is the one recording a *deletion*, written about an object that no longer has
+   * a parent to be found through. Scoping by walking the tree would silently drop exactly those.
+   * `U-07` filters by category instead, which works the same whether the subject still exists.
+   */
   objectId?: number;
+  /**
+   * The first segment of an action — `object`, `setting`, `channel`, `trigger`, `template`,
+   * `schedule`, `sensor`. Twenty-six actions is too many to put in front of an operator; seven
+   * is a row of chips.
+   */
+  categories?: readonly string[];
+  actorKinds?: readonly string[];
+  from?: Date;
+  to?: Date;
   /** Entries older than this id, for paging backwards through history. */
   before?: string;
   limit: number;
 }
+
+/** The action prefixes `categories` filters on, in the order a UI shows them. */
+export const AUDIT_CATEGORIES = [
+  'object',
+  'setting',
+  'channel',
+  'trigger',
+  'template',
+  'schedule',
+  'sensor',
+] as const;
 
 /**
  * How many destroyed objects a single delete entry lists by name.
@@ -54,6 +82,18 @@ export class AuditRepository {
     if (query.objectId !== undefined) {
       where.push(`object_id = $${String(values.push(query.objectId))}`);
     }
+    if (query.categories !== undefined && query.categories.length > 0) {
+      // split_part rather than LIKE ANY: the category is the first segment, and a prefix match
+      // would make "object" also select a hypothetical "objectgroup.created".
+      where.push(
+        `split_part(action, '.', 1) = ANY($${String(values.push([...query.categories]))})`,
+      );
+    }
+    if (query.actorKinds !== undefined && query.actorKinds.length > 0) {
+      where.push(`actor_kind = ANY($${String(values.push([...query.actorKinds]))})`);
+    }
+    if (query.from !== undefined) where.push(`at >= $${String(values.push(query.from))}`);
+    if (query.to !== undefined) where.push(`at < $${String(values.push(query.to))}`);
     if (query.before !== undefined) {
       where.push(`id < $${String(values.push(query.before))}::bigint`);
     }

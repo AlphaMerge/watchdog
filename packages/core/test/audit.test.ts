@@ -563,6 +563,121 @@ describe(
         );
       });
 
+      it('filters by category, which is the action first segment and not a prefix match', async () => {
+        // Twenty-six actions is too many to put in front of an operator; seven categories is a
+        // row of chips. `split_part` rather than LIKE, so "object" never selects "objectgroup".
+        await service.setSetting(testActor, probeId, 'scan.intervalSeconds', 120, { kind: 'none' });
+        await service.update(
+          testActor,
+          probeId,
+          { kind: 'probe', name: 'renamed' },
+          { kind: 'none' },
+        );
+
+        const settings = await db.tx((q) =>
+          repository.list(q, { limit: 100, categories: ['setting'] }),
+        );
+        assert.ok(settings.length > 0);
+        assert.ok(settings.every((entry) => entry.action.startsWith('setting.')));
+
+        const both = await db.tx((q) =>
+          repository.list(q, { limit: 100, categories: ['setting', 'object'] }),
+        );
+        assert.ok(both.length > settings.length);
+      });
+
+      it('filters by who did it', async () => {
+        await service.update(
+          testActor,
+          probeId,
+          { kind: 'probe', name: 'renamed' },
+          { kind: 'none' },
+        );
+        const mine = await db.tx((q) =>
+          repository.list(q, { limit: 100, actorKinds: [testActor.kind] }),
+        );
+        assert.ok(mine.length > 0);
+        const nobody = await db.tx((q) =>
+          repository.list(q, { limit: 100, actorKinds: ['nonexistent-kind'] }),
+        );
+        assert.deepEqual(nobody, []);
+      });
+
+      it('filters by time, half-open so two adjacent windows never double-count', async () => {
+        await place([500, 501, 502]);
+        const at = (n: number): Date => new Date(Date.parse('2026-01-01T00:00:00Z') + n * 1_000);
+
+        const first = await db.tx((q) =>
+          repository.list(q, { limit: 100, objectId: probeId, from: at(500), to: at(501) }),
+        );
+        assert.deepEqual(
+          first.map((entry) => Number(entry.id)),
+          [500],
+          'from is inclusive and to is exclusive',
+        );
+
+        const rest = await db.tx((q) =>
+          repository.list(q, { limit: 100, objectId: probeId, from: at(501) }),
+        );
+        assert.deepEqual(
+          rest.map((entry) => Number(entry.id)),
+          [502, 501],
+        );
+      });
+
+      it('scopes to one object exactly, never to its subtree', async () => {
+        // A subtree scope has to walk `object` to find descendants, and the entry most worth
+        // reading is the one recording a deletion — written about an object with no parent left
+        // to be found through. Scoping that way would drop precisely those.
+        const child = await service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: 'below',
+        });
+        const forProbe = await db.tx((q) => repository.list(q, { limit: 100, objectId: probeId }));
+        assert.ok(
+          forProbe.every((entry) => entry.objectId === probeId),
+          'the child creation is not in the parent history',
+        );
+        const forChild = await db.tx((q) => repository.list(q, { limit: 100, objectId: child.id }));
+        assert.ok(forChild.some((entry) => entry.action === 'object.created'));
+      });
+
+      it('serves the global list over HTTP, filtered and paged', async () => {
+        await place([600, 601, 602, 603]);
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/audit',
+          query: { objectId: String(probeId), limit: '2' },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{ items: { id: string }[]; nextBefore: string | null }>();
+        assert.deepEqual(
+          body.items.map((entry) => Number(entry.id)),
+          [603, 602],
+        );
+        assert.equal(body.nextBefore, '602');
+
+        const next = await app.inject({
+          method: 'GET',
+          url: '/api/v1/audit',
+          query: { objectId: String(probeId), limit: '2', before: '602' },
+        });
+        assert.deepEqual(
+          next.json<{ items: { id: string }[] }>().items.map((entry) => Number(entry.id)),
+          [601, 600],
+        );
+      });
+
+      it('refuses a category that is not one', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/audit',
+          query: { category: 'bogus' },
+        });
+        assert.equal(response.statusCode, 400);
+      });
+
       it('pages without skipping or repeating an entry', async () => {
         // The cursor compares numerically (`id < $n`) while the sort was lexicographic, so the
         // two disagreed at a page boundary: entries were dropped and others came back twice.

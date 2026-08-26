@@ -93,7 +93,11 @@ export function StateLogPanel({
       </div>
       {log.data.nextBefore !== null && (
         <p className="text-xs text-text-muted">
-          The most recent {String(LIMIT)} changes. U-07 adds the full log with filters and paging.
+          The most recent {String(LIMIT)} changes.{' '}
+          <Link to={`/logs?objectId=${String(objectId)}`} className="text-accent hover:underline">
+            The whole log, filterable
+          </Link>
+          .
         </p>
       )}
     </div>

@@ -147,6 +147,10 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       the sink sees anything, so values are now recorded for the parameters that are not secrets.
       The changed-key list is still computed on the unredacted pair, because a rotated secret
       redacts to the same absence on both sides and would otherwise be invisible.
+      **Added by U-07:** the global list `GET /api/v1/audit`, with category, actor and time
+      filters. `objectId` there is one object exactly and never a subtree — the entry most worth
+      reading is a deletion, whose subject has no parent left to be found through.
+
       **Both sinks.** `CompositeAuditSink` writes the table and the structured log, inside the
       mutation's transaction — the table is what the history tab reads, the log is the plain-text
       audit component `CAPABILITIES.MD` §9 lists and the copy that survives someone dropping the
@@ -2476,8 +2480,49 @@ because each is a decision rather than a defect:
 
       Filters live in the URL, so "look at the Berlin alarms" is a link somebody sends; the
       object detail page links to its own scope.
-- [ ] **U-07 — Logs view** · M · M-15 · PRTG's category structure: status changes, system events,
+- [x] **U-07 — Logs view** · M · M-15 · PRTG's category structure: status changes, system events,
       object history; filters and paging.
+
+      **U-07 outcome.** `/logs` with the three categories `CAPABILITIES.MD §6` names, each backed
+      by its own endpoint, plus a new `GET /api/v1/audit` for the global object history — the only
+      one of the three that had no route, because `S-10` only ever exposed audit per object.
+
+      **Three tabs rather than one merged stream.** They are three tables answering three
+      questions: when did this sensor break, who changed this, and did anybody get told. Merging
+      them would need a lowest-common-denominator row that describes none of them well, and then
+      a filter to get back to the one you wanted.
+
+      **Every list pages by keyset, never by offset.** Rows arrive while somebody is reading — a
+      sensor changes state, somebody saves a setting — and an offset page recomputed against a
+      shifted table shows a row twice or skips one. Verified live on 200 object-history rows: all
+      200 distinct and still descending across the page boundary.
+
+      **Loading more appends; changing a filter discards.** A log is read downwards, so a "load
+      more" that swapped the list would lose the reader's place. But rows fetched against the old
+      query answer a different question, so a filter change drops them rather than showing them
+      under the new heading. Both are tested, along with the one that would look like it worked:
+      paging from the *second* page's cursor rather than the first, which otherwise refetches page
+      two for ever.
+
+      **`objectId` on the audit list is that object exactly, never its subtree.** A subtree scope
+      has to walk `object` to find descendants, and the entry most worth reading is the one
+      recording a *deletion* — written about an object with no parent left to be found through. So
+      scoping that way would silently drop precisely those. Category filtering is the alternative
+      and works the same whether the subject still exists.
+
+      **Twenty-six actions became seven categories**, the action's first segment, matched with
+      `split_part` rather than a prefix `LIKE` so `object` can never also select a hypothetical
+      `objectgroup.created`.
+
+      **Found while building it: the web `AuditEntry` type disagreed with the wire on two
+      fields.** `id` is a `bigint` served as a string and the client declared it a number — and it
+      is also the paging cursor, so a rounded one would page to the wrong place; `objectId` is
+      nullable and the client said it never was. Neither had bitten yet because the only consumer
+      was the detail page's Changes tab, which reads neither field for anything load-bearing.
+
+      System events carry only notifications, which is all v1 produces — the tab says so rather
+      than showing three empty sections for auto-discovery, reports and clustering. The object
+      detail page links to both its scoped alarms and its scoped log.
 - [ ] **U-08 — Schema-driven settings forms** · L · P-05, U-01 · Forms generated from each sensor
       type's `paramsSchema`, so a new sensor type needs no frontend work.
 - [ ] **U-09 — Inheritance-aware controls** · M · S-04, U-08 · Every inheritable field shows the

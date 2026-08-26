@@ -7,6 +7,7 @@ const NAV = [
   // screen, and the thing somebody opens this product to look at belongs near the front.
   { to: '/alarms', label: 'Alarms', end: false },
   { to: '/tree', label: 'Tree', end: false },
+  { to: '/logs', label: 'Logs', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
 ];
 
