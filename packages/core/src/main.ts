@@ -32,6 +32,7 @@ import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
+import { NotificationTester } from './notifications/test-send.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { ProgramTransport } from './notifications/delivery/program.js';
@@ -389,19 +390,22 @@ async function serve(): Promise<void> {
   // URLs like any other, and a self-hosted Mattermost accepting Slack's document is a common
   // enough target that exempting them would have been the wrong call.
   const chat = config.notifications.webhook;
+  // One list, shared with N-14's test send — a test that went through a different set of
+  // transports would be testing something the alarms do not use.
+  const transports = [
+    email,
+    webhook,
+    slackTransport({ config: chat, logger }),
+    teamsTransport({ config: chat, logger }),
+    // The escape hatch (N-10). Off until an operator configures a programs directory, because
+    // without one a template could name any path on the machine.
+    new ProgramTransport({ config: config.notifications.program, logger }),
+  ];
   const dispatcher = new NotificationDispatcher({
     db,
     logger,
     contexts: messageContexts,
-    transports: [
-      email,
-      webhook,
-      slackTransport({ config: chat, logger }),
-      teamsTransport({ config: chat, logger }),
-      // The escape hatch (N-10). Off until an operator configures a programs directory, because
-      // without one a template could name any path on the machine.
-      new ProgramTransport({ config: config.notifications.program, logger }),
-    ],
+    transports,
     // Growing waits with half of each randomised (N-13). A relay that refused one message will
     // refuse the next one a second later, and a relay coming back from an hour's outage must not
     // meet every deferred message at the same instant.
@@ -416,6 +420,16 @@ async function serve(): Promise<void> {
   // the same reader into channels on the Core Health sensor.
   const deliveryHealth = new DeliveryHealthReader({
     staleAfterMs: config.notifications.retry.staleAfterSeconds * 1_000,
+  });
+  // What "send test notification" sends through (N-14), and the same transports the alarms use.
+  const tester = new NotificationTester({
+    db,
+    logger,
+    contexts: messageContexts,
+    transports,
+    audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
+    publicUrl: config.notifications.publicUrl,
+    siteName: config.notifications.siteName,
   });
   const deliveryLoop = new DeliveryLoop({ dispatcher, logger });
   wakeDelivery.poke = () => {
@@ -445,6 +459,7 @@ async function serve(): Promise<void> {
     triggers,
     templates,
     deliveryHealth,
+    tester,
   });
   await api.build(VERSION, service);
   await api.start();

@@ -84,6 +84,20 @@ services:
     ports:
       - '127.0.0.1:1025:1025'
       - '127.0.0.1:8025:8025'
+    # Jim, MailHog's chaos monkey, is live in this image and randomly rejects recipients, refuses
+    # connections and throttles links. That is a genuinely useful thing to test against — and it
+    # is *not* something a test suite can assert against, because a `550 Invalid recipient` is a
+    # permanent rejection by every correct reading, so the transport does not retry it and the
+    # test simply fails. It cost four tickets' worth of "MailHog is flaky under load" before
+    # anybody read its log. Turned off here; raise the numbers deliberately when chaos is the
+    # thing being tested.
+    environment:
+      MH_JIM_ACCEPT: '1.0'
+      MH_JIM_DISCONNECT: '0.0'
+      MH_JIM_LINKSPEED_AFFECT: '0.0'
+      MH_JIM_REJECT_SENDER: '0.0'
+      MH_JIM_REJECT_RECIPIENT: '0.0'
+      MH_JIM_REJECT_AUTH: '0.0'
     healthcheck:
       test: ['CMD', '/bin/sh', '-c', 'nc -z 127.0.0.1 1025']
       interval: 10s

@@ -21,6 +21,7 @@ import { scheduleRoutes } from './routes/schedules.js';
 import { stateRoutes } from './routes/state.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
 import type { DeliveryHealthReader } from '../notifications/health.js';
+import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
@@ -82,6 +83,8 @@ export interface ApiServerOptions {
    * should 404 rather than report that everything is fine.
    */
   deliveryHealth?: DeliveryHealthReader;
+  /** What "send test notification" actually sends through (`N-14`). */
+  tester?: NotificationTester;
 }
 
 /**
@@ -107,6 +110,7 @@ export class ApiServer {
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
+  readonly #tester: NotificationTester | undefined;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -133,6 +137,7 @@ export class ApiServer {
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
+    this.#tester = options.tester;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -271,7 +276,10 @@ export class ApiServer {
           await scope.register(triggerRoutes, { triggers: this.#triggers });
         }
         if (this.#templates !== undefined) {
-          await scope.register(templateRoutes, { templates: this.#templates });
+          await scope.register(templateRoutes, {
+            templates: this.#templates,
+            ...(this.#tester === undefined ? {} : { tester: this.#tester }),
+          });
         }
         if (this.#deliveryHealth !== undefined) {
           await scope.register(notificationRoutes, {

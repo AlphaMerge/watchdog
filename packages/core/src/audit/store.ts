@@ -302,6 +302,21 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         ],
       };
 
+    case 'template.tested':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          templateId: mutation.templateId,
+          name: mutation.name,
+          method: mutation.method,
+          delivered: mutation.delivered,
+        },
+        // No diff, because nothing changed. The entry exists to say who sent it and whether it
+        // arrived, which is the whole of what a test send is.
+        diff: [],
+      };
+
     case 'schedule.created':
       return {
         ...base,

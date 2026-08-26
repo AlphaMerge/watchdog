@@ -631,16 +631,18 @@ describe(
           transports: [transport],
           // Zero, and load-bearing: the loop below cannot retry anything through the default
           // backoff, because a deferred request's `next_attempt_at` is a minute away and the very
-          // next `dispatch()` claims nothing. This test was relaxed in `N-08` to "dispatch until
-          // it lands" and then went on failing under load for exactly that reason.
+          // next `dispatch()` claims nothing.
           retry: { firstDelayMs: 0, maxDelayMs: 0 },
           leaseMs: 0,
         });
         try {
-          // Dispatched until it lands, rather than once. MailHog is a small Go binary sharing a
-          // container host with a dozen test files, and it drops the occasional connection under
-          // that load — which the transport correctly reports as retryable. Asserting a
-          // first-attempt success would be asserting that the relay was not busy.
+          // Dispatched until it lands, rather than once. Kept as a defence rather than as a
+          // diagnosis: the intermittent failures this was written for turned out to be Jim,
+          // MailHog's chaos monkey, which is live in that image and randomly answers
+          // `550 Invalid recipient` — a permanent rejection by every correct reading, so the
+          // transport does not retry it and no amount of looping would have helped. Jim is
+          // switched off in `docker-compose.dev.yml` (`N-14`). A relay genuinely being busy is
+          // still a thing, and this still survives it.
           let delivered = await statusOf(requestId);
           for (let attempt = 0; attempt < 5 && delivered.status !== 'sent'; attempt += 1) {
             await dispatcher.dispatch();

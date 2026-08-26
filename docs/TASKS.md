@@ -1935,8 +1935,46 @@ because each is a decision rather than a defect:
       not exist yet. `DeliveryHealthReader` is what it should read — shared, so the sensor and the
       API cannot end up disagreeing about whether delivery is working — and the note on `P-12`
       says which channels to make from it.
-- [ ] **N-14 — Send test notification** · S · N-05 · Per-template action with a full result
+- [x] **N-14 — Send test notification** · S · N-05 · Per-template action with a full result
       report.
+
+      **N-14 outcome.** `NotificationTester` and `POST /templates/:id/test`, sharing the
+      dispatcher's own transport list — a test that went through a different set of transports
+      would be testing something the alarms do not use.
+
+      **It really sends, and that is the point.** The same rendering, the same transport, the same
+      settings and the same recipients; a test that stubbed any of them would prove the stub
+      works. Which also means somebody testing an on-call template at three in the morning has
+      paged whoever is on call, so it is written to the audit log with who did it and whether it
+      arrived — `template.tested`, the one read-shaped action in this system that puts a real
+      message in front of real people.
+
+      **What it skips is the queue.** No `notification_request` row, so nothing is retried,
+      summarised (`N-11`) or suppressed by an activation schedule (`N-12`) — each of which would
+      turn "did my relay work" into "wait fifteen minutes and find out".
+
+      **Those three are reported instead, and that is the "full result report".** A green test on
+      a template that is switched off, or outside its schedule, or set to summarise everything,
+      has proved the relay works and proved nothing about whether an alarm would arrive. The
+      `notes` say so in words: *"This template is outside its 'Weekends' schedule right now. A
+      real notification would be thrown away."* Failures are reported rather than thrown — the
+      error, whether it was retryable, and how long it took — because a 500 explains nothing to
+      the person who clicked the button.
+
+      **Without a `sensorId` it renders against an example sensor**, which is not a convenience:
+      the first thing an operator does with a new installation is check that the SMTP relay works,
+      and at that point there may be no sensors at all. The example link still points at the
+      configured `publicUrl`, which is one of the things a test send should reveal.
+
+      **Jim.** Verifying this live found the cause of the "MailHog is flaky under load" that had
+      been blamed and worked around for four tickets: **Jim, MailHog's chaos monkey, is live in
+      that image** and randomly answers `550 Invalid recipient`. Measured at one failure in ten
+      test sends, and zero in twenty with Jim switched off in `docker-compose.dev.yml`. It is not
+      something a suite can assert against either — a 550 is a permanent rejection by every
+      correct reading, so the transport does not retry it and no amount of looping helps, which
+      is why the `N-12` workaround only ever reduced the odds. The retry loop in the real-SMTP
+      test stays as a defence against a genuinely busy relay; its comment now says what actually
+      happened.
 - [ ] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
       message plus digests, verified against MailHog and a webhook sink; a 30-second blip under a
       5-minute latency produces nothing.

@@ -245,6 +245,22 @@ export type Mutation =
       name: string;
       method: string;
     }
+  | {
+      /**
+       * A test send (`N-14`).
+       *
+       * Recorded even though it changes nothing, because it is the one read-shaped action in
+       * this system that puts a real message in front of real people: somebody testing an
+       * on-call template at three in the morning has paged whoever is on call. "Who woke me up"
+       * deserves an answer.
+       */
+      action: 'template.tested';
+      objectId: null;
+      templateId: number;
+      name: string;
+      method: string;
+      delivered: boolean;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
@@ -423,6 +439,14 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         templateId: mutation.templateId,
         name: mutation.name,
         method: mutation.method,
+      };
+    case 'template.tested':
+      return {
+        action: mutation.action,
+        templateId: mutation.templateId,
+        name: mutation.name,
+        method: mutation.method,
+        delivered: mutation.delivered,
       };
     case 'schedule.created':
     case 'schedule.deleted':

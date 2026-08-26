@@ -5,6 +5,7 @@ import type { Actor } from '../../objects/audit.js';
 import { notificationMethods } from '../../notifications/methods.js';
 import { describePlaceholders } from '../../notifications/placeholders.js';
 import { WHEN_INACTIVE } from '../../notifications/activation.js';
+import type { NotificationTester } from '../../notifications/test-send.js';
 import {
   DEFAULT_SUMMARISATION,
   describeSummarisationModes,
@@ -14,6 +15,13 @@ import type { TemplateInput, TemplateService } from '../../notifications/templat
 
 export interface TemplateRouteOptions {
   templates: TemplateService;
+  /**
+   * What actually sends a test message (`N-14`).
+   *
+   * Optional like the rest of the notification wiring: absent, the route is not registered, so a
+   * build with no transports 404s rather than reporting that the test succeeded.
+   */
+  tester?: NotificationTester;
 }
 
 /** Until accounts exist (A-01), every actor is the caller's address — in exactly one place. */
@@ -202,11 +210,55 @@ const usedBySchema = {
   },
 } as const;
 
+const testSendSchema = {
+  $id: 'ms:templateTestResult',
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'templateId',
+    'templateName',
+    'method',
+    'methodName',
+    'sensorId',
+    'sensorName',
+    'subject',
+    'body',
+    'recipients',
+    'unknownPlaceholders',
+    'delivered',
+    'detail',
+    'error',
+    'retryable',
+    'durationMs',
+    'notes',
+  ],
+  properties: {
+    templateId: { type: 'integer' },
+    templateName: { type: 'string' },
+    method: { type: 'string' },
+    methodName: { type: 'string' },
+    sensorId: { type: ['integer', 'null'] },
+    sensorName: { type: 'string' },
+    subject: { type: 'string' },
+    body: { type: 'string' },
+    recipients: { type: 'array', items: recipientSchema },
+    unknownPlaceholders: { type: 'array', items: { type: 'string' } },
+    delivered: { type: 'boolean' },
+    detail: { type: ['string', 'null'] },
+    error: { type: ['string', 'null'] },
+    retryable: { type: ['boolean', 'null'] },
+    durationMs: { type: 'integer' },
+    /** What would have been different for a real notification. */
+    notes: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
+
 export const TEMPLATE_SCHEMAS = [
   templateSchema,
   methodSchema,
   templateInputSchema,
   summarisationModeSchema,
+  testSendSchema,
   placeholderSchema,
   previewSchema,
   usedBySchema,
@@ -221,7 +273,7 @@ export const TEMPLATE_SCHEMAS = [
  * they name.
  */
 export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptions): void {
-  const { templates } = options;
+  const { templates, tester } = options;
 
   app.get(
     '/notification-methods',
@@ -382,6 +434,40 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
     },
     async (request) => templates.preview(request.params.id, request.query.sensorId),
   );
+
+  if (tester !== undefined) {
+    app.post<{ Params: { id: number }; Body: { sensorId?: number } }>(
+      '/templates/:id/test',
+      {
+        schema: {
+          tags: ['templates'],
+          summary: 'Send a test notification through this template',
+          description:
+            '**This really sends.** The same rendering, the same transport, the same settings ' +
+            'and the same recipients — testing an on-call template at three in the morning ' +
+            'pages whoever is on call, which is why it is written to the audit log. What it ' +
+            'skips is the queue: nothing is retried, summarised or suppressed by an activation ' +
+            'schedule, because those would each turn "did my relay work" into "wait fifteen ' +
+            'minutes and find out". `notes` reports what a real notification would have run ' +
+            'into instead, so a green test on a template that is switched off cannot be ' +
+            'mistaken for a working alarm. Without `sensorId` the message is rendered against ' +
+            'an example sensor, which is what an installation with no sensors yet needs.',
+          params: idParams,
+          body: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { sensorId: { type: 'integer', minimum: 1 } },
+          },
+          response: { 200: { $ref: 'ms:templateTestResult' } },
+        },
+      },
+      async (request) =>
+        tester.send(actorFor(request), {
+          templateId: request.params.id,
+          ...(request.body.sensorId === undefined ? {} : { sensorId: request.body.sensorId }),
+        }),
+    );
+  }
 
   app.post<{ Body: TemplateInput }>(
     '/templates',
