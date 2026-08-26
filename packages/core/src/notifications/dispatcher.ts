@@ -1,6 +1,7 @@
 import { describeError, type Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import type { SensorState } from '../state/tables.js';
+import { discardReason, TemplateActivation, type Suppression } from './activation.js';
 import type { NotificationReason } from './chain.js';
 import type { MessageContextLoader, PendingNotification } from './context.js';
 import { notificationMethods } from './methods.js';
@@ -64,6 +65,8 @@ export interface DispatchStats {
   held: number;
   /** Digest messages sent, which is not the same as windows: a large one splits. */
   digests: number;
+  /** Notifications thrown away because their template was outside its schedule (`N-12`). */
+  discarded: number;
 }
 
 interface ClaimRow {
@@ -123,6 +126,7 @@ export class NotificationDispatcher {
   readonly #maxAttempts: number;
   readonly #maxDigests: number;
   readonly #summaries = new SummaryRepository();
+  readonly #activation = new TemplateActivation();
   #prunedAt = 0;
   readonly #stats: DispatchStats = {
     sent: 0,
@@ -131,6 +135,7 @@ export class NotificationDispatcher {
     awaiting: 0,
     held: 0,
     digests: 0,
+    discarded: 0,
   };
 
   constructor(options: NotificationDispatcherOptions) {
@@ -158,13 +163,19 @@ export class NotificationDispatcher {
    * straight back rather than waiting for the next tick.
    */
   async dispatch(now = new Date()): Promise<number> {
+    // What the clock has switched off (`N-12`). First, because a template outside its schedule
+    // either owes nothing at all or owes it later, and both answers change what the rest of this
+    // pass may touch.
+    const suppressed = await this.#activation.suppressed(this.#db, now);
+    for (const template of suppressed.discarded) await this.#discard(template, now);
+
     // Before anything is claimed, because the decision is what says which requests are claimable
     // at all. A request folded into a digest is not owed as a message of its own.
-    await this.#decide(now);
+    await this.#decide(now, suppressed.templateIds);
     await this.#db.tx((q) => this.#summaries.closeDue(q, now));
-    const digested = await this.#digests(now);
+    const digested = await this.#digests(now, suppressed.templateIds);
 
-    const claimed = await this.#claim(now);
+    const claimed = await this.#claim(now, suppressed.templateIds);
     if (claimed.length === 0) {
       this.#stats.awaiting = await this.#countAwaiting();
       // Idle is when there is time for housekeeping. A window that released its first Down and
@@ -253,19 +264,24 @@ export class NotificationDispatcher {
   }
 
   /** What is owed as a message of its own. */
-  async #claim(now: Date): Promise<ClaimRow[]> {
+  async #claim(now: Date, suppressed: readonly number[]): Promise<ClaimRow[]> {
     // Only what is owed as a message of its own. A held request belongs to a digest, and one
     // whose window has been deleted belongs to nobody — so it is sent rather than lost.
     return this.#claimWhere(
       now,
+      suppressed,
       `(r.disposition = 'immediate' OR (r.disposition = 'held' AND r.summary_id IS NULL))`,
       [],
     );
   }
 
   /** Everything a closed window is still holding, claimed together as one digest. */
-  async #claimMembers(windowId: number, now: Date): Promise<ClaimRow[]> {
-    return this.#claimWhere(now, `r.summary_id = $5`, [windowId], MAX_DIGEST_MEMBERS);
+  async #claimMembers(
+    windowId: number,
+    now: Date,
+    suppressed: readonly number[],
+  ): Promise<ClaimRow[]> {
+    return this.#claimWhere(now, suppressed, `r.summary_id = $6`, [windowId], MAX_DIGEST_MEMBERS);
   }
 
   /**
@@ -278,6 +294,7 @@ export class NotificationDispatcher {
    */
   async #claimWhere(
     now: Date,
+    suppressed: readonly number[],
     predicate: string,
     extra: readonly unknown[],
     limit = this.#batchSize,
@@ -295,6 +312,9 @@ export class NotificationDispatcher {
             -- A template that is gone, or was never there, is claimed on purpose: it fails with
             -- a reason an operator can act on rather than sitting in the queue for ever.
             AND (t.id IS NULL OR (t.enabled AND t.method = ANY($2::text[])))
+            -- Outside its activation schedule and set to collect rather than discard (N-12).
+            -- Left pending on purpose: this is "send it when I am back", not a failure.
+            AND NOT (r.template_id = ANY($5::bigint[]))
           ORDER BY r.next_attempt_at NULLS FIRST, r.id
           LIMIT $3
           FOR UPDATE OF r SKIP LOCKED
@@ -315,7 +335,14 @@ export class NotificationDispatcher {
           (SELECT priority FROM notification_template WHERE id = r.template_id) AS t_priority,
           (SELECT enabled FROM notification_template WHERE id = r.template_id) AS t_enabled
         `,
-        [now, this.methods, limit, new Date(now.getTime() + this.#retryDelayMs), ...extra],
+        [
+          now,
+          this.methods,
+          limit,
+          new Date(now.getTime() + this.#retryDelayMs),
+          [...suppressed],
+          ...extra,
+        ],
       );
       return rows;
     });
@@ -333,9 +360,13 @@ export class NotificationDispatcher {
    * retry would move a failed immediate message into a digest and quietly change what the
    * operator was promised.
    */
-  async #decide(now: Date): Promise<number> {
+  async #decide(now: Date, suppressed: readonly number[]): Promise<number> {
     return this.#db.tx(async (q) => {
-      const pending = await this.#summaries.undecided(q, this.#batchSize * 4);
+      // A suppressed template's requests are left undecided rather than being folded into a
+      // window that would open and close while nobody is listening. When the schedule reopens
+      // the whole backlog is decided together, which is what makes "collect and send when
+      // reactivated" arrive as one message and one digest rather than as a stale digest.
+      const pending = await this.#summaries.undecided(q, this.#batchSize * 4, suppressed);
       let held = 0;
       for (const request of pending) {
         const mode = isSummarisationMode(request.summarisation)
@@ -377,15 +408,48 @@ export class NotificationDispatcher {
   }
 
   /** Sends what the closed windows are holding. Returns how many requests it covered. */
-  async #digests(now: Date): Promise<number> {
-    const owing = await this.#db.tx((q) => this.#summaries.owing(q, now, this.#maxDigests));
+  async #digests(now: Date, suppressed: readonly number[]): Promise<number> {
+    const owing = await this.#db.tx((q) =>
+      this.#summaries.owing(q, now, this.#maxDigests, suppressed),
+    );
     let covered = 0;
     for (const window of owing) {
-      const members = await this.#claimMembers(window.id, now);
+      const members = await this.#claimMembers(window.id, now, suppressed);
       if (members.length === 0) continue;
       covered += await this.#sendDigest(members, now);
     }
     return covered;
+  }
+
+  /**
+   * Throws away everything a template outside its schedule owes (`N-12`).
+   *
+   * **`discarded`, not `failed`.** Nobody was meant to receive it, so nothing went wrong —
+   * counting it as a failure would put it on `N-13`'s Core Health failure count and send an
+   * operator looking for a relay problem that does not exist. It is not `sent` either, because
+   * nobody got it. The row says which schedule suppressed it and when that schedule reopens, so
+   * "why did I not hear about this" has an answer.
+   */
+  async #discard(template: Suppression, now: Date): Promise<void> {
+    const rows = await this.#db.query<{ id: string }>(
+      `UPDATE notification_request
+       SET status = 'discarded', next_attempt_at = NULL, last_error = $2, delivered_at = NULL
+       WHERE status = 'pending' AND template_id = $1
+       RETURNING id::text AS id`,
+      [template.templateId, discardReason(template)],
+    );
+    if (rows.length === 0) return;
+    this.#stats.discarded += rows.length;
+    this.#logger.info(
+      {
+        templateId: template.templateId,
+        scheduleId: template.scheduleId,
+        discarded: rows.length,
+        activeAt: template.activeAt,
+        at: now,
+      },
+      'notifications discarded: the template is outside its activation schedule',
+    );
   }
 
   /**

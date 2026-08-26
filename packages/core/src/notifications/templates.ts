@@ -4,6 +4,7 @@ import type { Actor, AuditSink } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import type { ObjectId } from '../objects/types.js';
 import { triggerKinds } from '../triggers/definition.js';
+import { isWhenInactive, type WhenInactive } from './activation.js';
 import type { MessageContextLoader } from './context.js';
 import { MethodError, notificationMethods } from './methods.js';
 import {
@@ -44,9 +45,20 @@ export interface StoredTemplate {
   readonly summarisation: SummarisationMode;
   /** How long a collection window stays open, in seconds. */
   readonly summaryWindowSeconds: number;
+  /** The `M-09` schedule this template is active during, or null for always (`N-12`). */
+  readonly scheduleId: number | null;
+  /** Joined for the read, never written: the schedule's own name lives on the schedule. */
+  readonly scheduleName: string | null;
+  readonly whenInactive: WhenInactive;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
+
+/** A template as it is written: everything the row owns, and nothing it merely joins. */
+export type TemplateWrite = Omit<
+  StoredTemplate,
+  'id' | 'scheduleName' | 'createdAt' | 'updatedAt'
+>;
 
 /** What a client sends. Absent fields on an update keep what is stored. */
 export interface TemplateInput {
@@ -61,6 +73,9 @@ export interface TemplateInput {
   readonly enabled?: boolean;
   readonly summarisation?: string;
   readonly summaryWindowSeconds?: number;
+  /** `null` clears the schedule, which means "always active". */
+  readonly scheduleId?: number | null;
+  readonly whenInactive?: string;
 }
 
 /**
@@ -93,6 +108,9 @@ export interface TemplateView {
    */
   readonly summarisation: SummarisationMode;
   readonly summaryWindowSeconds: number;
+  readonly scheduleId: number | null;
+  readonly scheduleName: string | null;
+  readonly whenInactive: WhenInactive;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -129,6 +147,9 @@ interface TemplateRow {
   enabled: boolean;
   summarisation: string;
   summary_window_seconds: number;
+  schedule_id: string | null;
+  schedule_name: string | null;
+  when_inactive: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -149,6 +170,9 @@ function toStored(row: TemplateRow): StoredTemplate {
       ? row.summarisation
       : DEFAULT_SUMMARISATION,
     summaryWindowSeconds: row.summary_window_seconds,
+    scheduleId: row.schedule_id === null ? null : Number(row.schedule_id),
+    scheduleName: row.schedule_name,
+    whenInactive: isWhenInactive(row.when_inactive) ? row.when_inactive : 'queue',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -157,6 +181,8 @@ function toStored(row: TemplateRow): StoredTemplate {
 const COLUMNS = `
   t.id::text AS id, t.name, t.description, t.method, t.settings, t.subject, t.body,
   t.recipients, t.priority, t.enabled, t.summarisation, t.summary_window_seconds,
+  t.schedule_id::text AS schedule_id, t.when_inactive,
+  (SELECT name FROM schedule WHERE id = t.schedule_id) AS schedule_name,
   t.created_at, t.updated_at
 `;
 
@@ -180,13 +206,13 @@ export class TemplateRepository {
 
   async create(
     q: Queryable,
-    write: Omit<StoredTemplate, 'id' | 'createdAt' | 'updatedAt'>,
+    write: TemplateWrite,
   ): Promise<number> {
     const rows = await q.query<{ id: string }>(
       `INSERT INTO notification_template
          (name, description, method, settings, subject, body, recipients, priority, enabled,
-          summarisation, summary_window_seconds)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11)
+          summarisation, summary_window_seconds, schedule_id, when_inactive)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)
        RETURNING id::text AS id`,
       [
         write.name,
@@ -200,6 +226,8 @@ export class TemplateRepository {
         write.enabled,
         write.summarisation,
         write.summaryWindowSeconds,
+        write.scheduleId,
+        write.whenInactive,
       ],
     );
     return Number(rows[0]?.id ?? 0);
@@ -208,13 +236,14 @@ export class TemplateRepository {
   async update(
     q: Queryable,
     id: number,
-    write: Omit<StoredTemplate, 'id' | 'createdAt' | 'updatedAt'>,
+    write: TemplateWrite,
   ): Promise<void> {
     await q.query(
       `UPDATE notification_template
        SET name = $2, description = $3, method = $4, settings = $5::jsonb, subject = $6,
            body = $7, recipients = $8::jsonb, priority = $9, enabled = $10,
-           summarisation = $11, summary_window_seconds = $12
+           summarisation = $11, summary_window_seconds = $12, schedule_id = $13,
+           when_inactive = $14
        WHERE id = $1`,
       [
         id,
@@ -229,6 +258,8 @@ export class TemplateRepository {
         write.enabled,
         write.summarisation,
         write.summaryWindowSeconds,
+        write.scheduleId,
+        write.whenInactive,
       ],
     );
   }
@@ -399,6 +430,7 @@ export class TemplateService {
     const write = this.#parse(input, null);
     const now = new Date();
     return this.#db.tx(async (q) => {
+      await this.#requireSchedule(q, write.scheduleId);
       const id = await this.#repo.create(q, write);
       await this.#audit.record(
         q,
@@ -434,6 +466,7 @@ export class TemplateService {
       if (before === null) throw notFound(id);
 
       const write = this.#parse(input, before);
+      await this.#requireSchedule(q, write.scheduleId);
       await this.#repo.update(q, id, write);
       await this.#audit.record(
         q,
@@ -505,10 +538,7 @@ export class TemplateService {
   }
 
   /** Validates the input against its method and fills the schema's defaults in. */
-  #parse(
-    input: TemplateInput,
-    before: StoredTemplate | null,
-  ): Omit<StoredTemplate, 'id' | 'createdAt' | 'updatedAt'> {
+  #parse(input: TemplateInput, before: StoredTemplate | null): TemplateWrite {
     const method = notificationMethods.get(input.method);
     // A secret the client did not resend is the one it was never shown. Merge before validating,
     // so a required secret is not reported missing when it is sitting in the row.
@@ -568,6 +598,13 @@ export class TemplateService {
     // dispatcher will not honour — the stored value always describes what actually happens.
     const summarisation: SummarisationMode = method.summarisable ? asked : 'always-immediate';
 
+    const whenInactive = input.whenInactive ?? before?.whenInactive ?? 'queue';
+    if (!isWhenInactive(whenInactive)) {
+      throw new MethodError('this template cannot be saved', { method: method.id }, [
+        `"${whenInactive}" is not a choice; use "queue" or "discard"`,
+      ]);
+    }
+
     return {
       name: input.name,
       description: input.description ?? before?.description ?? '',
@@ -581,7 +618,31 @@ export class TemplateService {
       summarisation,
       summaryWindowSeconds:
         input.summaryWindowSeconds ?? before?.summaryWindowSeconds ?? DEFAULT_WINDOW_SECONDS,
+      // Absent keeps what is stored; an explicit `null` clears it, which is the same
+      // absent-versus-null distinction the secret merge draws and for the same reason.
+      scheduleId: input.scheduleId === undefined ? (before?.scheduleId ?? null) : input.scheduleId,
+      whenInactive,
     };
+  }
+
+  /**
+   * Refuses a schedule that is not there.
+   *
+   * The column has a foreign key, so the database would refuse it anyway — with a constraint
+   * name. This is the same refusal in words an operator can act on, which is the difference
+   * between "fix the schedule id" and "ask a developer what 23503 means".
+   */
+  async #requireSchedule(q: Queryable, scheduleId: number | null): Promise<void> {
+    if (scheduleId === null) return;
+    const rows = await q.query<{ id: string }>(
+      'SELECT id::text AS id FROM schedule WHERE id = $1',
+      [scheduleId],
+    );
+    if (rows.length === 0) {
+      throw new ObjectError('OBJECT_NOT_FOUND', `no schedule ${String(scheduleId)}`, {
+        context: { scheduleId, phase: 'templates' },
+      });
+    }
   }
 
   async #loaded(q: Queryable, id: number): Promise<TemplateView> {
@@ -610,6 +671,9 @@ export class TemplateService {
       redactedSettings: redacted,
       summarisation: stored.summarisation,
       summaryWindowSeconds: stored.summaryWindowSeconds,
+      scheduleId: stored.scheduleId,
+      scheduleName: stored.scheduleName,
+      whenInactive: stored.whenInactive,
       subject: stored.subject,
       body: stored.body,
       recipients: stored.recipients,

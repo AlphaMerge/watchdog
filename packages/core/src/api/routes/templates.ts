@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Actor } from '../../objects/audit.js';
 import { notificationMethods } from '../../notifications/methods.js';
 import { describePlaceholders } from '../../notifications/placeholders.js';
+import { WHEN_INACTIVE } from '../../notifications/activation.js';
 import {
   DEFAULT_SUMMARISATION,
   describeSummarisationModes,
@@ -58,6 +59,9 @@ const templateSchema = {
     'summarisable',
     'summarisation',
     'summaryWindowSeconds',
+    'scheduleId',
+    'scheduleName',
+    'whenInactive',
     'createdAt',
     'updatedAt',
   ],
@@ -87,6 +91,10 @@ const templateSchema = {
     /** Always `always-immediate` for a method that is never summarised — forced, not ignored. */
     summarisation: { type: 'string', enum: [...SUMMARISATION_MODES] },
     summaryWindowSeconds: { type: 'integer' },
+    /** The `M-09` schedule this template is active during, or null for always (`N-12`). */
+    scheduleId: { type: ['integer', 'null'] },
+    scheduleName: { type: ['string', 'null'] },
+    whenInactive: { type: 'string', enum: [...WHEN_INACTIVE] },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
   },
@@ -127,6 +135,9 @@ const templateInputSchema = {
     // The column's own bounds. A window under a minute is a digest of one, and one over a day is
     // a notification nobody will connect to the outage that caused it.
     summaryWindowSeconds: { type: 'integer', minimum: 60, maximum: 86_400 },
+    // Absent keeps what is stored; an explicit null clears it, which means "always active".
+    scheduleId: { type: ['integer', 'null'], minimum: 1 },
+    whenInactive: { type: 'string', enum: [...WHEN_INACTIVE] },
   },
 } as const;
 

@@ -36,7 +36,11 @@ export interface ClosedWindow {
  */
 export class SummaryRepository {
   /** Requests still waiting for a decision, oldest first. */
-  async undecided(q: Queryable, limit: number): Promise<UndecidedRequest[]> {
+  async undecided(
+    q: Queryable,
+    limit: number,
+    suppressed: readonly number[] = [],
+  ): Promise<UndecidedRequest[]> {
     const rows = await q.query<{
       id: string;
       template_id: string | null;
@@ -55,11 +59,15 @@ export class SummaryRepository {
       -- undecided for ever.
       LEFT JOIN notification_template t ON t.id = r.template_id
       WHERE r.disposition = 'undecided' AND r.status = 'pending'
+        -- A template outside its activation schedule (N-12) is left undecided, so its backlog
+        -- is summarised as one storm when the schedule reopens rather than in windows that
+        -- opened and closed while nobody was listening.
+        AND NOT (r.template_id = ANY($2::bigint[]))
       ORDER BY r.id
       LIMIT $1
       FOR UPDATE OF r SKIP LOCKED
       `,
-      [limit],
+      [limit, [...suppressed]],
     );
     return rows.map((row) => ({
       id: Number(row.id),
@@ -149,12 +157,18 @@ export class SummaryRepository {
   }
 
   /** Closed windows that still owe a digest, oldest first. */
-  async owing(q: Queryable, now: Date, limit: number): Promise<ClosedWindow[]> {
+  async owing(
+    q: Queryable,
+    now: Date,
+    limit: number,
+    suppressed: readonly number[] = [],
+  ): Promise<ClosedWindow[]> {
     const rows = await q.query<{ id: string; template_id: string }>(
       `
       SELECT s.id::text AS id, s.template_id::text AS template_id
       FROM notification_summary s
       WHERE s.closed_at IS NOT NULL
+        AND NOT (s.template_id = ANY($3::bigint[]))
         AND EXISTS (
           SELECT 1 FROM notification_request r
           WHERE r.summary_id = s.id
@@ -164,7 +178,7 @@ export class SummaryRepository {
       ORDER BY s.id
       LIMIT $2
       `,
-      [now, limit],
+      [now, limit, [...suppressed]],
     );
     return rows.map((row) => ({ id: Number(row.id), templateId: Number(row.template_id) }));
   }

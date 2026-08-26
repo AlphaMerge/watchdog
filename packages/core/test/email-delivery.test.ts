@@ -625,6 +625,12 @@ describe(
           logger: silent,
           contexts,
           transports: [transport],
+          // Zero, and load-bearing: the loop below cannot retry anything through the default
+          // sixty-second delay, because a deferred request's `next_attempt_at` is a minute away
+          // and the very next `dispatch()` claims nothing. This test was relaxed in `N-08` to
+          // "dispatch until it lands" and then went on failing under load for exactly that
+          // reason.
+          retryDelayMs: 0,
         });
         try {
           // Dispatched until it lands, rather than once. MailHog is a small Go binary sharing a

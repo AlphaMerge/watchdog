@@ -1808,8 +1808,63 @@ because each is a decision rather than a defect:
 
       **Left for `N-15`.** The 200-sensor scenario test, which is what proves the alarm *volume*
       rather than the mechanism.
-- [ ] **N-12 — Template activation schedules** · M · M-09, N-05 · With queue-or-discard for
+- [x] **N-12 — Template activation schedules** · M · M-09, N-05 · With queue-or-discard for
       notifications generated while inactive.
+
+      **N-12 outcome.** Migration 021 adds two columns to `notification_template` and a third
+      answer to `notification_request.status`; `activation.ts` decides which templates the clock
+      has switched off; the dispatcher does the rest with the exclusions it already had for
+      summarisation.
+
+      **The choice is the whole ticket, and both halves are real.** An on-call rota that pages at
+      03:00 wants the out-of-hours message *gone*; a daytime team's ticket queue wants every one
+      of them waiting on Monday morning. A system that picked one would be wrong for half its
+      users, so `when_inactive` is a column and neither answer is the "advanced" one.
+
+      **`discarded` is its own status, not `failed`.** A notification nobody was meant to receive
+      did not fail — counting it as one would put it on `N-13`'s Core Health failure count and
+      send an operator looking for a relay problem that does not exist. It is not `sent` either,
+      because nobody got it. The row carries which schedule suppressed it and when that schedule
+      reopens, so "why did I not hear about this" has an answer rather than a silence.
+
+      **Evaluated at delivery, not when the alarm is queued.** An operator setting a template to
+      office hours is saying "do not send me this outside office hours" — about the *message*,
+      not about the outage — so a notification queued at 17:59 and delivered at 18:01 is an
+      out-of-hours message and is treated as one.
+
+      **In TypeScript rather than SQL, deliberately.** A schedule is a statement about local time
+      with its own IANA zone (`M-09`), evaluated through `Intl` so office hours move with daylight
+      saving. Reimplementing that in SQL would be a second answer to the same question and the two
+      would disagree twice a year — on exactly the nights nobody is awake to notice. An
+      installation has tens of templates, so asking in TypeScript is one small partial-index query
+      per pass.
+
+      **A suppressed template's backlog is left *undecided* rather than held.** That is the piece
+      that makes this meet `N-11` properly: deciding them would open and close summarisation
+      windows all night with nobody listening, and the morning would bring a stale digest. Left
+      undecided, the whole night is decided as one storm when the schedule reopens — first Down
+      immediately, the rest in one digest. A test asserts no window opens at all while the
+      template is off.
+
+      **The reference is guarded in both directions.** `schedule_id` is a real foreign key with
+      `ON DELETE RESTRICT` — a schedule quietly detaching itself would turn an out-of-hours
+      template into an always-on one, which is the loudest possible failure for this feature — and
+      `ScheduleService.delete` refuses first, with the template names, so an operator gets words
+      rather than a constraint number. A template naming a schedule that does not exist is refused
+      the same way. Absent `scheduleId` keeps what is stored and an explicit `null` clears it, the
+      same distinction the secret merge draws.
+
+      **Verified live against the dev stack:** two templates on the built-in *Weekends* schedule,
+      inactive on a Wednesday afternoon. The `discard` one recorded `discarded: the template is
+      outside its "Weekends" schedule; it is active again at …`; the `queue` one stayed pending
+      with nothing in MailHog; moving it to *Office hours* delivered it, and the discarded one
+      stayed discarded.
+
+      **An unrelated flake fixed on the way through.** The real-SMTP test has failed twice under
+      full-suite load since `N-08` "relaxed" it to dispatch until it lands — and could not have
+      worked, because its dispatcher used the default sixty-second retry delay, so the very next
+      `dispatch()` in the loop claimed nothing. It now uses `retryDelayMs: 0`, which is what makes
+      the relaxation actually retry.
 - [ ] **N-13 — Delivery retry and failure surfacing** · M · N-07 · Backoff retry; failures
       logged and raised on Core Health; the alarm itself is never lost.
 - [ ] **N-14 — Send test notification** · S · N-05 · Per-template action with a full result

@@ -230,6 +230,19 @@ export class ScheduleService {
         );
       }
 
+      const templates = await this.#repo.templatesUsing(q, id);
+      if (templates.length > 0) {
+        throw new ObjectError(
+          'OBJECT_NOT_DELETABLE',
+          `"${before.name}" is still the activation schedule of ` +
+            `${String(templates.length)} notification template(s)`,
+          {
+            context: { phase: 'schedules' },
+            details: { scheduleId: id, usedByTemplates: templates },
+          },
+        );
+      }
+
       await this.#repo.delete(q, id);
       await this.#audit.record(
         q,

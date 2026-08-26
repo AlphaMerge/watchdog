@@ -204,6 +204,26 @@ export class ScheduleRepository {
     return rows.map((row) => ({ objectId: Number(row.object_id), name: row.name }));
   }
 
+  /**
+   * Notification templates active only during this schedule (`N-12`).
+   *
+   * A real foreign key, unlike the object assignment, and `ON DELETE RESTRICT` — so the database
+   * would refuse the delete on its own. This exists to refuse it with names instead of with a
+   * constraint violation, the same way `usedBy` does for objects.
+   */
+  async templatesUsing(
+    q: Queryable,
+    id: number,
+    limit = 50,
+  ): Promise<{ templateId: number; name: string }[]> {
+    const rows = await q.query<{ id: string; name: string }>(
+      `SELECT id::text AS id, name FROM notification_template
+       WHERE schedule_id = $1 ORDER BY name LIMIT $2`,
+      [id, limit],
+    );
+    return rows.map((row) => ({ templateId: Number(row.id), name: row.name }));
+  }
+
   /** How many objects name each schedule. One query for a list that shows usage per row. */
   async usageCounts(q: Queryable): Promise<Map<number, number>> {
     const rows = await q.query<{ schedule_id: string; uses: string }>(
