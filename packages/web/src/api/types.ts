@@ -391,3 +391,122 @@ export interface NotificationRequestPage {
   items: NotificationRequestView[];
   nextBefore: number | null;
 }
+
+// ── notifications (U-10) ────────────────────────────────────────────────────────────────────
+
+export interface NotificationMethod {
+  id: string;
+  name: string;
+  description: string;
+  /** The JSON Schema the settings form is generated from, `writeOnly` marking the secrets. */
+  settingsSchema: Record<string, unknown>;
+  /** False for a method that addresses itself — a webhook has a URL, not a recipient list. */
+  usesRecipients: boolean;
+  /** False for a method a digest makes no sense for. */
+  summarisable: boolean;
+}
+
+export interface TemplateRecipient {
+  kind: 'address' | 'user' | 'userGroup';
+  value: string;
+}
+
+export interface TemplateView {
+  id: number;
+  name: string;
+  description: string;
+  method: string;
+  methodName: string;
+  /** Minus anything `writeOnly` — the API never returns those (`N-05`). */
+  settings: Record<string, unknown>;
+  redactedSettings: string[];
+  subject: string;
+  body: string;
+  recipients: TemplateRecipient[];
+  priority: number;
+  enabled: boolean;
+  summary: string;
+  summarisable: boolean;
+  summarisation: string;
+  summaryWindowSeconds: number;
+  scheduleId: number | null;
+  scheduleName: string | null;
+  whenInactive: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What a template is written as. A secret it does not carry is kept; `null` clears one. */
+export interface TemplateInput {
+  name: string;
+  description?: string;
+  method: string;
+  settings: Record<string, unknown>;
+  subject?: string;
+  body?: string;
+  recipients?: TemplateRecipient[];
+  priority?: number;
+  enabled?: boolean;
+  summarisation?: string;
+  summaryWindowSeconds?: number;
+  scheduleId?: number | null;
+  whenInactive?: string;
+}
+
+export interface TemplatePreview {
+  /** `null` for a draft that has never been saved. */
+  templateId: number | null;
+  sensorId: number;
+  subject: string;
+  body: string;
+  unknown: string[];
+}
+
+export interface TemplateTestResult {
+  templateId: number;
+  templateName: string;
+  method: string;
+  methodName: string;
+  sensorId: number | null;
+  sensorName: string;
+  subject: string;
+  body: string;
+  recipients: TemplateRecipient[];
+  unknownPlaceholders: string[];
+  delivered: boolean;
+  detail: string;
+  error: string | null;
+  retryable: boolean;
+  durationMs: number;
+  /**
+   * What a green test does not prove.
+   *
+   * `N-14` collects these deliberately: a template that is switched off, outside its activation
+   * schedule, or summarised into a digest can deliver a test and still never deliver an alarm.
+   */
+  notes: string[];
+}
+
+export interface PlaceholderInfo {
+  name: string;
+  description: string;
+}
+
+export interface SummarisationMode {
+  id: string;
+  description: string;
+}
+
+export interface ScheduleSummary {
+  id: number;
+  name: string;
+  description: string;
+}
+
+/** One trigger kind this build understands (`N-01`). */
+export interface TriggerKind {
+  id: string;
+  name: string;
+  description: string;
+  settingsSchema: Record<string, unknown>;
+}

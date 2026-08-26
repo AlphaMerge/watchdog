@@ -114,7 +114,8 @@ export interface TemplateView {
 
 /** What a template would say about one sensor right now (`N-06`). */
 export interface RenderedPreview {
-  readonly templateId: number;
+  /** `null` for a draft that has never been saved (`U-10`). */
+  readonly templateId: number | null;
   readonly sensorId: ObjectId;
   readonly subject: string;
   readonly body: string;
@@ -375,9 +376,34 @@ export class TemplateService {
   async preview(id: number, sensorId: ObjectId): Promise<RenderedPreview> {
     const stored = await this.#repo.get(this.#db, id);
     if (stored === null) throw notFound(id);
+    const context = await this.#contextFor(sensorId, id);
+    return { templateId: id, sensorId, ...render(stored, context) };
+  }
+
+  /**
+   * What an *unsaved* draft would say (`U-10`).
+   *
+   * The editor's preview has to answer for the text in the box, not the text on disk — an
+   * operator fixing a subject line wants to see the fix, and a preview that only ever showed the
+   * last saved version would be answering a question nobody asked. The alternative was
+   * substituting in the browser, which would put a second implementation of `N-06`'s placeholder
+   * and escaping rules somewhere it could drift from this one.
+   *
+   * Reads nothing but the sensor and writes nothing at all. The input still goes through the
+   * same `#parse` every write does, so a draft that could not be saved is refused here with the
+   * same message rather than previewing something the operator cannot keep.
+   */
+  async previewDraft(input: TemplateInput, sensorId: ObjectId): Promise<RenderedPreview> {
+    const draft = this.#parse(input, null);
+    const context = await this.#contextFor(sensorId, null);
+    return { templateId: null, sensorId, ...render(draft, context) };
+  }
+
+  /** The facts a message is rendered against: one sensor, as it stands right now. */
+  async #contextFor(sensorId: ObjectId, templateId: number | null): Promise<MessageContext> {
     if (this.#contexts === undefined) {
       throw new ObjectError('OBJECT_INVALID', 'this build cannot preview a template', {
-        context: { templateId: id, phase: 'templates' },
+        context: { templateId: templateId ?? 0, phase: 'templates' },
       });
     }
 
@@ -410,10 +436,12 @@ export class TemplateService {
       now,
     );
     const context = contexts.get(0);
-    if (context === undefined) throw notFound(id);
-
-    const rendered = render(stored, context);
-    return { templateId: id, sensorId, ...rendered };
+    if (context === undefined) {
+      throw new ObjectError('OBJECT_NOT_FOUND', `no sensor ${String(sensorId)}`, {
+        context: { objectId: sensorId, phase: 'templates' },
+      });
+    }
+    return context;
   }
 
   async create(actor: Actor, input: TemplateInput): Promise<TemplateView> {

@@ -4,7 +4,7 @@ import { ApiError, problemPath, send, useApi } from '../api/client';
 import type { ObjectDetail, SensorTypeSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { SchemaForm } from '../forms/SchemaForm';
-import { defaultFor, fieldsOf, readAt, writeAt, type JsonSchema } from '../forms/schema';
+import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
 import { allProblems, type FieldProblem } from '../forms/validate';
 
 /**
@@ -47,12 +47,7 @@ export function AddSensor(): React.JSX.Element {
       setServerProblems([]);
       const type =
         types.status === 'ready' ? types.data.items.find((t) => t.id === next) : undefined;
-      let seeded: Record<string, unknown> = {};
-      for (const field of fieldsOf(type?.paramsSchema ?? {})) {
-        const value = defaultFor(field);
-        if (value !== undefined) seeded = writeAt(seeded, field.path, value);
-      }
-      setValues(seeded);
+      setValues(seedDefaults(type?.paramsSchema ?? {}));
       setReplacing(new Set());
     },
     [types],

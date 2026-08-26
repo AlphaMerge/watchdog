@@ -132,6 +132,36 @@ export function defaultFor(field: FieldModel): unknown {
   return undefined;
 }
 
+/**
+ * A whole document pre-filled from the defaults a schema declares.
+ *
+ * **One function, because there are three forms.** Sensor parameters (`U-08`), notification
+ * method settings and trigger-kind settings (`U-10`) all seed the same way, and three copies of
+ * the loop meant three chances to walk only the top level — which all three of them did, so a
+ * default nested inside an object property was declared, rendered as an empty control, and never
+ * saved. `fieldsOf` returns a tree; this walks it.
+ *
+ * **Never a credential.** A `writeOnly` field with a declared default would otherwise be seeded
+ * with that default and written, which invents a secret nobody typed. The field starts empty and
+ * the core applies its own default if it has one.
+ */
+export function seedDefaults(schema: JsonSchema): Record<string, unknown> {
+  let seeded: Record<string, unknown> = {};
+  const visit = (fields: readonly FieldModel[]): void => {
+    for (const field of fields) {
+      if (field.writeOnly) continue;
+      if (field.kind === 'object') {
+        visit(field.children);
+        continue;
+      }
+      const value = defaultFor(field);
+      if (value !== undefined) seeded = writeAt(seeded, field.path, value);
+    }
+  };
+  visit(fieldsOf(schema));
+  return seeded;
+}
+
 /** Reads a dotted path out of a params object. */
 export function readAt(source: Record<string, unknown>, path: string): unknown {
   let cursor: unknown = source;

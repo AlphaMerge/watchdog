@@ -2615,8 +2615,48 @@ because each is a decision rather than a defect:
       set the interval on the device and see the sensor say "inherited from ms-target"; override
       at the same value and read "Reverting restores 120, from ms-target"; revert and watch it
       return to inheriting.
-- [ ] **U-10 — Notification configuration UI** · L · N-05 · Template editor with live placeholder
+- [x] **U-10 — Notification configuration UI** · L · N-05 · Template editor with live placeholder
       preview and test send; trigger editor showing inherited triggers and their source.
+
+      **U-10 outcome.** `/templates` edits templates and the Triggers tab edits triggers, both
+      forms generated from schemas the core already publishes: a notification method's
+      `settingsSchema` and a trigger kind's. That is the third and fourth use of `U-08`'s form
+      generator, and adding a method or a kind stays a backend-only job.
+
+      **The preview renders the draft, which needed a new route.** `POST /templates/preview` takes
+      an *unsaved* template and a sensor, and runs it through the same `#parse` every write uses.
+      Previewing what is stored instead would have shown the operator the old subject line while
+      they typed a new one — the one thing a live preview exists to prevent. It is debounced at
+      500 ms rather than fired per keystroke: substitution is a round trip, and the answer changes
+      about once a word.
+
+      **A misspelled placeholder is refused, not half-rendered.** `%sensorr` gets "this template
+      uses placeholders this build does not know", the offending name, and the full valid list —
+      because the save path refuses it too, so a partial render would preview something
+      unsaveable. The refusal is rendered with its details, not just its sentence; the list is the
+      useful half.
+
+      **Deleting a template in use is refused with the list.** `N-05`'s "used by" lookup stands in
+      for the foreign key a `jsonb` reference cannot have, and the refusal now renders each
+      trigger with a link to the object's Triggers tab — measured live: `"On-call email" is still
+      used by 1 trigger(s)`, one click from the thing holding it.
+
+      **Inherited triggers are shown, read-only, with their source**, and the note says they fire
+      *as well as* the ones defined here rather than instead of them. That is `WORKFLOW.MD`'s
+      rule, and it is the one an operator gets wrong: a trigger list that showed only the local
+      ones would make a device-level trigger invisible from the sensor it fires for.
+
+      **One seeding function, because there were three copies of it.** Sensor params, method
+      settings and trigger settings all pre-fill from schema defaults, and all three walked only
+      the top level of `fieldsOf`'s tree — so a default nested inside an object property was
+      declared, drawn as an empty control, and never saved. `seedDefaults` walks it, and skips
+      `writeOnly` everywhere: a credential with a declared default would otherwise be written by a
+      form nobody typed a secret into.
+
+      Verified live end to end: created a template through the form, watched the preview follow
+      the subject line, sent a test that arrived in 64 ms carrying `N-14`'s notes, attached it to
+      a trigger, had the delete refused with the link, and read an inherited threshold trigger on
+      the sensor showing "from ms-target".
 - [ ] **U-11 — Accessibility and responsive pass** · M · U-03…U-10 · WCAG 2.1 AA, keyboard
       navigation, touch targets, no horizontal body scroll.
 

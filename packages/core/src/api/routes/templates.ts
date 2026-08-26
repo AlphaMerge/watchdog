@@ -177,7 +177,8 @@ const previewSchema = {
   additionalProperties: false,
   required: ['templateId', 'sensorId', 'subject', 'body', 'unknown'],
   properties: {
-    templateId: { type: 'integer' },
+    /** Null for a draft that has never been saved. */
+    templateId: { type: ['integer', 'null'] },
     sensorId: { type: 'integer' },
     subject: { type: 'string' },
     body: { type: 'string' },
@@ -433,6 +434,33 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       },
     },
     async (request) => templates.preview(request.params.id, request.query.sensorId),
+  );
+
+  app.post<{ Body: { template: TemplateInput; sensorId: number } }>(
+    '/templates/preview',
+    {
+      schema: {
+        tags: ['templates'],
+        summary: 'What an unsaved draft would say about one sensor',
+        description:
+          'The same rendering as the saved preview, against a template that does not exist yet ' +
+          '— what an editor needs to show the text in the box rather than the text on disk ' +
+          '(`U-10`). The draft goes through the same validation a write does, so one that could ' +
+          'not be saved is refused here rather than previewing something the operator cannot ' +
+          'keep. Nothing is sent, nothing is written, and no template is created.',
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['template', 'sensorId'],
+          properties: {
+            template: { $ref: 'ms:templateInput' },
+            sensorId: { type: 'integer', minimum: 1 },
+          },
+        },
+        response: { 200: { $ref: 'ms:templatePreview' } },
+      },
+    },
+    async (request) => templates.previewDraft(request.body.template, request.body.sensorId),
   );
 
   if (tester !== undefined) {

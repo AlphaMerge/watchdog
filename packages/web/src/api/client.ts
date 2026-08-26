@@ -26,6 +26,14 @@ export interface ErrorDetails {
    * below reads both.
    */
   problems?: { path?: string; instancePath?: string; message?: string }[];
+  /**
+   * What still references the thing a delete was refused for.
+   *
+   * A trigger names a template inside a `jsonb` document, so no foreign key can enforce it and
+   * the "used by" lookup stands in for one (`N-05`). The list is the useful half of the refusal:
+   * a bare "cannot delete" leaves somebody hunting through every object for the reference.
+   */
+  usedBy?: { triggerId?: number; objectId?: number; objectName?: string; summary?: string }[];
   [key: string]: unknown;
 }
 
