@@ -75,6 +75,16 @@ export interface DependencyReactor {
   ): Promise<{ moved: number; transitions: number }>;
 }
 
+/**
+ * Just enough of `AlarmEngine` to reconcile the sensors a batch moved (`N-02`).
+ *
+ * Narrow for the same reason `DependencyReactor` is: ingestion has no business knowing what a
+ * notification is, only that something wants to look at what it just decided.
+ */
+export interface AlarmReactor {
+  react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<unknown>;
+}
+
 export interface IngestorOptions {
   /** Narrower than the pool, so a test can hand it a stub that fails. */
   db: IngestTarget;
@@ -82,6 +92,19 @@ export interface IngestorOptions {
   config: IngestionConfig;
   lateData?: LateDataSink;
   dependencies?: DependencyReactor;
+  /**
+   * What arms and stands down notification chains (`N-02`).
+   *
+   * Reacts **after** the dependency reaction. In an alarm storm every dependent records its own
+   * Down in this same batch on its way to being paused by the master's (`M-17`), so reconciling
+   * against the state the transaction actually ends in arms one chain instead of forty.
+   *
+   * Not load-bearing, and measured rather than assumed: reacting first also ends with one, because
+   * the dependency reaction re-reconciles the sensors it paused through `reevaluate` — inside this
+   * same transaction, so nothing outside ever sees the pair. Doing the work once is simply better
+   * than arming thirty-nine chains and standing them down two statements later.
+   */
+  alarms?: AlarmReactor;
   /**
    * Poked after a write whose state changes moved a dependency (`M-11`).
    *
@@ -164,6 +187,7 @@ export class Ingestor {
   readonly #config: IngestionConfig;
   readonly #lateData: LateDataSink | undefined;
   readonly #dependencies: DependencyReactor | undefined;
+  readonly #alarms: AlarmReactor | undefined;
   readonly #onDependencyChange: (() => void) | undefined;
   #dependencyPauses = 0;
 
@@ -195,6 +219,7 @@ export class Ingestor {
     this.#config = options.config;
     this.#lateData = options.lateData;
     this.#dependencies = options.dependencies;
+    this.#alarms = options.alarms;
     this.#onDependencyChange = options.onDependencyChange;
   }
 
@@ -426,6 +451,15 @@ export class Ingestor {
           this.#dependencies === undefined || transitions.length === 0
             ? 0
             : (await this.#dependencies.react(q, transitions, new Date())).moved;
+        // After the dependency reaction, and in the same transaction. A chain armed against a
+        // state that rolled back would page somebody about a sensor that is fine.
+        if (this.#alarms !== undefined && transitions.length > 0) {
+          await this.#alarms.react(
+            q,
+            [...new Set(transitions.map((transition) => transition.sensorId))],
+            new Date(),
+          );
+        }
         return {
           stored: written,
           late: noted,

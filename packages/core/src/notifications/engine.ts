@@ -1,0 +1,383 @@
+import type { Logger } from '@ms/shared';
+import type { Queryable } from '../db/pool.js';
+import { STATE_TRIGGER, triggerKinds } from '../triggers/definition.js';
+import type { EffectiveTrigger } from '../triggers/repository.js';
+import { TriggerRepository } from '../triggers/repository.js';
+import { fire, reconcile, stillStanding, type Alarm, type StateTriggerSettings } from './chain.js';
+import {
+  AlarmRepository,
+  type AlarmAdvance,
+  type AlarmInsert,
+  type AlarmRow,
+  type RequestInsert,
+  type SensorStanding,
+} from './repository.js';
+
+export interface AlarmEngineOptions {
+  logger: Logger;
+  alarms?: AlarmRepository;
+  triggers?: TriggerRepository;
+  /**
+   * How many alarms one due-sweep fires.
+   *
+   * Bounded so a clock jump forward, or a core that was down over a long outage, cannot turn one
+   * sweep into an unbounded write. What is left is still due at the next one.
+   */
+  maxPerSweep?: number;
+  /** How many sensors one trigger edit reconciles. Beyond this the sweep picks the rest up. */
+  maxReconciled?: number;
+}
+
+/** What a reaction did. Every field is a counter Core Health will want (`M-18`, `N-13`). */
+export interface AlarmReaction {
+  armed: number;
+  cleared: number;
+  suppressed: number;
+  resumed: number;
+  queued: number;
+}
+
+const EMPTY: AlarmReaction = { armed: 0, cleared: 0, suppressed: 0, resumed: 0, queued: 0 };
+
+const DEFAULT_MAX_PER_SWEEP = 500;
+const DEFAULT_MAX_RECONCILED = 20_000;
+
+/**
+ * The state trigger's engine (`N-02`).
+ *
+ * Two entry points, and the division between them is the whole design.
+ *
+ * `react` is called whenever sensors may have moved — from the ingestion write and from
+ * `SensorStateService.reevaluate`, which between them cover every path that can change a state.
+ * It reconciles: it compares where each sensor is now against the alarms standing for it, and
+ * arms, suppresses, resumes or stands them down. It consumes no events and keeps no memory, so a
+ * missed call is corrected by the next one and a restart needs no replay.
+ *
+ * `sweep` fires what has fallen due. `N-04` is what will call it at the right moment rather than
+ * on a fixed tick; the due times themselves are absolute and already in the table, so the
+ * difference between the two is promptness, not correctness.
+ *
+ * **Nothing here delivers anything.** A fired step queues a `notification_request` in the same
+ * transaction that advanced the alarm, which is what makes "sent exactly once" reachable at all.
+ * `N-05` gives the template ids meaning and `N-07` onwards deliver.
+ */
+export class AlarmEngine {
+  readonly #alarms: AlarmRepository;
+  readonly #triggers: TriggerRepository;
+  readonly #logger: Logger;
+  readonly #maxPerSweep: number;
+  readonly #maxReconciled: number;
+  #queued = 0;
+  #fired = 0;
+  /**
+   * Steps that fell due and named no template.
+   *
+   * Not an error and not a drop: "do not tell me when it goes down, tell me if it is still down
+   * in half an hour" is a trigger with no initial template, and the chain still has to run
+   * through `initial` to reach the escalation. Counted so an operator wondering why a trigger is
+   * silent can see that it is firing and sending nothing.
+   */
+  #untemplated = 0;
+
+  constructor(options: AlarmEngineOptions) {
+    this.#alarms = options.alarms ?? new AlarmRepository();
+    this.#triggers = options.triggers ?? new TriggerRepository();
+    this.#logger = options.logger.child({ component: 'alarms' });
+    this.#maxPerSweep = options.maxPerSweep ?? DEFAULT_MAX_PER_SWEEP;
+    this.#maxReconciled = options.maxReconciled ?? DEFAULT_MAX_RECONCILED;
+  }
+
+  get stats(): { queued: number; fired: number; untemplated: number } {
+    return { queued: this.#queued, fired: this.#fired, untemplated: this.#untemplated };
+  }
+
+  /**
+   * Reconciles a batch of sensors against the triggers that apply to them.
+   *
+   * Inside the caller's transaction, always. A sensor whose state committed without its alarm
+   * would be an outage nobody is tracking, and one whose alarm committed without its state would
+   * page somebody about a sensor that is fine.
+   */
+  async react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<AlarmReaction> {
+    if (sensorIds.length === 0) return { ...EMPTY };
+    // The guard, first and cheapest. An installation that notifies nobody pays exactly this.
+    if (!(await this.#alarms.anyWork(q))) return { ...EMPTY };
+
+    const [standing, existing, effective] = await Promise.all([
+      this.#alarms.standingOf(q, sensorIds),
+      this.#alarms.alarmsFor(q, sensorIds),
+      this.#triggers.effectiveForMany(q, sensorIds),
+    ]);
+
+    const arm: AlarmInsert[] = [];
+    const advance: AlarmAdvance[] = [];
+    const clear: number[] = [];
+    const requests: RequestInsert[] = [];
+    const result: AlarmReaction = { ...EMPTY };
+
+    for (const sensorId of sensorIds) {
+      const sensor = standing.get(sensorId);
+      // No runtime row means no sensor, or one that has never been decided. Either way there is
+      // nothing to reconcile against, and any alarm for it went with the object's cascade.
+      if (sensor === undefined) continue;
+
+      const alarms = new Map(
+        (existing.get(sensorId) ?? []).map((alarm) => [alarm.triggerId, alarm]),
+      );
+      for (const trigger of effective.get(sensorId) ?? []) {
+        if (trigger.kind !== STATE_TRIGGER.id || !trigger.enabled) continue;
+        const settings = readSettings(trigger, this.#logger);
+        if (settings === null) continue;
+
+        const alarm = alarms.get(trigger.id) ?? null;
+        alarms.delete(trigger.id);
+        this.#apply(sensor, trigger, alarm, settings, now, {
+          arm,
+          advance,
+          clear,
+          requests,
+          result,
+        });
+      }
+
+      // Whatever is left applied to this sensor once and no longer does — a trigger deleted, or
+      // disabled, or the sensor moved out from under it. Nothing recovered, so nobody is told.
+      for (const orphan of alarms.values()) {
+        clear.push(orphan.id);
+        result.cleared += 1;
+      }
+    }
+
+    result.queued = await this.#alarms.queue(q, requests);
+    this.#queued += result.queued;
+    this.#untemplated += requests.length - result.queued;
+    await this.#alarms.arm(q, arm);
+    await this.#alarms.advance(q, advance);
+    await this.#alarms.clear(q, clear);
+    return result;
+  }
+
+  /**
+   * Fires every alarm whose next step has fallen due.
+   *
+   * Returns how many it fired, so a caller that got a full sweep can come straight back rather
+   * than waiting for the next tick.
+   */
+  async sweep(q: Queryable, now: Date): Promise<{ fired: number; queued: number }> {
+    const due = await this.#alarms.due(q, now, this.#maxPerSweep);
+    if (due.length === 0) return { fired: 0, queued: 0 };
+
+    const advance: AlarmAdvance[] = [];
+    const requests: RequestInsert[] = [];
+    const clear: number[] = [];
+
+    for (const alarm of due) {
+      const settings = readSettings(
+        { id: alarm.triggerId, kind: STATE_TRIGGER.id, settings: alarm.triggerSettings },
+        this.#logger,
+      );
+      if (settings === null) continue;
+
+      // The alarm fell due for a state the sensor is no longer in. `react` should have stood it
+      // down already, and does in every path that goes through a transaction — but the sweep is
+      // the last thing between a stale row and a page at 3 a.m., so it checks rather than
+      // assumes. Standing it down silently is right: nothing recovered that anybody was told
+      // about, or `react` would have sent the recovery when it cleared it.
+      if (!stillStanding(alarm.state, alarm.currentState)) {
+        clear.push(alarm.id);
+        continue;
+      }
+
+      const firing = fire(alarm, now, settings);
+      requests.push({
+        at: now,
+        sensorId: alarm.sensorId,
+        triggerId: alarm.triggerId,
+        triggerKind: STATE_TRIGGER.id,
+        templateId: firing.templateId,
+        reason: firing.reason,
+        // The state that armed the alarm, not the one the sensor is in now. They differ when an
+        // acknowledgement landed between the due time and the sweep, and the message is about
+        // the outage, not about the acknowledgement.
+        state: alarm.state,
+        message: alarm.message,
+      });
+      advance.push({
+        id: alarm.id,
+        phase: firing.phase,
+        nextDueAt: firing.nextDueAt,
+        repeats: firing.repeats,
+        suppressed: alarm.suppressed,
+      });
+    }
+
+    const queued = await this.#alarms.queue(q, requests);
+    await this.#alarms.advance(q, advance);
+    const stale = await this.#alarms.clear(q, clear);
+    this.#fired += advance.length;
+    this.#queued += queued;
+    this.#untemplated += requests.length - queued;
+    if (advance.length > 0 || stale > 0) {
+      this.#logger.info({ fired: advance.length, queued, stale }, 'notification chain advanced');
+    }
+    return { fired: advance.length, queued };
+  }
+
+  /** When the next alarm falls due, so a caller can wait rather than poll (`N-04`). */
+  async nextDueAt(q: Queryable): Promise<Date | null> {
+    return this.#alarms.nextDueAt(q);
+  }
+
+  /**
+   * Reconciles every sensor beneath an object, which is what a trigger edit needs.
+   *
+   * Creating "tell me about outages" during an outage has to arm the outage in progress. The
+   * chain is measured from the sensor's own `since`, so a sensor that has been Down for an hour
+   * is already past a five-minute latency and notifies at the next sweep — which is right: the
+   * operator asked to be told about sensors that are down, and it is.
+   */
+  async reconcileSubtree(q: Queryable, objectId: number, now: Date): Promise<AlarmReaction> {
+    const sensors = await this.#alarms.sensorsUnder(q, objectId, this.#maxReconciled);
+    if (sensors.length === this.#maxReconciled) {
+      this.#logger.warn(
+        { objectId, limit: this.#maxReconciled },
+        'trigger reconciliation hit its bound; the rest follow at their next state change',
+      );
+    }
+    return this.react(q, sensors, now);
+  }
+
+  /**
+   * One (sensor, trigger) pair: decide, and collect the writes.
+   *
+   * The decision itself is `chain.reconcile`, which knows nothing about databases. This turns
+   * its answer into rows.
+   */
+  #apply(
+    sensor: SensorStanding,
+    trigger: { id: number },
+    alarm: AlarmRow | null,
+    settings: StateTriggerSettings,
+    now: Date,
+    out: {
+      arm: AlarmInsert[];
+      advance: AlarmAdvance[];
+      clear: number[];
+      requests: RequestInsert[];
+      result: AlarmReaction;
+    },
+  ): void {
+    const view: Alarm | null =
+      alarm === null
+        ? null
+        : {
+            state: alarm.state,
+            since: alarm.since,
+            phase: alarm.phase,
+            nextDueAt: alarm.nextDueAt,
+            repeats: alarm.repeats,
+            suppressed: alarm.suppressed,
+          };
+    const decision = reconcile(view, sensor.state, sensor.since, settings, now);
+
+    switch (decision.kind) {
+      case 'idle':
+      case 'hold':
+        return;
+
+      case 'arm':
+        out.arm.push({
+          sensorId: sensor.sensorId,
+          triggerId: trigger.id,
+          state: settings.state,
+          since: sensor.since,
+          nextDueAt: decision.nextDueAt,
+        });
+        out.result.armed += 1;
+        return;
+
+      case 'suppress':
+        if (alarm === null) return;
+        // The chain stops and the alarm stands, which is the pair PLAN.md's exit criterion names.
+        out.advance.push({
+          id: alarm.id,
+          phase: alarm.phase,
+          nextDueAt: null,
+          repeats: alarm.repeats,
+          suppressed: true,
+        });
+        out.result.suppressed += 1;
+        return;
+
+      case 'resume':
+        if (alarm === null) return;
+        out.advance.push({
+          id: alarm.id,
+          phase: alarm.phase,
+          nextDueAt: decision.nextDueAt,
+          repeats: alarm.repeats,
+          suppressed: false,
+        });
+        out.result.resumed += 1;
+        return;
+
+      case 'recover':
+        if (alarm === null) return;
+        out.requests.push({
+          at: now,
+          sensorId: sensor.sensorId,
+          triggerId: trigger.id,
+          triggerKind: STATE_TRIGGER.id,
+          templateId: settings.recoveryTemplateId,
+          reason: 'recovery',
+          state: sensor.state,
+          message: sensor.message,
+        });
+        out.clear.push(alarm.id);
+        out.result.cleared += 1;
+        return;
+
+      case 'cancel':
+        if (alarm === null) return;
+        out.clear.push(alarm.id);
+        out.result.cleared += 1;
+        return;
+    }
+  }
+}
+
+/**
+ * A stored trigger's settings as the chain needs them.
+ *
+ * Re-validated on the way out rather than trusted. The row was validated on the way in, but a
+ * downgrade, a hand-edited row or a future kind change could all leave settings the current
+ * build cannot read — and the honest answer to that is to skip the trigger and say so, not to
+ * crash the ingestion batch it happens to be riding in.
+ */
+function readSettings(
+  trigger: Pick<EffectiveTrigger, 'id' | 'kind' | 'settings'>,
+  logger: Logger,
+): StateTriggerSettings | null {
+  try {
+    const settings = triggerKinds.validate(trigger.kind, trigger.settings);
+    return {
+      state: settings['state'] as StateTriggerSettings['state'],
+      initialLatencySeconds: Number(settings['initialLatencySeconds'] ?? 0),
+      initialTemplateId: idOrNull(settings['initialTemplateId']),
+      escalationLatencySeconds: Number(settings['escalationLatencySeconds'] ?? 0),
+      escalationTemplateId: idOrNull(settings['escalationTemplateId']),
+      repeatMinutes: Number(settings['repeatMinutes'] ?? 0),
+      recoveryTemplateId: idOrNull(settings['recoveryTemplateId']),
+    };
+  } catch {
+    logger.warn(
+      { triggerId: trigger.id, kind: trigger.kind },
+      'stored trigger settings are not readable by this build; skipping it',
+    );
+    return null;
+  }
+}
+
+function idOrNull(value: unknown): number | null {
+  return typeof value === 'number' ? value : null;
+}

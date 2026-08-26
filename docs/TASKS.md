@@ -1193,8 +1193,73 @@ because each is a decision rather than a defect:
       **Not built, and not smuggled in.** PRTG has a per-object "inherit notification triggers:
       yes/no" toggle. It is not in `CAPABILITIES.MD` and it is not here; a trigger is switched off
       where it is defined, or the object is moved. Filed as `N-16` rather than added quietly.
-- [ ] **N-02 — State trigger** · L · N-01, M-15 · Initial latency, initial notification,
+- [x] **N-02 — State trigger** · L · N-01, M-15 · Initial latency, initial notification,
       escalation latency, escalation notification, repeat interval, recovery notification.
+
+      **N-02 outcome.** Two tables (migration `016`) and three modules. `notification_alarm` is
+      what the engine is currently doing about one sensor for one trigger;
+      `notification_request` is what it decided to send. `chain.ts` holds the decisions and
+      nothing else, `repository.ts` the set-based SQL, `engine.ts` the two entry points. Nothing
+      delivers anything yet: `N-05` gives the template ids meaning, `N-07` onwards send.
+
+      **The engine tracks alarms, not events — the central decision.** The obvious design reacts
+      to each state change as it arrives: arm a timer on Down, cancel it on Up. It does not
+      survive a restart, it leaks a timer whenever a cancellation is missed, and it cannot answer
+      "why is this sensor about to page somebody" without replaying history. So there is a row
+      per (sensor, trigger) for as long as that trigger's state is standing, and every reaction
+      is a *reconciliation* of that row against the sensor's present state. A restart rebuilds
+      nothing — the rows are there and the due times are absolute. A missed reaction self-corrects
+      at the next one. The property is not theoretical: see the measurement below.
+
+      **The alarm keeps its own clock.** `sensor_runtime.since` moves on every transition, and
+      acknowledging a Down *is* a transition — so a chain measured against it would silently
+      restart its escalation the moment somebody acknowledged it. `notification_alarm.since` is
+      when the alarm began and does not move while it stands, which is also what keeps "down for
+      three hours" saying three hours after an acknowledgement.
+
+      **An acknowledged Down is still Down.** `down_acknowledged` is a different state
+      (`docs/state-machine.md §2.4`), so the naive comparison ends the alarm and fires a recovery
+      — telling everybody the sensor came back at the exact moment an operator said "I know, I am
+      on it". `stillStanding` is that one rule, and `PLAN.md`'s exit criterion is the pair it
+      makes possible: the chain stops, the alarm stands, and the recovery still fires. The two
+      halves pull in opposite directions — deleting the alarm loses the recovery, leaving it
+      armed keeps escalating — which is why they are asserted in one test.
+
+      **A recovery is a return to Up and nothing else.** `CAPABILITIES.MD §5.1` says so, and the
+      narrowness is the point: a Down sensor that goes Unknown because its probe died has not
+      recovered, and one an operator paused for maintenance has not either. A false all-clear is
+      worse than silence, because somebody stops looking. Confirmed live — clearing a simulated
+      error took a sensor to Unknown and the engine stood the alarm down without a word.
+
+      **Where it hangs.** `SensorStateService.reevaluate` and the ingestion write, which between
+      them cover every path that can change a state, plus `TriggerSync` on the audit sink for the
+      configuration half — adding a trigger during an outage has to arm the outage, which is the
+      case that sync exists for. `AlarmSweep` fires what falls due, once a second, and is
+      deliberately dull: `N-04` replaces the tick with a wait on `nextDueAt`, and the correctness
+      lives in the table either way.
+
+      **One real bug, and the same one twice before.** The guard in front of everything was "is
+      any trigger enabled", which is false the moment somebody switches off the last trigger in
+      an installation — while alarms are still standing against it. The very reaction that should
+      have stood them down returned early, and they stayed armed for ever. `M-09` and `M-11`
+      learned this exact lesson; `anyWork` is now the union of "any trigger could arm" and "any
+      alarm is standing", which is the shape all three should have had from the start.
+
+      **A claim withdrawn after measuring it.** The reaction is placed after the dependency
+      reaction so a storm arms one chain rather than forty. A mutation test — reversing the two
+      lines — showed the reversed order *also* ends with one, because the dependency reaction
+      re-reconciles the sensors it paused through `reevaluate`, inside the same transaction, so
+      nothing outside ever sees the pair. The order is still right (doing the work once beats
+      arming thirty-nine chains and standing them down two statements later) but it is not
+      load-bearing, and the comment claiming it was has been corrected. That is reconciliation
+      earning its keep: two orderings, one answer.
+
+      **Not fixed here, filed as `N-17`.** A simulated error (`M-14`) returns at layer 2 of the
+      state model and never reaches the acknowledgement layer, so `POST /acknowledge` on a
+      simulated Down is recorded and has no effect — the sensor stays `down`, not
+      `down_acknowledged`. Found while verifying live. It is a state-machine question, not a
+      notifications one, and changing the layer order to suit this ticket would contradict
+      `docs/state-machine.md §2` and `M-01`'s tables.
 - [ ] **N-03 — Threshold trigger** · M · N-01 · Channel, condition, value, latency, trigger and
       clear notifications.
 - [ ] **N-04 — Latency timer engine** · L · N-02 · Timers cancel on recovery and on
@@ -1225,6 +1290,14 @@ because each is a decision rather than a defect:
 - [ ] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
       message plus digests, verified against MailHog and a webhook sink; a 30-second blip under a
       5-minute latency produces nothing.
+- [ ] **N-17 — Acknowledging a simulated error does nothing** · S · M-14, N-02 · `evaluate`
+      returns at layer 2 for a simulated error, so acknowledgement — layer 6 — never runs. The
+      API accepts the acknowledgement, records it, and the sensor stays `down` with cause
+      `simulated`, which makes `M-14`'s own purpose ("test a notification chain end to end")
+      impossible to complete: the escalation cannot be cancelled the way a real one would be.
+      Decide whether a simulated error should be acknowledgeable (a layer-2 result that still
+      falls through to layer 6), or whether the API should refuse the acknowledgement and say
+      why. Either way `docs/state-machine.md §2` and `M-01`'s tables move with it.
 - [ ] **N-16 — Per-object trigger inheritance toggle** · S · N-01 · PRTG lets an object opt out
       of its ancestors' notification triggers entirely. `N-01` deliberately did not build it: it
       is not in `CAPABILITIES.MD`, and a trigger can already be switched off where it is defined.

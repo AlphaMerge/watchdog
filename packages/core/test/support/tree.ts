@@ -14,7 +14,7 @@ import { ObjectService } from '../../src/objects/service.js';
 import { DependencyPauses } from '../../src/dependencies/pauses.js';
 import { DependencyRepository } from '../../src/dependencies/repository.js';
 import { ScheduleRepository } from '../../src/schedules/repository.js';
-import { SensorStateService } from '../../src/state/service.js';
+import { SensorStateService, type AlarmReactor } from '../../src/state/service.js';
 import { testSensorTypes } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
 
@@ -75,7 +75,7 @@ export interface Harness {
 
 export async function buildHarness(
   db: Database,
-  options: { states?: boolean } = {},
+  options: { states?: boolean; alarms?: AlarmReactor } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
 
@@ -87,7 +87,15 @@ export async function buildHarness(
   // not move, which is not a system anyone should run and is exactly what `M-08` tests.
   const states =
     options.states === true
-      ? new SensorStateService({ db, logger: silent, settings: resolver })
+      ? new SensorStateService({
+          db,
+          logger: silent,
+          settings: resolver,
+          // Where the notification engine sits in production (`N-02`): `reevaluate` is the
+          // choke point for every state change that is not a check result, so a pause, an
+          // acknowledgement or a schedule window reaches it here or not at all.
+          ...(options.alarms === undefined ? {} : { alarms: options.alarms }),
+        })
       : undefined;
   // Built here rather than in each test, because the pause sweep releases dependency delays and
   // a harness whose sweep could not would let that regress unnoticed (`M-11`).

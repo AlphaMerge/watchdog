@@ -94,29 +94,56 @@ export class TriggerRepository {
    * everything else about the object.
    */
   async effectiveFor(q: Queryable, objectId: ObjectId): Promise<EffectiveTrigger[]> {
-    const rows = await q.query<TriggerRow & { depth: number; owner_name: string }>(
+    return (await this.effectiveForMany(q, [objectId])).get(objectId) ?? [];
+  }
+
+  /**
+   * The same walk for several objects at once, which is what the engine asks per batch (`N-02`).
+   *
+   * Upward, unlike `effectiveForSensors` below, and the choice is pure cardinality. An ingestion
+   * batch touches a few hundred sensors and each has a chain five objects long, so walking up
+   * reads a few hundred rows. Walking down from a trigger on the root would expand every one of
+   * five thousand sensors and then discard all but the batch — the right direction for a sweep
+   * over everything, the wrong one for a batch.
+   */
+  async effectiveForMany(
+    q: Queryable,
+    objectIds: readonly ObjectId[],
+  ): Promise<Map<ObjectId, EffectiveTrigger[]>> {
+    const out = new Map<ObjectId, EffectiveTrigger[]>();
+    if (objectIds.length === 0) return out;
+
+    const rows = await q.query<TriggerRow & { origin: string; depth: number; owner_name: string }>(
       `
       WITH RECURSIVE chain AS (
-        SELECT o.id, o.parent_id, o.name, 0 AS depth
-        FROM object o WHERE o.id = $1
+        SELECT o.id AS origin, o.id, o.parent_id, o.name, 0 AS depth
+        FROM object o WHERE o.id = ANY($1::bigint[])
         UNION ALL
-        SELECT p.id, p.parent_id, p.name, chain.depth + 1
+        SELECT chain.origin, p.id, p.parent_id, p.name, chain.depth + 1
         FROM object p JOIN chain ON p.id = chain.parent_id
         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       )
-      SELECT ${COLUMNS}, chain.depth, chain.name AS owner_name
+      SELECT ${COLUMNS}, chain.origin::text AS origin, chain.depth, chain.name AS owner_name
       FROM chain
       JOIN notification_trigger t ON t.object_id = chain.id
-      ORDER BY chain.depth, t.id
+      ORDER BY chain.origin, chain.depth, t.id
       `,
-      [objectId],
+      [objectIds],
     );
-    return rows.map((row) => ({
-      ...toStored(row),
-      inherited: row.depth > 0,
-      depth: row.depth,
-      definedOn: { objectId: Number(row.object_id), name: row.owner_name },
-    }));
+
+    for (const row of rows) {
+      const origin = Number(row.origin);
+      const effective: EffectiveTrigger = {
+        ...toStored(row),
+        inherited: row.depth > 0,
+        depth: row.depth,
+        definedOn: { objectId: Number(row.object_id), name: row.owner_name },
+      };
+      const existing = out.get(origin);
+      if (existing === undefined) out.set(origin, [effective]);
+      else existing.push(effective);
+    }
+    return out;
   }
 
   /**

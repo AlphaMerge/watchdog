@@ -25,6 +25,9 @@ import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
 import { ScheduleSweep } from './schedules/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
+import { AlarmEngine } from './notifications/engine.js';
+import { AlarmSweep } from './notifications/sweep.js';
+import { TriggerSync } from './notifications/sync.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
@@ -182,7 +185,14 @@ async function serve(): Promise<void> {
   const channels = new ChannelResolver({ logger, lookups });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.
-  const states = new SensorStateService({ db, logger, settings: resolver });
+  // What arms and stands down notification chains (N-02). Built before the state service,
+  // because that service is one of the two places that tells it a sensor moved -- the other is
+  // the ingestor, below.
+  const alarms = new AlarmEngine({ logger });
+  const states = new SensorStateService({ db, logger, settings: resolver, alarms });
+  // The configuration half of the same job: adding a trigger during an outage has to arm the
+  // outage, and moving a subtree under one has to arm what arrives with it.
+  const triggerSync = new TriggerSync({ engine: alarms, logger });
   const cacheInvalidator = new ResultCacheInvalidator({ channels, sensors: states, logger });
 
   // What turns a schedule into `sensor_runtime.paused_by_schedule` (M-09). It rides the audit
@@ -216,6 +226,7 @@ async function serve(): Promise<void> {
       cacheInvalidator,
       scheduleSync,
       dependencySync,
+      triggerSync,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
@@ -251,7 +262,11 @@ async function serve(): Promise<void> {
   // carries it.
   const triggers = new TriggerService({
     db,
-    audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
+    audit: new CompositeAuditSink([
+      new DatabaseAuditSink(),
+      new LoggingAuditSink(logger),
+      triggerSync,
+    ]),
     logger,
   });
 
@@ -293,6 +308,20 @@ async function serve(): Promise<void> {
     timeoutMs: 2_000,
     run: () => {
       scheduleSweep.stop();
+      return Promise.resolve();
+    },
+  });
+
+  // Fires notification chains as they fall due. A tick a second until N-04 replaces it with a
+  // wait on the next due time; every due time is absolute and in the table, so a sweep that runs
+  // late sends late rather than not at all.
+  const alarmSweep = new AlarmSweep({ db, engine: alarms, logger });
+  alarmSweep.start();
+  lifecycle.onShutdown({
+    name: 'alarm-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      alarmSweep.stop();
       return Promise.resolve();
     },
   });
@@ -341,6 +370,9 @@ async function serve(): Promise<void> {
     // master's Down is visible, or a dependent's next result raises the alarm the dependency
     // exists to suppress (M-11).
     dependencies: dependencyPauses,
+    // After the dependency reaction, in the same transaction: an alarm armed before the
+    // dependencies settled is the alarm the dependency exists to suppress (M-17, N-02).
+    alarms,
     // And afterwards, the probes: a check result is not a configuration change, so this is the
     // one write path the audit sink does not cover.
     onDependencyChange: () => {

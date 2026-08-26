@@ -72,6 +72,16 @@ export interface PolicySource {
   ): Promise<Map<number, { value: unknown }>>;
 }
 
+/**
+ * Just enough of `AlarmEngine` to reconcile a batch of sensors (`N-02`).
+ *
+ * Narrow on purpose, like `PolicySource` above: this module has no business knowing what a
+ * notification is. It knows that something wants to look at the sensors it just moved.
+ */
+export interface AlarmReactor {
+  react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<unknown>;
+}
+
 export interface SensorStateServiceOptions {
   db: Database;
   logger: Logger;
@@ -86,6 +96,15 @@ export interface SensorStateServiceOptions {
   policy?: FailurePolicy;
   /** Sensors held in memory. The v1 target is 5,000, so the default holds every one of them. */
   maxCached?: number;
+  /**
+   * What reconciles notification alarms against the states this service decides (`N-02`).
+   *
+   * `reevaluate` is the choke point for every state change that is *not* a check result — a
+   * pause, a resume, an acknowledgement, a dependency, a schedule window. The result path is
+   * covered by the `Ingestor`, which reacts after the dependency reaction so an alarm is never
+   * armed for a sensor the same transaction is about to pause.
+   */
+  alarms?: AlarmReactor;
 }
 
 export interface StateStats {
@@ -115,6 +134,7 @@ export class SensorStateService {
   readonly #settings: PolicySource | undefined;
   readonly #fallback: FailurePolicy;
   readonly #maxCached: number;
+  readonly #alarms: AlarmReactor | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -140,6 +160,7 @@ export class SensorStateService {
     this.#settings = options.settings;
     this.#fallback = options.policy ?? DEFAULT_FAILURE_POLICY;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
+    this.#alarms = options.alarms;
   }
 
   stats(): StateStats {
@@ -403,6 +424,11 @@ export class SensorStateService {
 
     await writeStateHistory(q, transitions);
     await writeStateChanges(q, rewrites);
+    // Last, and in the same transaction: a chain armed against a state that rolled back would
+    // page somebody about a sensor that is fine. Every sensor asked about, not only the ones
+    // that moved — a reconciliation is a comparison against the present, and one that skipped
+    // the unmoved would never notice an alarm left standing by a trigger that changed.
+    await this.#alarms?.react(q, sensorIds, at);
     this.#transitions += transitions.length;
     this.#reevaluations += transitions.length;
     return transitions.length;
