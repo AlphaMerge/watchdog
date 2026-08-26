@@ -22,7 +22,10 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': { target: coreUrl, changeOrigin: true },
+      // `ws` because `/api/v1/stream` upgrades (`U-02`). Without it the socket 400s here and
+      // works in production, which is the worst way round: the feature would look broken only
+      // to the people building it.
+      '/api': { target: coreUrl, changeOrigin: true, ws: true },
     },
   },
   build: {

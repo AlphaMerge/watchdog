@@ -47,4 +47,16 @@ describe('StatusBadge', () => {
     }
     expect(glyphs.size).toBe(ALL.length);
   });
+
+  it('says what a rolled-up badge means, when it is told', () => {
+    // A group's badge is the worst state beneath it. Announcing a bare "Down" on a group says
+    // the group is down, which is a different and usually false claim (`U-03`).
+    render(<StatusBadge state="down" describedAs="worst state below Berlin: down" />);
+    expect(screen.getByRole('img', { name: 'worst state below Berlin: down' })).toBeDefined();
+  });
+
+  it('stays a plain reading when nothing overrides it', () => {
+    const { container } = render(<StatusBadge state="down" />);
+    expect(container.querySelector('[role="img"]')).toBeNull();
+  });
 });

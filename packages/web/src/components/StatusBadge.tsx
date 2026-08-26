@@ -52,9 +52,18 @@ const PRESENTATION: Record<SensorState, Presentation> = {
 export function StatusBadge({
   state,
   size = 'md',
+  describedAs,
 }: {
   state: SensorState;
   size?: 'sm' | 'md';
+  /**
+   * What this badge *means*, when it is not the plain reading.
+   *
+   * `U-03` needs it: a group's badge is the worst state anywhere beneath it, and a screen reader
+   * announcing "Down" on a group would say the group is down. Sighted users get the same
+   * distinction from the row it sits on; this is how everybody else does.
+   */
+  describedAs?: string;
 }): React.JSX.Element {
   const { label, glyph, classes } = PRESENTATION[state];
   const padding = size === 'sm' ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-1 text-sm';
@@ -62,6 +71,7 @@ export function StatusBadge({
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded border font-medium ${padding} ${classes}`}
+      {...(describedAs === undefined ? {} : { role: 'img', 'aria-label': describedAs })}
     >
       <span aria-hidden="true">{glyph}</span>
       {label}

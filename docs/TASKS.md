@@ -2196,12 +2196,72 @@ because each is a decision rather than a defect:
       Verified live against the dev stack: a socket subscribed to a device's subtree received the
       snapshot of its three sensors and then `state` frames, numbered in sequence, as a simulated
       error went on and came off.
-- [ ] **U-03 — Device tree** · L · U-02 · Virtualised tree with rollup status colouring, live
+- [x] **U-03 — Device tree** · L · U-02 · Virtualised tree with rollup status colouring, live
       updates, search and tag filtering. Responsive at 5,000 sensors.
       **Added by S-14:** the tree already comes back in the operator's arrangement, and
       `POST /objects/{id}/order` moves an item one place or to an end. Drag-to-position is not
       covered — it would want an `{ after: siblingId }` form of the same endpoint, which is a
       small addition to `reorderSiblings` when this task knows it needs one.
+
+      **U-03 outcome.** Three concerns that a tree normally tangles together, kept apart: the
+      **shape** is fetched, the **states** are streamed, and the **rollup** is computed from the
+      stream alone.
+
+      **Shape: a level at a time, and cached.** `GET /objects?parentId=X&sort=manual&limit=500`
+      per expanded branch, not `GET /objects/{id}/tree` — that route caps at 5,000 objects with
+      no cursor, and the v1 target is 5,000 *sensors*, so the whole-subtree read is the one call
+      guaranteed to hit its own ceiling on the installation this task exists to serve. Collapsing
+      keeps what it loaded, so re-expanding is free.
+
+      **Rollup from the stream, not from the children.** A collapsed group shows the colour of an
+      outage inside it **without its children ever having been loaded** — verified live: with
+      the tree collapsed to its two probes, a simulated error on one Ping sensor turned Smoke
+      probe red, and clearing it turned it green again, no reload and nothing fetched. This works
+      because `U-02`'s events carry the absolute path, so one pass over the live states rolls a
+      colour onto every ancestor id in it. The alternative — rolling up from loaded children —
+      makes a collapsed branch a liar, which is the one thing a status tree may not be.
+
+      **The severity ladder is this file's own, and it is not the core's.** I first wrote that it
+      mirrored `ROLLUP_SEVERITY` and that was wrong: the core's ladder ranks `up`/`warning`/`down`
+      for a *channel* rollup and knows nothing of `paused` or `unknown`. A tree needs the full
+      set, and two rungs are deliberate. `up` beats `paused`, because a branch holding one live
+      sensor and forty paused ones is a branch that is up — reporting it as paused hides the
+      thing still being watched. `unknown` beats `up`, because "we are not hearing from this" is
+      a weaker claim than "this is fine" and must not be painted over by it.
+
+      **Virtualised, and measured rather than asserted.** `VirtualList` renders the visible window
+      plus overscan between two spacer divs. Measured on the 5,000-sensor shape the exit criteria
+      name: **5,200 rows flattened and 5,000 states rolled up in 4.4 ms** (`tree-model.test.ts`),
+      so a state change repaints inside a frame. Flattening is iterative, not recursive — a tree
+      deep enough to blow the stack is a tree an operator built, not a bug.
+
+      **A virtualised tree has to keep telling the truth about its size and its shape.** Every row
+      carries `aria-posinset`/`aria-setsize` against the *whole* list, so "row 400 of 5,000" holds
+      when eleven rows exist — a list that reports the eleven has hidden the installation. The
+      roles come from the caller rather than the component: the first version was a `listbox` of
+      `option`s with `aria-rowcount`, which is wrong three ways over — `aria-rowcount` is only
+      valid on a grid, `option` announces a selection model this has none of, and a flattened tree
+      without `aria-level` is read out as one flat list of names, losing the only thing the
+      indentation was saying. It is now a `tree` of `treeitem`s carrying `aria-level` and
+      `aria-expanded`, verified in the browser as well as in `virtual-list.test.tsx`.
+
+      **Search and tag filtering are the server's**, `q` and `tag` on `/objects`, because
+      filtering the loaded shape would only ever search the branches somebody had already opened.
+      Tag matching is inheritance-aware, so searching `linux` finds the sensors under a device
+      tagged `linux` and not only the device — confirmed live.
+
+      **Found while building it.** `StatusBadge` was being passed a `label` prop it never
+      declared, and **TypeScript did not catch it**: JSX spread attributes skip excess-property
+      checking, so the badge had been silently dropping it. It now has a real `describedAs` prop
+      that sets `role="img"` and an `aria-label` — which the tree needs anyway, because a group's
+      badge is the worst state *beneath* it and a bare "Down" announced on a group is a claim
+      about the group. And Vite's `/api` proxy had no `ws: true`, so the stream worked when the
+      core served the built app and 400'd in development only: broken for the people building it
+      and nobody else.
+
+      **`StateStream.close()` was permanent**, so React StrictMode's mount/unmount/mount left the
+      tree saying "Connecting…" forever. `subscribe()` clears the flag; the double-invoke found
+      a real bug, which is what it is for.
 - [ ] **U-04 — Sensor detail page** · L · U-02, S-08 · Live graph, channel table, historic tabs
       (2d/30d/365d), log, settings, triggers.
 - [ ] **U-05 — Time-series charts** · L · U-04 · uPlot panels per the `dataviz` guidance;

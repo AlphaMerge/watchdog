@@ -91,9 +91,11 @@ export class StateStream {
     this.#open = options.open ?? ((url) => new WebSocket(url) as unknown as SocketLike);
     this.#retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
     this.#schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms) as unknown as number);
-    this.#cancel = options.cancel ?? ((handle) => {
-      clearTimeout(handle);
-    });
+    this.#cancel =
+      options.cancel ??
+      ((handle) => {
+        clearTimeout(handle);
+      });
   }
 
   get status(): StreamStatus {
@@ -108,8 +110,17 @@ export class StateStream {
     return this.#reconnects;
   }
 
-  /** Scopes the stream to a subtree, or to everything. Safe to call before the socket opens. */
+  /**
+   * Scopes the stream to a subtree, or to everything. Safe to call before the socket opens.
+   *
+   * **Reopens a closed stream**, which is what makes `close()` mean "I am not watching" rather
+   * than "this object is spent". React's StrictMode mounts, unmounts and remounts every effect
+   * in development, so the cleanup runs before the second subscribe — and a stream that stayed
+   * closed would leave the tree saying "Connecting…" for ever, in development only, which is the
+   * worst way for a bug to behave.
+   */
   subscribe(objectId: number | null): void {
+    this.#closed = false;
     this.#objectId = objectId;
     // The states held are about the old subtree. Keeping them would leave a tree showing rows
     // from a branch nobody is looking at any more.

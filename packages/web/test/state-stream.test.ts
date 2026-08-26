@@ -61,8 +61,24 @@ const SNAPSHOT = {
   objectId: 1,
   truncated: false,
   entries: [
-    { sensorId: 10, sensorName: 'Ping', path: [1, 2, 10], state: 'up', cause: 'scan', message: '', at: 'x' },
-    { sensorId: 11, sensorName: 'HTTP', path: [1, 2, 11], state: 'down', cause: 'scan', message: '', at: 'x' },
+    {
+      sensorId: 10,
+      sensorName: 'Ping',
+      path: [1, 2, 10],
+      state: 'up',
+      cause: 'scan',
+      message: '',
+      at: 'x',
+    },
+    {
+      sensorId: 11,
+      sensorName: 'HTTP',
+      path: [1, 2, 11],
+      state: 'down',
+      cause: 'scan',
+      message: '',
+      at: 'x',
+    },
   ],
 };
 
@@ -207,6 +223,22 @@ describe('the live state stream', () => {
     latest().deliver({ type: 'something-new' });
     latest().deliver({ type: 'state', sensorId: 10 });
     expect(stream.states.size).toBe(0);
+  });
+
+  it('reopens when it is subscribed to again after closing', () => {
+    // React StrictMode mounts, unmounts and remounts every effect in development, so the
+    // cleanup runs before the second subscribe. A stream that stayed closed would say
+    // "Connecting…" for ever, in development only.
+    const { stream, latest, sockets } = harness();
+    stream.subscribe(1);
+    latest().open();
+    stream.close();
+
+    stream.subscribe(1);
+    expect(sockets.length).toBe(2);
+    latest().open();
+    expect(latest().sent).toEqual([JSON.stringify({ subscribe: { objectId: 1 } })]);
+    expect(stream.status).toBe('live');
   });
 
   it('schedules nothing more once it is closed', () => {
