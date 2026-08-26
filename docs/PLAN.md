@@ -397,6 +397,27 @@ table is exhaustive rather than representative.
 - A 30-second blip under a 5-minute latency produces nothing.
 - Acknowledging cancels pending escalations; recovery notification still fires.
 
+All three exit criteria are met and measured, in
+`packages/core/test/notification-scenario.test.ts` against a real MailHog and a real HTTP sink:
+
+- **A 200-sensor outage becomes 9 emails** — one immediate message for the first Down, then the
+  remaining 199 as **8 digests** of 25, 25, 25, 25, 25, 25, 25 and 24. Every one is numbered
+  "(n of 8)", because a digest that says "25 notifications" with no idea how many are missing is
+  a digest nobody can trust. The same outage produces **200 webhook posts**, which is correct
+  rather than a failure: `CAPABILITIES.MD §5.2` never summarises a machine-consumed channel, and
+  that is the trade-off an operator makes when they choose one.
+- **A 30-second blip under a 5-minute latency produces nothing at all** — no message, no queued
+  request, and the armed chain is stood down rather than left waiting. The recovery is silent
+  too: a chain that never fired has nothing to recover from.
+- **Acknowledging cancels the escalation and the recovery still fires** — in
+  `packages/core/test/notification-engine.test.ts`, which drives the two halves together because
+  they pull in opposite directions and getting one right by breaking the other is the bug.
+
+`M-17` measured the other half of *one outage, one alarm*: where a dependency **is** modelled, a
+switch failure in front of forty sensors produces one Down and forty Paused, so summarisation
+never sees the storm at all. The two mechanisms are complementary — dependencies collapse what is
+causally one outage, summarisation collapses what is merely simultaneous.
+
 ---
 
 ## Phase 5 — Web UI

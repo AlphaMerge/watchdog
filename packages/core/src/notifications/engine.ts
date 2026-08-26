@@ -146,11 +146,12 @@ export class AlarmEngine {
     // The guard, first and cheapest. An installation that notifies nobody pays exactly this.
     if (!(await this.#alarms.anyWork(q))) return { ...EMPTY };
 
-    const [standing, existing, effective] = await Promise.all([
-      this.#alarms.standingOf(q, sensorIds),
-      this.#alarms.alarmsFor(q, sensorIds),
-      this.#triggers.effectiveForMany(q, sensorIds),
-    ]);
+    // One at a time, deliberately. `q` is always a transaction's client here — the method
+    // contract above says so — and a client is one wire: `Promise.all` bought no parallelism,
+    // only pg's "already executing a query" deprecation, which `N-15`'s scenario test surfaced.
+    const standing = await this.#alarms.standingOf(q, sensorIds);
+    const existing = await this.#alarms.alarmsFor(q, sensorIds);
+    const effective = await this.#triggers.effectiveForMany(q, sensorIds);
 
     // Only the channels some threshold trigger in this batch actually names, and only when
     // there is one. An installation with no threshold triggers never touches the hypertable.

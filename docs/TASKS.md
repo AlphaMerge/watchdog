@@ -1975,9 +1975,42 @@ because each is a decision rather than a defect:
       is why the `N-12` workaround only ever reduced the odds. The retry loop in the real-SMTP
       test stays as a defence against a genuinely busy relay; its comment now says what actually
       happened.
-- [ ] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
+- [x] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
       message plus digests, verified against MailHog and a webhook sink; a 30-second blip under a
       5-minute latency produces nothing.
+
+      **N-15 outcome.** `packages/core/test/notification-scenario.test.ts`, and Phase 4's exit
+      criteria are now measured in `PLAN.md`.
+
+      **Against real delivery, not stubs.** A scenario test whose delivery is a mock proves the
+      mock agrees with itself; the whole point of the criterion is that a message arrives
+      somewhere an operator could look. So: a real ESMTP conversation with MailHog and a real
+      HTTP server as the webhook sink, driven through the same `AlarmEngine`, `AlarmScheduler`
+      and `NotificationDispatcher` production wires up.
+
+      **The number: 200 sensors become 9 emails.** One immediate message for the first Down, then
+      199 in 8 digests of 25, 25, 25, 25, 25, 25, 25 and 24 — the overflow split of
+      `CAPABILITIES.MD §5.2` doing real work rather than being unit-tested in isolation. Each
+      digest is numbered "(n of 8)".
+
+      **And 200 webhook posts, which is the point rather than a failure.** The same outage, the
+      same trigger set, a method that is never summarised. Asserting it here is what makes the
+      trade-off visible: an operator choosing a machine-consumed channel is choosing every event.
+
+      **Two triggers on the root, so every sensor arms two chains.** That fell out of writing the
+      scenario and is worth stating: `N-01`'s inheritance accumulates, so the counts differ per
+      method rather than per sensor, and 200 sensors produced 400 obligations.
+
+      **The blip asserts absence, three ways.** No message arrived, no request was ever queued,
+      and the armed chain was stood down rather than left waiting — because "nothing arrived" is
+      also what a broken engine that never armed anything produces.
+
+      **A real defect found by running it.** `AlarmEngine.react` issued its three reads with
+      `Promise.all` on the caller's transaction client. pg queues them, so the results were right
+      — and it emitted `client.query() when the client is already executing a query`, which
+      **breaks outright on pg@9**. A transaction is one client and therefore one wire, so the
+      `Promise.all` bought no parallelism at all; it is now three awaits. The deprecation is gone
+      from the whole core suite.
 - [ ] **N-17 — Acknowledging a simulated error does nothing** · S · M-14, N-02 · `evaluate`
       returns at layer 2 for a simulated error, so acknowledgement — layer 6 — never runs. The
       API accepts the acknowledgement, records it, and the sensor stays `down` with cause
