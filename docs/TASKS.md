@@ -127,8 +127,11 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       rendered* — not a zero-height bar, which would still be a mark on the baseline. `extentOf`
       skips nulls, so a gap cannot pull the scale to zero either, and that is unit-tested. U-04
       also extended the rule to *current* values: a reading older than three scan intervals is
-      withheld rather than shown, because a stale number is no-data wearing a value. What remains
-      is the same rule in `U-05`'s uPlot panels and the end-to-end scenario test.
+      withheld rather than shown, because a stale number is no-data wearing a value.
+      **Finished on the UI side by U-05:** the uPlot panels keep `spanGaps` false and no code path
+      turns a null into a number, so an outage is a break in the line rather than a dip to the
+      floor; the tooltip says "no reading" and the table view a dash. What remains is only the
+      end-to-end scenario test — a gap walked from a Down sensor to a rendered chart.
 - [x] **S-10 — Audit log** · M · S-03 · Every create/update/delete recorded with actor,
       timestamp and diff; queryable per object.
       **S-10 outcome:** migration 005, `packages/core/src/audit/`, and
@@ -2342,8 +2345,78 @@ because each is a decision rather than a defect:
       breadcrumb the page already loaded — an inheritable value can only come from an ancestor.
       The tab strip has roving tabindex and arrow-key navigation per the ARIA practice, checked in
       the browser: only the selected tab takes a tab stop.
-- [ ] **U-05 — Time-series charts** · L · U-04 · uPlot panels per the `dataviz` guidance;
+- [x] **U-05 — Time-series charts** · L · U-04 · uPlot panels per the `dataviz` guidance;
       gap-aware rendering (breaks, never a line to zero); themed; accessible.
+
+      **U-05 outcome.** Real uPlot panels on the history tab, with the min–max band behind each
+      average, a crosshair and one tooltip listing every series at the hovered bucket, a legend
+      carrying each channel's latest value, and a table view.
+
+      **The dual-axis trap is designed out rather than resisted.** A Ping sensor reports response
+      time in milliseconds and packet loss as a percentage. On one y-axis either loss is
+      invisible against a 250 ms scale or the scale means nothing; on two, the crossing point of
+      the lines is an artefact of where the axes were put and a reader takes it for a
+      relationship — the single most common charting mistake, and the `dataviz` guidance is blunt
+      about it. So `groupByUnit` splits channels into one chart per unit and a panel is
+      structurally incapable of holding two scales. Channels that *do* share a unit stay together,
+      because that is where comparison is real: a Traffic sensor's in, out and sum belong on one
+      axis.
+
+      **Colour follows the channel, never its position on screen.** The palette slot comes from a
+      channel's index in the sensor's whole channel list, not its index within a group — so
+      splitting by unit, or a sensor type gaining a channel, never repaints the others. Verified
+      live: with both Ping channels forced onto one chart and then split apart again, response
+      time stayed orange and packet loss stayed blue.
+
+      **The palette was computed, not chosen.** Eight categorical slots from the `dataviz`
+      reference palette, re-run through its validator against *our* surfaces rather than the
+      skill's — a contrast or lightness result only means something against the surface the chart
+      actually draws on. Light on `#ffffff`: worst adjacent CVD ΔE 9.1, worst normal-vision ΔE
+      19.6. Dark on `#111827`: 8.4 and 19.3. Both pass every gate. Three light slots sit below
+      3:1 on white, which is a WARN whose relief is mandatory — the table view and the
+      value-bearing legend are that relief, and both ship on every chart. The command is in a
+      comment beside the tokens so the next person changing a hex re-runs it.
+
+      **Status colours are not series colours.** The state tokens stay reserved: a colour that
+      also means "channel 4" stops meaning "down".
+
+      **The gap rule survives the change of renderer, which is the point of doing it now.**
+      `spanGaps` stays false and no code path turns a null into a number, so a period with no
+      readings is a break in the line. uPlot's alternative would be to join across it, and a
+      joined line is the same lie as drawing to zero told more convincingly. The tooltip reports
+      a gap as "no reading" rather than omitting the row — omitting it would let a reader
+      conclude the channel does not exist there. Confirmed live at 3-minute resolution: 430 of
+      961 buckets are gaps and the line breaks in every one of them.
+
+      **The canvas is `aria-hidden` and the data lives in the table.** A canvas carries no text an
+      assistive technology can reach; a `figcaption` names the chart and its range, and the table
+      view is the WCAG-clean twin rather than a fallback. Both themes are selected sets, not an
+      automatic flip, and switching one rebuilds every chart live — the colours are read from the
+      document's own custom properties at draw time, which is what `U-01` chose custom properties
+      over Tailwind theme keys for.
+
+      **Found while building it.** Automatic precision meant "up to six decimal places", which is
+      right for a stored reading of `0.223 ms` and wrong for a 45-minute average of
+      `0.20335648…` — six digits of it manufactured by dividing. It now means three significant
+      digits, with the places moving with the magnitude so `0.000412` does not round to a zero.
+      And the history API did not carry a channel's configured precision at all, so a chart had no
+      way to honour it; `decimals` now travels with `ChannelRef` through `TimeSeriesStore`.
+
+      **A second one found by reviewing rather than by running it.** The legend resolved its key
+      colours in JavaScript at render time, so a theme toggle rebuilt the canvases and left the
+      legend beside them in the old palette — invisible in the dev data, where every panel is a
+      single channel and has no legend at all. The DOM does not need a resolved colour: the keys
+      now carry `var(--ms-series-N)` and re-resolve themselves when the attribute on `<html>`
+      changes, with no re-render to forget. Only the canvas reads values.
+
+      Refetching holds the previous render at reduced opacity rather than flashing a skeleton, and
+      the range and view controls sit in one row above every panel they scope, so two panels can
+      never disagree about which period they show.
+
+      **Not done here, and deliberately: keyboard focus on the marks.** The guidance asks for the
+      same detail on focus as on hover; the canvas is `aria-hidden` and not focusable, and the
+      table view is the reachable equivalent the same guidance names. `U-11` is where a focusable
+      crosshair belongs if it is wanted at all.
 - [ ] **U-06 — Alarms view** · M · U-02, M-13 · Severity filters, branch scoping, priority and
       duration sorting, inline acknowledge/pause/resume.
 - [ ] **U-07 — Logs view** · M · M-15 · PRTG's category structure: status changes, system events,

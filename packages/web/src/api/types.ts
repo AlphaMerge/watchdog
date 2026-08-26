@@ -136,6 +136,8 @@ export interface HistoryChannel {
   key: string;
   name: string;
   unit: string;
+  /** Display precision, or `null` for automatic — the chart axis and the table honour it. */
+  decimals: number | null;
   avg: (number | null)[];
   min: (number | null)[];
   max: (number | null)[];
@@ -241,6 +243,7 @@ export interface ChannelValue {
   key: string;
   name: string;
   unit: string;
+  decimals: number | null;
   /**
    * `null` is "nothing recent", and it is not a zero.
    *

@@ -2,15 +2,37 @@ import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '.
 import { Empty } from '../../components/Panels';
 
 /**
+ * How many decimal places an automatic-precision value gets.
+ *
+ * **Three significant digits, not six decimal places.** A stored reading of `0.223 ms` and a
+ * 45-minute average of `0.20335648…` are the same channel, and printing the second one in full
+ * claims a precision the average does not have — six digits of it manufactured by division. The
+ * places move with the magnitude so a small value keeps its digits: `0.000412` stays
+ * `0.000412` rather than rounding to `0.000`, which would read as a zero.
+ */
+export function automaticDecimals(value: number): number {
+  const size = Math.abs(value);
+  if (size === 0) return 0;
+  if (size >= 100) return 0;
+  if (size >= 10) return 1;
+  if (size >= 1) return 2;
+  // Below one: enough places for three significant digits, capped so a denormal cannot ask for
+  // forty of them.
+  return Math.min(8, 2 - Math.floor(Math.log10(size)));
+}
+
+/**
  * Formats a reading the way its channel is configured to show it (`M-07`).
  *
- * `decimals: null` means automatic — as many digits as the value has, which is what a
- * millisecond RTT of `0.223` needs and what a percentage of `0` must not be padded into.
+ * `decimals: null` means automatic — see `automaticDecimals`. A configured precision is honoured
+ * exactly, padding included, because a channel set to two places wants `0.20` and not `0.2`.
  */
 export function formatValue(value: number, unit: string, decimals: number | null): string {
   const shown =
     decimals === null
-      ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(value)
+      ? new Intl.NumberFormat(undefined, {
+          maximumFractionDigits: automaticDecimals(value),
+        }).format(value)
       : new Intl.NumberFormat(undefined, {
           minimumFractionDigits: decimals,
           maximumFractionDigits: decimals,

@@ -18,6 +18,14 @@ export interface ChannelRef {
   key: string;
   name: string;
   unit: string;
+  /**
+   * The channel's display precision, or `null` for automatic (`M-07`).
+   *
+   * Carried through the time-series reads because a chart axis has to honour it: a channel
+   * configured to two decimals and plotted to six says the device is more precise than it is,
+   * and one plotted to zero flattens a millisecond RTT to a row of "0".
+   */
+  decimals: number | null;
 }
 
 /** The newest reading one channel has, inside a bounded lookback. */
@@ -355,8 +363,9 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
       key: string | null;
       name: string | null;
       unit: string | null;
+      decimals: number | null;
     }>(
-      `SELECT c.id AS channel_id, c.key, c.name, c.unit
+      `SELECT c.id AS channel_id, c.key, c.name, c.unit, c.decimals
        FROM object o
        LEFT JOIN channel c ON c.sensor_id = o.id
        WHERE o.id = $1 AND o.kind = 'sensor'
@@ -373,6 +382,7 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
         key: row.key,
         name: row.name ?? row.key,
         unit: row.unit ?? '',
+        decimals: row.decimals,
       });
     }
     return { exists: true, channels };

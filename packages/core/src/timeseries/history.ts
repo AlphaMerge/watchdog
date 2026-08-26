@@ -11,6 +11,8 @@ export interface HistoryChannel {
   key: string;
   name: string;
   unit: string;
+  /** The channel's display precision, or `null` for automatic — a chart axis honours it. */
+  decimals: number | null;
   /**
    * Aligned to `buckets`, one entry each. **`null` is a gap, never a zero** — a Down or paused
    * sensor produced no readings, and CLAUDE.md is explicit that a graph must break the line
@@ -48,6 +50,8 @@ export interface ChannelValue {
   key: string;
   name: string;
   unit: string;
+  /** The channel's display precision, or `null` for automatic. */
+  decimals: number | null;
   /** `null` when nothing was recorded inside the lookback — a gap, never a zero. */
   value: number | null;
   /** When that reading was taken. `null` alongside a `null` value. */
@@ -146,6 +150,7 @@ export class HistoryService {
         key: channel.key,
         name: channel.name,
         unit: channel.unit,
+        decimals: channel.decimals,
         avg: new Array<number | null>(plan.bucketCount).fill(null),
         min: new Array<number | null>(plan.bucketCount).fill(null),
         max: new Array<number | null>(plan.bucketCount).fill(null),
@@ -246,6 +251,7 @@ export class HistoryService {
           key: channel.key,
           name: channel.name,
           unit: channel.unit,
+          decimals: channel.decimals,
           value: row?.value ?? null,
           at: row === undefined ? null : row.at.toISOString(),
         };

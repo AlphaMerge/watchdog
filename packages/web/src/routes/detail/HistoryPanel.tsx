@@ -1,12 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
 import type { HistoryChannel, HistorySeries } from '../../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '../../charts/groups';
+import { SeriesLegend } from '../../charts/SeriesLegend';
+import { SeriesTable } from '../../charts/SeriesTable';
+import { TimeSeriesChart, type ChartSeries } from '../../charts/TimeSeriesChart';
 import { formatValue } from './ChannelTable';
 
 /**
- * The three ranges PRTG's sensor page offers, and this one does too
- * (`CAPABILITIES.MD §8`).
+ * The three ranges PRTG's sensor page offers, and this one does too (`CAPABILITIES.MD §8`).
  *
  * They are not arbitrary: two days is "what happened on my shift", thirty is "is this getting
  * worse", a year is "what do I tell the auditor". The resolution is left to the server, which
@@ -20,12 +23,20 @@ export const RANGES = [
 
 export type RangeId = (typeof RANGES)[number]['id'];
 
+/**
+ * Historic data, as charts (`U-05`).
+ *
+ * **One filter row above everything it scopes**, and the range and the view toggle both sit in
+ * it: every panel re-renders against the same slice, so two panels can never disagree about what
+ * period they are showing. A per-panel range control would guarantee that they eventually do.
+ */
 export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Element {
   const [range, setRange] = useState<RangeId>('2d');
+  const [asTable, setAsTable] = useState(false);
   const days = RANGES.find((entry) => entry.id === range)?.days ?? 2;
 
-  // Anchored on mount and on each range change rather than on every render, so the request path
-  // is stable and `useApi` does not refetch itself into a loop.
+  // Anchored on the range rather than on every render, so the request path is stable and
+  // `useApi` does not refetch itself into a loop.
   const path = useMemo(() => {
     const to = new Date();
     const from = new Date(to.getTime() - days * 86_400_000);
@@ -33,41 +44,84 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
   }, [sensorId, days]);
   const history = useApi<HistorySeries>(path);
 
+  // The last answer, kept so a range change holds the frame instead of flashing a skeleton. A
+  // chart that vanishes and comes back moves everything below it twice, and the reader loses
+  // their place in a page they were reading. Dimming says "this is the old slice" without
+  // taking it away.
+  const held = useRef<HistorySeries | null>(null);
+  useEffect(() => {
+    if (history.status === 'ready') held.current = history.data;
+  }, [history]);
+  const showing = history.status === 'ready' ? history.data : held.current;
+
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <span id="range-label" className="text-sm text-text-muted">
-          Range
-        </span>
-        <div role="group" aria-labelledby="range-label" className="flex gap-1">
-          {RANGES.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              aria-pressed={entry.id === range}
-              onClick={() => {
-                setRange(entry.id);
-              }}
-              className={`rounded border px-2 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                entry.id === range
-                  ? 'border-accent bg-surface-muted font-medium text-text'
-                  : 'border-border text-text-muted hover:text-text'
-              }`}
-            >
-              {entry.label}
-            </button>
-          ))}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-2">
+          <span id="range-label" className="text-sm text-text-muted">
+            Range
+          </span>
+          <div role="group" aria-labelledby="range-label" className="flex gap-1">
+            {RANGES.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                aria-pressed={entry.id === range}
+                onClick={() => {
+                  setRange(entry.id);
+                }}
+                className={`rounded border px-2 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                  entry.id === range
+                    ? 'border-accent bg-surface-muted font-medium text-text'
+                    : 'border-border text-text-muted hover:text-text'
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        <button
+          type="button"
+          aria-pressed={asTable}
+          onClick={() => {
+            setAsTable((held) => !held);
+          }}
+          className="rounded border border-border px-2 py-1 text-sm text-text-muted hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          {asTable ? 'Show charts' : 'Show table'}
+        </button>
       </div>
 
-      {history.status === 'loading' && <Loading what="history" />}
       {history.status === 'error' && <ErrorPanel error={history.error} retry={history.reload} />}
-      {history.status === 'ready' && <Series series={history.data} />}
+      {history.status === 'loading' && showing === null && <Loading what="history" />}
+      {showing !== null && history.status !== 'error' && (
+        <div
+          className={history.status === 'loading' ? 'opacity-50 transition-opacity' : undefined}
+          aria-busy={history.status === 'loading'}
+        >
+          <Series series={showing} asTable={asTable} />
+        </div>
+      )}
     </div>
   );
 }
 
-function Series({ series }: { series: HistorySeries }): React.JSX.Element {
+function Series({
+  series,
+  asTable,
+}: {
+  series: HistorySeries;
+  asTable: boolean;
+}): React.JSX.Element {
+  const groups = useMemo(() => groupByUnit(series.channels), [series.channels]);
+  // uPlot's time scale wants epoch seconds.
+  const times = useMemo(
+    () => series.buckets.map((bucket) => Math.round(Date.parse(bucket) / 1_000)),
+    [series.buckets],
+  );
+
   if (series.channels.length === 0) {
     return (
       <Empty because="Channels are declared by the sensor type; readings arrive once a probe runs the check.">
@@ -77,15 +131,151 @@ function Series({ series }: { series: HistorySeries }): React.JSX.Element {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <Provenance series={series} />
-      {series.channels.map((channel) => (
-        <Card key={channel.id}>
-          <ChannelPlot channel={channel} buckets={series.buckets} />
+      {asTable ? (
+        <Card title="Readings">
+          <SeriesTable
+            channels={series.channels}
+            buckets={series.buckets}
+            format={(channel, value) => formatValue(value, channel.unit, null)}
+            caption={`Every bucket from ${new Date(series.from).toLocaleString()} to ${new Date(series.to).toLocaleString()}, one column per channel. A dash is a bucket with no reading.`}
+          />
         </Card>
-      ))}
+      ) : (
+        groups.map((group) => (
+          <Card key={group.unit === '' ? '(none)' : group.unit}>
+            <Panel group={group} times={times} buckets={series.buckets} />
+          </Card>
+        ))
+      )}
     </div>
   );
+}
+
+/**
+ * One chart: the channels that share a unit.
+ *
+ * Never two units on one pair of axes. A second y-scale makes the crossing point of two lines an
+ * artefact of where the axes were placed, and a reader takes it for a relationship — which is
+ * why `groupByUnit` exists and why this component cannot be handed a mixed group.
+ */
+function Panel({
+  group,
+  times,
+  buckets,
+}: {
+  group: ChartGroup;
+  times: readonly number[];
+  buckets: readonly string[];
+}): React.JSX.Element {
+  const chartSeries = useMemo<ChartSeries[]>(
+    () =>
+      group.series.map(({ channel, slot }) => ({
+        label: channel.name,
+        slot,
+        avg: channel.avg,
+        min: channel.min,
+        max: channel.max,
+      })),
+    [group],
+  );
+
+  const decimals = group.series[0]?.channel.decimals ?? null;
+  const format = useCallback((value: number) => formatValue(value, '', decimals), [decimals]);
+
+  const extent = groupExtent(group);
+  const drawable = group.series.filter(({ channel }) => hasReadings(channel));
+  const heading =
+    group.series.length === 1
+      ? (group.series[0]?.channel.name ?? '')
+      : `${group.unit === '' ? 'Unitless' : group.unit} channels`;
+
+  const latest = group.series.map(({ channel }) => {
+    const value = lastReading(channel);
+    return value === null ? null : formatValue(value, channel.unit, channel.decimals);
+  });
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3 className="text-sm font-medium text-text">
+          {heading}
+          {group.series.length === 1 && group.unit !== '' && (
+            <span className="ml-1 text-text-muted">({group.unit})</span>
+          )}
+        </h3>
+        <p className="text-xs text-text-muted">{summarise(group, extent)}</p>
+      </div>
+
+      {drawable.length === 0 ? (
+        <p className="mt-2 rounded border border-dashed border-border px-3 py-8 text-center text-xs text-text-muted">
+          Nothing was recorded in this range.
+        </p>
+      ) : (
+        // The canvas carries no text an assistive technology can reach, so it is hidden from one
+        // and the figure's caption plus the table view carry the data. Announcing an empty
+        // graphic would be worse than announcing nothing.
+        <figure className="mt-2">
+          <div aria-hidden="true">
+            <TimeSeriesChart times={times} series={chartSeries} format={format} label={heading} />
+          </div>
+          <figcaption className="sr-only">{describe(group, buckets, extent)}</figcaption>
+        </figure>
+      )}
+
+      <SeriesLegend series={chartSeries} latest={latest} />
+
+      <p className="mt-2 text-xs text-text-muted">
+        Breaks in a line are gaps, not zeroes — a Down sensor records no channel values at all.
+      </p>
+    </div>
+  );
+}
+
+/** The newest reading a channel has in this range, or null when it ends in a gap. */
+export function lastReading(channel: HistoryChannel): number | null {
+  for (let index = channel.avg.length - 1; index >= 0; index -= 1) {
+    const value = channel.avg[index];
+    if (value !== null && value !== undefined) return value;
+  }
+  return null;
+}
+
+/** The one-line range summary beside a panel heading. */
+export function summarise(group: ChartGroup, extent: { low: number; high: number } | null): string {
+  const buckets = group.series[0]?.channel.avg.length ?? 0;
+  const gaps = group.series.reduce(
+    (worst, { channel }) => Math.max(worst, channel.avg.filter((value) => value === null).length),
+    0,
+  );
+  const unit = group.unit;
+  const range =
+    extent === null
+      ? 'no readings in this range'
+      : extent.low === extent.high
+        ? // "0 % to 0 %" is a worse sentence than the one fact it contains — and quoting a
+          // padded drawing scale here would invent a reading nobody took.
+          `steady at ${formatValue(extent.low, unit, null)}`
+        : `${formatValue(extent.low, unit, null)} to ${formatValue(extent.high, unit, null)}`;
+  if (gaps === 0 || buckets === 0) return range;
+  return `${range} · ${gaps.toLocaleString()} of ${buckets.toLocaleString()} buckets are gaps`;
+}
+
+/** What a screen reader is told instead of the canvas. */
+export function describe(
+  group: ChartGroup,
+  buckets: readonly string[],
+  extent: { low: number; high: number } | null,
+): string {
+  const first = buckets[0];
+  const last = buckets[buckets.length - 1];
+  const period =
+    first === undefined || last === undefined
+      ? ''
+      : ` from ${new Date(first).toLocaleString()} to ${new Date(last).toLocaleString()}`;
+  const names = group.series.map(({ channel }) => channel.name).join(', ');
+  return `Line chart of ${names}${period}. ${summarise(group, extent)}. The same readings are in the table view.`;
 }
 
 /**
@@ -112,182 +302,9 @@ function Provenance({ series }: { series: HistorySeries }): React.JSX.Element {
   );
 }
 
-function formatSeconds(seconds: number): string {
+export function formatSeconds(seconds: number): string {
   if (seconds % 86_400 === 0) return `${String(seconds / 86_400)}d`;
   if (seconds % 3_600 === 0) return `${String(seconds / 3_600)}h`;
   if (seconds % 60 === 0) return `${String(seconds / 60)}m`;
   return `${String(seconds)}s`;
-}
-
-export interface Extent {
-  /** What the data actually spans. This is what a label may quote. */
-  readonly low: number;
-  readonly high: number;
-  /** What the plot is scaled against, which is not always the same thing. */
-  readonly floor: number;
-  readonly ceiling: number;
-  readonly present: number;
-}
-
-/**
- * The vertical extent a channel's plot needs, ignoring the gaps.
- *
- * **The measured range and the drawing scale are two different numbers, and conflating them
- * invents data.** A packet-loss channel that read 0 for two days has a range of 0 to 0; a plot
- * cannot divide by that, so the *scale* is padded to give the flat line somewhere to sit. Quoting
- * the padded scale in the label is how "-1 % to 1 %" appeared beside a channel that has never
- * been anything but zero — a negative packet loss, reported by the UI, about readings that do
- * not exist.
- */
-export function extentOf(channel: HistoryChannel): Extent | null {
-  let low = Number.POSITIVE_INFINITY;
-  let high = Number.NEGATIVE_INFINITY;
-  let present = 0;
-  for (let index = 0; index < channel.avg.length; index += 1) {
-    const min = channel.min[index];
-    const max = channel.max[index];
-    if (min === null || min === undefined || max === null || max === undefined) continue;
-    present += 1;
-    if (min < low) low = min;
-    if (max > high) high = max;
-  }
-  if (present === 0) return null;
-  if (low === high) {
-    // A flat series. Pad by a tenth of its own magnitude so the line sits mid-height, and by 1
-    // when the value is 0 and a tenth of it is nothing.
-    const pad = Math.abs(low) === 0 ? 1 : Math.abs(low) / 10;
-    return { low, high, floor: low - pad, ceiling: high + pad, present };
-  }
-  return { low, high, floor: low, ceiling: high, present };
-}
-
-/**
- * One channel's series, drawn as a column per bucket.
- *
- * **A gap is drawn as nothing, and this is the rule the whole storage layer exists to protect.**
- * `null` in `avg` means the sensor produced no reading — it was Down, or paused, or the probe
- * could not be reached — and a column drawn to the floor would report an outage as a perfect
- * score. There is no code path here that turns a null into a zero: the column is simply not
- * rendered, so the row has a hole in it exactly where the data has one.
- *
- * Not uPlot. `U-05` brings the real charts, with axes, cursors and the `dataviz` guidance; this
- * is the shape of the data at a glance and the gap rule enforced from the first day the page
- * exists, so the chart that replaces it has something to be checked against.
- */
-function ChannelPlot({
-  channel,
-  buckets,
-}: {
-  channel: HistoryChannel;
-  buckets: readonly string[];
-}): React.JSX.Element {
-  const extent = extentOf(channel);
-  const gaps = channel.avg.length - (extent?.present ?? 0);
-
-  return (
-    <div>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h3 className="text-sm font-medium text-text">
-          {channel.name}
-          {channel.unit !== '' && <span className="ml-1 text-text-muted">({channel.unit})</span>}
-        </h3>
-        <p className="text-xs text-text-muted">
-          {extent === null
-            ? 'no readings in this range'
-            : extent.low === extent.high
-              ? // Flat. "0 % to 0 %" is a worse sentence than the one fact it contains.
-                `steady at ${formatValue(extent.low, channel.unit, null)}`
-              : `${formatValue(extent.low, channel.unit, null)} to ${formatValue(extent.high, channel.unit, null)}`}
-          {gaps > 0 &&
-            ` · ${gaps.toLocaleString()} of ${channel.avg.length.toLocaleString()} buckets are gaps`}
-        </p>
-      </div>
-
-      {extent === null ? (
-        <p className="mt-2 rounded border border-dashed border-border px-3 py-6 text-center text-xs text-text-muted">
-          Nothing was recorded in this range.
-        </p>
-      ) : (
-        <div
-          className="mt-2 flex h-28 items-end gap-px rounded border border-border bg-surface-muted px-1 pb-1 pt-2"
-          role="img"
-          aria-label={plotDescription(channel, extent, gaps, buckets)}
-        >
-          {channel.avg.map((value, index) => {
-            const min = channel.min[index] ?? null;
-            const max = channel.max[index] ?? null;
-            if (value === null || min === null || max === null) {
-              // The gap. Nothing is drawn — not a zero-height bar, which would still be a mark
-              // on the baseline and would read as "we measured, and it was nothing".
-              return <span key={index} className="h-full flex-1" />;
-            }
-            const span = extent.ceiling - extent.floor;
-            const bottom = ((min - extent.floor) / span) * 100;
-            const top = ((max - extent.floor) / span) * 100;
-            const mid = ((value - extent.floor) / span) * 100;
-            return (
-              <span
-                key={index}
-                className="relative h-full flex-1"
-                title={tooltip(channel, index, buckets, value, min, max)}
-              >
-                {/* The bucket's range, then its average on top of it. Both, because an average
-                    over an hour hides the spike that made somebody open this page. */}
-                <span
-                  className="absolute inset-x-0 rounded-[1px] bg-accent/25"
-                  style={{
-                    bottom: `${String(bottom)}%`,
-                    height: `${String(Math.max(top - bottom, 1))}%`,
-                  }}
-                />
-                <span
-                  className="absolute inset-x-0 h-0.5 rounded-[1px] bg-accent"
-                  style={{ bottom: `${String(mid)}%` }}
-                />
-              </span>
-            );
-          })}
-        </div>
-      )}
-
-      <p className="mt-1 text-xs text-text-muted">
-        Empty columns are gaps, not zeroes — a Down sensor records no channel values at all.
-      </p>
-    </div>
-  );
-}
-
-function tooltip(
-  channel: HistoryChannel,
-  index: number,
-  buckets: readonly string[],
-  avg: number,
-  min: number,
-  max: number,
-): string {
-  const at = buckets[index];
-  const when = at === undefined ? '' : `${new Date(at).toLocaleString()}: `;
-  const unit = channel.unit;
-  if (min === max) return `${when}${formatValue(avg, unit, null)}`;
-  return `${when}${formatValue(avg, unit, null)} (${formatValue(min, unit, null)}–${formatValue(max, unit, null)})`;
-}
-
-/** What a screen reader is told instead of the columns. */
-export function plotDescription(
-  channel: HistoryChannel,
-  extent: Extent,
-  gaps: number,
-  buckets: readonly string[],
-): string {
-  const first = buckets[0];
-  const last = buckets[buckets.length - 1];
-  const period =
-    first === undefined || last === undefined
-      ? ''
-      : ` from ${new Date(first).toLocaleString()} to ${new Date(last).toLocaleString()}`;
-  const holes =
-    gaps === 0
-      ? 'no gaps'
-      : `${String(gaps)} of ${String(channel.avg.length)} buckets have no reading`;
-  return `${channel.name}${period}: ${formatValue(extent.low, channel.unit, null)} to ${formatValue(extent.high, channel.unit, null)}, ${holes}.`;
 }

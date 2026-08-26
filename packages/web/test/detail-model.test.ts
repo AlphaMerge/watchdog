@@ -1,16 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { extentOf } from '../src/routes/detail/HistoryPanel';
 import { formatValue, howLongAgo } from '../src/routes/detail/ChannelTable';
 import { formatDuration } from '../src/routes/detail/StateLogPanel';
+import { formatSeconds, lastReading, summarise } from '../src/routes/detail/HistoryPanel';
 import { nextTab } from '../src/components/Tabs';
 import type { HistoryChannel } from '../src/api/types';
 
-function channel(avg: (number | null)[], spread = 0): HistoryChannel {
+export function channel(
+  avg: (number | null)[],
+  options: { spread?: number; unit?: string; name?: string; id?: number } = {},
+): HistoryChannel {
+  const spread = options.spread ?? 0;
   return {
-    id: 1,
+    id: options.id ?? 1,
     key: 'rtt',
-    name: 'Response time',
-    unit: 'ms',
+    name: options.name ?? 'Response time',
+    unit: options.unit ?? 'ms',
+    decimals: null,
     avg,
     min: avg.map((value) => (value === null ? null : value - spread)),
     max: avg.map((value) => (value === null ? null : value + spread)),
@@ -18,49 +23,53 @@ function channel(avg: (number | null)[], spread = 0): HistoryChannel {
   };
 }
 
-describe('the extent of a series', () => {
-  it('spans the readings and ignores the gaps', () => {
-    const extent = extentOf(channel([1, null, 5, null, 3]));
-    expect(extent).not.toBeNull();
-    expect(extent?.low).toBe(1);
-    expect(extent?.high).toBe(5);
-    expect(extent?.present).toBe(3);
+describe('the newest reading in a range', () => {
+  it('skips trailing gaps to find it', () => {
+    expect(lastReading(channel([1, 5, null, null]))).toBe(5);
   });
 
-  it('spans the min and max, not only the averages', () => {
-    // An average over an hour hides the spike that made somebody open the page. A plot scaled to
-    // the averages would clip the very thing they came to see.
-    const extent = extentOf(channel([10, 10], 4));
-    expect(extent?.low).toBe(6);
-    expect(extent?.high).toBe(14);
+  it('is null when the whole range is a gap', () => {
+    expect(lastReading(channel([null, null]))).toBeNull();
   });
 
-  it('is null when every bucket is a gap', () => {
-    // Not a zero-height plot: there is nothing to draw, and drawing a flat line at zero would
-    // say the sensor measured nothing rather than that it measured nothing.
-    expect(extentOf(channel([null, null, null]))).toBeNull();
+  it('finds a genuine zero rather than reading it as absent', () => {
+    // The recurring trap: `value || null` would turn a healthy 0% packet loss into "no data".
+    expect(lastReading(channel([5, 0]))).toBe(0);
+  });
+});
+
+describe('summarising a panel', () => {
+  const group = (avg: (number | null)[], spread = 0) => ({
+    unit: 'ms',
+    series: [{ channel: channel(avg, { spread }), slot: 0 }],
   });
 
-  it('keeps the measured range apart from the padded drawing scale', () => {
-    // The bug this exists to prevent: a packet-loss channel that has only ever read 0 was
-    // labelled "-1 % to 1 %", inventing a negative reading out of the plot's own geometry.
-    const extent = extentOf(channel([0, 0, 0]));
-    expect(extent?.low).toBe(0);
-    expect(extent?.high).toBe(0);
-    expect(extent?.floor).toBe(-1);
-    expect(extent?.ceiling).toBe(1);
+  it('quotes the measured range, not a padded drawing scale', () => {
+    // A packet-loss channel that has only ever read 0 was once labelled "-1 % to 1 %", inventing
+    // a negative reading out of the plot's own geometry. uPlot pads its own scale now; the
+    // words beside the heading report what was actually measured.
+    expect(summarise(group([0, 0, 0]), { low: 0, high: 0 })).toBe('steady at 0 ms');
   });
 
-  it('pads a flat non-zero series relative to its own magnitude', () => {
-    const extent = extentOf(channel([200, 200]));
-    expect(extent?.floor).toBe(180);
-    expect(extent?.ceiling).toBe(220);
+  it('reports the span when there is one, and counts the gaps', () => {
+    expect(summarise(group([1, null, 5]), { low: 1, high: 5 })).toBe(
+      '1 ms to 5 ms · 1 of 3 buckets are gaps',
+    );
   });
 
-  it('does not pad a series that already has a range', () => {
-    const extent = extentOf(channel([1, 9]));
-    expect(extent?.floor).toBe(1);
-    expect(extent?.ceiling).toBe(9);
+  it('says so when nothing was recorded', () => {
+    expect(summarise(group([null, null]), null)).toBe(
+      'no readings in this range · 2 of 2 buckets are gaps',
+    );
+  });
+});
+
+describe('formatting a resolution', () => {
+  it('uses the largest whole unit', () => {
+    expect(formatSeconds(30)).toBe('30s');
+    expect(formatSeconds(180)).toBe('3m');
+    expect(formatSeconds(7_200)).toBe('2h');
+    expect(formatSeconds(86_400)).toBe('1d');
   });
 });
 
@@ -78,6 +87,20 @@ describe('formatting a reading', () => {
   it('does not round a small reading away to nothing', () => {
     // 0.223 ms displayed as "0 ms" would make a healthy LAN look like a broken clock.
     expect(formatValue(0.223, 'ms', null)).toBe('0.223 ms');
+    expect(formatValue(0.000412, 'ms', null)).toBe('0.000412 ms');
+  });
+
+  it('does not claim the precision an average manufactured', () => {
+    // A 45-minute average of a sub-millisecond RTT comes back as 0.20335648…; six decimal places
+    // of it are an artefact of dividing, and printing them says the device is that precise.
+    expect(formatValue(0.20335648, 'ms', null)).toBe('0.203 ms');
+    expect(formatValue(246.10004, 'ms', null)).toBe('246 ms');
+    expect(formatValue(12.3456, 'ms', null)).toBe('12.3 ms');
+  });
+
+  it('honours a configured precision exactly, padding included', () => {
+    // A channel set to two places wants "0.20", not "0.2" — the trailing zero is the claim.
+    expect(formatValue(0.2, '%', 2)).toBe('0.20 %');
   });
 });
 

@@ -342,6 +342,27 @@ under `[data-theme='dark']`. Tailwind consumes them through `@theme`. The reason
 are canvas — uPlot cannot read a Tailwind class, but it can read a custom property, so `U-05`
 gets the same palette as the DOM without a second source of truth.
 
+### Amended 2026-08-26 (U-05) — the series palette, and what "one axis" costs
+
+uPlot landed as chosen, at 1.6.32 — the version the accepted-risk note above names — and the
+custom-property decision paid: `readChartTheme` resolves the same tokens the DOM uses, at draw
+time, so a theme switch rebuilds every chart with no second palette to keep in step.
+
+Two things this decision did not anticipate:
+
+**Charts need a categorical palette, and the state tokens are not it.** A colour that also means
+"channel 4" stops meaning "down". So `--ms-series-1…8` are their own slots, taken from the
+`dataviz` reference palette and re-validated against *our* surfaces rather than the skill's
+defaults — light `#ffffff`, dark `#111827` — because a contrast result only means anything
+against the surface the chart draws on. Both modes clear every gate; three light slots land in
+the sub-3:1 warn band, whose mandated relief is the table view and the value-bearing legend that
+every panel ships. The validator command is recorded beside the tokens.
+
+**"One axis, never two" decides the page layout, not just a chart option.** A sensor's channels
+routinely carry different units, so a panel holds only the channels that share one and a sensor
+gets as many panels as it has units. That is `groupByUnit`, and it makes a two-scale chart
+unrepresentable rather than merely discouraged.
+
 **No component library.** Not Material, not shadcn, not Radix wholesale. The surface this product
 needs is small and unusual — a virtualised tree, a channel table, a schema-driven form — and none
 of it comes out of a component library anyway. Accessible primitives may be added *individually*
