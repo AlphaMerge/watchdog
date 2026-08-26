@@ -1070,8 +1070,17 @@ export class ObjectService {
         : await this.#resolver.resolveAllAsChildOf(id, asChildOf);
     const own = await this.#resolver.own(id);
 
+    // What a revert would restore: resolved at the parent, because inheritance is
+    // nearest-ancestor and discarding the local value removes this object from the walk. The
+    // root has no parent and falls through to the registry default. One extra resolve, and only
+    // when there is a parent to resolve at — a UI cannot compute this from `effective` alone,
+    // and asking it to would mean telling an operator what reverting does by doing it.
+    const from = asChildOf ?? object.parentId;
+    const above = from === null ? {} : await this.#resolver.resolveAll(from);
+
     return settingRegistry.definitions().map((definition) => {
       const resolved = effective[definition.key];
+      const parent = above[definition.key];
       return {
         key: definition.key,
         description: definition.description,
@@ -1079,6 +1088,10 @@ export class ObjectService {
         effective: {
           value: resolved?.value ?? definition.default,
           source: resolved?.source ?? { kind: 'default' },
+        },
+        inherited: {
+          value: parent?.value ?? definition.default,
+          source: parent?.source ?? { kind: 'default' },
         },
         own: definition.key in own ? { value: own[definition.key] } : null,
       };

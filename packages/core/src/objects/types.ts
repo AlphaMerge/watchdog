@@ -281,6 +281,14 @@ export interface SettingView {
   readonly schema: Readonly<Record<string, unknown>>;
   readonly effective: { readonly value: unknown; readonly source: SettingSource };
   /**
+   * What this setting would resolve to with the local override discarded (`U-09`).
+   *
+   * The parent's effective value, or the registry default at the root. Equal to `effective`
+   * when there is no override, and different exactly when there is — which is what lets an
+   * override toggle say what reverting will do without doing it first.
+   */
+  readonly inherited: { readonly value: unknown; readonly source: SettingSource };
+  /**
    * `null` means no override. Distinct from `{ value: 60 }`, which means "overridden to the
    * same value the parent happens to have" — the override toggle is on in one case and off in
    * the other, so these must not collapse into one another.

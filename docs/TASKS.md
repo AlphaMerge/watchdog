@@ -2571,8 +2571,50 @@ because each is a decision rather than a defect:
 
       Generated labels are sentence case to match the rest of the UI — a declared `title` always
       wins.
-- [ ] **U-09 — Inheritance-aware controls** · M · S-04, U-08 · Every inheritable field shows the
+- [x] **U-09 — Inheritance-aware controls** · M · S-04, U-08 · Every inheritable field shows the
       inherited value and an override toggle; reverting discards the local value.
+
+      **U-09 outcome.** The Settings tab stops being read-only: each setting shows what is in
+      force, where it came from, an override toggle, and — the part that needed an API change —
+      what reverting would restore.
+
+      **`SettingView` gained `inherited`, and the toggle cannot work without it.** The view
+      already carried the *effective* value and `own`, but when a setting is overridden, what the
+      object would fall back to is nowhere in the response. A UI could only show an operator what
+      reverting does by doing it. `inherited` is the setting resolved **at the parent** — which is
+      what a revert means, since inheritance is nearest-ancestor and discarding the local value
+      removes this object from the walk — and the registry default at the root, which has no
+      parent to ask.
+
+      **Overridden-to-the-same-value stays a distinct state, and this is the subtle one.**
+      `own: { value: 300 }` under a parent that also says 300 is a deliberate pin: when the parent
+      moves to 30, this object stays at 300. A control that decided "is this overridden?" by
+      comparing the effective value against the inherited one would silently turn that pin into a
+      follower. The toggle reads `own`, which is `null` or a value and never a comparison — the
+      response schema has said so since `S-04`, and there is now a test that walks the parent
+      underneath a pin and asserts it holds.
+
+      **Turning the toggle on writes immediately**, with the value it is already showing, rather
+      than leaving a pin that exists only in the browser until somebody types something. Turning
+      it off is `DELETE`, which discards the local value; the sentence beside it says what will
+      come back and names the ancestor it comes from rather than an id.
+
+      **The inherited value is shown disabled, not hidden.** It is the fact an operator came to
+      read; hiding it behind the toggle would make them switch the toggle on to find out what they
+      were about to override.
+
+      **Controls are `U-08`'s, extracted so there is one of them.** `SchemaControl` now renders a
+      value from a schema for both the sensor-parameter form and this, because two places deciding
+      what an `integer` with a `minimum` looks like is two places to fix when one is wrong. One
+      thing does not transfer: a setting's key is dotted — `scan.intervalSeconds` — and the params
+      form's path machinery would read that as nesting, so `fieldFor` builds the field model
+      directly. A nullable setting is not "required": `schedule.id: null` means "always", and
+      calling it required would make that unreachable through the control.
+
+      Verified live end to end: override, edit, save, watch the origin change to "set here";
+      set the interval on the device and see the sensor say "inherited from ms-target"; override
+      at the same value and read "Reverting restores 120, from ms-target"; revert and watch it
+      return to inheriting.
 - [ ] **U-10 — Notification configuration UI** · L · N-05 · Template editor with live placeholder
       preview and test send; trigger editor showing inherited triggers and their source.
 - [ ] **U-11 — Accessibility and responsive pass** · M · U-03…U-10 · WCAG 2.1 AA, keyboard

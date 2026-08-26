@@ -463,6 +463,114 @@ describe(
       assert.equal(body.effective.source.kind, 'inherited');
     });
 
+    it('says what a revert would restore, without needing one to find out (U-09)', async () => {
+      // The override toggle's whole job. A view that carried only the effective value could show
+      // an operator what reverting does only by doing it.
+      const g = await createGroup(probeId, 'Group');
+      const d = await createDevice(g, 'switch-02');
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/objects/${String(g)}/settings/scan.intervalSeconds`,
+        payload: { value: 300 },
+      });
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/objects/${String(d.id)}/settings/scan.intervalSeconds`,
+        payload: { value: 30 },
+      });
+
+      const view = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(d.id)}/settings`,
+      });
+      const interval = view
+        .json<{
+          settings: {
+            key: string;
+            effective: { value: number; source: { kind: string } };
+            inherited: { value: number; source: { kind: string; objectId?: number } };
+            own: { value: number } | null;
+          }[];
+        }>()
+        .settings.find((setting) => setting.key === 'scan.intervalSeconds');
+
+      assert.ok(interval);
+      assert.equal(interval.effective.value, 30, 'the override is what is in force');
+      assert.equal(interval.effective.source.kind, 'own');
+      assert.equal(interval.inherited.value, 300, 'and 300 is what reverting would restore');
+      assert.equal(interval.inherited.source.objectId, g, 'named, so the UI can link to it');
+      assert.deepEqual(interval.own, { value: 30 });
+    });
+
+    it('reports the registry default as what a revert restores at the root', async () => {
+      const view = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(h.rootId)}/settings`,
+      });
+      assert.equal(view.statusCode, 200);
+      const interval = view
+        .json<{
+          settings: { key: string; inherited: { value: number; source: { kind: string } } }[];
+        }>()
+        .settings.find((setting) => setting.key === 'scan.intervalSeconds');
+      assert.ok(interval);
+      // The root has no parent to inherit from, and falling through to the default is the honest
+      // answer rather than repeating the root's own value back at it.
+      assert.equal(interval.inherited.source.kind, 'default');
+      assert.equal(interval.inherited.value, 60);
+    });
+
+    it('keeps an override pinned to the same value the parent has as an override', async () => {
+      // The state that must not collapse: `own: { value: 300 }` under a parent that also says
+      // 300 is a deliberate pin, and when the parent moves to 30 this object stays at 300.
+      // Comparing values instead of reading `own` would turn it silently into a follower.
+      const g = await createGroup(probeId, 'Group');
+      const d = await createDevice(g, 'switch-03');
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/objects/${String(g)}/settings/scan.intervalSeconds`,
+        payload: { value: 300 },
+      });
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/objects/${String(d.id)}/settings/scan.intervalSeconds`,
+        payload: { value: 300 },
+      });
+
+      const read = async () => {
+        const view = await app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(d.id)}/settings`,
+        });
+        const found = view
+          .json<{
+            settings: {
+              key: string;
+              effective: { value: number };
+              inherited: { value: number };
+              own: { value: number } | null;
+            }[];
+          }>()
+          .settings.find((setting) => setting.key === 'scan.intervalSeconds');
+        assert.ok(found);
+        return found;
+      };
+
+      const pinned = await read();
+      assert.deepEqual(pinned.own, { value: 300 }, 'an override, even at the same number');
+      assert.equal(pinned.inherited.value, 300);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/objects/${String(g)}/settings/scan.intervalSeconds`,
+        payload: { value: 30 },
+      });
+      const after = await read();
+      assert.equal(after.effective.value, 300, 'the pin held when the parent moved');
+      assert.equal(after.inherited.value, 30, 'and reverting would now restore 30');
+    });
+
     it('rejects a value that fails the setting schema', async () => {
       const g = await createGroup(probeId, 'Group');
       const res = await app.inject({

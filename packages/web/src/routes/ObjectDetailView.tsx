@@ -154,8 +154,10 @@ export function ObjectDetailView(): React.JSX.Element {
             )}
             {settings.status === 'ready' && (
               <SettingsPanel
+                objectId={detail.id}
                 items={settings.data.settings}
                 ancestors={ancestors.status === 'ready' ? ancestors.data.items : null}
+                onChanged={settings.reload}
               />
             )}
           </Card>

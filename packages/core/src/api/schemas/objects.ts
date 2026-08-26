@@ -146,12 +146,26 @@ export const settingViewSchema = {
   $id: 'ms:settingView',
   type: 'object',
   additionalProperties: false,
-  required: ['key', 'description', 'schema', 'effective', 'own'],
+  required: ['key', 'description', 'schema', 'effective', 'inherited', 'own'],
   properties: {
     key: { type: 'string' },
     description: { type: 'string' },
     schema: { type: 'object', additionalProperties: true },
     effective: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['value', 'source'],
+      properties: { value: {}, source: { $ref: 'ms:settingSource' } },
+    },
+    /**
+     * What this setting would resolve to if the local override were discarded — the parent's
+     * effective value, or the registry default at the root.
+     *
+     * Equal to `effective` whenever there is no override, and *different* from it exactly when
+     * there is. `U-09`'s override toggle needs both: a control that only knew the effective
+     * value could show what reverting does only by doing it.
+     */
+    inherited: {
       type: 'object',
       additionalProperties: false,
       required: ['value', 'source'],

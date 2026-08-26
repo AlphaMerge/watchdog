@@ -205,16 +205,28 @@ export interface PauseView {
  * because the group two levels up says so", and an operator changing the wrong object is what
  * happens when only the value is shown.
  */
+export type SettingSource =
+  | { kind: 'own'; objectId: number }
+  | { kind: 'inherited'; objectId: number; depth: number }
+  | { kind: 'default' };
+
 export interface SettingView {
   key: string;
   description: string;
-  effective: {
-    value: unknown;
-    source:
-      | { kind: 'own'; objectId: number }
-      | { kind: 'inherited'; objectId: number; depth: number }
-      | { kind: 'default' };
-  };
+  /** The setting's own JSON Schema, which is what its control is generated from (`U-08`). */
+  schema: Record<string, unknown>;
+  effective: { value: unknown; source: SettingSource };
+  /**
+   * What this setting would resolve to with the local override discarded (`U-09`).
+   *
+   * Equal to `effective` when there is no override, and different exactly when there is — which
+   * is what lets the toggle say what reverting will do without doing it.
+   */
+  inherited: { value: unknown; source: SettingSource };
+  /**
+   * `null` means no override. Distinct from `{ value: 60 }` meaning "overridden to the same
+   * value the parent happens to have" — the toggle is on in one case and off in the other.
+   */
   own: { value: unknown } | null;
 }
 
