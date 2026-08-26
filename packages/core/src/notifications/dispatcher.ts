@@ -1,8 +1,21 @@
 import { describeError, type Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import type { SensorState } from '../state/tables.js';
+import type { NotificationReason } from './chain.js';
 import type { MessageContextLoader, PendingNotification } from './context.js';
-import { render } from './placeholders.js';
+import { notificationMethods } from './methods.js';
+import { render, substitute, type MessageContext } from './placeholders.js';
+import { SummaryRepository } from './summaries.js';
+import {
+  countKinds,
+  DEFAULT_SUMMARISATION,
+  digestSubject,
+  disposition,
+  isSummarisationMode,
+  kindOf,
+  splitDigest,
+  summarises,
+} from './summarisation.js';
 import type { StoredTemplate } from './templates.js';
 import type { DeliveryResult, DeliveryTransport, OutgoingMessage } from './delivery/transport.js';
 
@@ -28,6 +41,8 @@ export interface NotificationDispatcherOptions {
    * an address the relay will never accept — cannot occupy the queue for ever.
    */
   maxAttempts?: number;
+  /** How many digests one pass sends. Each is one window, and may be several messages. */
+  maxDigests?: number;
 }
 
 export interface DispatchStats {
@@ -45,6 +60,10 @@ export interface DispatchStats {
    * alarm never arrived needs to be able to tell them apart from a queue that is simply busy.
    */
   awaiting: number;
+  /** Notifications folded into a digest rather than sent on their own (`N-11`). */
+  held: number;
+  /** Digest messages sent, which is not the same as windows: a large one splits. */
+  digests: number;
 }
 
 interface ClaimRow {
@@ -64,11 +83,20 @@ interface ClaimRow {
   t_recipients: StoredTemplate['recipients'] | null;
   t_priority: number | null;
   t_enabled: boolean | null;
+  reason: NotificationReason;
 }
 
 const DEFAULT_BATCH = 25;
 const DEFAULT_RETRY_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_MAX_DIGESTS = 5;
+const DEFAULT_WINDOW_SECONDS = 900;
+/** How many held requests one digest may cover. Above the split cap, so a big storm still splits. */
+const MAX_DIGEST_MEMBERS = 500;
+/** A window whose contents have all been sent, kept this long so it stays visible in a query. */
+const PRUNE_AFTER_MS = 60 * 60 * 1_000;
+/** How often the tidying runs. The idle loop ticks every thirty seconds; this need not. */
+const PRUNE_EVERY_MS = 10 * 60 * 1_000;
 
 /**
  * What turns a queued obligation into a message somebody receives (`N-07`).
@@ -93,7 +121,17 @@ export class NotificationDispatcher {
   readonly #batchSize: number;
   readonly #retryDelayMs: number;
   readonly #maxAttempts: number;
-  readonly #stats: DispatchStats = { sent: 0, deferred: 0, failed: 0, awaiting: 0 };
+  readonly #maxDigests: number;
+  readonly #summaries = new SummaryRepository();
+  #prunedAt = 0;
+  readonly #stats: DispatchStats = {
+    sent: 0,
+    deferred: 0,
+    failed: 0,
+    awaiting: 0,
+    held: 0,
+    digests: 0,
+  };
 
   constructor(options: NotificationDispatcherOptions) {
     this.#db = options.db;
@@ -103,6 +141,7 @@ export class NotificationDispatcher {
     this.#batchSize = options.batchSize ?? DEFAULT_BATCH;
     this.#retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_MS;
     this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.#maxDigests = options.maxDigests ?? DEFAULT_MAX_DIGESTS;
   }
 
   get stats(): DispatchStats {
@@ -119,10 +158,24 @@ export class NotificationDispatcher {
    * straight back rather than waiting for the next tick.
    */
   async dispatch(now = new Date()): Promise<number> {
+    // Before anything is claimed, because the decision is what says which requests are claimable
+    // at all. A request folded into a digest is not owed as a message of its own.
+    await this.#decide(now);
+    await this.#db.tx((q) => this.#summaries.closeDue(q, now));
+    const digested = await this.#digests(now);
+
     const claimed = await this.#claim(now);
     if (claimed.length === 0) {
       this.#stats.awaiting = await this.#countAwaiting();
-      return 0;
+      // Idle is when there is time for housekeeping. A window that released its first Down and
+      // then saw nothing else closes empty, which is the common case for a template that
+      // notifies about one sensor at a time. Rarely, though: the idle loop ticks every thirty
+      // seconds and a `NOT EXISTS` sweep does not need to run that often.
+      if (now.getTime() - this.#prunedAt >= PRUNE_EVERY_MS) {
+        this.#prunedAt = now.getTime();
+        await this.#summaries.prune(this.#db, new Date(now.getTime() - PRUNE_AFTER_MS));
+      }
+      return digested;
     }
 
     const contexts = await this.#contexts.loadFor(this.#db, claimed.map(toPending), now);
@@ -176,8 +229,9 @@ export class NotificationDispatcher {
     }
 
     this.#stats.awaiting = await this.#countAwaiting();
-    return claimed.length;
+    return claimed.length + digested;
   }
+
 
   async close(): Promise<void> {
     for (const transport of this.#transports.values()) await transport.close?.();
@@ -198,16 +252,36 @@ export class NotificationDispatcher {
     }
   }
 
+  /** What is owed as a message of its own. */
+  async #claim(now: Date): Promise<ClaimRow[]> {
+    // Only what is owed as a message of its own. A held request belongs to a digest, and one
+    // whose window has been deleted belongs to nobody — so it is sent rather than lost.
+    return this.#claimWhere(
+      now,
+      `(r.disposition = 'immediate' OR (r.disposition = 'held' AND r.summary_id IS NULL))`,
+      [],
+    );
+  }
+
+  /** Everything a closed window is still holding, claimed together as one digest. */
+  async #claimMembers(windowId: number, now: Date): Promise<ClaimRow[]> {
+    return this.#claimWhere(now, `r.summary_id = $5`, [windowId], MAX_DIGEST_MEMBERS);
+  }
+
   /**
    * Takes a batch, marking it attempted before anything is sent.
    *
-   * Only requests whose template this build can actually deliver: a method with no transport yet
-   * is left alone rather than failed, because `N-08` to `N-10` are days away and marking them
-   * undeliverable would throw away real obligations. The same for a template switched off —
-   * `CAPABILITIES.MD §5.2`'s activation schedules make "collect and send when reactivated" a
-   * first-class choice (`N-12`), and leaving the rows queued is that behaviour arrived at early.
+   * Only requests whose template this build can actually deliver: a method with no transport is
+   * left alone rather than failed. The same for a template switched off — `CAPABILITIES.MD §5.2`'s
+   * activation schedules make "collect and send when reactivated" a first-class choice (`N-12`),
+   * and leaving the rows queued is that behaviour arrived at early.
    */
-  async #claim(now: Date): Promise<ClaimRow[]> {
+  async #claimWhere(
+    now: Date,
+    predicate: string,
+    extra: readonly unknown[],
+    limit = this.#batchSize,
+  ): Promise<ClaimRow[]> {
     return this.#db.tx(async (q) => {
       const rows = await q.query<ClaimRow>(
         `
@@ -216,6 +290,7 @@ export class NotificationDispatcher {
           FROM notification_request r
           LEFT JOIN notification_template t ON t.id = r.template_id
           WHERE r.status = 'pending'
+            AND ${predicate}
             AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= $1)
             -- A template that is gone, or was never there, is claimed on purpose: it fails with
             -- a reason an operator can act on rather than sitting in the queue for ever.
@@ -230,7 +305,7 @@ export class NotificationDispatcher {
         WHERE r.id = claimed.id
         RETURNING
           r.id::text AS id, r.sensor_id::text AS sensor_id, r.at, r.state, r.message, r.observed,
-          r.attempts - 1 AS attempts, r.template_id::text AS template_id,
+          r.reason, r.attempts - 1 AS attempts, r.template_id::text AS template_id,
           (SELECT name FROM notification_template WHERE id = r.template_id) AS t_name,
           (SELECT method FROM notification_template WHERE id = r.template_id) AS t_method,
           (SELECT settings FROM notification_template WHERE id = r.template_id) AS t_settings,
@@ -240,10 +315,150 @@ export class NotificationDispatcher {
           (SELECT priority FROM notification_template WHERE id = r.template_id) AS t_priority,
           (SELECT enabled FROM notification_template WHERE id = r.template_id) AS t_enabled
         `,
-        [now, this.methods, this.#batchSize, new Date(now.getTime() + this.#retryDelayMs)],
+        [now, this.methods, limit, new Date(now.getTime() + this.#retryDelayMs), ...extra],
       );
       return rows;
     });
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // Summarisation (`N-11`).
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * Decides, once, whether each newly queued notification is a message or part of a digest.
+   *
+   * Once, and recorded, because "the first Down of the window goes immediately" is not a property
+   * of the request: it depends on what the window has already released. Deciding again on a
+   * retry would move a failed immediate message into a digest and quietly change what the
+   * operator was promised.
+   */
+  async #decide(now: Date): Promise<number> {
+    return this.#db.tx(async (q) => {
+      const pending = await this.#summaries.undecided(q, this.#batchSize * 4);
+      let held = 0;
+      for (const request of pending) {
+        const mode = isSummarisationMode(request.summarisation)
+          ? request.summarisation
+          : DEFAULT_SUMMARISATION;
+        // Slack, Teams, HTTP action and execute program are never summarised
+        // (`CAPABILITIES.MD §5.2`): they are cheap and usually machine-consumed, and a digest
+        // posted to a channel is worse than the messages it replaced.
+        const summarisable =
+          request.method !== null &&
+          notificationMethods.ids.includes(request.method) &&
+          notificationMethods.get(request.method).summarisable;
+
+        if (!summarisable || !summarises(mode) || request.templateId === null) {
+          await this.#summaries.decide(q, request.id, 'immediate', null);
+          continue;
+        }
+
+        const window = await this.#summaries.openWindow(
+          q,
+          request.templateId,
+          now,
+          request.windowSeconds ?? DEFAULT_WINDOW_SECONDS,
+        );
+        const kind = kindOf(request);
+        if (disposition(mode, kind, window.released) === 'immediate') {
+          // Recorded before the message goes, so the *second* Down of a storm is held even if
+          // the first one is still being delivered.
+          await this.#summaries.release(q, window.id, kind);
+          await this.#summaries.decide(q, request.id, 'immediate', null);
+          continue;
+        }
+        await this.#summaries.decide(q, request.id, 'held', window.id);
+        held += 1;
+      }
+      this.#stats.held += held;
+      return held;
+    });
+  }
+
+  /** Sends what the closed windows are holding. Returns how many requests it covered. */
+  async #digests(now: Date): Promise<number> {
+    const owing = await this.#db.tx((q) => this.#summaries.owing(q, now, this.#maxDigests));
+    let covered = 0;
+    for (const window of owing) {
+      const members = await this.#claimMembers(window.id, now);
+      if (members.length === 0) continue;
+      covered += await this.#sendDigest(members, now);
+    }
+    return covered;
+  }
+
+  /**
+   * One window's worth of notifications, as one message — or as several, when it is too big.
+   *
+   * **The lines are the operator's own subject line, rendered per notification.** A digest cannot
+   * use their subject as its subject: "%sensor on %device is %status" says nothing useful about
+   * twelve sensors. But throwing their wording away and inventing our own would produce a digest
+   * that reads nothing like the messages it replaced, so the subject becomes the line and the
+   * digest's own subject is generated.
+   */
+  async #sendDigest(members: readonly ClaimRow[], now: Date): Promise<number> {
+    const contexts = await this.#contexts.loadFor(this.#db, members.map(toPending), now);
+    const [first] = members;
+    if (first === undefined) return 0;
+
+    const transport = this.#transports.get(first.t_method ?? '');
+    const settings = first.t_settings ?? {};
+    const escaping = transport?.bodyEscaping?.(settings) ?? 'none';
+
+    const entries: { member: { row: ClaimRow; context: MessageContext }; line: string }[] = [];
+    for (const row of members) {
+      const context = contexts.get(Number(row.id));
+      if (context === undefined) continue;
+      entries.push({
+        member: { row, context },
+        line: substitute(row.t_subject ?? '', context, escaping).text,
+      });
+    }
+
+    const parts = splitDigest(entries);
+    let covered = 0;
+    for (const [index, part] of parts.entries()) {
+      const [lead] = part.members;
+      if (lead === undefined) continue;
+      const counts = countKinds(part.members.map((entry) => kindOf(entry.row)));
+      const subject = digestSubject({
+        siteName: lead.context.siteName,
+        counts,
+        total: part.members.length,
+        part: index + 1,
+        parts: parts.length,
+      });
+
+      const result =
+        transport === undefined
+          ? ({
+              ok: false,
+              retryable: false,
+              error: `no transport for delivery method "${String(first.t_method)}"`,
+            } as const)
+          : await this.#attempt(transport, {
+              requestId: Number(lead.row.id),
+              sensorId: Number(lead.row.sensor_id),
+              subject,
+              body: part.lines.join('\n'),
+              recipients: first.t_recipients ?? [],
+              priority: first.t_priority ?? 3,
+              settings,
+              // One message about many sensors, so there is no single context that is *the*
+              // context. The first member's is what a transport that wants one gets, and it is
+              // the right one for the facts a digest actually uses — the site name and nothing
+              // sensor-specific.
+              context: lead.context,
+            });
+
+      if (result.ok) this.#stats.digests += 1;
+      for (const entry of part.members) {
+        await this.#record(Number(entry.row.id), entry.row.attempts + 1, result, now);
+        covered += 1;
+      }
+    }
+    return covered;
   }
 
   async #record(

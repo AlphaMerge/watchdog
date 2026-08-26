@@ -553,7 +553,10 @@ describe(
     });
 
     it('counts what it did, for Core Health', async () => {
-      const templateId = await emailTemplate();
+      // Immediate, because this is about the counters and not about `N-11`: under the default
+      // mode the second of two simultaneous notifications is held for the digest, which is a
+      // different test in a different file.
+      const templateId = await emailTemplate({ summarisation: 'always-immediate' });
       await queue(templateId);
       await queue(templateId);
       const { transport } = recorder(() => ({ ok: true }));
@@ -564,7 +567,9 @@ describe(
     });
 
     it('drains a backlog through the loop rather than one batch per tick', async () => {
-      const templateId = await emailTemplate();
+      // Immediate for the same reason: the question here is whether the loop comes back for the
+      // second batch, which needs seven messages rather than one message and a digest.
+      const templateId = await emailTemplate({ summarisation: 'always-immediate' });
       for (let index = 0; index < 7; index += 1) await queue(templateId);
       const { seen, transport } = recorder(() => ({ ok: true }));
       const dispatcher = new NotificationDispatcher({

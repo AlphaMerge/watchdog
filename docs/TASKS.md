@@ -1748,9 +1748,66 @@ because each is a decision rather than a defect:
       the acknowledgement was lifted, so the test passed all morning and failed every afternoon
       once the wall clock passed 09:00Z. It now sweeps relative to the clock the service actually
       used.
-- [ ] **N-11 — Summarisation engine** · L · N-05 · All six modes, default _first down and up
+- [x] **N-11 — Summarisation engine** · L · N-05 · All six modes, default _first down and up
       immediately then summarise_; configurable window; digest caps with overflow splitting;
       Slack/Teams/webhook/script always immediate.
+
+      **N-11 outcome.** What stops a switch failure from sending two hundred emails. A pure mode
+      table in `summarisation.ts`, a window table in migration 020, and three steps added to the
+      dispatcher ahead of the claim it already did: decide, close, digest.
+
+      **A window is a row, not a timer** — the same reasoning as `N-02`'s alarms. A timer holding
+      a storm's worth of notifications is a restart away from losing all of them, so an open
+      window is a row with a due time and closing it is an `UPDATE`. A core that restarts
+      mid-storm sends the digest late rather than never, and a test asserts exactly that against a
+      fresh dispatcher. One open window per template, enforced by a partial unique index rather
+      than by convention.
+
+      **`disposition` is a column because the decision has to be made once.** "Send the first Down
+      immediately, then summarise" is not a property of the request — it depends on what the
+      window has already released. Re-deciding on a retry would take a message an operator was
+      promised at once and fold it into a digest fifteen minutes later, so the answer is written
+      the first time and read thereafter. That is the subtlety in the whole ticket, and it has its
+      own test.
+
+      **Three kinds, not two.** Two modes say "summarise others", so there has to be an *other*:
+      a Warning is neither the outage the Down modes are about nor the all-clear. A threshold
+      breach is counted as a **Down**, deliberately — reading the mode names literally would hold
+      a filling disk for the whole window, and an operator who asked for "all Downs immediately"
+      would get a late digest about it. Between noisier than asked for and later than asked for,
+      an alarm system takes the noisy one.
+
+      **The digest reads in the operator's own words.** Their subject cannot be the digest's
+      subject — "%sensor on %device is %status" says nothing useful about twelve sensors — so the
+      digest's subject is generated and their subject becomes each *line* of the body, rendered
+      per notification. Throwing their wording away would have produced a digest that reads
+      nothing like the messages it replaced.
+
+      **`CAPABILITIES.MD`'s caps, both of them.** Twenty-five notifications and about a thousand
+      characters per message, splitting the overflow. Either cap alone lets through a digest a
+      mail client truncates, and what gets cut is the end — which in a cascade is the part that
+      explains it. A single line longer than the cap gets a message to itself rather than being
+      dropped: it is somebody's alarm, and the cap exists to keep messages readable, not to decide
+      which outages are worth reporting.
+
+      **Methods that are never summarised are forced, not ignored.** Slack, Teams, HTTP action and
+      execute program store `always-immediate` whatever was asked for, so a form cannot show a
+      mode the dispatcher will not honour. The dispatcher asks the *method* rather than the row as
+      well, so a row written past the service is still sent immediately.
+
+      **Two existing tests changed, and the change is the feature.** `email-delivery.test.ts` had
+      two tests queueing several notifications on one template and expecting several messages —
+      which under the new default is one message and a digest. They now ask for
+      `always-immediate`, because they are about the counters and the batching loop rather than
+      about summarisation.
+
+      **Verified live against the dev stack** with a 60-second window and a three-sensor storm:
+      one immediate Down, then a digest reading _"Dev installation: 2 notifications — 2 down"_
+      with both sensors in the operator's own wording; then the same again on recovery — one
+      immediate Up and a 2-up digest. Nothing left pending.
+
+      **Left for `N-15`.** The 200-sensor scenario test, which is what proves the alarm *volume*
+      rather than the mechanism.
 - [ ] **N-12 — Template activation schedules** · M · M-09, N-05 · With queue-or-discard for
       notifications generated while inactive.
 - [ ] **N-13 — Delivery retry and failure surfacing** · M · N-07 · Backoff retry; failures

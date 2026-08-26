@@ -12,6 +12,15 @@ import {
   unknownPlaceholdersIn,
   type MessageContext,
 } from './placeholders.js';
+import {
+  DEFAULT_SUMMARISATION,
+  isSummarisationMode,
+  SUMMARISATION_MODES,
+  type SummarisationMode,
+} from './summarisation.js';
+
+/** The migration's own default, repeated here so a create with no mode agrees with the column. */
+const DEFAULT_WINDOW_SECONDS = 900;
 
 /** Who a message goes to. Only `address` resolves until `A-01` and `A-02` exist. */
 export interface Recipient {
@@ -31,6 +40,10 @@ export interface StoredTemplate {
   readonly recipients: Recipient[];
   readonly priority: number;
   readonly enabled: boolean;
+  /** How eagerly this template sends during a storm (`N-11`). */
+  readonly summarisation: SummarisationMode;
+  /** How long a collection window stays open, in seconds. */
+  readonly summaryWindowSeconds: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -46,6 +59,8 @@ export interface TemplateInput {
   readonly recipients?: readonly Recipient[];
   readonly priority?: number;
   readonly enabled?: boolean;
+  readonly summarisation?: string;
+  readonly summaryWindowSeconds?: number;
 }
 
 /**
@@ -71,6 +86,13 @@ export interface TemplateView {
   readonly summary: string;
   /** Whether `N-11` may ever fold this method's messages into a digest. */
   readonly summarisable: boolean;
+  /**
+   * The mode as stored, which for a method that is never summarised is always
+   * `always-immediate` — it is forced on write rather than accepted and ignored, so what a form
+   * shows and what the dispatcher does cannot disagree.
+   */
+  readonly summarisation: SummarisationMode;
+  readonly summaryWindowSeconds: number;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -105,6 +127,8 @@ interface TemplateRow {
   recipients: Recipient[];
   priority: number;
   enabled: boolean;
+  summarisation: string;
+  summary_window_seconds: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -121,6 +145,10 @@ function toStored(row: TemplateRow): StoredTemplate {
     recipients: row.recipients,
     priority: row.priority,
     enabled: row.enabled,
+    summarisation: isSummarisationMode(row.summarisation)
+      ? row.summarisation
+      : DEFAULT_SUMMARISATION,
+    summaryWindowSeconds: row.summary_window_seconds,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -128,7 +156,8 @@ function toStored(row: TemplateRow): StoredTemplate {
 
 const COLUMNS = `
   t.id::text AS id, t.name, t.description, t.method, t.settings, t.subject, t.body,
-  t.recipients, t.priority, t.enabled, t.created_at, t.updated_at
+  t.recipients, t.priority, t.enabled, t.summarisation, t.summary_window_seconds,
+  t.created_at, t.updated_at
 `;
 
 /** Where templates live. */
@@ -155,8 +184,9 @@ export class TemplateRepository {
   ): Promise<number> {
     const rows = await q.query<{ id: string }>(
       `INSERT INTO notification_template
-         (name, description, method, settings, subject, body, recipients, priority, enabled)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9)
+         (name, description, method, settings, subject, body, recipients, priority, enabled,
+          summarisation, summary_window_seconds)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11)
        RETURNING id::text AS id`,
       [
         write.name,
@@ -168,6 +198,8 @@ export class TemplateRepository {
         JSON.stringify(write.recipients),
         write.priority,
         write.enabled,
+        write.summarisation,
+        write.summaryWindowSeconds,
       ],
     );
     return Number(rows[0]?.id ?? 0);
@@ -181,7 +213,8 @@ export class TemplateRepository {
     await q.query(
       `UPDATE notification_template
        SET name = $2, description = $3, method = $4, settings = $5::jsonb, subject = $6,
-           body = $7, recipients = $8::jsonb, priority = $9, enabled = $10
+           body = $7, recipients = $8::jsonb, priority = $9, enabled = $10,
+           summarisation = $11, summary_window_seconds = $12
        WHERE id = $1`,
       [
         id,
@@ -194,6 +227,8 @@ export class TemplateRepository {
         JSON.stringify(write.recipients),
         write.priority,
         write.enabled,
+        write.summarisation,
+        write.summaryWindowSeconds,
       ],
     );
   }
@@ -521,6 +556,18 @@ export class TemplateService {
       );
     }
 
+    const asked = input.summarisation ?? before?.summarisation ?? DEFAULT_SUMMARISATION;
+    if (!isSummarisationMode(asked)) {
+      throw new MethodError('this template cannot be saved', { method: method.id }, [
+        `"${asked}" is not a summarisation mode`,
+        `known modes: ${SUMMARISATION_MODES.join(', ')}`,
+      ]);
+    }
+    // `CAPABILITIES.MD §5.2`: Slack, Teams, HTTP action and execute program are never
+    // summarised. Forced rather than accepted-and-ignored, so a form cannot show a mode the
+    // dispatcher will not honour — the stored value always describes what actually happens.
+    const summarisation: SummarisationMode = method.summarisable ? asked : 'always-immediate';
+
     return {
       name: input.name,
       description: input.description ?? before?.description ?? '',
@@ -531,6 +578,9 @@ export class TemplateService {
       recipients,
       priority: input.priority ?? before?.priority ?? 3,
       enabled: input.enabled ?? before?.enabled ?? true,
+      summarisation,
+      summaryWindowSeconds:
+        input.summaryWindowSeconds ?? before?.summaryWindowSeconds ?? DEFAULT_WINDOW_SECONDS,
     };
   }
 
@@ -558,6 +608,8 @@ export class TemplateService {
       methodName: method.name,
       settings,
       redactedSettings: redacted,
+      summarisation: stored.summarisation,
+      summaryWindowSeconds: stored.summaryWindowSeconds,
       subject: stored.subject,
       body: stored.body,
       recipients: stored.recipients,

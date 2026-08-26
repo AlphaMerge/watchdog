@@ -4,6 +4,11 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Actor } from '../../objects/audit.js';
 import { notificationMethods } from '../../notifications/methods.js';
 import { describePlaceholders } from '../../notifications/placeholders.js';
+import {
+  DEFAULT_SUMMARISATION,
+  describeSummarisationModes,
+  SUMMARISATION_MODES,
+} from '../../notifications/summarisation.js';
 import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
 
 export interface TemplateRouteOptions {
@@ -51,6 +56,8 @@ const templateSchema = {
     'enabled',
     'summary',
     'summarisable',
+    'summarisation',
+    'summaryWindowSeconds',
     'createdAt',
     'updatedAt',
   ],
@@ -77,6 +84,9 @@ const templateSchema = {
     enabled: { type: 'boolean' },
     summary: { type: 'string' },
     summarisable: { type: 'boolean' },
+    /** Always `always-immediate` for a method that is never summarised — forced, not ignored. */
+    summarisation: { type: 'string', enum: [...SUMMARISATION_MODES] },
+    summaryWindowSeconds: { type: 'integer' },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
   },
@@ -113,6 +123,21 @@ const templateInputSchema = {
     recipients: { type: 'array', maxItems: 200, items: recipientSchema },
     priority: { type: 'integer', minimum: 1, maximum: 5 },
     enabled: { type: 'boolean' },
+    summarisation: { type: 'string', enum: [...SUMMARISATION_MODES] },
+    // The column's own bounds. A window under a minute is a digest of one, and one over a day is
+    // a notification nobody will connect to the outage that caused it.
+    summaryWindowSeconds: { type: 'integer', minimum: 60, maximum: 86_400 },
+  },
+} as const;
+
+const summarisationModeSchema = {
+  $id: 'ms:summarisationMode',
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'description'],
+  properties: {
+    id: { type: 'string' },
+    description: { type: 'string' },
   },
 } as const;
 
@@ -170,6 +195,7 @@ export const TEMPLATE_SCHEMAS = [
   templateSchema,
   methodSchema,
   templateInputSchema,
+  summarisationModeSchema,
   placeholderSchema,
   previewSchema,
   usedBySchema,
@@ -216,6 +242,34 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         summarisable: method.summarisable,
       })),
     }),
+  );
+
+  app.get(
+    '/summarisation-modes',
+    {
+      schema: {
+        tags: ['templates'],
+        summary: 'How eagerly a template may send during a storm',
+        description:
+          'The six modes of `CAPABILITIES.MD §5.2`. The distinction that matters is between ' +
+          'the *first* modes and the *all* modes: "first Down immediately" turns a forty-sensor ' +
+          'outage into one message and a digest, while "all Downs immediately" sends forty. ' +
+          'A method whose `summarisable` is false ignores all of this and is stored as ' +
+          '`always-immediate`.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items', 'default'],
+            properties: {
+              items: { type: 'array', items: { $ref: 'ms:summarisationMode' } },
+              default: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    () => ({ items: describeSummarisationModes(), default: DEFAULT_SUMMARISATION }),
   );
 
   app.get(
