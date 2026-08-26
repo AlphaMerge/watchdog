@@ -1260,8 +1260,60 @@ because each is a decision rather than a defect:
       `down_acknowledged`. Found while verifying live. It is a state-machine question, not a
       notifications one, and changing the layer order to suit this ticket would contradict
       `docs/state-machine.md §2` and `M-01`'s tables.
-- [ ] **N-03 — Threshold trigger** · M · N-01 · Channel, condition, value, latency, trigger and
+- [x] **N-03 — Threshold trigger** · M · N-01 · Channel, condition, value, latency, trigger and
       clear notifications.
+
+      **N-03 outcome.** `threshold.ts` holds the decisions; migration `017` widens `N-02`'s
+      tables to carry them. The whole trigger is one channel, one comparison and one latency, and
+      almost all of the work was in what "the channel's current value" means.
+
+      **One alarm table, not two.** A threshold alarm and a state alarm differ in what arms them
+      and in nothing else: both stand while their condition holds, both have a latency measured
+      from when it began, both are reconciled against the present rather than driven by events.
+      More to the point, `N-04` will sweep *one* due-time index — two tables would mean two
+      sweeps and two chances to send a notification twice. So `kind` discriminates, `state`
+      becomes nullable, and a shape constraint makes the variants exclusive at the database
+      rather than by convention.
+
+      **A threshold trigger is not a channel limit, and the test says so.** A limit (`M-04`)
+      decides the sensor's *state*; a threshold trigger decides who is *told*, without changing
+      what the sensor is. "Page me at 80% but do not call the disk Down until 95%" needs both. It
+      is asserted directly — the sensor reads Up and a notification goes out anyway — and
+      confirmed live: `state = up` beside a queued `threshold` request. That is also why the two
+      new reasons are `threshold` and `clear` rather than reused `initial` and `recovery`: a
+      breach is not an outage, and a digest that called them the same thing would be describing a
+      different system.
+
+      **The design flaw the tests found: a time window cannot tell stale from fresh.** The first
+      version read "the newest sample within a lookback" and called that the current value. A
+      sensor that failed its last check still has readings from thirty seconds ago sitting in the
+      hypertable — indistinguishable, by timestamp alone, from a sensor that just reported. So a
+      breach stayed standing across an outage and would have sent a *clear* notification when the
+      sensor came back under its threshold, describing a recovery that never happened.
+      `readingsAreCurrent` is the fix and the signal was already stored:
+      `consecutive_failures = 0` means the most recent result succeeded, so what is in the table
+      came from it. Paused and Unknown are excluded outright — nobody is scanning, so nothing is
+      current whatever its timestamp says. A Down sensor with no failures is *included*, because
+      Down-by-limit is a successful check with a bad number in it and its readings are as current
+      as any. The lookback stays as a second, cruder bound: it keeps the lateral inside the newest
+      chunk or two rather than walking back through a hypertable chunked by the day.
+
+      **No-data is not zero, stated twice.** A `below 10` trigger must not fire when a probe goes
+      away, and losing the reading is not clearing the breach — the alarm is stood down, because
+      we no longer know, but *silently*: "back under 80%" would be a false all-clear, and a false
+      all-clear is worse than silence because somebody stops looking. The same rule `N-02` applies
+      to a recovery, for the same reason.
+
+      **What it deliberately does not have.** No escalation and no repeat: `CAPABILITIES.MD §5.1`
+      gives a threshold trigger a trigger notification and a clear notification and nothing
+      between them, and a channel that has been over its threshold for an hour has said everything
+      it has to say the first time. No acknowledgement either — that belongs to the state chain,
+      and a sensor can be over its threshold while perfectly Up.
+
+      **`equal` compares exactly.** Right for the channels anybody sets it on — status codes,
+      counts, enumerated values — and treacherous for a computed float. That is the operator's
+      choice to make, and a system that quietly compared within an epsilon would fire on a value
+      the operator can see is different.
 - [ ] **N-04 — Latency timer engine** · L · N-02 · Timers cancel on recovery and on
       acknowledgement; survive a restart; no leaks across thousands of sensors.
 - [ ] **N-05 — Notification templates** · M · N-01 · Template objects with method, content,

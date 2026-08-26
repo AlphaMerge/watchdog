@@ -8,14 +8,33 @@ export interface SensorStanding {
   readonly state: SensorState;
   readonly since: Date;
   readonly message: string;
+  /**
+   * Failures in a row, which is also how the engine knows whether the *last* check produced any
+   * readings (`N-03`).
+   *
+   * Zero means the most recent result succeeded, so whatever the hypertable holds for this
+   * sensor came from it. Anything else means the last check failed and recorded no channel
+   * values at all — and the readings still sitting in the table belong to an earlier result,
+   * which is history rather than the channel's current value.
+   */
+  readonly consecutiveFailures: number;
 }
+
+/** What armed an alarm: a sensor state, or a channel over a threshold. */
+export type AlarmKind = 'state' | 'threshold';
 
 /** One standing alarm, with its row id so it can be advanced or removed. */
 export interface AlarmRow {
   readonly id: number;
   readonly sensorId: number;
   readonly triggerId: number;
-  readonly state: SensorState;
+  readonly kind: AlarmKind;
+  /** The state that armed it. Null on a threshold alarm — see migration `017`'s shape check. */
+  readonly state: SensorState | null;
+  /** The channel it watches. Null on a state alarm. */
+  readonly channelKey: string | null;
+  /** What that channel last read. Null on a state alarm, and on a channel with no reading. */
+  readonly observed: number | null;
   readonly since: Date;
   readonly phase: AlarmPhase;
   readonly nextDueAt: Date | null;
@@ -34,7 +53,10 @@ export interface DueAlarm extends AlarmRow {
 export interface AlarmInsert {
   readonly sensorId: number;
   readonly triggerId: number;
-  readonly state: SensorState;
+  readonly kind: AlarmKind;
+  readonly state: SensorState | null;
+  readonly channelKey: string | null;
+  readonly observed: number | null;
   readonly since: Date;
   readonly nextDueAt: Date | null;
 }
@@ -45,6 +67,14 @@ export interface AlarmAdvance {
   readonly nextDueAt: Date | null;
   readonly repeats: number;
   readonly suppressed: boolean;
+  /**
+   * The value the channel last read, on a threshold alarm.
+   *
+   * Carried on every advance rather than only when it changes: "what is this about to page
+   * somebody about" should be answerable from the row, and a stale number there is worse than
+   * none.
+   */
+  readonly observed?: number | null;
 }
 
 /** A notification the chain decided is owed. Nothing here delivers it — `N-07` onwards do. */
@@ -57,13 +87,19 @@ export interface RequestInsert {
   readonly reason: NotificationReason;
   readonly state: SensorState;
   readonly message: string;
+  /** Set on a threshold notification: which channel, and what it read (`N-06`'s %lastvalue). */
+  readonly channelKey?: string | null;
+  readonly observed?: number | null;
 }
 
 interface AlarmRowShape {
   id: string;
   sensor_id: string;
   trigger_id: string;
-  state: SensorState;
+  kind: AlarmKind;
+  state: SensorState | null;
+  channel_key: string | null;
+  observed: number | null;
   since: Date;
   phase: AlarmPhase;
   next_due_at: Date | null;
@@ -76,7 +112,10 @@ function toAlarm(row: AlarmRowShape): AlarmRow {
     id: Number(row.id),
     sensorId: Number(row.sensor_id),
     triggerId: Number(row.trigger_id),
+    kind: row.kind,
     state: row.state,
+    channelKey: row.channel_key,
+    observed: row.observed,
     since: row.since,
     phase: row.phase,
     nextDueAt: row.next_due_at,
@@ -87,7 +126,8 @@ function toAlarm(row: AlarmRowShape): AlarmRow {
 
 const ALARM_COLUMNS = `
   a.id::text AS id, a.sensor_id::text AS sensor_id, a.trigger_id::text AS trigger_id,
-  a.state, a.since, a.phase, a.next_due_at, a.repeats, a.suppressed
+  a.kind, a.state, a.channel_key, a.observed,
+  a.since, a.phase, a.next_due_at, a.repeats, a.suppressed
 `;
 
 /**
@@ -131,8 +171,9 @@ export class AlarmRepository {
       state: SensorState;
       since: Date;
       message: string;
+      consecutive_failures: number;
     }>(
-      `SELECT r.object_id::text AS object_id, r.state, r.since, r.message
+      `SELECT r.object_id::text AS object_id, r.state, r.since, r.message, r.consecutive_failures
        FROM sensor_runtime r
        WHERE r.object_id = ANY($1::bigint[])`,
       [sensorIds],
@@ -144,6 +185,7 @@ export class AlarmRepository {
         state: row.state,
         since: row.since,
         message: row.message,
+        consecutiveFailures: row.consecutive_failures,
       });
     }
     return out;
@@ -222,17 +264,21 @@ export class AlarmRepository {
   async arm(q: Queryable, inserts: readonly AlarmInsert[]): Promise<number> {
     if (inserts.length === 0) return 0;
     const rows = await q.query<{ id: string }>(
-      `INSERT INTO notification_alarm (sensor_id, trigger_id, state, since, phase, next_due_at)
+      `INSERT INTO notification_alarm
+         (sensor_id, trigger_id, kind, state, channel_key, observed, since, phase, next_due_at)
        SELECT * FROM unnest(
-         $1::bigint[], $2::bigint[], $3::sensor_state_kind[], $4::timestamptz[],
-         $5::text[], $6::timestamptz[]
+         $1::bigint[], $2::bigint[], $3::text[], $4::sensor_state_kind[], $5::text[],
+         $6::double precision[], $7::timestamptz[], $8::text[], $9::timestamptz[]
        )
        ON CONFLICT (sensor_id, trigger_id) DO NOTHING
        RETURNING id::text AS id`,
       [
         inserts.map((row) => row.sensorId),
         inserts.map((row) => row.triggerId),
+        inserts.map((row) => row.kind),
         inserts.map((row) => row.state),
+        inserts.map((row) => row.channelKey),
+        inserts.map((row) => row.observed),
         inserts.map((row) => row.since),
         inserts.map(() => 'pending'),
         inserts.map((row) => row.nextDueAt),
@@ -247,11 +293,15 @@ export class AlarmRepository {
     const rows = await q.query<{ id: string }>(
       `UPDATE notification_alarm a
        SET phase = w.phase, next_due_at = w.next_due_at, repeats = w.repeats,
-           suppressed = w.suppressed
+           suppressed = w.suppressed,
+           -- Only on a threshold alarm: the shape constraint forbids a value on a state one,
+           -- and COALESCE would be the wrong fix because NULL is a real reading (no reading).
+           observed = CASE WHEN a.kind = 'threshold' THEN w.observed ELSE a.observed END
        FROM (
          SELECT * FROM unnest(
-           $1::bigint[], $2::text[], $3::timestamptz[], $4::integer[], $5::boolean[]
-         ) AS t(id, phase, next_due_at, repeats, suppressed)
+           $1::bigint[], $2::text[], $3::timestamptz[], $4::integer[], $5::boolean[],
+           $6::double precision[]
+         ) AS t(id, phase, next_due_at, repeats, suppressed, observed)
        ) AS w
        WHERE a.id = w.id
        RETURNING a.id::text AS id`,
@@ -261,6 +311,7 @@ export class AlarmRepository {
         advances.map((row) => row.nextDueAt),
         advances.map((row) => row.repeats),
         advances.map((row) => row.suppressed),
+        advances.map((row) => row.observed ?? null),
       ],
     );
     return rows.length;
@@ -289,10 +340,11 @@ export class AlarmRepository {
     if (sendable.length === 0) return 0;
     const rows = await q.query<{ id: string }>(
       `INSERT INTO notification_request
-         (at, sensor_id, trigger_id, trigger_kind, template_id, reason, state, message)
+         (at, sensor_id, trigger_id, trigger_kind, template_id, reason, state, message,
+          channel_key, observed)
        SELECT * FROM unnest(
          $1::timestamptz[], $2::bigint[], $3::bigint[], $4::text[], $5::bigint[],
-         $6::text[], $7::sensor_state_kind[], $8::text[]
+         $6::text[], $7::sensor_state_kind[], $8::text[], $9::text[], $10::double precision[]
        )
        RETURNING id::text AS id`,
       [
@@ -304,9 +356,60 @@ export class AlarmRepository {
         sendable.map((row) => row.reason),
         sendable.map((row) => row.state),
         sendable.map((row) => row.message),
+        sendable.map((row) => row.channelKey ?? null),
+        sendable.map((row) => row.observed ?? null),
       ],
     );
     return rows.length;
+  }
+
+  /**
+   * What the named channels currently read, for the sensors that have a threshold trigger
+   * (`N-03`).
+   *
+   * **Read from storage, not threaded through from the batch.** Reconciliation answers "what is
+   * true now", and a design that only ever learned values from the ingestion path could not
+   * arm a trigger created during a breach, could not survive a restart without replay, and would
+   * need a second code path for every reaction that carries no readings.
+   *
+   * Bounded three ways so it stays a seek. Only the sensors asked about; only the channel keys
+   * some trigger actually names; and only the last `lookbackMs`, because a threshold is a claim
+   * about the *present* and a reading from yesterday is not one. The time bound also keeps the
+   * lateral inside the newest chunk or two of a hypertable chunked by the day, rather than
+   * walking back through every chunk to find a channel that stopped reporting.
+   */
+  async currentValues(
+    q: Queryable,
+    sensorIds: readonly number[],
+    channelKeys: readonly string[],
+    now: Date,
+    lookbackMs: number,
+  ): Promise<Map<number, Map<string, number>>> {
+    const out = new Map<number, Map<string, number>>();
+    if (sensorIds.length === 0 || channelKeys.length === 0) return out;
+
+    const rows = await q.query<{ sensor_id: string; key: string; value: number }>(
+      `
+      SELECT c.sensor_id::text AS sensor_id, c.key, s.value
+      FROM channel c
+      JOIN LATERAL (
+        SELECT value FROM sample
+        WHERE channel_id = c.id AND time > $3 AND time <= $4
+        ORDER BY time DESC
+        LIMIT 1
+      ) s ON true
+      WHERE c.sensor_id = ANY($1::bigint[]) AND c.key = ANY($2::text[])
+      `,
+      [sensorIds, channelKeys, new Date(now.getTime() - lookbackMs), now],
+    );
+
+    for (const row of rows) {
+      const sensorId = Number(row.sensor_id);
+      const channels = out.get(sensorId) ?? new Map<string, number>();
+      channels.set(row.key, row.value);
+      out.set(sensorId, channels);
+    }
+    return out;
   }
 
   /**

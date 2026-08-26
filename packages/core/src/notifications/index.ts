@@ -13,11 +13,23 @@ export {
   type Firing,
   type NotificationReason,
   type Reconciliation,
+  type StateReason,
   type StateTriggerSettings,
 } from './chain.js';
 export {
+  breaches,
+  fireThreshold,
+  reconcileThreshold,
+  thresholdDueAt,
+  type ChannelReading,
+  type ThresholdAlarm,
+  type ThresholdCondition,
+  type ThresholdTriggerSettings,
+} from './threshold.js';
+export {
   AlarmRepository,
   type AlarmAdvance,
+  type AlarmKind,
   type AlarmInsert,
   type AlarmRow,
   type DueAlarm,

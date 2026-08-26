@@ -1,6 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
-import { STATE_TRIGGER, triggerKinds } from '../triggers/definition.js';
+import { STATE_TRIGGER, THRESHOLD_TRIGGER, triggerKinds } from '../triggers/definition.js';
 import type { EffectiveTrigger } from '../triggers/repository.js';
 import { TriggerRepository } from '../triggers/repository.js';
 import { fire, reconcile, stillStanding, type Alarm, type StateTriggerSettings } from './chain.js';
@@ -12,6 +12,14 @@ import {
   type RequestInsert,
   type SensorStanding,
 } from './repository.js';
+import {
+  fireThreshold,
+  readingsAreCurrent,
+  reconcileThreshold,
+  type ChannelReading,
+  type ThresholdCondition,
+  type ThresholdTriggerSettings,
+} from './threshold.js';
 
 export interface AlarmEngineOptions {
   logger: Logger;
@@ -26,6 +34,16 @@ export interface AlarmEngineOptions {
   maxPerSweep?: number;
   /** How many sensors one trigger edit reconciles. Beyond this the sweep picks the rest up. */
   maxReconciled?: number;
+  /**
+   * How far back a channel reading may be and still count as the channel's current value
+   * (`N-03`).
+   *
+   * A threshold trigger is a claim about the present, so a reading from yesterday is not one —
+   * a sensor that stopped reporting has no current value, which is not the same as a value of
+   * zero. Six hours by default: generous enough for any sane scan interval, and short enough
+   * that the lookup stays inside the newest chunk or two of a hypertable chunked by the day.
+   */
+  valueLookbackMs?: number;
 }
 
 /** What a reaction did. Every field is a counter Core Health will want (`M-18`, `N-13`). */
@@ -41,6 +59,7 @@ const EMPTY: AlarmReaction = { armed: 0, cleared: 0, suppressed: 0, resumed: 0, 
 
 const DEFAULT_MAX_PER_SWEEP = 500;
 const DEFAULT_MAX_RECONCILED = 20_000;
+const DEFAULT_VALUE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 
 /**
  * The state trigger's engine (`N-02`).
@@ -67,6 +86,7 @@ export class AlarmEngine {
   readonly #logger: Logger;
   readonly #maxPerSweep: number;
   readonly #maxReconciled: number;
+  readonly #valueLookbackMs: number;
   #queued = 0;
   #fired = 0;
   /**
@@ -85,6 +105,7 @@ export class AlarmEngine {
     this.#logger = options.logger.child({ component: 'alarms' });
     this.#maxPerSweep = options.maxPerSweep ?? DEFAULT_MAX_PER_SWEEP;
     this.#maxReconciled = options.maxReconciled ?? DEFAULT_MAX_RECONCILED;
+    this.#valueLookbackMs = options.valueLookbackMs ?? DEFAULT_VALUE_LOOKBACK_MS;
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -109,6 +130,16 @@ export class AlarmEngine {
       this.#triggers.effectiveForMany(q, sensorIds),
     ]);
 
+    // Only the channels some threshold trigger in this batch actually names, and only when
+    // there is one. An installation with no threshold triggers never touches the hypertable.
+    const values = await this.#alarms.currentValues(
+      q,
+      sensorIds,
+      channelKeysIn(effective),
+      now,
+      this.#valueLookbackMs,
+    );
+
     const arm: AlarmInsert[] = [];
     const advance: AlarmAdvance[] = [];
     const clear: number[] = [];
@@ -121,23 +152,36 @@ export class AlarmEngine {
       // nothing to reconcile against, and any alarm for it went with the object's cascade.
       if (sensor === undefined) continue;
 
+      const readings = values.get(sensorId);
       const alarms = new Map(
         (existing.get(sensorId) ?? []).map((alarm) => [alarm.triggerId, alarm]),
       );
       for (const trigger of effective.get(sensorId) ?? []) {
-        if (trigger.kind !== STATE_TRIGGER.id || !trigger.enabled) continue;
-        const settings = readSettings(trigger, this.#logger);
-        if (settings === null) continue;
+        if (!trigger.enabled) continue;
+        const out = { arm, advance, clear, requests, result };
 
-        const alarm = alarms.get(trigger.id) ?? null;
-        alarms.delete(trigger.id);
-        this.#apply(sensor, trigger, alarm, settings, now, {
-          arm,
-          advance,
-          clear,
-          requests,
-          result,
-        });
+        if (trigger.kind === STATE_TRIGGER.id) {
+          const settings = readSettings(trigger, this.#logger);
+          if (settings === null) continue;
+          const alarm = alarms.get(trigger.id) ?? null;
+          alarms.delete(trigger.id);
+          this.#apply(sensor, trigger, alarm, settings, now, out);
+          continue;
+        }
+
+        if (trigger.kind === THRESHOLD_TRIGGER.id) {
+          const settings = readThreshold(trigger, this.#logger);
+          if (settings === null) continue;
+          const alarm = alarms.get(trigger.id) ?? null;
+          alarms.delete(trigger.id);
+          // `undefined` from the map is "no reading", which is not zero (`CLAUDE.md`). And a
+          // sensor whose last check failed, or that nobody is scanning, has no current value
+          // whatever the hypertable still holds for it — see `readingsAreCurrent`.
+          const reading: ChannelReading = readingsAreCurrent(sensor)
+            ? (readings?.get(settings.channelKey) ?? null)
+            : null;
+          this.#applyThreshold(sensor, trigger, alarm, settings, reading, now, out);
+        }
       }
 
       // Whatever is left applied to this sensor once and no longer does — a trigger deleted, or
@@ -172,6 +216,40 @@ export class AlarmEngine {
     const clear: number[] = [];
 
     for (const alarm of due) {
+      if (alarm.kind === 'threshold') {
+        // No staleness check to make. A threshold alarm's condition is a value, and the value it
+        // was armed with is on the row — re-reading the hypertable here would only let a channel
+        // that dipped for one sample suppress a notification the operator asked for after a
+        // latency they chose. `react` stands the alarm down the moment a reading clears it.
+        const config = readThreshold(
+          { id: alarm.triggerId, kind: THRESHOLD_TRIGGER.id, settings: alarm.triggerSettings },
+          this.#logger,
+        );
+        if (config === null) continue;
+        const firing = fireThreshold(config);
+        requests.push({
+          at: now,
+          sensorId: alarm.sensorId,
+          triggerId: alarm.triggerId,
+          triggerKind: THRESHOLD_TRIGGER.id,
+          templateId: firing.templateId,
+          reason: firing.reason,
+          state: alarm.currentState,
+          message: alarm.message,
+          channelKey: alarm.channelKey,
+          observed: alarm.observed,
+        });
+        advance.push({
+          id: alarm.id,
+          phase: firing.phase,
+          nextDueAt: firing.nextDueAt,
+          repeats: alarm.repeats,
+          suppressed: alarm.suppressed,
+          observed: alarm.observed,
+        });
+        continue;
+      }
+
       const settings = readSettings(
         { id: alarm.triggerId, kind: STATE_TRIGGER.id, settings: alarm.triggerSettings },
         this.#logger,
@@ -183,12 +261,13 @@ export class AlarmEngine {
       // the last thing between a stale row and a page at 3 a.m., so it checks rather than
       // assumes. Standing it down silently is right: nothing recovered that anybody was told
       // about, or `react` would have sent the recovery when it cleared it.
-      if (!stillStanding(alarm.state, alarm.currentState)) {
+      if (alarm.state === null || !stillStanding(alarm.state, alarm.currentState)) {
         clear.push(alarm.id);
         continue;
       }
+      const armedState = alarm.state;
 
-      const firing = fire(alarm, now, settings);
+      const firing = fire({ ...alarm, state: armedState }, now, settings);
       requests.push({
         at: now,
         sensorId: alarm.sensorId,
@@ -199,7 +278,7 @@ export class AlarmEngine {
         // The state that armed the alarm, not the one the sensor is in now. They differ when an
         // acknowledgement landed between the due time and the sweep, and the message is about
         // the outage, not about the acknowledgement.
-        state: alarm.state,
+        state: armedState,
         message: alarm.message,
       });
       advance.push({
@@ -268,7 +347,7 @@ export class AlarmEngine {
     },
   ): void {
     const view: Alarm | null =
-      alarm === null
+      alarm === null || alarm.state === null
         ? null
         : {
             state: alarm.state,
@@ -289,7 +368,10 @@ export class AlarmEngine {
         out.arm.push({
           sensorId: sensor.sensorId,
           triggerId: trigger.id,
+          kind: 'state',
           state: settings.state,
+          channelKey: null,
+          observed: null,
           since: sensor.since,
           nextDueAt: decision.nextDueAt,
         });
@@ -344,6 +426,107 @@ export class AlarmEngine {
         return;
     }
   }
+
+  /**
+   * One (sensor, threshold trigger) pair.
+   *
+   * The decision is `reconcileThreshold`, which knows nothing about databases. This turns its
+   * answer into rows — and the only place the two kinds diverge is what a `recover` means: a
+   * state alarm's is a recovery notification, a threshold alarm's is a clear.
+   */
+  #applyThreshold(
+    sensor: SensorStanding,
+    trigger: { id: number },
+    alarm: AlarmRow | null,
+    settings: ThresholdTriggerSettings,
+    reading: ChannelReading,
+    now: Date,
+    out: {
+      arm: AlarmInsert[];
+      advance: AlarmAdvance[];
+      clear: number[];
+      requests: RequestInsert[];
+      result: AlarmReaction;
+    },
+  ): void {
+    const decision = reconcileThreshold(
+      alarm === null
+        ? null
+        : {
+            channelKey: alarm.channelKey ?? '',
+            since: alarm.since,
+            phase: alarm.phase,
+            observed: alarm.observed,
+          },
+      reading,
+      settings,
+      now,
+    );
+
+    switch (decision.kind) {
+      case 'idle':
+        return;
+
+      case 'hold':
+        // Not a no-op, unlike a state alarm's: the channel is still over its threshold and the
+        // value has probably moved, and the row is where "what is this about to page somebody
+        // about" is answered.
+        if (alarm === null || alarm.observed === reading) return;
+        out.advance.push({
+          id: alarm.id,
+          phase: alarm.phase,
+          nextDueAt: alarm.nextDueAt,
+          repeats: alarm.repeats,
+          suppressed: alarm.suppressed,
+          observed: reading,
+        });
+        return;
+
+      case 'arm':
+        out.arm.push({
+          sensorId: sensor.sensorId,
+          triggerId: trigger.id,
+          kind: 'threshold',
+          state: null,
+          channelKey: settings.channelKey,
+          observed: reading,
+          since: now,
+          nextDueAt: decision.nextDueAt,
+        });
+        out.result.armed += 1;
+        return;
+
+      case 'recover':
+        if (alarm === null) return;
+        out.requests.push({
+          at: now,
+          sensorId: sensor.sensorId,
+          triggerId: trigger.id,
+          triggerKind: THRESHOLD_TRIGGER.id,
+          templateId: settings.clearTemplateId,
+          reason: 'clear',
+          state: sensor.state,
+          message: sensor.message,
+          channelKey: settings.channelKey,
+          observed: reading,
+        });
+        out.clear.push(alarm.id);
+        out.result.cleared += 1;
+        return;
+
+      case 'cancel':
+        if (alarm === null) return;
+        out.clear.push(alarm.id);
+        out.result.cleared += 1;
+        return;
+
+      // A threshold trigger has no acknowledgement semantics: it is about a value, and a sensor
+      // can be over its threshold while perfectly Up. `reconcileThreshold` never returns these.
+      case 'suppress':
+      case 'resume':
+        return;
+    }
+  }
 }
 
 /**
@@ -376,6 +559,54 @@ function readSettings(
     );
     return null;
   }
+}
+
+/**
+ * A stored threshold trigger's settings, re-validated on the way out for the same reason.
+ *
+ * `fire` on a state alarm reads five fields and this reads four; they are separate functions
+ * rather than one generic reader because a `Record<string, unknown>` narrowed by a `kind` string
+ * is a discriminated union in name only, and the field names are the whole content.
+ */
+function readThreshold(
+  trigger: Pick<EffectiveTrigger, 'id' | 'kind' | 'settings'>,
+  logger: Logger,
+): ThresholdTriggerSettings | null {
+  try {
+    const settings = triggerKinds.validate(trigger.kind, trigger.settings);
+    return {
+      channelKey: typeof settings['channelKey'] === 'string' ? settings['channelKey'] : '',
+      condition: settings['condition'] as ThresholdCondition,
+      value: Number(settings['value'] ?? 0),
+      latencySeconds: Number(settings['latencySeconds'] ?? 0),
+      triggerTemplateId: idOrNull(settings['triggerTemplateId']),
+      clearTemplateId: idOrNull(settings['clearTemplateId']),
+    };
+  } catch {
+    logger.warn(
+      { triggerId: trigger.id, kind: trigger.kind },
+      'stored trigger settings are not readable by this build; skipping it',
+    );
+    return null;
+  }
+}
+
+/**
+ * Every channel a threshold trigger in this batch names, deduplicated.
+ *
+ * What bounds the value lookup to a seek. An installation with no threshold triggers produces an
+ * empty list, and `currentValues` then never touches the hypertable at all.
+ */
+function channelKeysIn(effective: ReadonlyMap<number, readonly EffectiveTrigger[]>): string[] {
+  const keys = new Set<string>();
+  for (const triggers of effective.values()) {
+    for (const trigger of triggers) {
+      if (trigger.kind !== THRESHOLD_TRIGGER.id || !trigger.enabled) continue;
+      const key = trigger.settings['channelKey'];
+      if (typeof key === 'string' && key !== '') keys.add(key);
+    }
+  }
+  return [...keys];
 }
 
 function idOrNull(value: unknown): number | null {

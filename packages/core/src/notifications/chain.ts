@@ -18,8 +18,18 @@ import type { SensorState } from '../state/tables.js';
 /** How far along the chain an alarm is. */
 export type AlarmPhase = 'pending' | 'notified' | 'escalated';
 
-/** Why a notification is owed. */
-export type NotificationReason = 'initial' | 'escalation' | 'repeat' | 'recovery';
+/**
+ * Why a notification is owed.
+ *
+ * The first four are the state trigger's chain; `threshold` and `clear` are `N-03`'s pair. Two
+ * more names rather than reusing `initial` and `recovery`, because a threshold breach is not an
+ * outage and a clear is not a recovery — the sensor may have been Up throughout, which is the
+ * whole distinction between a threshold trigger and a channel limit (`M-04`).
+ */
+export type NotificationReason = StateReason | 'threshold' | 'clear';
+
+/** The four steps of a state trigger's chain. */
+export type StateReason = 'initial' | 'escalation' | 'repeat' | 'recovery';
 
 /** A state trigger's settings, after `triggerKinds.validate` has filled the defaults in. */
 export interface StateTriggerSettings {
@@ -62,7 +72,7 @@ export type Reconciliation =
 
 /** What falling due decided: the message owed, and where the chain goes next. */
 export interface Firing {
-  readonly reason: NotificationReason;
+  readonly reason: StateReason;
   /** Null when the trigger names no template for this step — see `notificationOwed`. */
   readonly templateId: number | null;
   readonly phase: AlarmPhase;
@@ -171,7 +181,7 @@ export function nextDueAfter(
  * silently sending nothing would be the wrong reading of it.
  */
 export function templateFor(
-  reason: NotificationReason,
+  reason: StateReason,
   phase: AlarmPhase,
   settings: StateTriggerSettings,
 ): number | null {
