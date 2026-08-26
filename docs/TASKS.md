@@ -412,6 +412,11 @@ because each is a decision rather than a defect:
       fired, wakes, idle wakes and when it intends to look again. `AlarmEngine.stats` adds queued
       requests and the steps that fired with no template configured, which is what an operator
       wondering why a trigger is silent needs to see.
+      **Added by U-02:** `StateBroadcaster.stats` is the live-stream half — subscribers
+      attached, events published and delivered, subscribers cut off for falling behind, and the
+      state changes published while nobody was watching. The one that matters is the cut-off
+      count: it is a browser being handed a tree it cannot keep up with, and it is invisible from
+      anywhere else.
       **Added by N-13:** `DeliveryHealthReader` is the notification half, and is already served
       at `GET /notification-health` so an operator has an answer before this ticket lands. The
       channels it should become: pending notifications, of those how many are being retried, the
@@ -2131,8 +2136,66 @@ because each is a decision rather than a defect:
       type (P-05's conservative fallback), and the first version of the detail page labelled them
       "write-only" — telling an operator their timeout was a credential. The page now checks the
       catalogue and distinguishes "set, write-only" from "withheld, type not registered".
-- [ ] **U-02 — WebSocket state stream** · L · P-12 · Subscribe to state changes by subtree;
+- [x] **U-02 — WebSocket state stream** · L · P-12 · Subscribe to state changes by subtree;
       reconnect and resync; no full-page polling.
+
+      **U-02 outcome.** `GET /api/v1/stream`, a `StateBroadcaster` in the core and a
+      framework-free `StateStream` in the web app, with the tree wired to it.
+
+      **The stated dependency is backwards, and nothing blocked.** `P-12` is the Core Health
+      *sensor*; a state stream needs none of it. The real relationship runs the other way —
+      `CLAUDE.md` says a new subsystem with a queue or a connection adds a metric to Core Health
+      — so `StateBroadcaster.stats` is what `P-12` should read, and the note there says so.
+
+      **The hard part was where a committed state change comes from.** Every reaction in this
+      system deliberately runs *inside* the transaction — a dependency pause and an alarm chain
+      must commit with the state that caused them (`M-11`, `N-02`). Publishing is the opposite: a
+      frame announcing a state change, sent from inside the transaction that decided it, is an
+      outage on an operator's screen that may never have happened. So `Queryable` gained
+      `afterCommit`, and the publish hangs off **`writeStateHistory`** — the one function every
+      state change in the system goes through, from ingestion, a pause, an acknowledgement, a
+      simulated error, a dependency cascade and a schedule window alike. One seam, and a new path
+      cannot forget. It announces only the rows that actually landed, because
+      `ON CONFLICT DO NOTHING` drops a repeat and announcing the drop would describe a history
+      the table does not have.
+
+      **Subscribe, then snapshot, then stream — and the order is the whole design.** The
+      subscriber is attached *before* its snapshot is read, so a change landing in between is
+      queued and delivered afterwards rather than falling into the gap. Applying it a second time
+      sets the state it already has, which is why this ordering is safe and the intuitive one
+      silently loses changes.
+
+      **Resync is "subscribe again".** No cursor, no replay log: a client that reconnects, or
+      that is told it overflowed, resubscribes and is handed a fresh snapshot. A cursor would
+      mean the server keeping a buffer whose length is a guess about how long a laptop stays
+      shut, and getting that guess wrong shows somebody a stale tree with no way to tell.
+
+      **A subscriber that cannot keep up is cut off and counted, never quietly trimmed.** A
+      client missing a change from the middle of the stream shows a state the system has moved on
+      from and has no way to know. And an installation with nobody watching pays *one comparison*
+      — the ancestry read that scopes an event to a subtree only happens when there is a
+      subscriber, the same guard `M-09` and `N-02` put in front of their sweeps.
+
+      **Events carry the absolute path**, root first. Not overhead: it is how a subtree
+      subscription is matched without a query per event, and it is what a tree rolls a colour up.
+      The snapshot walks *up* from the subtree root before walking down, so its paths are the
+      same absolute paths the events carry — a client matching one against the other would
+      otherwise find the tree it drew and the tree it updates rooted differently.
+
+      **Offline keeps the last states on screen and says so.** Blanking the tree is the
+      honest-looking mistake: it says "nothing is wrong" about a subtree nobody is hearing from.
+
+      **Two things found on the way.** `@ms/web` had no `pretest`, so its typecheck ran in no
+      loop anybody used — and had been failing: `LimitBand` was passed a `decimals` prop it did
+      not declare. It now formats limits at the channel's precision, because a limit shown as
+      "500" on a channel reading "499.98" reads like a threshold nobody crossed. And
+      `@fastify/swagger` does not describe routes that upgrade, so `/stream` is absent from the
+      OpenAPI document; rather than pretend otherwise, the document's own description says where
+      the stream is and how to talk to it.
+
+      Verified live against the dev stack: a socket subscribed to a device's subtree received the
+      snapshot of its three sensors and then `state` frames, numbered in sequence, as a simulated
+      error went on and came off.
 - [ ] **U-03 — Device tree** · L · U-02 · Virtualised tree with rollup status colouring, live
       updates, search and tag filtering. Responsive at 5,000 sensors.
       **Added by S-14:** the tree already comes back in the operator's arrangement, and

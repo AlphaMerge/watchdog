@@ -1,6 +1,7 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifySwagger from '@fastify/swagger';
 import fastifyStatic from '@fastify/static';
+import fastifyWebsocket from '@fastify/websocket';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { describeError, newCorrelationId, withCorrelation, type Logger } from '@ms/shared';
@@ -24,6 +25,8 @@ import type { DeliveryHealthReader } from '../notifications/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
+import { streamRoutes } from './routes/stream.js';
+import type { StateBroadcaster } from '../state/stream.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
@@ -85,6 +88,13 @@ export interface ApiServerOptions {
   deliveryHealth?: DeliveryHealthReader;
   /** What "send test notification" actually sends through (`N-14`). */
   tester?: NotificationTester;
+  /**
+   * Live state changes (`U-02`).
+   *
+   * Optional like the rest: absent, `/stream` is not registered and a client falls back to
+   * reading — which is slower and correct, rather than a socket that connects and says nothing.
+   */
+  stream?: StateBroadcaster;
 }
 
 /**
@@ -111,6 +121,7 @@ export class ApiServer {
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
   readonly #tester: NotificationTester | undefined;
+  readonly #stream: StateBroadcaster | undefined;
   readonly #undeclared: string[] = [];
   /**
    * Routes exempted from the response-schema guard because they serve files, not JSON.
@@ -138,6 +149,7 @@ export class ApiServer {
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
     this.#tester = options.tester;
+    this.#stream = options.stream;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -195,6 +207,11 @@ export class ApiServer {
     ])
       this.#app.addSchema(schema);
 
+    // Before the routes, because a route declared `websocket: true` needs the plugin in place.
+    // Registered only when there is something to stream: the plugin hooks the upgrade path, and
+    // a build with no state service has nothing to say over it.
+    if (this.#stream !== undefined) await this.#app.register(fastifyWebsocket);
+
     await this.#app.register(fastifySwagger, {
       openapi: {
         openapi: '3.1.0',
@@ -203,7 +220,12 @@ export class ApiServer {
           version,
           description:
             'Object tree, settings and credentials. Monitored-device credentials are ' +
-            'write-only: no route returns a secret, to anyone.',
+            'write-only: no route returns a secret, to anyone.\n\n' +
+            'Live state changes are pushed over a WebSocket at `GET /api/v1/stream`, which is ' +
+            'not listed below: `@fastify/swagger` does not describe routes that upgrade. Send ' +
+            '`{"subscribe":{"objectId":42}}` to scope it to a subtree, or `{"subscribe":{}}` ' +
+            'for everything; the server answers with a `snapshot` frame and then one `state` ' +
+            'frame per change. Subscribing again is how a client resyncs.',
         },
       },
     });
@@ -280,6 +302,9 @@ export class ApiServer {
             templates: this.#templates,
             ...(this.#tester === undefined ? {} : { tester: this.#tester }),
           });
+        }
+        if (this.#stream !== undefined) {
+          await scope.register(streamRoutes, { db: this.#db, stream: this.#stream });
         }
         if (this.#deliveryHealth !== undefined) {
           await scope.register(notificationRoutes, {

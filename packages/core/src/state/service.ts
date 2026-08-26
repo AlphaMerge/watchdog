@@ -40,6 +40,7 @@ import {
   type StateRewrite,
   type StateTransition,
 } from './runtime.js';
+import type { CommittedStates } from './runtime.js';
 
 /** One result, as much of it as the state machine reads. */
 export interface SensorResult {
@@ -105,6 +106,8 @@ export interface SensorStateServiceOptions {
    * armed for a sensor the same transaction is about to pause.
    */
   alarms?: AlarmReactor;
+  /** Told which state changes committed, so `U-02` can push them. */
+  onStatesCommitted?: CommittedStates;
 }
 
 export interface StateStats {
@@ -135,6 +138,7 @@ export class SensorStateService {
   readonly #fallback: FailurePolicy;
   readonly #maxCached: number;
   readonly #alarms: AlarmReactor | undefined;
+  readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -161,6 +165,7 @@ export class SensorStateService {
     this.#fallback = options.policy ?? DEFAULT_FAILURE_POLICY;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
     this.#alarms = options.alarms;
+    this.#onStatesCommitted = options.onStatesCommitted;
   }
 
   stats(): StateStats {
@@ -422,7 +427,7 @@ export class SensorStateService {
       for (const sensorId of recovered) this.#cache.delete(sensorId);
     }
 
-    await writeStateHistory(q, transitions);
+    await writeStateHistory(q, transitions, this.#onStatesCommitted);
     await writeStateChanges(q, rewrites);
     // Last, and in the same transaction: a chain armed against a state that rolled back would
     // page somebody about a sensor that is fine. Every sensor asked about, not only the ones

@@ -450,7 +450,8 @@ causally one outage, summarisation collapses what is merely simultaneous.
 | Task | State | Notes |
 | --- | --- | --- |
 | U-01 frontend scaffold | done | React 19 + Vite 8 + Tailwind 4 + React Router 7; CSS-custom-property tokens shared with the canvas charts to come; light and dark themes; served by the core from `api.webRoot` |
-| U-02…U-11 | not started | |
+| U-02 WebSocket state stream | done | `GET /api/v1/stream`, subscribe by subtree, snapshot then changes; published from `writeStateHistory` through a new `Queryable.afterCommit`, so nothing provisional reaches a screen. Resync is "subscribe again"; a subscriber that falls behind is cut off and counted rather than quietly trimmed. The tree is live and polls nothing |
+| U-03…U-11 | not started | |
 
 Pulled forward out of order, on request, and it reads honestly: with no state machine and no
 sensor types, every sensor shows Unknown and each empty panel names the task that fills it. The

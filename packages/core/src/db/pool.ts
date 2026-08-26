@@ -45,6 +45,20 @@ function postgresFields(cause: unknown): PostgresErrorFields {
  */
 export interface Queryable {
   query<T extends QueryResultRow>(text: string, values?: readonly unknown[]): Promise<T[]>;
+  /**
+   * Runs `fn` once this work has committed, and not at all if it rolls back (`U-02`).
+   *
+   * **For telling the outside world.** Everything inside a transaction is provisional: a
+   * WebSocket frame announcing a state change, sent from inside the transaction that decided it,
+   * is an outage on an operator's screen that may never have happened. Reacting *inside* the
+   * transaction is still the rule for anything that writes — a dependency pause and an alarm
+   * chain must commit with the state that caused them (`M-11`, `N-02`) — and this is the
+   * complement for the things that only publish.
+   *
+   * Absent on a plain pool query, where there is no transaction to wait for: the caller runs its
+   * own callback, because the statement has already committed by the time it returns.
+   */
+  afterCommit?(fn: () => void): void;
 }
 
 export class DatabaseError extends AppError {
@@ -190,7 +204,22 @@ export class Database implements Queryable {
    * they are inside a transaction.
    */
   async tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
-    return this.transaction(async (client) => fn(new ClientQueryable(client, this.#describe)));
+    const committed: (() => void)[] = [];
+    const result = await this.transaction(async (client) => {
+      const q = new ClientQueryable(client, this.#describe, (hook) => committed.push(hook));
+      return fn(q);
+    });
+    // After the COMMIT returned, so nothing here can be undone by a rollback. Each hook is
+    // isolated: one that throws must not stop the next, and must not turn a committed
+    // transaction into a failed call — the work is already durable.
+    for (const hook of committed) {
+      try {
+        hook();
+      } catch (error: unknown) {
+        this.#logger.error({ err: describeError(error) }, 'an after-commit hook threw');
+      }
+    }
+    return result;
   }
 
   /**
@@ -225,10 +254,22 @@ export class Database implements Queryable {
 export class ClientQueryable implements Queryable {
   readonly #client: PoolClient;
   readonly #description: string;
+  readonly #onCommit: ((fn: () => void) => void) | undefined;
 
-  constructor(client: PoolClient, description: string) {
+  constructor(
+    client: PoolClient,
+    description: string,
+    onCommit?: (fn: () => void) => void,
+  ) {
     this.#client = client;
     this.#description = description;
+    this.#onCommit = onCommit;
+  }
+
+  afterCommit(fn: () => void): void {
+    // Absent when this executor was built around a raw client rather than by `tx`, which is the
+    // honest answer: without a transaction to wait for there is nothing to defer to.
+    this.#onCommit?.(fn);
   }
 
   async query<T extends QueryResultRow>(text: string, values?: readonly unknown[]): Promise<T[]> {

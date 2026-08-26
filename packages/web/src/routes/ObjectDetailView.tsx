@@ -339,12 +339,19 @@ function SensorState({ view }: { view: SensorStateView }): React.JSX.Element {
 function LimitBand({
   limits,
   unit,
+  decimals,
 }: {
   limits: ChannelLimits;
   unit: string;
+  /** The channel's own display precision, or null when it has none. */
+  decimals: number | null;
 }): React.JSX.Element | null {
-  const show = (value: number): string =>
-    unit === '' ? String(value) : `${String(value)} ${unit}`;
+  // At the channel's precision, because a limit shown as "500" on a channel that reads "499.98"
+  // reads like a threshold nobody crossed.
+  const show = (value: number): string => {
+    const shown = decimals === null ? String(value) : value.toFixed(decimals);
+    return unit === '' ? shown : `${shown} ${unit}`;
+  };
   const parts: string[] = [];
   if (limits.lowerError !== null) parts.push(`error < ${show(limits.lowerError)}`);
   if (limits.lowerWarning !== null) parts.push(`warn < ${show(limits.lowerWarning)}`);

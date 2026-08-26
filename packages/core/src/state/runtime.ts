@@ -168,19 +168,30 @@ export async function loadRuntimes(
   return new Map(rows.map((row) => [Number(row.object_id), toRuntime(row)]));
 }
 
+/** Told what actually landed, after the transaction that wrote it commits (`U-02`). */
+export type CommittedStates = (committed: readonly StateTransition[]) => void | Promise<void>;
+
 /**
  * Appends the transitions to the history hypertable.
  *
  * `ON CONFLICT DO NOTHING` against the unique index on `(sensor_id, time)`, so a probe that
  * resends after a lost acknowledgement replays into the same rows rather than duplicating the
  * timeline — the same idempotence the readings have, and for the same reason.
+ *
+ * **This is where every state change in the system is written**, from ingestion, a pause, an
+ * acknowledgement, a simulated error, a dependency cascade and a schedule window alike — which
+ * is why `U-02`'s live stream is published from here rather than from each of those paths. It is
+ * published `afterCommit`, and only for the rows that actually landed: announcing a change that
+ * the conflict guard dropped, or one a rollback undid, would put an outage on an operator's
+ * screen that never happened.
  */
 export async function writeStateHistory(
   q: Queryable,
   changes: readonly StateTransition[],
+  onCommitted?: CommittedStates,
 ): Promise<number> {
   if (changes.length === 0) return 0;
-  const rows = await q.query<{ sensor_id: string }>(
+  const rows = await q.query<{ sensor_id: string; time: Date }>(
     `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
      SELECT * FROM unnest(
        $1::timestamptz[], $2::bigint[], $3::sensor_state_kind[],
@@ -192,7 +203,7 @@ export async function writeStateHistory(
      -- their timestamps apart (see reactionTime in dependencies/pauses.ts); this stays as a
      -- backstop, and the row count comes back so a drop cannot pass unnoticed.
      ON CONFLICT (sensor_id, time) DO NOTHING
-     RETURNING sensor_id::text AS sensor_id`,
+     RETURNING sensor_id::text AS sensor_id, time`,
     [
       changes.map((write) => write.at),
       changes.map((write) => write.sensorId),
@@ -202,6 +213,22 @@ export async function writeStateHistory(
       changes.map((write) => write.message),
     ],
   );
+
+  if (onCommitted !== undefined && rows.length > 0) {
+    // Matched on the pair, not on the sensor: a batch can carry two transitions for one sensor
+    // and have only one of them land, and announcing the dropped one would describe a history
+    // the table does not have.
+    const landed = new Set(rows.map((row) => `${row.sensor_id}@${row.time.toISOString()}`));
+    const committed = changes.filter((change) =>
+      landed.has(`${String(change.sensorId)}@${change.at.toISOString()}`),
+    );
+    const publish = (): void => {
+      void onCommitted(committed);
+    };
+    // No transaction to wait for means it has already committed, so the hook runs now.
+    if (q.afterCommit === undefined) publish();
+    else q.afterCommit(publish);
+  }
   return rows.length;
 }
 

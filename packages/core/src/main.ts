@@ -33,6 +33,8 @@ import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
 import { NotificationTester } from './notifications/test-send.js';
+import { StateBroadcaster } from './state/stream.js';
+import type { CommittedStates } from './state/runtime.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { ProgramTransport } from './notifications/delivery/program.js';
@@ -215,7 +217,21 @@ async function serve(): Promise<void> {
       wakeDelivery.poke();
     },
   });
-  const states = new SensorStateService({ db, logger, settings: resolver, alarms });
+  // Live state changes for the UI (U-02). Published after the commit, from `writeStateHistory`
+  // — the one function every state change in the system goes through — so ingestion, a pause,
+  // an acknowledgement, a simulated error and a dependency cascade all reach it without each
+  // path having to remember.
+  const stream = new StateBroadcaster({ logger });
+  const publishStates: CommittedStates = (committed) => {
+    void stream.publish(db, committed);
+  };
+  const states = new SensorStateService({
+    db,
+    logger,
+    settings: resolver,
+    alarms,
+    onStatesCommitted: publishStates,
+  });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.
   const triggerSync = new TriggerSync({ engine: alarms, logger });
@@ -460,6 +476,7 @@ async function serve(): Promise<void> {
     templates,
     deliveryHealth,
     tester,
+    stream,
   });
   await api.build(VERSION, service);
   await api.start();
@@ -495,6 +512,7 @@ async function serve(): Promise<void> {
     // After the dependency reaction, in the same transaction: an alarm armed before the
     // dependencies settled is the alarm the dependency exists to suppress (M-17, N-02).
     alarms,
+    onStatesCommitted: publishStates,
     // And afterwards, the probes: a check result is not a configuration change, so this is the
     // one write path the audit sink does not cover.
     onDependencyChange: () => {

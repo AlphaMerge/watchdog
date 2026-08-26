@@ -1,7 +1,12 @@
 import { describeError, type IngestionConfig, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { writeRuntimes, writeStateHistory } from '../state/runtime.js';
-import type { RuntimeWrite, StateDecisions, StateTransition } from '../state/runtime.js';
+import type {
+  CommittedStates,
+  RuntimeWrite,
+  StateDecisions,
+  StateTransition,
+} from '../state/runtime.js';
 
 /** One channel reading, resolved to a channel id and ready to write. */
 export interface SampleRow {
@@ -106,6 +111,11 @@ export interface IngestorOptions {
    */
   alarms?: AlarmReactor;
   /**
+   * Told which state changes committed, so `U-02` can push them (after the commit, never
+   * inside it — a frame about a transaction that rolled back is an outage that never happened).
+   */
+  onStatesCommitted?: CommittedStates;
+  /**
    * Poked after a write whose state changes moved a dependency (`M-11`).
    *
    * The ingestion path is the one write path that does **not** go through the audit sink — a
@@ -188,6 +198,7 @@ export class Ingestor {
   readonly #lateData: LateDataSink | undefined;
   readonly #dependencies: DependencyReactor | undefined;
   readonly #alarms: AlarmReactor | undefined;
+  readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #onDependencyChange: (() => void) | undefined;
   #dependencyPauses = 0;
 
@@ -220,6 +231,7 @@ export class Ingestor {
     this.#lateData = options.lateData;
     this.#dependencies = options.dependencies;
     this.#alarms = options.alarms;
+    this.#onStatesCommitted = options.onStatesCommitted;
     this.#onDependencyChange = options.onDependencyChange;
   }
 
@@ -441,7 +453,7 @@ export class Ingestor {
             : await this.#lateData.noteWrittenRange(q, new Date(oldest), new Date(newest));
         // Same transaction, same reason: the readings and the state they decided commit
         // together or not at all (M-02).
-        const appended = await writeStateHistory(q, transitions);
+        const appended = await writeStateHistory(q, transitions, this.#onStatesCommitted);
         const advanced = await writeRuntimes(q, [...runtimes.values()]);
         // Last, and in the same transaction: a master's dependents must be paused by the time
         // the master's own Down is visible. Reacting after the commit would leave a window in
