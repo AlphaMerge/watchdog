@@ -1131,8 +1131,68 @@ because each is a decision rather than a defect:
 
 ## Phase 4 — Notifications
 
-- [ ] **N-01 — Trigger storage and inheritance** · L · S-04 · Triggers on any object, inherited
+- [x] **N-01 — Trigger storage and inheritance** · L · S-04 · Triggers on any object, inherited
       downward; effective trigger set names the source object for each.
+
+      **N-01 outcome.** `notification_trigger` (migration `015`) hangs off any object, with the
+      kind's settings in `jsonb` behind a JSON Schema — the same arrangement as
+      `sensor_config.params`, and for the same reason: the two v1 kinds share almost no fields,
+      `[V2]` adds three more, and the schema generates the form, validates the API and documents
+      the field in one declaration rather than a column set per kind and a migration every time
+      one arrives. `TriggerRepository` owns the inheritance, `TriggerService` the validation and
+      the audit, and four routes serve them. Nothing here fires anything: `N-02`–`N-05` are the
+      engine, and this is the storage every one of them depends on.
+
+      **Triggers inherit by accumulation, not by nearest-ancestor — the central decision.**
+      Every other inheritable thing resolves to one value from the closest ancestor that defines
+      it, which is why `InheritanceResolver` exists and why `CLAUDE.md` insists everything goes
+      through it. A trigger is not a setting with a value. `CAPABILITIES.MD §5.1` says a child's
+      trigger tab shows "both its own and every inherited trigger", so the effective set is the
+      **union** along the chain: a state trigger on the root and a threshold trigger on one
+      device both apply to that device's sensors, and neither displaces the other. That is a
+      different rule, so it is a different table and a different query — not a quiet
+      reinterpretation of the resolver's. The rule in `CLAUDE.md` is about inheritable
+      *settings*; a trigger is a row, not a value.
+
+      **Two directions, one answer.** The tab walks *up* from one object, nearest first, and each
+      entry names the object it is defined on — the only place it can be edited or removed, and a
+      trigger an operator cannot find is one they cannot turn off. The engine (`N-02`) asks about
+      thousands of sensors at once, so `effectiveForSensors` walks *down* from each trigger to
+      the objects beneath it, the cheap direction `M-09` and `M-11` also take. A test asserts the
+      two agree on the same **order**, not just the same set: the engine sees the most specific
+      rule first, and a tab that ranked them differently would be describing a different system.
+      They differ in exactly one respect, deliberately — the tab shows disabled triggers, because
+      one an operator cannot see is one they cannot re-enable; the engine does not, because a
+      disabled trigger fires nothing. `anyDefined` is the `LIMIT 1` guard in front of all of it,
+      the same shape `M-09` and `M-11` use.
+
+      **A threshold trigger is not a channel limit (`M-04`).** A limit decides the sensor's
+      *state* — it is what makes a sensor Down, and everyone who looks at the sensor sees it. A
+      threshold trigger decides who gets *told*, without changing what the sensor is. "Page me at
+      80% but do not call the disk Down until 95%" needs both, and conflating them would make one
+      of them impossible.
+
+      **Two things found while writing it.** `TriggerError` was handing its `problems` list to
+      `AppError`, whose constructor takes a scalar-only `context` and silently drops everything
+      else — so a rejected trigger came back with no reason, which is a form that just refuses.
+      It carries its own `details` now, like `ObjectError`, and `toHttpError` maps it to 400
+      rather than letting an `AppError` fall through to a 500 that blames the server for the
+      caller's mistake. Separately, the audit diff for an update reported the new summary on both
+      sides; it carries `previousSummary` now, because "who changed the escalation to four hours"
+      is the question that log exists to answer.
+
+      **The state trigger offers four states, not six.** `§5.1`'s list minus the two marked
+      `[V2]` — a form field for a trigger that could never fire is worse than a missing one,
+      because it looks configured. Deliberately *not* `V1_STATES`: `paused` is a state an
+      operator puts a sensor into on purpose, so notifying about it is notifying about one's own
+      action, and `down_acknowledged` is stranger still — acknowledging is how an operator stops
+      being told, so a trigger on it would notify about the suppression of a notification. The
+      engine still has to know about `down_acknowledged`, because a `down` trigger must not
+      re-fire when the Down is acknowledged, but that is `N-02`'s problem and not a setting.
+
+      **Not built, and not smuggled in.** PRTG has a per-object "inherit notification triggers:
+      yes/no" toggle. It is not in `CAPABILITIES.MD` and it is not here; a trigger is switched off
+      where it is defined, or the object is moved. Filed as `N-16` rather than added quietly.
 - [ ] **N-02 — State trigger** · L · N-01, M-15 · Initial latency, initial notification,
       escalation latency, escalation notification, repeat interval, recovery notification.
 - [ ] **N-03 — Threshold trigger** · M · N-01 · Channel, condition, value, latency, trigger and
@@ -1165,6 +1225,12 @@ because each is a decision rather than a defect:
 - [ ] **N-15 — Notification scenario tests** · M · N-11 · 200-sensor outage → one immediate
       message plus digests, verified against MailHog and a webhook sink; a 30-second blip under a
       5-minute latency produces nothing.
+- [ ] **N-16 — Per-object trigger inheritance toggle** · S · N-01 · PRTG lets an object opt out
+      of its ancestors' notification triggers entirely. `N-01` deliberately did not build it: it
+      is not in `CAPABILITIES.MD`, and a trigger can already be switched off where it is defined.
+      Decide whether an operator ever needs "this device notifies nobody, whatever the root says"
+      — and if so, whether the toggle belongs on the object or is better served by a state
+      trigger with no template. Mark the scope in `CAPABILITIES.MD` either way.
 
 ## Phase 5 — Web UI
 

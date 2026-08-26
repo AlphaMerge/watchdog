@@ -201,6 +201,29 @@ export type Mutation =
       message: string;
       sensorsAffected: number;
     }
+  | {
+      /**
+       * A notification trigger was created, changed or removed (`N-01`).
+       *
+       * Audited because a trigger decides who finds out about an outage: somebody deleting one
+       * is somebody deciding a class of alarm stops reaching anyone, and that is exactly the
+       * change nobody notices until the night it matters. `objectId` is what it was defined on,
+       * so the entry lands on the object's own history tab.
+       */
+      action: 'trigger.created' | 'trigger.updated' | 'trigger.deleted';
+      objectId: ObjectId;
+      triggerId: number;
+      triggerKind: string;
+      /** The one-line description an operator sees on the tab, so the entry reads like it. */
+      summary: string;
+      /**
+       * What it said before, when there was a before.
+       *
+       * A diff that repeats itself on both sides tells the reader nothing, and "who changed the
+       * escalation to four hours" is the question this log exists to answer.
+       */
+      previousSummary?: string;
+    }
   | { action: 'setting.set'; objectId: ObjectId; key: string; before: unknown; after: unknown }
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
@@ -361,6 +384,15 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         simulated: mutation.simulated,
         sensorsAffected: mutation.sensorsAffected,
+      };
+    case 'trigger.created':
+    case 'trigger.updated':
+    case 'trigger.deleted':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        triggerId: mutation.triggerId,
+        triggerKind: mutation.triggerKind,
       };
     case 'schedule.created':
     case 'schedule.deleted':

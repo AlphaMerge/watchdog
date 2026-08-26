@@ -4,6 +4,7 @@ import { ObjectError } from '../objects/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { QueryError } from '../timeseries/query.js';
+import { TriggerError } from '../triggers/definition.js';
 
 export interface HttpErrorBody {
   error: {
@@ -68,6 +69,12 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
 
   if (error instanceof SettingError) {
     return envelope(400, error.code, error.message, { ...error.context });
+  }
+
+  if (error instanceof TriggerError) {
+    // Settings that failed their kind's own schema (`N-01`). The problems go out: a trigger a
+    // client cannot save and cannot see the reason for is a form that just refuses.
+    return envelope(400, error.code, error.message, { ...error.context }, { ...error.details });
   }
 
   if (error instanceof InheritanceError) {

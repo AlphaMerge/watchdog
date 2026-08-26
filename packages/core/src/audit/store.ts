@@ -256,6 +256,29 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       };
     }
 
+    case 'trigger.created':
+    case 'trigger.updated':
+    case 'trigger.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          triggerId: mutation.triggerId,
+          triggerKind: mutation.triggerKind,
+          trigger: mutation.summary,
+        },
+        diff: [
+          {
+            field: `trigger.${String(mutation.triggerId)}`,
+            before:
+              mutation.action === 'trigger.created'
+                ? null
+                : (mutation.previousSummary ?? mutation.summary),
+            after: mutation.action === 'trigger.deleted' ? null : mutation.summary,
+          },
+        ],
+      };
+
     case 'schedule.created':
       return {
         ...base,

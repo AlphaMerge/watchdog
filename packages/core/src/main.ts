@@ -25,6 +25,7 @@ import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
 import { ScheduleSweep } from './schedules/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
+import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
@@ -243,6 +244,17 @@ async function serve(): Promise<void> {
   const schedules = new ScheduleService({ db, audit: scheduleAudit, logger });
   await schedules.seedBuiltIns();
 
+  // The trigger library (N-01). Audited and logged like everything else, but deliberately not
+  // wired to the configuration notifier: a trigger decides who gets told about a sensor, not
+  // what a probe scans, so pushing one to every probe would be churn for a change none of them
+  // acts on. The database still bumps the owning object's version, so the next reconnect
+  // carries it.
+  const triggers = new TriggerService({
+    db,
+    audit: new CompositeAuditSink([new DatabaseAuditSink(), new LoggingAuditSink(logger)]),
+    logger,
+  });
+
   const history = new HistoryService({ db, logger, store });
   // Notices when a maintenance window opens and when a timed pause runs out. Every read already
   // accounts for the clock; this is what turns a boundary into a transition, a log entry and a
@@ -296,6 +308,7 @@ async function serve(): Promise<void> {
     catalogue,
     lookups,
     schedules,
+    triggers,
   });
   await api.build(VERSION, service);
   await api.start();
