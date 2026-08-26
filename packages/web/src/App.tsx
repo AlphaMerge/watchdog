@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { AlarmsView } from './routes/AlarmsView';
+import { AddSensor } from './routes/AddSensor';
 import { LogsView } from './routes/LogsView';
 import { Overview } from './routes/Overview';
 import { TreeView } from './routes/TreeView';
@@ -16,6 +17,7 @@ export function App(): React.JSX.Element {
         <Route path="tree" element={<TreeView />} />
         <Route path="logs" element={<LogsView />} />
         <Route path="objects/:id" element={<ObjectDetailView />} />
+        <Route path="objects/:id/add-sensor" element={<AddSensor />} />
         <Route path="sensor-types" element={<SensorTypesView />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

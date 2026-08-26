@@ -9,22 +9,62 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  */
 const BASE = '/api/v1';
 
+/**
+ * What the core says about a refusal, beyond the sentence.
+ *
+ * `problems` carries the JSON Pointer of each parameter a schema rejected, which is what lets a
+ * generated form put the message on the field it is about rather than in a banner above twelve
+ * inputs (`U-08`).
+ */
+export interface ErrorDetails {
+  /**
+   * Two shapes, from two validators.
+   *
+   * A refusal by the *request* schema comes from Fastify's Ajv and names `instancePath`, a JSON
+   * Pointer. A refusal of a sensor's *params* comes from the sensor-type gate and names `path`.
+   * A client that read only one would silently lose the other's field mapping, so `problemPath`
+   * below reads both.
+   */
+  problems?: { path?: string; instancePath?: string; message?: string }[];
+  [key: string]: unknown;
+}
+
+/** The dotted parameter path a refusal names, whichever validator produced it. */
+export function problemPath(problem: { path?: string; instancePath?: string }): string {
+  const raw = problem.path ?? problem.instancePath ?? '';
+  if (raw === '' || raw === '(root)') return '';
+  return raw.replace(/^\//, '').replace(/\//g, '.');
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly correlationId: string | undefined;
+  readonly details: ErrorDetails;
 
-  constructor(status: number, code: string, message: string, correlationId?: string) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    correlationId?: string,
+    details: ErrorDetails = {},
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.correlationId = correlationId;
+    this.details = details;
   }
 }
 
 interface ErrorBody {
-  error?: { code?: string; message?: string; correlationId?: string };
+  error?: {
+    code?: string;
+    message?: string;
+    correlationId?: string;
+    details?: ErrorDetails;
+  };
 }
 
 export async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -47,6 +87,7 @@ export async function request<T>(path: string, signal?: AbortSignal): Promise<T>
       body.error?.code ?? 'HTTP_ERROR',
       body.error?.message ?? `${String(response.status)} ${response.statusText}`,
       body.error?.correlationId,
+      body.error?.details,
     );
   }
   return (await response.json()) as T;
@@ -63,15 +104,18 @@ export async function send<T>(
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   body?: unknown,
+  /** `If-Match` mostly: the core requires it on PATCH so two open forms cannot silently race. */
+  headers: Readonly<Record<string, string>> = {},
 ): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
       method,
-      headers:
-        body === undefined
-          ? { accept: 'application/json' }
-          : { accept: 'application/json', 'content-type': 'application/json' },
+      headers: {
+        accept: 'application/json',
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...headers,
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
@@ -85,6 +129,7 @@ export async function send<T>(
       failed.error?.code ?? 'HTTP_ERROR',
       failed.error?.message ?? `${String(response.status)} ${response.statusText}`,
       failed.error?.correlationId,
+      failed.error?.details,
     );
   }
   // A 204 has no body to parse, and asking for one would turn a success into an error.

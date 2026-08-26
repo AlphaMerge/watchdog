@@ -42,6 +42,20 @@ export interface SensorTypeGate {
    * anything but internal: CLAUDE.md's write-only rule covers every route, to everyone.
    */
   redact(sensorType: string, params: Record<string, unknown>): RedactedParams;
+
+  /**
+   * A patch with every `writeOnly` value it does not mention taken from what is stored.
+   *
+   * The mirror of `redact`, and it has to exist for the same reason. A read never returns a
+   * credential, so no client can send one back — and `params` is *replaced* on update, not
+   * merged. Without this, anything that reads a sensor and writes it back deletes every secret
+   * it holds, on the first save, silently. `null` in the patch is an explicit unset.
+   */
+  carryWriteOnly(
+    sensorType: string,
+    patch: Record<string, unknown>,
+    stored: Record<string, unknown>,
+  ): Record<string, unknown>;
 }
 
 export type { ChannelRecord };
@@ -134,6 +148,17 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
         ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
         ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
       }));
+    },
+
+    carryWriteOnly(
+      sensorType: string,
+      patch: Record<string, unknown>,
+      stored: Record<string, unknown>,
+    ): Record<string, unknown> {
+      // An unregistered type has no declared secrets to carry, and `normalise` is about to
+      // refuse the patch anyway with a message that names what is registered.
+      if (!catalogue.has(sensorType)) return patch;
+      return catalogue.carryWriteOnly(sensorType, patch, stored);
     },
 
     redact(sensorType: string, params: Record<string, unknown>): RedactedParams {

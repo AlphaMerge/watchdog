@@ -21,6 +21,7 @@ import { ChannelTable } from './detail/ChannelTable';
 import { HistoryPanel } from './detail/HistoryPanel';
 import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
+import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 
 /** How often the channel table re-reads its values. */
@@ -109,15 +110,23 @@ export function ObjectDetailView(): React.JSX.Element {
               </Card>
             )}
             <Card title="Configuration">
-              <Configuration
-                detail={detail}
-                typeKnown={
-                  detail.sensorType !== undefined &&
-                  types.status === 'ready' &&
-                  types.data.items.some((type) => type.id === detail.sensorType)
-                }
-              />
+              <Configuration detail={detail} />
             </Card>
+            {detail.kind === 'sensor' && (
+              <Card title="Parameters">
+                {types.status === 'loading' && <Loading what="the sensor type" />}
+                {types.status === 'error' && (
+                  <ErrorPanel error={types.error} retry={types.reload} />
+                )}
+                {types.status === 'ready' && (
+                  <ParamsForm
+                    detail={detail}
+                    type={types.data.items.find((type) => type.id === detail.sensorType)}
+                    onSaved={object.reload}
+                  />
+                )}
+              </Card>
+            )}
           </div>
         </TabPanel>
       )}
@@ -222,6 +231,14 @@ function Header({
         {/* The alarms view scopes to a subtree; this is how somebody gets there from an object
             rather than by editing a query string. */}
         <span className="ml-auto flex shrink-0 gap-3 text-xs">
+          {detail.kind === 'device' && (
+            <Link
+              to={`/objects/${String(detail.id)}/add-sensor`}
+              className="text-accent hover:underline"
+            >
+              + Add a sensor
+            </Link>
+          )}
           <Link
             to={`/alarms?objectId=${String(detail.id)}`}
             className="text-accent hover:underline"
@@ -390,13 +407,7 @@ function Field({ label, value }: { label: string; value: React.ReactNode }): Rea
   );
 }
 
-function Configuration({
-  detail,
-  typeKnown,
-}: {
-  detail: ObjectDetail;
-  typeKnown: boolean;
-}): React.JSX.Element {
+function Configuration({ detail }: { detail: ObjectDetail }): React.JSX.Element {
   return (
     <>
       <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 text-sm">
@@ -423,81 +434,7 @@ function Configuration({
           }
         />
       </dl>
-      {detail.kind === 'sensor' && <Params detail={detail} typeKnown={typeKnown} />}
     </>
-  );
-}
-
-/**
- * Parameters, and the ones that are set but withheld.
- *
- * `redactedParams` is how the API says "this is configured, and you may not read it" — the value
- * is not masked, it is absent (`P-05`). Showing the distinction matters: an empty field and a set
- * credential look identical otherwise, and an operator would retype a secret that was fine.
- *
- * There are two reasons a parameter can be withheld and they are not interchangeable. Either the
- * sensor type marked it `writeOnly` — a genuine secret — or the type is not registered at all, in
- * which case the core cannot classify *any* of its parameters and conservatively withholds the
- * lot. Calling the second case "write-only" would tell an operator their timeout is a credential.
- */
-function Params({
-  detail,
-  typeKnown,
-}: {
-  detail: ObjectDetail;
-  typeKnown: boolean;
-}): React.JSX.Element {
-  const params = detail.params ?? {};
-  const redacted = detail.redactedParams ?? [];
-  const names = Object.keys(params);
-
-  if (names.length === 0 && redacted.length === 0) {
-    return <p className="mt-4 text-sm text-text-muted">No parameters.</p>;
-  }
-
-  return (
-    <div className="mt-4">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">Parameters</h3>
-      <dl className="mt-2 grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 text-sm">
-        {names.map((name) => (
-          <Field
-            key={name}
-            label={name}
-            value={<span className="font-mono">{JSON.stringify(params[name])}</span>}
-          />
-        ))}
-        {redacted.map((name) => (
-          <Field
-            key={name}
-            label={name}
-            value={
-              <span className="inline-flex items-center gap-2">
-                <span aria-hidden="true" className="font-mono tracking-widest text-text-muted">
-                  ••••••
-                </span>
-                {typeKnown ? (
-                  <span className="rounded border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg">
-                    set, write-only
-                  </span>
-                ) : (
-                  <span className="rounded border border-warning-border bg-warning-bg px-1.5 py-0.5 text-xs font-medium text-warning-fg">
-                    withheld
-                  </span>
-                )}
-              </span>
-            }
-          />
-        ))}
-      </dl>
-
-      {!typeKnown && redacted.length > 0 && (
-        <p className="mt-3 text-xs text-text-muted">
-          <code className="font-mono">{detail.sensorType}</code> is not a registered sensor type, so
-          the core cannot tell which of its parameters are secrets and withholds all of them. The
-          stored values are intact — registering the type shows them again.
-        </p>
-      )}
-    </div>
   );
 }
 

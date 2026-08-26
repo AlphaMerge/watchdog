@@ -2523,8 +2523,54 @@ because each is a decision rather than a defect:
       System events carry only notifications, which is all v1 produces — the tab says so rather
       than showing three empty sections for auto-discovery, reports and clustering. The object
       detail page links to both its scoped alarms and its scoped log.
-- [ ] **U-08 — Schema-driven settings forms** · L · P-05, U-01 · Forms generated from each sensor
+- [x] **U-08 — Schema-driven settings forms** · L · P-05, U-01 · Forms generated from each sensor
       type's `paramsSchema`, so a new sensor type needs no frontend work.
+
+      **U-08 outcome.** `packages/web/src/forms/` builds a form from a `paramsSchema`, wired into
+      both places a sensor's parameters are written: the detail page's Parameters card, and a new
+      add-sensor flow reached from a device. `P-05` published the catalogue's schemas for exactly
+      this, and the promise in `docs/adding-a-sensor-type.md` — that a type is a one-file job —
+      only holds if nobody has to hand-write a form to go with it.
+
+      **A defect in the core, and this is the one that mattered.** `params` is *replaced* on
+      update, and a read never returns a `writeOnly` value. So any client that reads a sensor and
+      writes it back deletes every credential it holds, on the first save, silently — and the
+      sensor keeps scanning until the next authentication failure. A generated form is precisely
+      such a client; so is a script, so is `curl`. `SensorCatalogue.carryWriteOnly` is the mirror
+      of redaction and lives in the same place for the same reason: **absent** keeps the stored
+      value, **present** replaces it, **`null`** removes it and is then validated, so a required
+      secret cannot be cleared and an optional one can. Five tests, two of which fail against the
+      old behaviour.
+
+      **The form never fills a credential and never sends an empty one.** A `writeOnly` parameter
+      shows "set, write-only" with Replace and Clear; leaving it alone omits the key entirely.
+      Pre-filling would be pre-filling a lie, and submitting the empty box would be the deletion
+      above with extra steps.
+
+      **A field the controls cannot draw becomes a JSON box, never nothing.** Same reason: a
+      control that silently skipped an array would delete it on the next save. The catalogue
+      permits schemas richer than these controls cover, and the honest answer to one is to hand
+      the operator the value.
+
+      **Defaults are pre-filled when adding and not when editing.** The core applies and *stores*
+      schema defaults at validation time, so on a new sensor the default is what is about to
+      happen and showing it is honest. On an existing one the same pre-fill would say a parameter
+      is set when the stored row does not have it.
+
+      **Client-side validation is a convenience, and says so.** It checks *less* than Ajv rather
+      than differently — two validators that disagree are worse than one — so combinators,
+      formats and conditionals are left to the core, whose refusal names a path. That path is
+      shown against the field it names rather than as a banner over twelve inputs, which needed
+      `ApiError` to start carrying `details` and needed to read **both** problem shapes: Fastify's
+      request validator says `instancePath`, the sensor-type gate says `path`.
+
+      **`If-Match` is sent, because the core requires it and is right to.** Two operators with
+      this form open is the realistic collision, and under last-write-wins the second save
+      silently reverts the first. Verified live: an external change made the open form stale and
+      the save came back 412 with a message saying whose change it would have overwritten.
+
+      Generated labels are sentence case to match the rest of the UI — a declared `title` always
+      wins.
 - [ ] **U-09 — Inheritance-aware controls** · M · S-04, U-08 · Every inheritable field shows the
       inherited value and an override toggle; reverting discards the local value.
 - [ ] **U-10 — Notification configuration UI** · L · N-05 · Template editor with live placeholder

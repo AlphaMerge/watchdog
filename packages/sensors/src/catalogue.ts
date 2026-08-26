@@ -185,6 +185,49 @@ export class SensorCatalogue {
   }
 
   /**
+   * A patch with every `writeOnly` value it does not mention taken from what is stored.
+   *
+   * **The rule this exists for is the mirror of redaction.** A read never returns a credential,
+   * so nothing outside the core can send one back — and `params` is replaced wholesale on
+   * update, not merged. Without this, any client that reads a sensor and writes it back deletes
+   * every secret it holds, on the first save, silently. A generated form (`U-08`) is exactly
+   * such a client, and so is a script, and so is `curl`. Putting it here rather than in the form
+   * means a new caller cannot forget it, which is the same argument that put redaction in one
+   * place.
+   *
+   * Three cases, and the third is what makes "unset" expressible at all:
+   *
+   * - **absent** from the patch — the stored value is carried forward;
+   * - **present** with a value — the patch wins, which is a rotation;
+   * - **present as `null`** — removed, and then validated, so a required secret cannot be
+   *   cleared and an optional one can.
+   */
+  carryWriteOnly(
+    id: string,
+    patch: Record<string, unknown>,
+    stored: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const paths = this.#writeOnly.get(id);
+    const merged = structuredClone(patch);
+    if (paths === undefined || paths.length === 0) return merged;
+
+    for (const path of paths) {
+      const segments = path.split('.');
+      const given = readAtPath(merged, segments);
+      if (given === null) {
+        // An explicit unset. Removing it before validation is what lets the schema decide
+        // whether this type may be without it.
+        deleteAtPath(merged, segments);
+        continue;
+      }
+      if (given !== undefined) continue;
+      const held = readAtPath(stored, segments);
+      if (held !== undefined) writeAtPath(merged, segments, held);
+    }
+    return merged;
+  }
+
+  /**
    * Params with every `writeOnly` value removed, and the paths that had one.
    *
    * Removed, not masked: `CredentialView` already established that a secret is *absent* from a
@@ -295,6 +338,38 @@ function collectWriteOnly(schema: JsonSchema, typeId: string, prefix = ''): read
 }
 
 /** Deletes a dotted path. Returns whether anything was actually there. */
+/** The value at a dotted path, or undefined — including when a parent is missing. */
+function readAtPath(source: Record<string, unknown>, segments: readonly string[]): unknown {
+  let cursor: unknown = source;
+  for (const segment of segments) {
+    if (typeof cursor !== 'object' || cursor === null || Array.isArray(cursor)) return undefined;
+    if (!Object.hasOwn(cursor, segment)) return undefined;
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  return cursor;
+}
+
+/** Writes at a dotted path, creating the objects on the way. */
+function writeAtPath(
+  target: Record<string, unknown>,
+  segments: readonly string[],
+  value: unknown,
+): void {
+  const [head, ...rest] = segments;
+  if (head === undefined) return;
+  if (rest.length === 0) {
+    target[head] = value;
+    return;
+  }
+  const child = target[head];
+  const next =
+    typeof child === 'object' && child !== null && !Array.isArray(child)
+      ? (child as Record<string, unknown>)
+      : {};
+  target[head] = next;
+  writeAtPath(next, rest, value);
+}
+
 function deleteAtPath(target: Record<string, unknown>, segments: readonly string[]): boolean {
   const [head, ...rest] = segments;
   if (head === undefined) return false;

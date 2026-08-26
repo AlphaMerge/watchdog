@@ -123,13 +123,23 @@ detail it hands out — API responses, audit rows, anything — while the stored
 the probe can use it. The read instead carries `redactedParams: ['community']`, so a form can
 show "set" without ever receiving the value.
 
-Two rules follow from how the redactor works:
+Three rules follow from how the redactor works:
 
 - **Hoist it to a plain property.** A `writeOnly` inside `oneOf`/`anyOf`/`allOf`/`items` cannot
   be redacted without evaluating which branch matched, and a redactor that guesses wrong either
   leaks the value or deletes a live one. The catalogue **refuses to register** such a type, at
   startup, rather than leaking at read time.
 - **Nested objects are fine.** `auth.privKey` is found and removed correctly.
+- **An update that does not mention it keeps it.** Because a read never returns the value,
+  nothing outside the core can send one back — and `params` is *replaced* on update, not merged.
+  So `carryWriteOnly` takes any `writeOnly` parameter a patch omits from what is stored (`U-08`).
+  Sending the key with a value rotates it; sending it as `null` removes it, and the schema then
+  decides whether this type may be without it. You get this for free; it is worth knowing because
+  it means a client cannot delete a credential by accident, and cannot clear one by sending `""`.
+
+The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
+"set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save
+unless somebody deliberately changed it.
 
 ---
 

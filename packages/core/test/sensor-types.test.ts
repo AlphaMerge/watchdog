@@ -181,6 +181,95 @@ describe(
       assert.equal(row?.params['community'], SECRET);
     });
 
+    // ── the mirror of redaction (U-08) ──────────────────────────────────────────────────────
+
+    it('keeps a secret the patch does not mention, instead of deleting it', async () => {
+      // The trap a generated form walks straight into: a read never returns the credential, and
+      // `params` is replaced wholesale on update. Round-tripping what was read would wipe every
+      // secret on the first save, silently, and the sensor would keep scanning until the next
+      // authentication failure.
+      const sensor = await createSensor({ community: SECRET, port: 161 });
+      await h.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: { port: 1161 } },
+        { kind: 'none' },
+      );
+
+      const [row] = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [sensor.id],
+      );
+      assert.equal(row?.params['community'], SECRET, 'the secret survived a patch that omitted it');
+      assert.equal(row.params['port'], 1161, 'and the patch still applied');
+    });
+
+    it('replaces a secret the patch does mention, which is how one is rotated', async () => {
+      const sensor = await createSensor({ community: SECRET, port: 161 });
+      await h.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: { community: 'rotated', port: 161 } },
+        { kind: 'none' },
+      );
+      const [row] = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [sensor.id],
+      );
+      assert.equal(row?.params['community'], 'rotated');
+    });
+
+    it('unsets a secret sent as null, so clearing one is expressible at all', async () => {
+      const sensor = await createSensor({ community: SECRET, port: 161 });
+      await h.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: { community: null, port: 161 } },
+        { kind: 'none' },
+      );
+      const [row] = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [sensor.id],
+      );
+      assert.ok(!Object.hasOwn(row?.params ?? {}, 'community'), 'the key is gone, not blanked');
+
+      const read = await h.service.get(sensor.id);
+      assert.ok(read.kind === 'sensor');
+      assert.deepEqual(read.redactedParams, [], 'and nothing claims it is still set');
+    });
+
+    it('carries the secret over an update that touches no params at all', async () => {
+      const sensor = await createSensor({ community: SECRET, port: 161 });
+      await h.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', name: 'renamed' },
+        { kind: 'none' },
+      );
+      const [row] = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [sensor.id],
+      );
+      assert.equal(row?.params['community'], SECRET);
+    });
+
+    it('does not put the secret into the audit entry for the patch that kept it', async () => {
+      // The value now passes through `update` even when the caller never sent it, so the audit
+      // path has one more way to be handed a credential than it had before.
+      const sensor = await createSensor({ community: SECRET, port: 161 });
+      h.audit.recorded.length = 0;
+      await h.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: { port: 1161 } },
+        { kind: 'none' },
+      );
+      assert.ok(
+        !JSON.stringify(h.audit.recorded).includes(SECRET),
+        'a carried-forward secret reached the audit sink',
+      );
+    });
+
     it('reports nothing redacted when no secret is set', async () => {
       const sensor = await createSensor({ count: 4 }, 'icmp.ping');
       assert.ok(sensor.kind === 'sensor');

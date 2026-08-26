@@ -1281,7 +1281,16 @@ export class ObjectService {
               ...patch,
               params: this.#sensorTypes.normalise(
                 before.kind === 'sensor' ? before.sensorType : '',
-                patch.params,
+                // Secrets the patch does not mention come from what is stored. `params` is
+                // replaced wholesale below, and a read never returns a credential — so without
+                // this, anything that reads a sensor and writes it back would delete every
+                // secret it holds on the first save. Here rather than in the caller for the same
+                // reason redaction is at one boundary: a new client cannot forget it.
+                this.#sensorTypes.carryWriteOnly(
+                  before.kind === 'sensor' ? before.sensorType : '',
+                  patch.params,
+                  before.kind === 'sensor' ? before.params : {},
+                ),
               ),
             }
           : patch;
