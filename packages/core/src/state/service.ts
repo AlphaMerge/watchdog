@@ -17,9 +17,11 @@ import type { Database, Queryable } from '../db/pool.js';
 import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
 import {
   applyResult,
+  clearedByRecovery,
   clearedByResume,
   evaluate,
   isPaused,
+  isStaleResult,
   operatorDecided,
   DEFAULT_FAILURE_POLICY,
   type FailurePolicy,
@@ -216,10 +218,9 @@ export class SensorStateService {
 
       let moved = false;
       for (const result of batch) {
-        const last = runtime.facts.lastResultAt;
         // Strictly newer, so a duplicate delivery is a no-op rather than a second failure. The
         // acknowledgement protocol is at-least-once by design; this is what makes that safe.
-        if (last !== null && result.at.getTime() <= last.getTime()) {
+        if (isStaleResult(runtime.facts, result.at)) {
           this.#resultsStale += 1;
           continue;
         }
@@ -337,6 +338,7 @@ export class SensorStateService {
     const runtimes = await loadRuntimes(q, sensorIds);
     const transitions: StateTransition[] = [];
     const rewrites: StateRewrite[] = [];
+    const recovered: number[] = [];
 
     for (const [sensorId, runtime] of runtimes) {
       const stillPaused = isPaused(runtime.facts.pause);
@@ -345,6 +347,13 @@ export class SensorStateService {
       const resuming = !stillPaused && runtime.state === 'paused';
       const facts = resuming ? clearedByResume(runtime.facts) : runtime.facts;
       const decision = evaluate(facts, this.#policies.get(sensorId) ?? this.#fallback);
+
+      // §2.4 clears an acknowledgement on a recovery, and a recovery does not have to arrive as
+      // a result: lifting a simulated error is one, and so is a pause clearing. Before `M-16`
+      // this ran only in `applyResult`, so an alarm acknowledged during a chain test kept its
+      // acknowledgement after the force was lifted — invisibly, and it silenced the sensor's
+      // next genuine failure.
+      if (clearedByRecovery(facts, decision) !== facts) recovered.push(sensorId);
 
       if (decision.state === runtime.state && decision.cause === runtime.cause) continue;
 
@@ -374,6 +383,22 @@ export class SensorStateService {
       // The cache is now behind the database. Dropping the entry costs one query on this
       // sensor's next result and is the only thing that cannot go wrong.
       this.#cache.delete(sensorId);
+    }
+
+    // Before the state, so a row can never say Down (Acknowledged) with no acknowledgement
+    // behind it. `reset` clears these too, and clearing twice costs nothing.
+    if (recovered.length > 0) {
+      await writeAcknowledgements(
+        q,
+        recovered.map((sensorId) => ({
+          sensorId,
+          acknowledgedAt: null,
+          acknowledgedUntil: null,
+          actorKind: null,
+          actorLabel: null,
+        })),
+      );
+      for (const sensorId of recovered) this.#cache.delete(sensorId);
     }
 
     await writeStateHistory(q, transitions);

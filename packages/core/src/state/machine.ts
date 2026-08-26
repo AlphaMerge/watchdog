@@ -221,6 +221,23 @@ export const INITIAL_SENSOR_FACTS: SensorFacts = {
   acknowledgedUntil: null,
 };
 
+/**
+ * Whether a result is older than what the sensor has already seen, and so must be discarded.
+ *
+ * **Strictly newer wins.** The probe protocol is at-least-once by design — a batch acknowledged
+ * after it was stored is offered again when the connection drops at the wrong moment — and this
+ * predicate is the whole of what makes that safe: a duplicate delivery is a no-op rather than a
+ * second failure, which would otherwise advance a two-step policy twice and take a sensor Down
+ * on one bad scan.
+ *
+ * Here rather than inline in the ingestion fold, so that `M-16`'s property tests exercise the
+ * rule production uses instead of a second copy of it that could drift from it.
+ */
+export function isStaleResult(facts: SensorFacts, at: Date): boolean {
+  const last = facts.lastResultAt;
+  return last !== null && at.getTime() <= last.getTime();
+}
+
 /** One check result, as much of it as the machine reads. */
 export interface ResultFacts {
   readonly at: Date;
@@ -266,27 +283,53 @@ export function applyResult(
 
   const evaluated = evaluate(next, policy);
 
+  // Whether this reading is what decided the state at all. Layers 1 to 3 of §2 short-circuit
+  // above it, and two rules below both turn on the difference.
+  const decidedByReading = !isPaused(next.pause) && !next.simulatedError && next.probeReachable;
+
   // An acknowledgement that has just lapsed reports `user`, not `scan`. The target being down
   // is not news — the sensor was already Down (Acknowledged); what changed, and what an
   // operator has to see, is that the suppression ended.
+  //
+  // Two conditions on that, both found by `M-16`'s table property and both the same mistake:
+  // the override was claiming to explain a change nobody could have seen.
+  //
+  // The suppression has to have been *in effect*, which is what §2.4's "the sensor was already
+  // Down (Acknowledged)" means. An acknowledgement sitting on a sensor that read Unknown —
+  // because its probe was away, or because the Down it was made against came from a simulated
+  // error that has since been lifted — silenced nothing, so its lapsing ends nothing.
+  //
+  // And this reading has to be what decided the state. A sensor held Down by a simulated error
+  // is Down for that reason, and `M-14` promises a forced outage is never mistakable for
+  // anything else.
+  const wasSuppressed = expired && evaluate(facts, policy).state === 'down_acknowledged';
   const decision: Decision =
-    expired && evaluated.state === 'down' ? { state: 'down', cause: 'user' } : evaluated;
+    wasSuppressed && decidedByReading && evaluated.state === 'down'
+      ? { state: 'down', cause: 'user' }
+      : evaluated;
 
-  // Recovery clears the acknowledgement — but only when this reading is what decided the
-  // state. Layers 1 to 3 short-circuit before the reading is looked at, and a sensor that
-  // reads Unknown because its probe went away has not recovered from anything; clearing the
-  // acknowledgement there would un-suppress an outage nobody has fixed.
-  const decidedByReading = !isPaused(next.pause) && !next.simulatedError && next.probeReachable;
+  return { facts: clearedByRecovery(next, decision), decision };
+}
+
+/**
+ * Drops an acknowledgement that the sensor has recovered out of (§2.4).
+ *
+ * **Only when the reading decided the state.** Layers 1 to 3 short-circuit before the reading is
+ * looked at, and a sensor that reads Unknown because its probe went away has not recovered from
+ * anything; clearing the acknowledgement there would un-suppress an outage nobody has fixed.
+ *
+ * Applied on *every* path that produces a decision, not only on a result — which is what `M-16`
+ * found it was missing. Force a simulated error on a healthy sensor, acknowledge the forced
+ * alarm, then lift the force: the sensor is Up again, and the acknowledgement it was carrying
+ * had nothing to do with any real outage. Before this ran on the re-evaluation path it stayed,
+ * invisibly, and silenced the sensor's next genuine failure.
+ */
+export function clearedByRecovery(facts: SensorFacts, decision: Decision): SensorFacts {
+  if (!facts.acknowledged) return facts;
+  const decidedByReading = !isPaused(facts.pause) && !facts.simulatedError && facts.probeReachable;
   const recovered =
-    next.acknowledged &&
-    decidedByReading &&
-    decision.state !== 'down' &&
-    decision.state !== 'down_acknowledged';
-
-  return {
-    facts: recovered ? { ...next, acknowledged: false } : next,
-    decision,
-  };
+    decidedByReading && decision.state !== 'down' && decision.state !== 'down_acknowledged';
+  return recovered ? { ...facts, acknowledged: false, acknowledgedUntil: null } : facts;
 }
 
 /**

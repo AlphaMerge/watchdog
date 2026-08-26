@@ -1040,8 +1040,58 @@ because each is a decision rather than a defect:
         database name *after* connecting its admin client, so a prefix it refused left an open
         socket and a run that hung for ever instead of failing. Validated before anything opens
         now. (The prefix it refused was mine: `state-log`, with a hyphen.)
-- [ ] **M-16 — Property-based state machine tests** · L · M-12, M-13 · No event sequence reaches
+- [x] **M-16 — Property-based state machine tests** · L · M-12, M-13 · No event sequence reaches
       an undefined state; invariants hold under shuffled and duplicated events.
+
+      **M-16 outcome.** `packages/core/test/state-machine-properties.test.ts`, using `fast-check`
+      (the first test dependency beyond `node:test` and `vitest`; shrinking is what makes a
+      counterexample actionable, and every one below arrived as three to five events).
+      `MS_PROPERTY_RUNS` turns the depth up; the default is 500 per property and a 300,000-run
+      sweep takes 50 seconds because the machine is pure.
+
+      **Why this is not what `M-02`'s exhaustive test already did.** That one drives `evaluate`
+      over the *entire* static input space — sixteen pause combinations × simulated × probe ×
+      acknowledged × five scan facts × four channel verdicts — and exhaustive beats sampled every
+      time. What it cannot reach is anything that depends on history: the two-step policy counts
+      consecutive scans, an acknowledgement expires against the result clock, a resume forgets
+      what was measured, and a redelivered batch must advance none of them. Those are properties
+      of a **fold**, and a fold has no finite input space to enumerate.
+
+      **Two real defects, both in the acknowledgement layer, both live:**
+
+      - **An acknowledgement survived a recovery that did not arrive as a result.** §2.4 says it
+        is cleared by recovery to any non-Down state, and `applyResult` did that — but
+        `reevaluate` did not. Force a simulated error on a healthy sensor to test a chain,
+        acknowledge the forced alarm, lift the force: the sensor is Up carrying an
+        acknowledgement made against an outage that never existed, invisible because nothing
+        displays one on an Up sensor, and it silences the next *genuine* failure. The rule is now
+        `clearedByRecovery`, applied on both paths, with an integration test that fails the next
+        real outage if it regresses.
+      - **A lapsing acknowledgement claimed a change nobody could see.** The expiry override
+        reported cause `user` whenever the computed state was Down — including when the Down came
+        from a simulated error (so `M-14`'s promise that a forced outage is unmistakable was
+        broken), and including when the acknowledgement had never actually suppressed anything.
+        It now requires both that the reading decided the state and that the sensor really was
+        showing Down (Acknowledged).
+
+      **Four gaps in `M-01`'s transition tables**, all of them states the machine reaches and the
+      tables did not describe: `paused → unknown : probe` and `paused → down : simulated` (a
+      resume while the probe is away or a force is set), `down_acknowledged → down : scan` (a
+      withdrawal, which `M-13` added), and `unknown → down_acknowledged : user` (a probe
+      returning to a still-acknowledged outage). The first two were hand-enumerated `from` lists
+      that excluded `paused` on the reasoning that pause outranks those layers — true while
+      paused, beside the point at the instant it resumes. Those entries are now derived from the
+      layers rather than listed.
+
+      **Two flaws in the generator, which is the same thing working.** It invented a channel
+      verdict of `up` with cause `limit`, which `rollUp` never returns — "within limits" is not a
+      fact about a limit — and it acknowledged sensors that were not Down, which `M-13` refuses.
+      Both were caught by the table property reaching transitions nothing can produce, and both
+      are now modelled with the production predicates (`CHANNELS_CLEAR`, `canAcknowledge`) so the
+      model cannot drift from what the system allows.
+
+      Also extracted `isStaleResult` out of the ingestion fold, so the at-least-once property
+      exercises the rule production uses rather than a second copy of it.
 - [ ] **M-17 — Alarm-storm scenario test** · M · M-11 · A simulated switch failure produces one
       dependency-suppressed alarm, not one per downstream sensor.
 

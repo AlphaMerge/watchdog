@@ -235,10 +235,16 @@ Applied last, and only to `down`:
 
 - **Suppresses notifications, not monitoring** (`WORKFLOW.MD §4` rule 4). The sensor keeps
   scanning, and its readings keep being stored.
-- **Cleared by** recovery to any non-`down` state, by expiry, and by resume (rule 5).
+- **Cleared by** recovery to any non-`down` state, by expiry, by resume (rule 5), and by an
+  operator withdrawing it (`M-13`). The recovery does not have to arrive as a *result*: lifting a
+  simulated error is one too, and `M-16` found that path leaking an acknowledgement onto a
+  healthy sensor, where it silenced the next genuine failure.
 - On expiry while still failing, the state returns to `down` with cause `user` — the change an
   operator needs to see is that the acknowledgement lapsed, not that the target is still down.
-  *Decided here.*
+  *Decided here.* Only when the suppression was actually in effect and the reading decided the
+  state: an acknowledgement lapsing on a sensor that read Unknown, or one held Down by a
+  simulated error, ended nothing an operator could see, and naming `user` there would put the
+  wrong cause on a state whose whole purpose is to be unmistakable (`M-16`).
 - **"Recovery" means a reading decided the state.** Layers 1 to 3 short-circuit before the
   reading is looked at, so a sensor that reads `unknown` because its probe went away has not
   recovered from anything, and clearing the acknowledgement there would un-suppress an outage

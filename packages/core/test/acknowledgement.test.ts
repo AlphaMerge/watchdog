@@ -389,6 +389,28 @@ describe(
       assert.equal(current.acknowledgedAt, null, 'and the acknowledgement went with the pause');
     });
 
+    it('does not survive a recovery that arrived without a reading', async () => {
+      // The leak `M-16`'s property tests found, against the real service rather than the model.
+      // Force a healthy sensor Down to test a chain, acknowledge the forced alarm, then lift
+      // the force: the sensor is Up again, and the acknowledgement was made against an outage
+      // that never existed. Before this was fixed it stayed — invisibly, because nothing shows
+      // an acknowledgement on an Up sensor — and silenced the next genuine failure.
+      await makeUp(sensorId, NOW);
+      await h.service.simulateError(testActor, sensorId, true, 'chain test');
+      assert.equal((await runtimeOf(sensorId)).state, 'down');
+
+      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'testing');
+      await h.service.simulateError(testActor, sensorId, false);
+
+      const recovered = await runtimeOf(sensorId);
+      assert.equal(recovered.state, 'up');
+      assert.equal(recovered.acknowledgedAt, null, 'and it took the acknowledgement with it');
+
+      // The real failure that follows must alarm, not be silenced by the chain test.
+      await makeDown(sensorId, new Date(NOW.getTime() + 300_000));
+      assert.equal((await runtimeOf(sensorId)).state, 'down');
+    });
+
     it('is withdrawn by clearing it, for the case none of the other three covers', async () => {
       // "I acknowledged the wrong sensor" is not recovery, expiry or a pause — and pause-then-
       // resume as the only undo would cost the sensor its failure count.

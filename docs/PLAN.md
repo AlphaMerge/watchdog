@@ -306,7 +306,10 @@ down`); default is one warning interval.
 **Exit criteria**
 
 - A property-based test suite over the state machine passes: no sequence of events reaches an
-  undefined state.
+  undefined state. **Met** (`M-16`): `state-machine-properties.test.ts` folds generated event
+  sequences — results, pauses, acknowledgements, simulated errors, probe loss — and checks §5's
+  invariants after every step. It found two live defects in the acknowledgement layer and four
+  transitions `M-01`'s tables did not describe.
 - Scenario tests: unplugging a simulated switch produces **one** dependency-suppressed alarm,
   not forty.
 - Paused states survive a core restart.

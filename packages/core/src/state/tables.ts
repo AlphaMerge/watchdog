@@ -183,10 +183,26 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: 'down', to: 'up', causes: ['scan'], trigger: 'successful scan, limits clear' },
   { from: 'down', to: 'down_acknowledged', causes: ['user'], trigger: 'operator acknowledged' },
   {
+    // Not only by acknowledging. A sensor that was Down (Acknowledged), lost its probe and got
+    // it back returns to Down (Acknowledged): the outage never ended, the acknowledgement never
+    // lapsed, and the layer that was hiding both was lifted. Lifting a simulated error does the
+    // same thing. Reachable from `unknown` and nowhere else — a resume clears the
+    // acknowledgement, and a recovery to Up or Warning clears it too, so no other state can
+    // arrive here still carrying one. Found by `M-16`'s deeper sweep.
+    from: 'unknown',
+    to: 'down_acknowledged',
+    causes: ['user'],
+    trigger: 'the layer that was hiding the outage was lifted, and the acknowledgement stands',
+  },
+  {
+    // `user` when the acknowledgement lapsed — the change an operator has to see is that the
+    // suppression ended, not that the target is still down. The reading's own cause when it was
+    // *withdrawn* (`M-13`), because then nothing about the outage changed and naming `user`
+    // would claim the operator caused the Down rather than un-silenced it.
     from: 'down_acknowledged',
     to: 'down',
-    causes: ['user'],
-    trigger: 'acknowledgement expired while still failing',
+    causes: ['user', 'scan', 'limit', 'lookup'],
+    trigger: 'the acknowledgement expired or was withdrawn while the sensor was still failing',
   },
   {
     from: 'down_acknowledged',
@@ -200,7 +216,7 @@ export const TRANSITIONS: readonly Transition[] = [
     causes: ['scan', 'limit', 'lookup'],
     trigger: 'recovered to a warning, which clears the acknowledgement',
   },
-  { from: 'paused', to: 'unknown', causes: ['scan'], trigger: 'the last pause source cleared' },
+
   // Re-entry with a different cause. Not a change of state, but a change an operator has to
   // see — Warning because the scan failed and Warning because a limit was breached are two
   // different problems — and §5 invariant 10 requires it to be recorded. Added by `M-02`,
@@ -218,16 +234,24 @@ export const TRANSITIONS: readonly Transition[] = [
     causes: ['parent', 'dependency', 'schedule', 'user'],
     trigger: 'a pause source became active',
   })),
-  ...V1_STATES.filter((from) => from !== 'paused').map((from): Transition => ({
+  // Layers 3 and 4 of §2 are the only things that produce Unknown, and either can take over
+  // from *any* state the moment the layer above it is lifted: a resume, a simulated error
+  // cleared, a probe returning. The first version of this table enumerated the `from` states by
+  // hand and excluded `paused` from both, on the reasoning that pause outranks them — which is
+  // true while it is paused and beside the point at the instant it resumes. `M-16`'s property
+  // tests reached `paused -> unknown : probe` and then `down -> unknown : scan`, neither of
+  // which was here; deriving the entries from the layers rather than listing them is what stops
+  // a third one turning up.
+  ...V1_STATES.map((from): Transition => ({
     from,
     to: 'unknown',
-    causes: ['probe'],
-    trigger: 'the owning probe became unreachable',
+    causes: ['scan', 'probe'],
+    trigger: 'whatever was deciding the state was lifted, and there is no current reading',
   })),
-  ...V1_STATES.filter((from) => from !== 'paused').map((from): Transition => ({
+  ...V1_STATES.map((from): Transition => ({
     from,
     to: 'down',
     causes: ['simulated'],
-    trigger: 'an operator set a simulated error',
+    trigger: 'an operator set a simulated error, or the last pause cleared while one was set',
   })),
 ];
