@@ -1,9 +1,9 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
 import { snmpParamsSchema } from '../support/snmp/schema.js';
-import { MAX_PATTERN } from '../support/snmp/extract.js';
+import { MAX_PATTERN } from '../support/pattern.js';
 // Type-only, and therefore erased: no `net-snmp` reaches the core, which loads this catalogue
 // for schemas and channel declarations and never runs a check.
-import type { Extracted } from '../support/snmp/extract.js';
+import type { Extracted } from '../support/pattern.js';
 import type { SnmpSession, SnmpVarbind } from '../support/snmp/session.js';
 
 /**
@@ -445,7 +445,7 @@ interface Helpers {
  *
  * `regex` goes through `extract`, which runs the match inside a `node:vm` context with a
  * watchdog — an operator-supplied pattern against device-supplied text is the one place in a
- * check that cannot be interrupted any other way (see `support/snmp/extract.ts`). It costs about
+ * check that cannot be interrupted any other way (see `support/pattern.ts`). It costs about
  * 100 µs a row against 0.2 µs for a direct match, which is why `exact` and `contains` are plain
  * string comparisons and why a pattern that backtracks fails the check on the *first* row rather
  * than being retried on every one of them.

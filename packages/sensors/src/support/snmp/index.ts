@@ -114,4 +114,4 @@ export {
   PatternError,
   type Extracted,
   type ExtractMode,
-} from './extract.js';
+} from '../pattern.js';

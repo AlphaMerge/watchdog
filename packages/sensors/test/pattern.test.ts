@@ -7,7 +7,7 @@ import {
   MAX_PATTERN,
   MAX_SUBJECT,
   PatternError,
-} from '../src/support/snmp/extract.js';
+} from '../src/support/pattern.js';
 
 /** The match runs in a sandbox, so `extract` takes the pattern's source rather than a RegExp. */
 const re = (source: string): string => source;

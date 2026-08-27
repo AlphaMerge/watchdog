@@ -219,6 +219,8 @@ describe('the built-in catalogue', () => {
     // Sorted by id, not by registration order.
     assert.deepEqual(standardCatalogue().ids(), [
       'dns.record',
+      'http.advanced',
+      'http.content',
       'http.request',
       'icmp.ping',
       'port.tcp',

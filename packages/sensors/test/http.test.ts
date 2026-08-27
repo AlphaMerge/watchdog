@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createServer, type Server } from 'node:http';
-import { httpRequest, resolveRedirect, statusAccepted } from '../src/types/http.js';
+import { httpRequest } from '../src/types/http.js';
+import { resolveRedirect, statusAccepted } from '../src/support/http/request.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 
 /**

@@ -1,10 +1,16 @@
 import { createContext, Script, type Context } from 'node:vm';
 
 /**
- * Getting a number out of a string a device returned (`T-03`).
+ * Getting a number out of a string something returned (`T-03`, moved here by `T-14`).
  *
- * Pure, and separate from the sensor type, because this is the half with the sharp edges: an
- * operator-supplied regular expression run against device-supplied text, inside a worker.
+ * Pure, and separate from any sensor type, because this is the half with the sharp edges: an
+ * operator-supplied regular expression run against remote-supplied text, inside a worker.
+ *
+ * **Not under `support/snmp/` any more, and it never should have been.** There is no SNMP in
+ * this file — it was written for `snmp.custom.string` and lived beside it. `snmp.table` was the
+ * second caller and `http.content` is the third, at which point the folder was telling a lie
+ * about what the code is. `support/snmp/index.ts` still re-exports it, so nothing that already
+ * imported it had to change.
  *
  * **Catastrophic backtracking is the risk, and it is genuinely bounded rather than hoped away.**
  * JavaScript has no interruptible regular expression: once `exec` is running, nothing stops it —

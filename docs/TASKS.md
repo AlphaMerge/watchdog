@@ -3313,10 +3313,50 @@ because each is a decision rather than a defect:
       Cipher-suite enumeration per version is deliberately **not** here: it is another dozen
       handshakes per scan, and the protocol version is what actually gets a device flagged in an
       audit.
-- [ ] **T-13 — HTTP Advanced** · M · P-09 · Method, headers, POST body, auth, redirect policy,
+- [x] **T-13 — HTTP Advanced** · M · P-09 · Method, headers, POST body, auth, redirect policy,
       response validation.
-- [ ] **T-14 — HTTP Content** · M · T-13 · String and regex matching, numeric extraction into
+
+      **T-13 outcome.** `http.advanced`, and the request itself moved to
+      `support/http/request.ts` — extracted at the moment there were three callers rather than
+      guessed at with one. The three types differ in what they ask for and what they do with the
+      answer, and not at all in how the request is made, which is the part holding the redirect
+      rules, the two timings and the bound on how much is kept.
+
+      **Separate from `http.request` rather than folded into it**, which is PRTG's split and the
+      right one: the plain form is what most sensors are, and a form with fifteen fields makes
+      the common case the hardest to fill in. This is the sensor for an API endpoint; that is a
+      different job from "is the web server up".
+
+      **Credentials come from the device, not from the parameters.** A new `http` credential kind
+      (`A-05`) carries either a bearer token or a user name and password, so a hundred sensors
+      against one API rotate in one place — where a token typed into each sensor's parameters
+      would be a hundred places to rotate it, each returned by the API to anybody who can read a
+      sensor. A token beats a password when both are set, so moving to one is the easy change.
+
+      **Response headers are validated because a header is often the whole answer.** A cache that
+      stopped setting `Cache-Control`, an API that stopped sending `X-Request-Id`, a site that
+      lost its `Strict-Transport-Security` — each is a real regression that a status code and a
+      response time report as perfectly healthy.
+- [x] **T-14 — HTTP Content** · M · T-13 · String and regex matching, numeric extraction into
       channels.
+
+      **T-14 outcome.** `http.content` — the type that monitors an *application* rather than a web
+      server. A status code says the server answered; it says nothing about the queue depth on
+      the status page, the build number that should have changed after a deploy, or the word
+      "healthy" that stopped appearing. A page returning 200 with a stack trace in it is Up by
+      every other measure.
+
+      **The body is bounded and passing the bound fails rather than truncates**, because a
+      pattern matched against half a document finds nothing and reports the value as *missing* —
+      a far more confusing fault than "this page is bigger than this sensor reads". A number that
+      genuinely stopped appearing is gapped rather than zeroed, and named in the message.
+
+      **`support/snmp/extract.ts` moved to `support/pattern.ts` on the way**, and it should never
+      have been under `snmp/`: there is no SNMP in it. It was written for `snmp.custom.string`
+      and lived beside it; `snmp.table` was the second caller and this is the third, at which
+      point the folder was telling a lie about what the code is. The `support/snmp` barrel still
+      re-exports it, so nothing that already imported it changed. The sandbox and its watchdog
+      are why an operator-supplied pattern against a remote-supplied page cannot hold a worker.
 - [ ] **T-15 — HTTP Transaction** · L · T-13 · Multi-step scripted sequence with per-step
       validation and variable capture between steps.
 - [ ] **T-16 — REST Custom** · L · T-13 · JSONPath/XPath extraction into declared channels, with

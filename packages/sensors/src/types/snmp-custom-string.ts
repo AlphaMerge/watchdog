@@ -1,6 +1,6 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
 import { snmpParamsSchema } from '../support/snmp/schema.js';
-import { MAX_PATTERN } from '../support/snmp/extract.js';
+import { MAX_PATTERN } from '../support/pattern.js';
 
 /**
  * One arbitrary string OID, with a regular expression and a lookup (`T-03`).

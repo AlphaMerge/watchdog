@@ -7,6 +7,7 @@ import type { JsonSchema } from '../contract.js';
 // `docs/adding-a-sensor-type.md` states for `execute`.
 import { SNMP_CREDENTIAL_SCHEMA } from '../support/snmp/schema.js';
 import { SSH_CREDENTIAL_SCHEMA } from '../support/ssh/schema.js';
+import { HTTP_CREDENTIAL_SCHEMA } from '../support/http/schema.js';
 
 /**
  * The credential kinds an installation can store (`A-05`).
@@ -56,6 +57,19 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: { ...SSH_CREDENTIAL_SCHEMA },
+    },
+  },
+  {
+    id: 'http',
+    name: 'HTTP',
+    description:
+      'Used by every HTTP Advanced sensor on this object and everything below it. A hundred ' +
+      'sensors against one API rotate their token here, in one place — a token typed into each ' +
+      'sensor’s parameters would be a hundred places to rotate it.',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { ...HTTP_CREDENTIAL_SCHEMA },
     },
   },
 ];
