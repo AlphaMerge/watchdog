@@ -3,6 +3,7 @@ import {
   parsePingOutput,
   pingCommand,
   pingPlatform,
+  runPing,
   summarise,
   type PingParams,
 } from '../support/ping.js';
@@ -108,60 +109,3 @@ export const icmpPing: SensorType = {
     };
   },
 };
-
-interface PingRun {
-  readonly output: string;
-  /** Something worth adding to a failure message: stderr, or why the process ended. */
-  readonly detail: string;
-}
-
-/**
- * Spawns `ping` and collects what it said.
- *
- * A non-zero exit is not an error here: ping exits 1 when nothing replied, which is a perfectly
- * ordinary result that the caller reads out of the output. Only being unable to *run* it is.
- */
-async function runPing(
-  command: string,
-  args: readonly string[],
-  signal: AbortSignal,
-): Promise<PingRun> {
-  // Imported here rather than at the top of the module: the core loads this catalogue for
-  // schemas and channel declarations and never calls execute, so it should not pay for the
-  // module graph behind it (docs/adding-a-sensor-type.md).
-  const { spawn } = await import('node:child_process');
-
-  return new Promise<PingRun>((resolve, reject) => {
-    // Node kills the process when the signal aborts, which is how this check honours
-    // `ctx.signal` without a race of its own.
-    const child = spawn(command, [...args], { signal, windowsHide: true });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr.on('data', (chunk: string) => (stderr += chunk));
-
-    child.on('error', (error: NodeJS.ErrnoException) => {
-      if (signal.aborted) {
-        reject(new Error(`the check was cancelled before ${command} finished`));
-        return;
-      }
-      if (error.code === 'ENOENT') {
-        // A probe running in a minimal container is the usual cause, and it fails identically
-        // on every check until someone installs the binary — so say which binary.
-        reject(new Error(`the "${command}" binary is not available on this probe`));
-        return;
-      }
-      reject(new Error(`could not run ${command}: ${error.message}`));
-    });
-
-    child.on('close', (code, killSignal) => {
-      const detail =
-        stderr.trim().split('\n')[0] ??
-        (killSignal === null ? `exit ${String(code ?? 'unknown')}` : `killed by ${killSignal}`);
-      resolve({ output: `${stdout}\n${stderr}`, detail: stderr.trim() === '' ? '' : detail });
-    });
-  });
-}

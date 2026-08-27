@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { CheckTarget } from '../src/contract.js';
 import {
+  jitterOf,
   parsePingOutput,
   pingCommand,
   pingPlatform,
@@ -206,5 +207,33 @@ describe('statistics', () => {
 
   it('rounds to microseconds, because a loopback ping has noise below that', () => {
     assert.equal(summarise({ transmitted: 1, times: [0.0294449] }).rttMs, 0.029);
+  });
+});
+
+describe('jitter', () => {
+  it('has none to report from fewer than two replies', () => {
+    // One reply is a round-trip time. Zero would read as "perfectly stable" about a link that
+    // answered once out of twenty, which is the opposite of the truth.
+    assert.equal(jitterOf([]), null);
+    assert.equal(jitterOf([12.4]), null);
+  });
+
+  it('is zero for a link that answers in the same time every packet', () => {
+    assert.equal(jitterOf([10, 10, 10, 10]), 0);
+  });
+
+  it('follows RFC 3550, not a spread', () => {
+    // J = J + (|D(i-1,i)| - J)/16, starting at zero. One gap of 10 ms is 0.625, not 10: the
+    // estimator is a smoothed average of *changes*, and a tool that reported the gap itself
+    // would disagree with every RTP endpoint on the network.
+    assert.equal(jitterOf([10, 20]), 0.625);
+  });
+
+  it('separates two runs with identical minimum, maximum and mean', () => {
+    // The whole reason this sensor exists. Same three samples, same average latency, and one of
+    // these links is usable for voice while the other is not — because jitter is a property of
+    // the order the packets arrived in, and no summary statistic of the set can see it.
+    assert.equal(jitterOf([10, 10, 30]), 1.25);
+    assert.equal(jitterOf([10, 30, 10]), 2.422);
   });
 });

@@ -3371,7 +3371,38 @@ because each is a decision rather than a defect:
       listeners, filter rules, severity/facility count channels, message retention.
 - [ ] **T-21 — Sensor Factory** · L · M-04 · Formula language over other sensors' channels
       (`channel(id, ch)` arithmetic), its own channels and limits, cycle detection.
-- [ ] **T-22 — Ping Jitter and Port Range** · M · P-08, P-10 · Completes the v1 connectivity set.
+- [x] **T-22 — Ping Jitter and Port Range** · M · P-08, P-10 · Completes the v1 connectivity set.
+
+      **T-22 outcome.** `icmp.jitter` and `port.range`, both reusing what `P-08` and `P-10`
+      already built rather than adding a second way to ping and a second way to connect.
+
+      **Jitter is RFC 3550 §6.4.1's estimator, not a spread.** A link answering in 20 ms every
+      time and one alternating 5/35 ms have the same minimum, maximum and mean, and one of them
+      makes a voice call unusable — no summary statistic of the *set* can tell them apart,
+      because jitter is a property of the order the packets arrived in. Using RTP's own
+      estimator rather than a simpler mean deviation is deliberate: a figure that disagreed with
+      every other tool on the network would be argued with rather than acted on. The test that
+      proves this is load-bearing feeds it `[10,10,30]` and `[10,30,10]` — identical sets,
+      1.25 ms against 2.422 ms — and it is the one that fails when the estimator is replaced by
+      a spread. Fewer than two replies gaps rather than reporting zero, because one reply has no
+      variation and "perfectly stable" is the opposite of what a link that answered once in
+      twenty is doing.
+
+      **`runPing` moved to `support/ping.ts` with the second caller**, so the abort handling and
+      the message that names the missing binary are not duplicated.
+
+      **The port set counts rather than judges, and is deliberately not a scanner.** "These five
+      must be open" is a back-end pool — five Port sensors would be five alarms for one outage —
+      and "this range must stay closed" is a firewall canary that wants zero. The same sensor
+      does both because it reports the count and leaves the verdict to a limit on the channel.
+      Sixty-four ports is the cap: enough for either job, and small enough that a probe cannot
+      become the thing that trips somebody's intrusion detection every sixty seconds. A real
+      scan is `nmap`, run by a person, once. A port a firewall *drops* counts as closed, because
+      from the outside it is.
+
+      Verified live against `ms-target`: `20-25,161,443,8080` reads "1 of 9 open: 22" at 11.11%
+      (161 is UDP and correctly not open over TCP), and ten packets give 0.059 ms of jitter
+      against a 0.062–0.391 ms range — well under the spread, which is the estimator working.
 - [ ] **T-23 — Sensor type authoring guide** · S · P-05 · Documentation plus a worked example,
       proving a new type is a one-file, half-day job.
 

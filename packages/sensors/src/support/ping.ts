@@ -175,3 +175,92 @@ export function summarise(outcome: PingOutcome): PingStatistics {
 function round(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
+
+/**
+ * Jitter, by RFC 3550's estimator (`T-22`).
+ *
+ * **The standard one rather than a simpler mean deviation, because the people who care about
+ * jitter already have a number in their heads.** RFC 3550 §6.4.1 is what RTP reports, what a
+ * VoIP engineer quotes, and what every other tool on the network prints; a sensor whose figure
+ * disagreed with all of them would be argued with rather than acted on, however defensible the
+ * arithmetic.
+ *
+ * `J = J + (|D(i-1,i)| - J) / 16`, where D is the difference between consecutive round-trip
+ * times. The smoothing means a single late packet nudges the figure rather than spiking it,
+ * which is the point — one slow reply is not a jittery link.
+ *
+ * Null when fewer than two replies came back: jitter is a property of the *gaps* between
+ * samples, so one sample has none, and reporting zero would say "perfectly stable" about a link
+ * that answered once.
+ */
+export function jitterOf(times: readonly number[]): number | null {
+  if (times.length < 2) return null;
+  let jitter = 0;
+  for (let at = 1; at < times.length; at += 1) {
+    const difference = Math.abs((times[at] ?? 0) - (times[at - 1] ?? 0));
+    jitter += (difference - jitter) / 16;
+  }
+  return round(jitter);
+}
+
+export interface PingRun {
+  readonly output: string;
+  /** Something worth adding to a failure message: stderr, or why the process ended. */
+  readonly detail: string;
+}
+
+/**
+ * Spawns `ping` and collects what it said.
+ *
+ * Here rather than in `icmp-ping.ts` since `T-22` added a second caller: `icmp.jitter` needs the
+ * identical spawn semantics — the abort handling, the ENOENT message naming the binary, and the
+ * rule that a non-zero exit is a result rather than an error — and a second copy of those would
+ * be a second set of failure messages for the same failures.
+ *
+ * A non-zero exit is not an error here: ping exits 1 when nothing replied, which is a perfectly
+ * ordinary result that the caller reads out of the output. Only being unable to *run* it is.
+ */
+export async function runPing(
+  command: string,
+  args: readonly string[],
+  signal: AbortSignal,
+): Promise<PingRun> {
+  // Imported here rather than at the top of the module: the core loads this catalogue for
+  // schemas and channel declarations and never calls execute, so it should not pay for the
+  // module graph behind it (docs/adding-a-sensor-type.md).
+  const { spawn } = await import('node:child_process');
+
+  return new Promise<PingRun>((resolve, reject) => {
+    // Node kills the process when the signal aborts, which is how this check honours
+    // `ctx.signal` without a race of its own.
+    const child = spawn(command, [...args], { signal, windowsHide: true });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (stdout += chunk));
+    child.stderr.on('data', (chunk: string) => (stderr += chunk));
+
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (signal.aborted) {
+        reject(new Error(`the check was cancelled before ${command} finished`));
+        return;
+      }
+      if (error.code === 'ENOENT') {
+        // A probe running in a minimal container is the usual cause, and it fails identically
+        // on every check until someone installs the binary — so say which binary.
+        reject(new Error(`the "${command}" binary is not available on this probe`));
+        return;
+      }
+      reject(new Error(`could not run ${command}: ${error.message}`));
+    });
+
+    child.on('close', (code, killSignal) => {
+      const detail =
+        stderr.trim().split('\n')[0] ??
+        (killSignal === null ? `exit ${String(code ?? 'unknown')}` : `killed by ${killSignal}`);
+      resolve({ output: `${stdout}\n${stderr}`, detail: stderr.trim() === '' ? '' : detail });
+    });
+  });
+}

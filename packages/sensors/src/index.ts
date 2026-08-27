@@ -53,6 +53,8 @@ import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
 import { dnsRecord } from './types/dns-record.js';
+import { icmpJitter } from './types/icmp-jitter.js';
+import { portRange } from './types/port-range.js';
 import { httpAdvanced } from './types/http-advanced.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
@@ -85,6 +87,8 @@ import { sshScript } from './types/ssh-script.js';
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,
   dnsRecord,
+  icmpJitter,
+  portRange,
   httpAdvanced,
   httpContent,
   httpRequest,
