@@ -190,6 +190,10 @@ export class IdentifyRunner {
         {
           timeoutMs: run.job.timeoutMs,
           community: run.job.community,
+          // The level chose these (`D-06`). Absent means a core that predates levels, and
+          // `identify` falls back to the standard set — which is what such a core would have
+          // meant anyway.
+          ...(run.job.ports === undefined ? {} : { ports: run.job.ports }),
         },
         this.#deps.sources,
       );

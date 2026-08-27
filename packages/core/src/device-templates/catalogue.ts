@@ -113,9 +113,19 @@ export class DeviceTemplateCatalogue {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  /** Every template that applies to this fingerprint, most specific first. */
-  match(fingerprint: Fingerprint): TemplateMatchResult[] {
-    return matchTemplates(fingerprint, this.all());
+  /**
+   * Every template that applies to this fingerprint, most specific first.
+   *
+   * `only` restricts the run to a named set (`D-06`). Empty or absent means all of them, which
+   * is what almost every run wants — a filter is for the operator who has written templates for
+   * their estate and does not want the shipped ones creating anything.
+   */
+  match(fingerprint: Fingerprint, only?: ReadonlySet<string>): TemplateMatchResult[] {
+    const candidates =
+      only === undefined || only.size === 0
+        ? this.all()
+        : this.all().filter((one) => only.has(one.id));
+    return matchTemplates(fingerprint, candidates);
   }
 
   /**
@@ -134,8 +144,9 @@ export class DeviceTemplateCatalogue {
   plan(
     fingerprint: Fingerprint,
     availableCredentials: ReadonlySet<string> = new Set(),
+    only?: ReadonlySet<string>,
   ): { sensors: SensorSpec[]; templates: TemplateMatchResult[]; tags: string[] } {
-    const matched = this.match(fingerprint);
+    const matched = this.match(fingerprint, only);
     const sensors: SensorSpec[] = [];
     const seen = new Set<string>();
     const tags = new Set<string>();

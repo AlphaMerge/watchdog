@@ -401,7 +401,7 @@ Template features:
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
 | **Auto-discovery, 3 stages**        | 1) ping sweep for live hosts, 2) identify each host via SNMP/WMI/other, 3) create the matching sensor set | `[V1]` |
 | IP range scanning                   | PRTG supports up to 65,536 addresses per discovery (which can run for days)                               | `[V1]` |
-| Discovery levels                    | From "standard, ping only" through "detailed, all sensor types"                                           | `[V1]` |
+| Discovery levels                    | Ping only, standard, detailed — with a time estimate per level before starting (`D-06`)                    | `[V1]` |
 | **Device templates**                | Named recommended sensor sets per device class; built-in plus user-authored                               | `[V1]` |
 | Scheduled rediscovery               | Hourly / daily / weekly, optionally auto-creating newly appeared devices. Off by default                  | `[V1]` |
 | Discovery results logged as tickets | `[V2]`                                                                                                    |

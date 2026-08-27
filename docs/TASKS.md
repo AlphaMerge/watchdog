@@ -4331,8 +4331,50 @@ because each is a decision rather than a defect:
       the device — and the Ping sensor itself pointing at itself with `holding: false`, which is
       `M-11`'s `a.master_id <> o.id` keeping the master scanning while its dependents are paused.
       PRTG carried that bug through v19.1.
-- [ ] **D-06 — Discovery levels** · M · D-04 · Ping-only through detailed, with time estimates
+- [x] **D-06 — Discovery levels** · M · D-04 · Ping-only through detailed, with time estimates
       shown before starting.
+
+      **D-06 outcome.** Three levels, and each is a real trade of time against what it finds
+      rather than a slider with names on it. `ping` sweeps and stops. `standard` asks a dozen
+      ports, reverse DNS and the SNMP system group. `detailed` asks about thirty-two ports and
+      waits twice as long for each, which is worth it where hosts are slow or firewalls drop
+      rather than refuse. The extra ports were chosen because each one changes what gets created
+      — a port no template mentions and no classifier rule reads costs a connection per host and
+      tells nobody anything, which is the difference between a discovery level and a port scan.
+
+      **The level table lives in `@ms/shared` and the job carries its choices**, so the estimate
+      an operator was shown is about the run that actually happens. `D-02` had identification
+      using the *sweep's* timeout, which made `detailed` no more patient than `standard`; the
+      level's own budget is sent now, along with its ports.
+
+      **The estimate is a range, and the arithmetic is the interesting part.** The two halves of
+      a run pull in opposite directions: an address that does not answer the sweep costs a full
+      timeout, so an *empty* range is the sweep's worst case; one that does answer costs almost
+      nothing there and then has to be identified. Written out, the cost is linear in the
+      fraction alive, so the two endpoints bracket every possible outcome and no hit rate has to
+      be guessed at. **The first version got this wrong** — it added the two halves' worst cases
+      together and reported "33 to 33 seconds" for a /24 where the answer for a half-alive
+      network is 20, a range that does not contain the truth. There is now a test that walks the
+      model across seven hit rates and asserts every one falls inside the bracket.
+
+      A mutation found the estimate's `if (level.identify)` guard was unreachable: a level that
+      does not identify has a timeout of zero, so the guard said the same thing twice. Removed,
+      with the table's invariant asserted instead — one mechanism and one test, rather than two
+      mechanisms that can drift.
+
+      **Templates are a filter rather than a fourth level.** "Detailed, but only these templates"
+      is a thing somebody wants and a level could not express it. Empty means all of them, and a
+      run filtered to templates that match nothing creates the device and no sensors — honest
+      rather than helpful, because quietly falling back to the generic set the operator excluded
+      would be worse.
+
+      The migration renames `identify` to `standard` in one place, rather than leaving a reader
+      in the service that would live for ever and that nobody could safely delete.
+
+      Twelve mutations, all killed. Verified live: the preview reports 1–8 s, 8–32 s and 8–64 s
+      for a /24, and 17, 136 and 273 minutes for a /16 — which is PRTG's "may take days" warning
+      with a number on it. And a detailed run against the dev network found ports the standard
+      run had not: `8080` on two hosts and `135` on the SQL Server.
 - [ ] **D-07 — Scheduled rediscovery** · M · D-04, M-09 · Hourly/daily/weekly, **off by default**,
       with optional auto-creation of newly appeared devices.
 - [ ] **D-08 — Discovery run summary** · S · D-04 · Scanned, found, created, errors — persisted

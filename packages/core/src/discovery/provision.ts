@@ -118,11 +118,13 @@ export class ProvisionService {
     }
 
     const credentials = await this.#credentialsFor(input.run.groupId);
+    // Empty means every template, which is what almost every run wants (`D-06`).
+    const only = new Set(input.run.templates);
 
     for (const host of input.hosts) {
       try {
         const fingerprint = host.fingerprint ?? unidentified(host.address);
-        const plan = this.#templates.plan(fingerprint, credentials);
+        const plan = this.#templates.plan(fingerprint, credentials, only);
 
         const existing = index.find(host.address, fingerprint.reverseName);
         let deviceId: number;

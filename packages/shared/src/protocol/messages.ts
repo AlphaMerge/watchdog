@@ -185,6 +185,15 @@ export interface IdentifyJob {
   timeoutMs: number;
   concurrency: number;
   /**
+   * TCP ports to ask about, from the run's level (`D-06`).
+   *
+   * Sent rather than left to the probe's own default, so the level decides in one place and the
+   * estimate an operator was shown is about the run that actually happens. Absent on a probe
+   * built before `D-06`, which falls back to its own list — the standard set, which is what
+   * such a probe would have used anyway.
+   */
+  ports?: number[];
+  /**
    * The SNMP community to try, or empty to skip SNMP.
    *
    * The one credential identification has. A community is not a secret in any useful sense —
@@ -721,6 +730,12 @@ const coreToProbeSchema = {
             timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
             concurrency: { type: 'integer', minimum: 1, maximum: 128 },
             community: { type: 'string', maxLength: 128 },
+            // Optional, so a probe and a core one version apart still agree on the message.
+            ports: {
+              type: 'array',
+              maxItems: 64,
+              items: { type: 'integer', minimum: 1, maximum: 65535 },
+            },
           },
           required: ['runId', 'addresses', 'cursor', 'timeoutMs', 'concurrency', 'community'],
           additionalProperties: false,

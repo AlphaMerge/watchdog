@@ -1,7 +1,13 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { IpRangeError, parseIpRange } from '@ms/shared';
+import {
+  DISCOVERY_LEVELS,
+  estimateSeconds,
+  IpRangeError,
+  parseIpRange,
+  type DiscoveryLevel,
+} from '@ms/shared';
 import { DiscoveryError } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
@@ -38,7 +44,8 @@ const runSchema = {
       type: 'string',
       enum: ['queued', 'running', 'identifying', 'done', 'cancelled', 'failed'],
     },
-    level: { type: 'string', enum: ['ping', 'identify'] },
+    level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
+    templates: { type: 'array', items: { type: 'string' } },
     identified: { type: 'integer' },
     devicesCreated: { type: 'integer' },
     devicesMatched: { type: 'integer' },
@@ -75,10 +82,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     {
       schema: {
         tags: ['discovery'],
-        summary: 'What a range means, before starting a run',
+        summary: 'What a range means, and what each level would cost',
         description:
-          'Parses a range and reports its size and a time estimate. The same parser the run ' +
-          'uses, so a range that previews is a range that will start.',
+          'Parses a range and estimates every level, so an operator picks one knowing what it ' +
+          'costs rather than finding out. The same parser and the same level table the run ' +
+          'uses, so a range that previews is a range that will start and an estimate is about ' +
+          'the run that actually happens.',
         body: {
           type: 'object',
           required: ['range'],
@@ -93,11 +102,37 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['range', 'total', 'estimateSeconds'],
+            required: ['range', 'total', 'levels'],
             properties: {
               range: { type: 'string' },
               total: { type: 'integer' },
-              estimateSeconds: { type: 'integer' },
+              levels: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['id', 'name', 'description', 'minSeconds', 'maxSeconds', 'ports'],
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    description: { type: 'string' },
+                    minSeconds: {
+                      type: 'integer',
+                      description:
+                        'If every address answers: the sweep is quick and every host is identified.',
+                    },
+                    maxSeconds: {
+                      type: 'integer',
+                      description:
+                        'If none do: the sweep pays a full timeout each and there is nothing to identify.',
+                    },
+                    ports: {
+                      type: 'integer',
+                      description: 'How many ports each host is asked about.',
+                    },
+                  },
+                },
+              },
             },
           },
         },
@@ -106,16 +141,29 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     (request: FastifyRequest) => {
       const body = request.body as { range: string; timeoutMs?: number; concurrency?: number };
       const range = parse(body.range);
-      const timeoutMs = body.timeoutMs ?? 1_000;
-      const concurrency = body.concurrency ?? 32;
+      const sweepTimeoutMs = body.timeoutMs ?? 1_000;
+      const sweepConcurrency = body.concurrency ?? 32;
       return {
         range: range.text,
         total: range.size,
-        // The worst case, deliberately: every address timing out is what a sweep of an empty
-        // range costs, and it is the number that stops somebody starting a /16 at 16:55 on a
-        // Friday. A range that is mostly alive finishes far sooner, which is a pleasant surprise
-        // rather than a broken promise.
-        estimateSeconds: Math.ceil((range.size * timeoutMs) / concurrency / 1_000),
+        levels: DISCOVERY_LEVELS.map((level) => {
+          const estimate = estimateSeconds({
+            level: level.id,
+            addresses: range.size,
+            sweepTimeoutMs,
+            sweepConcurrency,
+            // The bound the service uses when it dispatches identification (`D-02`).
+            identifyConcurrency: 8,
+          });
+          return {
+            id: level.id,
+            name: level.name,
+            description: level.description,
+            minSeconds: estimate.min,
+            maxSeconds: estimate.max,
+            ports: level.ports.length,
+          };
+        }),
       };
     },
   );
@@ -145,12 +193,21 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000 },
             level: {
               type: 'string',
-              enum: ['ping', 'identify'],
-              default: 'identify',
+              enum: ['ping', 'standard', 'detailed'],
+              default: 'standard',
               description:
-                '`ping` finds the addresses and stops. `identify` also asks each of them what ' +
-                'it is — reverse DNS, a bounded set of ports, an SNMP system group and any ' +
-                'banner a service volunteers — which is what `D-03` matches templates against.',
+                'How hard to look. `POST /discovery/preview` reports what each one costs on ' +
+                'this range, which is worth reading before starting a detailed sweep of a /16.',
+            },
+            templates: {
+              type: 'array',
+              maxItems: 100,
+              default: [],
+              items: { type: 'string', minLength: 1, maxLength: 100 },
+              description:
+                'Template ids this run may use. Empty means all of them. A filter rather than ' +
+                'a fourth level, because “detailed, but only these templates” is a thing ' +
+                'somebody wants and a level could not express it.',
             },
             snmpCommunity: {
               type: 'string',
@@ -176,8 +233,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         timeoutMs?: number;
         concurrency?: number;
         ratePerSecond?: number;
-        level?: 'ping' | 'identify';
+        level?: DiscoveryLevel;
         snmpCommunity?: string;
+        templates?: string[];
       };
       parse(body.range);
       const run = await discovery.start(body);

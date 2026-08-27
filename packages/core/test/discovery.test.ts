@@ -560,4 +560,79 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     assert.equal(error.status, 400);
     assert.equal(new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', 'nope').status, 404);
   });
+
+  /**
+   * Discovery levels (`D-06`).
+   *
+   * A level is a real trade of time against what it finds, and the two halves of that live in
+   * different places: the level table decides what to ask, and the estimate says what it costs.
+   * What is asserted here is that the run actually carries the level's choices to the probe —
+   * an estimate about a run that then behaves differently is worse than no estimate.
+   */
+  describe('levels', () => {
+    const sweptAndDone = async (level: 'ping' | 'standard' | 'detailed') => {
+      const record = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level });
+      await discovery.progress(record.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      sent = [];
+      await discovery.finished(record.id, 'done', 6, '');
+      return record;
+    };
+
+    it('defaults to standard', async () => {
+      assert.equal((await start()).level, 'standard');
+    });
+
+    it('stops after the sweep at ping level', async () => {
+      const record = await sweptAndDone('ping');
+      assert.equal((await mustGet(record.id)).status, 'done');
+      assert.equal(sent.length, 0, 'and asked the probe nothing further');
+    });
+
+    it('sends the level’s ports and its own timeout, not the sweep’s', async () => {
+      // A sweep's timeout is how long to wait for an ICMP echo; identification's is how long to
+      // wait for a TCP handshake, a resolver and an SNMP agent. Conflating them made `detailed`
+      // no more patient than `standard`.
+      const standard = await sweptAndDone('standard');
+      const first = sent.at(-1);
+      assert.ok(first !== undefined && first.kind === 'identify');
+      const standardPorts = first.job.ports ?? [];
+      assert.ok(standardPorts.length > 0);
+      const standardTimeout = first.job.timeoutMs;
+
+      // One run per probe at a time, so this one has to finish before the next is offered.
+      await discovery.identified(standard.id, 1, []);
+      await discovery.identifyFinished(standard.id, 'done', '');
+      assert.equal((await mustGet(standard.id)).status, 'done');
+
+      await sweptAndDone('detailed');
+      const second = sent.at(-1);
+      assert.ok(second !== undefined && second.kind === 'identify');
+      assert.ok(
+        (second.job.ports ?? []).length > standardPorts.length,
+        'detailed asks about more ports',
+      );
+      assert.ok(second.job.timeoutMs > standardTimeout, 'and waits longer for each');
+    });
+
+    it('records which templates a run may use, empty meaning all', async () => {
+      const all = await start();
+      assert.deepEqual(all.templates, []);
+
+      const some = await discovery.start({
+        groupId,
+        probeId,
+        range: '10.0.0.0/29',
+        templates: ['acme.switch', 'acme.router'],
+      });
+      assert.deepEqual((await mustGet(some.id)).templates, ['acme.switch', 'acme.router']);
+    });
+
+    it('reads a level it does not know as standard rather than refusing the run', async () => {
+      // A newer core wrote the row and an older one is reading it. Doing the sensible thing
+      // beats a run that cannot be resumed at all.
+      const record = await start();
+      await db.query(`UPDATE discovery_run SET level = 'ping' WHERE id = $1`, [record.id]);
+      assert.equal((await mustGet(record.id)).level, 'ping');
+    });
+  });
 });

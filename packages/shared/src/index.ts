@@ -84,3 +84,5 @@ export {
 export type { IpRange, IpSpan } from './net/ip-range.js';
 export { classify, enterpriseOf, IDENTIFY_PORTS } from './net/fingerprint.js';
 export type { DeviceKind, Evidence, Fingerprint, OpenPort } from './net/fingerprint.js';
+export { DISCOVERY_LEVELS, estimateSeconds, levelDefinition } from './net/discovery-levels.js';
+export type { DiscoveryLevel, EstimateInput, LevelDefinition } from './net/discovery-levels.js';

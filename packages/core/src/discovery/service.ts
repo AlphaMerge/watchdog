@@ -1,4 +1,5 @@
 import {
+  levelDefinition,
   parseIpRange,
   type Fingerprint,
   type IdentifyJob,
@@ -6,7 +7,7 @@ import {
   type SweepHost,
   type SweepJob,
 } from '@ms/shared';
-import type { Logger } from '@ms/shared';
+import type { DiscoveryLevel, Logger } from '@ms/shared';
 import { DiscoveryError } from './errors.js';
 
 /**
@@ -46,8 +47,10 @@ export interface DiscoveryRunRow {
   found: number;
   failed: number;
   status: 'queued' | 'running' | 'identifying' | 'done' | 'cancelled' | 'failed';
-  /** `ping` stops after the sweep; `identify` runs D-02's second stage. D-06 adds more. */
-  level: 'ping' | 'identify';
+  /** How hard this run looks (`D-06`). `ping` stops after the sweep. */
+  level: DiscoveryLevel;
+  /** Which templates provisioning may use, empty meaning all of them (`D-06`). */
+  templates: string[];
   identified: number;
   identifyCursor: number;
   snmpCommunity: string;
@@ -96,8 +99,9 @@ export interface StartRequest {
   concurrency?: number;
   ratePerSecond?: number;
   createdBy?: number;
-  level?: 'ping' | 'identify';
+  level?: DiscoveryLevel;
   snmpCommunity?: string;
+  templates?: readonly string[];
 }
 
 /** How many hosts one `identify-start` names, so a /16 does not become a megabyte of addresses. */
@@ -169,8 +173,8 @@ export class DiscoveryService {
     const rows = await this.#db.query<Record<string, unknown>>(
       `INSERT INTO discovery_run
          (group_id, probe_id, range_text, total, timeout_ms, concurrency, rate_per_second,
-          created_by, level, snmp_community)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          created_by, level, snmp_community, templates)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         request.groupId,
@@ -181,8 +185,9 @@ export class DiscoveryService {
         request.concurrency ?? 32,
         request.ratePerSecond ?? 0,
         request.createdBy ?? null,
-        request.level ?? 'identify',
+        request.level ?? 'standard',
         request.snmpCommunity ?? '',
+        [...(request.templates ?? [])],
       ],
     );
     const row = rows[0];
@@ -320,7 +325,12 @@ export class DiscoveryService {
     // a sweep that found nothing has nothing to identify.
     if (ending === 'done') {
       const run = await this.get(runId);
-      if (run !== null && run.status === 'running' && run.level === 'identify' && run.found > 0) {
+      if (
+        run !== null &&
+        run.status === 'running' &&
+        levelDefinition(run.level).identify &&
+        run.found > 0
+      ) {
         await this.#db.query(
           `UPDATE discovery_run SET status = 'identifying', cursor = GREATEST(cursor, $2)
            WHERE id = $1 AND status = 'running'`,
@@ -417,7 +427,11 @@ export class DiscoveryService {
         // Zero, not the run's cursor: the batch *is* the remaining work, so the probe counts
         // from the start of what it was handed and the core adds its own offset back on.
         cursor: 0,
-        timeoutMs: Math.max(1_000, run.timeoutMs),
+        // The level's own budget, not the sweep's: a sweep's timeout is how long to wait for an
+        // ICMP echo, and identification's is how long to wait for a TCP handshake, a resolver
+        // and an SNMP agent. Conflating them made `detailed` no more patient than `standard`.
+        timeoutMs: levelDefinition(run.level).identifyTimeoutMs,
+        ports: [...levelDefinition(run.level).ports],
         // Its own bound, far below the sweep's: each host here opens a dozen TCP connections, a
         // UDP socket and a resolver query, and thirty-two of those at once is four hundred file
         // descriptors and a burst that looks exactly like a port scan to anything watching.
@@ -682,7 +696,8 @@ function read(row: Record<string, unknown>): DiscoveryRunRow {
     found: Number(row['found']),
     failed: Number(row['failed']),
     status: row['status'] as DiscoveryRunRow['status'],
-    level: row['level'] === 'ping' ? 'ping' : 'identify',
+    level: readLevel(row['level']),
+    templates: Array.isArray(row['templates']) ? (row['templates'] as string[]) : [],
     identified: Number(row['identified'] ?? 0),
     identifyCursor: Number(row['identify_cursor'] ?? 0),
     devicesCreated: Number(row['devices_created'] ?? 0),
@@ -735,4 +750,9 @@ function readFingerprint(value: unknown): Fingerprint | null {
       ? (record['evidence'] as unknown[]).filter((one): one is string => typeof one === 'string')
       : [],
   };
+}
+
+/** A level from the database, defaulting rather than throwing — see `levelDefinition`. */
+function readLevel(value: unknown): DiscoveryLevel {
+  return value === 'ping' || value === 'detailed' ? value : 'standard';
 }

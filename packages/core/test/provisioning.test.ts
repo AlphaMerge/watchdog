@@ -474,6 +474,45 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
     });
   });
 
+  describe('the template filter', () => {
+    it('uses every template when none are named', async () => {
+      const record = await run();
+      const report = await provision([host('10.0.0.1', { ports: ports(80) })], record);
+      // `test.generic` and `test.web` both match; both name Ping, which deduplicates to one.
+      assert.equal(report.sensorsCreated, 1);
+    });
+
+    it('uses only the templates a run named', async () => {
+      // A filter rather than a fourth level (`D-06`), because "detailed, but only these
+      // templates" is a thing somebody wants and a level could not express it.
+      credentials = new Set(['snmp']);
+      const record = await discovery.start({
+        groupId,
+        probeId,
+        range: '10.0.0.0/29',
+        templates: ['test.generic'],
+      });
+      const report = await provision([host('10.0.0.1', { sysDescr: 'Linux one 5.15' })], record);
+      assert.deepEqual(report.devices[0]?.sensors, ['Ping'], 'test.linux was not consulted');
+    });
+
+    it('creates nothing at all when the named templates match nothing', async () => {
+      // Honest rather than helpful: a run filtered to templates that do not apply should say so
+      // by creating nothing, not by quietly falling back to the generic set the operator
+      // excluded.
+      const record = await discovery.start({
+        groupId,
+        probeId,
+        range: '10.0.0.0/29',
+        templates: ['test.web'],
+      });
+      const report = await provision([host('10.0.0.1')], record);
+      assert.equal(report.devicesCreated, 1, 'the device is still made');
+      assert.deepEqual(report.devices[0]?.sensors, []);
+      assert.equal(report.mastersSet, 0);
+    });
+  });
+
   describe('when something goes wrong', () => {
     it('records a sensor that cannot be created and makes the rest anyway', async () => {
       // **The defect this found live.** A built-in template named `snmp.diskfree` without the
