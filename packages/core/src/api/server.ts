@@ -38,6 +38,7 @@ import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
+import type { RediscoveryService } from '../discovery/rediscovery.js';
 import type { Actor } from '../objects/audit.js';
 import type { ScheduleService } from '../schedules/service.js';
 import type { TemplateService } from '../notifications/templates.js';
@@ -78,6 +79,8 @@ export interface ApiServerOptions {
   deviceTemplates?: DeviceTemplateCatalogue;
   /** Absent until D-04 is wired; the provision route then does not exist. */
   provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
+  /** Absent until D-07 is wired; the rediscovery routes then do not exist. */
+  rediscovery?: RediscoveryService;
   /**
    * Notification triggers (`N-01`).
    *
@@ -135,6 +138,7 @@ export class ApiServer {
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
   readonly #provision: ApiServerOptions['provision'];
+  readonly #rediscovery: RediscoveryService | undefined;
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -167,6 +171,7 @@ export class ApiServer {
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
     this.#provision = options.provision;
+    this.#rediscovery = options.rediscovery;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -322,6 +327,7 @@ export class ApiServer {
           await scope.register(discoveryRoutes, {
             discovery: this.#discovery,
             ...(this.#provision === undefined ? {} : { provision: this.#provision }),
+            ...(this.#rediscovery === undefined ? {} : { rediscovery: this.#rediscovery }),
           });
         }
         if (this.#deviceTemplates !== undefined) {

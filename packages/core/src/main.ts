@@ -63,6 +63,8 @@ import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { DiscoveryService } from './discovery/service.js';
 import { ProvisionService, type ProvisionReport } from './discovery/provision.js';
 import { DiscoveryError } from './discovery/errors.js';
+import { RediscoveryService } from './discovery/rediscovery.js';
+import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
@@ -298,6 +300,11 @@ async function serve(): Promise<void> {
   });
   const dependencySync = new DependencySync({ pauses: dependencyPauses, logger });
 
+  // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
+  // may be constrained by a permission window, and what an evaluator needs is the definition
+  // rather than the view a UI wants.
+  const scheduleRepository = new ScheduleRepository();
+
   const service = new ObjectService({
     db,
     repository: new ObjectRepository(),
@@ -321,7 +328,7 @@ async function serve(): Promise<void> {
     states,
     // Read-only: the pause view has to be able to say "held by the office-hours schedule", and
     // a schedule pauses through `sensor_runtime` rather than through `object_pause` (M-09).
-    schedules: new ScheduleRepository(),
+    schedules: scheduleRepository,
     dependencies: dependencyRepository,
     dependencyDelays: dependencyPauses,
     vault,
@@ -540,11 +547,19 @@ async function serve(): Promise<void> {
   // long after both are built.
   // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
   let probeEndpointRef: ProbeEndpoint | undefined;
+  // The same shape for the other direction: a finished run has to reach scheduled rediscovery
+  // (`D-07`), which is built later because it needs this service. A run cannot finish before a
+  // run has started, and no run starts until the API is up.
+  // eslint-disable-next-line prefer-const -- assigned below, once rediscovery exists.
+  let rediscoveryRef: RediscoveryService | undefined;
   const discovery = new DiscoveryService({
     db,
     logger,
     dispatch: (probeObjectId, message) =>
       probeEndpointRef?.sendSweep(probeObjectId, message) ?? false,
+    onFinished: async (runId) => {
+      await rediscoveryRef?.runFinished(runId);
+    },
   });
 
   // Provisioning (`D-04`). Built after the templates and before the API, and it takes the
@@ -587,6 +602,36 @@ async function serve(): Promise<void> {
     return report;
   };
 
+  // Scheduled rediscovery (`D-07`). Off by default in the strongest sense: there is no schedule
+  // until somebody creates one, and a new one is created disabled with auto-provisioning
+  // separately off.
+  const rediscovery = new RediscoveryService({
+    db,
+    logger,
+    discovery,
+    // `M-09`'s calendar as a permission window, read through the repository rather than this
+    // service learning how a schedule is stored.
+    windowFor: async (id) => {
+      // Through the repository the schedule service already holds: what a window needs is the
+      // definition, and `ScheduleView` is the shape a UI wants rather than the shape an
+      // evaluator does.
+      const found = await scheduleRepository.get(db, id);
+      return found?.definition ?? null;
+    },
+    provision: async (runId) => {
+      // The same actor an unattended job always is. `A-01` will give this a real one.
+      await provision(runId, { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' });
+    },
+  });
+  rediscoveryRef = rediscovery;
+  const rediscoverySweep = new RediscoverySweep({ service: rediscovery, logger });
+  rediscoverySweep.start();
+  lifecycle.onShutdown({
+    name: 'rediscovery-sweep',
+    timeoutMs: 2_000,
+    run: () => rediscoverySweep.stop(),
+  });
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -601,6 +646,7 @@ async function serve(): Promise<void> {
     discovery,
     deviceTemplates,
     provision,
+    rediscovery,
     triggers,
     templates,
     deliveryHealth,

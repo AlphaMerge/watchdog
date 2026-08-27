@@ -12,11 +12,14 @@ import { DiscoveryError } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
+import type { RediscoveryService } from '../../discovery/rediscovery.js';
 
 export interface DiscoveryRouteOptions {
   discovery: DiscoveryService;
   /** Absent until D-04 is wired; the provision route then does not exist. */
   provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
+  /** Absent until D-07 is wired; the rediscovery routes then do not exist. */
+  rediscovery?: RediscoveryService;
 }
 
 const idParams = {
@@ -468,6 +471,205 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       return { items: await discovery.list(id, limit ?? 25) };
     },
   );
+
+  if (options.rediscovery !== undefined) {
+    // Under `/discovery`, like everything else here, and `schedules` rather than `rediscovery`
+    // because it is the resource's name and the prefix already says which kind. It sits beside
+    // `/discovery/:id`, whose `:id` is a run: a static segment wins over a parametric one in
+    // Fastify's router, so the two cannot collide however they are ordered here. **Not `M-09`'s
+    // `/schedules`** — those are weekly windows for pausing sensors, and one of them may be
+    // attached to one of these as a permission window, which is the only relation they have.
+    const rediscovery = options.rediscovery;
+    const scheduleSchema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'groupId', 'name', 'enabled', 'range', 'cadence', 'description'],
+      properties: {
+        id: { type: 'integer' },
+        groupId: { type: 'integer' },
+        probeId: { type: 'integer' },
+        name: { type: 'string' },
+        enabled: { type: 'boolean' },
+        range: { type: 'string' },
+        level: { type: 'string' },
+        templates: { type: 'array', items: { type: 'string' } },
+        snmpCommunity: { type: 'string' },
+        timeoutMs: { type: 'integer' },
+        concurrency: { type: 'integer' },
+        ratePerSecond: { type: 'number' },
+        cadence: { type: 'string' },
+        cadenceMinute: { type: 'integer' },
+        cadenceWeekday: { type: 'integer' },
+        timezone: { type: ['string', 'null'] },
+        autoProvision: { type: 'boolean' },
+        scheduleId: { type: ['integer', 'null'] },
+        lastRunAt: { type: ['string', 'null'] },
+        lastRunId: { type: ['integer', 'null'] },
+        nextRunAt: { type: ['string', 'null'] },
+        description: { type: 'string' },
+      },
+    } as const;
+
+    app.get(
+      '/discovery/schedules',
+      {
+        schema: {
+          tags: ['discovery'],
+          summary: 'Rediscovery schedules',
+          description:
+            'Empty on almost every installation, because there is no schedule until somebody ' +
+            'creates one and a new one is created **disabled**. Surprise objects are a support ' +
+            'burden, and a monitoring system that invents devices on its own is one an operator ' +
+            'stops trusting.',
+          querystring: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { groupId: { type: 'integer', minimum: 1 } },
+          },
+          response: {
+            200: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['items'],
+              properties: { items: { type: 'array', items: scheduleSchema } },
+            },
+          },
+        },
+      },
+      async (request: FastifyRequest) => {
+        const { groupId } = request.query as { groupId?: number };
+        return { items: await rediscovery.list(groupId) };
+      },
+    );
+
+    app.post(
+      '/discovery/schedules',
+      {
+        schema: {
+          tags: ['discovery'],
+          summary: 'Create a rediscovery schedule',
+          description:
+            'Created **disabled** unless `enabled` says otherwise, and with `autoProvision` off: ' +
+            'a rediscovery then sweeps and identifies, and an operator reviews the plan at ' +
+            '`GET /discovery/:id/plan` before anything is created. Turning `autoProvision` on is ' +
+            'safe because provisioning is idempotent — it creates what has appeared since and ' +
+            'nothing else.',
+          body: {
+            type: 'object',
+            required: ['groupId', 'probeId', 'name', 'range', 'cadence'],
+            additionalProperties: false,
+            properties: {
+              groupId: { type: 'integer', minimum: 1 },
+              probeId: { type: 'integer', minimum: 1 },
+              name: { type: 'string', minLength: 1, maxLength: 200 },
+              range: { type: 'string', minLength: 1, maxLength: 4000 },
+              cadence: { type: 'string', enum: ['hourly', 'daily', 'weekly'] },
+              cadenceMinute: {
+                type: 'integer',
+                minimum: 0,
+                maximum: 1439,
+                default: 0,
+                description:
+                  'Minutes past the hour for an hourly cadence, past midnight for the others.',
+              },
+              cadenceWeekday: {
+                type: 'integer',
+                minimum: 0,
+                maximum: 6,
+                default: 0,
+                description: '0 is Monday. Read only for a weekly cadence.',
+              },
+              timezone: {
+                type: ['string', 'null'],
+                default: null,
+                description:
+                  'A cadence is a statement about local time — 02:30 has to be 02:30 in both ' +
+                  'halves of the year — so it is stored as one. Null is the core’s own zone.',
+              },
+              level: { type: 'string', enum: ['ping', 'standard', 'detailed'], default: 'standard' },
+              templates: { type: 'array', items: { type: 'string' }, default: [] },
+              snmpCommunity: { type: 'string', maxLength: 128, default: '' },
+              timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000, default: 1_000 },
+              concurrency: { type: 'integer', minimum: 1, maximum: 512, default: 32 },
+              ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000, default: 0 },
+              autoProvision: { type: 'boolean', default: false },
+              scheduleId: {
+                type: ['integer', 'null'],
+                default: null,
+                description:
+                  'A schedule (`M-09`) used as a *permission window*: “weekly, but not during ' +
+                  'the change freeze”. It answers a different question from the cadence — is it ' +
+                  'allowed now, versus when is it next due — which is why both exist.',
+              },
+              enabled: { type: 'boolean', default: false },
+            },
+          },
+          response: { 201: scheduleSchema },
+        },
+      },
+      async (request, reply) => {
+        const created = await rediscovery.create(
+          request.body as Parameters<RediscoveryService['create']>[0],
+        );
+        await reply.code(201).send(created);
+        return reply;
+      },
+    );
+
+    app.post(
+      '/discovery/schedules/:id/enabled',
+      {
+        schema: {
+          tags: ['discovery'],
+          summary: 'Turn a schedule on or off',
+          description:
+            'Enabling computes the next run; disabling clears it, so a schedule that is off ' +
+            'cannot be found by the sweep even if something else went wrong.',
+          params: idParams,
+          body: {
+            type: 'object',
+            required: ['enabled'],
+            additionalProperties: false,
+            properties: { enabled: { type: 'boolean' } },
+          },
+          response: { 200: scheduleSchema },
+        },
+      },
+      async (request: FastifyRequest) => {
+        const { id } = request.params as { id: number };
+        const { enabled } = request.body as { enabled: boolean };
+        const updated = await rediscovery.setEnabled(id, enabled);
+        if (updated === null) {
+          throw new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no rediscovery schedule ${String(id)}`, {
+            context: { id },
+          });
+        }
+        return updated;
+      },
+    );
+
+    app.delete(
+      '/discovery/schedules/:id',
+      {
+        schema: {
+          tags: ['discovery'],
+          summary: 'Delete a schedule',
+          params: idParams,
+          response: { 204: { type: 'null' } },
+        },
+      },
+      async (request, reply) => {
+        const { id } = request.params as { id: number };
+        if (!(await rediscovery.remove(id))) {
+          throw new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no rediscovery schedule ${String(id)}`, {
+            context: { id },
+          });
+        }
+        await reply.code(204).send();
+        return reply;
+      },
+    );
+  }
 }
 
 /** The parser's own sentence reaches the operator, rather than "invalid range". */

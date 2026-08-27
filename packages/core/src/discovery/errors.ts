@@ -8,11 +8,18 @@ import { AppError, type ErrorContext } from '@ms/shared';
  * and nobody notices until a client branches on it.
  */
 export type DiscoveryErrorCode =
-  'DISCOVERY_RANGE_INVALID' | 'DISCOVERY_RUN_NOT_FOUND' | 'DISCOVERY_FAILED';
+  | 'DISCOVERY_RANGE_INVALID'
+  | 'DISCOVERY_RUN_NOT_FOUND'
+  | 'DISCOVERY_SCHEDULE_INVALID'
+  | 'DISCOVERY_FAILED';
 
 export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>> = {
   DISCOVERY_RANGE_INVALID: 400,
   DISCOVERY_RUN_NOT_FOUND: 404,
+  // A cadence the calendar cannot fire (`D-07`): an hourly rediscovery asked for minute 180, a
+  // time zone this build has never heard of. The caller's mistake, and one they can only fix if
+  // we say which value was wrong — a 500 would blame the server and hide the sentence.
+  DISCOVERY_SCHEDULE_INVALID: 400,
   DISCOVERY_FAILED: 500,
 };
 

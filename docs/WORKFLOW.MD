@@ -75,7 +75,13 @@ Rules that matter:
   IPv4 only — a sweep enumerates addresses, and the smallest IPv6 subnet anybody assigns is a
   /64.
 - **Scheduled rediscovery** (hourly/daily/weekly) may auto-create devices that have appeared
-  since. This must be off by default — surprise objects are a support burden.
+  since. This must be off by default — surprise objects are a support burden. `D-07` is off in
+  the strongest sense available: there is no schedule until somebody creates one, a new one is
+  created disabled, and auto-provisioning is a *second* flag that is separately off, so the
+  default behaviour of an enabled schedule is to sweep, identify and leave the plan for an
+  operator to read. A cadence is an **event** — "every Sunday at 03:00" — which is a different
+  question from `M-09`'s weekly *window*, so it is its own small thing and a schedule may be
+  attached alongside it as a permission window: "weekly, but not during the change freeze".
 - **Templates** carry the mapping from fingerprint → sensor set. Users must be able to save
   an existing device's sensor set as a new template.
 - Every discovery run produces an auditable summary: hosts scanned, hosts found, devices

@@ -4375,8 +4375,59 @@ because each is a decision rather than a defect:
       for a /24, and 17, 136 and 273 minutes for a /16 — which is PRTG's "may take days" warning
       with a number on it. And a detailed run against the dev network found ports the standard
       run had not: `8080` on two hosts and `135` on the SQL Server.
-- [ ] **D-07 — Scheduled rediscovery** · M · D-04, M-09 · Hourly/daily/weekly, **off by default**,
+- [x] **D-07 — Scheduled rediscovery** · M · D-04, M-09 · Hourly/daily/weekly, **off by default**,
       with optional auto-creation of newly appeared devices.
+
+      **D-07 outcome.** Off by default in the strongest sense the schema allows: there is no
+      schedule until somebody creates one, a new one is created *disabled*, and
+      `auto_provision` is a **second** flag that is separately off. So the default behaviour of
+      a schedule an operator has switched on is to sweep, identify and leave the plan at
+      `GET /discovery/:id/plan` for somebody to read — `WORKFLOW.MD §2`'s "surprise objects are
+      a support burden" as three independent gates rather than one checkbox. Turning
+      auto-provisioning on is safe only because `D-04` is idempotent: it creates what has
+      appeared since and nothing else.
+
+      **A schedule is a stencil, not a run.** Each firing creates an ordinary `discovery_run`
+      with the schedule's parameters, so `D-01` through `D-06` have no second code path and
+      nothing downstream has to know a run was scheduled. The one thing that does know is
+      `discovery_run.schedule_id`, which is what lets `runFinished` provision a scheduled run
+      and refuse a hand-started one — a run somebody started is theirs to provision, and doing
+      it for them would be creating objects nobody asked for.
+
+      **The cadence is an event and `M-09`'s schedule is a window, and conflating them would
+      have been the easy mistake.** "Every Sunday at 03:00" is not a weekly calendar of active
+      periods, and `isActiveAt` cannot express it — so the cadence is its own small pure module
+      and an `M-09` schedule is available *alongside* it as a permission window: "weekly, but
+      not during the change freeze" is one expression of two mechanisms rather than a third
+      mechanism meaning both. A window that is never open books nothing, which reads as "never"
+      rather than as a crash; a window that has been deleted books *without* it and logs a
+      warning, because a rediscovery that runs when it should not is visible and one that
+      silently never runs again is not.
+
+      **The next firing is searched forward a minute at a time rather than computed**, and that
+      is the whole reason the module exists. Adding 24 hours to 02:30 lands on 03:30 the night
+      the clocks go forward; the test that asks for the run *after* the first one found a daily
+      cadence firing **twice** on the morning they go back, because 01:30 happens twice and both
+      instants have the right local time. `alreadyFired` looks back two hours for an earlier
+      instant with the same local time and skips the duplicate — and hourly is exempt on
+      purpose, since "every hour" on a twenty-five-hour day means twenty-five runs. The scan is
+      bounded at a week plus a day and only runs when a schedule fires or is edited.
+
+      **The next run is booked before the discovery is started**, so a start that throws does not
+      leave the schedule due for ever — one bad configuration would otherwise become a sweep
+      retrying it every minute, which is `D-02`'s stall failure arrived at before it happened
+      rather than after.
+
+      Thirteen mutations, all killed. **Live verification found the routes** — every other path
+      in `routes/discovery.ts` carries its own `/discovery` prefix and these were written at
+      `/rediscovery`, so `GET /discovery/rediscovery` was being answered by `/discovery/:id` with
+      "params/id must be integer" and the POST was a 404. They are `/discovery/schedules` now,
+      which is safe beside `/discovery/:id` because a static segment beats a parametric one.
+      Live verification also found the errors: an invalid cadence threw a bare `AppError`, which
+      `toHttpError` maps to a 500 saying nothing — an hourly cadence asked for minute 180 and an
+      unknown time zone are the caller's mistake, and both answer 400 with the sentence that
+      says which value was wrong. A schedule in `Europe/London` set to 03:00 books
+      `2026-08-28T02:00:00Z`, which is the zone being honoured rather than assumed.
 - [ ] **D-08 — Discovery run summary** · S · D-04 · Scanned, found, created, errors — persisted
       and viewable.
 - [ ] **D-09 — Bulk operations** · M · S-03 · Multi-select edit, clone, move, delete across the

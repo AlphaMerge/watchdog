@@ -82,6 +82,14 @@ export interface DiscoveryServiceOptions {
   logger: Logger;
   /** Sends a message to a connected probe. False when that probe is not connected. */
   dispatch: (probeId: number, message: DispatchMessage) => boolean;
+  /**
+   * Told when a run reaches `done`, so `D-07` can provision one it scheduled.
+   *
+   * A callback rather than this service knowing about rediscovery: a run does not care why it
+   * was started, and giving it a reason to would put a scheduling concern inside the thing that
+   * sweeps a network.
+   */
+  onFinished?: (runId: number) => Promise<void>;
 }
 
 /** Exactly what the probe endpoint's `sendSweep` takes, so there is one shape and no mapping. */
@@ -127,6 +135,7 @@ export class DiscoveryService {
   readonly #db: Db;
   readonly #logger: Logger;
   readonly #dispatch: DiscoveryServiceOptions['dispatch'];
+  readonly #onFinished: DiscoveryServiceOptions['onFinished'];
   #started = 0;
   #resumed = 0;
   #hostsStored = 0;
@@ -139,6 +148,7 @@ export class DiscoveryService {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'discovery' });
     this.#dispatch = options.dispatch;
+    this.#onFinished = options.onFinished;
   }
 
   stats(): {
@@ -363,6 +373,25 @@ export class DiscoveryService {
       [runId, cursor, ending, message],
     );
     this.#logger.info({ runId, ending, cursor }, 'discovery run ended');
+    if (ending === 'done') await this.#announceFinished(runId);
+  }
+
+  /**
+   * Tells whoever is listening that a run is complete.
+   *
+   * Never lets a listener's failure become the run's: the run *is* finished, the row says so,
+   * and a rediscovery that could not provision is a separate problem with its own log line.
+   */
+  async #announceFinished(runId: number): Promise<void> {
+    if (this.#onFinished === undefined) return;
+    try {
+      await this.#onFinished(runId);
+    } catch (error) {
+      this.#logger.error(
+        { runId, err: error instanceof Error ? error.message : 'unknown' },
+        'a listener failed after a discovery run finished',
+      );
+    }
   }
 
   /**
@@ -416,6 +445,7 @@ export class DiscoveryService {
       );
       this.#logger.info({ runId: run.id }, 'discovery run finished');
       this.#offers.delete(run.id);
+      await this.#announceFinished(run.id);
       return;
     }
 
