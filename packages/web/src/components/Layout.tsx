@@ -8,6 +8,7 @@ const NAV = [
   { to: '/alarms', label: 'Alarms', end: false },
   { to: '/tree', label: 'Tree', end: false },
   { to: '/logs', label: 'Logs', end: false },
+  { to: '/discovery', label: 'Discovery', end: false },
   { to: '/templates', label: 'Templates', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
 ];

@@ -510,3 +510,124 @@ export interface TriggerKind {
   description: string;
   settingsSchema: Record<string, unknown>;
 }
+
+// ── Discovery (`D-01` … `D-10`) ───────────────────────────────────────────────────────────────
+
+export type DiscoveryLevel = 'ping' | 'standard' | 'detailed';
+
+export type DiscoveryStatus =
+  | 'queued'
+  | 'running'
+  | 'identifying'
+  | 'done'
+  | 'cancelled'
+  | 'failed';
+
+/** One level, and what it would cost on the range that was previewed (`D-06`). */
+export interface DiscoveryLevelEstimate {
+  id: DiscoveryLevel;
+  name: string;
+  description: string;
+  /**
+   * The bracket, not a guess.
+   *
+   * The two halves of a run pull in opposite directions — an address that answers nothing costs
+   * a full sweep timeout, one that answers costs almost nothing there and then has to be
+   * identified — so the cost is linear in the fraction alive and these two endpoints contain
+   * every possible outcome. Showing one number would mean picking a hit rate nobody knows.
+   */
+  minSeconds: number;
+  maxSeconds: number;
+  ports: number;
+}
+
+export interface DiscoveryPreview {
+  range: string;
+  total: number;
+  levels: DiscoveryLevelEstimate[];
+}
+
+export interface DiscoveryRun {
+  id: number;
+  groupId: number;
+  probeId: number;
+  range: string;
+  total: number;
+  cursor: number;
+  found: number;
+  failed: number;
+  status: DiscoveryStatus;
+  level: DiscoveryLevel;
+  templates: string[];
+  identified: number;
+  identifyCursor: number;
+  scheduleId: number | null;
+  snmpCommunity: string;
+  devicesCreated: number;
+  devicesMatched: number;
+  sensorsCreated: number;
+  provisionedAt: string | null;
+  message: string;
+  timeoutMs: number;
+  concurrency: number;
+  ratePerSecond: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** What a run did, in one object (`D-08`). */
+export interface DiscoverySummary {
+  runId: number;
+  groupId: number;
+  probeId: number;
+  scheduleId: number | null;
+  range: string;
+  level: DiscoveryLevel;
+  status: DiscoveryStatus;
+  headline: string;
+  scanned: {
+    addresses: number;
+    swept: number;
+    alive: number;
+    unreachable: number;
+    failed: number;
+    identified: number;
+    complete: boolean;
+  };
+  found: {
+    byKind: { kind: string; count: number }[];
+    byVendor: { vendor: string; count: number }[];
+  };
+  created: {
+    devices: number;
+    matched: number;
+    sensors: number;
+    provisionedAt: string | null;
+  };
+  errors: { address: string; problem: string }[];
+  timing: {
+    createdAt: string;
+    startedAt: string | null;
+    finishedAt: string | null;
+    durationMs: number | null;
+    addressesPerSecond: number | null;
+  };
+}
+
+export interface DeviceTemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+  sensorCount: number;
+  overridesBuiltIn?: boolean;
+  /** `built-in`, or the file an operator's own template came from (`D-03`). */
+  source: string;
+}
+
+/** A template that would not load. Reported rather than hidden — see `D-03`. */
+export interface DeviceTemplateProblem {
+  id: string;
+  source: string;
+  problems: string[];
+}

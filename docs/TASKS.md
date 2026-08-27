@@ -4538,8 +4538,69 @@ because each is a decision rather than a defect:
       instruction would have been a trap besides: it is a legitimate stored value for a setting
       whose schema allows one, and a route that read it as a command could never store it. A
       *missing* `value` is now a malformed request rather than being folded into the same case.
-- [ ] **D-10 — Discovery UI** · M · U-03, D-06 · Range entry, level and template selection, live
+- [x] **D-10 — Discovery UI** · M · U-03, D-06 · Range entry, level and template selection, live
       progress, cancel.
+
+      **D-10 outcome.** A `/discovery` page: probe and group, a range box, the three levels with
+      `D-06`'s estimate beside each, templates, an SNMP community, then a progress bar with a
+      cancel button and `D-08`'s headline when it stops.
+
+      **The estimate is shown before the choice, not after it.** That is the whole reason `D-06`
+      exists: an operator picks `detailed` on a /24 knowing it is a minute, and declines it on a
+      /16 knowing it is hours. A level picker without the numbers beside it is the picker PRTG
+      has, and its warning — "may take days" — is true and helps nobody decide anything. Levels
+      are offered cheapest first so the list reads as a ramp and the expensive one is never where
+      a thumb lands first, and anything over ten minutes is flagged, because that is roughly
+      where somebody walks away — and a discovery they walked away from is one whose plan they
+      never read.
+
+      **One progress bar over two phases, and the split is not even.** A run sweeps every address
+      and then identifies only the ones that answered: a /24 with three live hosts is 254 sweeps
+      and 3 identifications. Weighting by count would make the bar leap from 5% to 100% the
+      instant the sweep ended. So the sweep owns a fixed 70% and identification the rest — a bar
+      that moves at a believable rate, which is the only thing a progress bar is for. `ping`
+      never identifies, so its sweep owns the whole bar rather than stopping at 70%.
+
+      **Progress is polled, and that is a decision rather than an omission.** `U-02`'s WebSocket
+      carries sensor state; a discovery run is not a sensor. It lives for minutes, one operator
+      is watching it, and pushing its progress would mean a new message kind, a subscription for
+      it, and a fan-out to every connected client for something one of them cares about. One
+      request every two seconds against an indexed primary key is cheaper, and it stops the
+      moment the run does. The timer is chained from each answer rather than an interval, so a
+      slow reply cannot stack requests behind it.
+
+      **The browser forms no opinion about a range.** An empty box is a local answer; everything
+      else waits for `POST /discovery/preview`, because the core's parser is the only thing that
+      knows what a range means and a second one here would eventually disagree with the one that
+      actually runs. The parser's own sentence is what gets shown — "that is 16,777,214 addresses
+      and one run may sweep 65,536; the usual cause is a /8 where a /24 was meant" is worth far
+      more than "invalid range".
+
+      **Nothing on this page creates anything.** A finished run shows what it found and offers
+      its group; turning that into devices stays behind `POST /discovery/:id/provision`, because
+      `WORKFLOW.MD §2` is explicit about surprise objects and this is the screen where that
+      promise is kept or broken.
+
+      Choosing a probe clears the group, since a group under the previous probe is a selection
+      that still looks valid and that the core would refuse. The Start button says which box is
+      empty rather than being mysteriously grey.
+
+      Twenty mutations, all killed. **Four defects found by driving the page rather than by any
+      test**, and each of a kind a unit test could not reach:
+
+      - Every earlier run wore a "scheduled" badge. `ms:discoveryRun` has
+        `additionalProperties: false`, so `scheduleId` — added to the row in `D-08` but never to
+        the response schema — was *stripped* rather than merely undocumented, and `!== null` was
+        true for all of them. A field missing from that list is a field the API does not return.
+      - The hint under each field was folded into the control's accessible *name*, so a screen
+        reader announced "Range 10.0.0.0/24, 10.0.0.1-10.0.0.50, or a single address, IPv4 only"
+        on every focus. The name is "Range"; the rest is `aria-describedby`. Found by reading
+        the page's accessibility tree, which is the only way this kind of defect is ever found.
+      - "1 seconds" on a /29, and "1 sensors" against a one-sensor template.
+
+      The estimate's unit is chosen from the *low* end of the bracket, not the high one: picking
+      by the high end reported a /16 standard sweep as "0.3–2.3 hours" where `D-06` measured it
+      as 17–136 minutes — the same number, said worse.
 
 ## Phase 8 — Remote probes
 

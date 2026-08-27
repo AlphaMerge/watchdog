@@ -50,6 +50,11 @@ const runSchema = {
     level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
     templates: { type: 'array', items: { type: 'string' } },
     identified: { type: 'integer' },
+    // `additionalProperties: false` here means a field missing from this list is stripped from
+    // the response rather than merely undocumented. `D-10` read a run's `scheduleId` and every
+    // run came back without one, so `!== null` was true for all of them and every row on the
+    // page was labelled "scheduled" — found by looking at the page, not by any test.
+    scheduleId: { type: ['integer', 'null'] },
     devicesCreated: { type: 'integer' },
     devicesMatched: { type: 'integer' },
     sensorsCreated: { type: 'integer' },
