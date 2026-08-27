@@ -213,6 +213,17 @@ export interface SensorType {
    * the type rather than configured per sensor.
    */
   readonly isolation?: 'process';
+  /**
+   * Set when the **core** computes this sensor's readings rather than a probe (`T-21`).
+   *
+   * There is exactly one of these and there should stay that way: a Sensor Factory's inputs are
+   * channel values the core already holds, and asking a probe to compute them would mean
+   * shipping other sensors' history out to every probe that had one. Declared rather than
+   * matched on the id, for the reason `listener` is: the probe configuration path reads this to
+   * leave such a sensor out of every assignment list, and a hardcoded id there would be a rule
+   * to keep in step by hand.
+   */
+  readonly evaluatedBy?: 'core';
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

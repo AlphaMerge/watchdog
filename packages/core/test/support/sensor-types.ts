@@ -63,10 +63,36 @@ const snmpTraffic: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/**
+ * The one type the *core* evaluates rather than a probe (`T-21`).
+ *
+ * Here rather than imported from `@ms/sensors` for the reason the other two are: these tests
+ * assert stored params exactly, and the real type's schema defaults would make them about Ajv.
+ * What matters to the core is `evaluatedBy`, which is what keeps a factory out of every probe's
+ * assignment list.
+ */
+const factory: SensorType = {
+  id: 'core.factory',
+  category: 'Custom',
+  costHint: 'light',
+  evaluatedBy: 'core',
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      channels: { type: 'array' },
+      maxAgeSeconds: { type: 'integer', minimum: 30, maximum: 86_400 },
+    },
+  },
+  channels: () => [{ key: 'value', name: 'Value', unit: '', isPrimary: true }],
+  execute: () => Promise.reject(new Error('a Sensor Factory is evaluated by the core')),
+};
+
 export function testCatalogue(): SensorCatalogue {
   const catalogue = new SensorCatalogue();
   catalogue.register(ping);
   catalogue.register(snmpTraffic);
+  catalogue.register(factory);
   return catalogue.seal();
 }
 

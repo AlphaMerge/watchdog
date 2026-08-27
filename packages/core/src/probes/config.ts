@@ -45,6 +45,14 @@ export interface ProbeConfigOptions {
    */
   vault?: CredentialVault;
   credentialKindsFor?: (sensorType: string) => readonly string[];
+  /**
+   * Whether the *core* evaluates this sensor type rather than a probe (`T-21`).
+   *
+   * Injected like `credentialKindsFor`, and defaulting to "no" for the same reason: this module
+   * is about resolving a configuration, and a test driving it should not have to build a sensor
+   * catalogue to do so. `main.ts` supplies the real answer.
+   */
+  coreEvaluated?: (sensorType: string) => boolean;
 }
 
 /**
@@ -60,6 +68,7 @@ export class ProbeConfigService {
   readonly #resolver: InheritanceResolver;
   readonly #vault: CredentialVault | undefined;
   readonly #credentialKindsFor: (sensorType: string) => readonly string[];
+  readonly #coreEvaluated: (sensorType: string) => boolean;
   /** Rotation markers from the last resolve, keyed by sensor. Never contents — see below. */
   #stamps = new Map<number, string>();
 
@@ -68,6 +77,7 @@ export class ProbeConfigService {
     this.#resolver = options.resolver;
     this.#vault = options.vault;
     this.#credentialKindsFor = options.credentialKindsFor ?? (() => []);
+    this.#coreEvaluated = options.coreEvaluated ?? ((): boolean => false);
   }
 
   /** The probe object a connected GID owns, or null while the GID is unclaimed. */
@@ -128,9 +138,14 @@ export class ProbeConfigService {
       [probeObjectId],
     );
 
-    if (rows.length === 0) return EMPTY_ASSIGNMENTS;
+    // Sensor types the *core* evaluates never go to a probe (`T-21`). Filtered here rather than
+    // in the SQL, and asked of the catalogue rather than matched on an id, for the reason the
+    // probe reads `listener` from it: a hardcoded `core.factory` here would be a second rule to
+    // keep in step by hand the day there is a second such type.
+    const assignable = rows.filter((row) => !this.#coreEvaluated(row.sensor_type));
+    if (assignable.length === 0) return EMPTY_ASSIGNMENTS;
 
-    const sensorIds = rows.map((row) => Number(row.sensor_id));
+    const sensorIds = assignable.map((row) => Number(row.sensor_id));
     // One query per key for the whole branch, not one per sensor: `resolveForObjects` exists
     // for exactly this, and looping the single-object resolver would be rows x keys round trips.
     const [intervals, timeouts] = await Promise.all([
@@ -138,10 +153,10 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>(sensorIds, 'scan.timeoutMs'),
     ]);
 
-    const credentials = await this.#credentialsFor(rows);
+    const credentials = await this.#credentialsFor(assignable);
     const stamps = this.#stamps;
 
-    const sensors: SensorAssignment[] = rows.map((row) => {
+    const sensors: SensorAssignment[] = assignable.map((row) => {
       const sensorId = Number(row.sensor_id);
       const forSensor = credentials.get(sensorId);
       return {

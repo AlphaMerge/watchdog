@@ -99,7 +99,10 @@ describe(
       const server = await serverWith(root);
       const response = await server.app.inject({ method: 'GET', url: '/api/v1/sensor-types' });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(response.json<{ items: unknown[] }>().items.length, 2);
+      // The test catalogue's types, whatever they are — the point is that JSON came back rather
+      // than the single-page app's index.html.
+      assert.ok(response.json<{ items: unknown[] }>().items.length > 0);
+      assert.match(response.headers['content-type'] as string, /application\/json/);
     });
 
     it('caches hashed assets hard and the shell not at all', async () => {

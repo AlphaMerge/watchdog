@@ -81,6 +81,7 @@ import { dbPostgresql } from './types/db-postgresql.js';
 import { exeScript } from './types/exe-script.js';
 import { exeScriptAdvanced } from './types/exe-script-advanced.js';
 import { syslogReceiver } from './types/syslog.js';
+import { coreFactory } from './types/core-factory.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -127,6 +128,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   exeScript,
   exeScriptAdvanced,
   syslogReceiver,
+  coreFactory,
   httpContent,
   httpRequest,
   portTcp,

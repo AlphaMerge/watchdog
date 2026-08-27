@@ -3725,8 +3725,60 @@ because each is a decision rather than a defect:
       "Accepted publickey" correctly excluded and the last three lines shown. Eight mutations
       killed, one of which first survived because "keep the severe ones" and "keep the mild ones"
       both count two out of three — only the per-severity breakdown tells them apart.
-- [ ] **T-21 — Sensor Factory** · L · M-04 · Formula language over other sensors' channels
+- [x] **T-21 — Sensor Factory** · L · M-04 · Formula language over other sensors' channels
       (`channel(id, ch)` arithmetic), its own channels and limits, cycle detection.
+
+      **T-21 outcome.** `core.factory`, and it is **the one sensor type the core evaluates rather
+      than a probe**. It has to be: its inputs are channel values this process already holds, and
+      asking a probe would mean shipping other sensors' history out to every probe that had one.
+      `SensorType.evaluatedBy: 'core'` is the declaration that keeps it out of every assignment
+      list — read from the catalogue, exactly as `listener` and `isolation` are, so there is no
+      sensor id hardcoded in the probe configuration path.
+
+      **The results go through `acceptResults` exactly as a probe's do**, which is the decision
+      everything else falls out of: channel creation, scaling, limits, the state machine,
+      dependencies, notifications. A factory sensor therefore has history, thresholds and alarms
+      with no special case anywhere downstream — which is what makes "one sensor to alarm on
+      instead of twelve" (CLAUDE.md: one outage, one alarm) something an operator can use rather
+      than a slogan.
+
+      **The formula language is hand-written and is deliberately not a sandbox around
+      JavaScript.** `new Function(formula)` would let anybody with sensor-create rights run code
+      in the core process, which holds the vault key and the database — and `support/pattern.ts`
+      already went to real trouble to bound an operator-supplied *regular expression*. So it
+      parses what it accepts and can evaluate nothing else: numbers, five operators, brackets,
+      `channel(id, 'key')`, `status(id)`, and ten functions. Trailing rubbish after a complete
+      expression is refused rather than ignored, because `1 + 2 nonsense` evaluating to 3 is a
+      formula quietly meaning something other than what it says.
+
+      **A gap propagates through the whole expression**, which is the rule the system is built on
+      applied where it is easiest to get wrong: `channel(1,'in') + channel(2,'in')` with sensor 2
+      missing must not report sensor 1's traffic as the total. That is a number which looks like
+      data and is wrong, and it is the failure mode a factory is most likely to produce.
+      `default(…, 0)` is how an operator says otherwise — in the formula, where a reader can see
+      it. A division by zero is a gap too, because a factory going Down over a briefly-zero
+      denominator would be an alarm about arithmetic.
+
+      **A stale reading counts as absent.** A source that stopped reporting leaves its last value
+      behind for ever, and arithmetic over something that stopped being true an hour ago is worse
+      than no number at all.
+
+      **Cycles are refused before anything is evaluated**, not discovered at a stack overflow: a
+      factory over a factory is legitimate and useful, a ring is not, and every member of one
+      fails its check naming the sensors that form it. Within one sweep, factories are evaluated
+      in dependency order, so a factory over a factory sees *this* sweep's value — a layer of
+      staleness per level would be a whole scan interval each.
+
+      **One sweep for the whole installation rather than a scan interval per factory.** They have
+      no device to be polite to and no packet to send: two queries per sweep however many there
+      are, where honouring each sensor's own interval would mean a second scheduler in the core to
+      stagger work cheaper than the staggering. An overrunning sweep is skipped and counted, the
+      same rule the probe's pool follows for a sensor.
+
+      Verified live: a factory over the development tree's two ping sensors reporting
+      `total_rtt=0.201 worst=0.113 up=3; gap had nothing to compute from` — a sum, a maximum, a
+      cluster count from `status()`, and a channel reading a sensor that does not exist correctly
+      blank rather than zero. The probe never received it. Eight mutations killed.
 - [x] **T-22 — Ping Jitter and Port Range** · M · P-08, P-10 · Completes the v1 connectivity set.
 
       **T-22 outcome.** `icmp.jitter` and `port.range`, both reusing what `P-08` and `P-10`

@@ -27,6 +27,8 @@ import { SchedulePauses } from './schedules/pauses.js';
 import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
 import { ScheduleSweep } from './schedules/sweep.js';
+import { FactoryService } from './factory/service.js';
+import { FactorySweep } from './factory/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
 import { AlarmEngine } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
@@ -372,6 +374,33 @@ async function serve(): Promise<void> {
     },
   });
 
+  // Recomputes Sensor Factory sensors (T-21). They are the one type the core evaluates itself:
+  // their inputs are channel values this process already holds, so asking a probe would mean
+  // shipping other sensors' history out to it. The results go through `acceptResults` exactly as
+  // a probe's do, which is what gives a factory sensor history, limits, dependencies and alarms
+  // with no special case anywhere downstream.
+  const factory = new FactoryService({
+    db,
+    logger,
+    ingest: async (results) => {
+      await ingestion.acceptResults('factory', {
+        type: 'results',
+        batchId: `factory-${String(Date.now())}`,
+        results: [...results],
+      });
+    },
+  });
+  const factorySweep = new FactorySweep({ service: factory, logger });
+  factorySweep.start();
+  lifecycle.onShutdown({
+    name: 'factory-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      factorySweep.stop();
+      return Promise.resolve();
+    },
+  });
+
   // Notices when a schedule's window opens or closes (M-09). On the wall-clock minute, which is
   // the resolution a schedule has; an installation that assigns none pays one `LIMIT 1` a
   // minute for it.
@@ -573,6 +602,10 @@ async function serve(): Promise<void> {
       // community string (`A-05`).
       credentialKindsFor: (sensorType) =>
         catalogue.has(sensorType) ? (catalogue.declaration(sensorType).credentialKinds ?? []) : [],
+      // A Sensor Factory is computed here, from readings this process already holds, so it never
+      // appears in a probe's assignment list (`T-21`).
+      coreEvaluated: (sensorType) =>
+        catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
     }),
   });
   configNotifier.attach(probeEndpoint);
