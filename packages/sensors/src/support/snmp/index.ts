@@ -62,6 +62,24 @@ export { SNMP_CREDENTIAL_SCHEMA, snmpParamsSchema } from './schema.js';
 export { snmpCheck, type SnmpCheckOptions } from './check.js';
 
 export {
+  DISK_TYPES,
+  HR,
+  humanBytes,
+  humanDuration,
+  percentOf,
+  storageAt,
+  storageRows,
+  SYS_UPTIME,
+  TICKS_PER_SECOND,
+  TICKS_WRAP_DAYS,
+  UCD,
+  uptimeOf,
+  type StorageAmounts,
+  type StorageRow,
+  type Uptime,
+} from './mibs.js';
+
+export {
   compilePattern,
   extract,
   MATCH_TIMEOUT_MS,

@@ -34,11 +34,15 @@ import { snmpTraffic } from './types/snmp-traffic.js';
 import { snmpCustom } from './types/snmp-custom.js';
 import { snmpCustomString } from './types/snmp-custom-string.js';
 import { snmpTable } from './types/snmp-table.js';
+import { snmpCpu } from './types/snmp-cpu.js';
+import { snmpDiskFree } from './types/snmp-disk-free.js';
+import { snmpMemory } from './types/snmp-memory.js';
+import { snmpUptime } from './types/snmp-uptime.js';
 
 /**
  * The types every installation gets.
  *
- * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three; `T-05` and `T-06` are the
+ * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three; `T-06` (traps) is the
  * rest of the SNMP set.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
@@ -50,6 +54,10 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   snmpCustom,
   snmpCustomString,
   snmpTable,
+  snmpCpu,
+  snmpDiskFree,
+  snmpMemory,
+  snmpUptime,
 ];
 
 export function standardCatalogue(

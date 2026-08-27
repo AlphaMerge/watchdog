@@ -2941,8 +2941,73 @@ because each is a decision rather than a defect:
       array renders in the generated form as `U-08`'s JSON fallback rather than as a repeating
       row of fields; that is `U-12`, not a change to this schema — the schema describes the
       parameter honestly and the form generator is what has the gap.
-- [ ] **T-05 — SNMP CPU / Memory / Disk Free / Uptime** · M · T-01 · Standard MIB sensors with
+- [x] **T-05 — SNMP CPU / Memory / Disk Free / Uptime** · M · T-01 · Standard MIB sensors with
       restart detection on uptime.
+
+      **T-05 outcome.** Four types — `snmp.cpu`, `snmp.memory`, `snmp.diskfree`, `snmp.uptime` —
+      plus `support/snmp/mibs.ts`, which holds the parts of HOST-RESOURCES-MIB and UCD-SNMP-MIB
+      that are *not* obvious from the OID. Every number quoted below was measured against the dev
+      target's own net-snmp agent while writing this; they are in the code comments because they
+      are the argument for the choices.
+
+      **`sysUpTime` is the wrong OID for uptime and is the one everybody reaches for.** It counts
+      from the last time the *network management subsystem* re-initialised, so restarting `snmpd`
+      resets it while the host keeps running. On the dev target it read **32 hours against
+      `hrSystemUptime`'s 8.9 days**, on a box that had not rebooted — a sensor built on it would
+      have raised the exact alarm this type exists to raise, falsely, on the first device it was
+      pointed at. `hrSystemUptime` is preferred, `sysUpTime` is the fallback for hardware with no
+      HOST-RESOURCES-MIB (where the two do restart together, and the sensor says the reading now
+      means something else), and both are read every scan because an agent that restarted alone
+      explains a gap in every other SNMP sensor on the device.
+
+      **Restart detection is a threshold trigger on an uptime channel in seconds, and that is not
+      a compromise.** A restarted device has a small uptime; `M-11`'s threshold trigger already
+      evaluates "below 600" with latency, escalation and summarisation. Verified live: the trigger
+      reads back as **"when uptime < 600"**. Detecting the *transition* instead would mean the
+      core keeping a previous reading per channel and synthesising a value the probe never sent —
+      a new concept in ingestion, for a strictly narrower answer, since a condition also catches a
+      restart that happened while the sensor was Down and a transition does not. What the type
+      owes that setup is the unit: seconds rather than raw TimeTicks, or every threshold anybody
+      writes is wrong by a factor of a hundred.
+
+      **"Available memory" has three sources on one device and they disagree by a factor of two.**
+      Measured on the same 7936 MiB box: the `hrStorage` row net-snmp calls "Available memory"
+      (Linux's own `MemAvailable`) said **5169 MiB**; `memAvailReal + memBuffer + memCached` said
+      5583 MiB; `memAvailReal` alone — which is `MemFree` — said **2819 MiB**. The last is what a
+      naive sensor reports, and it would have called the box **64% used** when the true figure is
+      35%. Every Linux machine under load looks nearly full by that measure, because the kernel
+      spends free memory on page cache deliberately and hands it back on demand, and a monitoring
+      system that alarms on it teaches its operators to ignore memory alarms. The order is
+      MemAvailable, then free+buffers+cached, then MemFree with the caveat in the message; the
+      sensor always says which it used. Live, it read 32.03% used.
+
+      **`hrStorageSize` is in allocation units and the unit differs per row on the same device** —
+      1024 on the memory rows, 4096 on the filesystems. A sensor reading the column raw reports a
+      filesystem four times too small, which is why `snmp.diskfree` exists rather than being a
+      `snmp.table` preset: it multiplies out, finds the row by mount point, and computes the
+      percentage the device does not report at all.
+
+      **Nothing assumes an index starts at one or is contiguous.** The dev target indexes its
+      eight processors from **196608** and its storage rows 1, 3, 6, 7, 8, 10, 11, 33, 38, 39 —
+      so `snmp.diskfree` matches the mount point every scan and treats a stored index as a hint it
+      *verifies* before trusting, and `snmp.cpu` walks rather than probing 1..n.
+
+      `snmp.cpu` prefers `hrProcessorLoad` over UCD's `ssCpuRaw*` counters deliberately: the raw
+      counters are jiffies, a percentage is one counter over the sum of all of them, and the core
+      computes rates per channel independently (`T-02`) so it could not divide one by another —
+      that would need a new kind of derived channel for a number the device already computes. The
+      average is primary with the **busiest processor** beside it, because a 32-core box with one
+      pegged core averages 3% and is in trouble.
+
+      Verified live against the target's real agent, all four: uptime naming the agent restart,
+      `2.13% across 8 processors, busiest 3%`, memory at 32.03% from MemAvailable, and `/dev` found
+      by name on row 33.
+
+      **Not done here:** a channel *per processor* and a sensor per filesystem at add time both
+      need what `T-02` and `T-04` need — `R-09` for the picker, and dynamic channel declaration for
+      the per-row case, which the channel model deliberately does not have (see the `T-04`
+      outcome). `snmp.cpu` reports the average and the busiest instead, which is the pair worth
+      alarming on.
 - [ ] **T-06 — SNMP Trap Receiver** · L · T-01 · Listener, trap and inform handling, filter
       rules, count channels, message retention.
 - [ ] **T-07 — SSH session layer** · M · P-05 · `ssh2` with key and password auth, connection

@@ -219,10 +219,14 @@ describe('the built-in catalogue', () => {
     // Sorted by id, not by registration order.
     assert.deepEqual(standardCatalogue().ids(), [
       'icmp.ping',
+      'snmp.cpu',
       'snmp.custom',
       'snmp.custom.string',
+      'snmp.diskfree',
+      'snmp.memory',
       'snmp.table',
       'snmp.traffic',
+      'snmp.uptime',
     ]);
   });
 
