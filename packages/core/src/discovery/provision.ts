@@ -41,6 +41,8 @@ export interface ProvisionReport {
   matched: number;
   devicesCreated: number;
   sensorsCreated: number;
+  /** Devices given a master object, so one unreachable host is one alarm (`D-05`). */
+  mastersSet: number;
   /** Sensors a template named that were already there. Zero duplicates is the promise. */
   sensorsSkipped: number;
   /** Hosts nothing could be created for, and why. Never silent. */
@@ -101,6 +103,7 @@ export class ProvisionService {
       matched: 0,
       devicesCreated: 0,
       sensorsCreated: 0,
+      mastersSet: 0,
       sensorsSkipped: 0,
       problems: [],
       devices: [],
@@ -152,6 +155,7 @@ export class ProvisionService {
 
         const already = sensorsByDevice.get(deviceId) ?? [];
         const names: string[] = [];
+        let masterSensorId: number | null = null;
         for (const spec of plan.sensors) {
           if (hasSensor(already, spec)) {
             report.sensorsSkipped += 1;
@@ -172,6 +176,9 @@ export class ProvisionService {
             sensorsByDevice.set(deviceId, already);
             report.sensorsCreated += 1;
             names.push(sensor.name);
+            // The first spec that claims it, and only one per device: a second would overwrite
+            // the first, and which one won would depend on template order.
+            if (spec.master === true && masterSensorId === null) masterSensorId = sensor.id;
           } catch (error) {
             // **Per sensor, not per host.** A template naming a sensor that cannot be created —
             // a required parameter it does not supply, a type whose schema changed under it —
@@ -182,6 +189,33 @@ export class ProvisionService {
             report.problems.push({
               address: host.address,
               problem: `${spec.type}: ${error instanceof Error ? error.message : 'could not be created'}`,
+            });
+          }
+        }
+
+        // **Only on a device this pass created.** A device an operator already set up has
+        // dependency choices of its own — possibly "none", deliberately — and a discovery that
+        // overwrote them would be editing a decision somebody made on purpose, silently, on
+        // every re-run. `D-04`'s whole promise is that a second run changes nothing.
+        if (created && masterSensorId !== null) {
+          try {
+            // `device` mode writes the setting on the *device*, so every other sensor under it
+            // inherits this one as master and the master itself keeps scanning — `M-11` gets
+            // that from one `a.master_id <> o.id` rather than a special case.
+            await this.#objects.setDependency(
+              input.actor,
+              masterSensorId,
+              'device',
+              undefined,
+              undefined,
+            );
+            report.mastersSet += 1;
+          } catch (error) {
+            // A device with its sensors and no master is a working device; failing the whole
+            // host over the dependency would be losing the sensors to save the wiring.
+            report.problems.push({
+              address: host.address,
+              problem: `the master dependency could not be set: ${error instanceof Error ? error.message : 'unknown'}`,
             });
           }
         }

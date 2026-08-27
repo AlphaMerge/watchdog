@@ -72,6 +72,26 @@ export interface SensorSpec {
    * this reason).
    */
   readonly credential?: string;
+  /**
+   * This sensor becomes the device's **master object** (`D-05`, `M-11`).
+   *
+   * `WORKFLOW.MD §2` says auto-discovery sets each device's Ping sensor as master object for the
+   * parent device, so the whole sensor set pauses when the device is unreachable — one outage,
+   * one alarm, which is the rule the whole system is built around.
+   *
+   * **A template property rather than a hardcoded sensor type**, because "the reachability
+   * sensor" is not always a Ping. A switch reached only over SNMP has none; an appliance behind
+   * a firewall that drops ICMP is monitored by its HTTPS certificate. A template written for
+   * those says which of its sensors goes Down when the device is gone, and a template that says
+   * nothing gets no master — which is honest, and better than picking one by a rule nobody can
+   * see in the file.
+   *
+   * At most one per plan. `applicableSensors` filters before this is read, so a master whose
+   * port is closed or whose credential is missing is simply not there — and a device is left
+   * with no master rather than one that cannot scan, which would pause every sensor on it for
+   * ever.
+   */
+  readonly master?: boolean;
 }
 
 export interface DeviceTemplate {
@@ -241,6 +261,15 @@ export function validateTemplate(
   if (template.name.trim() === '') problems.push('a template needs a name');
   if (template.sensors.length === 0) {
     problems.push('a template with no sensors would create a device and nothing to watch it with');
+  }
+
+  const masters = template.sensors.filter((spec) => spec.master === true);
+  if (masters.length > 1) {
+    // Which one won would depend on the order they happen to be written in, and a dependency
+    // that moves when somebody reorders a file is worse than no dependency at all.
+    problems.push(
+      `${String(masters.length)} sensors are marked as the device's master object; at most one can be`,
+    );
   }
 
   const seen = new Set<string>();

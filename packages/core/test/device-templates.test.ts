@@ -313,6 +313,39 @@ describe('the built-in set', () => {
     }
   });
 
+  it('marks at most one master per template, and it is the reachability sensor', () => {
+    // `ms.web-server` has none on purpose: it is *additive* — matched alongside whatever the
+    // device really is — so it names the sensors a web server wants and leaves the device's
+    // identity to the template that knows it.
+    for (const template of BUILT_IN_DEVICE_TEMPLATES) {
+      const masters = template.sensors.filter((one) => one.master === true);
+      assert.ok(masters.length <= 1, `${template.id} marks ${String(masters.length)}`);
+      if (masters[0] !== undefined) assert.equal(masters[0].type, 'icmp.ping', template.id);
+    }
+  });
+
+  it('plans exactly one master for every device, whatever it turned out to be', () => {
+    // **The invariant that matters**, and it is about the plan rather than any one template:
+    // `ms.generic` matches everything and marks its Ping, so a device nothing else recognised
+    // still gets a master — one unreachable host is one alarm rather than a device's worth
+    // (`D-05`, `WORKFLOW.MD §2`).
+    const held = built();
+    const cases: Partial<Evidence>[] = [
+      {},
+      { sysDescr: 'Linux web01 5.15', ports: ports(22, 80, 443) },
+      { sysDescr: 'Windows Version 6.3', ports: ports(3389, 5985) },
+      { sysObjectId: '1.3.6.1.4.1.9.1.1745', sysDescr: 'Cisco IOS Software' },
+      { sysDescr: 'Synology DiskStation DS920+', ports: ports(443) },
+      { ports: ports(9100, 631) },
+      { sysDescr: 'VMware ESXi 8.0.2', ports: ports(443) },
+    ];
+    for (const one of cases) {
+      const plan = held.plan(fingerprint(one), new Set(['snmp', 'ssh', 'windows']));
+      const masters = plan.sensors.filter((spec) => spec.master === true);
+      assert.equal(masters.length, 1, `${JSON.stringify(one)} planned ${String(masters.length)}`);
+    }
+  });
+
   it('declares a credential for every sensor that cannot work without one', () => {
     // The rule this enforces: a template must not create a sensor that will fail from its first
     // scan because nothing can authenticate it.
@@ -419,6 +452,25 @@ describe('refusing a bad template', () => {
     assert.match(huge.join(' '), /longer than 200 characters/);
   });
 
+  it('refuses two masters in one template', () => {
+    // Which one won would depend on the order they happen to be written in, and a dependency
+    // that moves when somebody reorders a file is worse than no dependency at all.
+    const problems = validateTemplate(
+      {
+        id: 'a.b',
+        name: 'X',
+        description: '',
+        match: {},
+        sensors: [
+          { type: 'icmp.ping', name: 'A', master: true },
+          { type: 'snmp.uptime', name: 'B', master: true },
+        ],
+      },
+      known,
+    );
+    assert.match(problems.join(' '), /at most one can be/);
+  });
+
   it('catches a duplicated spec', () => {
     const problems = validateTemplate(
       {
@@ -449,6 +501,22 @@ describe('refusing a bad template', () => {
 describe('saving a device as a template', () => {
   const credentialKindsFor = (type: string): readonly string[] =>
     catalogue.has(type) ? (catalogue.declaration(type).credentialKinds ?? []) : [];
+
+  it('keeps which sensor was the device’s master', () => {
+    // One of the decisions the operator already made, and the whole point of saving a device as
+    // a template is not having to make them again.
+    const template = templateFromDevice({
+      id: 'acme.switch',
+      name: 'ACME switch',
+      credentialKindsFor,
+      sensors: [
+        { name: 'Ping', sensorType: 'icmp.ping', params: {}, isMaster: true },
+        { name: 'Uptime', sensorType: 'snmp.uptime', params: {} },
+      ],
+    });
+    assert.equal(template.sensors[0]?.master, true);
+    assert.equal(template.sensors[1]?.master, undefined);
+  });
 
   it('turns a device’s sensors into specs', () => {
     const template = templateFromDevice({

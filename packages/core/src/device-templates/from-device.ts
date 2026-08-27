@@ -5,6 +5,8 @@ export interface DeviceSensorRow {
   readonly name: string;
   readonly sensorType: string;
   readonly params: Readonly<Record<string, unknown>>;
+  /** True when this sensor is its device's master object, so the template keeps that (`D-05`). */
+  readonly isMaster?: boolean;
 }
 
 export interface FromDeviceOptions {
@@ -54,6 +56,9 @@ export function templateFromDevice(options: FromDeviceOptions): DeviceTemplate {
       // most one that it genuinely cannot work without. A type declaring two would need the
       // spec to grow a list, and there is no such type to test it against.
       ...(credentials[0] === undefined ? {} : { credential: credentials[0] }),
+      // Carried across, because it is one of the decisions the operator already made on this
+      // device and the whole point of saving one is not having to make them again.
+      ...(row.isMaster === true ? { master: true } : {}),
     });
   }
 

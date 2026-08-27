@@ -27,7 +27,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'Reachability, and nothing else. Matches every device, scores zero, and is beaten by ' +
       'anything that knows more — so a host nothing recognised is still monitored.',
     match: {},
-    sensors: [{ type: 'icmp.ping', name: 'Ping' }],
+    sensors: [{ type: 'icmp.ping', name: 'Ping', master: true }],
     tags: ['auto-discovered'],
   },
 
@@ -39,7 +39,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'created without the port that serves it and the credential that authenticates it.',
     match: { kind: ['linux'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       {
         type: 'ssh.load',
         name: 'Load average',
@@ -93,7 +93,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'that is never, which is the honest outcome rather than four failing sensors.',
     match: { kind: ['windows'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       {
         type: 'windows.cpu',
         name: 'CPU load',
@@ -124,7 +124,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'rebooted is the explanation for everything else that went strange at the same moment.',
     match: { kind: ['network'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       { type: 'snmp.cpu', name: 'CPU load', credential: 'snmp' },
       { type: 'snmp.memory', name: 'Memory', credential: 'snmp' },
@@ -141,7 +141,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'sensor and this file being data are for.',
     match: { kind: ['printer'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       {
         type: 'http.request',
@@ -161,7 +161,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'is here is the host itself, which is what takes the guests with it when it goes.',
     match: { kind: ['hypervisor'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       { type: 'snmp.cpu', name: 'CPU load', credential: 'snmp' },
       { type: 'snmp.memory', name: 'Memory', credential: 'snmp' },
@@ -180,7 +180,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     description: 'Free space first: a NAS that filled up is the outage, not the symptom.',
     match: { kind: ['nas'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       // `/volume1` is Synology's and QNAP's first share and covers most of what anybody has;
       // a NAS that names its volumes differently needs a template of its own, which is what
       // this file being data is for.
@@ -229,7 +229,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       'Custom sensors — that is what this mechanism is for.',
     match: { sysObjectIdPrefix: ['1.3.6.1.4.1.9'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       { type: 'snmp.cpu', name: 'CPU load', credential: 'snmp' },
       { type: 'snmp.memory', name: 'Memory', credential: 'snmp' },
@@ -245,7 +245,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       '`sysDescr`. Less precise than an OID prefix and easier to write.',
     match: { vendor: ['Synology'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       {
         type: 'snmp.diskfree',
         name: 'Volume 1',

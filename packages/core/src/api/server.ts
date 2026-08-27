@@ -445,14 +445,32 @@ export async function buildApiServer(options: ApiServerOptions): Promise<ApiServ
 async function sensorsOfDevice(
   db: Database,
   deviceId: number,
-): Promise<{ name: string; sensorType: string; params: Record<string, unknown> }[]> {
-  const rows = await db.query<{ name: string; type: string; params: Record<string, unknown> }>(
-    `SELECT o.name, sc.type, sc.params
+): Promise<
+  { name: string; sensorType: string; params: Record<string, unknown>; isMaster: boolean }[]
+> {
+  const rows = await db.query<{
+    name: string;
+    type: string;
+    params: Record<string, unknown>;
+    is_master: boolean;
+  }>(
+    // The master is a *setting on the device* pointing back at one of its sensors (`M-11`), so
+    // it is read from there rather than from the sensor — which is also why `D-05` sets it by
+    // calling `setDependency` on the sensor rather than writing a column.
+    `SELECT o.name, sc.type, sc.params,
+            COALESCE(s.value #>> '{}' = o.id::text, false) AS is_master
      FROM object o
      JOIN sensor_config sc ON sc.object_id = o.id
+     LEFT JOIN object_setting s
+       ON s.object_id = $1 AND s.key = 'dependency.masterId'
      WHERE o.parent_id = $1 AND o.kind = 'sensor'
      ORDER BY o.id`,
     [deviceId],
   );
-  return rows.map((row) => ({ name: row.name, sensorType: row.type, params: row.params }));
+  return rows.map((row) => ({
+    name: row.name,
+    sensorType: row.type,
+    params: row.params,
+    isMaster: row.is_master,
+  }));
 }

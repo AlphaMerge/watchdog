@@ -307,6 +307,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                   type: 'integer',
                   description: 'Sensors a template named that were already there.',
                 },
+                mastersSet: {
+                  type: 'integer',
+                  description:
+                    'Devices whose reachability sensor became their master object, so one ' +
+                    'unreachable host is one alarm rather than a device’s worth.',
+                },
                 problems: {
                   type: 'array',
                   items: {

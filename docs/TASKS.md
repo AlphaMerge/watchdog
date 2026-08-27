@@ -4287,8 +4287,50 @@ because each is a decision rather than a defect:
       twelve skipped, no problems; and adding an SNMP credential to the group and provisioning a
       third time added exactly eight sensors, to exactly the two hosts that had answered SNMP,
       skipping the twelve already there.
-- [ ] **D-05 — Default master dependency** · S · D-04, M-11 · Each discovered device's Ping
+- [x] **D-05 — Default master dependency** · S · D-04, M-11 · Each discovered device's Ping
       sensor becomes its master object.
+
+      **D-05 outcome.** `M-11` already had the mechanism — `device` mode writes the setting on
+      the *device*, so every sensor under it inherits that one as master and the master is
+      excluded from its own dependency — so this is discovery using it, plus the two places it
+      deliberately does not.
+
+      **The master is a template property, not a hardcoded `icmp.ping`.** "The reachability
+      sensor" is not always a Ping: a switch reached only over SNMP has none, and an appliance
+      behind a firewall that drops ICMP is watched by its certificate. A template says which of
+      its sensors goes Down when the device is gone, and one that says nothing gets no master —
+      which is honest, and better than a rule nobody can see in the file. `validateTemplate`
+      refuses two in one template, because which won would depend on the order somebody wrote
+      them in, and a dependency that moves when a file is reordered is worse than none. The
+      built-in set marks its Ping, and a test asserts every plan produces **exactly one** master
+      — `ms.generic` matches everything, so a device nothing recognised still gets one.
+
+      **Only on a device this pass created**, and that is the decision that matters. A device an
+      operator already set up has dependency choices of its own — possibly "none", deliberately —
+      and a discovery that overwrote them would be editing a decision somebody made on purpose,
+      silently, on every re-run. `D-04`'s promise is that a second run changes nothing, and this
+      keeps it even in the sharper case: an operator who deleted both the Ping and the dependency
+      gets the sensor back on the next run and *not* the dependency.
+
+      **A master that could not be created leaves the device with none.** `applicableSensors`
+      filters first, so a master whose port is closed or whose credential is missing is simply
+      not there — and a master that cannot scan would pause every sensor on the device for ever.
+      Failing to set one is a recorded problem rather than a failed host: a device with its
+      sensors and no master is a working device, and failing the host would lose the sensors to
+      save the wiring.
+
+      Save-as-template carries it across, because it is one of the decisions the operator already
+      made and not having to make them again is the point of saving one.
+
+      Seven mutations, all killed. Two needed sharper fixtures: overwriting a matched device's
+      master is invisible unless the re-run actually recreates the master sensor, and "last
+      marked wins" is invisible unless two *different* templates each mark one.
+
+      Verified live: three discovered devices, three masters set, `dependency.masterId` on each
+      *device* and on none of its sensors, the HTTP sensor inheriting it with `definedOn` naming
+      the device — and the Ping sensor itself pointing at itself with `holding: false`, which is
+      `M-11`'s `a.master_id <> o.id` keeping the master scanning while its dependents are paused.
+      PRTG carried that bug through v19.1.
 - [ ] **D-06 — Discovery levels** · M · D-04 · Ping-only through detailed, with time estimates
       shown before starting.
 - [ ] **D-07 — Scheduled rediscovery** · M · D-04, M-09 · Hourly/daily/weekly, **off by default**,

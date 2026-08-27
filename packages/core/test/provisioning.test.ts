@@ -50,7 +50,7 @@ const TEMPLATES: readonly DeviceTemplate[] = [
     name: 'Generic',
     description: '',
     match: {},
-    sensors: [{ type: 'icmp.ping', name: 'Ping' }],
+    sensors: [{ type: 'icmp.ping', name: 'Ping', master: true }],
     tags: ['auto-discovered'],
   },
   {
@@ -59,7 +59,7 @@ const TEMPLATES: readonly DeviceTemplate[] = [
     description: '',
     match: { kind: ['linux'] },
     sensors: [
-      { type: 'icmp.ping', name: 'Ping' },
+      { type: 'icmp.ping', name: 'Ping', master: true },
       { type: 'snmp.traffic', name: 'Traffic', params: { port: 1 }, credential: 'snmp' },
       {
         type: 'snmp.traffic',
@@ -566,6 +566,210 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       assert.deepEqual(await discovery.problems(record.id), [
         { address: '10.0.0.9', problem: 'still failing, differently' },
       ]);
+    });
+  });
+
+  /**
+   * The master object (`D-05`).
+   *
+   * `WORKFLOW.MD §2`: auto-discovery sets each device's reachability sensor as master object for
+   * the parent device, so the whole sensor set pauses when the device is unreachable — one
+   * outage, one alarm, which is the rule the system is built around. `M-11` already had the
+   * mechanism; what is here is discovery using it, and the two places it deliberately does not.
+   */
+  describe('the master dependency', () => {
+    /** What the device's own setting points at, which is where `M-11` keeps it. */
+    const masterOf = async (deviceId: number): Promise<number | null> => {
+      const rows = await db.query<{ value: string }>(
+        `SELECT value #>> '{}' AS value FROM object_setting
+         WHERE object_id = $1 AND key = 'dependency.masterId'`,
+        [deviceId],
+      );
+      const value = rows[0]?.value;
+      return value === undefined ? null : Number(value);
+    };
+
+    it('makes the sensor the template marked into the device’s master', async () => {
+      const record = await run();
+      const report = await provision([host('10.0.0.1')], record);
+      assert.equal(report.mastersSet, 1);
+
+      const device = report.devices[0];
+      assert.ok(device !== undefined);
+      const master = await masterOf(device.deviceId);
+      assert.ok(master !== null, 'the device has a master');
+
+      const rows = await db.query<{ name: string; type: string }>(
+        `SELECT o.name, sc.type FROM object o
+         JOIN sensor_config sc ON sc.object_id = o.id WHERE o.id = $1`,
+        [master],
+      );
+      assert.equal(rows[0]?.type, 'icmp.ping', 'and it is the reachability sensor');
+    });
+
+    it('writes it on the device, so every other sensor inherits it', async () => {
+      // `device` mode is the whole trick: the setting lands on the device, every sensor under it
+      // inherits that sensor as their master, and the master is excluded from its own dependency
+      // — which is what keeps it scanning while its dependents are paused.
+      credentials = new Set(['snmp']);
+      const record = await run();
+      const report = await provision([host('10.0.0.1', { sysDescr: 'Linux one 5.15' })], record);
+      const device = report.devices[0];
+      assert.ok(device !== undefined);
+
+      const master = await masterOf(device.deviceId);
+      const onSensors = await db.query<{ count: string }>(
+        `SELECT count(*) AS count FROM object_setting os
+         JOIN object o ON o.id = os.object_id
+         WHERE o.parent_id = $1 AND os.key = 'dependency.masterId'`,
+        [device.deviceId],
+      );
+      assert.ok(master !== null);
+      assert.equal(Number(onSensors[0]?.count ?? -1), 0, 'and on none of the sensors');
+    });
+
+    it('does not touch a device it only matched', async () => {
+      // **The decision that matters.** A device an operator already set up has dependency
+      // choices of its own — possibly "none", deliberately — and a discovery that overwrote them
+      // would be editing a decision somebody made on purpose, silently, on every re-run.
+      const record = await run();
+      const first = await provision([host('10.0.0.1')], record);
+      const device = first.devices[0];
+      assert.ok(device !== undefined);
+
+      // The operator changes their mind.
+      await db.query(
+        `DELETE FROM object_setting WHERE object_id = $1 AND key = 'dependency.masterId'`,
+        [device.deviceId],
+      );
+
+      const second = await provision([host('10.0.0.1')], record);
+      assert.equal(second.matched, 1);
+      assert.equal(second.mastersSet, 0, 'nothing was set the second time');
+      assert.equal(await masterOf(device.deviceId), null, 'and the operator’s choice stands');
+    });
+
+    it('does not re-master a matched device even when it recreates the master sensor', async () => {
+      // The sharper version of the rule above. An operator who deleted the Ping *and* the
+      // dependency has made two decisions; a re-run that restored the sensor may — but
+      // restoring the dependency would undo the second one, silently, on every future run.
+      const record = await run();
+      const first = await provision([host('10.0.0.1')], record);
+      const device = first.devices[0];
+      assert.ok(device !== undefined);
+
+      await db.query(
+        `DELETE FROM object_setting WHERE object_id = $1 AND key = 'dependency.masterId'`,
+        [device.deviceId],
+      );
+      await db.query(`DELETE FROM object WHERE parent_id = $1 AND kind = 'sensor'`, [
+        device.deviceId,
+      ]);
+
+      const second = await provision([host('10.0.0.1')], record);
+      assert.equal(second.matched, 1);
+      assert.ok(second.sensorsCreated > 0, 'the sensor came back');
+      assert.equal(second.mastersSet, 0, 'and the dependency did not');
+      assert.equal(await masterOf(device.deviceId), null);
+    });
+
+    it('takes the master of the most specific template that marks one', async () => {
+      // Several templates match a device and each may mark its own; `validateTemplate` only
+      // rules out two within *one* template. The first spec wins, and `plan` orders by how
+      // specific the template is — so a vendor template's choice beats the generic one's rather
+      // than depending on which happened to be created last.
+      const held = new DeviceTemplateCatalogue(() => true);
+      held.register(
+        {
+          id: 'a.generic',
+          name: 'Generic',
+          description: '',
+          match: {},
+          sensors: [{ type: 'core.factory', name: 'Fallback master', master: true }],
+        },
+        'test',
+      );
+      held.register(
+        {
+          id: 'b.specific',
+          name: 'Specific',
+          description: '',
+          match: { kind: ['linux'] },
+          sensors: [{ type: 'icmp.ping', name: 'Real master', master: true }],
+        },
+        'test',
+      );
+      const picky = new ProvisionService({
+        objects: harness.service,
+        templates: held.seal(),
+        logger: silentLogger,
+        credentialsFor: () => Promise.resolve(credentials),
+        recordDevice: () => Promise.resolve(),
+      });
+
+      const record = await run();
+      const report = await picky.provision({
+        run: record,
+        hosts: [host('10.0.0.1', { sysDescr: 'Linux one 5.15' })],
+        existingDevices: [],
+        existingSensors: [],
+        actor: testActor,
+      });
+      assert.equal(report.mastersSet, 1);
+      const device = report.devices[0];
+      assert.ok(device !== undefined);
+      const master = await masterOf(device.deviceId);
+      const rows = await db.query<{ name: string }>(`SELECT name FROM object WHERE id = $1`, [
+        master,
+      ]);
+      assert.equal(rows[0]?.name, 'Real master');
+    });
+
+    it('leaves a device with no master when nothing reachable could be created', async () => {
+      // A master that cannot scan would pause every sensor on the device for ever, so a template
+      // whose master spec was filtered out — closed port, missing credential — gets none.
+      const held = new DeviceTemplateCatalogue(() => true);
+      held.register(
+        {
+          id: 'test.nomaster',
+          name: 'No master',
+          description: '',
+          match: {},
+          sensors: [
+            { type: 'icmp.ping', name: 'Ping', master: true, requires: { portsAll: [9999] } },
+            { type: 'core.factory', name: 'Rollup' },
+          ],
+        },
+        'test',
+      );
+      const withoutMaster = new ProvisionService({
+        objects: harness.service,
+        templates: held.seal(),
+        logger: silentLogger,
+        credentialsFor: () => Promise.resolve(credentials),
+        recordDevice: () => Promise.resolve(),
+      });
+
+      const record = await run();
+      const report = await withoutMaster.provision({
+        run: record,
+        hosts: [host('10.0.0.1')],
+        existingDevices: [],
+        existingSensors: [],
+        actor: testActor,
+      });
+      assert.equal(report.mastersSet, 0);
+      assert.deepEqual(report.problems, [], 'and it is not an error');
+      assert.equal(await masterOf(report.devices[0]?.deviceId ?? 0), null);
+    });
+
+    it('sets one master even when several templates mark one', async () => {
+      // Which one won would otherwise depend on template order, and a dependency that moves when
+      // somebody reorders a file is worse than no dependency at all.
+      const record = await run();
+      // `test.generic` and `test.linux` both mark their Ping; `plan` deduplicates to one spec.
+      const report = await provision([host('10.0.0.1', { sysDescr: 'Linux one 5.15' })], record);
+      assert.equal(report.mastersSet, 1);
     });
   });
 });
