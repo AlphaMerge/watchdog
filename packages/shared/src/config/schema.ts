@@ -363,6 +363,41 @@ export interface ProbeConfig {
      */
     checkAbortGraceMs: number;
   };
+  /**
+   * The SNMP trap listener (`T-06`).
+   *
+   * Off by default, and that is deliberate rather than cautious: it binds a socket, port 162 is
+   * privileged, and a probe that silently opened a listening port nobody asked for would be a
+   * surprise on somebody's firewall audit. A `snmp.trap` sensor whose probe has this disabled
+   * fails its check saying so, which is a better answer than a confident zero.
+   */
+  trapListener: {
+    enabled: boolean;
+    /** 162 is the assigned port and needs privilege; 10162 is the usual unprivileged choice. */
+    port: number;
+    /** The address to bind. `0.0.0.0` accepts from anywhere the host can be reached at. */
+    address: string;
+    /** udp4 or udp6. One socket, one family — a dual-stack probe runs two probes. */
+    transport: 'udp4' | 'udp6';
+    /**
+     * Community strings that may send v1/v2c notifications. Empty accepts any.
+     *
+     * A trap community is not a credential in the `A-05` sense: it authenticates the *sender* to
+     * the probe rather than the probe to a device, it is the same for every device that sends,
+     * and it arrives before any sensor is known. So it is probe configuration, not a per-sensor
+     * parameter — and it is not secret in any useful way, since v1 and v2c send it in clear.
+     */
+    communities: string[];
+    /**
+     * Notifications held before the oldest is overwritten, across all sensors.
+     *
+     * The bound that makes a trap flood survivable: a device in a loop can send thousands a
+     * second, and an unbounded buffer is a probe that runs out of memory during exactly the
+     * incident it was bought for. What is lost is counted per sensor and reported, never
+     * dropped silently (CLAUDE.md).
+     */
+    bufferSize: number;
+  };
   core: {
     host: string;
     port: number;
@@ -718,7 +753,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
 export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
   type: 'object',
   additionalProperties: false,
-  required: ['service', 'probe', 'core'],
+  required: ['service', 'probe', 'trapListener', 'core'],
   properties: {
     service: serviceSchema('ms-probe', '/var/lib/ms-probe'),
     probe: {
@@ -758,6 +793,23 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         workerPoolSize: { type: 'integer', minimum: 0, maximum: 1_024, default: 0 },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },
+      },
+    },
+    trapListener: {
+      type: 'object',
+      default: {} as ProbeConfig['trapListener'],
+      additionalProperties: false,
+      required: ['enabled', 'port', 'address', 'transport', 'communities', 'bufferSize'],
+      properties: {
+        enabled: { type: 'boolean', default: false },
+        port: { type: 'integer', minimum: 1, maximum: 65_535, default: 162 },
+        address: { type: 'string', minLength: 1, default: '0.0.0.0' },
+        transport: { type: 'string', enum: ['udp4', 'udp6'], default: 'udp4' },
+        communities: { type: 'array', items: { type: 'string', minLength: 1 }, default: [] },
+        // Ten thousand traps is minutes of a bad flood and a few megabytes of memory. Past this
+        // the honest answer is that the sensor scans too rarely for the volume, which is what
+        // the dropped count says.
+        bufferSize: { type: 'integer', minimum: 100, maximum: 1_000_000, default: 10_000 },
       },
     },
     core: {

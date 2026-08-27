@@ -37,6 +37,11 @@ declare module 'net-snmp' {
     idBitsSize?: number;
     backwardsGetNexts?: boolean;
     context?: string;
+    /**
+     * Where `trap` and `inform` send. **Not** `port`, which is where requests go — the two are
+     * separate on purpose, since a manager polls 161 and sends notifications to 162.
+     */
+    trapPort?: number;
   }
 
   export interface V3User {
@@ -69,6 +74,23 @@ declare module 'net-snmp' {
     ): void;
     close(): void;
     on(event: 'error' | 'close', listener: (error?: Error) => void): void;
+    /**
+     * Sends a notification. Declared for the receiver's own tests (`T-06`), which need a real
+     * sender on the other end of a real socket; nothing shipped sends traps.
+     *
+     * `typeOrOid` is a generic trap number for v1 and a trap OID for v2c.
+     */
+    trap(
+      typeOrOid: number | string,
+      varbindsOrCallback: Varbind[] | ((error: Error | null) => void),
+      callback?: (error: Error | null) => void,
+    ): void;
+    /** As `trap`, but the receiver acknowledges it and the callback reports whether it did. */
+    inform(
+      typeOrOid: number | string,
+      varbindsOrCallback: Varbind[] | ((error: Error | null) => void),
+      callback?: (error: Error | null) => void,
+    ): void;
   }
 
   export function createSession(
@@ -123,4 +145,50 @@ declare module 'net-snmp' {
     callback: (error: Error | null, data?: unknown) => void,
     mib?: Mib,
   ): Agent;
+
+  /** Notification PDU types. Trap is v1, TrapV2 and InformRequest are v2c/v3. */
+  export const PduType: Readonly<Record<string, number>> & {
+    Trap: number;
+    TrapV2: number;
+    InformRequest: number;
+  };
+
+  export interface ReceiverOptions {
+    port: number;
+    address?: string;
+    transport?: 'udp4' | 'udp6';
+    disableAuthorization?: boolean;
+    includeAuthentication?: boolean;
+    engineID?: string;
+  }
+
+  export interface NotificationPdu {
+    type: number;
+    varbinds?: { oid: string; type: number; value: unknown }[];
+    enterprise?: string;
+    agentAddr?: string;
+    generic?: number;
+    specific?: number;
+    community?: string;
+    user?: string;
+  }
+
+  export interface Notification {
+    pdu: NotificationPdu;
+    rinfo: { address: string; port: number };
+  }
+
+  export interface Receiver {
+    getAuthorizer(): Authorizer;
+    close(callback?: () => void): void;
+  }
+
+  /**
+   * Traps and informs. The receiver acknowledges an inform itself, before the callback runs —
+   * which is the whole difference between the two, since an unacknowledged inform is retried.
+   */
+  export function createReceiver(
+    options: ReceiverOptions,
+    callback: (error: Error | null, notification?: Notification) => void,
+  ): Receiver;
 }

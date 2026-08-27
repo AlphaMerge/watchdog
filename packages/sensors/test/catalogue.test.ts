@@ -226,6 +226,7 @@ describe('the built-in catalogue', () => {
       'snmp.memory',
       'snmp.table',
       'snmp.traffic',
+      'snmp.trap',
       'snmp.uptime',
     ]);
   });

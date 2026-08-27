@@ -16,6 +16,14 @@
     "spoolBatchMaxRows": 500,
     "spoolCatchUpMaxRows": 2000
   },
+  "trapListener": {
+    "enabled": true,
+    "port": 10162,
+    "address": "0.0.0.0",
+    "transport": "udp4",
+    "communities": [],
+    "bufferSize": 1000
+  },
   "core": {
     "host": "127.0.0.1",
     "port": 23560,

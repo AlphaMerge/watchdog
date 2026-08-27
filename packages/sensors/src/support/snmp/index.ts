@@ -62,6 +62,32 @@ export { SNMP_CREDENTIAL_SCHEMA, snmpParamsSchema } from './schema.js';
 export { snmpCheck, type SnmpCheckOptions } from './check.js';
 
 export {
+  genericNameOf,
+  GENERIC_TRAPS,
+  readRule,
+  renderTrap,
+  ruleMatches,
+  SNMP_TRAP_OID,
+  SYS_UPTIME_0,
+  trapOidFromV1,
+  trapOidFromVarbinds,
+  type TrapDetail,
+  type TrapKind,
+  type TrapRule,
+  type TrapVarbind,
+  type TrapVersion,
+} from './trap.js';
+
+export {
+  normaliseTrap,
+  openTrapReceiver,
+  type ReceivedTrap,
+  type ReceiverPdu,
+  type TrapReceiver,
+  type TrapReceiverOptions,
+} from './receiver.js';
+
+export {
   DISK_TYPES,
   HR,
   humanBytes,

@@ -9,9 +9,9 @@ import type { CheckResult } from '@ms/shared';
  * `CheckTarget` for P-08 is what surfaced it — the probe's copy would have gone on compiling
  * without the field the sensor needed.
  */
-export type { CheckContext, CheckExecution, CheckTarget } from '@ms/sensors';
+export type { CheckContext, CheckExecution, CheckTarget, ReceivedBatch } from '@ms/sensors';
 
-import type { CheckContext, CheckExecution, CheckTarget } from '@ms/sensors';
+import type { CheckContext, CheckExecution, CheckTarget, ReceivedBatch } from '@ms/sensors';
 
 export interface CheckRequest {
   sensorId: number;
@@ -26,6 +26,13 @@ export interface CheckRequest {
    * carries results, not requests.
    */
   credentials?: Record<string, Record<string, unknown>>;
+  /**
+   * What a listener collected for this sensor since its last check (`T-06`).
+   *
+   * Attached by the probe at submit time for a type whose declaration names a listener, and
+   * absent for every polling type. Structured-cloneable, because it crosses into a worker.
+   */
+  received?: ReceivedBatch;
   /** Hard deadline. The sensor's own `scan.timeoutMs`, resolved by the core. */
   timeoutMs: number;
 }

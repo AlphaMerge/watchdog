@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { bootstrap, describeError, probeConfigSchema, type ProbeConfig } from '@ms/shared';
+import { standardCatalogue } from '@ms/sensors';
 import { CheckPool } from './runner/pool.js';
+import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { mkdir } from 'node:fs/promises';
 import { AssignmentStore } from './scheduler/assignments.js';
 import { ResultSpool } from './spool/spool.js';
@@ -82,6 +84,37 @@ async function main(): Promise<void> {
   await pool.start();
   lifecycle.onShutdown({ name: 'check-pool', timeoutMs: 10_000, run: () => pool.stop() });
 
+  // Which sensor types are fed by a listener rather than by polling (`T-06`), asked of the
+  // catalogue rather than matched on an id here: `T-20`'s syslog receiver is already the second
+  // one, and a probe with a hardcoded type id would need editing for each.
+  //
+  // Building the catalogue in this thread is cheap and does not load a protocol stack: a type's
+  // heavy imports live inside `execute`, which only a worker ever calls.
+  const listenerFor = new Map<string, string>();
+  for (const summary of standardCatalogue().summaries()) {
+    const declared = standardCatalogue().declaration(summary.id).listener;
+    if (declared !== undefined) listenerFor.set(summary.id, declared);
+  }
+
+  const trapListener = config.trapListener.enabled
+    ? new TrapListener({
+        logger,
+        port: config.trapListener.port,
+        address: config.trapListener.address,
+        transport: config.trapListener.transport,
+        communities: config.trapListener.communities,
+        bufferSize: config.trapListener.bufferSize,
+      })
+    : undefined;
+  if (trapListener !== undefined) {
+    await trapListener.start();
+    lifecycle.onShutdown({
+      name: 'trap-listener',
+      timeoutMs: 5_000,
+      run: () => trapListener.stop(),
+    });
+  }
+
   // The scheduler hands due sensors to the pool and returns. `onDue` runs on the wheel's own
   // thread, so it must never wait for a check — `submit` is fire-and-forget by design.
   const wheel = new TimingWheel({
@@ -90,12 +123,21 @@ async function main(): Promise<void> {
       for (const sensorId of due) {
         const assignment = assignments.get(sensorId);
         if (assignment === undefined) continue;
+        // A listener sensor is handed what arrived since its last scan instead of polling. The
+        // drain is a slice of a ring buffer — O(what arrived) and no I/O — so it is safe on the
+        // wheel's own thread, which must never wait for anything.
+        const wants = listenerFor.get(assignment.sensorType);
+        const received =
+          wants === LISTENER_ID && trapListener !== undefined
+            ? trapListener.drain(sensorId)
+            : undefined;
         pool.submit({
           sensorId,
           sensorType: assignment.sensorType,
           target: assignment.target,
           params: assignment.params,
           ...(assignment.credentials === undefined ? {} : { credentials: assignment.credentials }),
+          ...(received === undefined ? {} : { received }),
           timeoutMs: assignment.timeoutMs,
         });
       }
@@ -124,7 +166,12 @@ async function main(): Promise<void> {
       // The backlog is the first thing to move once the link is back.
       if (state === 'connected') drain.wake();
     },
-    onConfig: (update) => assignments.apply(update),
+    onConfig: (update) => {
+      const size = assignments.apply(update);
+      // A deleted sensor should stop costing a cursor. Cheap, and it runs only on a config push.
+      trapListener?.retain(assignments.ids());
+      return size;
+    },
   });
   coreClient.start();
   lifecycle.onShutdown({
@@ -146,8 +193,9 @@ async function main(): Promise<void> {
     },
   });
 
-  // Phase 2 continues here: the child-process runner (P-03), the listeners and the disk spool
-  // (R-02) register themselves, each adding its own shutdown hook.
+  // Phase 2 continues here: the child-process runner (P-03) registers itself, and `T-20` adds
+  // the syslog receiver beside the trap listener above, on the same `CheckContext.received`
+  // contract.
   //
   // The probe reports ready as soon as it is running: it is *not* waiting for the core. A
   // probe that cannot reach the core still scans and spools (WORKFLOW.MD §10).

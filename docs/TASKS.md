@@ -3008,8 +3008,65 @@ because each is a decision rather than a defect:
       the per-row case, which the channel model deliberately does not have (see the `T-04`
       outcome). `snmp.cpu` reports the average and the busiest instead, which is the pair worth
       alarming on.
-- [ ] **T-06 — SNMP Trap Receiver** · L · T-01 · Listener, trap and inform handling, filter
+- [x] **T-06 — SNMP Trap Receiver** · L · T-01 · Listener, trap and inform handling, filter
       rules, count channels, message retention.
+
+      **T-06 outcome.** The first sensor in the catalogue that is *asked* questions rather than
+      asking them, and most of the ticket was deciding where that shape lives. A check runs in
+      whichever worker is free and only while it is running, so a listening socket cannot be
+      inside one; a socket per sensor would mean a port per sensor, which is not how devices send
+      traps. So the probe owns one receiver and `CheckContext.received` carries each sensor what
+      has arrived since it last looked.
+
+      **The split is the design: the listener knows nothing about sensors, and the sensor type
+      does all the deciding.** Filter rules, counting and retention are `params`, so they belong
+      to the type — one file in `@ms/sensors`, tested against a fabricated batch with no socket in
+      the test. The probe keeps a ring buffer, a cursor per sensor and the counters that make it
+      observable. Buffering *once* and filtering per sensor at check time is what makes that
+      possible: filtering at receive time would need the listener to know every sensor's rules,
+      and it costs nothing here because a probe has a handful of trap sensors, not thousands.
+      `T-20`'s syslog receiver is the second listener and reuses the contract unchanged.
+
+      **v1 and v2c traps are different messages and exactly one place knows it.** A v1 trap
+      carries an enterprise OID, a generic 0–6 and a specific in the PDU header; a v2c trap and an
+      inform put `sysUpTime.0` and `snmpTrapOID.0` at the front of the varbinds instead. A rule
+      written against one shape would silently never match the other — the worst failure a
+      receiver can have, because it looks exactly like a quiet network. RFC 3584 §3.1 is the
+      mapping (generic 0–5 → `1.3.6.1.6.3.1.1.5.{n+1}`, generic 6 → `{enterprise}.0.{specific}`,
+      and the `.0` is the part everybody drops). Verified live: a v1 trap and a v2c trap sent
+      seconds apart both read as `linkDown` in the same sensor message.
+
+      **Informs are acknowledged, and that is not optional.** An unacknowledged inform is
+      retransmitted until the sender gives up, so a receiver that merely counted them would turn
+      one event into a burst. `net-snmp`'s receiver sends the response before the callback runs;
+      the test asserts it from the *sender's* side, which is the only thing that proves it.
+
+      **A trap sensor is Up when traps arrive, and its count is per interval.** The ordinary state
+      of a healthy device is zero, so the alarm is an upper limit — a sensor that went Down for
+      silence would alarm every quiet night. It deliberately does not turn one trap into one
+      alarm: a device with a flapping uplink sends the same trap every thirty seconds, and "one
+      outage, one alarm" is exactly what the count crossing a limit once preserves.
+
+      **Two things it refuses to report as zero.** No listener running on the probe is a *failed
+      check* naming the configuration, not a count of nothing — a receiver that was never switched
+      on must not look like a quiet network. And a bounded buffer that overwrote notifications
+      before a sensor read them fails the check too, by default: the count is known to be short,
+      and a gap is the honest reading for a number nobody should act on. What was lost is counted
+      per sensor and never dropped silently.
+
+      **Found by pointing it at the dev target:** `sourceIsDevice` compared a trap's sender
+      *address* against the device's `host`, which there is the name `ms-target` — so it counted
+      zero for ever, indistinguishable from silence. The host is now resolved (cached five
+      minutes, skipped for a literal address) and a name that will not resolve fails the check
+      rather than matching nothing. Verified live afterwards: the device-filtered sensor resolved
+      the name, saw a trap from the docker gateway, and reported it as **not matched** rather than
+      counting or discarding it.
+
+      **Not done here:** v3 notifications decode and are reported as v3, but configuring USM users
+      for a *receiver* — engine IDs, per-user keys, on the probe rather than per device — is its
+      own config surface and is not wired. The listener is off by default: it binds a socket, 162
+      is privileged, and a probe that silently opened a listening port would be a surprise on
+      somebody's firewall audit.
 - [ ] **T-07 — SSH session layer** · M · P-05 · `ssh2` with key and password auth, connection
       reuse, host-key policy, command timeouts.
 - [ ] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,

@@ -98,6 +98,60 @@ export interface CheckContext {
    * not gets its worker terminated, which costs strictly more than returning.
    */
   readonly signal: AbortSignal;
+  /**
+   * What a probe-side listener collected for this sensor since its last check (`T-06`).
+   *
+   * The second shape of sensor. Everything else here *asks* a device a question on a schedule;
+   * a trap or syslog sensor is asked questions *by* devices, continuously, and its scan is the
+   * moment it reports what arrived. The socket cannot live in the check — a check runs in
+   * whichever worker is free and only while it is running — so the probe holds one listener and
+   * hands each sensor the notifications it has not seen yet.
+   *
+   * **The listener knows nothing about sensors and the sensor type does all the deciding.**
+   * Filter rules, buckets and retention are `params`, so they belong to the type, in one file,
+   * where they are testable against a fabricated batch with no socket anywhere. The listener
+   * decodes, normalises and remembers a cursor per sensor. That split is what keeps a listener
+   * sensor an ordinary plugin rather than a special case wired through the probe.
+   *
+   * Absent for every polling type, and absent on the first check after a probe restart — which
+   * `since` is how a type tells apart "no traps arrived" from "I have not been listening".
+   */
+  readonly received?: ReceivedBatch;
+}
+
+/**
+ * One thing a listener received (`T-06`).
+ *
+ * Crosses a worker-thread boundary, so it is plain structured-cloneable data and nothing else.
+ * `detail` is deliberately loose: an SNMP trap puts its trap OID, version and varbinds there and
+ * a syslog message (`T-20`) will put its facility and severity, and a contract that enumerated
+ * both would have to change every time a listener is added. A type reads it defensively, exactly
+ * as it reads `params`.
+ */
+export interface ReceivedNotification {
+  /** When the probe received it, ISO-8601. The probe's clock, like every other result. */
+  readonly at: string;
+  /** The sender, as an address. Never resolved — a reverse lookup per trap is a trap flood. */
+  readonly source: string;
+  /** One line, already rendered, for retention and for the sensor message. */
+  readonly text: string;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+export interface ReceivedBatch {
+  /** Which listener produced this. A type checks it before trusting `detail`. */
+  readonly listener: string;
+  /** Oldest first. */
+  readonly items: readonly ReceivedNotification[];
+  /**
+   * Notifications this sensor never saw because the listener's buffer wrapped first.
+   *
+   * Counted rather than dropped quietly: CLAUDE.md's rule is that backpressure is visible, and a
+   * trap sensor that silently missed the flood it exists to report is the worst version of it.
+   */
+  readonly dropped: number;
+  /** When this sensor's cursor was last reset, ISO-8601. Moves on a probe restart. */
+  readonly since: string;
 }
 
 export interface CheckExecution {
@@ -130,6 +184,18 @@ export interface SensorType {
    * credential in the installation to run a Ping.
    */
   readonly credentialKinds?: readonly string[];
+  /**
+   * The probe-side listener this type is fed by, instead of polling (`T-06`).
+   *
+   * Declared rather than discovered, and the probe reads it from the catalogue rather than
+   * matching on the type id: a probe that hardcoded `'snmp.trap'` would need editing for every
+   * listener sensor added after it, and `T-20`'s syslog receiver is already the second.
+   *
+   * A type that names one is handed `CheckContext.received` when its check runs, and is handed
+   * nothing when that listener is not running on this probe — which it must report as a failure,
+   * never as a reading of zero.
+   */
+  readonly listener?: string;
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

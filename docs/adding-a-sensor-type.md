@@ -83,6 +83,18 @@ an operator types by hand. Prefer a shape with a control where one fits; reach f
 the parameter genuinely is a list (`snmp.table.columns`), and know that the form is the thing
 with the gap, not your schema. `U-12` is the ticket to close it.
 
+### `listener` (optional)
+
+Names a probe-side listener that feeds this type instead of it polling (`T-06`). A type that sets
+it is handed `CheckContext.received` — everything that listener collected for this sensor since
+its last check — and is handed **nothing** when that listener is not running, which it must report
+as a failed check rather than as a reading of zero. A receiver that was never switched on must not
+look like a quiet network.
+
+The division is fixed and worth following: the listener decodes and buffers, and the *type* does
+all the deciding — filtering, counting, retention are `params`, so they are testable against a
+fabricated batch with no socket in the test. `snmp.trap` is the worked example.
+
 ### `costHint`
 
 `light` | `medium` | `heavy`. Not a duration — a `heavy` check is heavy because of what it

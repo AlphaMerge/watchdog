@@ -51,10 +51,14 @@ case "${1:-start}" in
     # the container's own loopback, and no published port could reach it.
     # MS_LOG_LEVEL=debug is how you see individual checks finishing: the probe logs each one at
     # debug, because at 5,000 sensors a minute an info line per check is the whole journal.
+    # 10162/udp is the probe's SNMP trap listener (T-06), published so a sender on the host or in
+    # another compose service can reach it — 162 itself needs privilege the dev probe has not
+    # got. T-20's syslog listener wants the same treatment on its own port.
     docker compose -f "${compose_file}" run -d --name "${name}" \
       -e MS_API__HOST=0.0.0.0 \
       -e "MS_SERVICE__LOG_LEVEL=${MS_LOG_LEVEL:-info}" \
       -p 127.0.0.1:8080:8080 \
+      -p 127.0.0.1:10162:10162/udp \
       toolchain \
       'node packages/core/dist/src/main.js --config dev/core.json & sleep 3; exec node packages/probe/dist/src/main.js --config dev/probe.json' \
       >/dev/null

@@ -287,6 +287,7 @@ export class CheckPool {
       target: job.request.target,
       params: job.request.params,
       ...(job.request.credentials === undefined ? {} : { credentials: job.request.credentials }),
+      ...(job.request.received === undefined ? {} : { received: job.request.received }),
     });
   }
 

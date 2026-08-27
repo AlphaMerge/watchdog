@@ -1,5 +1,10 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { UNKNOWN_SENSOR_TYPE, type CheckRegistry, type CheckTarget } from './types.js';
+import {
+  UNKNOWN_SENSOR_TYPE,
+  type CheckRegistry,
+  type CheckTarget,
+  type ReceivedBatch,
+} from './types.js';
 
 /**
  * A pool worker.
@@ -18,6 +23,7 @@ interface RunMessage {
   target: CheckTarget;
   params: Record<string, unknown>;
   credentials?: Record<string, Record<string, unknown>>;
+  received?: ReceivedBatch;
 }
 
 interface AbortMessage {
@@ -58,6 +64,7 @@ async function run(message: RunMessage): Promise<void> {
       params: message.params,
       credentials: message.credentials ?? {},
       signal: controller.signal,
+      ...(message.received === undefined ? {} : { received: message.received }),
     });
     port.postMessage({
       type: 'result',

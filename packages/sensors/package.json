@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
+    },
+    "./snmp": {
+      "types": "./dist/src/support/snmp/index.d.ts",
+      "default": "./dist/src/support/snmp/index.js"
     }
   },
   "scripts": {
