@@ -123,15 +123,23 @@ export function pauseCause(flags: PauseFlags): SensorStateCause | null {
 }
 
 /**
- * Whether an operator's own action is what decided this state.
+ * Whether this state needs a sentence of its own on the sensor.
  *
- * The three that are: a pause, an acknowledgement and a simulated error. Their message is the
- * operator's words and belongs on the sensor, where anyone looking at it will read it first; a
- * state a *reading* decided already carries the check's own message, and a state that decided
- * itself — Unknown after a resume — has nothing to say beyond that nobody has scanned it.
+ * Four that do: a pause, an acknowledgement, a simulated error and a lost probe. The first three
+ * are an operator's own words; the fourth is `R-05`'s, and it belongs here for the same reason —
+ * a sensor reading "Unknown" with nothing beside it is the thing to avoid, and "the probe
+ * carrying this sensor stopped answering" is the whole of what an operator needs to know.
+ *
+ * A state a *reading* decided already carries the check's own message, and a state that decided
+ * itself — Unknown after a resume — has nothing to say beyond that nobody has scanned it yet.
  */
 export function operatorDecided(decision: Decision): boolean {
-  return decision.state === 'paused' || decision.cause === 'user' || decision.cause === 'simulated';
+  return (
+    decision.state === 'paused' ||
+    decision.cause === 'user' ||
+    decision.cause === 'simulated' ||
+    decision.cause === 'probe'
+  );
 }
 
 export function isPaused(flags: PauseFlags): boolean {

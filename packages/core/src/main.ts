@@ -65,6 +65,7 @@ import { ProvisionService, type ProvisionReport } from './discovery/provision.js
 import { DiscoveryError } from './discovery/errors.js';
 import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
+import { ProbeReachability } from './probes/reachability.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
@@ -272,12 +273,20 @@ async function serve(): Promise<void> {
   const publishStates: CommittedStates = (committed) => {
     void stream.publish(db, committed);
   };
+  // Read through a closure because `R-05` needs this service to build and this service needs
+  // its answer: the state machine asks "is this sensor's probe up" on every decision, and the
+  // thing that knows is the probe endpoint's link, which is built much later. Nothing calls it
+  // until a state is decided, which is long after both exist.
+  // eslint-disable-next-line prefer-const -- assigned below, once reachability exists.
+  let reachabilityRef: ProbeReachability | undefined;
+  const noProbesDown: ReadonlySet<number> = new Set();
   const states = new SensorStateService({
     db,
     logger,
     settings: resolver,
     alarms,
     onStatesCommitted: publishStates,
+    unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.
@@ -724,6 +733,11 @@ async function serve(): Promise<void> {
     states,
   });
 
+  // A lost probe is one alarm, not a thousand (`R-05`). Built before the endpoint, which is
+  // what tells it when a link comes and goes.
+  const reachability = new ProbeReachability({ db, logger, states });
+  reachabilityRef = reachability;
+
   const probeEndpoint: ProbeEndpoint = new ProbeEndpoint({
     config: config.probeEndpoint,
     logger,
@@ -731,6 +745,7 @@ async function serve(): Promise<void> {
     results: ingestion,
     discovery,
     registry: probeRegistry,
+    reachability,
     probeConfig: new ProbeConfigService({
       db,
       resolver,

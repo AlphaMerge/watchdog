@@ -108,6 +108,20 @@ export interface SensorStateServiceOptions {
   alarms?: AlarmReactor;
   /** Told which state changes committed, so `U-02` can push them. */
   onStatesCommitted?: CommittedStates;
+  /**
+   * The sensors whose probe is not answering (`R-05`).
+   *
+   * A live set rather than a stored column, and read on every load rather than at one call
+   * site: `probeReachable` is a fact about a TCP connection, and a sensor whose probe is gone
+   * must read as Unknown however its state came to be re-decided — a pause clearing, a
+   * dependency releasing, a schedule window opening. Consulting it in one place is what stops a
+   * later re-evaluation from quietly flipping a sensor back to Up while its probe is still
+   * missing.
+   *
+   * Absent means every probe is reachable, which is what a unit test wants and what a core
+   * without a probe endpoint would honestly report.
+   */
+  unreachableSensors?: () => ReadonlySet<number>;
 }
 
 export interface StateStats {
@@ -139,6 +153,7 @@ export class SensorStateService {
   readonly #maxCached: number;
   readonly #alarms: AlarmReactor | undefined;
   readonly #onStatesCommitted: CommittedStates | undefined;
+  readonly #unreachableSensors: (() => ReadonlySet<number>) | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -166,6 +181,7 @@ export class SensorStateService {
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
     this.#alarms = options.alarms;
     this.#onStatesCommitted = options.onStatesCommitted;
+    this.#unreachableSensors = options.unreachableSensors;
   }
 
   stats(): StateStats {
@@ -370,7 +386,7 @@ export class SensorStateService {
 
     // Read through the caller's transaction, never the cache: the flags were written moments
     // ago in this same transaction, and a cache populated before them is exactly wrong.
-    const runtimes = await loadRuntimes(q, sensorIds);
+    const runtimes = this.#withProbeFacts(await loadRuntimes(q, sensorIds));
     const transitions: StateTransition[] = [];
     const rewrites: StateRewrite[] = [];
     const recovered: number[] = [];
@@ -499,7 +515,7 @@ export class SensorStateService {
   ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }> {
     if (sensorIds.length === 0) return { acknowledged: [], refused: [], transitions: 0 };
 
-    const runtimes = await loadRuntimes(q, sensorIds);
+    const runtimes = this.#withProbeFacts(await loadRuntimes(q, sensorIds));
     const acknowledged: number[] = [];
     const refused: number[] = [];
     for (const sensorId of sensorIds) {
@@ -552,6 +568,26 @@ export class SensorStateService {
   }
 
   /** Loads what is not already cached. One query each for the whole batch, or none at all. */
+  /**
+   * What was loaded, with the live probe fact laid over it (`R-05`).
+   *
+   * `loadRuntimes` restores `probeReachable: true` because the column does not exist — the fact
+   * is a connection, not a row. This is the one place that knows better, so every path that
+   * decides a state gets the same answer and none of them has to remember to ask.
+   */
+  #withProbeFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
+    const unreachable = this.#unreachableSensors?.();
+    if (unreachable === undefined || unreachable.size === 0) return runtimes;
+    for (const [sensorId, runtime] of runtimes) {
+      if (!unreachable.has(sensorId)) continue;
+      runtimes.set(sensorId, {
+        ...runtime,
+        facts: { ...runtime.facts, probeReachable: false },
+      });
+    }
+    return runtimes;
+  }
+
   async #warm(sensorIds: readonly number[]): Promise<void> {
     const runtimes = sensorIds.filter((id) => !this.#cache.has(id));
     const policies =
@@ -563,7 +599,7 @@ export class SensorStateService {
     const [loaded, resolved] = await Promise.all([
       runtimes.length === 0
         ? new Map<number, SensorRuntime>()
-        : this.#db.tx((q: Queryable) => loadRuntimes(q, runtimes)),
+        : this.#db.tx((q: Queryable) => loadRuntimes(q, runtimes)).then((loaded) => this.#withProbeFacts(loaded)),
       policies.length === 0 || this.#settings === undefined
         ? new Map<number, { value: unknown }>()
         : this.#settings.resolveForObjects(policies, SCAN_RETRY_WARNINGS.key),

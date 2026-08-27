@@ -111,6 +111,18 @@ export interface ProbeEndpointOptions {
    * no approval queue at all.
    */
   registry?: ProbeAdmission;
+  /**
+   * Told when a probe's link comes and goes, so its sensors read Unknown rather than Down
+   * (`R-05`). Absent means nothing tells the state machine, which is the pre-`R-05` behaviour:
+   * the sensors keep their last reading for ever.
+   */
+  reachability?: ProbeReachabilitySink;
+}
+
+/** What the transport tells `R-05`, and nothing more. */
+export interface ProbeReachabilitySink {
+  lost(probeObjectId: number): Promise<number>;
+  found(probeObjectId: number): Promise<number>;
 }
 
 /**
@@ -711,6 +723,15 @@ export class ProbeEndpoint {
           if (session.probeObjectId !== null) {
             await source.touch(session.probeObjectId);
             logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
+            // Its sensors go back to their last reading (`R-05`). Here rather than at the
+            // handshake, because this is the moment the *branch* is known — a session without
+            // one was never carrying sensors, so there is nothing to bring back.
+            const reachability = this.#options.reachability;
+            if (reachability !== undefined) {
+              void reachability.found(session.probeObjectId).catch((error: unknown) => {
+                logger.error(describeError(error), 'could not restore this probe’s sensors');
+              });
+            }
             // A probe that has just claimed its branch may have a sweep waiting, and a
             // reconnecting one almost certainly does — a run left `queued` by the disconnect
             // below. Offering it here rather than on a timer is what makes a resume immediate.
@@ -834,6 +855,16 @@ export class ProbeEndpoint {
     if (sink !== undefined && session?.probeObjectId != null) {
       void sink.probeDisconnected(session.probeObjectId).catch((error: unknown) => {
         logger.error(describeError(error), 'could not release this probe’s discovery runs');
+      });
+    }
+
+    // The sensors this probe carried are Unknown from now on, not Down: nobody has asked them
+    // anything (`R-05`). Only for a probe that had actually claimed a branch — an unapproved or
+    // unclaimed session was never carrying anything.
+    const reachability = this.#options.reachability;
+    if (reachability !== undefined && session?.probeObjectId != null) {
+      void reachability.lost(session.probeObjectId).catch((error: unknown) => {
+        logger.error(describeError(error), 'could not mark this probe’s sensors as Unknown');
       });
     }
     logger.info(
