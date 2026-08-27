@@ -552,6 +552,40 @@ sitting**, and until it has, treat the criterion as unproven rather than met.
   sets each device's Ping sensor as its master dependency.
 - Re-running creates zero duplicates.
 
+**Both exit criteria are met and measured**, on 2026-08-27 against the dev network
+(`172.19.0.0/24`). Phase 7 is complete: `D-01` through `D-10` are all done.
+
+| What | Measured |
+| --- | --- |
+| Detailed sweep of a /24 | **5.1 s**, 254 addresses, 49.5 addresses/second — inside the 8–64 s the preview offered |
+| Found | 11 hosts alive, 11 identified, 243 unreachable, 0 failed |
+| First provisioning | 11 devices, 12 sensors, **11 master dependencies**, 0 problems |
+| Re-run, identical | **0 devices, 0 sensors created**; 11 matched, 12 skipped |
+| With an SNMP credential | 8 further sensors on the 2 SNMP hosts; still 0 new devices |
+| Sensors Up on first scan | **19 of 20** |
+
+**The master dependency is where `D-05` said it would be**: `dependency.masterId` on the
+*device*, the HTTP sensor inheriting it with `definedOn` naming the device, and the Ping sensor
+resolving to *itself* with `holding: false` — `M-11`'s `a.master_id <> o.id` keeping the master
+scanning while its dependents pause, which is the bug PRTG carried to v19.1.
+
+**"Correct sensor sets" turned out to mean withholding them.** Nine of the eleven hosts
+classified `unknown` and got a Ping and nothing else, which is right: `unknown` is a real answer,
+and guessing would create sensors that fail from their first scan. The two that answered SNMP
+matched `ms.linux`, and its SNMP sensors were **still withheld** until a credential existed on
+the group — `D-03`'s `credential` gate, visible in the plan as a template that matched and a
+sensor list that did not include it. Adding the credential and re-provisioning created exactly
+those eight, and they came up Up. The one Warning is `snmp.diskfree` asking for `/` on a
+container whose storage table has no such row, and it says so in those words along with the
+twelve rows it does have — a template default meeting a container, diagnosed rather than left as
+a red square.
+
+**Two halves of the criterion were not measured, and are stated rather than implied.** There is
+no Windows machine on the dev network, so the `T-10` sensor set has never been provisioned by a
+discovery — the same open item `T-10` already carries. And the two SNMP hosts are a Net-SNMP
+agent and a simulator rather than switches or appliances, so `sysObjectID`-driven vendor
+templates are exercised only by `D-03`'s unit tests.
+
 ---
 
 ### Phase 7 progress
