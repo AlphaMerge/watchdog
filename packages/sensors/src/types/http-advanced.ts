@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { authorizationFor } from '../support/http/auth.js';
 import { HTTP_COMMON_SCHEMA, httpChannels, runHttp } from './http-shared.js';
 
 /**
@@ -155,25 +156,3 @@ export const httpAdvanced: SensorType = {
     };
   },
 };
-
-/**
- * The `Authorization` header a stored credential produces, or null.
- *
- * Both schemes in one place because the choice is the credential's, not the sensor's: an
- * operator who swaps a device from basic auth to a bearer token should not have to edit every
- * sensor under it.
- */
-function authorizationFor(credential: Readonly<Record<string, unknown>>): string | null {
-  const token = credential['token'];
-  if (typeof token === 'string' && token.trim() !== '') return `Bearer ${token.trim()}`;
-
-  const username = credential['username'];
-  const password = credential['password'];
-  if (typeof username === 'string' && username !== '') {
-    const encoded = Buffer.from(
-      `${username}:${typeof password === 'string' ? password : ''}`,
-    ).toString('base64');
-    return `Basic ${encoded}`;
-  }
-  return null;
-}

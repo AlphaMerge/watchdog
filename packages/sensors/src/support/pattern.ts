@@ -41,11 +41,17 @@ import { createContext, Script, type Context } from 'node:vm';
 export const MAX_PATTERN = 500;
 
 /**
- * How much device text is matched against.
+ * How much device text is matched against, by default.
  *
  * Not the defence against backtracking — the timeout is — but still worth having: SNMP allows an
  * OctetString of 65,535 bytes, cost grows with the subject, and 4 KB is far more than any
  * `sysDescr` or vendor status string.
+ *
+ * **A caller may raise it, and the HTTP types do** (`T-15`). 4 KB is the right bound for a string
+ * an agent returned and the wrong one for a web page: a status page with the queue depth below
+ * the fold, or a CSRF token in a form after 4 KB of markup, would silently read as "not found" —
+ * a value reported as missing when it is right there. The watchdog still bounds the cost either
+ * way, which is what makes raising it safe.
  */
 export const MAX_SUBJECT = 4_096;
 
@@ -139,8 +145,9 @@ export function extract(
   pattern: string | null,
   mode: ExtractMode,
   timeoutMs: number = MATCH_TIMEOUT_MS,
+  maxSubject: number = MAX_SUBJECT,
 ): Extracted {
-  const subject = text.length > MAX_SUBJECT ? text.slice(0, MAX_SUBJECT) : text;
+  const subject = text.length > maxSubject ? text.slice(0, maxSubject) : text;
 
   if (pattern === null || pattern === '') {
     if (mode === 'match') return { kind: 'value', value: 1, matched: subject };

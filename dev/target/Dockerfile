@@ -35,12 +35,30 @@ RUN printf '%s\n' \
       '<p>monitoring-target-ok</p>' \
     > /var/www/html/index.html \
  && printf '%s\n' \
+      '# A session, so an HTTP Transaction sensor (T-15) has a real multi-step flow to run:' \
+      '# /signin sets a cookie and redirects, and /dashboard only greets you by name if the' \
+      '# cookie arrived. Getting that wrong is the fault the sensor exists to catch, and it is' \
+      '# invisible to a status code.' \
+      'map $http_cookie $ms_who {' \
+      '  default          anonymous;' \
+      '  "~*session=authed" ops;' \
+      '}' \
       'server {' \
       '  listen 80 default_server;' \
       '  root /var/www/html;' \
       '  location / { try_files $uri $uri/ =404; }' \
       '  location = /slow { return 200 "slow-ok\n"; }' \
       '  location = /down { return 503 "unavailable\n"; }' \
+      '  location = /session {' \
+      '    add_header Set-Cookie "session=authed; Path=/";' \
+      '    return 200 "token=tok-live-42\n";' \
+      '  }' \
+      '  location = /signin {' \
+      '    add_header Set-Cookie "session=authed; Path=/";' \
+      '    return 302 /dashboard;' \
+      '  }' \
+      '  location = /dashboard { return 200 "welcome $ms_who\n"; }' \
+      '  location = /echo { return 200 "t=$arg_t\n"; }' \
       '}' \
     > /etc/nginx/sites-available/default
 

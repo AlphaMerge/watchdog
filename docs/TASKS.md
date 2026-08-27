@@ -3195,6 +3195,16 @@ because each is a decision rather than a defect:
       **Added by `T-08`:** a test that fails under load and not alone is a test that will be
       re-run rather than read, and this one guards real behaviour. It wants an injected clock like
       the one `T-07`'s pool eviction test uses, not a longer timeout.
+- [ ] **P-21 — The performance suite must not run against a busy machine** · M · — · Four
+      measured budgets — `tree-build-performance`, `ingestion-performance` (two of them) and
+      `notification-timers` — pass in isolation and fail inside the full core suite, where 1,300
+      tests and the same PostgreSQL are competing for the machine. **Added by `T-15`:** a suite
+      that reports four failures on an ordinary run is a suite people stop reading, and these are
+      the tests guarding the numbers `PLAN.md` quotes. A budget measured under contention is not
+      a measurement of anything. They want their own runner — `npm run test:perf`, serial, with
+      nothing else on the database — and the main suite should skip them unless asked, the way
+      `P-15` will need for the 5,000-sensor benchmark. Related to `P-20`, which is the same
+      disease in one timing assertion.
 - [ ] **P-19 — One session pool for every transport** · M · T-09 · `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
@@ -3357,8 +3367,47 @@ because each is a decision rather than a defect:
       point the folder was telling a lie about what the code is. The `support/snmp` barrel still
       re-exports it, so nothing that already imported it changed. The sandbox and its watchdog
       are why an operator-supplied pattern against a remote-supplied page cannot hold a worker.
-- [ ] **T-15 — HTTP Transaction** · L · T-13 · Multi-step scripted sequence with per-step
+- [x] **T-15 — HTTP Transaction** · L · T-13 · Multi-step scripted sequence with per-step
       validation and variable capture between steps.
+
+      **T-15 outcome.** `http.transaction` — the sensor for a *login*, not for a page. Every
+      other HTTP type asks one question of one URL, and what an operator wants to know about a
+      web application is whether somebody can sign in and reach what they came for. That is a
+      form, a POST, a session cookie and a page behind it, where every part answers 200 while
+      the whole thing is broken: a login page that renders perfectly and rejects every password
+      is four healthy sensors and one useless application.
+
+      **Five sensors in a row would not do this**, for three reasons that are the same reason:
+      they do not share a session, they do not run in order, and five failures is five alarms for
+      one outage. Here the jar carries between steps, the first failure ends the transaction, and
+      there is one sensor to alarm on. The failure names the step — "step 3 of 5 (open the
+      dashboard) answered 302" is a diagnosis; "the transaction failed" is a ticket somebody has
+      to reproduce by hand. Per-step timings are channels for the same reason: a checkout that
+      got slower got slower *somewhere*.
+
+      **The cookie jar had to go into `fetchHttp`, not between the steps.** A login is a POST
+      that answers 302 with a `Set-Cookie` and expects the very next request to carry it — a jar
+      applied only between steps sends the session cookie one hop too late, and the dashboard
+      comes back as the login page with a perfectly healthy 200 on it.
+
+      **Two defects in shared code surfaced while building it.** A 302 was re-sending the POST
+      body: RFC 7231 §6.4.3 permits changing to GET "for historical reasons" and every browser
+      and `curl -L` do, and replaying a login form against the dashboard is a request no
+      application expects — 307 and 308 exist to say "do not", and now preserve both. And
+      `pattern.ts` bounded every subject at 4 KB, which is right for a string an SNMP agent
+      returned and wrong for a page: a CSRF token or a queue depth below 4 KB of markup read as
+      "not found", so the bound is now the caller's and `http.content` passes its own too.
+
+      **Secrets are scrubbed out of the message on the way out.** Steps substitute
+      `{{credential.password}}` from the device rather than carrying a password in their
+      parameters, and a failure message is stored on the state log and returned by the API — so
+      an API key in a query string, which is exactly where a transport error puts the URL, would
+      otherwise be a secret the API hands to anybody who can read a sensor.
+
+      Verified live against `ms-target`, which gained a session flow for it: sign in through a
+      302, capture a token, substitute it into a later step — `3 steps in 19 ms; slowest was
+      sign in at 10 ms` — and, with one step's expectation broken, `step 3 of 3 (call the api)
+      answered 200 but does not contain "t=WRONG"`.
 - [ ] **T-16 — REST Custom** · L · T-13 · JSONPath/XPath extraction into declared channels, with
       a mapping editor.
 - [ ] **T-17 — Mail sensors** · L · P-05 · SMTP, POP3, IMAP, and SMTP&IMAP Round Trip with

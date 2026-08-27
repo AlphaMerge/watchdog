@@ -139,7 +139,8 @@ export const portRange: SensorType = {
     const ports = parsePorts(typeof spec === 'string' ? spec : '');
     const timeoutMs = Number(context.params['timeoutMs'] ?? 3_000);
     const concurrency = Math.max(1, Number(context.params['concurrency'] ?? 8));
-    const family = context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
+    const family =
+      context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
 
     const open: number[] = [];
     const queue = [...ports];

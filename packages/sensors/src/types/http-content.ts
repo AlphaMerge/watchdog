@@ -188,7 +188,10 @@ export const httpContent: SensorType = {
     const readings: { key: string; value: number }[] = [];
     const notes: string[] = [];
     for (const extraction of extractions) {
-      const found = extract(body, extraction.pattern, 'number');
+      // The whole body it was allowed to read, not `pattern.ts`'s 4 KB default: that bound is
+      // right for a string an SNMP agent returned and wrong for a page, where a number below the
+      // fold would silently read as a value that is missing.
+      const found = extract(body, extraction.pattern, 'number', undefined, maxBodyBytes);
       if (found.kind === 'too-slow') {
         throw new Error(
           `matching /${extraction.pattern}/ was still running after ${String(found.afterMs)} ms ` +

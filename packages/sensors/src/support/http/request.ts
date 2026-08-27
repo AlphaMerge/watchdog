@@ -33,6 +33,18 @@ export interface HttpRequestOptions {
    * needs the text and bounds how much.
    */
   readonly maxBodyBytes: number;
+  /**
+   * A cookie jar, read before each request and updated from each response — **including the
+   * redirect hops** (`T-15`).
+   *
+   * That is why it lives here rather than in the transaction sensor that wants it. A login is a
+   * POST that answers 302 with a `Set-Cookie` and expects the very next request to carry it; a
+   * jar applied only between *steps* would send the session cookie one request too late, and the
+   * dashboard would come back as the login page with a perfectly healthy 200 on it.
+   *
+   * Absent for every other sensor, which want each scan to stand alone.
+   */
+  readonly cookies?: Map<string, string>;
 }
 
 export interface HttpResponse {
@@ -64,9 +76,16 @@ export async function fetchHttp(
   const timing: { firstByteAt?: bigint } = {};
 
   let path = options.path;
+  // A 302 turns a POST into a GET, which is what every browser and `curl -L` do — see RFC 7231
+  // §6.4.3, which permits it "for historical reasons" and then describes what everybody actually
+  // implements. `T-15` is what surfaced this: a login is a POST that answers 302, and re-sending
+  // the form body to the dashboard is a request no application expects. 307 and 308 exist
+  // precisely to say "do not do that", so they preserve both.
+  let method = options.method;
+  let body = options.body;
   let redirects = 0;
   let size = 0;
-  let body = '';
+  let kept = '';
   let status = 0;
   let headers: IncomingHttpHeaders = {};
   let unfollowed: string | null = null;
@@ -80,7 +99,7 @@ export async function fetchHttp(
             host: options.host,
             port: options.port,
             path,
-            method: options.method,
+            method,
             signal,
             ...(options.scheme === 'https'
               ? { rejectUnauthorized: options.verifyTls, servername: options.host }
@@ -90,18 +109,19 @@ export async function fetchHttp(
               // No keep-alive: a pooled connection would make the connect time these sensors
               // measure depend on whether the last scan happened to leave one open.
               connection: 'close',
-              ...options.headers,
-              ...(options.body === ''
+              ...(options.cookies === undefined || options.cookies.size === 0
                 ? {}
-                : { 'content-length': String(Buffer.byteLength(options.body)) }),
+                : { cookie: cookieHeader(options.cookies) }),
+              ...options.headers,
+              ...(body === '' ? {} : { 'content-length': String(Buffer.byteLength(body)) }),
             },
           },
           (res) => {
             timing.firstByteAt ??= process.hrtime.bigint();
             res.on('data', (chunk: Buffer) => {
               size += chunk.length;
-              if (body.length < options.maxBodyBytes) {
-                body += chunk.toString('utf8').slice(0, options.maxBodyBytes - body.length);
+              if (kept.length < options.maxBodyBytes) {
+                kept += chunk.toString('utf8').slice(0, options.maxBodyBytes - kept.length);
               }
             });
             res.on('end', () => {
@@ -120,7 +140,7 @@ export async function fetchHttp(
           );
         });
         req.on('error', reject);
-        if (options.body !== '') req.write(options.body);
+        if (body !== '') req.write(body);
         req.end();
       },
     ).catch((error: unknown) => {
@@ -129,6 +149,7 @@ export async function fetchHttp(
 
     status = outcome.status;
     headers = outcome.headers;
+    if (options.cookies !== undefined) absorbCookies(options.cookies, headers['set-cookie']);
     const location = typeof headers.location === 'string' ? headers.location : null;
 
     const redirecting = status >= 300 && status < 400 && location !== null;
@@ -153,8 +174,12 @@ export async function fetchHttp(
     }
     path = next;
     redirects += 1;
+    if (status !== 307 && status !== 308 && method !== 'HEAD') {
+      method = 'GET';
+      body = '';
+    }
     // A redirect's body is not the body anybody asked about.
-    body = '';
+    kept = '';
     size = 0;
   }
 
@@ -163,7 +188,7 @@ export async function fetchHttp(
     status,
     headers,
     size,
-    body,
+    body: kept,
     redirects,
     totalMs,
     timeToFirstByteMs:
@@ -173,6 +198,34 @@ export async function fetchHttp(
     finalPath: path,
     unfollowedLocation: unfollowed,
   };
+}
+
+/** What to send, in the one format every server has parsed since 1994. */
+function cookieHeader(jar: ReadonlyMap<string, string>): string {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+/**
+ * Merges `Set-Cookie` into the jar.
+ *
+ * Only the name and the value: paths, domains and `Secure` are a browser's job, and a sensor
+ * talking to one host over one scheme has nothing to decide. Expiry is honoured *only* as
+ * deletion — `Max-Age=0` or an empty value — because that is a logout, and a transaction that
+ * kept sending a cookie the server just cleared would test the wrong thing.
+ */
+function absorbCookies(jar: Map<string, string>, raw: string | string[] | undefined): void {
+  if (raw === undefined) return;
+  for (const line of Array.isArray(raw) ? raw : [raw]) {
+    const [pair = '', ...attributes] = line.split(';');
+    const at = pair.indexOf('=');
+    if (at <= 0) continue;
+    const name = pair.slice(0, at).trim();
+    const value = pair.slice(at + 1).trim();
+    const cleared =
+      value === '' || attributes.some((part) => /^\s*max-age\s*=\s*0*\s*$/i.test(part));
+    if (cleared) jar.delete(name);
+    else jar.set(name, value);
+  }
 }
 
 /**

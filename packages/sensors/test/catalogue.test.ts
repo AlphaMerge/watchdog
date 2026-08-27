@@ -222,6 +222,7 @@ describe('the built-in catalogue', () => {
       'http.advanced',
       'http.content',
       'http.request',
+      'http.transaction',
       'icmp.jitter',
       'icmp.ping',
       'port.range',

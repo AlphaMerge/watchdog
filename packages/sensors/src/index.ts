@@ -56,6 +56,7 @@ import { dnsRecord } from './types/dns-record.js';
 import { icmpJitter } from './types/icmp-jitter.js';
 import { portRange } from './types/port-range.js';
 import { httpAdvanced } from './types/http-advanced.js';
+import { httpTransaction } from './types/http-transaction.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -90,6 +91,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpJitter,
   portRange,
   httpAdvanced,
+  httpTransaction,
   httpContent,
   httpRequest,
   portTcp,
