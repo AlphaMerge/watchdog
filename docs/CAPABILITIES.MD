@@ -201,7 +201,7 @@ through WinRM or a PowerShell `Get-CimInstance` shell-out from a probe running o
 | SMTP                 | Connect and greet an SMTP server                                |
 | POP3 / IMAP          | Connect and optionally authenticate                             |
 | SMTP&IMAP Round Trip | Send a test message, wait for delivery, measure end-to-end time |
-| SMTP&POP3 Round Trip | Same, via POP3 `[V2]`                                           |
+| SMTP&POP3 Round Trip | Same, via POP3 — pulled into v1 by `T-17`, since one sensor does both |
 
 ### 3.8 Databases `[V1]`
 

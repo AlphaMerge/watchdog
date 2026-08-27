@@ -8,6 +8,7 @@ import type { JsonSchema } from '../contract.js';
 import { SNMP_CREDENTIAL_SCHEMA } from '../support/snmp/schema.js';
 import { SSH_CREDENTIAL_SCHEMA } from '../support/ssh/schema.js';
 import { HTTP_CREDENTIAL_SCHEMA } from '../support/http/schema.js';
+import { MAIL_CREDENTIAL_SCHEMA } from '../support/mail/schema.js';
 
 /**
  * The credential kinds an installation can store (`A-05`).
@@ -15,7 +16,7 @@ import { HTTP_CREDENTIAL_SCHEMA } from '../support/http/schema.js';
  * Mirrors the `credential_kind` enum in migration 001, but only the kinds something can actually
  * *use*: a kind with no transport behind it would offer an operator a form for credentials
  * nothing would ever authenticate with, and a forgotten password in a database is worse than an
- * absent feature. `T-09` adds `windows`, and it is one entry here.
+ * absent feature. `T-17` added `mail`, which took a migration because the kind is a column value; `T-09` adds `windows`, which is already in the enum and so is one entry here.
  *
  * **A kind is a schema, and the schema does the same three jobs it does for a sensor type**
  * (`docs/adding-a-sensor-type.md`): it validates the write, it generates the form, and — the
@@ -70,6 +71,20 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: { ...HTTP_CREDENTIAL_SCHEMA },
+    },
+  },
+  {
+    id: 'mail',
+    name: 'Mail',
+    description:
+      'Used by every mail sensor on this object and everything below it. A relay account and a ' +
+      'mailbox account are two credential *sets* of this one kind, not two kinds — set the ' +
+      'relay’s on the group and the mailbox’s on the device, and inheritance resolves each ' +
+      'sensor to the nearest one.',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { ...MAIL_CREDENTIAL_SCHEMA },
     },
   },
 ];

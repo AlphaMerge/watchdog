@@ -3462,8 +3462,58 @@ because each is a decision rather than a defect:
       it is worth deciding once, deliberately, rather than hand-rolling a parser inside a sensor
       type. The path language in `support/json-path.ts` is the model for the XPath subset:
       documented, bounded, and stopping short of anything that evaluates.
-- [ ] **T-17 — Mail sensors** · L · P-05 · SMTP, POP3, IMAP, and SMTP&IMAP Round Trip with
+- [x] **T-17 — Mail sensors** · L · P-05 · SMTP, POP3, IMAP, and SMTP&IMAP Round Trip with
       cleanup of test messages.
+
+      **T-17 outcome.** Four types over `support/mail/`: one connection and three protocol
+      clients written here, because npm's mail libraries are all *clients* — they retry, they
+      queue, they hide a `452` behind a reconnect, and every one of those behaviours is the
+      opposite of what a check must do. A sensor that retried would report a healthy relay while
+      one message in three was being refused.
+
+      **All three protocols are the same transport wearing different words**, so the socket, the
+      CRLF line splitting, the per-reply deadline, the abort and the in-place `STARTTLS` upgrade
+      live in `connection.ts` and the protocols only supply "has this reply ended" — SMTP by a
+      space after the code, POP3 by a lone dot, IMAP by its own tag coming back. Three copies of
+      that would be three chances to get the timeout subtly wrong, and the failure mode is a
+      worker that hangs rather than a check that fails.
+
+      **A TCP connect is not a mail check.** Port 25 accepts a connection long after the relay
+      behind it stopped taking mail: a full queue answers `452` at `MAIL FROM`, an anti-spam
+      layer out of licence answers `451` at `RCPT TO`, and both are perfect to a Port sensor.
+      **And SMTP, IMAP and a mailbox all answering is still three green sensors on a system where
+      mail has not moved for six hours** — which is what the round trip is for: it is the only
+      one of the four that measures the pipeline rather than its parts.
+
+      **Cleanup is not optional and its failure is a check failure.** The round trip puts a
+      message in a real mailbox every scan, so it deletes by a token generated per check — never
+      by position, because POP3 renumbers — and reports anything of its own left behind by an
+      earlier scan on a channel of its own. `DELE` is not a delete until `QUIT` (RFC 1939 §6) and
+      `STORE \Deleted` is not one until `EXPUNGE`, so both failures are noticed rather than
+      reported as a clean round trip while the mailbox fills at one message a minute.
+
+      **Two things found while writing it.** `STARTTLS` that is asked for and not offered fails
+      rather than continuing — a silent downgrade would report a healthy relay while sending the
+      password in plain text. And an address is a sensor *parameter*, so a carriage return in one
+      ends the `MAIL FROM` command and lets whatever follows be read as another: that is
+      injection through a configuration form, and it is refused at the protocol rather than at
+      the caller so a new caller cannot forget. A newline in the subject is folded instead of
+      refused, because that one is a typo in almost every case.
+
+      `mail` joined the credential kinds, which took migration `024` — the kind is a Postgres
+      enum value, and an installation that could store a kind the database rejects would fail at
+      the moment somebody types a password in. `ALTER TYPE … ADD VALUE` is transactional on
+      PostgreSQL 12+; the rollback rebuilds the enum and says plainly that it deletes mail
+      credentials, because Postgres has no `DROP VALUE`.
+
+      Tested against three in-house simulators (`test/support/mail-servers.ts`) sharing one
+      mailbox, since what is worth asserting — a relay that accepts a connection and refuses at
+      `RCPT TO`, a `QUIT` that fails so a deletion never happened — is unreachable against a
+      server behaving normally. Verified live against **GreenMail**, added to the dev stack for
+      this: MailHog is a sink that speaks no POP3 or IMAP, and a round trip needs both halves on
+      one server. `delivered in 342 ms`, `INBOX: 1 message, 1 unread`, `1 message waiting (69
+      bytes)`, `delivered in 539 ms after 1 mailbox check`, and IMAP over implicit TLS on 3993
+      with the "certificate is not being verified" note on every scan.
 - [ ] **T-18 — Database sensors** · L · P-05 · PostgreSQL, MySQL, MSSQL: connect, run a query,
       execution time and first-result-cell channels, statement timeout.
 - [ ] **T-19 — EXE/Script sensors** · L · P-03 · Simple and Advanced variants, documented output

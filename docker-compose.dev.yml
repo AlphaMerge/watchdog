@@ -105,6 +105,46 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------------------
+  # GreenMail — a mail *server* for the mail sensors (Phase 6, T-17).
+  #
+  # Not a replacement for MailHog and not a duplicate of it. MailHog is a sink: it swallows SMTP
+  # so the notification workstream has somewhere to send to, and it speaks no POP3 or IMAP at
+  # all. The mail sensors need the other half — a mailbox that can be opened, counted and read
+  # back — and a round-trip sensor needs both halves to be the same server, so that a message
+  # posted over SMTP can be found over IMAP.
+  #
+  # One account, `ops`, so the credential in a dev sensor is the obvious one. Everything is in
+  # memory and disappears with the container, which is what you want from a mailbox that a
+  # sensor is deleting from every minute.
+  #
+  #   SMTP 3025 · POP3 3110 · IMAP 3143 · SMTPS 3465 · IMAPS 3993 · POP3S 3995 · API 8080
+  # ---------------------------------------------------------------------------------------
+  greenmail:
+    image: greenmail/standalone:2.1.0
+    environment:
+      # `setup.test.all` starts every protocol, plain and TLS. `auth.disabled` is *not* set: the
+      # mail sensors authenticate, and a server that accepted anything would let a broken
+      # credential path pass unnoticed.
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.users=ops:hunter2@ms-mail
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.verbose
+    ports:
+      - '127.0.0.1:3025:3025'
+      - '127.0.0.1:3110:3110'
+      - '127.0.0.1:3143:3143'
+      - '127.0.0.1:3465:3465'
+      - '127.0.0.1:3993:3993'
+      - '127.0.0.1:3995:3995'
+    healthcheck:
+      test: ['CMD', '/bin/sh', '-c', 'nc -z 127.0.0.1 3143']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------------------
   # SNMP simulator — a target for the SNMP workstream (Phase 6, T-01…T-06). Replaced by our
   # own harness in P-06; this is enough to develop against in the meantime.
   # ---------------------------------------------------------------------------------------
