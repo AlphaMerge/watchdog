@@ -2715,6 +2715,14 @@ because each is a decision rather than a defect:
 
 ## Phase 6 — Sensor breadth
 
+- [ ] **U-12 — Repeating fields in the generated form** · M · U-08 · An array of objects in a
+      `paramsSchema` renders as `U-08`'s JSON fallback — an editable textarea holding the raw
+      value. It round-trips correctly and deletes nothing, which is why the fallback exists, but
+      an operator configuring one types JSON by hand.
+      **Added by `T-04`:** `snmp.table.columns` is the first shipped parameter of that shape, and
+      `T-06`'s filter rules will be the second. Wants `kind: 'array'` in `forms/schema.ts` with
+      add/remove/reorder over `items`, and it must keep working for a free-form array with no
+      `items`, which still has to fall back.
 - [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
 
@@ -2828,6 +2836,11 @@ because each is a decision rather than a defect:
       is no way to populate an interface picker at add time — the core has no route to the
       device. `D-02` (device identification) needs the same pair, and so does any "test this
       sensor now" button.
+      **Added by `T-04`:** and the table row picker, which is the same gap on a bigger surface —
+      an operator adding a table sensor currently reads the table with `snmpwalk` and types the
+      column positions and the row value they find. Neither sensor type is blocked on it: both
+      resolve the row on every scan either way, so this is the add-time convenience and not the
+      monitoring.
 - [x] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and
       lookup mapping for strings.
 
@@ -2878,8 +2891,56 @@ because each is a decision rather than a defect:
       want the same — an operator has to type a lookup id today rather than choose from what the
       installation has loaded. The id is validated by the core and a missing one is reported
       rather than fatal (`M-06`), so this is a convenience gap and not a correctness one.
-- [ ] **T-04 — SNMP Custom Table** · L · T-01 · Walk a table; one sensor per row or channels per
+- [x] **T-04 — SNMP Custom Table** · L · T-01 · Walk a table; one sensor per row or channels per
       column; row selection at add time.
+
+      **T-04 outcome.** `snmp.table`: one sensor is one row, and its channels are the columns.
+      The ticket offered that layout *or* channels-per-row, and only one of them the channel
+      model supports. `channels(params)` is declared before a sensor has ever run — that is what
+      lets the core create channels at sensor-creation time carrying a primary, a lookup and a
+      counter width. Rows live on the device, so a channel-per-row sensor could declare none of
+      those: its channels would be created from the wire on first scan (`ChannelResolver` does
+      that), with no primary, no lookup and no counter arithmetic — a table sensor that could not
+      compute a rate, which is most of what a table sensor is for. Columns are typed in at add
+      time; rows are discovered. So columns are channels.
+
+      **The row is found by what it is called, not only by where it sits.** A table index is an
+      integer an agent may reassign — the dev target's own `hrStorageTable` is indexed
+      1, 3, 6, 7, 8, 10, 11, 33, 38…, and `ifIndex` moves when a module is reseated — so a sensor
+      pinned to index 3 later watches a different volume with nothing anywhere to say so. Naming
+      the identifying column and the value to find in it survives that, at one walk per scan; the
+      index is still accepted alone, and given *with* a value becomes a hint checked first, so an
+      unchanged table costs one request instead of a walk. Measured on the test agent: 2 requests
+      when the hint holds. `rowIndex` is text rather than an integer because plenty of real tables
+      are indexed by more than one arc.
+
+      **Reused rather than re-solved:** `T-02`'s counter path (a column set to counter declares
+      64 bits and the reading corrects it from the varbind type, so a Counter32 wrap is not read
+      as a device reset), `M-06`'s lookups per column, and `T-03`'s sandboxed matcher for
+      `regex` row matching — an operator-supplied pattern against device-supplied text is the one
+      thing in a check that no `AbortSignal` can interrupt, and matching runs against *every row*
+      of the naming column, so a pattern that backtracks fails the check on the first row rather
+      than costing the 250 ms watchdog on each of them.
+
+      **Channel keys are derived from the column, not asked for** (`col6`, `col1_6`). A key is
+      stable within the sensor and is never the label, so deriving it means renaming a channel
+      keeps its history — and makes two columns with the same key impossible, where the
+      one-key-per-sensor constraint would otherwise turn a duplicate into a failed insert at
+      sensor creation.
+
+      Verified live against the dev target's real net-snmp agent, which produced a case the test
+      agent only simulated: a sensor on `hrStorageEntry` matching "Physical memory" resolved to
+      row 1, read Size and Used, and **gapped** `hrStorageAllocationFailures` — that agent does
+      not implement the column — reporting `value: null` through storage and query rather than a
+      zero, with the reason in the sensor message and the sensor still Up. A second sensor on
+      `ifEntry` matching "eth0" resolved to the sparse index 11 and reported 15.97 octets/s from a
+      Counter32 through `T-02`'s arithmetic, alongside `ifOperStatus` carrying its lookup.
+
+      **Not done here:** the row picker still needs `R-09`, same as `T-02`'s interface picker —
+      an operator reads the table with `snmpwalk` and types what they find. And the `columns`
+      array renders in the generated form as `U-08`'s JSON fallback rather than as a repeating
+      row of fields; that is `U-12`, not a change to this schema — the schema describes the
+      parameter honestly and the form generator is what has the gap.
 - [ ] **T-05 — SNMP CPU / Memory / Disk Free / Uptime** · M · T-01 · Standard MIB sensors with
       restart detection on uptime.
 - [ ] **T-06 — SNMP Trap Receiver** · L · T-01 · Listener, trap and inform handling, filter

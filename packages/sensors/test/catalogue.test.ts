@@ -221,6 +221,7 @@ describe('the built-in catalogue', () => {
       'icmp.ping',
       'snmp.custom',
       'snmp.custom.string',
+      'snmp.table',
       'snmp.traffic',
     ]);
   });

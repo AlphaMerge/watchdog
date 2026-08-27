@@ -71,7 +71,17 @@ somebody wonders why the timeout setting does nothing.
 
 Use `default` freely. Defaults are applied at validation time and **stored**, so a sensor's row
 is complete regardless of which form or script created it, and `channels()` never has to
-second-guess an absent optional.
+second-guess an absent optional. Make sure a `default` satisfies its own schema: a `default` of
+`''` under a `pattern` that rejects the empty string is a parameter nobody can leave alone, and
+the catalogue's "validates against its own declared defaults" test refuses to ship one.
+
+**What the generated form draws.** Strings, numbers, integers, booleans, enums and objects that
+declare their `properties` get a real control. Everything else — an array, a free-form object —
+falls back to an editable JSON box (`forms/Control.tsx`). That fallback exists so a save can
+never *delete* a parameter the form could not draw, and it round-trips correctly, but it is JSON
+an operator types by hand. Prefer a shape with a control where one fits; reach for an array when
+the parameter genuinely is a list (`snmp.table.columns`), and know that the form is the thing
+with the gap, not your schema. `U-12` is the ticket to close it.
 
 ### `costHint`
 
