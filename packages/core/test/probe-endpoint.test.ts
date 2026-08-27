@@ -642,13 +642,19 @@ describe(
     class StubSource {
       claimed: number | null = 7;
       sensors: SensorAssignment[] = [];
+      /** Credential rotation stamps, so a test can rotate one without touching a sensor. */
+      stamps = new Map<number, string>();
       touched: number[] = [];
 
       probeObjectFor(): Promise<number | null> {
         return Promise.resolve(this.claimed);
       }
       assignmentsFor(): Promise<ProbeAssignments> {
-        return Promise.resolve({ version: fingerprint(this.sensors), sensors: [...this.sensors] });
+        return Promise.resolve({
+          version: fingerprint(this.sensors, this.stamps),
+          sensors: [...this.sensors],
+          stamps: new Map(this.stamps),
+        });
       }
       touch(objectId: number): Promise<void> {
         this.touched.push(objectId);

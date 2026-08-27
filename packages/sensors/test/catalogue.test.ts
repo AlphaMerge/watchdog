@@ -228,6 +228,10 @@ describe('the built-in catalogue', () => {
       'snmp.traffic',
       'snmp.trap',
       'snmp.uptime',
+      'ssh.diskfree',
+      'ssh.load',
+      'ssh.meminfo',
+      'ssh.script',
     ]);
   });
 

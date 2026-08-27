@@ -3121,6 +3121,13 @@ because each is a decision rather than a defect:
       SNMP pool's lease counting and idle eviction; extracting the shared half is `P-19` below,
       deliberately deferred until `T-09` makes it a third instance and the shape is actually
       known rather than guessed from two.
+- [ ] **P-20 — `alarm-scheduler` sweep test is timing-flaky** · S · — · "counts what it did, for
+      Core Health" in `packages/core/test/alarm-scheduler.test.ts` asserts a timer *fired* within a
+      real wall-clock window. It passes 17/17 in isolation and fails about one run in ten inside
+      the full suite, where the machine is busy — it read `{"sweeps":3,"fired":0,"wakes":1}`.
+      **Added by `T-08`:** a test that fails under load and not alone is a test that will be
+      re-run rather than read, and this one guards real behaviour. It wants an injected clock like
+      the one `T-07`'s pool eviction test uses, not a longer timeout.
 - [ ] **P-19 — One session pool for every transport** · M · T-09 · `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
@@ -3128,8 +3135,62 @@ because each is a decision rather than a defect:
       `T-09`'s WinRM transport is the third and the point at which the shape is known. Whoever
       does it should keep the SNMP pool's synchronous `acquire` working or update its 21 tests
       deliberately, not incidentally.
-- [ ] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
+- [x] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
+
+      **T-08 outcome.** Four types on `T-07`'s session layer, plus `support/ssh/parse.ts` — pure,
+      and separate because every one of these formats has a variant that parses *almost* right
+      and yields a number that is wrong rather than absent, which is worse than one that fails.
+
+      **The script output format is line-oriented first, because the author is usually writing
+      shell.** `echo "queue:12"` is one line; emitting JSON from shell means quoting and escaping,
+      and a script that gets that wrong fails in a way its author cannot see by running it. Three
+      shapes: a bare number (one reading, the channel called `value`), `key:value` lines with
+      `message:` reserved, and a JSON object when the output starts with `{`. `=` works wherever
+      `:` does, because half the world writes `key=value` and being strict about it would be a
+      rule with no purpose. A script reporting a key the sensor has no channel for is **named in
+      the message** rather than dropped — that is how an operator finds out their script and their
+      sensor have drifted apart — and a non-zero exit fails the check with the script's own
+      stderr, which is how a script refuses to answer instead of reporting a zero somebody graphs.
+
+      **`df -P -k` and the reason it is not `df`.** Without `-P`, `df` wraps a long device name
+      onto its own line and an obvious parser reads the *previous* filesystem's columns; `-k`
+      pins the block size, because `df` honours `BLOCKSIZE` and `DF_BLOCK_SIZE` from the
+      environment and a login shell may set them. The percentage is recomputed rather than read:
+      `df` rounds its own up to a whole number, so a 40.4% volume reads as 41% — fine for a
+      person, wrong for a threshold somebody set at 41. The path is single-quoted with the
+      shell's own escape for an embedded quote, since a path is operator input reaching a shell.
+
+      **`ssh.load` makes the per-processor figure primary**, and gets the processor count in the
+      same round trip. A load of 4 is idle on a 32-core box and desperate on a single-core one, so
+      the raw average cannot carry a threshold that means the same thing on two machines. Where
+      the count is unavailable the channel *gaps* rather than falling back to the raw figure — a
+      per-processor load that is secretly the whole-machine one is a number somebody would set a
+      limit against.
+
+      **`ssh.meminfo` gets `MemAvailable` for the asking**, which is the number `T-05`'s
+      `snmp.memory` has to work for: over SNMP the UCD-MIB exposes `MemFree` under a name that
+      sounds like availability, and the measured gap on one box was 64% used against a true 35%.
+      Live on the same dev target the two agreed — 37.12% over SSH against 32.03% over SNMP,
+      minutes apart — which cross-validates both. Channel keys deliberately match the SNMP
+      equivalents so a summary graph across a Linux box and a switch lines up; there is a test
+      asserting the two lists are identical.
+
+      **Found live, and the most important thing in this ticket: a rotated credential never
+      reached a running probe.** `ProbeAssignments.version` is computed over the whole
+      configuration *including* `A-05`'s rotation stamps, so a rotation changed it and the core
+      decided something had to be sent — but `diffAssignments` compared sensors one at a time with
+      **no stamps**, so every sensor hashed identically and the delta was empty. The probe recorded
+      the new version and went on authenticating with the old secret, indefinitely, with nothing
+      anywhere saying so. Rotating a password to lock somebody out would have appeared to work and
+      not have. Fixed by carrying the stamps on `ProbeAssignments` and threading them through the
+      diff; `probe-config.test.ts` pins it. This is a defect in `R-04`'s delta that `A-05` created
+      and neither ticket's tests could see, because it needs a credential change with *nothing
+      else* changing — which is exactly what pasting a host key fingerprint in is.
+
+      A mutation run also found a **weak test of my own**: `parseMeminfo` was asserted against
+      `HugePages_Total: 0`, where multiplying by 1024 is still 0, so the unit check could be
+      deleted entirely and the test still passed. The fixture now uses a non-zero count.
 - [ ] **T-09 — Windows check transport** · L · P-03 · PowerShell / WinRM shell-out from a
       Windows-hosted probe, with credential handling and output parsing.
 - [ ] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
@@ -3275,6 +3336,11 @@ because each is a decision rather than a defect:
       drains — which is what the larger catch-up batches shorten.
 - [x] **R-04 — Incremental config push** · L · S-03, F-09 · Each probe receives only its own
       subtree, as deltas, with a resync path after a long disconnect.
+      **Corrected by `T-08`:** the delta compared each sensor without `A-05`'s credential
+      stamps, so a credential rotation produced a *changed version* and an *empty delta* — the
+      probe recorded the new version and kept the old secret for ever. The stamps now travel on
+      `ProbeAssignments` and go into both the whole-config fingerprint and the per-sensor diff.
+
       **R-04 outcome.** Protocol version 3: `config-set`, `config-delta`, `config-unchanged`
       from the core, `config-ack` back, and a `configVersion` fingerprint on `hello`. The
       fingerprint is content-addressed rather than a counter — derived from the answer itself, so

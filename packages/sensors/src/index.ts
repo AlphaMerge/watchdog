@@ -61,12 +61,17 @@ import { snmpDiskFree } from './types/snmp-disk-free.js';
 import { snmpMemory } from './types/snmp-memory.js';
 import { snmpUptime } from './types/snmp-uptime.js';
 import { snmpTrap } from './types/snmp-trap.js';
+import { sshDiskFree } from './types/ssh-disk-free.js';
+import { sshLoad } from './types/ssh-load.js';
+import { sshMeminfo } from './types/ssh-meminfo.js';
+import { sshScript } from './types/ssh-script.js';
 
 /**
  * The types every installation gets.
  *
- * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three, and `T-20` adds the
- * syslog receiver on the same listener contract `snmp.trap` established.
+ * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three; `T-09`/`T-10` add the
+ * Windows set, and `T-20` adds the syslog receiver on the listener contract `snmp.trap`
+ * established.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
@@ -82,6 +87,10 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   snmpMemory,
   snmpUptime,
   snmpTrap,
+  sshDiskFree,
+  sshLoad,
+  sshMeminfo,
+  sshScript,
 ];
 
 export function standardCatalogue(

@@ -86,6 +86,8 @@ interface ProbeSession {
    */
   sentVersion: string | null;
   sentSensors: readonly SensorAssignment[];
+  /** The credential stamps that went with `sentSensors`; the delta needs them (`T-08`). */
+  sentStamps: ReadonlyMap<number, string>;
 }
 
 /** Constant-time comparison, so a wrong key cannot be found one character at a time. */
@@ -383,6 +385,7 @@ export class ProbeEndpoint {
       probeObjectId: null,
       sentVersion: null,
       sentSensors: [],
+      sentStamps: new Map(),
     };
     this.#sessions.set(gid, session);
 
@@ -466,6 +469,7 @@ export class ProbeEndpoint {
         if (assignments.version === held) {
           session.sentVersion = assignments.version;
           session.sentSensors = assignments.sensors;
+          session.sentStamps = assignments.stamps;
           if (presented !== undefined) {
             session.connection.send({ type: 'config-unchanged', version: assignments.version });
             logger.info({ version: assignments.version }, 'probe configuration is already current');
@@ -478,10 +482,16 @@ export class ProbeEndpoint {
         const delta =
           session.sentVersion === null
             ? null
-            : diffAssignments(session.sentSensors, assignments.sensors);
+            : diffAssignments(
+                session.sentSensors,
+                assignments.sensors,
+                session.sentStamps,
+                assignments.stamps,
+              );
 
         session.sentVersion = assignments.version;
         session.sentSensors = assignments.sensors;
+        session.sentStamps = assignments.stamps;
 
         // Only the upserts are weighed against the snapshot: a removal is an integer, an upsert
         // is a whole assignment, and counting them alike would turn "one sensor deleted from a

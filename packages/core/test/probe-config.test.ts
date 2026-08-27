@@ -119,6 +119,32 @@ describe('assignment deltas', () => {
     const set = [assignment({ sensorId: 1 }), assignment({ sensorId: 2 })];
     assert.deepEqual(diffAssignments(set, set), { upserted: [], removed: [] });
   });
+
+  it('resends a sensor whose credential was rotated, with nothing else changed', () => {
+    // The bug this exists for, found live while rotating a host key fingerprint during `T-08`.
+    // `version` is computed over the whole configuration *including* the stamps, so a rotation
+    // changed it and the core decided something had to be sent — but the delta compared sensors
+    // one at a time with no stamps, so every one hashed the same as before and the delta was
+    // empty. The probe recorded the new version and went on authenticating with the old secret,
+    // indefinitely, with nothing anywhere saying so.
+    const set = [assignment({ sensorId: 1 }), assignment({ sensorId: 2 })];
+    const before = new Map([
+      [1, '7@2026-08-27T05:00:00.000Z'],
+      [2, '7@2026-08-27T05:00:00.000Z'],
+    ]);
+    const after = new Map([
+      [1, '7@2026-08-27T05:10:00.000Z'],
+      [2, '7@2026-08-27T05:00:00.000Z'],
+    ]);
+
+    const delta = diffAssignments(set, set, before, after);
+    assert.deepEqual(
+      delta.upserted.map((sensor) => sensor.sensorId),
+      [1],
+      'only the sensor whose credential moved should be resent',
+    );
+    assert.deepEqual(delta.removed, []);
+  });
 });
 
 // ── against the database ────────────────────────────────────────────────────────────────────

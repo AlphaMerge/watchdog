@@ -11,10 +11,26 @@ export interface ProbeAssignments {
   /** Fingerprint of `sensors`. Equal fingerprints mean equal configuration. */
   readonly version: string;
   readonly sensors: readonly SensorAssignment[];
+  /**
+   * The credential rotation stamp per sensor, carried alongside rather than folded in.
+   *
+   * It has to travel with the set because the *delta* needs it too, and that is not obvious:
+   * `version` is computed over the whole configuration including these, so a rotation changes it
+   * and the core decides something must be sent — but `diffAssignments` compares sensors one at
+   * a time, and without the stamps every sensor hashes the same as before. The result was a
+   * version that said "changed" and a delta that said "nothing", so a probe recorded the new
+   * version and went on using the old credential for ever. Found live, rotating a host key
+   * fingerprint during `T-08`.
+   */
+  readonly stamps: ReadonlyMap<number, string>;
 }
 
 /** An empty assignment set still has a stable fingerprint, so "nothing" compares equal. */
-export const EMPTY_ASSIGNMENTS: ProbeAssignments = { version: fingerprint([]), sensors: [] };
+export const EMPTY_ASSIGNMENTS: ProbeAssignments = {
+  version: fingerprint([]),
+  sensors: [],
+  stamps: new Map(),
+};
 
 export interface ProbeConfigOptions {
   db: Database;
@@ -142,7 +158,7 @@ export class ProbeConfigService {
       };
     });
 
-    return { version: fingerprint(sensors, stamps), sensors };
+    return { version: fingerprint(sensors, stamps), sensors, stamps };
   }
 
   /**
@@ -240,16 +256,28 @@ function stableJson(value: unknown): string {
   });
 }
 
-/** What changed between two assignment sets, as the delta the probe applies. */
+/**
+ * What changed between two assignment sets, as the delta the probe applies.
+ *
+ * **The stamps are not optional and the default is a trap the code fell into once.** A per-sensor
+ * fingerprint computed without them is identical before and after a credential rotation, so a
+ * rotation produced an *empty* delta against a version that had changed — the probe recorded the
+ * new version and kept authenticating with the old secret, indefinitely, with nothing anywhere
+ * saying so. Rotating a password to lock somebody out would have appeared to work and not have.
+ */
 export function diffAssignments(
   before: readonly SensorAssignment[],
   after: readonly SensorAssignment[],
+  beforeStamps: ReadonlyMap<number, string> = new Map(),
+  afterStamps: ReadonlyMap<number, string> = new Map(),
 ): { upserted: SensorAssignment[]; removed: number[] } {
-  const previous = new Map(before.map((sensor) => [sensor.sensorId, fingerprint([sensor])]));
+  const previous = new Map(
+    before.map((sensor) => [sensor.sensorId, fingerprint([sensor], beforeStamps)]),
+  );
   const upserted: SensorAssignment[] = [];
 
   for (const sensor of after) {
-    if (previous.get(sensor.sensorId) !== fingerprint([sensor])) upserted.push(sensor);
+    if (previous.get(sensor.sensorId) !== fingerprint([sensor], afterStamps)) upserted.push(sensor);
     previous.delete(sensor.sensorId);
   }
   // Whatever is left was in the old set and not the new one.

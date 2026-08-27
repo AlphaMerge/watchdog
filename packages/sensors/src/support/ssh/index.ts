@@ -47,3 +47,16 @@ export {
 export { SSH_CREDENTIAL_SCHEMA, SSH_TRANSPORT_SCHEMA, sshParamsSchema } from './schema.js';
 
 export { hostKeyNote, sshCheck, type SshCheckOptions } from './check.js';
+
+export {
+  clip,
+  parseDf,
+  parseLoadAverage,
+  parseMeminfo,
+  parseScriptOutput,
+  ParseError,
+  type DiskUsage,
+  type LoadAverage,
+  type ScriptOutput,
+  type ScriptReading,
+} from './parse.js';
