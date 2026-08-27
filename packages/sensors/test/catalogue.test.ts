@@ -218,7 +218,9 @@ describe('the built-in catalogue', () => {
     // type that breaks a rule fails here rather than on an operator's first sensor.
     // Sorted by id, not by registration order.
     assert.deepEqual(standardCatalogue().ids(), [
+      'dns.record',
       'icmp.ping',
+      'port.tcp',
       'snmp.cpu',
       'snmp.custom',
       'snmp.custom.string',

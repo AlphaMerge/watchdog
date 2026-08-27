@@ -413,9 +413,46 @@ because each is a decision rather than a defect:
       probe in a minimal production container hits the same wall.
 - [ ] **P-09 — HTTP sensor** · M · P-05 · Status code, response time, size channels; timeout,
       redirect and TLS-verification options.
-- [ ] **P-10 — Port sensor** · S · P-05 · TCP connect with timing; optional banner match.
-- [ ] **P-11 — DNS sensor** · S · P-05 · Resolve a record type, validate the value, time the
+- [x] **P-10 — Port sensor** · S · P-05 · TCP connect with timing; optional banner match.
+
+      **P-10 outcome.** `port.tcp`. The cheapest check that proves something is *serving*, which
+      ICMP does not — a host answers ping while the daemon on it has been dead for an hour. The
+      reading is the handshake time, which sits above an ICMP time to the same host and should:
+      a listener's accept queue filling up shows here and nowhere else, which is the reason to
+      run this alongside a ping rather than instead of it.
+
+      **The banner is matched as text, never as a regular expression**, and deliberately: an
+      operator-supplied pattern against remote-supplied bytes is the ReDoS hazard `T-03` had to
+      put a `node:vm` watchdog behind, and "does this still say OpenSSH_9" is a substring. A
+      banner that *changed* is a reading of 0 rather than a failed check — the service is up and
+      answering, and what it says is a thing to set a limit on — but a banner asked of a protocol
+      that never speaks first is a **failed check saying so**, because that is a misconfigured
+      sensor and not a fault. Errors name the cause from the socket's own code: nothing listening,
+      a name that did not resolve, or a filtered port, which behaves exactly like a slow one and
+      is the one people misread.
+
+      A banner is a *line* — SSH, SMTP, FTP, POP3 and IMAP all end theirs with CRLF — so the
+      newline ends the read. Waiting out the banner timeout after it had arrived cost three
+      seconds on every scan; measured in the tests, 3008 ms down to 1.9 ms.
+- [x] **P-11 — DNS sensor** · S · P-05 · Resolve a record type, validate the value, time the
       query; configurable resolver.
+
+      **P-11 outcome.** `dns.record`. Resolution is the dependency nothing else in a monitoring
+      system can see failing: every check that names a host resolves it first, so a broken
+      resolver is a hundred sensors going Down with a hundred different-looking errors and the
+      one thing they share invisible.
+
+      **The resolver is configurable and defaults to the system's, because those answer different
+      questions.** Empty, this is "can this probe resolve names at all" — the thing the hundred
+      sensors depend on. Pointed at a server it is "is *that* nameserver answering correctly".
+      Same sensor, one field. A name is refused as a resolver: resolving a resolver is the problem
+      this sensor exists to detect.
+
+      The expected value is compared against **every** record rather than the first, because a
+      name with two addresses answers in either order and a check reading `records[0]` would flap
+      between them for ever with nothing wrong. "No such record" and "the lookup failed" are
+      separated — different faults, different fixes. MX carries its priority and SRV its weight,
+      since a set that kept its hosts and reordered their priorities is a change worth seeing.
 - [ ] **P-12 — Core Health sensor** · M · P-05, S-07 · CPU, memory, ingestion queue depth, DB
       write latency, notification queue depth, config age.
       **Added by S-07:** `Ingestor.stats()` and `IngestionService.stats()` carry the ingestion
