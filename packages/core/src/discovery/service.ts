@@ -51,6 +51,10 @@ export interface DiscoveryRunRow {
   identified: number;
   identifyCursor: number;
   snmpCommunity: string;
+  devicesCreated: number;
+  devicesMatched: number;
+  sensorsCreated: number;
+  provisionedAt: string | null;
   message: string;
   timeoutMs: number;
   concurrency: number;
@@ -578,6 +582,78 @@ export class DiscoveryService {
     });
   }
 
+  /** Which device a host became (`D-04`), so a re-run knows what it already made. */
+  async recordDevice(runId: number, address: string, deviceId: number): Promise<void> {
+    await this.#db.query(
+      `UPDATE discovery_host SET device_id = $3
+       WHERE run_id = $1 AND address = $2::inet`,
+      [runId, address, deviceId],
+    );
+  }
+
+  /**
+   * Records what a provisioning pass did, and what it could not do.
+   *
+   * **Counts are added rather than assigned.** Provisioning can be run twice — an operator who
+   * configured a credential and wants the sensors it unlocks — and the run's total is what it
+   * created across all of them, not what the last one happened to do.
+   */
+  async recordProvisioning(
+    runId: number,
+    report: {
+      devicesCreated: number;
+      matched: number;
+      sensorsCreated: number;
+      problems: readonly { address: string; problem: string }[];
+    },
+  ): Promise<void> {
+    await this.#db.query(
+      `UPDATE discovery_run
+       SET devices_created = devices_created + $2,
+           devices_matched = devices_matched + $3,
+           sensors_created = sensors_created + $4,
+           provisioned_at = now()
+       WHERE id = $1`,
+      [runId, report.devicesCreated, report.matched, report.sensorsCreated],
+    );
+
+    if (report.problems.length > 0) {
+      // One row per address, so several failing sensors on one host become one line an operator
+      // reads rather than eight that say the same thing. The primary key would refuse them
+      // anyway; joining them here is what keeps the *last* one from being the only one kept.
+      const byAddress = new Map<string, string[]>();
+      for (const one of report.problems) {
+        const held = byAddress.get(one.address);
+        if (held === undefined) byAddress.set(one.address, [one.problem]);
+        else held.push(one.problem);
+      }
+      const values: unknown[] = [runId];
+      const tuples = [...byAddress].map(([address, problems], at) => {
+        values.push(address, problems.join('; ').slice(0, 2_000));
+        return `($1, $${String(at * 2 + 2)}::inet, $${String(at * 2 + 3)})`;
+      });
+      // A second attempt that failed differently replaces the first record: what an operator
+      // needs is why it is *still* failing, not an archaeology of every attempt.
+      await this.#db.query(
+        `INSERT INTO discovery_problem (run_id, address, problem)
+         VALUES ${tuples.join(', ')}
+         ON CONFLICT (run_id, address) DO UPDATE SET problem = EXCLUDED.problem, at = now()`,
+        values,
+      );
+    }
+  }
+
+  /** What a provisioning pass could not create, and why. */
+  async problems(runId: number): Promise<{ address: string; problem: string }[]> {
+    const rows = await this.#db.query<{ address: string; problem: string }>(
+      `SELECT host(address) AS address, problem
+       FROM discovery_problem WHERE run_id = $1
+       ORDER BY discovery_problem.address`,
+      [runId],
+    );
+    return rows.map((row) => ({ address: row.address, problem: row.problem }));
+  }
+
   /**
    * Marks every run a probe was doing as needing a resume, on disconnect.
    *
@@ -609,6 +685,10 @@ function read(row: Record<string, unknown>): DiscoveryRunRow {
     level: row['level'] === 'ping' ? 'ping' : 'identify',
     identified: Number(row['identified'] ?? 0),
     identifyCursor: Number(row['identify_cursor'] ?? 0),
+    devicesCreated: Number(row['devices_created'] ?? 0),
+    devicesMatched: Number(row['devices_matched'] ?? 0),
+    sensorsCreated: Number(row['sensors_created'] ?? 0),
+    provisionedAt: row['provisioned_at'] == null ? null : iso(row['provisioned_at']),
     snmpCommunity: typeof row['snmp_community'] === 'string' ? row['snmp_community'] : '',
     message: typeof row['message'] === 'string' ? row['message'] : '',
     timeoutMs: Number(row['timeout_ms']),

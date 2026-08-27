@@ -61,6 +61,9 @@ import { SqlTimeSeriesStore } from './timeseries/store.js';
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { DiscoveryService } from './discovery/service.js';
+import { ProvisionService, type ProvisionReport } from './discovery/provision.js';
+import { DiscoveryError } from './discovery/errors.js';
+import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
 import { SensorStateService } from './state/service.js';
@@ -223,6 +226,13 @@ async function serve(): Promise<void> {
     directory: join(config.service.dataDir, 'device-templates'),
     logger,
     knownSensorType: (id) => catalogue.has(id),
+    // And that the parameters it supplies would actually make that sensor. Checking only the
+    // type is checking half of it: a template naming `snmp.diskfree` without its mount point
+    // fails at provisioning time, once per device, long after anybody is looking at it.
+    validateParams: (id, params) => {
+      const outcome = catalogue.validate(id, params);
+      return outcome.valid ? [] : outcome.problems.map((one) => one.message);
+    },
   });
 
   // Built here rather than beside the ingestion service, because the audit sink below has to
@@ -537,6 +547,46 @@ async function serve(): Promise<void> {
       probeEndpointRef?.sendSweep(probeObjectId, message) ?? false,
   });
 
+  // Provisioning (`D-04`). Built after the templates and before the API, and it takes the
+  // object service rather than the database: creating a device or a sensor has to go through
+  // the same validation, audit and version bookkeeping every other creation does — a discovery
+  // that wrote rows directly would be a second way to make an object, with a second set of
+  // rules to keep in step.
+  const provisioner = new ProvisionService({
+    objects: service,
+    templates: deviceTemplates,
+    logger,
+    credentialsFor: (groupId) => credentialKindsInScope(db, groupId),
+    recordDevice: (runId, address, deviceId) => discovery.recordDevice(runId, address, deviceId),
+  });
+
+  const provision = async (runId: number, actor: Actor): Promise<ProvisionReport> => {
+    const run = await discovery.get(runId);
+    if (run === null) {
+      throw new DiscoveryError(
+        'DISCOVERY_RUN_NOT_FOUND',
+        `there is no discovery run ${String(runId)}`,
+        {
+          context: { runId },
+        },
+      );
+    }
+    const [hosts, existingDevices, existingSensors] = await Promise.all([
+      discovery.hosts(runId, 65_536),
+      devicesInGroup(db, run.groupId),
+      sensorsInGroup(db, run.groupId),
+    ]);
+    const report = await provisioner.provision({
+      run,
+      hosts,
+      existingDevices,
+      existingSensors,
+      actor,
+    });
+    await discovery.recordProvisioning(runId, report);
+    return report;
+  };
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -550,6 +600,7 @@ async function serve(): Promise<void> {
     schedules,
     discovery,
     deviceTemplates,
+    provision,
     triggers,
     templates,
     deliveryHealth,
@@ -693,4 +744,65 @@ if (process.argv[1] !== undefined && import.meta.filename === realpathSync(proce
     process.stderr.write(`fatal: ${describeError(error).message}\n`);
     process.exit(1);
   });
+}
+
+/**
+ * The devices already in a group, for `D-04`'s idempotency check.
+ *
+ * Direct rather than through `ObjectService.list`, because what is wanted is the whole group at
+ * once with the one field that identifies a device — and paging through a listing API to build
+ * an in-memory index would be a page size somebody has to tune.
+ */
+async function devicesInGroup(
+  db: Database,
+  groupId: number,
+): Promise<{ id: number; name: string; host: string }[]> {
+  const rows = await db.query<{ id: string; name: string; host: string | null }>(
+    `SELECT o.id, o.name, d.host
+     FROM object o
+     JOIN device_config d ON d.object_id = o.id
+     WHERE o.parent_id = $1 AND o.kind = 'device'`,
+    [groupId],
+  );
+  return rows.map((row) => ({ id: Number(row.id), name: row.name, host: row.host ?? '' }));
+}
+
+/** Every sensor on those devices, so a re-run creates none of them twice. */
+async function sensorsInGroup(
+  db: Database,
+  groupId: number,
+): Promise<{ deviceId: number; sensorType: string; params: Record<string, unknown> }[]> {
+  const rows = await db.query<{ parent_id: string; type: string; params: Record<string, unknown> }>(
+    `SELECT s.parent_id, sc.type, sc.params
+     FROM object s
+     JOIN sensor_config sc ON sc.object_id = s.id
+     JOIN object d ON d.id = s.parent_id
+     WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`,
+    [groupId],
+  );
+  return rows.map((row) => ({
+    deviceId: Number(row.parent_id),
+    sensorType: row.type,
+    params: row.params,
+  }));
+}
+
+/**
+ * Which credential kinds a group could resolve, so a sensor that cannot authenticate is not made.
+ *
+ * The *ancestry*, not the group alone: credentials are an inheritable setting (`A-05`), so a
+ * community set at the root reaches every group under it. Asking only about the group would
+ * leave out most installations, which set their credentials once at the top.
+ */
+async function credentialKindsInScope(db: Database, groupId: number): Promise<Set<string>> {
+  const rows = await db.query<{ kind: string }>(
+    `WITH RECURSIVE ancestry AS (
+       SELECT id, parent_id FROM object WHERE id = $1
+       UNION ALL
+       SELECT o.id, o.parent_id FROM object o JOIN ancestry a ON o.id = a.parent_id
+     )
+     SELECT DISTINCT cs.kind FROM credential_set cs JOIN ancestry a ON a.id = cs.object_id`,
+    [groupId],
+  );
+  return new Set(rows.map((row) => row.kind));
 }

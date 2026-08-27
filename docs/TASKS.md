@@ -4229,8 +4229,64 @@ because each is a decision rather than a defect:
       `ms.web-server` and `ms.generic` and planned nine sensors with exactly one Ping; and with
       no credentials named, every host planned Ping alone — except the web server, whose HTTP
       sensor needs none.
-- [ ] **D-04 — Provisioning and idempotency** · L · D-03 · Create devices and sensors; match on
+- [x] **D-04 — Provisioning and idempotency** · L · D-03 · Create devices and sensors; match on
       IP/DNS within the target group; re-runs create zero duplicates.
+
+      **D-04 outcome.** Idempotency is the whole ticket and it is not a nicety: a discovery is
+      re-run — on a schedule (`D-07`), or by an operator who has just configured a credential —
+      and a second run that duplicated everything would double the object tree, double the load
+      on every device in it, and double every alarm.
+
+      **Three keys, in order of how much each means.** The address is what the sweep found and is
+      exact. The reverse name is next, because a device somebody created years ago as
+      `web01.example.com` is the same machine the sweep just found at an address. The short name
+      is last and is only consulted when nothing else matched — two sites can each have a
+      `web01`, and consulting it first would merge `web01.london` and `web01.paris` into one
+      device the first time both were discovered. **Within the target group**, because the same
+      address legitimately exists twice in one installation: two sites behind NAT, a lab that
+      mirrors production.
+
+      **A device created during the pass joins the index immediately**, or two addresses that
+      resolve to the same name in one run would become two devices — the second being exactly the
+      duplicate this ticket exists to prevent.
+
+      **The duplicate check compares the parameters the *spec* names, not the sensor's.** A
+      sensor created by hand carries every default its schema has; requiring those to match too
+      would make every re-run create a second copy of everything. Two `http.request` sensors on
+      different paths are still two sensors, because the spec's own parameters differ.
+
+      **It goes through `ObjectService`, not the database.** Creating a device or a sensor has to
+      get the same validation, audit and version bookkeeping every other creation does — a
+      discovery that wrote rows directly would be a second way to make an object, with a second
+      set of rules to keep in step.
+
+      **One host at a time rather than one transaction for the lot.** A /24 is two hundred
+      devices and a thousand sensors; one transaction holding the tree lock for all of it would
+      block every other write in the installation for as long as it took, and a failure
+      three-quarters through would roll back work that was perfectly good.
+
+      **Two defects, and the first found the second.** Provisioning failed the moment it first
+      ran: `ms.linux` and `ms.nas` named `snmp.diskfree` without the mount point that type
+      requires, so `create` threw. `validateTemplate` had only been checking that the sensor
+      *type* existed, which is half of it — the create call then fails at provisioning time, once
+      per device, long after anybody is looking at the template. It now validates the parameters
+      against the type's own schema, and the built-in set has a test asserting the whole shipped
+      catalogue passes. And the failure exposed the second: the `try`/`catch` was per *host*, so
+      one unmakeable sensor lost every sensor after it on that device — which came out with a
+      Ping and nothing else while the report said nothing was wrong. It is per sensor now, and
+      the problem names the type.
+
+      Seventeen mutations, all killed. **Three of them found fixtures that could not
+      discriminate**: the short-name ordering test had only one candidate device so either order
+      found it; the duplicate check's parameter comparison was tested against a hand-made sensor
+      with no parameters, where both directions agree; and no test made a sensor creation fail
+      once the template bug was fixed. Each is now the case it was meant to be.
+
+      Verified live end to end: a sweep of twelve addresses found eleven hosts and created eleven
+      devices with twelve sensors; **the second provision created nothing** — eleven matched,
+      twelve skipped, no problems; and adding an SNMP credential to the group and provisioning a
+      third time added exactly eight sensors, to exactly the two hosts that had answered SNMP,
+      skipping the twelve already there.
 - [ ] **D-05 — Default master dependency** · S · D-04, M-11 · Each discovered device's Ping
       sensor becomes its master object.
 - [ ] **D-06 — Discovery levels** · M · D-04 · Ping-only through detailed, with time estimates

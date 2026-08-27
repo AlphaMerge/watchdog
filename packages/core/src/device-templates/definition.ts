@@ -223,6 +223,16 @@ export function applicableSensors(
 export function validateTemplate(
   template: DeviceTemplate,
   knownSensorType: (id: string) => boolean,
+  /**
+   * Whether a spec's parameters would actually make that sensor.
+   *
+   * **Added after provisioning failed on a built-in template**, which named `snmp.diskfree`
+   * without the mount point that type requires. Checking only that the *type* exists is checking
+   * half of it: the create call fails at provisioning time, once per device, long after anybody
+   * is looking at the template. Optional so a caller with no catalogue can still validate the
+   * shape.
+   */
+  validateParams?: (id: string, params: Readonly<Record<string, unknown>>) => string[],
 ): string[] {
   const problems: string[] = [];
   if (!TEMPLATE_ID.test(template.id)) {
@@ -240,6 +250,10 @@ export function validateTemplate(
       // creates fewer sensors than it says it will, which nobody notices until the day the
       // device it mattered on goes down.
       problems.push(`there is no sensor type called "${spec.type}"`);
+    } else if (validateParams !== undefined) {
+      for (const problem of validateParams(spec.type, spec.params ?? {})) {
+        problems.push(`"${spec.type}" cannot be created as configured: ${problem}`);
+      }
     }
     // The same type twice is legitimate — two HTTP sensors on different paths — so the key
     // includes the parameters. Two *identical* specs are a copy-paste mistake.

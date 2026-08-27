@@ -36,8 +36,14 @@ const fingerprint = (over: Partial<Evidence> = {}): Fingerprint =>
 
 const ports = (...list: number[]) => list.map((port) => ({ port, transport: 'tcp' as const }));
 
+/** The same validator the core wires in, so these assert what an installation actually gets. */
+const validateParams = (id: string, params: Readonly<Record<string, unknown>>): string[] => {
+  const outcome = catalogue.validate(id, params);
+  return outcome.valid ? [] : outcome.problems.map((one) => one.message);
+};
+
 const built = (): DeviceTemplateCatalogue => {
-  const held = new DeviceTemplateCatalogue(known);
+  const held = new DeviceTemplateCatalogue(known, validateParams);
   for (const template of BUILT_IN_DEVICE_TEMPLATES) held.register(template, 'built-in');
   return held.seal();
 };
@@ -290,7 +296,11 @@ describe('the built-in set', () => {
   const held = built();
 
   it('loads with no problems', () => {
-    // The assertion is that every sensor type they name exists and no template is malformed.
+    // The assertion is that every type they name exists, every one is configured well enough to
+    // actually be created, and no template is malformed. The second of those was added after
+    // provisioning failed on a built-in: `snmp.diskfree` was named without the mount point it
+    // requires, so every device got a Ping and nothing else while the report said nothing was
+    // wrong.
     assert.deepEqual(held.problems(), []);
     assert.equal(held.all().length, BUILT_IN_DEVICE_TEMPLATES.length);
   });
@@ -339,6 +349,32 @@ describe('the built-in set', () => {
 });
 
 describe('refusing a bad template', () => {
+  it('refuses a spec whose parameters would not make that sensor', () => {
+    // Checking only that the type exists is checking half of it: the create call then fails at
+    // provisioning time, once per device, long after anybody is looking at the template.
+    const problems = validateTemplate(
+      { id: 'a.b', name: 'X', description: '', match: {}, sensors: [{ type: 'snmp.diskfree' }] },
+      known,
+      validateParams,
+    );
+    assert.match(problems.join(' '), /cannot be created as configured/);
+
+    assert.deepEqual(
+      validateTemplate(
+        {
+          id: 'a.b',
+          name: 'X',
+          description: '',
+          match: {},
+          sensors: [{ type: 'snmp.diskfree', params: { mountPoint: '/' } }],
+        },
+        known,
+        validateParams,
+      ),
+      [],
+    );
+  });
+
   it('names a sensor type that does not exist', () => {
     // Loudly and by name: a template naming a type that does not exist silently creates fewer
     // sensors than it says, which nobody notices until the device it mattered on goes down.

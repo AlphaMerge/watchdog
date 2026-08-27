@@ -70,7 +70,12 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
       },
       {
         type: 'snmp.diskfree',
-        name: 'Disk free (SNMP)',
+        name: 'Root filesystem',
+        // A mount point is required, and a template has to name one: `/` is the filesystem
+        // every Unix has and the one that takes the machine down when it fills. Whichever
+        // *other* filesystems a host has cannot be guessed from a fingerprint — `hrStorageDescr`
+        // is only readable once the SNMP credential works — so those are an operator's to add.
+        params: { mountPoint: '/' },
         requires: { sysDescr: '.' },
         credential: 'snmp',
       },
@@ -176,7 +181,15 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     match: { kind: ['nas'] },
     sensors: [
       { type: 'icmp.ping', name: 'Ping' },
-      { type: 'snmp.diskfree', name: 'Disk free', credential: 'snmp' },
+      // `/volume1` is Synology's and QNAP's first share and covers most of what anybody has;
+      // a NAS that names its volumes differently needs a template of its own, which is what
+      // this file being data is for.
+      {
+        type: 'snmp.diskfree',
+        name: 'Volume 1',
+        params: { mountPoint: '/volume1' },
+        credential: 'snmp',
+      },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       { type: 'snmp.memory', name: 'Memory', credential: 'snmp' },
     ],
@@ -233,7 +246,12 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     match: { vendor: ['Synology'] },
     sensors: [
       { type: 'icmp.ping', name: 'Ping' },
-      { type: 'snmp.diskfree', name: 'Disk free', credential: 'snmp' },
+      {
+        type: 'snmp.diskfree',
+        name: 'Volume 1',
+        params: { mountPoint: '/volume1' },
+        credential: 'snmp',
+      },
       { type: 'snmp.uptime', name: 'Uptime', credential: 'snmp' },
       { type: 'snmp.cpu', name: 'CPU load', credential: 'snmp' },
       {

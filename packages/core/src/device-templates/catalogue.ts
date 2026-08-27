@@ -50,10 +50,16 @@ export class DeviceTemplateCatalogue {
   readonly #held = new Map<string, Held>();
   readonly #problems: TemplateProblem[] = [];
   readonly #knownSensorType: (id: string) => boolean;
+  readonly #validateParams:
+    ((id: string, params: Readonly<Record<string, unknown>>) => string[]) | undefined;
   #sealed = false;
 
-  constructor(knownSensorType: (id: string) => boolean) {
+  constructor(
+    knownSensorType: (id: string) => boolean,
+    validateParams?: (id: string, params: Readonly<Record<string, unknown>>) => string[],
+  ) {
     this.#knownSensorType = knownSensorType;
+    this.#validateParams = validateParams;
   }
 
   get sealed(): boolean {
@@ -65,7 +71,7 @@ export class DeviceTemplateCatalogue {
     if (this.#sealed) {
       throw new DeviceTemplateError('the template catalogue is sealed', { id: template.id });
     }
-    const problems = validateTemplate(template, this.#knownSensorType);
+    const problems = validateTemplate(template, this.#knownSensorType, this.#validateParams);
     if (problems.length > 0) {
       this.#problems.push({ id: template.id, source, problems });
       return;

@@ -37,6 +37,8 @@ import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
+import type { ProvisionReport } from '../discovery/provision.js';
+import type { Actor } from '../objects/audit.js';
 import type { ScheduleService } from '../schedules/service.js';
 import type { TemplateService } from '../notifications/templates.js';
 import type { TriggerService } from '../triggers/service.js';
@@ -74,6 +76,8 @@ export interface ApiServerOptions {
   discovery?: DiscoveryService;
   /** Absent until D-03 is wired. */
   deviceTemplates?: DeviceTemplateCatalogue;
+  /** Absent until D-04 is wired; the provision route then does not exist. */
+  provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
   /**
    * Notification triggers (`N-01`).
    *
@@ -130,6 +134,7 @@ export class ApiServer {
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
+  readonly #provision: ApiServerOptions['provision'];
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -161,6 +166,7 @@ export class ApiServer {
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
+    this.#provision = options.provision;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -313,7 +319,10 @@ export class ApiServer {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });
         }
         if (this.#discovery !== undefined) {
-          await scope.register(discoveryRoutes, { discovery: this.#discovery });
+          await scope.register(discoveryRoutes, {
+            discovery: this.#discovery,
+            ...(this.#provision === undefined ? {} : { provision: this.#provision }),
+          });
         }
         if (this.#deviceTemplates !== undefined) {
           const templates = this.#deviceTemplates;

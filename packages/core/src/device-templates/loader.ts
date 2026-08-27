@@ -11,6 +11,8 @@ export interface LoadDeviceTemplatesOptions {
   logger: Logger;
   /** So a template naming a sensor type that does not exist is refused by name (`D-03`). */
   knownSensorType: (id: string) => boolean;
+  /** And so one naming a type it cannot supply the required parameters for is refused too. */
+  validateParams?: (id: string, params: Readonly<Record<string, unknown>>) => string[];
 }
 
 /**
@@ -28,7 +30,7 @@ export interface LoadDeviceTemplatesOptions {
 export async function loadDeviceTemplates(
   options: LoadDeviceTemplatesOptions,
 ): Promise<DeviceTemplateCatalogue> {
-  const catalogue = new DeviceTemplateCatalogue(options.knownSensorType);
+  const catalogue = new DeviceTemplateCatalogue(options.knownSensorType, options.validateParams);
   const logger = options.logger.child({ component: 'device-templates' });
 
   for (const template of BUILT_IN_DEVICE_TEMPLATES) catalogue.register(template, 'built-in');

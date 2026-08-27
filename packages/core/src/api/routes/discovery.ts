@@ -4,9 +4,13 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { IpRangeError, parseIpRange } from '@ms/shared';
 import { DiscoveryError } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
+import type { ProvisionReport } from '../../discovery/provision.js';
+import type { Actor } from '../../objects/audit.js';
 
 export interface DiscoveryRouteOptions {
   discovery: DiscoveryService;
+  /** Absent until D-04 is wired; the provision route then does not exist. */
+  provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
 }
 
 const idParams = {
@@ -36,6 +40,10 @@ const runSchema = {
     },
     level: { type: 'string', enum: ['ping', 'identify'] },
     identified: { type: 'integer' },
+    devicesCreated: { type: 'integer' },
+    devicesMatched: { type: 'integer' },
+    sensorsCreated: { type: 'integer' },
+    provisionedAt: { type: ['string', 'null'] },
     message: { type: 'string' },
     timeoutMs: { type: 'integer' },
     concurrency: { type: 'integer' },
@@ -268,6 +276,103 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       const existing = await discovery.get(id);
       if (existing === null) throw notFound(id);
       return existing;
+    },
+  );
+
+  if (options.provision !== undefined) {
+    const provision = options.provision;
+    app.post(
+      '/discovery/:id/provision',
+      {
+        schema: {
+          tags: ['discovery'],
+          summary: 'Create the devices and sensors this run found',
+          description:
+            '**Idempotent.** Devices are matched on address, then reverse name, then short name ' +
+            'within the target group, and only sensors that are not already there are created — ' +
+            'so running this twice creates nothing the second time. That matters because a ' +
+            'discovery is re-run: on a schedule, or by an operator who has configured a ' +
+            'credential and wants the sensors it unlocks.',
+          params: idParams,
+          response: {
+            200: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['devicesCreated', 'matched', 'sensorsCreated', 'sensorsSkipped'],
+              properties: {
+                devicesCreated: { type: 'integer' },
+                matched: { type: 'integer', description: 'Devices that already existed.' },
+                sensorsCreated: { type: 'integer' },
+                sensorsSkipped: {
+                  type: 'integer',
+                  description: 'Sensors a template named that were already there.',
+                },
+                problems: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['address', 'problem'],
+                    properties: { address: { type: 'string' }, problem: { type: 'string' } },
+                  },
+                },
+                devices: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['address', 'deviceId', 'created'],
+                    properties: {
+                      address: { type: 'string' },
+                      deviceId: { type: 'integer' },
+                      created: { type: 'boolean' },
+                      sensors: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      async (request: FastifyRequest) => {
+        const { id } = request.params as { id: number };
+        if ((await discovery.get(id)) === null) throw notFound(id);
+        return provision(id, { kind: 'anonymous', remoteAddress: request.ip });
+      },
+    );
+  }
+
+  app.get(
+    '/discovery/:id/problems',
+    {
+      schema: {
+        tags: ['discovery'],
+        summary: 'What a run could not create, and why',
+        params: idParams,
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['address', 'problem'],
+                  properties: { address: { type: 'string' }, problem: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest) => {
+      const { id } = request.params as { id: number };
+      return { items: await discovery.problems(id) };
     },
   );
 
