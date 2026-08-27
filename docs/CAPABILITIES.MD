@@ -140,7 +140,7 @@ account for most real deployments.
 | HTTP Transaction   | Multi-step scripted request sequence with per-step validation             |
 | HTTP Push Data     | Inbound webhook — external systems POST values to us `[V2]`               |
 | HTTP Full Web Page | Full browser-style page load including sub-resources `[V2]`               |
-| REST Custom        | Call a REST endpoint, parse JSON/XML into channels via JSONPath/XPath     |
+| REST Custom        | Call a REST endpoint, parse JSON into channels via JSONPath; XML is `T-24` |
 
 ### 3.3 TLS / certificates `[V1]`
 

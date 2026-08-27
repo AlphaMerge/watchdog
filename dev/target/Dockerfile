@@ -62,6 +62,12 @@ RUN printf '%s\n' \
       '}' \
     > /etc/nginx/sites-available/default
 
+# A JSON document with the shapes a REST Custom sensor (T-16) has paths for: a status word, a
+# gauge, and a list with a state field to filter and count on. Static, so the numbers a live
+# check reads are the numbers this file says.
+RUN printf '%s' '{"status":"healthy","version":"4.2.1","queue":{"depth":12,"oldest":"4.5"},"nodes":[{"name":"a","state":"up","load":0.4},{"name":"b","state":"down","load":0.95},{"name":"c","state":"down","load":0.7}]}' \
+    > /var/www/html/status.json
+
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 

@@ -1,6 +1,11 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { authorizationFor } from '../support/http/auth.js';
-import { HTTP_COMMON_SCHEMA, httpChannels, runHttp } from './http-shared.js';
+import {
+  HTTP_COMMON_SCHEMA,
+  HTTP_REQUEST_SCHEMA,
+  httpChannels,
+  readRequestExtras,
+  runHttp,
+} from './http-shared.js';
 
 /**
  * An HTTP request with headers, a body and credentials (`T-13`).
@@ -54,37 +59,7 @@ export const httpAdvanced: SensorType = {
     additionalProperties: false,
     properties: {
       ...HTTP_COMMON_SCHEMA,
-      method: {
-        enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
-        default: 'GET',
-        title: 'Method',
-      },
-      body: {
-        type: 'string',
-        maxLength: 16_384,
-        default: '',
-        title: 'Request body',
-        description: 'Sent as-is. Set a Content-Type header below to match it.',
-      },
-      requestHeaders: {
-        type: 'array',
-        maxItems: MAX_HEADERS,
-        default: [],
-        title: 'Request headers',
-        description:
-          'Sent with the request. An Authorization header does *not* belong here — set an HTTP ' +
-          'credential on the device instead, so a hundred sensors against one API rotate their ' +
-          'token in one place rather than a hundred.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['name'],
-          properties: {
-            name: { type: 'string', minLength: 1, maxLength: 200, title: 'Header' },
-            value: { type: 'string', maxLength: 2_048, default: '', title: 'Value' },
-          },
-        },
-      },
+      ...HTTP_REQUEST_SCHEMA,
       expectHeaders: {
         type: 'array',
         maxItems: MAX_HEADERS,
@@ -112,24 +87,10 @@ export const httpAdvanced: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
-    const methodRaw = context.params['method'];
-    const method = typeof methodRaw === 'string' ? methodRaw : 'GET';
-    const bodyRaw = context.params['body'];
-    const body = typeof bodyRaw === 'string' ? bodyRaw : '';
-
-    const headers: Record<string, string> = {};
-    for (const header of readPairs(context.params['requestHeaders'], 'name', 'value')) {
-      headers[header.name.toLowerCase()] = header.contains;
-    }
-
-    // The device's credential, inherited. Absent is fine — plenty of endpoints need none.
-    const credential = context.credentials['http'];
-    if (credential !== undefined) {
-      const authorization = authorizationFor(credential);
-      if (authorization !== null) headers['authorization'] = authorization;
-    }
-
-    const outcome = await runHttp(context, { method, headers, body, maxBodyBytes: 0 });
+    const outcome = await runHttp(
+      context,
+      readRequestExtras(context.params, context.credentials, 0),
+    );
 
     const missing: string[] = [];
     for (const rule of readPairs(context.params['expectHeaders'], 'name', 'contains')) {

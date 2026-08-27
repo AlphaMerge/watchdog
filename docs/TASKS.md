@@ -2790,6 +2790,15 @@ because each is a decision rather than a defect:
       `T-06`'s filter rules will be the second. Wants `kind: 'array'` in `forms/schema.ts` with
       add/remove/reorder over `items`, and it must keep working for a free-form array with no
       `items`, which still has to fall back.
+      **Still open after `T-15` and `T-16`:** `http.transaction.steps` and `rest.custom.extract`
+      are arrays of objects with arrays of objects *inside* them, so this is now the shape of
+      every new sensor type's most important parameter rather than an edge case.
+- [ ] **U-13 — Mapping editor for REST Custom** · M · T-16, U-04 · The form that writes
+      `rest.custom`'s `extract` array: paste a response, see what each path selects against it,
+      name the channel. **Split out by `T-16`:** the sensor works without it — the paths go in
+      the parameter form like any other array — but writing JSONPath blind against an API you
+      cannot see is the part that makes people give up. It wants the response and the paths side
+      by side, which is a UI job and not a sensor one.
 - [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
 
@@ -3408,8 +3417,51 @@ because each is a decision rather than a defect:
       302, capture a token, substitute it into a later step — `3 steps in 19 ms; slowest was
       sign in at 10 ms` — and, with one step's expectation broken, `step 3 of 3 (call the api)
       answered 200 but does not contain "t=WRONG"`.
-- [ ] **T-16 — REST Custom** · L · T-13 · JSONPath/XPath extraction into declared channels, with
-      a mapping editor.
+- [x] **T-16 — REST Custom** · L · T-13 · JSONPath/XPath extraction into declared channels, with
+      a mapping editor. **JSON delivered; the XML half is `T-24` and the editor is `U-13`.**
+
+      **T-16 outcome.** `rest.custom` plus `support/json-path.ts`, a bounded path language of its
+      own. The difference from `http.content` is the shape of the answer and it is not cosmetic:
+      a regular expression over JSON works right up until a field moves, a key is reordered, or a
+      number arrives as a string — none of which is a change to the *data*, and all of which
+      break a pattern. `$.nodes[?(@.state=='down')]` with a `count` says what it means and keeps
+      saying it.
+
+      **A path selects a set and the aggregate is chosen, never guessed.** "How many nodes are
+      down" and "the worst load on any node" are the same path with a different aggregate; a
+      language that silently took the first match would answer both wrongly and never say so.
+      `count` counts what the path selected and every other aggregate counts only what is a
+      number — conflating those makes both of them wrong somewhere.
+
+      **The subset is documented rather than discovered**, and it stops short of script
+      expressions on purpose: full JSONPath's `[?(...)]` evaluates JavaScript in the reference
+      implementation, and an operator-supplied expression that can execute is a thing this
+      codebase already refused once, in `support/pattern.ts`. Members, indexes, a wildcard,
+      recursive descent and one comparison is what people actually write against a status
+      endpoint. **The descent is iterative**: the recursive version overflowed the call stack at
+      around 12,000 levels of nesting and reported `Maximum call stack size exceeded`, which
+      tells an operator nothing and is not a diagnosis of anything. Now the visit budget is the
+      only bound and it says what to do.
+
+      **Nothing found is a gap; nothing found *anywhere* is a failure.** A metric an API stopped
+      publishing is missing data, and the one thing this system does not do is draw that as zero.
+      But every path matching nothing is not a gap — it is a sensor pointed at a document that
+      does not contain any of what it is looking for, which would otherwise read as flat lines
+      for ever.
+
+      Verified live against `ms-target`, which gained a `/status.json` for it: `depth=12 down=2
+      worst=95 oldest=4.5` — a filter and a count, a wildcard with a maximum and a scale, and a
+      gauge the API quoted as a string — and, with the expectation inverted, `200, but the
+      response says: $.status is "healthy" and should be "degraded"`.
+- [ ] **T-24 — REST Custom, the XML half** · M · T-16 · XPath extraction from an XML response,
+      the other half of what `T-16` names. **Split out by `T-16`:** parsing XML properly needs a
+      parser this package does not have, and namespaces, CDATA, entities and mixed content all
+      have a way of half-working — a half-parsed document yields a confidently wrong number,
+      which is worse than no sensor. That is a dependency decision (`fast-xml-parser` is the
+      obvious candidate) and it has a second caller behind it in the v2 VMware SOAP sensors, so
+      it is worth deciding once, deliberately, rather than hand-rolling a parser inside a sensor
+      type. The path language in `support/json-path.ts` is the model for the XPath subset:
+      documented, bounded, and stopping short of anything that evaluates.
 - [ ] **T-17 — Mail sensors** · L · P-05 · SMTP, POP3, IMAP, and SMTP&IMAP Round Trip with
       cleanup of test messages.
 - [ ] **T-18 — Database sensors** · L · P-05 · PostgreSQL, MySQL, MSSQL: connect, run a query,

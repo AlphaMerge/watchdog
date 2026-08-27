@@ -227,6 +227,7 @@ describe('the built-in catalogue', () => {
       'icmp.ping',
       'port.range',
       'port.tcp',
+      'rest.custom',
       'snmp.cpu',
       'snmp.custom',
       'snmp.custom.string',

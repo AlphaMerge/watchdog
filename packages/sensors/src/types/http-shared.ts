@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, JsonSchema } from '../contract.js';
+import { authorizationFor } from '../support/http/auth.js';
 
 /**
  * What the three HTTP sensor types have in common (`P-09`, `T-13`, `T-14`).
@@ -74,6 +75,87 @@ export const HTTP_COMMON_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'somebody asks who is making these requests every minute.',
   },
 };
+
+/**
+ * Method, body and request headers — what an *API* sensor needs on top of the common block
+ * (`T-13`, shared by `T-16`).
+ *
+ * Separate from `HTTP_COMMON_SCHEMA` because `http.request` and `http.content` want none of it:
+ * a form with fifteen fields makes the common case the hardest one to fill in.
+ */
+export const HTTP_REQUEST_SCHEMA: Readonly<Record<string, JsonSchema>> = {
+  method: {
+    enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    default: 'GET',
+    title: 'Method',
+  },
+  body: {
+    type: 'string',
+    maxLength: 16_384,
+    default: '',
+    title: 'Request body',
+    description: 'Sent as-is. Set a Content-Type header below to match it.',
+  },
+  requestHeaders: {
+    type: 'array',
+    maxItems: 20,
+    default: [],
+    title: 'Request headers',
+    description:
+      'Sent with the request. An Authorization header does *not* belong here — set an HTTP ' +
+      'credential on the device instead, so a hundred sensors against one API rotate their ' +
+      'token in one place rather than a hundred.',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name'],
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 200, title: 'Header' },
+        value: { type: 'string', maxLength: 2_048, default: '', title: 'Value' },
+      },
+    },
+  },
+};
+
+/**
+ * The method, body and headers those parameters describe, with the device credential applied.
+ *
+ * The credential is the device's and inherited, so a hundred sensors against one API rotate
+ * their token in one place. Absent is fine — plenty of endpoints need none.
+ */
+export function readRequestExtras(
+  params: Readonly<Record<string, unknown>>,
+  credentials: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+  maxBodyBytes: number,
+): HttpCheckExtras {
+  const methodRaw = params['method'];
+  const bodyRaw = params['body'];
+
+  const headers: Record<string, string> = {};
+  const raw = params['requestHeaders'];
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      const name = typeof record['name'] === 'string' ? record['name'].trim() : '';
+      if (name === '') continue;
+      headers[name.toLowerCase()] = typeof record['value'] === 'string' ? record['value'] : '';
+    }
+  }
+
+  const credential = credentials['http'];
+  if (credential !== undefined) {
+    const authorization = authorizationFor(credential);
+    if (authorization !== null) headers['authorization'] = authorization;
+  }
+
+  return {
+    method: typeof methodRaw === 'string' ? methodRaw : 'GET',
+    body: typeof bodyRaw === 'string' ? bodyRaw : '',
+    headers,
+    maxBodyBytes,
+  };
+}
 
 /** The channels every HTTP sensor reports. `withSize` is false for HEAD, which has no body. */
 export function httpChannels(withSize: boolean): ChannelDef[] {
