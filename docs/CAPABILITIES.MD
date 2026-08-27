@@ -406,7 +406,7 @@ Template features:
 | Scheduled rediscovery               | Hourly / daily / weekly, optionally auto-creating newly appeared devices. Off by default                  | `[V1]` |
 | Discovery run summary               | Scanned, found, identified, created, errors — one sentence and the table under it (`D-08`)                 | `[V1]` |
 | Discovery results logged as tickets | `[V2]` — the summary above is the v1 answer to the same need: a run says what it did without a ticket queue |
-| Bulk edit / clone / move objects    | `[V1]`                                                                                                    |
+| Bulk edit / clone / move objects    | Pause, resume, move, clone, delete, set and revert a setting over a selection; per-object outcome (`D-09`)   | `[V1]` |
 | Import/export of configuration      | `[V2]`                                                                                                    |
 
 ---

@@ -17,6 +17,7 @@ import { logIfUnexpected, toHttpError } from './errors.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
+import { BulkService } from '../objects/bulk.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
@@ -312,7 +313,13 @@ export class ApiServer {
 
     await this.#app.register(
       async (scope) => {
-        await scope.register(objectRoutes, { service, buildVersion: version });
+        await scope.register(objectRoutes, {
+          service,
+          buildVersion: version,
+          // Built here rather than taken as an option: it holds no state and wraps the service
+          // it is given, so there is nothing for a caller to configure or get wrong (`D-09`).
+          bulk: new BulkService({ objects: service, logger: this.#logger }),
+        });
         await scope.register(historyRoutes, { history: this.#history });
         await scope.register(stateRoutes, { db: this.#db });
         await scope.register(stateLogRoutes, { log: this.#stateLog });

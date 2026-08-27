@@ -4,6 +4,8 @@ import '@fastify/swagger';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { ObjectService } from '../../objects/service.js';
+import type { BulkOperation, BulkService } from '../../objects/bulk.js';
+import { MAX_BULK } from '../../objects/bulk.js';
 import type { Actor } from '../../objects/audit.js';
 import { settingRegistry } from '../../settings/registry.js';
 import type {
@@ -28,6 +30,8 @@ import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
 
 export interface ObjectRoutesOptions {
   service: ObjectService;
+  /** Bulk operations over a selection (`D-09`). */
+  bulk: BulkService;
   /**
    * Folded into the cache validator for inheritance-bearing responses. The last input to a
    * resolved setting is its registry default, which lives in code — so an upgrade has to
@@ -176,7 +180,7 @@ export async function objectRoutes(
   app: FastifyInstance,
   options: ObjectRoutesOptions,
 ): Promise<void> {
-  const { service, buildVersion } = options;
+  const { service, buildVersion, bulk } = options;
 
   const sendDetail = async (
     reply: FastifyReply,
@@ -546,6 +550,124 @@ export async function objectRoutes(
         .header('Location', `/api/v1/objects/${String(result.object.id)}`)
         .header('ETag', etagFor(result.object.version))
         .send(result);
+    },
+  );
+
+  // ── 8b. bulk operations (`D-09`) ─────────────────────────────────────────────────────────
+  app.post<{
+    Body: {
+      ids: number[];
+      operation: string;
+      targetParentId?: number;
+      cascade?: boolean;
+      key?: string;
+      value?: unknown;
+      minutes?: number;
+      until?: string;
+      from?: string;
+      message?: string;
+    };
+  }>(
+    '/objects/bulk',
+    {
+      schema: {
+        description:
+          'Applies one operation to a selection. **Each object is atomic and the batch is ' +
+          'best-effort**: the report names every object that did not change and why, rather ' +
+          'than failing the request. An operator who selects forty sensors and pauses them, one ' +
+          'of which a colleague deleted a moment ago, wants thirty-nine paused and a line ' +
+          'naming the fortieth — all-or-nothing would give them neither.\n\n' +
+          'The selection is explicit ids, never a filter. A client enumerating a selection with ' +
+          '`GET /objects` **must** page with `sort=id`: under `sort=name` a keyset scan can ' +
+          'return a renamed object twice or skip it, so a bulk delete would miss objects the ' +
+          'operator chose.\n\n' +
+          `At most ${String(MAX_BULK)} objects, because each one takes the tree lock in turn ` +
+          'and a larger selection is a filter rather than a selection. Repeated ids are ' +
+          'collapsed and counted, never applied twice.',
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['ids', 'operation'],
+          properties: {
+            ids: {
+              type: 'array',
+              minItems: 1,
+              maxItems: MAX_BULK,
+              items: { type: 'integer', minimum: 1 },
+            },
+            operation: {
+              type: 'string',
+              enum: [
+                'pause',
+                'resume',
+                'move',
+                'clone',
+                'delete',
+                'setting',
+                'revertSetting',
+              ],
+            },
+            targetParentId: {
+              type: 'integer',
+              minimum: 1,
+              description: 'Required by `move` and `clone`.',
+            },
+            cascade: {
+              type: 'boolean',
+              default: false,
+              description:
+                '`delete` only. False refuses an object that has children, which is the safe ' +
+                'default: a selection of six groups is six subtrees and nobody counted them.',
+            },
+            key: { type: 'string', description: 'Required by `setting` and `revertSetting`.' },
+            value: {
+              description:
+                '`setting` only. To go back to the inherited value use `revertSetting` — the ' +
+                'same split the single-object routes make between `PUT` and `DELETE`, and not ' +
+                'a null here, which is a legitimate stored value for a setting whose schema ' +
+                'allows one.',
+            },
+            minutes: { type: 'integer', minimum: 1, description: '`pause` only.' },
+            until: { type: 'string', format: 'date-time', description: '`pause` only.' },
+            from: { type: 'string', format: 'date-time', description: '`pause` only.' },
+            message: { type: 'string', maxLength: 500, description: '`pause` only.' },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['requested', 'succeeded', 'failed', 'duplicates', 'outcomes'],
+            properties: {
+              requested: { type: 'integer' },
+              succeeded: { type: 'integer' },
+              failed: { type: 'integer' },
+              duplicates: { type: 'integer' },
+              outcomes: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['objectId', 'ok'],
+                  properties: {
+                    objectId: { type: 'integer' },
+                    ok: { type: 'boolean' },
+                    problem: { type: 'string' },
+                    code: { type: 'string' },
+                    createdId: { type: 'integer' },
+                    deleted: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(
+        await bulk.apply(actorFor(request), request.body.ids, operationFrom(request.body)),
+      );
     },
   );
 
@@ -1209,4 +1331,73 @@ export async function objectRoutes(
       await reply.send({ kind: request.params.kind, ...outcome });
     },
   );
+}
+
+/**
+ * The request body as an operation.
+ *
+ * A flat body with an `operation` discriminator rather than six endpoints, because a UI's bulk
+ * bar is one control with a menu on it and six routes would be six things to keep in step. The
+ * fields each operation needs are validated here rather than by the schema: JSON Schema can say
+ * "targetParentId is an integer" but not "targetParentId is required when operation is move"
+ * without `oneOf`, which produces error messages naming all six branches for a mistake in one.
+ */
+function operationFrom(body: {
+  operation: string;
+  targetParentId?: number;
+  cascade?: boolean;
+  key?: string;
+  value?: unknown;
+  minutes?: number;
+  until?: string;
+  from?: string;
+  message?: string;
+}): BulkOperation {
+  const needs = <T>(value: T | undefined, field: string): T => {
+    if (value === undefined) {
+      throw new ObjectError('OBJECT_INVALID', `${body.operation} needs ${field}`, {
+        context: { phase: 'validate-request' },
+        details: { operation: body.operation, missing: field },
+      });
+    }
+    return value;
+  };
+
+  switch (body.operation) {
+    case 'resume':
+      return { kind: 'resume' };
+    case 'move':
+      return { kind: 'move', targetParentId: needs(body.targetParentId, 'targetParentId') };
+    case 'clone':
+      return { kind: 'clone', targetParentId: needs(body.targetParentId, 'targetParentId') };
+    case 'delete':
+      return { kind: 'delete', cascade: body.cascade ?? false };
+    case 'setting':
+      // `??` would turn an explicit null into a null and a *missing* value into one too. The
+      // difference matters: setting a nullable setting to null is a real request, and leaving
+      // `value` out is a malformed one.
+      return { kind: 'setting', key: needs(body.key, 'key'), value: needs(body.value, 'value') };
+    case 'revertSetting':
+      return { kind: 'revertSetting', key: needs(body.key, 'key') };
+    case 'pause': {
+      // The same four-way read the single-object pause route does. One place would be better;
+      // two places that disagree would be worse than either, so this mirrors it exactly.
+      const request =
+        body.from !== undefined && body.until !== undefined
+          ? ({ kind: 'window', from: new Date(body.from), until: new Date(body.until) } as const)
+          : body.minutes !== undefined
+            ? ({ kind: 'duration', minutes: body.minutes } as const)
+            : body.until !== undefined
+              ? ({ kind: 'until', until: new Date(body.until) } as const)
+              : ({ kind: 'indefinite' } as const);
+      return { kind: 'pause', request, message: body.message ?? '' };
+    }
+    default:
+      // Unreachable through the API, whose schema enumerates the six. Here so the switch is
+      // total and a seventh added to the schema alone fails loudly rather than silently.
+      throw new ObjectError('OBJECT_INVALID', `there is no bulk operation "${body.operation}"`, {
+        context: { phase: 'validate-request' },
+        details: { operation: body.operation },
+      });
+  }
 }

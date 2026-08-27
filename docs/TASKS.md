@@ -4474,13 +4474,70 @@ because each is a decision rather than a defect:
       The breakdown counts are `count(*)::int` rather than the default bigint, which
       node-postgres hands over as a *string* to keep 64-bit values exact — `"3" > "12"` would
       have sorted the breakdown wrong in a way that only appears past ten of something.
-- [ ] **D-09 — Bulk operations** · M · S-03 · Multi-select edit, clone, move, delete across the
+- [x] **D-09 — Bulk operations** · M · S-03 · Multi-select edit, clone, move, delete across the
       tree.
       **Added by S-03:** `ObjectService.batch(mode, fn)` composes any number of repository
       operations into one transaction under one advisory lock — D-09 is a loop, not an API
       redesign. Bulk selection **must** page with `sort=id`: under `sort=name` a keyset scan can
       return a renamed object twice or miss it, so a bulk delete could skip objects the operator
       selected.
+
+      **D-09 outcome.** `POST /objects/bulk` with an `operation` discriminator over six verbs —
+      pause, resume, move, clone, delete and set-a-setting, the last being what "multi-select
+      edit" actually is. One route rather than six, because a UI's bulk bar is one control with
+      a menu on it.
+
+      **It is a loop over the single-object methods, and `batch` is deliberately not used —
+      which contradicts the note above, so it is said out loud rather than quietly diverged
+      from.** Two reasons. `batch` hands out `(q, repo)`, the *repository*, and every rule this
+      system has about changing an object — hierarchy validation, write-only redaction, audit,
+      version bookkeeping, dependency and inheritance recomputation — lives in the service method
+      above it; composing repository calls would be a second way to update an object, which is
+      exactly what `CLAUDE.md` forbids and the kind of thing that is correct the day it is
+      written and diverges quietly after. And one transaction over a selection holds the
+      **exclusive tree lock** for the whole batch: `ObjectService.delete` already worries about
+      that for a single subtree, and five hundred of them would block every write in the
+      installation — a self-inflicted outage in the thing that is meant to notice outages.
+      `batch` remains right for repository operations that genuinely must be atomic; a selection
+      of independent objects is not that.
+
+      **So each object is atomic and the batch is best-effort, with a per-object outcome.** An
+      operator who selects forty sensors and pauses them, one of which a colleague deleted a
+      moment ago, wants thirty-nine paused and a line naming the fortieth; all-or-nothing gives
+      them neither, plus an error they cannot map back to a row. `D-04` made the same call per
+      host for the same reason.
+
+      **The judgement worth the most in the report is the smallest.** Selecting a device *and*
+      its sensor and deleting both: the device goes, and the sensor is then genuinely absent.
+      Reporting "object 812 does not exist" is true and useless — it reads as somebody else
+      changing the tree underneath them and sends an operator looking for a problem that is not
+      there, when their own selection did exactly what they asked. The batch remembers what it
+      destroyed and says *"it was removed with an object deleted earlier in this batch"*, while
+      an id it never touched still reports a plain absence.
+
+      **Cascade goes through the delete guard rather than around it.** `delete` refuses a
+      non-empty subtree unless told exactly how many descendants to expect, which is what stops a
+      client that thought it was deleting one object from deleting five thousand. A bulk cascade
+      cannot know that number in advance, so it asks for the safe delete first and reads the
+      count out of the refusal — and the retry's `exact` check then catches a subtree that
+      changed between the two attempts, which is the race the guard exists for. Counting
+      separately and passing the answer straight to `exact` would have the same shape and none
+      of the protection.
+
+      Repeated ids are collapsed and counted rather than silently dropped — a tree UI hands the
+      same id over twice when a row and its ancestor's "select all" are both ticked, and applying
+      an operation twice is at best wasted work and at worst a second audit entry for one change.
+      The cap of 500 is checked *after* deduplication, so a client sending one id six hundred
+      times is a selection of one rather than a refusal.
+
+      Twelve mutations, all killed. **Live verification found the revert.** The first version
+      read `value: null` as "go back to what you inherit", and it failed on every object,
+      because the null went straight to the setting's own schema, which wants an integer. It is
+      its own `revertSetting` operation now — the split the single-object routes already make
+      between `PUT` and `DELETE`, so there is one grammar rather than two. Null as an
+      instruction would have been a trap besides: it is a legitimate stored value for a setting
+      whose schema allows one, and a route that read it as a command could never store it. A
+      *missing* `value` is now a malformed request rather than being folded into the same case.
 - [ ] **D-10 — Discovery UI** · M · U-03, D-06 · Range entry, level and template selection, live
       progress, cancel.
 
