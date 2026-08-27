@@ -10,6 +10,16 @@ export type {
 } from './contract.js';
 
 export {
+  assertSplittable,
+  credentialKind,
+  credentialKindIds,
+  CREDENTIAL_KINDS,
+  secretFields,
+  splitCredential,
+  type CredentialKindDefinition,
+} from './credentials/index.js';
+
+export {
   SensorCatalogue,
   SensorTypeError,
   type ParamProblem,

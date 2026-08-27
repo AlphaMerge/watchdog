@@ -92,6 +92,19 @@ const idParams = {
   properties: { id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } },
 } as const;
 
+const credentialKindParams = {
+  type: 'object',
+  required: ['id', 'kind'],
+  additionalProperties: false,
+  properties: {
+    id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    // Not an enum of the database's `credential_kind`: the service refuses a kind with no
+    // transport behind it, and a 400 from the schema would say "not one of six" where the
+    // service says which ones this build can actually use.
+    kind: { type: 'string', minLength: 1, maxLength: 40 },
+  },
+} as const;
+
 const settingKeyParams = {
   type: 'object',
   required: ['id', 'key'],
@@ -1079,6 +1092,121 @@ export async function objectRoutes(
       await reply.send({
         items: await service.credentials(request.params.id, includeInherited),
       });
+    },
+  );
+
+  // ── 16. the kinds an operator can store, and the form for each ───────────────────────────
+  app.get(
+    '/credential-kinds',
+    {
+      schema: {
+        description:
+          'The credential kinds this build can use, with the JSON Schema a form is generated ' +
+          'from (`A-05`). Fields marked `writeOnly` are the secret half: they are encrypted at ' +
+          'rest and **never returned by any route, to anyone**, so a form renders them as ' +
+          '"set" with Replace and Clear rather than as a filled input. A kind absent from this ' +
+          'list has no transport behind it yet, and storing a password nothing authenticates ' +
+          'with is worse than not offering the field.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['id', 'name', 'description', 'schema'],
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    description: { type: 'string' },
+                    schema: { type: 'object', additionalProperties: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      await reply.send({ items: service.credentialKinds() });
+    },
+  );
+
+  // ── 17. store a credential set ───────────────────────────────────────────────────────────
+  app.put<{ Params: { id: number; kind: string }; Body: { values: Record<string, unknown> } }>(
+    '/objects/:id/credentials/:kind',
+    {
+      schema: {
+        description:
+          'Stores the credential set of this kind on this object, where everything below it ' +
+          'inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a ' +
+          "sensor's `writeOnly` parameter is: a read never returns the value, so a client " +
+          'cannot send it back, and replacing the whole record would delete the community ' +
+          'string every time somebody corrected the SNMP version beside it. Send the field with ' +
+          'a value to rotate it, or `null` to remove it. The response carries no secret.',
+        params: credentialKindParams,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['values'],
+          properties: { values: { type: 'object', additionalProperties: true } },
+        },
+        response: { 200: { $ref: 'ms:credentialView' } },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(
+        await service.setCredential(
+          actorFor(request),
+          request.params.id,
+          request.params.kind,
+          request.body.values,
+          optionalIfMatch(request.headers['if-match']),
+        ),
+      );
+    },
+  );
+
+  // ── 18. remove a credential set ──────────────────────────────────────────────────────────
+  app.delete<{ Params: { id: number; kind: string } }>(
+    '/objects/:id/credentials/:kind',
+    {
+      schema: {
+        description:
+          'Removes the credential set defined *on this object*. It does not leave the object ' +
+          'without credentials: whatever an ancestor defines comes back into force, and the ' +
+          'response says which, so removing a device-level community string tells you the ' +
+          "group's one is now in use rather than leaving it to be discovered.",
+        params: credentialKindParams,
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['kind', 'removed', 'nowInherited'],
+            properties: {
+              kind: { type: 'string' },
+              removed: { type: 'boolean' },
+              nowInherited: {
+                oneOf: [{ $ref: 'ms:credentialView' }, { type: 'null' }],
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const outcome = await service.clearCredential(
+        actorFor(request),
+        request.params.id,
+        request.params.kind,
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.send({ kind: request.params.kind, ...outcome });
     },
   );
 }

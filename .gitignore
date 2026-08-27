@@ -13,3 +13,9 @@ coverage/
 dev/tls/
 dev/data/
 .claude/settings.local.json
+
+# Vault key files (`A-05`). `dev/data/` already covers the development one; this catches a key
+# generated under any other data directory. Committing one would publish every stored
+# monitored-device credential to whoever can read the repository.
+vault.key
+*.vault.key

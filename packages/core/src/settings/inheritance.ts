@@ -43,6 +43,22 @@ export interface ResolvedCredential {
   updatedAt: string;
 }
 
+/**
+ * A credential set as it is stored: public half in the clear, secret half still encrypted.
+ *
+ * Only `resolveSealedCredentials` produces one, only `CredentialVault` opens one, and neither a
+ * route nor the audit sink ever sees the type. `ownerId` is the object the record lives on —
+ * which is what the seal is bound to, and is *not* the sensor that inherited it.
+ */
+export interface SealedCredential {
+  kind: CredentialKind;
+  publicParams: Record<string, unknown>;
+  secret: Buffer;
+  keyId: string;
+  ownerId: number;
+  updatedAt: string;
+}
+
 export class InheritanceError extends AppError {
   constructor(message: string, context: Record<string, string | number>) {
     super('INHERITANCE_FAILED', message, { context });
@@ -339,6 +355,83 @@ export class InheritanceResolver {
           : { kind: 'inherited', objectId: Number(row.object_id), depth: row.depth },
       updatedAt: row.updated_at.toISOString(),
     }));
+  }
+
+  /**
+   * The sealed credential records in effect for many objects at once (`A-05`).
+   *
+   * **The one place `credential_set.secret` is read**, and the only method on this class that
+   * selects it. Everything else — `resolveCredentials`, every API route, the audit sink — sees
+   * `public_params` and nothing more; CLAUDE.md's rule is that a monitored device's credentials
+   * are never returned to anyone, and the exception is not "an administrator" but "the probe
+   * that has to authenticate with them".
+   *
+   * The same walk as `resolveCredentials`, batched the way `resolveForObjects` is: the probe
+   * configuration resolves a whole branch, and one query per sensor per kind would be thousands
+   * of round trips to build one push.
+   *
+   * Returns the record still sealed. Decryption belongs to `CredentialVault`, which holds the
+   * keys; this class does the parent-walking and nothing else.
+   */
+  async resolveSealedCredentials(
+    objectIds: readonly number[],
+    kinds: readonly CredentialKind[],
+  ): Promise<Map<number, Map<CredentialKind, SealedCredential>>> {
+    const out = new Map<number, Map<CredentialKind, SealedCredential>>();
+    if (objectIds.length === 0 || kinds.length === 0) return out;
+
+    const rows = await this.#db.query<{
+      start_id: string;
+      kind: CredentialKind;
+      public_params: Record<string, unknown>;
+      secret: Buffer;
+      key_id: string;
+      object_id: string;
+      depth: number;
+      updated_at: Date;
+    }>(
+      `
+      WITH RECURSIVE chain AS (
+        SELECT o.id AS start_id, o.id, o.parent_id, 0 AS depth
+        FROM object o
+        WHERE o.id = ANY($1)
+
+        UNION ALL
+
+        SELECT chain.start_id, parent.id, parent.parent_id, chain.depth + 1
+        FROM object parent
+        JOIN chain ON parent.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT DISTINCT ON (chain.start_id, cs.kind)
+             chain.start_id, cs.kind, cs.public_params, cs.secret, cs.key_id,
+             cs.object_id, chain.depth, cs.updated_at
+      FROM chain
+      JOIN credential_set cs ON cs.object_id = chain.id AND cs.kind = ANY($2::credential_kind[])
+      ORDER BY chain.start_id, cs.kind, chain.depth ASC
+      `,
+      [objectIds, kinds],
+    );
+
+    for (const row of rows) {
+      const startId = Number(row.start_id);
+      let forObject = out.get(startId);
+      if (forObject === undefined) {
+        forObject = new Map<CredentialKind, SealedCredential>();
+        out.set(startId, forObject);
+      }
+      forObject.set(row.kind, {
+        kind: row.kind,
+        publicParams: row.public_params,
+        secret: row.secret,
+        keyId: row.key_id,
+        // The object the record is stored on, not the sensor asking. The seal is bound to it,
+        // so decrypting against the sensor's id would fail on every inherited credential.
+        ownerId: Number(row.object_id),
+        updatedAt: row.updated_at.toISOString(),
+      });
+    }
+    return out;
   }
 
   /** Sets an explicit local value, overriding whatever would be inherited. */

@@ -16,7 +16,7 @@ function context(
   signal: AbortSignal = new AbortController().signal,
   target: CheckTarget = { host: '127.0.0.1', ipVersion: 'v4' },
 ): CheckContext {
-  return { sensorId: 1, target, params, signal };
+  return { sensorId: 1, target, params, credentials: {}, signal };
 }
 
 describe('icmp.ping', () => {

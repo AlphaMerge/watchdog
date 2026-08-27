@@ -41,6 +41,35 @@ describe('assignment fingerprints', () => {
     assert.equal(fingerprint([a]), fingerprint([b]));
   });
 
+  it('hashes a credential’s rotation stamp and never the credential', () => {
+    // A community string is short and drawn from a tiny space, and this digest is sent to probes
+    // and written to logs — a published SHA-256 of one is recovered by guessing. Two assignments
+    // differing *only* in the secret must therefore fingerprint identically: what the probe is
+    // told changed is that the record was rewritten, not what it now says.
+    const stamps = new Map([[1, 'snmp=7@2026-08-27T09:00:00.000Z']]);
+    const first = assignment({ credentials: { snmp: { community: 'first' } } });
+    const second = assignment({
+      credentials: { snmp: { community: 'second-and-quite-different' } },
+    });
+    assert.equal(fingerprint([first], stamps), fingerprint([second], stamps));
+  });
+
+  it('moves when a credential is rotated, so a probe is not told nothing changed', () => {
+    // The other half. Without it a probe holding the old community string is sent
+    // `config-unchanged` and keeps authenticating with it, and the sensor stays Down with
+    // nothing to explain why.
+    const sensor = assignment({ credentials: { snmp: { community: 'first' } } });
+    const before = fingerprint([sensor], new Map([[1, 'snmp=7@2026-08-27T09:00:00.000Z']]));
+    const after = fingerprint([sensor], new Map([[1, 'snmp=7@2026-08-27T09:05:00.000Z']]));
+    assert.notEqual(before, after);
+  });
+
+  it('moves when a credential is removed', () => {
+    const sensor = assignment({ credentials: { snmp: { community: 'first' } } });
+    const withCredential = fingerprint([sensor], new Map([[1, 'snmp=7@2026-08-27T09:00:00.000Z']]));
+    assert.notEqual(withCredential, fingerprint([sensor], new Map()));
+  });
+
   it('moves when anything the probe acts on moves', () => {
     const base = fingerprint([assignment()]);
     const variants = [
@@ -110,6 +139,10 @@ describe(
       config = new ProbeConfigService({
         db,
         resolver: new InheritanceResolver({ db, logger: silent }),
+        vault: h.vault,
+        // What the real wiring passes: only the kinds a sensor type declared, so a probe
+        // running Ping never receives an SNMP community string (`A-05`).
+        credentialKindsFor: (sensorType) => (sensorType === 'snmp.traffic' ? ['snmp'] : []),
       });
     });
 
@@ -262,6 +295,121 @@ describe(
       );
 
       assert.equal((await config.assignmentsFor(probeId)).version, before.version);
+    });
+  },
+);
+
+describe(
+  'credentials in a probe assignment (`A-05`)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let db: Database;
+    let h: Harness;
+    let config: ProbeConfigService;
+    let probeId: number;
+    let deviceId: number;
+
+    before(async () => {
+      scratch = await createScratchDatabase('probecreds');
+      db = scratch.db;
+      h = await buildHarness(db);
+      config = new ProbeConfigService({
+        db,
+        resolver: new InheritanceResolver({ db, logger: silent }),
+        vault: h.vault,
+        credentialKindsFor: (sensorType) => (sensorType === 'snmp.traffic' ? ['snmp'] : []),
+      });
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    beforeEach(async () => {
+      await db.query("DELETE FROM object WHERE kind <> 'root'");
+      const probe = await h.service.create(testActor, {
+        kind: 'probe',
+        parentId: h.rootId,
+        name: `probe-${String(process.hrtime.bigint())}`,
+        gid: `gid-${String(process.hrtime.bigint())}`,
+      });
+      probeId = probe.id;
+      const device = await h.service.create(testActor, {
+        kind: 'device',
+        parentId: probeId,
+        name: 'router',
+        host: '192.0.2.50',
+        ipVersion: 'v4',
+      });
+      deviceId = device.id;
+    });
+
+    const addSensor = (type: string, name: string) =>
+      h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name,
+        sensorType: type,
+        params: {},
+      });
+
+    it('sends the inherited credential to the sensor that needs it', async () => {
+      await h.service.setCredential(testActor, deviceId, 'snmp', {
+        version: 'v2c',
+        community: 'rack-secret',
+      });
+      const sensor = await addSensor('snmp.traffic', 'traffic');
+
+      const assignments = await config.assignmentsFor(probeId);
+      const assignment = assignments.sensors.find((s) => s.sensorId === sensor.id);
+      assert.deepEqual(assignment?.credentials?.['snmp'], {
+        version: 'v2c',
+        community: 'rack-secret',
+      });
+    });
+
+    it('sends nothing to a sensor whose type declared no kinds', async () => {
+      // Least privilege, and the reason `credentialKinds` is declared rather than inferred: a
+      // probe running Ping has no business holding an SNMP community string.
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'rack-secret' });
+      const ping = await addSensor('icmp.ping', 'ping');
+
+      const assignments = await config.assignmentsFor(probeId);
+      const assignment = assignments.sensors.find((s) => s.sensorId === ping.id);
+      assert.equal(assignment?.credentials, undefined);
+      assert.equal(JSON.stringify(assignment).includes('rack-secret'), false);
+    });
+
+    it('sends nothing when no ancestor defines the kind', async () => {
+      const sensor = await addSensor('snmp.traffic', 'traffic');
+      const assignments = await config.assignmentsFor(probeId);
+      assert.equal(
+        assignments.sensors.find((s) => s.sensorId === sensor.id)?.credentials,
+        undefined,
+      );
+    });
+
+    it('changes the fingerprint when a credential is rotated', async () => {
+      // Without this a probe holding the old community string is told "config-unchanged" and
+      // keeps authenticating with it — the sensor stays Down and nothing explains why.
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'first' });
+      await addSensor('snmp.traffic', 'traffic');
+      const before = (await config.assignmentsFor(probeId)).version;
+
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'second' });
+      const after = (await config.assignmentsFor(probeId)).version;
+      assert.notEqual(before, after);
+    });
+
+    it('changes the fingerprint when a credential is removed', async () => {
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'first' });
+      await addSensor('snmp.traffic', 'traffic');
+      const before = (await config.assignmentsFor(probeId)).version;
+
+      await h.service.clearCredential(testActor, deviceId, 'snmp');
+      const after = (await config.assignmentsFor(probeId)).version;
+      assert.notEqual(before, after);
     });
   },
 );

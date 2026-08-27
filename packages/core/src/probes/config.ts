@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { SensorAssignment } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import type { InheritanceResolver } from '../settings/inheritance.js';
+import type { CredentialKind, InheritanceResolver } from '../settings/inheritance.js';
+import type { CredentialVault } from '../vault/service.js';
 
 /** Matches the repository's own guard: a walk that cannot terminate is a hung request. */
 const MAX_WALK_DEPTH = 1000;
@@ -18,6 +19,16 @@ export const EMPTY_ASSIGNMENTS: ProbeAssignments = { version: fingerprint([]), s
 export interface ProbeConfigOptions {
   db: Database;
   resolver: InheritanceResolver;
+  /**
+   * The vault, and the catalogue that says which sensor type needs which credential kind
+   * (`A-05`).
+   *
+   * Both optional together: without them assignments carry no credentials, which is what an
+   * installation with no vault configured should push rather than failing to configure its
+   * probes at all. A sensor whose type needs a credential then fails its own check and says so.
+   */
+  vault?: CredentialVault;
+  credentialKindsFor?: (sensorType: string) => readonly string[];
 }
 
 /**
@@ -31,10 +42,16 @@ export interface ProbeConfigOptions {
 export class ProbeConfigService {
   readonly #db: Database;
   readonly #resolver: InheritanceResolver;
+  readonly #vault: CredentialVault | undefined;
+  readonly #credentialKindsFor: (sensorType: string) => readonly string[];
+  /** Rotation markers from the last resolve, keyed by sensor. Never contents — see below. */
+  #stamps = new Map<number, string>();
 
   constructor(options: ProbeConfigOptions) {
     this.#db = options.db;
     this.#resolver = options.resolver;
+    this.#vault = options.vault;
+    this.#credentialKindsFor = options.credentialKindsFor ?? (() => []);
   }
 
   /** The probe object a connected GID owns, or null while the GID is unclaimed. */
@@ -105,8 +122,12 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>(sensorIds, 'scan.timeoutMs'),
     ]);
 
+    const credentials = await this.#credentialsFor(rows);
+    const stamps = this.#stamps;
+
     const sensors: SensorAssignment[] = rows.map((row) => {
       const sensorId = Number(row.sensor_id);
+      const forSensor = credentials.get(sensorId);
       return {
         sensorId,
         sensorType: row.sensor_type,
@@ -117,10 +138,56 @@ export class ProbeConfigService {
         },
         intervalSeconds: intervals.get(sensorId)?.value ?? 60,
         timeoutMs: timeouts.get(sensorId)?.value ?? 30_000,
+        ...(forSensor === undefined ? {} : { credentials: forSensor }),
       };
     });
 
-    return { version: fingerprint(sensors), sensors };
+    return { version: fingerprint(sensors, stamps), sensors };
+  }
+
+  /**
+   * The decrypted credentials each sensor needs, and the stamps that go into the fingerprint.
+   *
+   * Grouped by the *set of kinds* a sensor type declares rather than resolved per sensor: a
+   * branch is usually a handful of types over thousands of sensors, so this is a query per
+   * distinct kind-set instead of one per sensor.
+   */
+  async #credentialsFor(
+    rows: readonly { sensor_id: string; sensor_type: string }[],
+  ): Promise<Map<number, Record<string, Record<string, unknown>>>> {
+    this.#stamps = new Map();
+    if (this.#vault === undefined) return new Map();
+
+    const byKindSet = new Map<string, { kinds: string[]; sensorIds: number[] }>();
+    for (const row of rows) {
+      const kinds = this.#credentialKindsFor(row.sensor_type);
+      if (kinds.length === 0) continue;
+      const key = [...kinds].sort().join(',');
+      const bucket = byKindSet.get(key) ?? { kinds: [...kinds].sort(), sensorIds: [] };
+      bucket.sensorIds.push(Number(row.sensor_id));
+      byKindSet.set(key, bucket);
+    }
+    if (byKindSet.size === 0) return new Map();
+
+    const out = new Map<number, Record<string, Record<string, unknown>>>();
+    for (const { kinds, sensorIds } of byKindSet.values()) {
+      const resolved = await this.#vault.resolveFor(sensorIds, kinds as CredentialKind[]);
+      for (const [sensorId, byKind] of resolved) {
+        const values: Record<string, Record<string, unknown>> = {};
+        const marks: string[] = [];
+        // Sorted, so the same credentials in a different map order fingerprint the same.
+        for (const kind of [...byKind.keys()].sort()) {
+          const entry = byKind.get(kind);
+          /* c8 ignore next -- the key came from this map */
+          if (entry === undefined) continue;
+          values[kind] = entry.values;
+          marks.push(`${kind}=${entry.stamp}`);
+        }
+        out.set(sensorId, values);
+        this.#stamps.set(sensorId, marks.join('|'));
+      }
+    }
+    return out;
   }
 }
 
@@ -135,7 +202,10 @@ export class ProbeConfigService {
  * Sorted by sensor id, and every field written explicitly, so the same configuration hashes the
  * same regardless of row order or of what order a driver happened to build an object in.
  */
-export function fingerprint(sensors: readonly SensorAssignment[]): string {
+export function fingerprint(
+  sensors: readonly SensorAssignment[],
+  credentialStamps: ReadonlyMap<number, string> = new Map(),
+): string {
   const canonical = [...sensors]
     .sort((a, b) => a.sensorId - b.sensorId)
     .map((sensor) => [
@@ -146,6 +216,13 @@ export function fingerprint(sensors: readonly SensorAssignment[]): string {
       sensor.target.ipVersion,
       sensor.intervalSeconds,
       sensor.timeoutMs,
+      // **The stamp, never the credential.** A rotated community string has to change this, or
+      // the probe holding the old one is told "unchanged" and keeps authenticating with it. The
+      // obvious way to get that is to hash the credential in — and it is a mistake: a community
+      // string is short and drawn from a tiny space, so a published SHA-256 of one is recovered
+      // by guessing, and this value is sent to probes and written to logs. The owning object and
+      // the update time change on every rotation and give nothing away (`A-05`).
+      credentialStamps.get(sensor.sensorId) ?? '',
     ]);
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 32);
 }

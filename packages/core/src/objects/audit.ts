@@ -265,6 +265,27 @@ export type Mutation =
   | { action: 'setting.reverted'; objectId: ObjectId; key: string; before: unknown }
   | {
       /**
+       * A credential set was stored or replaced (`A-05`).
+       *
+       * **There is no field here a secret could occupy, and that is the point of giving this its
+       * own shape** rather than reusing `setting.set`'s `before`/`after: unknown`. An audit row
+       * is permanent and readable through the history API, so a diff carrying values would be a
+       * plaintext archive of every credential this installation has ever held — the exact thing
+       * encrypting the column was for. `secretsSet` is field *names*: enough to answer "was the
+       * community string rotated, or only the SNMP version corrected".
+       */
+      action: 'credential.set';
+      objectId: ObjectId;
+      credentialKind: string;
+      created: boolean;
+      secretsSet: readonly string[];
+      secretsKept: readonly string[];
+      /** The half stored in the clear — an SNMP version, a user name. Never a key. */
+      publicParams: Readonly<Record<string, unknown>>;
+    }
+  | { action: 'credential.deleted'; objectId: ObjectId; credentialKind: string }
+  | {
+      /**
        * A schedule was created, changed or removed (`M-09`).
        *
        * `objectId` is null because a schedule is not in the object tree: it is a library object
@@ -402,6 +423,22 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'setting.set':
     case 'setting.reverted':
       return { action: mutation.action, objectId: mutation.objectId, key: mutation.key };
+    case 'credential.set':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        credentialKind: mutation.credentialKind,
+        created: mutation.created,
+        secretsSet: [...mutation.secretsSet],
+        secretsKept: [...mutation.secretsKept],
+        publicParams: mutation.publicParams,
+      };
+    case 'credential.deleted':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        credentialKind: mutation.credentialKind,
+      };
     case 'sensor.acknowledged':
       return {
         action: mutation.action,

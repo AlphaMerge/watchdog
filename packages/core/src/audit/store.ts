@@ -46,6 +46,7 @@ export interface AuditQuery {
 export const AUDIT_CATEGORIES = [
   'object',
   'setting',
+  'credential',
   'channel',
   'trigger',
   'template',
@@ -420,6 +421,37 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         // Reverting means "inherit again", so there is no after value — the effective one now
         // comes from an ancestor, and which ancestor is a question for the resolver.
         diff: [{ field: `setting.${mutation.key}`, before: mutation.before, after: null }],
+      };
+
+    case 'credential.set':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          credentialKind: mutation.credentialKind,
+          created: mutation.created,
+          secretsSet: [...mutation.secretsSet],
+          secretsKept: [...mutation.secretsKept],
+        },
+        // The public half only, and only as an "after". There is deliberately no before: it
+        // would be the previous public parameters beside a `secretsSet` list, which invites the
+        // next person to add the values to match — and a diff of credentials is a permanent,
+        // API-readable copy of them.
+        diff: [
+          {
+            field: `credential.${mutation.credentialKind}`,
+            before: null,
+            after: mutation.publicParams,
+          },
+        ],
+      };
+
+    case 'credential.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { credentialKind: mutation.credentialKind },
+        diff: [{ field: `credential.${mutation.credentialKind}`, before: null, after: null }],
       };
 
     case 'object.paused':

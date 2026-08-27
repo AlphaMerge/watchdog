@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import {
   bootstrap,
   coreConfigSchema,
@@ -15,6 +15,9 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/
 import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
+import { CredentialVault } from './vault/service.js';
+import { VaultKeyring } from './vault/keyring.js';
+import { VaultSealer } from './vault/sealer.js';
 import { ObjectService } from './objects/service.js';
 import { PauseSweep } from './objects/pause-sweep.js';
 import { DependencyPauses } from './dependencies/pauses.js';
@@ -183,6 +186,23 @@ async function serve(): Promise<void> {
   // about what a sensor is.
   const catalogue = standardCatalogue();
 
+  // The vault, before anything that can write a credential. A key file that is unreadable, too
+  // permissive or absent-with-`create:false` stops the core here rather than at the first write
+  // — an installation that starts and then cannot store a credential has already told an
+  // operator it is healthy.
+  const vaultKeyFile = isAbsolute(config.vault.keyFile)
+    ? config.vault.keyFile
+    : join(config.service.dataDir, config.vault.keyFile);
+  const vault = new CredentialVault({
+    resolver,
+    sealer: new VaultSealer(VaultKeyring.load(vaultKeyFile, { create: config.vault.create })),
+    logger,
+  });
+  logger.info(
+    { keyFile: vaultKeyFile, kinds: vault.kinds().map((kind) => kind.id) },
+    'credential vault ready',
+  );
+
   // Built-ins, then whatever the operator wrote under <dataDir>/lookups, later winning by id
   // (M-06). Loaded before anything can report a reading, because a channel resolved without its
   // lookup would be judged by nothing until the next time its cache went cold.
@@ -280,6 +300,7 @@ async function serve(): Promise<void> {
     schedules: new ScheduleRepository(),
     dependencies: dependencyRepository,
     dependencyDelays: dependencyPauses,
+    vault,
     logger,
   });
   logSensorTypes(logger, catalogue);
@@ -544,7 +565,15 @@ async function serve(): Promise<void> {
     logger,
     coreVersion: VERSION,
     results: ingestion,
-    probeConfig: new ProbeConfigService({ db, resolver }),
+    probeConfig: new ProbeConfigService({
+      db,
+      resolver,
+      vault,
+      // Only the kinds a type declared, so a probe running Ping never receives an SNMP
+      // community string (`A-05`).
+      credentialKindsFor: (sensorType) =>
+        catalogue.has(sensorType) ? (catalogue.declaration(sensorType).credentialKinds ?? []) : [],
+    }),
   });
   configNotifier.attach(probeEndpoint);
   await probeEndpoint.start();

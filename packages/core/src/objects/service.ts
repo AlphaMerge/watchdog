@@ -25,6 +25,7 @@ import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
 import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
+import type { CredentialVault } from '../vault/service.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type {
   AcknowledgementView,
@@ -87,6 +88,14 @@ export interface ObjectServiceOptions {
   dependencies?: DependencyLookup;
   /** What releases a dependency's recovery delay when it runs out (`M-11`). */
   dependencyDelays?: ReleasesDependencyDelays;
+  /**
+   * The credential vault (`A-05`).
+   *
+   * Optional so a test about the tree need not build a keyring. Absent, the credential *read*
+   * still works — it has only ever returned metadata — and a write is refused with a sentence
+   * rather than silently storing a secret in the clear.
+   */
+  vault?: CredentialVault;
   /** Refuses a clone larger than this. Protects the request, not the database. */
   maxCloneObjects?: number;
 }
@@ -170,6 +179,7 @@ export class ObjectService {
   readonly #schedules: ScheduleLookup | undefined;
   readonly #dependencies: DependencyLookup | undefined;
   readonly #dependencyDelays: ReleasesDependencyDelays | undefined;
+  readonly #vault: CredentialVault | undefined;
   readonly #maxCloneObjects: number;
 
   constructor(options: ObjectServiceOptions) {
@@ -183,6 +193,7 @@ export class ObjectService {
     this.#schedules = options.schedules;
     this.#dependencies = options.dependencies;
     this.#dependencyDelays = options.dependencyDelays;
+    this.#vault = options.vault;
     this.#maxCloneObjects = options.maxCloneObjects ?? 5_000;
   }
 
@@ -1110,6 +1121,143 @@ export class ObjectService {
       source: row.source,
       updatedAt: row.updatedAt,
     }));
+  }
+
+  /**
+   * The credential kinds this build can store, with the schema a form is built from.
+   *
+   * Empty without a vault, rather than a refusal: a UI asking what it can offer should be told
+   * "nothing" and hide the section, not shown an error on a page about something else.
+   */
+  credentialKinds(): readonly { id: string; name: string; description: string; schema: unknown }[] {
+    return this.#vault?.kinds() ?? [];
+  }
+
+  // ── credential writes (`A-05`) ───────────────────────────────────────────────────────────
+
+  /**
+   * Stores or replaces a credential set on one object.
+   *
+   * **The response says what changed, never what it changed to.** The summary carries the field
+   * *names* that were set and the public parameters; there is no shape in it a secret could
+   * occupy, which is the same reason `CredentialView` has none. That holds for the audit entry
+   * too — `credential.set` records that a community string was replaced and by whom, and an
+   * entry that recorded the value would be a permanent plaintext copy of every credential this
+   * installation has ever held, readable through the history API.
+   */
+  async setCredential(
+    actor: Actor,
+    id: ObjectId,
+    kind: string,
+    values: Readonly<Record<string, unknown>>,
+    pre: Precondition = { kind: 'none' },
+  ): Promise<CredentialView> {
+    const vault = this.#requireVault();
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+      if (pre.kind === 'version' && object.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, object.version);
+      }
+
+      const summary = await vault.write(q, id, kind, values);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'credential.set',
+            objectId: id,
+            credentialKind: kind,
+            created: summary.created,
+            secretsSet: summary.secretsSet,
+            secretsKept: summary.secretsKept,
+            publicParams: summary.publicParams,
+          },
+        ],
+        new Date(),
+      );
+
+      // Through `q`, not the pool: the row was written in this transaction and has not been
+      // committed, so a resolver on its own connection cannot see it — and would report the
+      // credential as absent immediately after storing it.
+      const [view] = (await this.#resolver.withExecutor(q).resolveCredentials(id)).filter(
+        (row) => row.kind === kind && row.source.kind === 'own',
+      );
+      /* c8 ignore next -- the row was just written in this transaction */
+      if (view === undefined) throw notFound(id);
+      return {
+        kind: view.kind,
+        publicParams: view.publicParams,
+        source: view.source,
+        updatedAt: view.updatedAt,
+      };
+    });
+  }
+
+  /**
+   * Removes the credential set defined on this object.
+   *
+   * Removing an override *reveals* whatever an ancestor defines, exactly as reverting a setting
+   * does — it does not leave the object without credentials. The 200 says which, so an operator
+   * deleting a device-level community string is told the group's one is now in force rather than
+   * finding out from a sensor that kept working.
+   */
+  async clearCredential(
+    actor: Actor,
+    id: ObjectId,
+    kind: string,
+    pre: Precondition = { kind: 'none' },
+  ): Promise<{ removed: boolean; nowInherited: CredentialView | null }> {
+    const vault = this.#requireVault();
+    return this.#db.tx(async (q) => {
+      const object = await this.#repo.get(q, id);
+      if (object === null) throw notFound(id);
+      if (pre.kind === 'version' && object.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, object.version);
+      }
+
+      const removed = await vault.clear(q, id, kind);
+      if (removed) {
+        await this.#audit.record(
+          q,
+          actor,
+          [{ action: 'credential.deleted', objectId: id, credentialKind: kind }],
+          new Date(),
+        );
+      }
+
+      // Same reason: the delete is not committed yet, so a resolver on the pool would still see
+      // the row this transaction removed and report it as the one now in force.
+      const inherited =
+        (await this.#resolver.withExecutor(q).resolveCredentials(id)).find(
+          (row) => row.kind === kind,
+        ) ?? null;
+      return {
+        removed,
+        nowInherited:
+          inherited === null
+            ? null
+            : {
+                kind: inherited.kind,
+                publicParams: inherited.publicParams,
+                source: inherited.source,
+                updatedAt: inherited.updatedAt,
+              },
+      };
+    });
+  }
+
+  #requireVault(): CredentialVault {
+    if (this.#vault === undefined) {
+      throw new ObjectError(
+        'CREDENTIAL_VAULT_UNAVAILABLE',
+        'this core has no credential vault configured, so a credential cannot be stored — ' +
+          'writing one in the clear instead is not an option',
+        { context: { phase: 'credentials' } },
+      );
+    }
+    return this.#vault;
   }
 
   // ── settings writes ──────────────────────────────────────────────────────────────────────

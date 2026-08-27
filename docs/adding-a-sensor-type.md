@@ -175,6 +175,40 @@ If the type shells out, it belongs in a child process, not a worker (`P-03`) —
 
 ---
 
+## Credentials that belong to the device
+
+A password, community string or key for the **monitored device** does not go in `paramsSchema`.
+It goes in a credential set on the device or the group above it, and every sensor underneath
+inherits it — set once for a rack, rotated in one place (`A-05`, `CAPABILITIES.MD §10`).
+
+Declare which kinds your type needs, and they arrive decrypted in `ctx.credentials`:
+
+```ts
+export const snmpUptime: SensorType = {
+  id: 'snmp.uptime',
+  credentialKinds: ['snmp'],
+  // ...
+  async execute(context: CheckContext): Promise<CheckExecution> {
+    const snmp = context.credentials['snmp'];
+    if (snmp === undefined) {
+      // Say which kind is missing. The alternative is an authentication failure twenty seconds
+      // later that reads like the device is broken.
+      throw new Error('no SNMP credentials are set on this device or any group above it');
+    }
+    // ...
+  },
+};
+```
+
+- **Declared, not inferred.** The core decrypts exactly these kinds for exactly these sensors and
+  sends them to the probe that owns them. A type that did not say would have to be sent
+  everything, so every probe would hold every credential in the installation to run a Ping.
+- **A missing kind is absent, not an error.** Whether the check can run without it is your
+  judgement — you are the one placed to name what is missing.
+- **`writeOnly` in `paramsSchema` still exists** and is still right for a secret that belongs to
+  *this sensor* rather than to the device. If two sensors on the same device would hold the same
+  value, it is a credential set.
+
 ## Shared transports
 
 Some protocols are too big to re-derive per type, so they live once under

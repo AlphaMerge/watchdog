@@ -19,6 +19,13 @@ export interface CheckRequest {
   /** Where the check points, resolved by the core from the sensor's parent device (R-04). */
   target: CheckTarget;
   params: Record<string, unknown>;
+  /**
+   * Credential sets this sensor's type declared, decrypted by the core (`A-05`).
+   *
+   * Held in memory for as long as the assignment is, and never written anywhere: the spool
+   * carries results, not requests.
+   */
+  credentials?: Record<string, Record<string, unknown>>;
   /** Hard deadline. The sensor's own `scan.timeoutMs`, resolved by the core. */
   timeoutMs: number;
 }

@@ -286,6 +286,7 @@ export class CheckPool {
       sensorType: job.request.sensorType,
       target: job.request.target,
       params: job.request.params,
+      ...(job.request.credentials === undefined ? {} : { credentials: job.request.credentials }),
     });
   }
 

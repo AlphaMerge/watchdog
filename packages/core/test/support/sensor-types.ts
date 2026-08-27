@@ -30,11 +30,18 @@ const ping: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
-/** Carries a credential in `community`, which is the whole point of it being here. */
+/**
+ * Carries a credential two ways, which is the whole point of it being here.
+ *
+ * `community` as a `writeOnly` *parameter* is how a credentialed sensor looked before `A-05`,
+ * and the redaction tests still need it. `credentialKinds` is how it looks after: the secret
+ * lives on the device, inherited, and the core hands it to the check.
+ */
 const snmpTraffic: SensorType = {
   id: 'snmp.traffic',
   category: 'SNMP',
   costHint: 'medium',
+  credentialKinds: ['snmp'],
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

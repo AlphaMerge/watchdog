@@ -2977,7 +2977,7 @@ because each is a decision rather than a defect:
       the tree; explicit beats inherited; highest across groups wins.
 - [ ] **A-04 — Read-only account restrictions** · M · A-03 · Enforced at account level: no admin
       groups, no credential visibility, optional acknowledge permission.
-- [ ] **A-05 — Credential vault** · L · A-03 · Credential sets inherited from group/device,
+- [x] **A-05 — Credential vault** · L · A-03 · Credential sets inherited from group/device,
       encrypted at rest with a key from the OS keystore or a key file, **write-only through the
       API** by every route.
       **Added by S-03:** credential inheritance already lives in
@@ -2985,6 +2985,67 @@ because each is a decision rather than a defect:
       Read routes exist and return metadata only (kind, `publicParams`, source, `updatedAt`);
       A-05 adds the write path. **Scheduling risk:** Phase 6 (sensor breadth) precedes Phase 9
       in the plan, so A-05 must be pulled forward or credentialed sensors are unusable.
+
+      **A-05 outcome — pulled forward, minus the half that needs accounts.** The stated
+      dependency is `A-03`, which needs `A-02` and `A-01`; none exist. But that dependency is
+      about *who may write* a credential, and everything here is already write-only to
+      **everyone**, which is the stronger property CLAUDE.md demands. `A-03`/`A-04` still add the
+      permission check on the write — one guard in one place when accounts arrive. The scheduling
+      risk this ticket predicted is what forced it: `T-01` shipped a transport whose sensors would
+      otherwise each carry their own community string.
+
+      **A key file, not the OS keystore, and the task offered both.** On Linux the keystore is
+      libsecret over a *session* D-Bus, which a systemd system service does not have; on Windows
+      it is DPAPI through a native addon. A mechanism that works on one platform, in one session
+      type, with a compiled dependency is not a key path for a standalone native service
+      (CLAUDE.md constraint 1). The file is generated at first start rather than defaulted —
+      a key derived from something the installer knows produces an installation encrypted in form
+      and not in fact — created 0600, and **refused on every load if the mode has widened**, since
+      key files get restored from backups and copied between hosts.
+
+      **AES-256-GCM, and the associated data is the part worth explaining.** Object id and kind go
+      into the AAD, so a `secret` column value copied from one row to another fails to
+      authenticate. Without it, anybody with database access could grant a device another
+      device's credentials by copying a cell — an attack needing no key at all. Reverting the AAD
+      to a constant still passes 19 of 21 crypto tests; the two that fail are the ones that exist
+      for it.
+
+      **The fingerprint hashes a rotation stamp, never the credential.** A probe's config version
+      has to change when a community string is rotated, or the probe holding the old one is told
+      `config-unchanged` and keeps authenticating with it. The obvious way to get that is to hash
+      the credential in — and it is a mistake: a community string is short and drawn from a tiny
+      space, so a published SHA-256 of one is recovered by guessing, and this value is sent to
+      probes and written to logs. `ownerId@updatedAt` changes on every rotation and reveals
+      nothing.
+
+      **Secrets reach the probe, deliberately, and only there.** The probe is what authenticates
+      to the device, so the alternatives are shipping the vault key to every probe or moving the
+      protocol into the core. What bounds it: mutual TLS, only the kinds a sensor *type* declared
+      (`SensorType.credentialKinds`), and only to the probe that owns that sensor — a Ping probe
+      never receives an SNMP community string. Verified: the probe keeps assignments in a `Map`
+      and its only disk write is the result spool, which carries outcomes and never parameters.
+
+      **The audit entry has its own shape rather than reusing `setting.set`'s `before`/`after`.**
+      An audit row is permanent and readable through the history API, so a diff carrying values
+      would be a plaintext archive of every credential the installation has ever held. It records
+      field *names*: `secretsSet: ["community"]` answers "was the community rotated, or only the
+      SNMP version corrected" without answering "to what".
+
+      **A secret the caller omits is kept**, the mirror of `U-08`'s `carryWriteOnly` and for the
+      same reason: a read never returns it, so a form correcting the version beside it cannot send
+      it back, and a wholesale replace would delete it every time. `null` clears it.
+
+      Verified live end to end: key file created 0600; the community string appears in none of
+      `?include=credentials`, the credentials route, the object history or the global audit feed;
+      `position('super-secret' in secret) = 0` in the column itself; a device-level set inherited
+      by the sensor at depth 1; an edit sending only the version reporting
+      `secretsKept: ["community"]`; and a delete answering with the group's credential now in
+      force. 52 new tests.
+
+      **Left for `A-03`/`A-04`:** who may write one, and the read-only account restriction.
+      **Left as a follow-up:** a rotation pass that rewrites records onto a new key —
+      `key_id`, `VaultKeyring`'s multi-key support and `VaultSealer.isCurrent` are the half that
+      makes it a loop rather than a design.
 - [ ] **A-06 — API tokens** · M · A-01 · Per-user tokens, scoped, revocable, with last-used
       tracking.
 - [ ] **A-07 — TOTP MFA** · M · A-01 · `otpauth` enrolment with QR, recovery codes, enforcement

@@ -47,6 +47,19 @@ export interface SensorAssignment {
   target: { host: string; ipVersion: 'auto' | 'v4' | 'v6' };
   intervalSeconds: number;
   timeoutMs: number;
+  /**
+   * Decrypted credential sets for the kinds this sensor's type declared (`A-05`).
+   *
+   * **Secrets on the wire, deliberately, and only on this wire.** The probe is the thing that
+   * authenticates to the device, so it has to hold them; the alternatives are giving every probe
+   * the vault key or moving the protocol into the core, and both are worse. What bounds it: the
+   * channel is mutual TLS, only the kinds a sensor's type declares are sent, and only to the
+   * probe that owns that sensor — a Ping probe never receives an SNMP community string.
+   *
+   * The probe keeps assignments in memory and writes none of them to disk. Its only file is the
+   * result spool, which carries check outcomes and never parameters.
+   */
+  credentials?: Record<string, Record<string, unknown>>;
 }
 
 /** A single channel's reading inside a check result. */

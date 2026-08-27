@@ -95,6 +95,7 @@ async function main(): Promise<void> {
           sensorType: assignment.sensorType,
           target: assignment.target,
           params: assignment.params,
+          ...(assignment.credentials === undefined ? {} : { credentials: assignment.credentials }),
           timeoutMs: assignment.timeoutMs,
         });
       }

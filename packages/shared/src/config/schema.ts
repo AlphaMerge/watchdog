@@ -298,6 +298,8 @@ export interface CoreConfig {
   database: DatabaseConfig;
   ingestion: IngestionConfig;
   housekeeping: HousekeepingConfig;
+  /** Where monitored-device credentials are encrypted from (`A-05`). */
+  vault: VaultConfig;
   probeEndpoint: {
     host: string;
     port: number;
@@ -444,6 +446,33 @@ function relaySchema(defaultPort: number): JSONSchemaType<SmtpRelay> {
   };
 }
 
+/**
+ * The credential vault's key (`A-05`).
+ *
+ * A file rather than the OS keystore, and the reasoning is in `vault/keyring.ts`: on Linux the
+ * keystore is libsecret over a *session* D-Bus, which a systemd system service does not have,
+ * and on Windows it is DPAPI through a native addon. Neither survives CLAUDE.md's first
+ * constraint — production is a standalone native service.
+ */
+export interface VaultConfig {
+  /**
+   * Path to the key file. Relative paths resolve against the service's data directory.
+   *
+   * The file is created with mode 0600 at first start if it is absent, and a load refuses a file
+   * any other user can read. Back it up: losing it loses every stored device credential, and
+   * nothing else.
+   */
+  keyFile: string;
+  /**
+   * Whether to create a key file that is not there.
+   *
+   * True is right for an ordinary install. False is for an operator who restores the key from a
+   * backup as part of provisioning and wants a missing one to stop the core rather than be
+   * papered over with a new key that silently orphans every stored credential.
+   */
+  create: boolean;
+}
+
 export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
   type: 'object',
   additionalProperties: false,
@@ -454,6 +483,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
     'database',
     'ingestion',
     'housekeeping',
+    'vault',
     'probeEndpoint',
   ],
   properties: {
@@ -652,6 +682,16 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             fiveMinuteAfterDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 30 },
           },
         },
+      },
+    },
+    vault: {
+      type: 'object',
+      default: {} as CoreConfig['vault'],
+      additionalProperties: false,
+      required: ['keyFile', 'create'],
+      properties: {
+        keyFile: { type: 'string', default: 'vault.key' },
+        create: { type: 'boolean', default: true },
       },
     },
     probeEndpoint: {

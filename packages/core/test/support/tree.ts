@@ -17,6 +17,9 @@ import { ScheduleRepository } from '../../src/schedules/repository.js';
 import { SensorStateService, type AlarmReactor } from '../../src/state/service.js';
 import { testSensorTypes } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
+import { CredentialVault } from '../../src/vault/service.js';
+import { VaultKeyring } from '../../src/vault/keyring.js';
+import { VaultSealer } from '../../src/vault/sealer.js';
 
 export const silent = pino({ level: 'silent' });
 
@@ -66,6 +69,8 @@ export interface Harness {
   repository: ObjectRepository;
   resolver: InheritanceResolver;
   audit: CapturingAuditSink;
+  /** The vault the service was wired with (`A-05`). Its keys live only in this process. */
+  vault: CredentialVault;
   /** Present only when `buildHarness` was asked for one; `M-08`'s pauses need it. */
   states: SensorStateService | undefined;
   /** The dependency reactor the service was wired with, when states were asked for (`M-11`). */
@@ -104,11 +109,20 @@ export async function buildHarness(
       ? undefined
       : new DependencyPauses({ logger: silent, settings: resolver, states });
 
+  // A keyring made here rather than loaded: a test that wrote a key file would leave one on
+  // disk, and the crypto itself is covered against real files in `vault-crypto.test.ts`.
+  const vault = new CredentialVault({
+    resolver,
+    sealer: new VaultSealer(VaultKeyring.fromKeys([{ id: 'test-key', key: Buffer.alloc(32, 7) }])),
+    logger: silent,
+  });
+
   const service = new ObjectService({
     db,
     repository,
     resolver,
     audit,
+    vault,
     sensorTypes: testSensorTypes(),
     ...(states === undefined ? {} : { states }),
     ...(dependencies === undefined ? {} : { dependencyDelays: dependencies }),
@@ -122,7 +136,7 @@ export async function buildHarness(
   });
 
   const root = await repository.getRoot(db);
-  return { service, repository, resolver, audit, states, dependencies, rootId: root.id };
+  return { service, repository, resolver, audit, vault, states, dependencies, rootId: root.id };
 }
 
 export { LoggingAuditSink };

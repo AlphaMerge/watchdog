@@ -6,6 +6,9 @@ import { InheritanceError } from '../settings/inheritance.js';
 import { QueryError } from '../timeseries/query.js';
 import { MethodError } from '../notifications/methods.js';
 import { TriggerError } from '../triggers/definition.js';
+import { VaultError } from '../vault/service.js';
+import { VaultKeyError } from '../vault/keyring.js';
+import { VaultSealError } from '../vault/sealer.js';
 
 export interface HttpErrorBody {
   error: {
@@ -82,6 +85,21 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // Settings that failed their kind's own schema (`N-01`). The problems go out: a trigger a
     // client cannot save and cannot see the reason for is a form that just refuses.
     return envelope(400, error.code, error.message, { ...error.context }, { ...error.details });
+  }
+
+  if (error instanceof VaultError) {
+    // A kind this build has no transport for, and nothing else: the vault's other failures are
+    // `VaultKeyError` and `VaultSealError` below, which are the operator's problem rather than
+    // the caller's. Naming the kinds that *do* work is the useful half — a form told only "no"
+    // cannot tell a typo from a feature that has not shipped.
+    return envelope(400, error.code, error.message, { ...error.context });
+  }
+
+  if (error instanceof VaultKeyError || error instanceof VaultSealError) {
+    // 503, and deliberately without the message. These say which key is missing or which record
+    // would not decrypt, which is exactly what an operator needs in the log and exactly what an
+    // unauthenticated caller should not be told about the shape of the vault.
+    return envelope(503, error.code, 'the credential vault is not usable — see the core log');
   }
 
   if (error instanceof InheritanceError) {

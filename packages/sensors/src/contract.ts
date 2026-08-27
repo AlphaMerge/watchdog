@@ -67,6 +67,19 @@ export interface CheckContext {
   readonly target: CheckTarget;
   readonly params: Readonly<Record<string, unknown>>;
   /**
+   * The credential sets this type declared, resolved and decrypted for this sensor (`A-05`).
+   *
+   * Keyed by kind, and holding only the kinds `credentialKinds` names — a Ping sensor is never
+   * handed an SSH key. Each is the *inherited* answer: set once on the device, or on the group
+   * above it, and every sensor underneath gets it. A kind that is declared but not configured
+   * anywhere up the tree is simply absent, which a type should report as a check failure naming
+   * the kind rather than as an authentication error twenty seconds later.
+   *
+   * These are secrets. They exist in this worker for the duration of the check and are not
+   * logged, not spooled and not returned in a result.
+   */
+  readonly credentials: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  /**
    * Not optional and not advisory. CLAUDE.md requires every check to honour it; one that does
    * not gets its worker terminated, which costs strictly more than returning.
    */
@@ -93,6 +106,16 @@ export interface SensorType {
   /** Validates the API, generates the UI form, and marks secrets `writeOnly`. */
   readonly paramsSchema: JsonSchema;
   readonly costHint: CostHint;
+  /**
+   * Credential kinds this type needs, resolved from the sensor's ancestors and handed to
+   * `execute` in `ctx.credentials` (`A-05`).
+   *
+   * Declared rather than discovered, and the reason is what the core does with it: it decrypts
+   * exactly these kinds for exactly these sensors and sends them to the probe that owns them. A
+   * type that did not say would have to be sent everything, so every probe would hold every
+   * credential in the installation to run a Ping.
+   */
+  readonly credentialKinds?: readonly string[];
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

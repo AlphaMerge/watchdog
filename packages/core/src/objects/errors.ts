@@ -17,7 +17,8 @@ export type ObjectErrorCode =
   | 'OBJECT_NOT_CLONEABLE'
   | 'OBJECT_CLONE_TOO_LARGE'
   | 'OBJECT_VERSION_CONFLICT'
-  | 'OBJECT_PRECONDITION_REQUIRED';
+  | 'OBJECT_PRECONDITION_REQUIRED'
+  | 'CREDENTIAL_VAULT_UNAVAILABLE';
 
 export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   OBJECT_INVALID: 400,
@@ -39,6 +40,9 @@ export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   OBJECT_CLONE_TOO_LARGE: 409,
   OBJECT_VERSION_CONFLICT: 412,
   OBJECT_PRECONDITION_REQUIRED: 428,
+  // 503 rather than 500: the request is fine and the core is running, it simply has no vault
+  // configured — an operator fixes it in the configuration file, not by retrying.
+  CREDENTIAL_VAULT_UNAVAILABLE: 503,
 };
 
 /**

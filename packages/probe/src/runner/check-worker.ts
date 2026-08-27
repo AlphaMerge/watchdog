@@ -17,6 +17,7 @@ interface RunMessage {
   sensorType: string;
   target: CheckTarget;
   params: Record<string, unknown>;
+  credentials?: Record<string, Record<string, unknown>>;
 }
 
 interface AbortMessage {
@@ -55,6 +56,7 @@ async function run(message: RunMessage): Promise<void> {
       sensorId: message.sensorId,
       target: message.target,
       params: message.params,
+      credentials: message.credentials ?? {},
       signal: controller.signal,
     });
     port.postMessage({
