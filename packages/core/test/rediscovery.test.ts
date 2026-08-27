@@ -86,7 +86,7 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       db,
       logger: silentLogger,
       // Connected, and nothing is asserted about what the probe was sent — `D-01` owns that.
-      dispatch: () => true,
+      dispatch: () => ({ kind: 'sent' }),
     });
     rediscovery = new RediscoveryService({
       db,

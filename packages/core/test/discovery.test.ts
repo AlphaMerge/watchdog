@@ -30,6 +30,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
   let probeId = 0;
   let sent: DispatchMessage[] = [];
   let connected = true;
+  let tooOld = false;
   let discovery: DiscoveryService;
 
   before(async () => {
@@ -46,6 +47,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
     sent = [];
     connected = true;
+    tooOld = false;
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -64,9 +66,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       db,
       logger: silentLogger,
       dispatch: (_probeId, message) => {
-        if (!connected) return false;
+        if (tooOld) return { kind: 'too-old', protocolVersion: 2, needs: 4 };
+        if (!connected) return { kind: 'offline' };
         sent.push(message);
-        return true;
+        return { kind: 'sent' };
       },
     });
   });
@@ -121,6 +124,34 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       connected = true;
       await discovery.pump(probeId);
       assert.equal((await mustGet(run.id)).status, 'running');
+    });
+
+    it('fails a run whose probe can never accept it, rather than waiting forever', async () => {
+      // **`offline` and `too-old` used to be the same answer**, and the consequences are
+      // opposite: waiting is right for a probe that is coming back and wrong for one whose build
+      // will never understand the message. Such a run reported "waiting for a probe" for as long
+      // as anybody left it, which is indistinguishable from the ordinary case above.
+      tooOld = true;
+      const run = await start();
+
+      const stored = await mustGet(run.id);
+      assert.equal(stored.status, 'failed');
+      assert.match(stored.message, /protocol 2/, 'names what the probe speaks');
+      assert.match(stored.message, /needs 4/, 'and what the stage needs');
+      assert.match(stored.message, /upgrade the probe/, 'and what to do about it');
+    });
+
+    it('does not re-offer a run it failed for skew', async () => {
+      tooOld = true;
+      const run = await start();
+      assert.equal((await mustGet(run.id)).status, 'failed');
+
+      // A pump after the probe reconnects must not resurrect it: the run was ended with a
+      // reason, and quietly restarting it would discard that reason.
+      tooOld = false;
+      await discovery.pump(probeId);
+      assert.equal((await mustGet(run.id)).status, 'failed');
+      assert.equal(sent.length, 0);
     });
 
     it('offers one run at a time, oldest first', async () => {
@@ -383,6 +414,23 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.ok(message !== undefined && message.kind === 'identify');
       assert.deepEqual(message.job.addresses, ['10.0.0.1', '10.0.0.2']);
       assert.equal(message.job.cursor, 0, 'the batch is the remaining work');
+    });
+
+    it('fails rather than identifying against a probe too old for the stage', async () => {
+      // **The second stage arrived in a later protocol version than the first**, so a probe can
+      // be new enough to sweep and too old to identify — which means this path is reachable
+      // without the run ever having been refused. Left alone it stayed `identifying` forever,
+      // with a progress bar that had finished sweeping and would never finish anything else.
+      const run = await start();
+      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+
+      tooOld = true;
+      await discovery.finished(run.id, 'done', 6, '');
+
+      const stored = await mustGet(run.id);
+      assert.equal(stored.status, 'failed');
+      assert.match(stored.message, /identification needs 4/);
+      assert.match(stored.message, /protocol 2/);
     });
 
     it('ends the run without identifying when the level says ping only', async () => {

@@ -153,7 +153,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
     discovery = new DiscoveryService({
       db,
       logger: silentLogger,
-      dispatch: () => true,
+      dispatch: () => ({ kind: 'sent' }),
     });
     provisioner = new ProvisionService({
       objects: harness.service,

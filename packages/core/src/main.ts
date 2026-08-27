@@ -565,8 +565,11 @@ async function serve(): Promise<void> {
   const discovery = new DiscoveryService({
     db,
     logger,
+    // The endpoint does not exist yet, so `offline` is the honest answer until it does — the
+    // run waits and is offered again, which is exactly what happens to a probe that has not
+    // connected. Reading a missing endpoint as `too-old` would fail runs during start-up.
     dispatch: (probeObjectId, message) =>
-      probeEndpointRef?.sendSweep(probeObjectId, message) ?? false,
+      probeEndpointRef?.sendSweep(probeObjectId, message) ?? { kind: 'offline' },
     onFinished: async (runId) => {
       await rediscoveryRef?.runFinished(runId);
     },

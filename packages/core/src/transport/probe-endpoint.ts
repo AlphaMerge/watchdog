@@ -2,12 +2,16 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type TLSSocket } from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import {
+  capabilitiesFor,
   describeError,
+  describeSkew,
+  explainSkew,
   isProtocolCompatible,
   loadTlsMaterial,
   MessageConnection,
   parseProbeToCore,
   PROTOCOL_VERSION,
+  versionFor,
   withCorrelation,
   type ConnectionClose,
   type CoreConfig,
@@ -76,6 +80,18 @@ export interface IdentifyCancel {
 
 export type SweepMessage = SweepStart | SweepCancel | IdentifyStart | IdentifyCancel;
 
+/**
+ * What happened to a sweep message, in the three cases the caller acts on differently (`R-06`).
+ *
+ * `offline` is not a failure — the run waits and is offered again on reconnect. `too-old` is
+ * final for as long as that probe runs that build, and the run has to be failed with a reason
+ * rather than left queued against a probe that will never answer.
+ */
+export type SweepDelivery =
+  | { kind: 'sent' }
+  | { kind: 'offline' }
+  | { kind: 'too-old'; protocolVersion: number; needs: number };
+
 export interface DiscoverySink {
   /** A probe with this branch has connected, or reconnected. Offer it whatever it should run. */
   pump(probeObjectId: number): Promise<void>;
@@ -142,7 +158,11 @@ export interface ProbeAdmission {
   }): Promise<
     | { kind: 'approved'; gid: string; objectId: number | null; issuedKey?: string }
     | { kind: 'pending'; gid: string }
-    | { kind: 'refused'; code: 'revoked' | 'source-not-allowed' | 'bad-access-key'; detail: string }
+    | {
+        kind: 'refused';
+        code: 'revoked' | 'source-not-allowed' | 'bad-access-key' | 'protocol-version';
+        detail: string;
+      }
   >;
 }
 
@@ -440,25 +460,30 @@ export class ProbeEndpoint {
   /**
    * Sends a sweep message to a connected probe, by the *object* id its branch owns.
    *
-   * Returns false when that probe is not connected, which is not a failure: the run stays
-   * queued and is offered again when it reconnects. That path is also how a probe restart
-   * resumes a sweep, so it is the ordinary one rather than the exception.
+   * **`offline` and `too-old` are different answers and the caller has to be able to tell them
+   * apart** (`R-06`). Both used to be `false`, and the consequences diverge completely: an
+   * offline probe is the ordinary case — the run stays queued and is offered again when it
+   * reconnects, which is also how a probe restart resumes a sweep — while a probe that is too
+   * old will never accept this message however long the run waits. Collapsing the two left such
+   * a run queued forever with nothing said, which is exactly what `R-06` exists to stop.
    */
-  sendSweep(probeObjectId: number, message: SweepMessage): boolean {
+  sendSweep(probeObjectId: number, message: SweepMessage): SweepDelivery {
     for (const session of this.#sessions.values()) {
       if (session.probeObjectId !== probeObjectId) continue;
-      const needed = message.kind === 'start' || message.kind === 'cancel' ? 4 : 5;
-      if (session.protocolVersion < needed) {
+      const capability =
+        message.kind === 'start' || message.kind === 'cancel' ? 'discoverySweep' : 'identification';
+      if (!capabilitiesFor(session.protocolVersion)[capability]) {
+        const needs = versionFor(capability);
         this.#options.logger.warn(
-          { probeObjectId, protocolVersion: session.protocolVersion, needs: needed },
+          { probeObjectId, protocolVersion: session.protocolVersion, needs },
           'probe is too old for this discovery stage',
         );
-        return false;
+        return { kind: 'too-old', protocolVersion: session.protocolVersion, needs };
       }
       session.connection.send(wireFor(message));
-      return true;
+      return { kind: 'sent' };
     }
-    return false;
+    return { kind: 'offline' };
   }
 
   /**
@@ -536,21 +561,20 @@ export class ProbeEndpoint {
       connection.close(`rejected: ${code}`, { type: 'reject', code, message: detail });
     };
 
-    // Version skew is reported, never silently tolerated (TASKS.md R-06).
-    if (!isProtocolCompatible(hello.protocolVersion)) {
-      reject(
-        'protocol-version',
-        `probe speaks protocol ${String(hello.protocolVersion)}, core speaks ${String(PROTOCOL_VERSION)}`,
-      );
-      return undefined;
-    }
-
     const { registry } = this.#options;
 
     // Without a registry the endpoint keeps the pre-`R-01` behaviour: whoever presents the
     // shared key is trusted. `main.ts` always passes one; this path is what the transport's own
     // tests drive, and leaving it in means those tests are not secretly testing the registry.
     if (registry === undefined) {
+      // **The version check lives in the registry now** (`R-06`), because a refusal that leaves
+      // no row is the one that takes a day to find. There is nothing to write a row against
+      // here, so this branch keeps the check itself — the asymmetry is the point rather than an
+      // oversight.
+      if (!isProtocolCompatible(hello.protocolVersion)) {
+        reject('protocol-version', explainSkew(describeSkew(hello.protocolVersion)));
+        return undefined;
+      }
       if (config.accessKeys.length > 0 && !keyMatches(hello.accessKey, config.accessKeys)) {
         reject('bad-access-key', 'the access key was not accepted');
         return undefined;
@@ -703,10 +727,20 @@ export class ProbeEndpoint {
     // the periodic sweep — and a check repeated four times is a check three of them can be
     // written without. An unapproved probe scans nothing because this is the only door.
     if (!session.approved) return;
-    if (session.protocolVersion < 3) {
+    // **A probe that cannot be sent configuration scans nothing, and that has to be loud**
+    // (`R-06`). It connects, it heartbeats, and every health signal says the link is fine while
+    // no sensor under it is ever checked — the quietest failure this system has. `warn` rather
+    // than `info` because nothing about it is routine, and the skew is recorded against the
+    // registration as well, so it is answerable from the probes page and not only from a log
+    // somebody would have to already suspect.
+    if (!capabilitiesFor(session.protocolVersion).configPush) {
       if (presented !== undefined) {
-        logger.info(
-          { protocolVersion: session.protocolVersion },
+        logger.warn(
+          {
+            protocolVersion: session.protocolVersion,
+            needs: versionFor('configPush'),
+            skew: explainSkew(describeSkew(session.protocolVersion)),
+          },
           'probe is too old for configuration push; it will scan nothing',
         );
       }

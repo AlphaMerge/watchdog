@@ -434,4 +434,87 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.equal((await registry.list()).length, 2);
     });
   });
+
+  /**
+   * Version skew (`R-06`).
+   *
+   * The refusal itself already existed, in the endpoint, before the registry saw the probe — so
+   * the one refusal an operator is most likely to meet, having upgraded one end and not the
+   * other, was the one refusal that left nothing behind to find. These are about the row.
+   */
+  describe('a probe whose protocol this core cannot speak', () => {
+    it('is refused, and says which version each end speaks', async () => {
+      const decision = await registry.admit(hello({ protocolVersion: 99 }));
+      assert.equal(decision.kind, 'refused');
+      assert.equal(decision.code, 'protocol-version');
+      assert.match(decision.detail, /protocol 99/);
+    });
+
+    it('is refused when it is older than this build understands, too', async () => {
+      const decision = await registry.admit(hello({ protocolVersion: 0 }));
+      assert.equal(decision.kind, 'refused');
+      assert.equal(decision.code, 'protocol-version');
+    });
+
+    it('updates the recorded version before refusing, for a probe already known', async () => {
+      // The point of moving the check here. An operator asking "why did backup-01 stop
+      // scanning" needs the row to say 99, not the 6 it spoke the last time it managed to get
+      // in — the stale number is the one that sends them looking in the wrong place.
+      const first = await registry.admit(hello({ gid: 'known-machine', protocolVersion: 6 }));
+      assert.equal(first.kind, 'pending');
+
+      const decision = await registry.admit(hello({ gid: 'known-machine', protocolVersion: 99 }));
+      assert.equal(decision.kind, 'refused');
+
+      const stored = await registry.get('known-machine');
+      assert.equal(stored?.protocolVersion, 99, 'the version it is actually running');
+      assert.equal(stored.skew.kind, 'incompatible');
+    });
+
+    it('does not enrol one it has never seen, because approving it could not help', async () => {
+      await registry.admit(hello({ gid: 'stranger', protocolVersion: 99 }));
+      assert.equal(await registry.get('stranger'), null);
+      assert.equal((await registry.list()).length, 0, 'nothing was added to the approval queue');
+    });
+
+    it('refuses it before the access key is even considered', async () => {
+      // Otherwise the operator is told to check a key that was never the problem.
+      const decision = await registry.admit(
+        hello({ protocolVersion: 99, accessKey: 'not-the-shared-key' }),
+      );
+      assert.equal(decision.kind, 'refused');
+      assert.equal(decision.code, 'protocol-version');
+    });
+  });
+
+  describe('the skew reported against a registration', () => {
+    it('is current for a probe speaking this build’s own version', async () => {
+      const decision = await registry.admit(hello({ gid: 'current-machine' }));
+      assert.equal(decision.kind, 'pending');
+      assert.equal((await registry.get('current-machine'))?.skew.kind, 'current');
+    });
+
+    it('is outdated — not incompatible — for one that connects but can do nothing', async () => {
+      // The whole reason `R-06` exists: this probe is healthy by every other measure.
+      await registry.admit(hello({ gid: 'old-machine', protocolVersion: 2 }));
+      const stored = await registry.get('old-machine');
+      assert.equal(stored?.skew.kind, 'outdated');
+      assert.match(stored.skew.explanation, /cannot be sent sensors to scan/);
+    });
+
+    it('is unknown for a row an upgrade carried over, not a red mark', async () => {
+      // `R-01`'s migration approved the probes that already existed and had no version to record
+      // for them. Reading that zero as "speaks protocol 0" would condemn every one of them
+      // before any had reconnected.
+      await db.query(
+        `INSERT INTO probe_registration (gid, status, object_id, decided_at)
+         VALUES ('carried-over', 'approved', $1, now())`,
+        [probeId],
+      );
+      const stored = await registry.get('carried-over');
+      assert.equal(stored?.protocolVersion, 0);
+      assert.equal(stored.skew.kind, 'unknown');
+      assert.match(stored.skew.explanation, /has not connected/);
+    });
+  });
 });

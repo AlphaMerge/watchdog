@@ -97,8 +97,15 @@ interface Db {
 export interface DiscoveryServiceOptions {
   db: Db;
   logger: Logger;
-  /** Sends a message to a connected probe. False when that probe is not connected. */
-  dispatch: (probeId: number, message: DispatchMessage) => boolean;
+  /**
+   * Sends a message to a connected probe.
+   *
+   * **Three answers, not two** (`R-06`). `offline` means wait — the run is offered again on
+   * reconnect, which is also how a probe restart resumes a sweep. `too-old` means this probe
+   * will never accept the message, and a run left queued against it waits forever with nothing
+   * said, which is the failure `R-06` names.
+   */
+  dispatch: (probeId: number, message: DispatchMessage) => SweepDelivery;
   /**
    * Told when a run reaches `done`, so `D-07` can provision one it scheduled.
    *
@@ -108,6 +115,16 @@ export interface DiscoveryServiceOptions {
    */
   onFinished?: (runId: number) => Promise<void>;
 }
+
+/**
+ * Exactly what the probe endpoint's `sendSweep` answers, mirrored here for the same reason
+ * `DispatchMessage` is: this service does not import the transport, and the two declarations
+ * meet where `main.ts` wires them, which is where TypeScript checks that they still agree.
+ */
+export type SweepDelivery =
+  | { kind: 'sent' }
+  | { kind: 'offline' }
+  | { kind: 'too-old'; protocolVersion: number; needs: number };
 
 /** Exactly what the probe endpoint's `sendSweep` takes, so there is one shape and no mapping. */
 export type DispatchMessage =
@@ -267,7 +284,11 @@ export class DiscoveryService {
         ratePerSecond: run.ratePerSecond,
       },
     });
-    if (!sent) return;
+    if (sent.kind === 'too-old') {
+      await this.#failForSkew(run.id, 'discovery sweep', sent);
+      return;
+    }
+    if (sent.kind !== 'sent') return;
 
     if (run.status === 'queued') {
       await this.#db.query(
@@ -279,6 +300,32 @@ export class DiscoveryService {
       this.#resumed += 1;
       this.#logger.info({ runId: run.id, cursor: run.cursor }, 'discovery run resumed');
     }
+  }
+
+  /**
+   * Fails a run whose probe can never accept it, and says which probe and what version (`R-06`).
+   *
+   * **The alternative is what this replaces: nothing.** A run offered to a probe that is too old
+   * stayed `queued`, was offered again on the next pump, was refused again, and reported
+   * "waiting for a probe" for as long as anybody left it — a state indistinguishable from a
+   * probe that is merely offline and about to come back. Waiting is right for an offline probe
+   * and wrong here, because no amount of waiting changes the probe's build.
+   */
+  async #failForSkew(
+    runId: number,
+    stage: string,
+    delivery: { protocolVersion: number; needs: number },
+  ): Promise<void> {
+    const message =
+      `the probe assigned to this run speaks protocol ${String(delivery.protocolVersion)}, ` +
+      `and ${stage} needs ${String(delivery.needs)} — upgrade the probe and start the run again`;
+    this.#logger.error({ runId, ...delivery }, 'discovery run failed: the probe is too old');
+    await this.#db.query(
+      `UPDATE discovery_run SET status = 'failed', message = $2, finished_at = now()
+       WHERE id = $1 AND status IN ('queued', 'running', 'identifying')`,
+      [runId, message],
+    );
+    this.#offers.delete(runId);
   }
 
   /**
@@ -466,7 +513,7 @@ export class DiscoveryService {
       return;
     }
 
-    this.#dispatch(run.probeId, {
+    const offered = this.#dispatch(run.probeId, {
       kind: 'identify',
       job: {
         runId: run.id,
@@ -486,6 +533,9 @@ export class DiscoveryService {
         community: run.snmpCommunity,
       },
     });
+    if (offered.kind === 'too-old') {
+      await this.#failForSkew(run.id, 'identification', offered);
+    }
   }
 
   /**

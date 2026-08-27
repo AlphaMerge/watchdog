@@ -4854,8 +4854,57 @@ because each is a decision rather than a defect:
       Still in memory and never persisted, as `M-02` intended: a core that has just started has
       not learned that a probe is missing, and a pessimistic restore would write a transition per
       sensor on every restart.
-- [ ] **R-06 — Version skew detection** · M · F-09 · Core and probe negotiate a protocol version;
+- [x] **R-06 — Version skew detection** · M · F-09 · Core and probe negotiate a protocol version;
       incompatibility is reported clearly, never silently mishandled.
+
+      **R-06 outcome.** The negotiation already worked; what it did not do was *say* anything.
+      Incompatible was handled — the link closes and both ends log why — and that was never the
+      dangerous case, because a closed link is loud. The dangerous case is the one in between:
+      a probe on protocol 2 connects, heartbeats, passes every health signal this system has,
+      and is refused configuration, so nothing under it is ever scanned. That was an
+      `info`-level log line and nothing else.
+
+      **The version numbers were scattered, and that is the defect underneath.** `probe-endpoint`
+      compared against a bare `3` for configuration and a bare `4` or `5` for the two discovery
+      stages, each with its meaning in a comment beside it. `capabilitiesFor` in `@ms/shared` is
+      now the one map from version to capability, `versionFor` gives the number back for a
+      message, and every gate reads them — so adding a version is one table entry rather than a
+      search for comparisons, and the cost of missing one was never a crash but a probe that
+      quietly does nothing.
+
+      **`describeSkew` separates compatible from current**, which the old boolean could not.
+      `isProtocolCompatible` answers whether two ends can hold a conversation; the skew verdict
+      answers what that conversation may contain — `current`, `outdated` with what it cannot do,
+      or `incompatible` with why. `explainSkew` names *both* versions every time: "probe is
+      outdated" is not something anybody can act on and "speaks protocol 2, this build speaks 6,
+      so it cannot be sent sensors to scan" is.
+
+      **A discovery run assigned to a probe that is too old used to wait forever.** `sendSweep`
+      answered `false` both for a probe that is offline and for one that will never understand
+      the message, and the caller — having no way to tell them apart — waited, which is right
+      for the first and wrong for the second. It is now a three-way `SweepDelivery`, and a
+      `too-old` answer fails the run naming the probe's version, the version the stage needs and
+      what to do about it, instead of reporting "waiting for a probe" indefinitely.
+
+      **The refusal is recorded where refusals are recorded.** The version check ran in the
+      endpoint, before the registry had seen the probe, so the one refusal an operator is most
+      likely to meet — they upgraded one end and not the other — was the only refusal that left
+      no row behind. It moved into `ProbeRegistry.admit`, *after* the sighting is written, so the
+      queue shows the version the probe is actually running rather than the one it spoke the last
+      time it managed to get in. A probe this core has never seen and cannot speak to is still
+      refused without a row: enrolling it would put something in the approval queue that
+      approving cannot help.
+
+      **The skew is derived at read time, never stored**, because it is a statement about this
+      build as much as about the probe — the same protocol-4 probe is current against a
+      protocol-4 core and outdated against this one, and a stored verdict would go stale at
+      exactly the moment it matters. A recorded `0` reads as `unknown` rather than as protocol
+      zero, so the probes `R-01`'s migration carried over are not condemned before any of them
+      has reconnected.
+
+      Not done here: there is no probes page yet — `R-01` shipped the API without one — so the
+      skew is answerable over HTTP and from the log, and a UI for it belongs with whatever ticket
+      builds that page.
 - [ ] **R-07 — Probe installers** · L · F-07 · Linux and Windows probe-only packages with a
       guided enrolment flow.
 - [ ] **R-08 — Disconnect/reconnect soak test** · M · R-03 · A one-hour disconnect replays with

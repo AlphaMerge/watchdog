@@ -838,5 +838,56 @@ describe(
         { protocolVersion: 2 },
       );
     });
+
+    /**
+     * Sweep delivery (`R-06`).
+     *
+     * `sendSweep` used to answer `false` for two unrelated situations. A caller that cannot tell
+     * "not now" from "never" has to guess, and it guessed wait — so a discovery run assigned to
+     * a probe too old for it sat queued for as long as anybody left it.
+     */
+    it('tells a caller that a probe is too old, not merely absent', async () => {
+      const source = new StubSource();
+
+      await withProbe(
+        source,
+        async (_probe, endpoint) => {
+          await Promise.resolve();
+          const delivery = endpoint.sendSweep(7, { kind: 'cancel', runId: 1 });
+          assert.equal(delivery.kind, 'too-old');
+          assert.equal(delivery.protocolVersion, 3);
+          assert.equal(delivery.needs, 4);
+        },
+        { protocolVersion: 3 },
+      );
+    });
+
+    it('distinguishes the two discovery stages, which arrived in different versions', async () => {
+      // A protocol-4 probe sweeps and cannot identify. Answering `too-old` to both, or to
+      // neither, loses half the capability an operator paid for by upgrading.
+      const source = new StubSource();
+
+      await withProbe(
+        source,
+        async (_probe, endpoint) => {
+          await Promise.resolve();
+          assert.equal(endpoint.sendSweep(7, { kind: 'cancel', runId: 1 }).kind, 'sent');
+          const identify = endpoint.sendSweep(7, { kind: 'identify-cancel', runId: 1 });
+          assert.equal(identify.kind, 'too-old');
+          assert.equal(identify.needs, 5);
+        },
+        { protocolVersion: 4 },
+      );
+    });
+
+    it('answers offline for a probe that is simply not there', async () => {
+      const source = new StubSource();
+
+      await withProbe(source, async (_probe, endpoint) => {
+        // 999 is nobody's branch, which is what an offline probe looks like from here.
+        assert.equal(endpoint.sendSweep(999, { kind: 'cancel', runId: 1 }).kind, 'offline');
+        await Promise.resolve();
+      });
+    });
   },
 );

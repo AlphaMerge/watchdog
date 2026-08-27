@@ -29,6 +29,25 @@ const registrationSchema = {
     firstSeenAt: { type: 'string' },
     lastSeenAt: { type: ['string', 'null'] },
     decidedAt: { type: ['string', 'null'] },
+    skew: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'explanation'],
+      description:
+        'What this probe’s protocol version means against this core (R-06). `outdated` is the ' +
+        'one worth reading: such a probe connects and heartbeats normally and is refused every ' +
+        'feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning ' +
+        'nothing at all.',
+      properties: {
+        kind: { type: 'string', enum: ['unknown', 'current', 'outdated', 'incompatible'] },
+        peerVersion: { type: 'integer' },
+        ownVersion: { type: 'integer' },
+        missing: { type: 'array', items: { type: 'string' } },
+        reason: { type: 'string' },
+        // The same thing in one sentence, so a caller need not reassemble it.
+        explanation: { type: 'string' },
+      },
+    },
   },
 } as const;
 

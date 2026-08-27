@@ -1,5 +1,14 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { addressAllowed, AppError, parseAddressFilter, type Logger } from '@ms/shared';
+import {
+  addressAllowed,
+  AppError,
+  describeSkew,
+  explainSkew,
+  parseAddressFilter,
+  PROTOCOL_VERSION,
+  type Logger,
+  type ProtocolSkew,
+} from '@ms/shared';
 
 /**
  * Which probes this installation trusts (`R-01`).
@@ -27,7 +36,19 @@ import { addressAllowed, AppError, parseAddressFilter, type Logger } from '@ms/s
 export type ProbeDecision =
   | { kind: 'approved'; gid: string; objectId: number | null; issuedKey?: string }
   | { kind: 'pending'; gid: string }
-  | { kind: 'refused'; code: 'revoked' | 'source-not-allowed' | 'bad-access-key'; detail: string };
+  | {
+      kind: 'refused';
+      code: 'revoked' | 'source-not-allowed' | 'bad-access-key' | 'protocol-version';
+      detail: string;
+    };
+
+/**
+ * A skew verdict with its own sentence attached, so every caller does not reassemble one.
+ *
+ * The union carries the parts a UI would arrange itself; `explanation` is the same thing said
+ * once, for the log line, the API and the operator who wants a reason rather than a shape.
+ */
+export type RegistrationSkew = ProtocolSkew & { explanation: string };
 
 export interface ProbeRegistration {
   gid: string;
@@ -44,6 +65,15 @@ export interface ProbeRegistration {
   firstSeenAt: string;
   lastSeenAt: string | null;
   decidedAt: string | null;
+  /**
+   * What this probe's protocol version means for what it can do (`R-06`).
+   *
+   * **Derived rather than stored**, because it is a statement about *this build* as much as
+   * about the probe: the same protocol-4 probe is current against a protocol-4 core and outdated
+   * against this one, and a stored verdict would go stale the moment the core was upgraded —
+   * which is the exact moment it matters.
+   */
+  skew: RegistrationSkew;
 }
 
 export class ProbeRegistryError extends AppError {
@@ -112,10 +142,35 @@ export class ProbeRegistry {
   async admit(hello: ProbeHello): Promise<ProbeDecision> {
     const existing = hello.gid === '' ? null : await this.get(hello.gid);
 
-    if (existing === null) return this.#enrol(hello);
-
     // Recorded before the decision, so a refused attempt is still visible in the queue.
-    await this.#touch(existing.gid, hello);
+    if (existing !== null) await this.#touch(existing.gid, hello);
+
+    // **Version skew is a refusal like every other one here, so it is recorded like every other
+    // one** (`R-06`). It used to be checked in the endpoint, before the registry saw the probe
+    // at all, which meant the one refusal an operator is most likely to hit — they upgraded one
+    // end and not the other — was the one refusal that left no row behind. The touch above ran
+    // first, so the queue now shows the version the probe is actually running rather than the
+    // version it ran the last time it managed to connect.
+    //
+    // A probe this core has *never* seen and cannot talk to is refused without a row. Enrolling
+    // it would put something in the approval queue that approving cannot help, and its identity
+    // claims are the claims of a peer whose protocol this build does not implement.
+    const skew = describeSkew(hello.protocolVersion);
+    if (skew.kind === 'incompatible') {
+      this.#logger.warn(
+        {
+          gid: hello.gid,
+          remoteAddress: hello.remoteAddress,
+          protocolVersion: hello.protocolVersion,
+          coreProtocolVersion: PROTOCOL_VERSION,
+          known: existing !== null,
+        },
+        'refusing a probe whose protocol this core cannot speak',
+      );
+      return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
+    }
+
+    if (existing === null) return this.#enrol(hello);
 
     if (existing.status === 'revoked') {
       this.#logger.warn(
@@ -429,6 +484,7 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     displayName: text(row['display_name']),
     agentVersion: text(row['agent_version']),
     protocolVersion: Number(row['protocol_version'] ?? 0),
+    skew: skewFor(Number(row['protocol_version'] ?? 0)),
     lastAddress: text(row['last_address']),
     allowFrom: Array.isArray(row['allow_from']) ? (row['allow_from'] as string[]) : [],
     hasOwnKey: row['access_key_hash'] != null,
@@ -438,6 +494,20 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     lastSeenAt: row['last_seen_at'] == null ? null : iso(row['last_seen_at']),
     decidedAt: row['decided_at'] == null ? null : iso(row['decided_at']),
   };
+}
+
+/**
+ * The recorded version's meaning, with zero read as "nothing recorded" rather than as a version.
+ *
+ * The column defaults to zero and the `R-01` upgrade filled no version for the probes it carried
+ * over, so zero is what a probe that has not reconnected since looks like. `describeSkew` would
+ * call that incompatible, which is true of a peer that really claimed zero and false of every
+ * row an upgrade wrote.
+ */
+function skewFor(protocolVersion: number): RegistrationSkew {
+  const skew: ProtocolSkew =
+    protocolVersion === 0 ? { kind: 'unknown' } : describeSkew(protocolVersion);
+  return { ...skew, explanation: explainSkew(skew) };
 }
 
 function iso(value: unknown): string {

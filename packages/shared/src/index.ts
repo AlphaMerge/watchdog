@@ -45,6 +45,14 @@ export type {
   MessageConnectionOptions,
 } from './protocol/connection.js';
 export {
+  capabilitiesFor,
+  describeSkew,
+  explainSkew,
+  missingCapabilities,
+  versionFor,
+} from './protocol/capabilities.js';
+export type { ProbeCapabilities, ProtocolSkew } from './protocol/capabilities.js';
+export {
   isProtocolCompatible,
   MIN_PROTOCOL_VERSION,
   parseCoreToProbe,
