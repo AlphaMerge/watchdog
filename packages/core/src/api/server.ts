@@ -21,6 +21,7 @@ import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { discoveryRoutes } from './routes/discovery.js';
+import { deviceTemplateRoutes } from './routes/device-templates.js';
 import { stateRoutes } from './routes/state.js';
 import { alarmRoutes, ALARM_SCHEMAS } from './routes/alarms.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
@@ -35,6 +36,7 @@ import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { DiscoveryService } from '../discovery/service.js';
+import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ScheduleService } from '../schedules/service.js';
 import type { TemplateService } from '../notifications/templates.js';
 import type { TriggerService } from '../triggers/service.js';
@@ -70,6 +72,8 @@ export interface ApiServerOptions {
   schedules?: ScheduleService;
   /** Absent until D-01 is wired; the discovery routes then simply do not exist. */
   discovery?: DiscoveryService;
+  /** Absent until D-03 is wired. */
+  deviceTemplates?: DeviceTemplateCatalogue;
   /**
    * Notification triggers (`N-01`).
    *
@@ -125,6 +129,7 @@ export class ApiServer {
   readonly #lookups: LookupCatalogue;
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
+  readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -155,6 +160,7 @@ export class ApiServer {
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
+    this.#deviceTemplates = options.deviceTemplates;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -309,6 +315,18 @@ export class ApiServer {
         if (this.#discovery !== undefined) {
           await scope.register(discoveryRoutes, { discovery: this.#discovery });
         }
+        if (this.#deviceTemplates !== undefined) {
+          const templates = this.#deviceTemplates;
+          await scope.register(deviceTemplateRoutes, {
+            templates,
+            ...(this.#discovery === undefined ? {} : { discovery: this.#discovery }),
+            sensorsOf: (deviceId) => sensorsOfDevice(this.#db, deviceId),
+            credentialKindsFor: (sensorType) =>
+              this.#catalogue.has(sensorType)
+                ? (this.#catalogue.declaration(sensorType).credentialKinds ?? [])
+                : [],
+          });
+        }
         if (this.#triggers !== undefined) {
           await scope.register(triggerRoutes, { triggers: this.#triggers });
         }
@@ -403,4 +421,29 @@ export async function buildApiServer(options: ApiServerOptions): Promise<ApiServ
     throw error;
   }
   return server;
+}
+
+/**
+ * A device's sensors, for save-as-template (`D-03`).
+ *
+ * Read straight rather than through `ObjectService`, because what is wanted is the *stored*
+ * parameters: the service redacts anything a type marked `writeOnly` and hands back
+ * `redactedParams` instead, which is exactly right for an API response and exactly wrong for a
+ * template that has to carry the settings forward. Nothing sensitive is lost by reading them
+ * directly — a monitored device's credentials live in the vault and never appear in `params`
+ * (CLAUDE.md) — and `templateFromDevice` writes that down where somebody will read it.
+ */
+async function sensorsOfDevice(
+  db: Database,
+  deviceId: number,
+): Promise<{ name: string; sensorType: string; params: Record<string, unknown> }[]> {
+  const rows = await db.query<{ name: string; type: string; params: Record<string, unknown> }>(
+    `SELECT o.name, sc.type, sc.params
+     FROM object o
+     JOIN sensor_config sc ON sc.object_id = o.id
+     WHERE o.parent_id = $1 AND o.kind = 'sensor'
+     ORDER BY o.id`,
+    [deviceId],
+  );
+  return rows.map((row) => ({ name: row.name, sensorType: row.type, params: row.params }));
 }

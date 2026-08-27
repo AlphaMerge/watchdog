@@ -51,6 +51,7 @@ import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
 import { loadLookups } from './lookups/loader.js';
+import { loadDeviceTemplates } from './device-templates/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
 import { ResultCacheInvalidator } from './ingestion/invalidation.js';
 import { Ingestor } from './ingestion/ingestor.js';
@@ -212,6 +213,16 @@ async function serve(): Promise<void> {
   const lookups = await loadLookups({
     directory: join(config.service.dataDir, 'lookups'),
     logger,
+  });
+
+  // Built-ins, then whatever the operator wrote under <dataDir>/device-templates, later winning
+  // by id — the same shape as the lookups above, so somebody who has learnt one knows the other
+  // (`D-03`). The sensor catalogue is passed in so a template naming a type that does not exist
+  // is refused *by name* at start rather than silently creating fewer sensors than it says.
+  const deviceTemplates = await loadDeviceTemplates({
+    directory: join(config.service.dataDir, 'device-templates'),
+    logger,
+    knownSensorType: (id) => catalogue.has(id),
   });
 
   // Built here rather than beside the ingestion service, because the audit sink below has to
@@ -538,6 +549,7 @@ async function serve(): Promise<void> {
     lookups,
     schedules,
     discovery,
+    deviceTemplates,
     triggers,
     templates,
     deliveryHealth,

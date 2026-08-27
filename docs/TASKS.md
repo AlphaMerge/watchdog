@@ -4172,8 +4172,63 @@ because each is a decision rather than a defect:
       Eighteen mutations, all killed. Verified live: a twenty-address sweep found eleven hosts and
       identified all eleven — `sysDescr` classified two of them as Linux at 88, the open ports
       picked up PostgreSQL, MariaDB and SQL Server, and reverse DNS named the rest.
-- [ ] **D-03 — Device templates** · L · D-02 · Fingerprint → sensor set mapping; a built-in
+- [x] **D-03 — Device templates** · L · D-02 · Fingerprint → sensor set mapping; a built-in
       template set; save-this-device-as-a-template.
+
+      **D-03 outcome.** The same shape as the lookup catalogue — definition, built-ins,
+      catalogue, loader, override-by-id from `<dataDir>/device-templates` — and deliberately so:
+      an operator who has learnt where lookups go and how an override works knows this too. It is
+      also the mechanism `CAPABILITIES.MD §3.7` chooses over PRTG's dozens of hardcoded vendor
+      sensor types, so being a *data file* is the whole point.
+
+      **Matching is data, never an expression**, for the reason `T-21`'s formula language gives
+      about the same process: a template that could evaluate something would be an
+      operator-supplied expression running in the core. Criteria are ANDed — a template that ORed
+      them would *widen* as it was made more specific, which is the opposite of what anybody
+      writing one expects — and each contributes a weight reflecting how specific it is, so a
+      template pinned to a `sysObjectID` prefix outranks one that says "network device" without
+      anybody maintaining an order by hand.
+
+      **`matchTemplates` returns every match rather than the best**, because a device is
+      genuinely several things at once: a Linux box serving HTTP wants both sets, and picking one
+      would mean somebody writing "Linux server that also serves HTTP" and then "…and also
+      PostgreSQL". Deduplication is by type *and* parameters — two templates naming `icmp.ping`
+      mean one Ping sensor, two naming `http.request` on different paths mean two — with the keys
+      sorted, because two templates written by two people will not agree on key order and
+      `JSON.stringify` preserves it.
+
+      **The whole set is written to avoid one failure: a discovery that creates thirty sensors
+      per device, twenty of which fail from their first scan.** That is how an operator learns to
+      distrust the feature and turns it off. So `requires` is per *sensor* — an SSH Disk Free
+      sensor on a Linux server with port 22 firewalled is a sensor that fails for ever — and
+      `credential` names the kind a sensor cannot work without, so a device whose ancestry can
+      authenticate nothing gets Ping and nothing else. A test asserts that every built-in spec
+      whose type declares a credential kind says so. `ms.generic` matches everything and scores
+      zero, which is what makes the rest safe: a host nothing recognised is still monitored.
+
+      **Save-as-template does not infer a match rule, and that is the interesting decision.** It
+      would be easy to guess one from the device's fingerprint — same vendor, same OID prefix —
+      and it would be wrong about half the time: only the operator knows whether the template is
+      for *this model*, *this vendor* or *every switch*. So it comes back matching nothing until
+      somebody says, because a template that matched everything by accident would put a Cisco
+      sensor set on every printer in the estate. It also drops parameters nobody set, since a
+      template pinning every default would stop a later release's better default from ever
+      reaching devices made from it. Nothing needs redacting: a monitored device's credentials
+      live in the vault and never appear in `params`, which is a property of the object model
+      rather than of that function — so it is written down where somebody will read it.
+
+      Twenty mutations, all killed. **One found a test asserting the wrong thing and passing
+      anyway**: the OID-prefix boundary check was tested with a *longer* prefix against a shorter
+      arc, which `startsWith` gets right by accident. The assertion that earns its place is
+      enterprise 99 against a prefix of enterprise 9. One mutation was equivalent — adding `g` to
+      a `RegExp` constructed fresh on every call does nothing — which is what the "constructed
+      fresh" comment is about.
+
+      Verified live against `D-02`'s run: `172.19.0.4` (SNMP, no SSH) planned the four SNMP
+      sensors and no SSH ones; `172.19.0.6` (SSH, HTTP and SNMP) matched `ms.linux`,
+      `ms.web-server` and `ms.generic` and planned nine sensors with exactly one Ping; and with
+      no credentials named, every host planned Ping alone — except the web server, whose HTTP
+      sensor needs none.
 - [ ] **D-04 — Provisioning and idempotency** · L · D-03 · Create devices and sensors; match on
       IP/DNS within the target group; re-runs create zero duplicates.
 - [ ] **D-05 — Default master dependency** · S · D-04, M-11 · Each discovered device's Ping
