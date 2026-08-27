@@ -65,6 +65,8 @@ import { mailSmtp } from './types/mail-smtp.js';
 import { dbMssql } from './types/db-mssql.js';
 import { dbMysql } from './types/db-mysql.js';
 import { dbPostgresql } from './types/db-postgresql.js';
+import { exeScript } from './types/exe-script.js';
+import { exeScriptAdvanced } from './types/exe-script-advanced.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -108,6 +110,8 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   dbPostgresql,
   dbMysql,
   dbMssql,
+  exeScript,
+  exeScriptAdvanced,
   httpContent,
   httpRequest,
   portTcp,

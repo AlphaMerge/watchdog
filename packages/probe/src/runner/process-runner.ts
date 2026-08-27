@@ -80,6 +80,15 @@ export interface ProcessRunnerOptions {
   childModule?: string;
   /** How much of a child's own stdout/stderr is kept for a diagnosis. */
   maxOutputBytes?: number;
+  /**
+   * Extra environment for the child, on top of the built minimum.
+   *
+   * How a probe-level *policy* setting reaches a check that runs in a process of its own —
+   * `T-19`'s script directory is the first, and it must come from here rather than from a
+   * sensor's parameters or the boundary it enforces would be decorative. Not a general
+   * pass-through: whatever is put here reaches code somebody else wrote.
+   */
+  childEnv?: Readonly<Record<string, string>>;
   onResult: (result: CheckResult, meta: ResultMeta) => void;
 }
 
@@ -119,6 +128,7 @@ export class ProcessRunner {
   readonly #maxOutputBytes: number;
   readonly #uid: number | undefined;
   readonly #gid: number | undefined;
+  readonly #childEnv: Readonly<Record<string, string>>;
   readonly #registryModule: string;
   readonly #childModule: string;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
@@ -146,6 +156,7 @@ export class ProcessRunner {
     this.#maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
     this.#uid = options.uid;
     this.#gid = options.gid;
+    this.#childEnv = options.childEnv ?? {};
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#childModule = options.childModule ?? join(import.meta.dirname, 'check-child.js');
@@ -221,6 +232,7 @@ export class ProcessRunner {
               TEMP: process.env['TEMP'] ?? 'C:\\Windows\\Temp',
             }
           : {}),
+        ...this.#childEnv,
       },
       timeoutMs: job.request.timeoutMs + KILL_MARGIN_MS,
       maxOutputBytes: this.#maxOutputBytes,

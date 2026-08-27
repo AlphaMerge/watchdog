@@ -13,6 +13,10 @@
     "./snmp": {
       "types": "./dist/src/support/snmp/index.d.ts",
       "default": "./dist/src/support/snmp/index.js"
+    },
+    "./script": {
+      "types": "./dist/src/support/script/index.d.ts",
+      "default": "./dist/src/support/script/index.js"
     }
   },
   "scripts": {

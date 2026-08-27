@@ -14,7 +14,8 @@
     "workerPoolSize": 0,
     "spoolSegmentMaxBytes": 8388608,
     "spoolBatchMaxRows": 500,
-    "spoolCatchUpMaxRows": 2000
+    "spoolCatchUpMaxRows": 2000,
+    "scriptDir": "dev/scripts"
   },
   "trapListener": {
     "enabled": true,

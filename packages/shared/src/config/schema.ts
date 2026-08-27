@@ -384,6 +384,16 @@ export interface ProbeConfig {
      */
     processUid: number;
     processGid: number;
+    /**
+     * Where this probe keeps the programs an EXE/Script sensor may run (`T-19`).
+     *
+     * **The security boundary of that sensor type**, and the reason it is here rather than in a
+     * sensor's parameters: a directory an operator could set per sensor would make the directory
+     * decorative, and creating a sensor would become the same thing as running any command as
+     * the account this probe holds its credentials in. Empty means this probe runs no programs
+     * at all, which is the right default for a probe nobody has deliberately given scripts to.
+     */
+    scriptDir: string;
   };
   /**
    * The SNMP trap listener (`T-06`).
@@ -798,6 +808,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'processMemoryLimitMb',
         'processUid',
         'processGid',
+        'scriptDir',
       ],
       properties: {
         gid: { type: 'string', default: '' },
@@ -831,6 +842,8 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         processMemoryLimitMb: { type: 'integer', minimum: 64, maximum: 8_192, default: 256 },
         processUid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
         processGid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
+        // Empty by default: a probe runs no programs until somebody deliberately says where.
+        scriptDir: { type: 'string', default: '' },
       },
     },
     trapListener: {

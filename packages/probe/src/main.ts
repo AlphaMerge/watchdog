@@ -7,11 +7,13 @@ import {
   type ProbeConfig,
 } from '@ms/shared';
 import { standardCatalogue } from '@ms/sensors';
+import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import type { ResultMeta } from './runner/types.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
@@ -107,6 +109,16 @@ async function main(): Promise<void> {
     memoryLimitMb: config.probe.processMemoryLimitMb,
     ...(config.probe.processUid > 0 ? { uid: config.probe.processUid } : {}),
     ...(config.probe.processGid > 0 ? { gid: config.probe.processGid } : {}),
+    // The one probe-level policy setting an isolated check is given (`T-19`). Absent when no
+    // script directory is configured, which makes an EXE/Script sensor fail saying so rather
+    // than run something from wherever it happened to be started.
+    // Resolved here, against the *probe's* working directory, because that is what every other
+    // path in this config file is relative to (`spoolDir`, the TLS files). The check runs in a
+    // child process whose working directory is its own, so a relative path handed straight
+    // through would be resolved against somewhere nobody configured.
+    ...(config.probe.scriptDir === ''
+      ? {}
+      : { childEnv: { [SCRIPT_DIR_ENV]: resolve(config.probe.scriptDir) } }),
     onResult: spoolResult,
   });
   lifecycle.onShutdown({

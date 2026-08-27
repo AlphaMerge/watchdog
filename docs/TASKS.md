@@ -3616,8 +3616,64 @@ because each is a decision rather than a defect:
       amd64 only and under emulation on Apple silicon it starts, reports healthy, and then
       segfaults (`qemu: uncaught target signal 11`, measured). Edge speaks the same TDS, so the
       driver has a real target on every machine rather than on some of them.
-- [ ] **T-19 — EXE/Script sensors** · L · P-03 · Simple and Advanced variants, documented output
+- [x] **T-19 — EXE/Script sensors** · L · P-03 · Simple and Advanced variants, documented output
       formats, sandboxing, timeout, working directory and env control.
+
+      **T-19 outcome.** `exe.script` and `exe.script.advanced`, both declaring
+      `isolation: 'process'` — which is what `P-03` was built for, and the order was not
+      accidental: a fault in code somebody else wrote must not take the probe down.
+
+      **This is the escape hatch, and it is why the plugin contract does not have to cover
+      everything.** Every other type answers a question somebody anticipated; this one answers the
+      question nobody did — a vendor's CLI, a licence count, a business metric out of a report, a
+      queue depth from an application with no API. It is what stops "we need a sensor for X" being
+      a release.
+
+      **The sandboxing is one function, and it is the whole ticket.** `resolveProgram` takes a
+      *name* and resolves it inside a directory the operator configured **on the probe**. Not an
+      absolute path, not a relative one, not `..`. Without that, anyone who may add a sensor may
+      run any command as the account this probe holds every credential in — creating a sensor
+      would be remote code execution with extra steps. The directory is `probe.scriptDir` and it
+      is **empty by default**, so a probe nobody has deliberately given scripts to runs nothing.
+      `realpath` runs *before* the prefix comparison, not after: a symbolic link inside the
+      directory pointing at `/bin/sh` is the obvious way around a check made on the name, and
+      resolving first is what closes it. A name may only contain letters, digits, dot, dash,
+      underscore and a slash — nothing is run through a shell, so a name needing anything else is
+      a name pointing somewhere it should not.
+
+      **Warning is not an outcome a check can report, and that is a deliberate divergence from
+      PRTG.** Its format has a Warning return code; here Warning comes from a limit on a channel
+      (`M-04`), which is visible, editable and inheritable — where a Warning baked into a script
+      is a threshold nobody can see or change without editing the script on every probe. A
+      non-zero code fails the check and the message names what the script meant by it.
+
+      **Three output formats for the simple sensor and two JSON shapes for the advanced one**,
+      including PRTG's own `returncode:value:message` and `{"prtg":{"result":[…]}}`, so an
+      installation's existing scripts work unchanged. A comma decimal separator is read, because
+      that is what a script written on a German-locale machine prints. XML is not accepted, for
+      the reason `T-16` gave and settled in `T-24`.
+
+      **The advanced sensor's channels come from the program, not from the form** — the core
+      creates a channel the first time a sensor mentions it (`S-07`), so a script that starts
+      reporting a new metric gets a new channel on its next scan. What the form does declare is
+      *which* channel is primary, because that one cannot be discovered and a sensor without one
+      is a sensor nothing alarms on.
+
+      **The environment is built, never inherited**, and there is a test that the probe's own
+      `MS_*` overrides do not reach a script. One write-only `secret` parameter reaches the
+      program as `MS_SECRET` — in the environment rather than an argument, because arguments are
+      world-readable through `ps`.
+
+      **Found live:** `probe.scriptDir` was handed to the child process as written, so a relative
+      path resolved against the *child's* working directory rather than the probe's — every other
+      path in that config file is relative to where the probe was started. Resolved in `main.ts`
+      now.
+
+      Verified live: `34 jobs waiting on ms-target` from a PRTG-format script with `%host`
+      substituted, three dynamically created channels from an advanced one, and a PRTG-style
+      script's `Free Space`/`Inodes` arriving as `free_space` and `inodes`. Three sensors naming
+      `/bin/sh`, `../../../bin/sh` and `sh -c id` were each refused with a message saying why.
+      `dev/scripts/` holds the three examples. Six mutations of the boundary killed.
 - [ ] **T-20 — Syslog Receiver** · L · P-05 · In-house RFC 3164 and 5424 parser, UDP + TCP
       listeners, filter rules, severity/facility count channels, message retention.
 - [ ] **T-21 — Sensor Factory** · L · M-04 · Formula language over other sensors' channels

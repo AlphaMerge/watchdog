@@ -222,6 +222,8 @@ describe('the built-in catalogue', () => {
       'db.mysql',
       'db.postgresql',
       'dns.record',
+      'exe.script',
+      'exe.script.advanced',
       'http.advanced',
       'http.content',
       'http.request',
