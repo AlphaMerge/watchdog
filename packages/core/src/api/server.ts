@@ -14,6 +14,11 @@ import type { HistoryService } from '../timeseries/history.js';
 import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
+import { registerAuthentication } from './authentication.js';
+import { authRoutes } from './routes/auth.js';
+import type { AccountService } from '../auth/accounts.js';
+import type { SessionService } from '../auth/sessions.js';
+import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
@@ -87,6 +92,21 @@ export interface ApiServerOptions {
   /** Absent until R-01 is wired; the approval queue then has no routes. */
   probeRegistry?: ProbeRegistry;
   /**
+   * Accounts, sessions and login throttling (`A-01`).
+   *
+   * Optional like the rest, and absent has a specific meaning: no `/auth` routes and no
+   * authentication hook, so every request is `anonymous` exactly as it was before `A-01`. That is
+   * what the transport's own tests run against, and what an upgrade looks like before anybody
+   * has been given an account.
+   */
+  auth?: {
+    accounts: AccountService;
+    sessions: SessionService;
+    throttle: LoginThrottle;
+    /** Whether an API request without a session is refused. */
+    required: boolean;
+  };
+  /**
    * Notification triggers (`N-01`).
    *
    * Optional for the same reason as the schedules, and absent for the same effect: not
@@ -145,6 +165,7 @@ export class ApiServer {
   readonly #provision: ApiServerOptions['provision'];
   readonly #rediscovery: RediscoveryService | undefined;
   readonly #probeRegistry: ProbeRegistry | undefined;
+  readonly #auth: ApiServerOptions['auth'];
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -179,6 +200,7 @@ export class ApiServer {
     this.#provision = options.provision;
     this.#rediscovery = options.rediscovery;
     this.#probeRegistry = options.probeRegistry;
+    this.#auth = options.auth;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -241,6 +263,17 @@ export class ApiServer {
       ...NOTIFICATION_SCHEMAS,
     ])
       this.#app.addSchema(schema);
+
+    // **Before the routes, and before anything else that could answer.** A hook added here runs
+    // for every request the instance ever serves; adding it after a route would leave that route
+    // unauthenticated, which is a guard with a blind spot (`A-01`).
+    if (this.#auth !== undefined) {
+      registerAuthentication(this.#app, {
+        sessions: this.#auth.sessions,
+        logger: this.#logger,
+        required: this.#auth.required,
+      });
+    }
 
     // Before the routes, because a route declared `websocket: true` needs the plugin in place.
     // Registered only when there is something to stream: the plugin hooks the upgrade path, and
@@ -345,6 +378,15 @@ export class ApiServer {
         }
         if (this.#probeRegistry !== undefined) {
           await scope.register(probeRoutes, { registry: this.#probeRegistry });
+        }
+        if (this.#auth !== undefined) {
+          const auth = this.#auth;
+          await scope.register(authRoutes, {
+            accounts: auth.accounts,
+            sessions: auth.sessions,
+            throttle: auth.throttle,
+            logger: this.#logger,
+          });
         }
         if (this.#deviceTemplates !== undefined) {
           const templates = this.#deviceTemplates;

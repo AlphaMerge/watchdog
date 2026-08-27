@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
   bootstrap,
@@ -65,6 +66,9 @@ import { ProvisionService, type ProvisionReport } from './discovery/provision.js
 import { DiscoveryError } from './discovery/errors.js';
 import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
+import { AccountService } from './auth/accounts.js';
+import { SessionService } from './auth/sessions.js';
+import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
@@ -653,6 +657,39 @@ async function serve(): Promise<void> {
     enrolmentKeys: config.probeEndpoint.accessKeys,
   });
 
+  // Accounts and sessions (`A-01`). Built before the API, because the API's authentication hook
+  // asks the session service on every request.
+  const accounts = new AccountService({ db, logger });
+  const sessions = new SessionService({ db, logger });
+  const loginThrottle = new LoginThrottle({ db, logger });
+
+  // **An installation with no accounts cannot be administered, and one with a known default
+  // password is worse than one with none.** So the first administrator is created here with a
+  // generated password, printed once where the operator installing this will see it, and flagged
+  // to be replaced at the first login. Does nothing at all once any account exists.
+  const firstAdmin = await accounts.ensureFirstAdministrator();
+  if (firstAdmin !== null) {
+    // **The password goes to a file, not to the log, and that is not a detail.** Every logger in
+    // this system redacts a field called `password` — correctly, because a credential in a log is
+    // a credential in a log shipper, a search index and a backup. Renaming the field to slip past
+    // that would be defeating a control that is doing its job. So the secret is written where the
+    // installer already writes secrets: one file, owned by the service, mode 0600, and the log
+    // says where it is.
+    const passwordFile = join(config.service.dataDir, 'first-admin-password');
+    await writeFile(
+      passwordFile,
+      `${firstAdmin.password}\n\n` +
+        `This is the generated password for the '${firstAdmin.login}' account.\n` +
+        `Log in, change it when prompted, then delete this file.\n`,
+      { mode: 0o600 },
+    );
+    logger.warn(
+      { login: firstAdmin.login, passwordFile },
+      'created the first administrator — its generated password is in that file; ' +
+        'change it at first login and delete the file',
+    );
+  }
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -669,6 +706,16 @@ async function serve(): Promise<void> {
     provision,
     rediscovery,
     probeRegistry,
+    auth: {
+      accounts,
+      sessions,
+      throttle: loginThrottle,
+      // **Off until `A-03` lands, and that is deliberate.** Turning the guard on before there
+      // are per-object rights would mean an installation where every account sees everything —
+      // a worse answer than the honest one, which is that authentication exists and is not yet
+      // load-bearing. The `A-04` work is what flips this.
+      required: false,
+    },
     triggers,
     templates,
     deliveryHealth,

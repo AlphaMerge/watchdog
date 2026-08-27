@@ -1,7 +1,7 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Actor } from '../../objects/audit.js';
+import type { FastifyInstance } from 'fastify';
+import { actorFor } from '../authentication.js';
 import { notificationMethods } from '../../notifications/methods.js';
 import { describePlaceholders } from '../../notifications/placeholders.js';
 import { WHEN_INACTIVE } from '../../notifications/activation.js';
@@ -22,11 +22,6 @@ export interface TemplateRouteOptions {
    * build with no transports 404s rather than reporting that the test succeeded.
    */
   tester?: NotificationTester;
-}
-
-/** Until accounts exist (A-01), every actor is the caller's address — in exactly one place. */
-function actorFor(request: FastifyRequest): Actor {
-  return { kind: 'anonymous', remoteAddress: request.ip };
 }
 
 const idParams = {

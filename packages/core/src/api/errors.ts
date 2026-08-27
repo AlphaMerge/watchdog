@@ -5,6 +5,7 @@ import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { DiscoveryError } from '../discovery/errors.js';
 import { ProbeRegistryError } from '../probes/registry.js';
+import { AuthError } from '../auth/errors.js';
 import { QueryError } from '../timeseries/query.js';
 import { MethodError } from '../notifications/methods.js';
 import { TriggerError } from '../triggers/definition.js';
@@ -108,6 +109,13 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // The parser's own sentence goes out unchanged: "that is 16,777,214 addresses and one run
     // may sweep 65,536 — the usual cause is a /8 where a /24 was meant" is the whole point of
     // having written it, and a generic "invalid range" would throw it away.
+    return envelope(error.status, error.code, error.message, { ...error.context });
+  }
+
+  if (error instanceof AuthError) {
+    // The status travels with the error (`A-01`). Note that every *login* failure is one code
+    // and one sentence: "no such account" and "wrong password" as distinguishable answers is a
+    // login enumerator, so which it was goes to the log and never to the caller.
     return envelope(error.status, error.code, error.message, { ...error.context });
   }
 

@@ -5012,8 +5012,62 @@ because each is a decision rather than a defect:
 
 ## Phase 9 — Users, RBAC and security
 
-- [ ] **A-01 — Accounts and authentication** · L · S-01 · Read/write and read-only accounts,
+- [x] **A-01 — Accounts and authentication** · L · S-01 · Read/write and read-only accounts,
       argon2 hashing, secure-cookie sessions, login throttling.
+
+      **A-01 outcome.** Everything before this ran as `anonymous`. The `Actor` union has carried a
+      `user` variant since the audit log was written and nothing ever produced one — four route
+      files each had their own `actorFor` returning the request's IP address. The audit log was
+      recording *that* a thing happened without being able to record *who* did it, which is half
+      of what an audit log is for. Those four are now one, in `api/authentication.ts`, the same
+      rule this codebase already applies to inheritance and to credential redaction.
+
+      **argon2id for passwords, SHA-256 for session tokens** — they look like the same problem and
+      are opposites. A password is drawn from a space small enough to search offline, so the cost
+      of a guess is the whole defence; a session token is 32 bytes from the CSPRNG with nothing to
+      guess, and a slow hash there would only make every request slower. The stored session id is
+      a hash of the cookie, never the cookie, so a database dump is not a login (`R-01`'s rule).
+
+      **Server-side sessions rather than a signed token** (`ADR-001`). A JWT would save the table
+      and cost the ability to *end* a session: revoking a stateless token means a deny-list — a
+      table, so nothing was saved — or waiting for expiry, which is not revocation. Expiry is
+      rolling with an absolute ceiling, so a long incident does not log an operator out and a
+      session that is used constantly still ends.
+
+      **Login throttling counts on two axes, and it has to be both.** Locking an account after N
+      failures is a denial of service: anybody who knows an operator's login can lock them out of
+      their own monitoring system by failing to log in as them, during the outage they are
+      investigating. Counting only per address stops nothing distributed. So an address that keeps
+      failing is refused outright — including for logins that do not exist, which is exactly the
+      enumerator traffic worth stopping — while an account that keeps failing is *delayed*, never
+      locked. Counted in the database, so a restart does not hand back an allowance.
+
+      **Every login failure is one code and one sentence.** "No such account" and "wrong password"
+      as distinguishable answers is a login enumerator, and a login is half a credential — so the
+      reason goes to the log and never to the caller, a login naming no account still spends a
+      real argon2 verification against a decoy so the absence cannot be timed, and the `disabled`
+      check runs *after* the password because answering earlier would say the login exists.
+
+      **`Secure` on the cookie is decided per request rather than configured**, because guessing
+      wrong is bad in both directions: always, and login over plain HTTP silently fails because
+      the browser never returns the cookie; never, and a session issued over TLS travels in clear
+      on the next plain-HTTP request.
+
+      **The guard is off by default, and that is deliberate.** Turning it on before `A-03` gives
+      per-object rights would mean an installation where every account sees everything — a worse
+      answer than the honest one, that authentication exists and is not yet load-bearing. An
+      upgrade must also not find its API shut off before anybody has an account.
+
+      Live verification earned its keep: the bootstrap logged its generated password as a
+      `password` field, and **every logger in this system redacts that** — correctly, since a
+      credential in a log is a credential in a log shipper, a search index and a backup. Renaming
+      the field to slip past it would be defeating a control that was doing its job, so the
+      secret is written where the installer already writes secrets: one file, mode 0600, and the
+      log carries the path. Confirmed live: `-rw-------`, nothing in the log, and the first
+      authenticated create wrote `user | 2 | admin` into an audit table whose every previous row
+      said `anonymous | 172.19.0.1`.
+
+      Tests: 34 against the services, 19 over HTTP.
 - [ ] **A-02 — User groups and primary group** · M · A-01 · Group membership, one primary group
       per user.
 - [ ] **A-03 — Per-object access rights** · L · A-02, S-04 · none/read/write/full; inherited up

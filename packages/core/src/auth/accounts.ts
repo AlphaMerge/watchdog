@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AppError, type Logger } from '@ms/shared';
+import { AuthError } from './errors.js';
 import type { Database, Queryable } from '../db/pool.js';
 import { hashPassword, needsRehash, verifyPassword, spendVerificationTime } from './passwords.js';
 
@@ -69,13 +70,13 @@ export class AccountService {
   async create(request: CreateAccountRequest): Promise<Account> {
     const login = request.login.trim();
     if (!LOGIN_PATTERN.test(login) || login.length > 64) {
-      throw new AppError(
+      throw new AuthError(
         'ACCOUNT_LOGIN_INVALID',
         'a login may contain only letters, digits, dot, underscore, at and dash',
       );
     }
     if (request.password.length < 12) {
-      throw new AppError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
+      throw new AuthError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
     }
 
     const hash = await hashPassword(request.password);
@@ -100,7 +101,7 @@ export class AccountService {
       return read(row);
     } catch (error: unknown) {
       if (isUniqueViolation(error)) {
-        throw new AppError('ACCOUNT_EXISTS', `an account named ${login} already exists`);
+        throw new AuthError('ACCOUNT_EXISTS', `an account named ${login} already exists`);
       }
       throw error;
     }
@@ -196,7 +197,9 @@ export class AccountService {
       ],
     );
     const row = rows[0];
-    if (row === undefined) throw new AppError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+    if (row === undefined) {
+      throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+    }
     return read(row);
   }
 
@@ -214,7 +217,7 @@ export class AccountService {
     options: { current?: string; byAdministrator?: boolean } = {},
   ): Promise<void> {
     if (next.length < 12) {
-      throw new AppError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
+      throw new AuthError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
     }
 
     const rows = await this.#db.query<{ password_hash: string }>(
@@ -222,11 +225,13 @@ export class AccountService {
       [id],
     );
     const row = rows[0];
-    if (row === undefined) throw new AppError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+    if (row === undefined) {
+      throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+    }
 
     if (options.byAdministrator !== true) {
       if (options.current === undefined || !(await verifyPassword(row.password_hash, options.current))) {
-        throw new AppError('ACCOUNT_PASSWORD_WRONG', 'the current password was not accepted');
+        throw new AuthError('ACCOUNT_PASSWORD_WRONG', 'the current password was not accepted');
       }
     }
 
@@ -249,7 +254,7 @@ export class AccountService {
       [id],
     );
     if (rows[0] === undefined) {
-      throw new AppError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+      throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
     }
   }
 

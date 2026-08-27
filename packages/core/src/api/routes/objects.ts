@@ -1,12 +1,12 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`, which the
 // generated OpenAPI document carries into the API reference (H-07).
 import '@fastify/swagger';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
+import { actorFor } from '../authentication.js';
 import type { ObjectService } from '../../objects/service.js';
 import type { BulkOperation, BulkService } from '../../objects/bulk.js';
 import { MAX_BULK } from '../../objects/bulk.js';
-import type { Actor } from '../../objects/audit.js';
 import { settingRegistry } from '../../settings/registry.js';
 import type {
   CreateObjectInput,
@@ -65,11 +65,6 @@ const KIND_FILTER = {
     { type: 'array', items: { enum: [...OBJECT_KINDS] }, maxItems: OBJECT_KINDS.length },
   ],
 } as const;
-
-/** Until accounts exist (A-01), every actor is the caller's address — in exactly one place. */
-function actorFor(request: FastifyRequest): Actor {
-  return { kind: 'anonymous', remoteAddress: request.ip };
-}
 
 function assertKnownSettingKeys(keys: readonly string[]): void {
   for (const key of keys) {

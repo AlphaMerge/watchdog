@@ -1,17 +1,12 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Actor } from '../../objects/audit.js';
+import type { FastifyInstance } from 'fastify';
+import { actorFor } from '../authentication.js';
 import { triggerKinds } from '../../triggers/definition.js';
 import type { TriggerInput, TriggerService } from '../../triggers/service.js';
 
 export interface TriggerRouteOptions {
   triggers: TriggerService;
-}
-
-/** Until accounts exist (A-01), every actor is the caller's address — in exactly one place. */
-function actorFor(request: FastifyRequest): Actor {
-  return { kind: 'anonymous', remoteAddress: request.ip };
 }
 
 const idParams = {
