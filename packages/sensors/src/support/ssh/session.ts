@@ -1,0 +1,386 @@
+// Default import, not named: `ssh2` is CommonJS, and Node's ESM loader cannot see named
+// exports through it at runtime even though TypeScript resolves them. Same as `net-snmp`.
+import ssh2 from 'ssh2';
+import type { Client } from 'ssh2';
+import { describeCredentials, type SshCredentials } from './credentials.js';
+import { describeVerdict, verifyHostKey, type HostKeyVerdict } from './host-key.js';
+
+/**
+ * One SSH connection to one host (`T-07`).
+ *
+ * **The only file in `packages/` that imports `ssh2`**, for the reason `session.ts` next door
+ * records about `net-snmp`: ADR-001 Decision 6 wants the cost of replacing a protocol library to
+ * be a change to one file, and that only holds if there is one file. `ssh2.d.ts` beside this
+ * declares the surface actually used — about a hundred lines — which is the other half of that
+ * bargain.
+ *
+ * **A connection is not a session, and the difference is what makes reuse worth having.** An SSH
+ * handshake is TCP, key exchange and authentication — hundreds of milliseconds against SNMP's
+ * single datagram — while a *channel* on an established connection is nearly free. So a device
+ * with a dozen SSH sensors pays for one handshake, and `exec` opens a channel per check. The
+ * server's own `MaxSessions` bounds how many at once (OpenSSH defaults to 10), which is why the
+ * pool exists rather than one connection being enough.
+ *
+ * **Abort closes the channel, never the connection.** The connection belongs to every sensor on
+ * the device; tearing it down because *this* check ran out of time would fail the others in
+ * flight on it — the same rule the SNMP session follows for the same reason.
+ */
+
+export type SshPhase = 'connect' | 'authenticate' | 'host-key' | 'exec';
+
+export interface SshTarget {
+  readonly host: string;
+  readonly port?: number;
+}
+
+export interface SshSessionOptions {
+  /** The whole handshake: TCP, key exchange and authentication. */
+  readonly connectTimeoutMs?: number;
+  /** One command. Separate, because a slow login and a slow script are different faults. */
+  readonly commandTimeoutMs?: number;
+  /**
+   * The most output one command may produce before it is failed.
+   *
+   * A bound rather than a nicety: `exec` streams into memory, a check runs in a worker shared by
+   * hundreds of sensors, and `cat /var/log/syslog` by mistake is a probe that stops. Failing is
+   * right where truncating is not — a script whose output was cut in half parses into a number
+   * that is wrong rather than absent, and `T-08` will parse these.
+   */
+  readonly maxOutputBytes?: number;
+}
+
+const DEFAULTS = {
+  connectTimeoutMs: 15_000,
+  commandTimeoutMs: 30_000,
+  maxOutputBytes: 1_048_576,
+} as const;
+
+export interface SshExecResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  /** Null when the command was killed by a signal rather than exiting. */
+  readonly code: number | null;
+  readonly signal: string | null;
+}
+
+/**
+ * A failure with enough in it to diagnose without the host in front of you.
+ *
+ * CLAUDE.md: "ETIMEDOUT" alone is not a diagnosis. Which host, which phase and which command
+ * separate "the password is wrong" from "the script does not exist" from "the box is gone" —
+ * and none of these ever carries the credential.
+ */
+export class SshError extends Error {
+  readonly host: string;
+  readonly phase: SshPhase;
+  readonly command: string | undefined;
+
+  constructor(
+    message: string,
+    context: { host: string; phase: SshPhase; command?: string; cause?: unknown },
+  ) {
+    super(message, context.cause === undefined ? undefined : { cause: context.cause });
+    this.name = 'SshError';
+    this.host = context.host;
+    this.phase = context.phase;
+    this.command = context.command;
+  }
+}
+
+export class SshSession {
+  readonly #client: Client;
+  readonly #host: string;
+  readonly #options: Required<SshSessionOptions>;
+  readonly #verdict: HostKeyVerdict;
+  #closed = false;
+
+  private constructor(
+    client: Client,
+    host: string,
+    options: Required<SshSessionOptions>,
+    verdict: HostKeyVerdict,
+  ) {
+    this.#client = client;
+    this.#host = host;
+    this.#options = options;
+    this.#verdict = verdict;
+    // A client that emits 'error' with nothing listening throws on the next tick and takes the
+    // worker down — one unreachable host would kill checks for hundreds of others.
+    client.on('error', () => {
+      this.#closed = true;
+    });
+    client.on('close', () => {
+      this.#closed = true;
+    });
+    client.on('end', () => {
+      this.#closed = true;
+    });
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  /** What the host key check concluded, for the sensor message. Never null on a live session. */
+  get hostKey(): HostKeyVerdict {
+    return this.#verdict;
+  }
+
+  static open(
+    target: SshTarget,
+    credentials: SshCredentials,
+    options: SshSessionOptions = {},
+  ): Promise<SshSession> {
+    const host = target.host.trim();
+    if (host === '') {
+      return Promise.reject(
+        new SshError('the device has no host to connect to', { host: '', phase: 'connect' }),
+      );
+    }
+
+    const resolved: Required<SshSessionOptions> = {
+      connectTimeoutMs: options.connectTimeoutMs ?? DEFAULTS.connectTimeoutMs,
+      commandTimeoutMs: options.commandTimeoutMs ?? DEFAULTS.commandTimeoutMs,
+      maxOutputBytes: options.maxOutputBytes ?? DEFAULTS.maxOutputBytes,
+    };
+
+    return new Promise<SshSession>((resolve, reject) => {
+      const client = new ssh2.Client();
+      let settled = false;
+      // Set by the host-key callback, which runs during the handshake and before 'ready'.
+      let verdict: HostKeyVerdict = { kind: 'unchecked', presented: '' };
+
+      const fail = (error: SshError): void => {
+        if (settled) return;
+        settled = true;
+        try {
+          client.end();
+        } catch {
+          // Already gone. Nothing to do, and nothing worth reporting over the real failure.
+        }
+        reject(error);
+      };
+
+      client.on('ready', () => {
+        if (settled) return;
+        settled = true;
+        resolve(new SshSession(client, host, resolved, verdict));
+      });
+
+      client.on('error', (error: Error & { level?: string }) => {
+        // ssh2 reports an authentication failure as an ordinary error with a level, so the
+        // phase — and therefore the message an operator reads — comes from that.
+        const authentication = error.level === 'client-authentication';
+        fail(
+          new SshError(
+            authentication
+              ? `${host} refused the credentials for ${describeCredentials(credentials)} — the ` +
+                  'user name, the password or the key is wrong, or the server does not allow this ' +
+                  'method for that user'
+              : `could not connect to ${host}: ${error.message}`,
+            {
+              host,
+              phase: authentication ? 'authenticate' : 'connect',
+              cause: error,
+            },
+          ),
+        );
+      });
+
+      const config = {
+        host,
+        port: target.port ?? 22,
+        username: credentials.username,
+        readyTimeout: resolved.connectTimeoutMs,
+        // Every key exchange and cipher ssh2 offers by default. Narrowing them is a policy
+        // decision an operator should make about their estate, not one a monitoring tool should
+        // make for them by failing to connect to older hardware.
+        ...(credentials.method === 'key'
+          ? {
+              privateKey: credentials.privateKey,
+              ...(credentials.passphrase === undefined
+                ? {}
+                : { passphrase: credentials.passphrase }),
+            }
+          : { password: credentials.password }),
+        /**
+         * Runs during the handshake, before authentication — which is the point. Returning
+         * false here means the credentials are never sent, so a host that failed its key check
+         * does not receive the password anyway.
+         */
+        hostVerifier: (key: Buffer): boolean => {
+          verdict = verifyHostKey(credentials.hostKeyPolicy, credentials.hostKeyFingerprint, key);
+          if (verdict.kind === 'trusted' || verdict.kind === 'unchecked') return true;
+          fail(
+            new SshError(describeVerdict(host, verdict) ?? 'the host key was rejected', {
+              host,
+              phase: 'host-key',
+            }),
+          );
+          return false;
+        },
+      };
+
+      try {
+        client.connect(config);
+      } catch (error) {
+        fail(
+          new SshError(`could not connect to ${host}: ${describe(error)}`, {
+            host,
+            phase: 'connect',
+            cause: error,
+          }),
+        );
+      }
+    });
+  }
+
+  /**
+   * Runs one command and collects what it wrote.
+   *
+   * A non-zero exit is **not** an error here: `df` returning 1 and a script reporting a problem
+   * are results a sensor type has to interpret, and turning them into throws would make every
+   * caller catch to get at the exit code. What *is* an error is not being able to run it at all.
+   */
+  async exec(command: string, signal: AbortSignal): Promise<SshExecResult> {
+    if (this.#closed) {
+      throw new SshError(`the SSH connection to ${this.#host} is closed`, {
+        host: this.#host,
+        phase: 'exec',
+        command,
+      });
+    }
+    if (signal.aborted) {
+      throw new SshError(`the check was cancelled before running a command on ${this.#host}`, {
+        host: this.#host,
+        phase: 'exec',
+        command,
+      });
+    }
+
+    return new Promise<SshExecResult>((resolve, reject) => {
+      let settled = false;
+      let stdout = '';
+      let stderr = '';
+      let bytes = 0;
+      // A holder rather than a bare `let`: the timeout's callback needs `finish` and `stop`,
+      // and `finish` needs to clear the timeout, so one of the three has to be reached
+      // indirectly.
+      const pending: { timer?: NodeJS.Timeout } = {};
+      let channel: { close(): void } | undefined;
+
+      const finish = (outcome: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (pending.timer !== undefined) clearTimeout(pending.timer);
+        signal.removeEventListener('abort', onAbort);
+        outcome();
+      };
+
+      /** Ends the channel, never the connection: it is shared with every other sensor here. */
+      const stop = (): void => {
+        try {
+          channel?.close();
+        } catch {
+          // The channel is already gone, which is the state we wanted.
+        }
+      };
+
+      const onAbort = (): void => {
+        stop();
+        finish(() => {
+          reject(
+            new SshError(`the check was cancelled while running a command on ${this.#host}`, {
+              host: this.#host,
+              phase: 'exec',
+              command,
+            }),
+          );
+        });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+
+      pending.timer = setTimeout(() => {
+        stop();
+        finish(() => {
+          reject(
+            new SshError(
+              `${command} did not finish on ${this.#host} within ` +
+                `${String(this.#options.commandTimeoutMs)} ms`,
+              { host: this.#host, phase: 'exec', command },
+            ),
+          );
+        });
+      }, this.#options.commandTimeoutMs);
+      pending.timer.unref();
+
+      this.#client.exec(command, (error, stream) => {
+        if (error !== null && error !== undefined) {
+          finish(() => {
+            reject(
+              new SshError(`could not run ${command} on ${this.#host}: ${error.message}`, {
+                host: this.#host,
+                phase: 'exec',
+                command,
+                cause: error,
+              }),
+            );
+          });
+          return;
+        }
+        channel = stream;
+
+        const take = (chunk: Buffer, onto: 'out' | 'err'): void => {
+          bytes += chunk.length;
+          if (bytes > this.#options.maxOutputBytes) {
+            stop();
+            finish(() => {
+              reject(
+                new SshError(
+                  `${command} produced more than ${String(this.#options.maxOutputBytes)} bytes ` +
+                    `on ${this.#host} and was stopped — a truncated answer parses into a number ` +
+                    'that is wrong rather than absent, so this fails instead',
+                  { host: this.#host, phase: 'exec', command },
+                ),
+              );
+            });
+            return;
+          }
+          if (onto === 'out') stdout += chunk.toString('utf8');
+          else stderr += chunk.toString('utf8');
+        };
+
+        stream.on('data', (chunk: Buffer) => {
+          take(chunk, 'out');
+        });
+        stream.stderr.on('data', (chunk: Buffer) => {
+          take(chunk, 'err');
+        });
+        stream.on('close', (code?: number | null, sig?: string | null) => {
+          finish(() => {
+            resolve({
+              stdout,
+              stderr,
+              code: typeof code === 'number' ? code : null,
+              signal: typeof sig === 'string' ? sig : null,
+            });
+          });
+        });
+      });
+    });
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      this.#client.end();
+    } catch {
+      // Closing twice, or closing a connection that already died, is not worth a failed check.
+    }
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

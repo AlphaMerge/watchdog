@@ -3067,8 +3067,67 @@ because each is a decision rather than a defect:
       own config surface and is not wired. The listener is off by default: it binds a socket, 162
       is privileged, and a probe that silently opened a listening port would be a surprise on
       somebody's firewall audit.
-- [ ] **T-07 — SSH session layer** · M · P-05 · `ssh2` with key and password auth, connection
+- [x] **T-07 — SSH session layer** · M · P-05 · `ssh2` with key and password auth, connection
       reuse, host-key policy, command timeouts.
+
+      **T-07 outcome.** `support/ssh/` mirrors `support/snmp/` deliberately — credentials,
+      session, pool, schema and the shared `check.ts` preamble — because a second transport that
+      is *shaped* differently is a second set of habits for whoever adds the third. `ssh2` is
+      imported in exactly one file with a hand-written `ssh2.d.ts` beside it, on the same bargain
+      ADR-001 Decision 6 made for `net-snmp`: replacing the library is a change to one file.
+
+      **The host key policy is the part of SSH that is easy to get wrong quietly**, and it is
+      where most of the thinking went. A client that accepts any host key authenticates the
+      *server* not at all, so a password can be handed to whatever answered on port 22 while the
+      check still goes green. Most tools default to accepting anything because the alternative
+      needs somewhere to record what was trusted — and a probe has nowhere: the config channel is
+      one-way (`R-09`), so a trust-on-first-use store on the probe would last until the next
+      restart and differ between probes.
+
+      **So the recording problem is solved with a person instead of a store.** The expected
+      fingerprint is a field on the credential, and a strict check with nothing recorded yet
+      **fails naming the fingerprint the server presented**. The operator compares it against the
+      machine and pastes it in. That is trust-on-first-use *with* the verification step that makes
+      it worth anything, it needs no write-back, and the failure message is the mechanism rather
+      than an error. `accept-any` exists, and says so in every sensor message rather than once at
+      configuration time — a standing decision to authenticate nothing should stay visible.
+      Verified against real OpenSSH: `hostVerifier` runs during key exchange, so a host that
+      fails its check never receives the password at all, and the test asserts the server saw no
+      authentication attempt.
+
+      **Connection reuse matters more here than for SNMP.** An SNMP session is a UDP socket; an
+      SSH handshake is TCP, key exchange and authentication — hundreds of milliseconds and real
+      CPU on both ends. Measured live against the dev target: five checks, one connection, four
+      reuses. The one structural difference from the SNMP pool is that opening is *asynchronous*,
+      which brings a problem that pool does not have — two sensors on a device coming due on the
+      same tick would both find nothing cached and both start a handshake. An in-flight open is
+      shared instead, so concurrent checks join one handshake rather than racing.
+
+      A non-zero exit is a **result, not an error**: `df` returning 1 and a script reporting a
+      problem are readings a sensor type interprets, and throwing would make every caller catch in
+      order to read an exit code. Output is bounded and passing the bound **fails** rather than
+      truncating — `T-08` parses this output, and half an answer parses into a number that is
+      wrong rather than absent. Abort closes the *channel*, never the connection, since the
+      connection belongs to every sensor on the device.
+
+      The test harness is built on `ssh2.Server` rather than hand-written, and the reasoning
+      differs from `T-01`'s on purpose: the SNMP agent is hand-written because the cases worth
+      testing are things a well-behaved agent *will not do*, where every SSH case worth testing —
+      refusing a password, presenting the wrong key, hanging, exiting non-zero — is something a
+      correct server does. A hand-rolled SSH server would have to implement key exchange
+      faithfully to be wrong about any of them.
+
+      **Not done here:** no sensor type uses this yet — that is `T-08`. The pool duplicates the
+      SNMP pool's lease counting and idle eviction; extracting the shared half is `P-19` below,
+      deliberately deferred until `T-09` makes it a third instance and the shape is actually
+      known rather than guessed from two.
+- [ ] **P-19 — One session pool for every transport** · M · T-09 · `support/snmp/pool.ts` and
+      `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
+      unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
+      **Added by `T-07`:** extracting it at two instances would have guessed which half varies;
+      `T-09`'s WinRM transport is the third and the point at which the shape is known. Whoever
+      does it should keep the SNMP pool's synchronous `acquire` working or update its 21 tests
+      deliberately, not incidentally.
 - [ ] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
 - [ ] **T-09 — Windows check transport** · L · P-03 · PowerShell / WinRM shell-out from a

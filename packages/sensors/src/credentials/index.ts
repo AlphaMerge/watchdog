@@ -6,6 +6,7 @@ import type { JsonSchema } from '../contract.js';
 // the barrel would drag a UDP stack into a process with no use for it, which is the same rule
 // `docs/adding-a-sensor-type.md` states for `execute`.
 import { SNMP_CREDENTIAL_SCHEMA } from '../support/snmp/schema.js';
+import { SSH_CREDENTIAL_SCHEMA } from '../support/ssh/schema.js';
 
 /**
  * The credential kinds an installation can store (`A-05`).
@@ -13,7 +14,7 @@ import { SNMP_CREDENTIAL_SCHEMA } from '../support/snmp/schema.js';
  * Mirrors the `credential_kind` enum in migration 001, but only the kinds something can actually
  * *use*: a kind with no transport behind it would offer an operator a form for credentials
  * nothing would ever authenticate with, and a forgotten password in a database is worse than an
- * absent feature. `T-07` adds `ssh`, `T-09` adds `windows`, and each is one entry here.
+ * absent feature. `T-09` adds `windows`, and it is one entry here.
  *
  * **A kind is a schema, and the schema does the same three jobs it does for a sensor type**
  * (`docs/adding-a-sensor-type.md`): it validates the write, it generates the form, and — the
@@ -42,6 +43,19 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: { ...SNMP_CREDENTIAL_SCHEMA },
+    },
+  },
+  {
+    id: 'ssh',
+    name: 'SSH',
+    description:
+      'Used by every SSH sensor on this object and everything below it. A monitoring account ' +
+      'needs no more than a shell and read access. The host key fingerprint here is what stops ' +
+      'the password being handed to whatever answers on port 22.',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { ...SSH_CREDENTIAL_SCHEMA },
     },
   },
 ];

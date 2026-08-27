@@ -430,7 +430,17 @@ manual handling required for native addons. We have `argon2`, and `better-sqlite
 used. **`net-snmp` is not one of them** — measured while building `T-01`: `net-snmp` 3.26.3
 depends only on `asn1-ber` and `smart-buffer`, neither of which has a `gypfile` or any
 dependency of its own. Three pure-JavaScript packages, so the SNMP stack costs the installer
-nothing. Revisit when SEA stabilises. `pkg` is deprecated by Vercel; `nexe`
+nothing.
+
+**`ssh2` needs a note rather than a correction** (measured while building `T-07`): its runtime
+dependencies `asn1` and `bcrypt-pbkdf` are pure JavaScript, but it declares `cpu-features` and
+`nan` as **optional** dependencies, and `cpu-features` is a `node-gyp` build. We do not build
+them — the repo runs npm with install scripts disabled, and `ssh2` falls back to its JavaScript
+implementations without them. So the SSH stack costs the installer nothing either, *provided the
+release build keeps install scripts off*. Turning them on to satisfy some other package would
+quietly add a compiled addon to the tarball, which is the thing this decision exists to avoid.
+
+Revisit when SEA stabilises. `pkg` is deprecated by Vercel; `nexe`
 has been in beta for years. Neither is an option.
 
 ---
