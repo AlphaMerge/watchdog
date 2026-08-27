@@ -394,6 +394,15 @@ export interface ProbeConfig {
      * at all, which is the right default for a probe nobody has deliberately given scripts to.
      */
     scriptDir: string;
+    /**
+     * Where PowerShell is, for the Windows sensors (`T-09`).
+     *
+     * Empty works it out: `powershell.exe` on Windows, which is 5.1 and on every Windows Server
+     * since 2012 R2, and `pwsh` elsewhere. Set it where PowerShell 7 lives somewhere unusual, or
+     * where an operator wants 7 rather than 5.1 on a machine that has both — the wrapper is
+     * written for the older one, so it runs on either.
+     */
+    powerShellPath: string;
   };
   /**
    * The SNMP trap listener (`T-06`).
@@ -834,6 +843,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'processUid',
         'processGid',
         'scriptDir',
+        'powerShellPath',
       ],
       properties: {
         gid: { type: 'string', default: '' },
@@ -869,6 +879,9 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         processGid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
         // Empty by default: a probe runs no programs until somebody deliberately says where.
         scriptDir: { type: 'string', default: '' },
+        // Empty means "work it out from the platform", which is right on Windows and honest
+        // everywhere else.
+        powerShellPath: { type: 'string', default: '' },
       },
     },
     trapListener: {

@@ -3260,8 +3260,11 @@ because each is a decision rather than a defect:
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
       **Added by `T-07`:** extracting it at two instances would have guessed which half varies;
-      `T-09`'s WinRM transport is the third and the point at which the shape is known. Whoever
-      does it should keep the SNMP pool's synchronous `acquire` working or update its 21 tests
+      `T-09`'s WinRM transport is the third and the point at which the shape is known. **`T-09`
+      landed and is not a third instance** — it is a shell-out with no session to keep, so the two
+      pools are still two and this ticket's trigger never fired. Whoever picks it up decides on
+      that basis: either two instances are enough to see the shape, or this waits for `D-05`'s
+      VMware transport. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
       deliberately, not incidentally.
 - [x] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
@@ -3319,9 +3322,118 @@ because each is a decision rather than a defect:
       A mutation run also found a **weak test of my own**: `parseMeminfo` was asserted against
       `HugePages_Total: 0`, where multiplying by 1024 is still 0, so the unit check could be
       deleted entirely and the test still passed. The fixture now uses a non-zero count.
-- [ ] **T-09 — Windows check transport** · L · P-03 · PowerShell / WinRM shell-out from a
+- [x] **T-09 — Windows check transport** · L · P-03 · PowerShell / WinRM shell-out from a
       Windows-hosted probe, with credential handling and output parsing.
-- [ ] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
+
+      **T-09 outcome.** `ADR-001`'s open question 3 — an in-house WinRM client, or a PowerShell
+      shell-out — answered: the shell-out. A client is not a protocol port, it is a cryptographic
+      implementation. WS-Management's only widely-permitted authentication is NTLMv2 or Kerberos;
+      Basic needs `AllowUnencrypted` or a certificate on every machine, which most estates forbid
+      outright. Writing NTLMv2 with message signing and sealing, in v1, to reach machines a
+      Windows probe already reaches with a supported client, is the wrong trade. **A Windows
+      probe is a real constraint and it is stated rather than worked around**: one Windows probe
+      monitors many Windows machines, because `Get-CimInstance -CimSession` *is* WinRM — but a
+      Linux-only installation cannot monitor Windows at all, and an operator meets that as a
+      sentence saying so rather than as `spawn ENOENT`.
+
+      **The defect a real PowerShell found, and nothing else could have.** The transport handed
+      the script over on stdin via `-Command -`, on the reasoning that a command line is
+      world-readable and stdin is not. Pointed at `pwsh` 7.5.0, that produced **no output and
+      exit code 0**: `-Command -` reads stdin as *interactive* input, so the multi-line
+      `try`/`catch` this wrapper is built on never completes. `-File -` is worse — it opens a
+      REPL and echoes `>>`. `-EncodedCommand` (base64 of UTF-16LE) behaves identically on 5.1 and
+      7. The original reasoning was misapplied: **the script is not the secret** — it contains
+      `$env:MS_WIN_PASSWORD`, not a password. The credential still travels in the environment,
+      which a process listing cannot reach; what argv exposes is which CIM class a sensor asks
+      about. Measured in `docs/findings/2026-08-27-powershell-transport.md`, along with three
+      other properties the wrapper depends on.
+
+      **The credential is in the environment, and that is the whole security argument.** On
+      Windows any user can read another process's command line through
+      `Win32_Process.CommandLine`; on POSIX it is `/proc/<pid>/cmdline`, world readable. A
+      monitoring service holds the credential for every Windows machine in the estate, so a
+      password in argv is that whole set readable by anybody with a session on the probe. Not in
+      the script text either, which `Start-Transcript` and module logging both write to disk.
+      Asserted by a test rather than described.
+
+      **Every line of the wrapper's preamble is load-bearing**, because PowerShell is a shell
+      designed for people and a check is not one. `$ErrorActionPreference = 'Stop'`, or a failed
+      cmdlet writes to the error stream and the process exits 0. `$ProgressPreference`, or
+      progress records land in the middle of the JSON. The output encoding, or 5.1 writes the
+      console code page and a volume label arrives as mojibake that still parses. `-Depth`,
+      because `ConvertTo-Json` defaults to 2 and *substitutes the type name* rather than failing
+      — `"System.Collections.Hashtable"` is a string, the document parses, and a path that
+      reached a number yesterday reaches a type name today.
+
+      **`asRows`, for the sharpest edge there is.** `ConvertTo-Json` serialises one object as an
+      object and two as an array; `@(…)` does not help and `-AsArray` is PowerShell 7 only, while
+      5.1 is what ships on a Windows Server. A volume sensor written against a machine with two
+      disks works and the same sensor on a machine with one disk reads a bare object. One place
+      meets it.
+
+      **Tested against a fake PowerShell that is a real process**, not a mocked `runProgram` —
+      everything worth getting wrong here is at the process boundary, and a mock at the function
+      boundary asserts only that the code calls the function the test said it would. Plus a suite
+      that runs the *actual* wrapper wherever a `pwsh` exists (`MS_TEST_PWSH` to point at one),
+      which is what would have caught `-Command -` on the first day.
+
+      **`P-19` should not wait for this ticket.** It is written as "extract the pool at the third
+      transport", with `T-09` named as the third. A shell-out has no session to keep, so there is
+      no third instance; the two pools are still two, and whoever picks `P-19` up should decide on
+      that basis rather than on this dependency.
+- [x] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
+
+      **T-10 outcome.** Four types on `T-09`'s transport, one query each.
+
+      `windows.cpu` reads `Win32_PerfFormattedData_PerfOS_Processor` rather than
+      `Win32_Processor.LoadPercentage` — the latter is a single sample taken at the moment of the
+      query and disagrees with Task Manager by tens of percent on a busy machine, which matters
+      when somebody compares this sensor to what they can see. Per-core channels come from the
+      machine (`S-07`), and the `_Total` instance is read rather than averaged from the parts:
+      the counter is an interval average and the instances are sampled separately, so computing
+      one would report a number the machine did not say. Empty counters fail the check rather
+      than reporting an idle machine — corrupted performance counters are a real Windows fault
+      and they return *nothing*, not an error.
+
+      `windows.memory` reads `Win32_OperatingSystem`, which counts every figure in **kibibytes**
+      and carries the virtual ones in the same row. The percentage is the primary because that is
+      where a limit belongs: "below 10% free" is a sentence somebody writes once for an estate,
+      where a byte figure is wrong the day a machine gets more RAM. A zero total gaps rather than
+      dividing — Infinity is a number, and it stores and draws.
+
+      `windows.volume` is **one sensor for the machine with a channel per volume**, not one
+      sensor per volume: six drives as six sensors is six alarms when the machine goes. The
+      primary is the *lowest* free percentage across the volumes it watches, so one limit says
+      "alarm when any disk here gets tight" and the per-volume channels say which. A volume that
+      reports no size — a locked BitLocker volume, a disconnected mapped drive — gaps and is
+      named, because a zero reads as a full disk.
+
+      `windows.service` is one service per sensor, which is what makes an alarm name the thing to
+      fix. It does not restart anything: a monitoring system that restarts a service turns an
+      incident into an intermittent one nobody investigates until the fourth time, and the state
+      history is what makes "it has restarted itself eleven times this week" visible. `expected`
+      is the second channel and the useful one — a Manual service that is stopped is a machine
+      working as configured, and the same service set to Automatic is an incident, so one limit
+      covers an estate of mixed configurations.
+
+      **A defect a mutation found, and it was the bad kind.** `windowsOptions` blanked the host
+      when no Windows credential was configured, so a sensor pointed at `server01` on a probe with
+      no credential quietly measured *the probe's own box* and filed the numbers under
+      `server01` — a wrong reading that looks entirely healthy. A credential is optional because a
+      domain service account already holds a token the far end accepts; absent credentials mean
+      "use who I am", not "ask somewhere else". Local is now what an operator asks for by name —
+      `.`, `localhost`, a loopback address.
+
+      Twenty-two mutations, all killed — including one killed by the type system rather than by a
+      test, which is the strongest kind: weakening the "this volume reported no size" guard makes
+      `free` and `size` stay `number | null` and the file stops compiling.
+
+      **What is not verified, stated rather than implied.** No `Get-CimInstance` has run against a
+      Windows machine. The transport, the wrapper and the parsing are proved — the wrapper against
+      a real PowerShell 7 — but the four *queries* are written against recorded output, and the
+      first run against Windows is an open item. `T-10` is complete as far as this environment can
+      take it and no further; a Windows box is the remaining step, and `D-02` (device
+      identification via WMI) is the natural place to do it.
 - [x] **T-11 — TLS Certificate sensor** · M · P-05 · Expiry countdown, chain validation, hostname
       match, issuer and SAN channels.
 

@@ -21,6 +21,10 @@
     "./script": {
       "types": "./dist/src/support/script/index.d.ts",
       "default": "./dist/src/support/script/index.js"
+    },
+    "./windows": {
+      "types": "./dist/src/support/windows/index.d.ts",
+      "default": "./dist/src/support/windows/index.js"
     }
   },
   "scripts": {

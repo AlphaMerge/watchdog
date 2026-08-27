@@ -255,6 +255,10 @@ describe('the built-in catalogue', () => {
       'syslog.receiver',
       'tls.certificate',
       'tls.security',
+      'windows.cpu',
+      'windows.memory',
+      'windows.service',
+      'windows.volume',
     ]);
   });
 

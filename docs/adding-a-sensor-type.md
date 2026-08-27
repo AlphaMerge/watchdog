@@ -288,6 +288,7 @@ What exists, and which ticket built it:
 | `support/pattern.ts` | an operator-supplied regex, run under a watchdog | `T-03` |
 | `support/json-path.ts` | a bounded JSONPath **and** XPath over a response tree | `T-16`, `T-24` |
 | `support/xml.ts` | XML into a plain object tree the path module reads | `T-24` |
+| `support/windows/` | one PowerShell shell-out; the wrapper, the envelope, the credential | `T-09` |
 
 Three of those are worth knowing about even if you never call them. `support/pattern.ts` exists
 because **JavaScript has no interruptible regular expression**: once `exec` is running nothing

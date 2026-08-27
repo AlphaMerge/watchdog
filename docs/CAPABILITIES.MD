@@ -181,8 +181,11 @@ limited by per-request crypto cost and does not scale simply by adding CPU.
 | PerfCounter Custom                                      | Arbitrary Windows performance counter | `[V2]` |
 | Windows Process / Print Queue / Pagefile / Network Card | Windows-native specifics              | `[V2]` |
 
-Implementation note: there is no maintained WMI client for Node. Windows checks must go
-through WinRM or a PowerShell `Get-CimInstance` shell-out from a probe running on Windows.
+Implementation note: there is no maintained WMI client for Node. Windows checks go through a
+PowerShell `Get-CimInstance` shell-out from a probe running on Windows (`T-09`) — one such probe
+reaches many Windows machines, since `-CimSession` is WinRM, but an installation with no Windows
+probe cannot monitor Windows at all. `ADR-001` question 3 records why an in-house WinRM client
+was not the answer for v1.
 
 ### 3.6 Linux / Unix / macOS over SSH `[V1]`
 

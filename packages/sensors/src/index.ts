@@ -101,12 +101,16 @@ import { sshDiskFree } from './types/ssh-disk-free.js';
 import { sshLoad } from './types/ssh-load.js';
 import { sshMeminfo } from './types/ssh-meminfo.js';
 import { sshScript } from './types/ssh-script.js';
+import { windowsCpu } from './types/windows-cpu.js';
+import { windowsMemory } from './types/windows-memory.js';
+import { windowsService } from './types/windows-service.js';
+import { windowsVolume } from './types/windows-volume.js';
 
 /**
  * The types every installation gets.
  *
- * `T-13`…`T-16` extend `http`; `T-09`/`T-10` add the Windows set; `T-20` adds the syslog
- * receiver on the listener contract `snmp.trap` established.
+ * `T-13`…`T-16` extend `http`; `T-10` adds the Windows set on `T-09`'s transport; `T-20` adds
+ * the syslog receiver on the listener contract `snmp.trap` established.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
@@ -149,6 +153,10 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   sshLoad,
   sshMeminfo,
   sshScript,
+  windowsCpu,
+  windowsMemory,
+  windowsService,
+  windowsVolume,
 ];
 
 export function standardCatalogue(

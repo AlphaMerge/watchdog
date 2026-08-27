@@ -8,6 +8,7 @@ import {
 } from '@ms/shared';
 import { standardCatalogue } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
+import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import type { ResultMeta } from './runner/types.js';
@@ -89,6 +90,17 @@ async function main(): Promise<void> {
         );
       });
   };
+
+  // Where PowerShell is, for the Windows sensors (`T-09`). In *this* process's environment
+  // rather than a runner's `childEnv`, because a Windows check runs in a worker and a worker
+  // inherits the probe's environment — and resolved here for the same reason `scriptDir` is,
+  // so a relative path in the config file means what the operator who wrote it meant.
+  if (config.probe.powerShellPath !== '') {
+    process.env[POWERSHELL_ENV] =
+      config.probe.powerShellPath.includes('/') || config.probe.powerShellPath.includes('\\')
+        ? resolve(config.probe.powerShellPath)
+        : config.probe.powerShellPath;
+  }
 
   const pool = new CheckPool({
     logger,

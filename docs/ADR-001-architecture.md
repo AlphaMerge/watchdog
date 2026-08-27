@@ -496,7 +496,14 @@ these numbers.
 
 1. Is TimescaleDB practical on Windows Server, or is Windows a plain-Postgres deployment?
 2. Raw-socket ICMP vs system-binary ping — measured throughput and accuracy at 1,000 targets.
-3. Do we need a WinRM client written in-house, or is a PowerShell shell-out from a
-   Windows-hosted probe sufficient for the v1 WMI sensor set?
+3. ~~Do we need a WinRM client written in-house, or is a PowerShell shell-out from a
+   Windows-hosted probe sufficient for the v1 WMI sensor set?~~ **Settled by `T-09`: the
+   shell-out.** WS-Management's only widely-permitted authentication is NTLMv2 or Kerberos —
+   Basic needs `AllowUnencrypted` or a certificate on every machine — so a client is a
+   cryptographic implementation rather than a protocol port, written to reach machines a Windows
+   probe already reaches with a supported client. The cost is that a Linux-only installation
+   cannot monitor Windows, which is stated to the operator rather than worked around. Revisit if
+   a cross-platform WinRM client becomes worth it; the sensor types call a transport interface
+   and would not change.
 4. Config storage: pure database, or database plus an exportable declarative file for
    version-controlled setups? (Leaning: database of record, YAML export/import in `[V2]`.)
