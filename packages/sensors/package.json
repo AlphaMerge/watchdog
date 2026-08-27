@@ -14,6 +14,10 @@
       "types": "./dist/src/support/snmp/index.d.ts",
       "default": "./dist/src/support/snmp/index.js"
     },
+    "./syslog": {
+      "types": "./dist/src/support/syslog/index.d.ts",
+      "default": "./dist/src/support/syslog/index.js"
+    },
     "./script": {
       "types": "./dist/src/support/script/index.d.ts",
       "default": "./dist/src/support/script/index.js"

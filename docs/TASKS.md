@@ -3674,8 +3674,57 @@ because each is a decision rather than a defect:
       script's `Free Space`/`Inodes` arriving as `free_space` and `inodes`. Three sensors naming
       `/bin/sh`, `../../../bin/sh` and `sh -c id` were each refused with a message saying why.
       `dev/scripts/` holds the three examples. Six mutations of the boundary killed.
-- [ ] **T-20 — Syslog Receiver** · L · P-05 · In-house RFC 3164 and 5424 parser, UDP + TCP
+- [x] **T-20 — Syslog Receiver** · L · P-05 · In-house RFC 3164 and 5424 parser, UDP + TCP
       listeners, filter rules, severity/facility count channels, message retention.
+
+      **T-20 outcome.** `syslog.receiver`, and it needed **no change to `T-06`'s listener
+      contract at all** — which is the point of having had one. The probe owns one socket, a
+      check runs in whichever worker is free and only while it is running, and
+      `CheckContext.received` hands each sensor what it has not seen. A second protocol arrived
+      and the seam held.
+
+      **The ring came out at the second caller, and that is not the same call `P-19` made.** It
+      says extracting the SNMP and SSH session pools at two instances would have guessed which
+      half varies. These two are not *similar*: the ring, the cursor arithmetic, the drop
+      counting and the retain sweep are byte-for-byte identical, and what varies — which socket,
+      which filter, how a message is rendered — is entirely outside them. `NotificationRing` is
+      the extraction; `T-06`'s tests passing unchanged is the evidence it was transparent.
+
+      **Both formats, and the older one is not optional.** RFC 5424 is what anything modern
+      emits; RFC 3164 is what a switch bought in 2014 still sends, and a receiver that only
+      understood the new one would work against a test rig and not against a network. The tag is
+      split from the pid (§4.1.3) because `sshd[1234]` as one field is a field nobody can write a
+      rule against, and a message stamped December arriving in January is read as *last* year —
+      getting that backwards puts a line eleven months into the future, where nothing looking at
+      a time range will ever find it.
+
+      **A message that parses badly still becomes a notification.** Dropping it loses exactly the
+      line somebody needs during an incident, because the devices that emit malformed syslog are
+      disproportionately the ones going wrong.
+
+      **TCP syslog has two framings and they are not compatible** — RFC 6587 §3.4.1
+      octet-counting and §3.4.2 newline-separated — so both are read. Guessing wrong on
+      octet-counting turns one message into several with the count glued to the front of the
+      first, which is the kind of corruption that gets blamed on the sender for weeks.
+
+      **Counting by severity is the reading and matching is the alarm.** A sensor that only
+      counted lines goes Down on a busy night and Up on a quiet one; per-severity channels let a
+      limit say "more than five errors a minute", which is the thing an operator means. Rules are
+      ANDed, because if they were ORed then adding a second rule would *widen* the sensor. Two
+      things it refuses to call zero: a listener that is not running, and a buffer that
+      overwrote messages before this sensor read them.
+
+      **The sender allow-list is a filter, not a lock**, and saying so is the point — syslog
+      authenticates nothing whatsoever, so an operator who believed otherwise would put this on a
+      port reachable from the internet. The listener is **off by default** and binds 10514 rather
+      than 514, which needs privilege a probe should not have.
+
+      Verified live end to end: five messages over UDP and one octet-counted frame over TCP,
+      through a sensor filtering on `appName = sshd` at `minSeverity: warning` — `4 messages`,
+      three `error` and one `critical`, with the `cron` line and the informational
+      "Accepted publickey" correctly excluded and the last three lines shown. Eight mutations
+      killed, one of which first survived because "keep the severe ones" and "keep the mild ones"
+      both count two out of three — only the per-severity breakdown tells them apart.
 - [ ] **T-21 — Sensor Factory** · L · M-04 · Formula language over other sensors' channels
       (`channel(id, ch)` arithmetic), its own channels and limits, cycle detection.
 - [x] **T-22 — Ping Jitter and Port Range** · M · P-08, P-10 · Completes the v1 connectivity set.

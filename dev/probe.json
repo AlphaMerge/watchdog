@@ -37,5 +37,15 @@
     "reconnectMinDelayMs": 500,
     "reconnectMaxDelayMs": 4000,
     "heartbeatIntervalMs": 2000
+  },
+  "syslogListener": {
+    "enabled": true,
+    "port": 10514,
+    "address": "0.0.0.0",
+    "udp": true,
+    "tcp": true,
+    "ipVersion": "udp4",
+    "senders": [],
+    "bufferSize": 20000
   }
 }

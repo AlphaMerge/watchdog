@@ -250,6 +250,7 @@ describe('the built-in catalogue', () => {
       'ssh.load',
       'ssh.meminfo',
       'ssh.script',
+      'syslog.receiver',
       'tls.certificate',
       'tls.security',
     ]);

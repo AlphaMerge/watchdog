@@ -12,6 +12,7 @@ import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import type { ResultMeta } from './runner/types.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
+import { LISTENER_ID as SYSLOG_LISTENER_ID, SyslogListener } from './listeners/syslog-listener.js';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
@@ -161,6 +162,27 @@ async function main(): Promise<void> {
     });
   }
 
+  const syslogListener = config.syslogListener.enabled
+    ? new SyslogListener({
+        logger,
+        port: config.syslogListener.port,
+        address: config.syslogListener.address,
+        udp: config.syslogListener.udp,
+        tcp: config.syslogListener.tcp,
+        ipVersion: config.syslogListener.ipVersion,
+        senders: config.syslogListener.senders,
+        bufferSize: config.syslogListener.bufferSize,
+      })
+    : undefined;
+  if (syslogListener !== undefined) {
+    await syslogListener.start();
+    lifecycle.onShutdown({
+      name: 'syslog-listener',
+      timeoutMs: 5_000,
+      run: () => syslogListener.stop(),
+    });
+  }
+
   // The scheduler hands due sensors to the pool and returns. `onDue` runs on the wheel's own
   // thread, so it must never wait for a check — `submit` is fire-and-forget by design.
   const wheel = new TimingWheel({
@@ -176,7 +198,9 @@ async function main(): Promise<void> {
         const received =
           wants === LISTENER_ID && trapListener !== undefined
             ? trapListener.drain(sensorId)
-            : undefined;
+            : wants === SYSLOG_LISTENER_ID && syslogListener !== undefined
+              ? syslogListener.drain(sensorId)
+              : undefined;
         const runner = isolated.has(assignment.sensorType) ? processRunner : pool;
         runner.submit({
           sensorId,

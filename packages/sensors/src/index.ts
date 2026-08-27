@@ -41,6 +41,19 @@ export {
   type TrapVersion,
 } from './support/snmp/trap.js';
 
+// The same split for syslog (`T-20`): the parser and the renderer are pure functions over plain
+// data, and the sockets live behind the `@ms/sensors/syslog` subpath.
+export {
+  FACILITIES,
+  SEVERITIES,
+  facilityName,
+  parseSyslog,
+  renderSyslog,
+  severityName,
+  type Severity,
+  type SyslogMessage,
+} from './support/syslog/parse.js';
+
 export {
   SensorCatalogue,
   SensorTypeError,
@@ -67,6 +80,7 @@ import { dbMysql } from './types/db-mysql.js';
 import { dbPostgresql } from './types/db-postgresql.js';
 import { exeScript } from './types/exe-script.js';
 import { exeScriptAdvanced } from './types/exe-script-advanced.js';
+import { syslogReceiver } from './types/syslog.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -112,6 +126,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   dbMssql,
   exeScript,
   exeScriptAdvanced,
+  syslogReceiver,
   httpContent,
   httpRequest,
   portTcp,

@@ -430,6 +430,31 @@ export interface ProbeConfig {
      */
     bufferSize: number;
   };
+  /**
+   * The probe's syslog listener (`T-20`).
+   *
+   * Off by default, and bound to 514 only if somebody says so: that port needs privilege a
+   * probe should not be running with, and a receiver nobody asked for is a socket accepting
+   * anything on the network. `sudo setcap 'cap_net_bind_service=+ep'` on the node binary, or a
+   * high port with a firewall redirect, are the two ordinary answers.
+   */
+  syslogListener: {
+    enabled: boolean;
+    port: number;
+    address: string;
+    udp: boolean;
+    tcp: boolean;
+    ipVersion: 'udp4' | 'udp6';
+    /**
+     * Addresses whose messages are kept. Empty accepts any.
+     *
+     * A filter, not a lock. Syslog authenticates nothing at all — anything that can reach the
+     * port can claim to be anything — so this stops a misconfigured device filling the buffer
+     * and stops nothing else.
+     */
+    senders: string[];
+    bufferSize: number;
+  };
   core: {
     host: string;
     port: number;
@@ -861,6 +886,28 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         // the honest answer is that the sensor scans too rarely for the volume, which is what
         // the dropped count says.
         bufferSize: { type: 'integer', minimum: 100, maximum: 1_000_000, default: 10_000 },
+      },
+    },
+    syslogListener: {
+      type: 'object',
+      default: {} as ProbeConfig['syslogListener'],
+      additionalProperties: false,
+      required: ['enabled', 'port', 'address', 'udp', 'tcp', 'ipVersion', 'senders', 'bufferSize'],
+      properties: {
+        enabled: { type: 'boolean', default: false },
+        // Not 514: that needs privilege a probe should not be running with. An operator who
+        // wants the well-known port says so, having decided how to grant it.
+        port: { type: 'integer', minimum: 1, maximum: 65_535, default: 10514 },
+        address: { type: 'string', minLength: 1, default: '0.0.0.0' },
+        udp: { type: 'boolean', default: true },
+        // On by default too: a firewall exporting an audit trail over UDP is a firewall whose
+        // audit trail has holes in it, and both framings of RFC 6587 are read.
+        tcp: { type: 'boolean', default: true },
+        ipVersion: { type: 'string', enum: ['udp4', 'udp6'], default: 'udp4' },
+        senders: { type: 'array', items: { type: 'string', minLength: 1 }, default: [] },
+        // Syslog arrives far faster than traps do — a chatty firewall is thousands a second —
+        // so the default buffer is larger, and what it loses is still counted rather than lost.
+        bufferSize: { type: 'integer', minimum: 100, maximum: 200_000, default: 20_000 },
       },
     },
     core: {
