@@ -640,6 +640,31 @@ templates are exercised only by `D-03`'s unit tests.
 | R-07 probe installers | done | It looked like packaging and was a security defect: `install.sh` issues **one** `probe.crt`/`probe.key` on the core host, so every probe in an installation presented the same TLS identity and revoking one at the transport layer was impossible — `R-01` made the access key per-probe, the certificate under it was shared. `ms-enrol` now issues a certificate per probe and packs it with the CA, the enrolment key and the core's address into one file an operator carries; it refuses to guess an address when the core binds a wildcard, because a bundle that cannot connect is worse than a question. `package.sh --probe-only` gives a probe host a probe — 12M against 16M measured, but the win is that there is no core to start, no `core.json` to misconfigure and no web root. `smoke-enrol.sh` proves it across **two** boxes, since a localhost-only SAN or a leftover `127.0.0.1` passes on one. Fixed on the way: the full tarball had been unbuildable since `T-18` on a `pg` range conflict |
 | R-08 disconnect/reconnect soak | done | Two clauses that fail in different places, so measured in two — zero data loss is the probe's spool, no ingestion stall is the core's pacer; one test spanning both would need the two services to import each other, which `ADR-001` does not allow. **An hour is a quantity, not a duration**: at the v1 target it is 300,000 readings, and sleeping for one would measure a clock. Probe side: 300,000 readings, 61.7 MB, replayed in 1.77 s, **0 lost, 0 duplicated, 0 corrupt**, caught up 2031x faster than the outage; an hour is 3% of the shipped spool, so the default is sized for about a day and a half. Core side, two probes each replaying an hour beside a live one: live p99 274.6 → 279.2 ms, **1.02x against a 3x budget**, replaying probes paced 50 ms and the live one never. Writing it taught me the pacer does not slow a *lone* catch-up — that is work, not unfairness — so the test runs two probes against a limit of one |
 
+Both exit criteria are met and measured:
+
+- **A probe disconnected for one hour reconnects and replays with no data loss and no ingestion
+  stall** — measured in two halves, because the two clauses fail in different places and
+  `ADR-001` keeps the two services from importing each other. The probe side spools an hour at
+  the v1 target (**300,000 readings, 61.7 MB**), survives a restart mid-outage, and replays every
+  one of them **once** in **1.77 s** — **0 lost, 0 duplicated, 0 corrupt**, catching up 2031×
+  faster than the outage that produced it. The core side runs two probes each replaying an hour
+  beside a third reporting live: live p99 goes **274.6 ms → 279.2 ms, a factor of 1.02** against
+  a 3× budget, with the replaying probes paced 50 ms and the live one never.
+- **Version skew between core and probe is detected and reported rather than silently
+  misbehaving** — `R-06`. The half that was missing was never the incompatible peer, which
+  closes the link loudly; it was the *compatible but outdated* one, which connects, heartbeats,
+  passes every health signal and is refused configuration, so nothing under it is ever scanned.
+  That is now a skew verdict on `GET /probes` naming both versions and what the probe cannot do,
+  and a discovery run assigned to a too-old probe fails with a reason instead of queueing for
+  ever.
+
+**One deliverable is not met and does not block the exit criteria:** *Probe Health — connection
+state, lag, spool depth, version skew*. The sensor itself is `P-13`, still open in Phase 2, so
+the facts exist and are exposed over the API and in the log but no sensor collects them yet.
+`R-05`'s "one alarm for a lost probe" is the same shape: the sensors go Unknown with cause
+`probe`, and the single alarm that replaces the storm is Probe Health's to raise once `P-13`
+lands.
+
 Pulled forward out of order, on request, and it closed the loop the previous phases had left
 open: with `P-08` providing a sensor type and `R-04` telling a probe which sensors it owns, the
 system scans a real target on a schedule for the first time — and with `R-02` it keeps them:
