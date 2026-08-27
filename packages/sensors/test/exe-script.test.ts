@@ -210,11 +210,95 @@ describe('output formats', () => {
     assert.throws(() => parseAdvanced('{"channels":[]}', 'value'), /returned no channels/);
   });
 
-  it('says what the program printed when it is not JSON', () => {
+  it('says what the program printed when it is neither JSON nor XML', () => {
     assert.throws(
-      () => parseAdvanced('<xml>no</xml>', 'value'),
-      /did not print JSON.*it printed "<xml>no<\/xml>"/s,
+      () => parseAdvanced('OK - everything fine', 'value'),
+      /did not print JSON.*it printed "OK - everything fine"/s,
     );
+  });
+
+  /**
+   * PRTG's advanced XML (`T-24`), which matters more here than XML does for REST: PRTG's EXE and
+   * Script Advanced sensors emit XML **by default**, so an installation moving across has scripts
+   * printing it and no reason to rewrite them.
+   */
+  describe('the XML an advanced script prints by default', () => {
+    const PRTG = `<?xml version="1.0" encoding="UTF-8"?>
+<prtg>
+  <result>
+    <channel>Free Space</channel>
+    <value>91.5</value>
+    <unit>%</unit>
+  </result>
+  <result>
+    <channel>Inodes</channel>
+    <value>4000</value>
+  </result>
+  <text>looks fine</text>
+</prtg>`;
+
+    it('reads the same channels the JSON form produces', () => {
+      // The same document, the same keys, the same primary — one `channelsFrom`, so the two
+      // shapes cannot drift into disagreeing about what a channel is called.
+      const parsed = parseAdvanced(PRTG, 'free_space');
+      assert.deepEqual(parsed.channels, [
+        { key: 'free_space', value: 91.5, name: 'Free Space', unit: '%' },
+        { key: 'inodes', value: 4000, name: 'Inodes' },
+      ]);
+      assert.equal(parsed.message, 'looks fine');
+      assert.equal(parsed.returnCode, null);
+    });
+
+    it('reads a single result, which is where a shape-dependent parser breaks', () => {
+      // The failure this rules out: a script works for months and breaks the first day it has
+      // one channel to report instead of two.
+      const parsed = parseAdvanced(
+        '<prtg><result><channel>Load</channel><value>1,5</value></result></prtg>',
+        'load',
+      );
+      assert.deepEqual(parsed.channels, [{ key: 'load', value: 1.5, name: 'Load' }]);
+    });
+
+    it('fails when the error flag is set, rather than reading it as a channel', () => {
+      assert.throws(
+        () => parseAdvanced('<prtg><error>1</error><text>the API said no</text></prtg>', 'value'),
+        /reported an error: the API said no/,
+      );
+    });
+
+    it('fails on XML that is well formed and is not this shape', () => {
+      // An HTML page or a SOAP fault parses perfectly well; what it does not have is <prtg>.
+      assert.throws(
+        () => parseAdvanced('<html><body>oops</body></html>', 'value'),
+        /XML with no <prtg> element/,
+      );
+    });
+
+    it('fails on XML that is not well formed, rather than on half of it', () => {
+      assert.throws(
+        () => parseAdvanced('<prtg><result><value>91.5</value>', 'value'),
+        /not well-formed XML/,
+      );
+    });
+
+    it('fails when the primary channel is missing, as the JSON form does', () => {
+      assert.throws(
+        () =>
+          parseAdvanced(
+            '<prtg><result><channel>Other</channel><value>1</value></result></prtg>',
+            'value',
+          ),
+        /no channel called "value"/,
+      );
+    });
+
+    it('reads a leading blank line, because a shell script prints one', () => {
+      assert.equal(
+        parseAdvanced('\n\n<prtg><result><channel>A</channel><value>2</value></result></prtg>', 'a')
+          .channels[0]?.value,
+        2,
+      );
+    });
   });
 
   it('makes a stable key out of a display name', () => {

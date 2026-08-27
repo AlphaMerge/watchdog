@@ -59,6 +59,14 @@ RUN printf '%s\n' \
       '  }' \
       '  location = /dashboard { return 200 "welcome $ms_who\n"; }' \
       '  location = /echo { return 200 "t=$arg_t\n"; }' \
+      '  # T-24: the same XML twice, once labelled and once not. The unlabelled one is what' \
+      '  # the `auto` format has to read the *body* to recognise, which is the half worth' \
+      '  # exercising — plenty of appliances answer XML as octet-stream.' \
+      '  location = /status.xml { default_type application/xml; }' \
+      '  location = /status-untyped {' \
+      '    default_type application/octet-stream;' \
+      '    alias /var/www/html/status.xml;' \
+      '  }' \
       '}' \
     > /etc/nginx/sites-available/default
 
@@ -67,6 +75,11 @@ RUN printf '%s\n' \
 # check reads are the numbers this file says.
 RUN printf '%s' '{"status":"healthy","version":"4.2.1","queue":{"depth":12,"oldest":"4.5"},"nodes":[{"name":"a","state":"up","load":0.4},{"name":"b","state":"down","load":0.95},{"name":"c","state":"down","load":0.7}]}' \
     > /var/www/html/status.json
+
+# The same document in XML, for the XML half of REST Custom (T-24). An appliance answering in
+# XML is the case that half exists for; the routes above serve it both labelled and not.
+RUN printf '%s' '<?xml version="1.0" encoding="UTF-8"?><cluster><status>healthy</status><version>4.2.1</version><queue depth="12"><oldest unit="s">4.5</oldest></queue><node name="a" state="up"><load>0.4</load></node><node name="b" state="down"><load>0.95</load></node><node name="c" state="down"><load>0.7</load></node></cluster>' \
+    > /var/www/html/status.xml
 
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh

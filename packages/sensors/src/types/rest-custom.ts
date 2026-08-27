@@ -31,11 +31,10 @@ import {
  * *every* channel fails the check instead, because that is not a gap — it is a sensor pointed at
  * the wrong document.
  *
- * **XML is not here.** `T-16` names XPath as well, and parsing XML properly needs a parser this
- * package does not have: namespaces, CDATA, entities and mixed content all have a way of
- * half-working, and a half-parsed document yields a confidently wrong number. That is a
- * dependency decision with a second caller behind it (the v2 VMware SOAP sensors), so it is
- * `T-24` rather than a hand-rolled parser here.
+ * **XML too, since `T-24`.** A response is parsed as XML when it says it is, or when it starts
+ * like one — and a path beginning with `/` is read as an XPath location path against the same
+ * engine. `/prtg/result[1]/value` and `$.queue.depth` are the same machinery with two spellings,
+ * because two path languages would be two things to learn and two to get subtly wrong.
  */
 
 const MAX_CHANNELS = 20;
@@ -122,6 +121,16 @@ export const restCustom: SensorType = {
     properties: {
       ...HTTP_COMMON_SCHEMA,
       ...HTTP_REQUEST_SCHEMA,
+      format: {
+        enum: ['auto', 'json', 'xml'],
+        default: 'auto',
+        title: 'Response format',
+        description:
+          '`auto` reads XML when the Content-Type says so, when the body opens with an XML ' +
+          'declaration, or when it starts with a tag that is not HTML — which covers the ' +
+          'appliance serving XML as application/octet-stream and the one serving it as JSON. ' +
+          'Set it explicitly only where that guess is wrong.',
+      },
       maxBodyBytes: {
         type: 'integer',
         minimum: 1_024,
@@ -130,7 +139,7 @@ export const restCustom: SensorType = {
         title: 'Response bound',
         description:
           'How much of the response is read. Passing it fails rather than truncating, because ' +
-          'half a JSON document does not parse at all and “unexpected end of input” is a worse ' +
+          'half a document does not parse at all and “unexpected end of input” is a worse ' +
           'diagnosis than “this response is bigger than this sensor reads”.',
       },
       extract: {
@@ -163,9 +172,12 @@ export const restCustom: SensorType = {
               maxLength: MAX_PATH,
               title: 'Path',
               description:
-                '$.queue.depth · $.nodes[0].load · $.nodes[*].load · $..load · ' +
-                '$.nodes[?(@.state==“down”)] — members, indexes, a wildcard, recursive descent ' +
-                'and one comparison. Script expressions are not supported, on purpose.',
+                'For JSON: $.queue.depth · $.nodes[0].load · $.nodes[*].load · $..load · ' +
+                '$.nodes[?(@.state==“down”)]. For XML, a path starting with a slash is read as ' +
+                'XPath: /prtg/result[1]/value · //channel · /result/@state · /result/text() · ' +
+                '/result[@state=“down”]/name. **JSONPath counts from zero and XPath from one**, ' +
+                'as each language does — the spelling decides. Script expressions are not ' +
+                'supported in either, on purpose.',
             },
             aggregate: {
               enum: [...AGGREGATES],
@@ -252,19 +264,27 @@ export const restCustom: SensorType = {
     if (outcome.body.length > maxBodyBytes) {
       throw new Error(
         `the response is larger than the ${String(maxBodyBytes)} bytes this sensor reads — half ` +
-          'a JSON document does not parse at all, so this fails rather than truncating',
+          'a document does not parse at all, so this fails rather than truncating',
       );
     }
 
+    const rawType = outcome.headers['content-type'];
+    const contentType = typeof rawType === 'string' ? rawType : '';
+    const declaredFormat = context.params['format'];
+    const format = declaredFormat === 'json' || declaredFormat === 'xml' ? declaredFormat : 'auto';
+
+    const { looksLikeXml, parseXml } = await import('../support/xml.js');
+    const asXml =
+      format === 'xml' || (format === 'auto' && looksLikeXml(outcome.body, contentType));
+
     let document: unknown;
     try {
-      document = JSON.parse(outcome.body) as unknown;
+      document = asXml ? parseXml(outcome.body) : (JSON.parse(outcome.body) as unknown);
     } catch (error) {
-      const type = outcome.headers['content-type'];
       throw new Error(
-        `${String(outcome.status)}, but the response is not JSON: ` +
+        `${String(outcome.status)}, but the response is not ${asXml ? 'XML' : 'JSON'}: ` +
           (error instanceof Error ? error.message : String(error)) +
-          (typeof type === 'string' ? ` (it says Content-Type: ${type})` : ''),
+          (contentType === '' ? '' : ` (it says Content-Type: ${contentType})`),
       );
     }
 

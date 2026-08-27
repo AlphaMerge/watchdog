@@ -32,6 +32,7 @@
     "@ms/shared": "0.1.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
+    "fast-xml-parser": "^5.11.1",
     "mysql2": "^3.24.2",
     "net-snmp": "3.26.3",
     "pg": "^8.23.0",

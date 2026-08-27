@@ -286,9 +286,10 @@ What exists, and which ticket built it:
 | `support/syslog/` | RFC 3164/5424 parsing and the UDP/TCP receivers | `T-20` |
 | `support/script/` | resolving a program name inside the probe's script directory | `T-19` |
 | `support/pattern.ts` | an operator-supplied regex, run under a watchdog | `T-03` |
-| `support/json-path.ts` | a bounded JSONPath over a JSON response | `T-16` |
+| `support/json-path.ts` | a bounded JSONPath **and** XPath over a response tree | `T-16`, `T-24` |
+| `support/xml.ts` | XML into a plain object tree the path module reads | `T-24` |
 
-Two of those are worth knowing about even if you never call them. `support/pattern.ts` exists
+Three of those are worth knowing about even if you never call them. `support/pattern.ts` exists
 because **JavaScript has no interruptible regular expression**: once `exec` is running nothing
 stops it, not `ctx.signal` and not a timer, and `(a+)+$` against forty characters takes 86 seconds
 — measured. It runs matches inside a `node:vm` with a timeout, which *can* interrupt one, at a
@@ -296,6 +297,18 @@ cost of about 100 µs a match. If your type takes a pattern from an operator, us
 `new RegExp`. And `support/json-path.ts` stops short of JSONPath's filter expressions on purpose:
 the reference implementation evaluates JavaScript in them, which would put an operator-supplied
 expression inside a probe.
+
+The third is `support/xml.ts`, and the thing to know is that it is **one path language, not
+two**. A path beginning with `/` is read as an XPath location path and translated to the same
+steps `selectPath` walks, so a type that already takes a JSON path takes an XML one for free —
+`parseXml` produces a plain object tree and everything downstream is unchanged. Two properties of
+that tree are load-bearing. Every *element* is an array, so a document with one `<result>` and a
+document with five have the same shape — otherwise a path works for months and breaks the first
+morning the list is short. An *attribute* is not, because an attribute is single-valued; it lives
+under an `@_` prefix rather than beside the children, so `<r name="x"><name>y</name></r>` keeps
+both reachable. `parseXml` validates before it parses — the
+library is lenient and would build a tree from a truncated response, which is exactly the case a
+check meets when a bound or a dropped connection cuts one off.
 
 **SNMP** (`support/snmp/`, built by `T-01`) is the worked example:
 

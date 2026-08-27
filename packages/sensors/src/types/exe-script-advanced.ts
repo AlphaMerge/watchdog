@@ -14,11 +14,13 @@ import { SCRIPT_SCHEMA, runScript } from './exe-script-shared.js';
  * *which* channel the sensor is judged by, because that one cannot be discovered: a sensor with
  * no primary is a sensor nothing alarms on.
  *
- * **Two JSON shapes are accepted**, this system's `{"channels":[…]}` and PRTG's
- * `{"prtg":{"result":[…]}}`, so an installation's existing advanced scripts work unchanged. XML
- * is not, and for the same reason `T-16` gave: parsing it properly needs a parser this package
- * does not have, and a half-parsed document yields a confidently wrong number. `T-24` settles
- * that dependency question for both.
+ * **Three shapes are accepted, and two of them are not ours.** This system's
+ * `{"channels":[…]}`, PRTG's `{"prtg":{"result":[…]}}`, and — since `T-24` — the XML form,
+ * `<prtg><result><channel>…`, which is what PRTG's own EXE and Script Advanced sensors emit *by
+ * default*. Accepting all three costs one branch and saves rewriting every script an installation
+ * already has. The format is decided by what the program printed rather than by a setting: a
+ * document starting with `<` is XML and everything else is JSON, so nobody has to describe their
+ * own script to the form.
  */
 export const exeScriptAdvanced: SensorType = {
   id: 'exe.script.advanced',

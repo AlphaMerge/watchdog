@@ -28,6 +28,16 @@ const CLUSTER = {
   ],
 };
 
+/** The same cluster, from the sort of appliance that answers in XML. */
+const CLUSTER_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<cluster>
+  <status>healthy</status>
+  <queue depth="12"><oldest unit="s">4.5</oldest></queue>
+  <node name="a" state="up"><load>0.4</load></node>
+  <node name="b" state="down"><load>0.95</load></node>
+  <node name="c" state="down"><load>0.7</load></node>
+</cluster>`;
+
 before(async () => {
   server = createServer((req, res) => {
     lastHeaders = req.headers;
@@ -56,6 +66,29 @@ before(async () => {
       if (url === '/html') {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end('<html><body>not an api</body></html>');
+        return;
+      }
+      if (url === '/cluster.xml') {
+        res.writeHead(200, { 'content-type': 'application/xml' });
+        res.end(CLUSTER_XML);
+        return;
+      }
+      if (url === '/cluster.xml-untyped') {
+        // The case `auto` exists for: an appliance serving XML as octet-stream, which is
+        // commoner than it should be.
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(CLUSTER_XML);
+        return;
+      }
+      if (url === '/xml-mislabelled') {
+        // A misconfiguration that exists in the field: XML under a JSON content type.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(CLUSTER_XML);
+        return;
+      }
+      if (url === '/truncated.xml') {
+        res.writeHead(200, { 'content-type': 'application/xml' });
+        res.end('<cluster><node><load>0.4</load>');
         return;
       }
       if (url === '/big') {
@@ -243,5 +276,99 @@ describe('rest.custom', () => {
     assert.equal(lastBody, '{"query":"depth"}');
     assert.equal(lastHeaders['content-type'], 'application/json');
     assert.equal(lastHeaders['authorization'], 'Bearer sekrit');
+  });
+
+  describe('XML, which is what the appliances answer in', () => {
+    it('reads an XPath into a channel', async () => {
+      const execution = await run({
+        path: '/cluster.xml',
+        extract: [
+          { key: 'depth', name: 'Queue depth', unit: 'jobs', path: '/cluster/queue/@depth' },
+          { key: 'worst', name: 'Worst load', path: '/cluster/node/load', aggregate: 'max' },
+          { key: 'nodes', name: 'Nodes', path: '/cluster/node', aggregate: 'count' },
+        ],
+      });
+      assert.equal(valueOf(execution, 'depth'), 12);
+      assert.equal(valueOf(execution, 'worst'), 0.95);
+      assert.equal(valueOf(execution, 'nodes'), 3);
+    });
+
+    it('counts with a predicate, which is the XML spelling of the JSON filter above', async () => {
+      const execution = await run({
+        path: '/cluster.xml',
+        extract: [{ key: 'down', path: "/cluster/node[@state='down']", aggregate: 'count' }],
+      });
+      assert.equal(valueOf(execution, 'down'), 2);
+    });
+
+    it('checks an expectation against XML the same way it does against JSON', async () => {
+      await assert.rejects(
+        () =>
+          run({
+            path: '/cluster.xml',
+            extract: [{ key: 'depth', path: '/cluster/queue/@depth' }],
+            expect: [{ path: '/cluster/status', equals: 'degraded' }],
+          }),
+        /is "healthy" and should be "degraded"/,
+      );
+    });
+
+    it('detects XML the server did not label, because half of them do not', async () => {
+      const execution = await run({
+        path: '/cluster.xml-untyped',
+        extract: [{ key: 'depth', path: '/cluster/queue/@depth' }],
+      });
+      assert.equal(valueOf(execution, 'depth'), 12);
+    });
+
+    it('parses what the operator says to parse, over what the server claims', async () => {
+      // XML under a JSON content type is a misconfiguration that exists in the field, and the
+      // operator can work around it here rather than waiting for somebody else to fix it.
+      // `auto` gets this one right on its own — a declaration outranks the content type — so
+      // what the override has to prove is that it is honoured in the direction where saying so
+      // changes the answer.
+      for (const format of ['auto', 'xml'] as const) {
+        const execution = await run({
+          path: '/xml-mislabelled',
+          format,
+          extract: [{ key: 'depth', path: '/cluster/queue/@depth' }],
+        });
+        assert.equal(valueOf(execution, 'depth'), 12, format);
+      }
+      await assert.rejects(
+        () =>
+          run({
+            path: '/xml-mislabelled',
+            format: 'json',
+            extract: [{ key: 'depth', path: '/cluster/queue/@depth' }],
+          }),
+        /is not JSON:/,
+      );
+    });
+
+    it('says which format it tried when the body is neither', async () => {
+      await assert.rejects(
+        () => run({ path: '/truncated.xml', extract: [{ key: 'n', path: '/cluster/node/load' }] }),
+        /is not XML: this is not well-formed XML/,
+      );
+      await assert.rejects(
+        () => run({ path: '/html', extract: [{ key: 'n', path: '$.n' }] }),
+        /is not JSON:/,
+        'an HTML error page is still not XML worth parsing',
+      );
+    });
+
+    it('gaps rather than zeroing when an XPath finds nothing', async () => {
+      // The rule the whole system is built on, and the one an XML path is most likely to break:
+      // a path that misses reads as no data, never as zero.
+      await assert.rejects(
+        () =>
+          run({
+            path: '/cluster.xml',
+            extract: [{ key: 'depth', path: '/cluster/missing/@depth' }],
+          }),
+        /none of this sensor’s 1 paths matched anything/,
+      );
+    });
   });
 });

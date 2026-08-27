@@ -1,4 +1,8 @@
 import { ScriptError } from './resolve.js';
+// A top-level import, and it stays lazy where it matters: nothing loads this module except
+// `exe.script*`'s `execute`, which is itself an `await import`. A probe running no script sensors
+// never reaches `fast-xml-parser`.
+import { parseXml } from '../xml.js';
 
 /**
  * What a program's output means (`T-19`).
@@ -124,18 +128,79 @@ export function parseSimple(stdout: string, format: ScriptFormat, key: string): 
  * `{"prtg":{"result":[…]}}` is what an installation's existing advanced scripts already emit.
  * Accepting both costs twenty lines and saves rewriting every script somebody has.
  *
- * XML is not accepted, and that is the same decision `T-16` made: parsing it properly needs a
- * parser this package does not have, and a half-parsed document yields a confidently wrong
- * number. `T-24` is where the dependency question gets settled for both.
+ * **XML too, since `T-24`** — and it matters more here than it does for REST, because PRTG's
+ * advanced EXE sensors emit XML *by default*. An installation moving across has scripts printing
+ * `<prtg><result><channel>…` and no reason to rewrite them. Which one it is comes from the first
+ * character rather than from a setting: asking an operator to describe their own script's output
+ * to a form is asking them to get it wrong once.
  */
 export function parseAdvanced(stdout: string, primaryKey: string): ScriptOutput {
   const text = stdout.trim();
   if (text === '') {
     throw new ScriptError('the program printed nothing on stdout');
   }
+  if (text.startsWith('<')) return parsePrtgXml(text, primaryKey);
   return parseJson(text, primaryKey);
 }
 
+/**
+ * PRTG's advanced XML, which is what its EXE/Script Advanced sensors print by default.
+ *
+ * The same document its JSON form describes — `<prtg>` with a `<result>` per channel, each
+ * carrying `<channel>`, `<value>` and optionally `<unit>` — so it goes through the same
+ * `channelsFrom` and produces the same keys. `<error>1</error>` with `<text>` is how such a
+ * script reports a failure, and it fails the check rather than becoming a reading.
+ */
+function parsePrtgXml(text: string, primaryKey: string): ScriptOutput {
+  const tree = parseXml(text);
+  const root = firstOf(tree['prtg']);
+  if (!isRecord(root)) {
+    throw new ScriptError(
+      'the program printed XML with no <prtg> element — that is the shape an advanced script ' +
+        'returns, and the whole document was ' +
+        quote(text.slice(0, 200)),
+    );
+  }
+
+  const error = asText(firstOf(root['error']));
+  if (error === '1' || error.toLowerCase() === 'true') {
+    throw new ScriptError(
+      `the program reported an error: ${asText(firstOf(root['text'])) || 'it gave no reason'}`,
+    );
+  }
+
+  const results = Array.isArray(root['result']) ? (root['result'] as unknown[]) : [];
+  const flattened = results.map((entry) => {
+    if (!isRecord(entry)) return entry;
+    // `<channel>`, `<value>` and `<unit>` are each a one-element array in the tree, and
+    // `channelsFrom` reads plain fields — so they are unwrapped here rather than teaching it
+    // about XML.
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(entry)) out[key] = textOf(value);
+    return out;
+  });
+
+  return {
+    channels: channelsFrom(flattened, primaryKey),
+    message: asText(firstOf(root['text'])),
+    returnCode: null,
+  };
+}
+
+/** The first item of what the XML tree made an array, or the value itself. */
+function firstOf(value: unknown): unknown {
+  return Array.isArray(value) ? (value as unknown[])[0] : value;
+}
+
+/** An element's string value: its text, past any attributes it carries. */
+function textOf(value: unknown): unknown {
+  const one = firstOf(value);
+  return isRecord(one) && '#text' in one ? one['#text'] : one;
+}
+
+/**
+ * Several channels, from JSON — both shapes.
+ */
 function parseJson(text: string, primaryKey: string): ScriptOutput {
   let document: unknown;
   try {

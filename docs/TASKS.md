@@ -3460,7 +3460,7 @@ because each is a decision rather than a defect:
       sign in at 10 ms` — and, with one step's expectation broken, `step 3 of 3 (call the api)
       answered 200 but does not contain "t=WRONG"`.
 - [x] **T-16 — REST Custom** · L · T-13 · JSONPath/XPath extraction into declared channels, with
-      a mapping editor. **JSON delivered; the XML half is `T-24` and the editor is `U-13`.**
+      a mapping editor. **JSON and XML delivered (`T-16`, `T-24`); the editor is `U-13`.**
 
       **T-16 outcome.** `rest.custom` plus `support/json-path.ts`, a bounded path language of its
       own. The difference from `http.content` is the shape of the answer and it is not cosmetic:
@@ -3495,7 +3495,7 @@ because each is a decision rather than a defect:
       worst=95 oldest=4.5` — a filter and a count, a wildcard with a maximum and a scale, and a
       gauge the API quoted as a string — and, with the expectation inverted, `200, but the
       response says: $.status is "healthy" and should be "degraded"`.
-- [ ] **T-24 — REST Custom, the XML half** · M · T-16 · XPath extraction from an XML response,
+- [x] **T-24 — REST Custom, the XML half** · M · T-16 · XPath extraction from an XML response,
       the other half of what `T-16` names. **Split out by `T-16`:** parsing XML properly needs a
       parser this package does not have, and namespaces, CDATA, entities and mixed content all
       have a way of half-working — a half-parsed document yields a confidently wrong number,
@@ -3504,6 +3504,83 @@ because each is a decision rather than a defect:
       it is worth deciding once, deliberately, rather than hand-rolling a parser inside a sensor
       type. The path language in `support/json-path.ts` is the model for the XPath subset:
       documented, bounded, and stopping short of anything that evaluates.
+
+      **T-24 outcome.** The dependency question, answered: `fast-xml-parser` — pure JavaScript,
+      maintained, MIT, and eight packages in total including its seven transitive dependencies,
+      none of which runs an install script. CLAUDE.md's rule is that syslog, NetFlow and WMI are
+      written here *because npm has no maintained option*; XML has several, and hand-writing one
+      would be inventing a bug in the part that hurts most. `support/xml.ts`
+      is the whole surface: `parseXml`, `looksLikeXml`, `XmlError`, and the parser settings that
+      are the real contract — every element is an array (so one `<result>` and five have the same
+      shape), attributes are not (an attribute is single-valued, and wrapping one would make
+      `@state` a list nobody asked for), attributes are prefixed rather than merged with children
+      (`<r name="x"><name>y</name></r>` is a document where merging would make one of the two
+      unreachable, and *which* one would depend on parse order), numbers stay strings, and
+      namespace prefixes are kept.
+
+      **A document is validated before it is parsed**, because `fast-xml-parser` is lenient by
+      design and will happily build a tree from a truncated one — which is the case a monitoring
+      check meets most often, a response cut off by a bound or a dropped connection. A tree from
+      half a document is the confidently-wrong number this ticket exists to avoid.
+
+      **XPath spelling over the same engine, not a second engine** — a deliberate divergence from
+      the wording above. Two path languages would be two things for an operator to learn, two to
+      test and two to get subtly wrong. So a path beginning with `/` is read as a location path
+      and produces the steps `selectPath` already walks: `/prtg/result[1]/value`,
+      `/prtg/result[last()]/channel`, `//channel`, `/result/unit/@state`, `/prtg/text/text()`,
+      `/prtg/result[unit='%']/value`, `/prtg/result[value>100]/channel`. Two step kinds were
+      added for it — `position` and `select` act on the node-set as a whole, which is XPath's
+      semantics and not JSONPath's — along with the flattening every step needs, because an
+      element is an array and `/prtg/result/value` must return `["91.5", …]` rather than
+      `[["91.5"], …]`. **`[1]` is the first, and that is the one place the two syntaxes
+      disagree**: JSONPath counts from zero and XPath from one, so the *syntax the path is
+      written in* decides and the field description says which. Treating them the same would make
+      `[1]` mean different things to two operators in the same field of the same form.
+
+      Wired into two places. `rest.custom` gains `format: auto|json|xml`; and
+      `exe.script.advanced` reads PRTG's advanced **XML**, which matters more, because that is
+      what PRTG's own EXE/Script Advanced sensors emit *by default* — an installation moving
+      across has scripts printing `<prtg><result><channel>…` and no reason to rewrite them. It
+      goes through the same `channelsFrom` as the JSON form, so the two shapes cannot drift into
+      disagreeing about what a channel is called.
+
+      **A defect found by the tests, in the shared half.** `looksLikeXml` fell back to "starts
+      with `<`" with only a `<!DOCTYPE html` guard, so a proxy or login page answering
+      `<html><body>…` was read as XML — and HTML is *well-formed enough to parse*, which turned
+      the honest diagnosis ("this is not an API response") into the useless one ("your path
+      matched nothing in it"). Now HTML is excluded by content type and by root element, while a
+      declaration still outranks a content type that contradicts it, so XML served as
+      `application/json` — a real misconfiguration — is still read. A second one: a `SYSTEM`
+      entity makes the library throw its own error, which escaped `parseXml` unclassified;
+      wrapped now, found by the XXE test.
+
+      **The XXE tests assert a property of the library, not of a setting we pass.** No
+      DTD-declared entity is expanded at all — a billion-laughs document parses to the literal
+      text `&lol8;` — and a `SYSTEM` entity is refused outright, so neither `file:///etc/passwd`
+      nor a URL it would fetch has anything to act on. A defence nobody checks is one that
+      disappears quietly on an upgrade, so all three are asserted.
+
+      `XMLValidator` is marked deprecated in favour of the `fast-xml-validator` package and we
+      are staying with it, measured: that move adds **seven** packages, including a second XML
+      parser, duplicate copies of two the parser already brings, and two with install scripts. If
+      it is ever removed the import fails at build time, which is the right failure — the
+      alternative is losing the validation without anything saying so.
+
+      Fourteen mutations, all killed: skipping validation, wrapping attributes in arrays, not
+      wrapping elements, letting the parser coerce numbers, dropping the HTML guard, counting
+      XPath positions from zero, not flattening a step's node-set, comparing a node instead of
+      its string value in a predicate, `last()` not being last, ignoring PRTG's XML error flag,
+      never reading advanced output as XML, ignoring an explicit `format: xml`, and not
+      unwrapping PRTG's XML fields.
+
+      Verified live against `ms-target`, which gained `/status.xml` and an unlabelled
+      `/status-untyped` serving the same document as `application/octet-stream`, plus a
+      `dev/scripts/prtg-style-xml.sh`. All three sensors Up: both REST ones read `depth=12 down=2
+      worst=95 oldest=4.5` through XPath — the unlabelled one via the body fallback — and the
+      script sensor reported `from a PRTG-style XML script` with `inodes` created dynamically
+      from `<channel>Inodes</channel>`. Pointed at the HTML page, it says `200, but the response
+      is not JSON: Unexpected token '<' … (it says Content-Type: text/html)`, which is the
+      defect above, fixed and confirmed.
 - [x] **T-17 — Mail sensors** · L · P-05 · SMTP, POP3, IMAP, and SMTP&IMAP Round Trip with
       cleanup of test messages.
 
@@ -3650,8 +3727,9 @@ because each is a decision rather than a defect:
       **Three output formats for the simple sensor and two JSON shapes for the advanced one**,
       including PRTG's own `returncode:value:message` and `{"prtg":{"result":[…]}}`, so an
       installation's existing scripts work unchanged. A comma decimal separator is read, because
-      that is what a script written on a German-locale machine prints. XML is not accepted, for
-      the reason `T-16` gave and settled in `T-24`.
+      that is what a script written on a German-locale machine prints. XML was not accepted here
+      for the reason `T-16` gave; `T-24` settled it and added PRTG's advanced XML, which is what
+      its own EXE/Script Advanced sensors emit by default.
 
       **The advanced sensor's channels come from the program, not from the form** — the core
       creates a channel the first time a sensor mentions it (`S-07`), so a script that starts

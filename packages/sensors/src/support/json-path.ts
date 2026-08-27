@@ -29,10 +29,41 @@ export class JsonPathError extends Error {
 }
 
 type Step =
-  | { readonly kind: 'member'; readonly name: string }
+  | {
+      readonly kind: 'member';
+      readonly name: string;
+      /**
+       * Apply this step to every element of an array rather than to the array itself (`T-24`).
+       *
+       * Set only for XPath-spelled paths, and it is what makes them work over an XML tree: every
+       * element in that tree is an array, so `/prtg/result/channel` has to walk *through* the
+       * one-element array `prtg` is. That is exactly XPath's own semantics — a location step
+       * applies to a node-set, not to a node.
+       *
+       * Deliberately not the default. In JSON, `$.a.b` where `a` is an array selects nothing and
+       * `$.a[*].b` is how you say otherwise; changing that would silently alter every path
+       * `T-16` shipped.
+       */
+      readonly through?: true;
+    }
   | { readonly kind: 'index'; readonly at: number }
   | { readonly kind: 'wildcard' }
-  | { readonly kind: 'descend'; readonly name: string }
+  | { readonly kind: 'descend'; readonly name: string; readonly through?: true }
+  /**
+   * An XPath predicate, which applies to the **node-set** rather than inside each node (`T-24`).
+   *
+   * This is the real difference between the two syntaxes, and it is not cosmetic. `$.a[0]` in
+   * JSONPath means "index into the array `a`"; `/a[1]` in XPath means "the first node of the set
+   * `/a` produced". Same brackets, different subject — so they are different steps, and the
+   * syntax the path was written in decides which one is built.
+   */
+  | { readonly kind: 'position'; readonly at: number }
+  | {
+      readonly kind: 'select';
+      readonly name: string;
+      readonly op: '==' | '!=' | '<' | '>' | '<=' | '>=';
+      readonly value: string | number | boolean | null;
+    }
   | {
       readonly kind: 'filter';
       readonly name: string;
@@ -60,6 +91,8 @@ export function parsePath(path: string): Step[] {
   let at = 0;
   const text = path.trim();
   if (text === '') throw new JsonPathError('the path is empty');
+  // A path beginning with a slash is XPath spelling (`T-24`), translated to the same steps.
+  if (text.startsWith('/')) return parseLocationPath(text);
   if (text.startsWith('$')) at = 1;
   else if (!text.startsWith('.') && !text.startsWith('[')) {
     // `queue.depth` rather than `$.queue.depth`. Accepted because everybody writes it, and
@@ -172,6 +205,108 @@ export function parsePath(path: string): Step[] {
   }
 }
 
+/**
+ * An XPath-style location path, over the same steps (`T-24`).
+ *
+ * **XPath spelling, not a second engine.** `T-24` asks for "XPath extraction", and a second path
+ * language would be two things for an operator to learn, two to test and two to get subtly wrong.
+ * So a path beginning with `/` is read here and produces the steps `selectPath` already walks:
+ *
+ *   /prtg/result/channel          members, in order
+ *   /prtg/result[2]/value         **one-based**, as XPath is — see below
+ *   /prtg/result[last()]/value    the last one
+ *   //channel                     at any depth
+ *   /result/@name                 an attribute
+ *   /result/text()                the element's own text
+ *   /result[@state='down']/name   a predicate on an attribute
+ *
+ * **`[1]` is the first, and that is the one place these two syntaxes disagree.** JSONPath counts
+ * from zero and XPath from one. Silently treating them the same would make `[1]` mean the second
+ * element to one operator and the first to another, in the same field of the same form — so the
+ * *syntax the path is written in* decides, and the description on the parameter says which.
+ */
+function parseLocationPath(text: string): Step[] {
+  const steps: Step[] = [];
+  let rest = text;
+
+  while (rest.startsWith('/')) {
+    const descend = rest.startsWith('//');
+    rest = rest.slice(descend ? 2 : 1);
+    if (rest === '') break;
+
+    const match = /^([^/[]+)/.exec(rest);
+    const raw = (match?.[1] ?? '').trim();
+    if (raw === '') throw new JsonPathError(`"${text}" has an empty step`);
+    rest = rest.slice(match?.[0].length ?? 0);
+
+    if (raw === '*') {
+      if (descend) throw new JsonPathError('`//*` selects everything at every depth');
+      steps.push({ kind: 'wildcard' });
+    } else if (raw === 'text()') {
+      // `#text` is where `fast-xml-parser` puts an element's own text when it also has
+      // attributes or children. An element with neither *is* its text, which `selectPath`
+      // reaches because a member step over a string simply selects nothing and the caller
+      // already has the element.
+      steps.push({ kind: 'member', name: '#text', through: true });
+    } else if (raw.startsWith('@')) {
+      steps.push({ kind: 'member', name: `@_${raw.slice(1)}`, through: true });
+    } else if (descend) {
+      steps.push({ kind: 'descend', name: raw, through: true });
+    } else {
+      steps.push({ kind: 'member', name: raw, through: true });
+    }
+
+    // Predicates. `[2]`, `[last()]`, or a comparison on an attribute or child.
+    while (rest.startsWith('[')) {
+      const close = rest.indexOf(']');
+      if (close < 0) throw new JsonPathError(`"${text}" has a [ that is never closed`);
+      const inner = rest.slice(1, close).trim();
+      rest = rest.slice(close + 1);
+
+      if (/^\d+$/.test(inner)) {
+        const position = Number(inner);
+        if (position < 1) {
+          throw new JsonPathError('XPath positions start at 1, so [0] selects nothing');
+        }
+        steps.push({ kind: 'position', at: position - 1 });
+        continue;
+      }
+      if (inner === 'last()') {
+        steps.push({ kind: 'position', at: -1 });
+        continue;
+      }
+      const comparison = /^@?([A-Za-z0-9_.:-]+)\s*(=|!=|<=|>=|<|>)\s*(.+)$/.exec(inner);
+      if (comparison === null) {
+        throw new JsonPathError(
+          `"[${inner}]" is not a predicate this reads — a position, last(), or a comparison ` +
+            "such as [@state='down']",
+        );
+      }
+      const name = inner.startsWith('@') ? `@_${comparison[1] ?? ''}` : (comparison[1] ?? '');
+      const operator = comparison[2] === '=' ? '==' : (comparison[2] ?? '==');
+      steps.push({
+        kind: 'select',
+        name,
+        op: operator as '==' | '!=' | '<' | '>' | '<=' | '>=',
+        value: literal((comparison[3] ?? '').trim()),
+      });
+    }
+  }
+
+  if (steps.length === 0) throw new JsonPathError('`/` on its own selects the whole document');
+  return steps;
+}
+
+/** A predicate's right-hand side. Same rules as the JSONPath filter's, so they cannot drift. */
+function literal(raw: string): string | number | boolean | null {
+  if (/^'.*'$/.test(raw) || /^".*"$/.test(raw)) return raw.slice(1, -1);
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw === 'null') return null;
+  if (raw !== '' && Number.isFinite(Number(raw))) return Number(raw);
+  return raw;
+}
+
 /** How many nodes one path may visit, so a recursive descent over a huge document is bounded. */
 const MAX_VISITS = 200_000;
 
@@ -191,11 +326,51 @@ export function selectPath(document: unknown, steps: readonly Step[]): unknown[]
   };
 
   for (const step of steps) {
+    // The two XPath steps act on the node-set as a whole, so they are handled before the loop
+    // that visits each node.
+    if (step.kind === 'position') {
+      budget(1);
+      const at = step.at < 0 ? current.length + step.at : step.at;
+      const one = current[at];
+      current = at >= 0 && at < current.length && one !== undefined ? [one] : [];
+      if (current.length === 0) return [];
+      continue;
+    }
+    if (step.kind === 'select') {
+      budget(current.length);
+      current = current.filter((node) => {
+        const raw = step.name === '' ? node : memberAt(node, step.name);
+        return compare(stringValue(raw), step.op, step.value);
+      });
+      if (current.length === 0) return [];
+      continue;
+    }
+
     const next: unknown[] = [];
     budget(current.length);
     for (const value of current) {
       switch (step.kind) {
         case 'member': {
+          if (step.through === true) {
+            // **An XPath step yields a node-set, and that is what the flattening is for.** Every
+            // element in the XML tree is an array — `<value>91.5</value>` is `value: ['91.5']` —
+            // so a step both walks *through* the array it is applied to and flattens the array it
+            // produces. Without the second half, `/prtg/result/value` returns `[['91.5'], ...]`
+            // and every aggregate over it reports nothing, which is a path that looks right and
+            // silently measures nothing.
+            for (const element of Array.isArray(value) ? (value as unknown[]) : [value]) {
+              if (step.name === TEXT && !isRecord(element)) {
+                // An element with no attributes and no children *is* its text.
+                if (element !== undefined && element !== null) next.push(element);
+                continue;
+              }
+              if (!isRecord(element) || !(step.name in element)) continue;
+              const found = element[step.name];
+              if (Array.isArray(found)) next.push(...(found as unknown[]));
+              else next.push(found);
+            }
+            break;
+          }
           if (isRecord(value) && step.name in value) next.push(value[step.name]);
           break;
         }
@@ -212,10 +387,18 @@ export function selectPath(document: unknown, steps: readonly Step[]): unknown[]
           break;
         }
         case 'descend': {
-          descend(value, step.name, next, budget);
+          const found: unknown[] = [];
+          descend(value, step.name, found, budget);
+          // An XPath descent yields a node-set too, so it flattens the same way a step does.
+          for (const one of found) {
+            if (step.through === true && Array.isArray(one)) next.push(...(one as unknown[]));
+            else next.push(one);
+          }
           break;
         }
         case 'filter': {
+          // An XPath predicate filters the node-set the step before it produced, and that set is
+          // already an array of elements — so the candidates are the same either way.
           const candidates: unknown[] = Array.isArray(value)
             ? (value as unknown[])
             : isRecord(value)
@@ -262,6 +445,23 @@ function descend(root: unknown, name: string, into: unknown[], budget: (by: numb
     const entries = Object.entries(value).filter(([key]) => key !== name);
     for (let at = entries.length - 1; at >= 0; at -= 1) stack.push(entries[at]?.[1]);
   }
+}
+
+/** Where an XML element's own text lands when it also has attributes or children. */
+const TEXT = '#text';
+
+/**
+ * What an XPath predicate compares against — the node's *string value*.
+ *
+ * Two unwrappings, and both are the XML tree showing through. A member is a one-element array
+ * because every element is; and an element that carries attributes is an object whose own text
+ * sits under `#text`, so `[unit='%']` on `<unit state="ok">%</unit>` has to reach past the
+ * attributes to the text. Comparing the object instead would make that predicate silently false
+ * — a filter that matches nothing and looks like a document that contains nothing.
+ */
+function stringValue(raw: unknown): unknown {
+  const one = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
+  return isRecord(one) && TEXT in one ? one[TEXT] : one;
 }
 
 /** `a.b.c` inside a filter, so `[?(@.status.state=='up')]` works. */
