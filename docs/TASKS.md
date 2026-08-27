@@ -4956,8 +4956,59 @@ because each is a decision rather than a defect:
       ranges across the merged production manifest. Nothing caught it because the packaging
       smoke test builds its own tarball and failed identically. Aligned to `^8.23.0`, which is
       what the lockfile already resolved.
-- [ ] **R-08 — Disconnect/reconnect soak test** · M · R-03 · A one-hour disconnect replays with
+- [x] **R-08 — Disconnect/reconnect soak test** · M · R-03 · A one-hour disconnect replays with
       zero data loss and no ingestion stall.
+
+      **R-08 outcome.** The criterion has two clauses that fail in different places, so it is
+      measured in two: **zero data loss** is the probe's spool, and **no ingestion stall** is the
+      core's pacer. One test spanning both would have needed `@ms/core` and `@ms/probe` to import
+      each other, which `ADR-001` deliberately does not allow — they are separate services and
+      share only `@ms/shared`.
+
+      **An hour is a quantity, not a duration.** Sleeping for an hour would measure a clock. At
+      `PLAN.md`'s v1 target — 5,000 sensors on a 60-second interval — an hour of disconnection is
+      300,000 readings, and producing them and replaying them is what measures the thing that
+      breaks. Both tests run a small fraction in the ordinary suite and take the full criterion
+      under an environment variable, the convention `P-15`'s scheduler benchmark already set.
+
+      Measured, the probe side (`MS_SOAK_MINUTES=60`):
+
+      ```
+      spooled       300,000 readings, 61.7 MB in 8 segments, 935 ms to write
+      an hour     62 MB projected at 216 bytes a reading, against a 2 GiB default (3.0% of it)
+      replayed    1773 ms in 150 batches, 169,233 readings/s
+      lost 0, duplicated 0, corrupt 0; caught up 2031x faster than the outage
+      ```
+
+      Measured, the core side (`MS_SOAK_FRACTION=1`), two probes each replaying an hour while a
+      third reports live:
+
+      ```
+      live, quiet     p50  263.7 ms   p99  274.6 ms    40 batches
+      live, replaying p50  263.6 ms   p99  279.2 ms   300 batches   -> 1.02x, budget 3x
+      replay          p50   24.5 ms   p99   48.5 ms   600 batches, cleared in 96.1 s
+      pacing          the replaying probes waited up to 50 ms; the live one 0 ms
+      ```
+
+      **The capacity number is the one worth reading.** An hour at the v1 target is 3% of the
+      shipped spool, so the default is not sized for an hour — it is sized for about a day and a
+      half. That is the right shape: the outage that loses an operator data is the one over a
+      weekend, not the one over lunch.
+
+      **The pacer does not slow a lone catch-up, and writing the test taught me that.** The first
+      version used one replaying probe, asserted it was paced, and failed — correctly. One probe
+      emptying its spool is not a fairness problem, it is just work; the delay begins when more
+      probes are catching up than the core will run at full speed. The test now runs two against
+      a limit of one, which measures the mechanism rather than its absence.
+
+      Live p99 moved 2% while 600,000 spooled readings went past it. The ~263 ms floor on every
+      live figure is the ingestion flush timer rather than the database — one probe offering one
+      batch at a time never fills a write — and it is identical in both arms, which is what makes
+      the ratio the measurement rather than the machine.
+
+      Also covered: a link that keeps dropping mid-replay. Nothing leaves the spool until the core
+      acknowledges it (`R-02`), so a batch in flight when the link drops is re-offered rather than
+      skipped — the failure this guards against loses exactly one batch per flap, silently.
 
 ## Phase 9 — Users, RBAC and security
 

@@ -16,6 +16,11 @@ export default tseslint.config(
       '**/*.tsbuildinfo',
       'build/**',
       'release/**',
+      // Agent worktrees are whole copies of this repository, build output and all. Linting one
+      // means linting everything twice and reporting thousands of errors from a minified bundle
+      // that no one committed — and the patterns above are anchored to the repository root, so
+      // a nested checkout's `build/` is not covered by them.
+      '.claude/worktrees/**',
     ],
   },
   js.configs.recommended,
