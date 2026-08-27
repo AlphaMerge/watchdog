@@ -3261,10 +3261,58 @@ because each is a decision rather than a defect:
 - [ ] **T-09 — Windows check transport** · L · P-03 · PowerShell / WinRM shell-out from a
       Windows-hosted probe, with credential handling and output parsing.
 - [ ] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
-- [ ] **T-11 — TLS Certificate sensor** · M · P-05 · Expiry countdown, chain validation, hostname
+- [x] **T-11 — TLS Certificate sensor** · M · P-05 · Expiry countdown, chain validation, hostname
       match, issuer and SAN channels.
-- [ ] **T-12 — TLS Security Check sensor** · M · T-11 · Offered protocol versions and cipher
+
+      **T-11 outcome.** `tls.certificate`. Days-until-expiry is the primary channel and that is
+      the whole design: an expired certificate is not an incident to detect, it is one to have
+      *prevented*, and the only thing that prevents it is a number counting down where somebody
+      set a limit weeks out. Every other channel is context for the day that limit fires.
+
+      **The handshake deliberately does not verify.** A client that refused to complete would
+      report nothing at all — the sensor would go Down with a TLS error instead of counting down
+      the days, at exactly the moment somebody needs the number. So the socket accepts anything
+      and *trusted*, *hostMatches* and the countdown become channels. That is also why an
+      untrusted chain or a wrong name is a reading of 0 rather than a failed check.
+
+      **The soonest expiry is taken across the whole chain, not the leaf.** An expiring
+      intermediate takes a site down exactly as an expiring leaf does, renews on somebody else's
+      schedule, and is the one nobody is watching — so the message names it when it is not the
+      leaf. Wildcards match exactly one label (`*.example.com` covers `a.example.com` and not
+      `a.b.example.com`), which is the browser rule and the one a naive `startsWith` gets wrong in
+      the direction that accepts too much.
+
+      The verdict is a **pure function** over a certificate, separately from the handshake, and
+      that turned out to be necessary rather than tidy: `openssl req` gained `-not_before` in 3.2
+      and this machine has 3.0, so there is no portable way to *issue* an already-expired
+      certificate for a live test. The expiry arithmetic is tested against fabricated
+      certificates, which is not a compromise — the input is a plain object either way.
+
+      Verified live against `www.google.com`: 67 days left, issued by WR2, 3 in chain, trusted
+      and matching, 117 ms handshake.
+- [x] **T-12 — TLS Security Check sensor** · M · T-11 · Offered protocol versions and cipher
       suites, scored by weakness.
+
+      **T-12 outcome.** `tls.security`. **It works by trying, because asking is not something TLS
+      permits**: there is no query for "what do you support", a client offers a range and the
+      server picks. So it is one handshake per version, each pinned to exactly that version, and
+      what completed is what is offered. Four connections a scan — which is why the timeout
+      parameter says out loud that this wants an interval in hours: what it measures changes when
+      somebody edits a configuration file, not from one minute to the next.
+
+      **The score is the weakest version still accepted, never an average.** An endpoint offering
+      TLS 1.3 *and* TLS 1.0 is a TLS 1.0 endpoint as far as an attacker is concerned, because the
+      attacker picks — and averaging would let a good new protocol hide a bad old one, which is
+      exactly what makes a security dashboard reassuring and wrong.
+
+      A refused *version* is the reading; a refused *connection* is a broken check, and the two
+      have to look different or an unreachable host scores as a perfectly hardened one. Verified
+      live against `www.google.com`: accepts TLS 1.2 and 1.3, refuses 1.0 and 1.1, score 80,
+      strongest handshake `TLS_AES_256_GCM_SHA384`.
+
+      Cipher-suite enumeration per version is deliberately **not** here: it is another dozen
+      handshakes per scan, and the protocol version is what actually gets a device flagged in an
+      audit.
 - [ ] **T-13 — HTTP Advanced** · M · P-09 · Method, headers, POST body, auth, redirect policy,
       response validation.
 - [ ] **T-14 — HTTP Content** · M · T-13 · String and regex matching, numeric extraction into

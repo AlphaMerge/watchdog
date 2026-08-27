@@ -55,6 +55,8 @@ import { icmpPing } from './types/icmp-ping.js';
 import { dnsRecord } from './types/dns-record.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
+import { tlsCertificate } from './types/tls-certificate.js';
+import { tlsSecurity } from './types/tls-security.js';
 import { snmpTraffic } from './types/snmp-traffic.js';
 import { snmpCustom } from './types/snmp-custom.js';
 import { snmpCustomString } from './types/snmp-custom-string.js';
@@ -83,6 +85,8 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   dnsRecord,
   httpRequest,
   portTcp,
+  tlsCertificate,
+  tlsSecurity,
   snmpTraffic,
   snmpCustom,
   snmpCustomString,

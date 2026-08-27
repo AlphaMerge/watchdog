@@ -235,6 +235,8 @@ describe('the built-in catalogue', () => {
       'ssh.load',
       'ssh.meminfo',
       'ssh.script',
+      'tls.certificate',
+      'tls.security',
     ]);
   });
 
