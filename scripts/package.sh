@@ -10,6 +10,17 @@
 #   etc/{core,probe}.json         example configuration
 #   install.sh                    Linux installer
 #
+# With --probe-only, a package for a remote probe host (TASKS.md R-07): the probe, the sensor
+# catalogue it executes, and nothing else. `install.sh --probe-only` already existed, but it
+# installs from the full tarball — so a remote probe host received the core service, the web UI
+# and the core's own dependencies, and was trusted not to start them.
+#
+# **The win is what cannot happen, not the megabytes.** Measured on linux/aarch64 at 0.1.0 it is
+# 12M against 16M, because most of the weight is the sensor catalogue's dependencies and the
+# probe is precisely what needs those — `pg` ships either way, since the probe runs the
+# PostgreSQL *sensor*. What the probe host no longer has is a core it could be pointed at, a
+# core.json to misconfigure, a web root to serve, and Fastify.
+#
 # Native addons are shipped as installed, not bundled: esbuild cannot inline a .node binary.
 # Build on the same OS and architecture as the target.
 set -euo pipefail
@@ -18,8 +29,31 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="${MS_BUILD_VERSION:-$(node -p "require('${repo_root}/package.json').version")}"
 arch="$(uname -m)"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-stage="${repo_root}/build/ms-${version}"
-out="${repo_root}/release/ms-${version}-${os}-${arch}.tar.gz"
+
+probe_only=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --probe-only) probe_only=1 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "${probe_only}" -eq 1 ]; then
+  # @ms/sensors comes too: the probe *is* what executes the checks, and a probe without the
+  # catalogue starts, connects, accepts assignments and fails every one of them.
+  packages=(shared sensors probe)
+  services=(probe)
+  name="ms-probe"
+else
+  packages=(shared sensors core probe)
+  services=(core probe)
+  name="ms"
+fi
+
+stage="${repo_root}/build/${name}-${version}"
+out="${repo_root}/release/${name}-${version}-${os}-${arch}.tar.gz"
 
 echo "==> building ${version} for ${os}/${arch}"
 rm -rf "${stage}"
@@ -28,7 +62,7 @@ mkdir -p "${stage}" "${repo_root}/release"
 npm --prefix "${repo_root}" run build
 
 echo "==> staging application"
-for pkg in shared sensors core probe; do
+for pkg in "${packages[@]}"; do
   mkdir -p "${stage}/app/${pkg}"
   cp -R "${repo_root}/packages/${pkg}/dist" "${stage}/app/${pkg}/dist"
   cp "${repo_root}/packages/${pkg}/package.json" "${stage}/app/${pkg}/package.json"
@@ -41,13 +75,13 @@ done
 
 echo "==> installing production dependencies"
 # A workspace-free manifest so `npm install --omit=dev` resolves only what the services need.
-node - "$repo_root" "$stage" "$version" <<'NODE'
+node - "$repo_root" "$stage" "$version" "${packages[*]}" <<'NODE'
 const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
-const [, , repoRoot, stage, version] = process.argv;
+const [, , repoRoot, stage, version, packageList] = process.argv;
 
 const merged = {};
-for (const pkg of ['shared', 'sensors', 'core', 'probe']) {
+for (const pkg of packageList.split(' ')) {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', pkg, 'package.json'), 'utf8'));
   for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
     // Workspace siblings are staged directly, not fetched.
@@ -76,7 +110,7 @@ ln -sfn ../../sensors "${stage}/app/node_modules/@ms/sensors"
 
 echo "==> staging launchers, units and examples"
 mkdir -p "${stage}/bin" "${stage}/deploy" "${stage}/etc"
-for svc in core probe; do
+for svc in "${services[@]}"; do
   cat > "${stage}/bin/ms-${svc}" <<LAUNCHER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -87,20 +121,34 @@ LAUNCHER
   chmod +x "${stage}/bin/ms-${svc}"
 done
 
-# The web UI, built to static assets and served by ms-core itself (ADR-001 Decision 8).
-# `api.webRoot` in core.json points at where install.sh puts this.
-echo "==> staging the web UI"
-npm --prefix "${repo_root}" run build:web
-cp -R "${repo_root}/packages/web/dist" "${stage}/web"
+if [ "${probe_only}" -eq 0 ]; then
+  # The web UI, built to static assets and served by ms-core itself (ADR-001 Decision 8).
+  # `api.webRoot` in core.json points at where install.sh puts this.
+  echo "==> staging the web UI"
+  npm --prefix "${repo_root}" run build:web
+  cp -R "${repo_root}/packages/web/dist" "${stage}/web"
+fi
 
-cp -R "${repo_root}/deploy/systemd" "${stage}/deploy/systemd"
-cp -R "${repo_root}/deploy/winsw" "${stage}/deploy/winsw"
-cp "${repo_root}/deploy/examples/core.json" "${stage}/etc/core.json"
-cp "${repo_root}/deploy/examples/probe.json" "${stage}/etc/probe.json"
-cp "${repo_root}/deploy/install.sh" "${stage}/install.sh"
-chmod +x "${stage}/install.sh"
+mkdir -p "${stage}/deploy/systemd" "${stage}/deploy/winsw"
+for svc in "${services[@]}"; do
+  cp "${repo_root}/deploy/systemd/ms-${svc}.service" "${stage}/deploy/systemd/ms-${svc}.service"
+  cp "${repo_root}/deploy/winsw/ms-${svc}.xml" "${stage}/deploy/winsw/ms-${svc}.xml"
+  cp "${repo_root}/deploy/examples/${svc}.json" "${stage}/etc/${svc}.json"
+done
+
+if [ "${probe_only}" -eq 1 ]; then
+  # The probe host's own installer and nothing that could install a core (R-07).
+  cp "${repo_root}/deploy/install-probe.sh" "${stage}/install-probe.sh"
+  cp "${repo_root}/deploy/install-probe.ps1" "${stage}/install-probe.ps1"
+  chmod +x "${stage}/install-probe.sh"
+else
+  cp "${repo_root}/deploy/install.sh" "${stage}/install.sh"
+  # The enrolment tool belongs on the core, because the CA does (R-07).
+  cp "${repo_root}/deploy/enrol-probe.sh" "${stage}/bin/ms-enrol"
+  chmod +x "${stage}/install.sh" "${stage}/bin/ms-enrol"
+fi
 printf '%s\n' "${version}" > "${stage}/VERSION"
 
 echo "==> creating ${out}"
-tar -czf "${out}" -C "${repo_root}/build" "ms-${version}"
+tar -czf "${out}" -C "${repo_root}/build" "${name}-${version}"
 echo "==> done: ${out}"

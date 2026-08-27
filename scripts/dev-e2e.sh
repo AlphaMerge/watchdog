@@ -7,7 +7,9 @@
 # Prerequisites: npm run build, scripts/dev-certs.sh
 set -u
 
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# `|| exit`: this script sets -u but not -e, so a failed cd would otherwise carry on and do
+# its work in whatever directory it happened to be in.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 logs="dev/data/e2e"
 mkdir -p "${logs}"
 

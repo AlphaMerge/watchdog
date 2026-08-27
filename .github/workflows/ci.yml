@@ -74,7 +74,7 @@ jobs:
 
       # install.sh runs as root on an operator's box; a shell bug there is an outage.
       - name: shellcheck
-        run: shellcheck -S warning scripts/*.sh deploy/install.sh
+        run: shellcheck -S warning scripts/*.sh deploy/*.sh
 
   install-smoke:
     name: install smoke test on a clean box
@@ -98,7 +98,7 @@ jobs:
       # Hand it the tarball the previous step built. Without an argument the script builds its
       # own, which is the right default locally but a wasted second build here.
       - name: install smoke test
-        run: scripts/smoke-install.sh "$(ls -t release/ms-*.tar.gz | head -1)"
+        run: scripts/smoke-install.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -106,6 +106,25 @@ jobs:
           name: release-tarball
           path: release/*.tar.gz
           retention-days: 7
+
+  enrol-smoke:
+    name: remote probe enrolment across two boxes
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      # Builds both packages itself: this test is about the two of them agreeing, so handing it
+      # a tarball built by another step would let them drift apart unnoticed. R-07.
+      - name: enrolment smoke test
+        run: scripts/smoke-enrol.sh
 
   dev-environment:
     name: dev compose comes up

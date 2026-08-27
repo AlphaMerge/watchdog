@@ -4905,8 +4905,57 @@ because each is a decision rather than a defect:
       Not done here: there is no probes page yet — `R-01` shipped the API without one — so the
       skew is answerable over HTTP and from the log, and a UI for it belongs with whatever ticket
       builds that page.
-- [ ] **R-07 — Probe installers** · L · F-07 · Linux and Windows probe-only packages with a
+- [x] **R-07 — Probe installers** · L · F-07 · Linux and Windows probe-only packages with a
       guided enrolment flow.
+
+      **R-07 outcome.** `install.sh --probe-only` already existed, so this looked like packaging
+      work. It was not: underneath it was a security defect. `install.sh` issues exactly one
+      `probe.crt`/`probe.key`, on the core host, and a remote probe could only be brought up by
+      copying that pair — so **every probe in an installation presented the same TLS identity**.
+      `R-01` made the *access key* per-probe and revocable; the certificate beneath it was
+      shared, and revoking one probe at the transport layer was not possible at all.
+
+      **`ms-enrol` issues a certificate per probe**, from the CA on the core host, and packs it
+      with `ca.crt`, the enrolment key and the core's address into one file an operator carries
+      to the probe host. A random serial rather than `-CAcreateserial`: the `.srl` file sits
+      beside the CA key and two operators enrolling at once would race for it, which is the one
+      thing a serial exists to prevent. It refuses to guess the core's address when the core
+      binds a wildcard — `0.0.0.0` is what a service binds and never what a probe can dial, and
+      a bundle that cannot connect is worse than a question.
+
+      **The bundle carries a private key, and the flow is built around that being true.** It is
+      written `0600`, it is meant to be carried once and deleted, and the probe it enrols still
+      waits for a person to approve it — so a leaked bundle is an identity that can knock, not
+      an identity that monitors. The key is generated on the core rather than by the probe
+      because submitting a CSR would need a trusted channel to the core, which is the very
+      channel being established; `R-01`'s approval queue is what makes carrying it acceptable.
+
+      **A probe host now receives a probe.** `package.sh --probe-only` builds `shared`,
+      `sensors` and `probe` and nothing else. Measured on linux/aarch64 at 0.1.0 it is 12M
+      against 16M — most of the weight is the sensor catalogue's dependencies and the probe is
+      exactly what needs those, so `pg` ships either way because the probe runs the PostgreSQL
+      *sensor*. The win is not megabytes: the probe host has no core it could be pointed at, no
+      `core.json` to misconfigure, no web root, and no Fastify.
+
+      **`install-probe.sh` and `install-probe.ps1` validate the bundle before writing anything.**
+      A bundle that turns out to be unreadable halfway through leaves a service pointing at a CA
+      that is not there, which starts, fails, and reports a TLS error rather than the truth. An
+      upgrade keeps the operator's `probe.json` but does update the endpoint and key when a new
+      bundle is given — that is usually why a second bundle was issued.
+
+      **`scripts/smoke-enrol.sh` is two boxes, because one would prove nothing.** A bundle that
+      depended on a path only the core host has, a certificate whose SAN only matches localhost,
+      or a `probe.json` still pointing at `127.0.0.1` all pass on a single host and fail on the
+      day it matters. It asserts the probe crossed the network, arrived *pending* under the name
+      it was enrolled with, was sent no configuration before approval, that two enrolments
+      produce different certificates, and that no core was installed on the probe host.
+
+      Found on the way and fixed here because nothing could be verified without it: **the full
+      release tarball had been unbuildable since `T-18`** (`f5f245b`). `@ms/sensors` declares
+      `pg ^8.23.0` while `@ms/core` still said `^8.13.0`, and `package.sh` refuses conflicting
+      ranges across the merged production manifest. Nothing caught it because the packaging
+      smoke test builds its own tarball and failed identically. Aligned to `^8.23.0`, which is
+      what the lockfile already resolved.
 - [ ] **R-08 — Disconnect/reconnect soak test** · M · R-03 · A one-hour disconnect replays with
       zero data loss and no ingestion stall.
 
