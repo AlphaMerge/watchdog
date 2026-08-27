@@ -238,7 +238,8 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | P-08 ping sensor | done | System `ping` spawned directly for `AbortSignal` support; pure parser with Linux/BSD/Windows fixtures; `rtt` and `loss` channels |
 | P-16 toolchain `ping` | done | `dev/toolchain/Dockerfile`; the base image had no `ping`, so the default ICMP path could not be tested |
 | P-15 5,000-sensor benchmark | done | **Go.** One sustained hour: 300,095 checks dispatched, 300,095 completed, 0 refused, p95 dispatch jitter 216 ms against the 1,000 ms budget. It also found the shipped pool default wrong by a factor of sixteen (`docs/findings/2026-08-26-scheduler-benchmark.md`) |
-| P-03, P-04, P-06, P-07, P-09…P-14 | not started | |
+| P-03 child-process runner | done | `ProcessRunner` beside `CheckPool`, same submit/callback contract, one spool sink. **The justification is narrower than "if a check can hang"**: a worker is terminable and has its own heap limit, so hanging and leaking are survivable there — a *hard crash* is not, and a segfault in a native module takes the whole probe down. That, and running as a different OS user, is what a thread cannot offer. One process per check rather than a pool, because not amortising is the feature: nothing survives from one check to the next. Measured at ~21 ms of start-up, the whole catalogue costing 1.3 ms more than a one-file registry — the rule about heavy imports living inside `execute`, showing up as a number (`docs/findings/2026-08-27-process-runner-startup.md`) |
+| P-04, P-06, P-07, P-09…P-14 | not started | |
 
 Two of the four exit criteria are covered by tests already: **a deliberately hung check does not
 delay any other check**, and **killing a worker mid-check loses exactly one result and recycles

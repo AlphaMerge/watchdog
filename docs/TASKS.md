@@ -311,7 +311,7 @@ because each is a decision rather than a defect:
       `retired` flag so the pool does not count its own termination as a crash and spawn a second
       replacement; without it the pool drifted one worker over its bound on every hung check.
       Left for R-02/R-03: results are logged rather than spooled and sent.
-- [ ] **P-03 — Child-process runner** · M · P-02 · For shell-outs and user scripts: separate
+- [x] **P-03 — Child-process runner** · M · P-02 · For shell-outs and user scripts: separate
       process, hard kill timer, resource limits, optional separate OS user.
       **Added by N-10:** `runProgram` in `@ms/shared` already does the bounded-execution half —
       `spawn` with no shell, a `SIGTERM`-then-`SIGKILL` timeout against the whole **process
@@ -325,6 +325,48 @@ because each is a decision rather than a defect:
       results arrive by callback, the deadline settles the result rather than waiting for the
       process, and a process that will not die on `SIGTERM` is killed the way a worker that
       ignores its abort is terminated. `CheckRegistry` is the seam both runners resolve through.
+
+      **P-03 outcome.** `ProcessRunner`, beside `CheckPool` and with the same contract — submit
+      returns immediately, results arrive by callback, and both spool through one sink because to
+      everything downstream a reading is a reading. Which runner a check goes to is the *sensor
+      type's* declaration (`SensorType.isolation: 'process'`), read from the catalogue exactly as
+      `T-06`'s `listener` is, so the probe never matches on a type id.
+
+      **The justification is narrower than "if a check can hang", and this ticket's own framing
+      undersold it.** A worker thread is terminable and has its own heap limit, so hanging and
+      leaking are both survivable in the pool. What is *not* survivable there is a **hard crash**:
+      a segmentation fault in a native module, or an `abort()` from something a user's script
+      loaded, takes the whole probe down — every sensor on it, not one. That, plus running as a
+      different OS user, is what a thread cannot offer at any price. There is a test for it:
+      `test.abort` raises `SIGABRT`, the runner reports one Down sensor and carries on.
+
+      **One process per check, not a pool of them** — the opposite of `CheckPool`'s trade, for the
+      opposite reason. A pool exists to amortise start-up; here *not* amortising is the feature,
+      because nothing survives from one check to the next and so a leak or a stuck handle cannot
+      accumulate. Measured at **~21 ms** of start-up, with the whole shipped catalogue costing
+      1.3 ms more than a one-file registry — a direct consequence of the rule that a type's heavy
+      imports live inside `execute`, and the measurement that would catch it being relaxed
+      (`docs/findings/2026-08-27-process-runner-startup.md`). 21 ms is noise beside a script that
+      runs `df`, and three to twenty times the cost of an ICMP check on the same LAN, which is
+      exactly why isolation is opt-in per type rather than the default.
+
+      **The request goes in on stdin, never in argv**, because a `CheckRequest` carries decrypted
+      credentials (`A-05`) and argv is world-readable through `ps` — a secret this system encrypts
+      at rest and then publishes to every local user would be a secret it did not protect at all.
+      The answer comes back on a *marked* line of stdout, read from the end, because a library a
+      type imports may print and a check that runs somebody's script may echo text it does not
+      control.
+
+      **Found while writing it:** the runner imported its result marker from `check-child.ts`,
+      which is an entry point with top-level `await` on stdin — so importing it ran the child's
+      body *inside the probe*, and the probe sat waiting for its own stdin to end, for ever. The
+      constant now lives in `types.ts`, which is neither the program nor its launcher.
+
+      **What is bounded and what is not**, stated rather than implied. Bounded: wall-clock
+      (`SIGTERM` then `SIGKILL` against the whole process group), heap, captured output, and a
+      built rather than inherited environment. Not bounded: CPU seconds, address space, file
+      descriptors and child count — Node exposes no `setrlimit`, and reaching one would mean a
+      shell or a native dependency. `A-09` is where a platform-specific answer belongs.
 - [ ] **P-04 — Backpressure and lag metrics** · M · P-02 · Skip-if-still-running, deferred-check
       counter, scheduler lag histogram (p50/p95/p99), pool utilisation.
       **Added by P-01:** `TimingWheel.stats()` already carries the scheduler half — tick lag

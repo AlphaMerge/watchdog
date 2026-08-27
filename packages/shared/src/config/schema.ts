@@ -362,6 +362,28 @@ export interface ProbeConfig {
      * restart.
      */
     checkAbortGraceMs: number;
+    /**
+     * Checks that may run in a child process at once (`P-03`).
+     *
+     * Much smaller than `workerPoolSize`, and it has to be: a worker awaiting a packet costs a
+     * slot and almost no memory, where each of these is a Node process of its own. Only sensor
+     * types that declare `isolation: 'process'` come here — today that is the EXE/Script family,
+     * because a fault in code somebody else wrote must not take the probe down with it.
+     */
+    processRunnerMaxConcurrent: number;
+    processRunnerQueueMaxLength: number;
+    /** Heap ceiling for each check process, as `--max-old-space-size`. */
+    processMemoryLimitMb: number;
+    /**
+     * POSIX user and group to run check processes as. 0 means "this probe's own".
+     *
+     * The point of a separate account is that a script somebody dropped in a directory does not
+     * run as the user holding this probe's certificate and credential material. Setting it needs
+     * the probe to be started with the privilege to change user, which in practice means root or
+     * `CAP_SETUID`; it is ignored on Windows, which has no equivalent this can reach.
+     */
+    processUid: number;
+    processGid: number;
   };
   /**
    * The SNMP trap listener (`T-06`).
@@ -771,6 +793,11 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'workerPoolSize',
         'checkQueueMaxLength',
         'checkAbortGraceMs',
+        'processRunnerMaxConcurrent',
+        'processRunnerQueueMaxLength',
+        'processMemoryLimitMb',
+        'processUid',
+        'processGid',
       ],
       properties: {
         gid: { type: 'string', default: '' },
@@ -793,6 +820,17 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         workerPoolSize: { type: 'integer', minimum: 0, maximum: 1_024, default: 0 },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },
+        // Four at once, because each is a Node process rather than a thread awaiting a packet.
+        processRunnerMaxConcurrent: { type: 'integer', minimum: 1, maximum: 64, default: 4 },
+        processRunnerQueueMaxLength: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100_000,
+          default: 256,
+        },
+        processMemoryLimitMb: { type: 'integer', minimum: 64, maximum: 8_192, default: 256 },
+        processUid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
+        processGid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
       },
     },
     trapListener: {

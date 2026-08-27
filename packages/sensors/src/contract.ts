@@ -196,6 +196,23 @@ export interface SensorType {
    * never as a reading of zero.
    */
   readonly listener?: string;
+  /**
+   * Where this type's checks run on the probe (`P-03`).
+   *
+   * Absent means the shared worker pool, which is right for every check that talks to a device
+   * over a socket. `'process'` puts each check in a child process of its own, and CLAUDE.md's
+   * rule for when that is needed is "if a check can hang" — which understates it. A worker
+   * thread is terminable and even has its own heap limit, so hanging and leaking are both
+   * survivable there. What is *not* survivable in a worker is a hard crash: a segmentation fault
+   * in a native module, or an `abort()` from something a user's script loaded, takes the whole
+   * probe down with it. And a worker cannot run as a different OS user.
+   *
+   * So this is for checks that execute code somebody else wrote — `T-19`'s EXE/Script sensors —
+   * where "a fault in the check kills every other sensor on this probe" is not an acceptable
+   * failure mode. It costs a Node start-up per check, which is why it is opt-in and declared by
+   * the type rather than configured per sensor.
+   */
+  readonly isolation?: 'process';
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

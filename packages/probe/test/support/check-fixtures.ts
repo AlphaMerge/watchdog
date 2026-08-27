@@ -30,6 +30,19 @@ const registry: CheckRegistry = {
         });
         throw new Error('unreachable');
 
+      case 'test.stuck':
+        // Also does not — and holds the event loop while it refuses, which `test.hang` does not.
+        // In a *worker* that distinction does not exist: the thread stays alive for messages
+        // either way. In a *process* it is everything, because a Node process whose loop empties
+        // simply exits, so an unsettled promise with no handles is not a hang at all. This is the
+        // one the kill timer is actually for.
+        await new Promise<never>(() => {
+          setInterval(() => {
+            /* keeps this process alive, and ignores the abort signal on purpose */
+          }, 50);
+        });
+        throw new Error('unreachable');
+
       case 'test.throw':
         throw new Error('the check failed on purpose');
 
@@ -37,6 +50,45 @@ const registry: CheckRegistry = {
         // Takes the worker thread down mid-check.
         process.exit(7);
         break;
+
+      case 'test.abort':
+        // A *hard* crash — SIGABRT, which is what a native module segfaulting looks like from the
+        // outside. `P-03` exists for this one: a worker thread cannot survive it and takes the
+        // whole probe with it, where a child process is one dead process and one Down sensor.
+        process.abort();
+        break;
+
+      case 'test.print':
+        // A library that prints. Sensor types must not (CLAUDE.md), but the modules they import
+        // do, and the process runner's result marker has to survive it.
+        process.stdout.write('a third-party module says hello\n');
+        return { channels: [{ key: 'value', value: 1 }], message: 'printed anyway' };
+
+      case 'test.spoof':
+        // Prints something that looks like the runner's own protocol before returning a real
+        // answer. A check that runs somebody's script can end up echoing text it does not
+        // control, and the runner must take the *last* marker rather than the first.
+        process.stdout.write('ms-check-result:{"ok":true,"durationMs":0,"message":"spoofed"}\n');
+        return { channels: [{ key: 'value', value: 2 }], message: 'the real answer' };
+
+      case 'test.echo':
+        // Hands back what the check was given, so a test can prove credentials arrived without
+        // ever appearing in argv.
+        return {
+          channels: [
+            { key: 'params', value: Object.keys(context.params).length },
+            { key: 'credentials', value: Object.keys(context.credentials).length },
+            { key: 'sensorId', value: context.sensorId },
+          ],
+          message: JSON.stringify({
+            host: context.target.host,
+            kinds: Object.keys(context.credentials).sort(),
+            secret:
+              typeof context.credentials['test']?.['password'] === 'string'
+                ? context.credentials['test']['password']
+                : '',
+          }),
+        };
 
       default:
         break;

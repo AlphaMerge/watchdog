@@ -66,4 +66,15 @@ export interface CheckRegistry {
 /** The shape the worker sniffs for. Kept structural so a test registry need not import one. */
 export const UNKNOWN_SENSOR_TYPE = 'UNKNOWN_SENSOR_TYPE';
 
+/**
+ * How a check process announces its answer on stdout (`P-03`).
+ *
+ * **Here rather than in `check-child.ts`, and that is not tidiness.** `check-child.ts` is an
+ * *entry point*: it has top-level `await` that reads stdin and a `process.exit` at the end. The
+ * runner imported the marker from it once, which ran the child's own body inside the probe — a
+ * parent that sat waiting for its own stdin to end, for ever. A constant shared between a program
+ * and its launcher belongs in neither of them.
+ */
+export const RESULT_MARKER = 'ms-check-result:';
+
 export type { CheckResult };

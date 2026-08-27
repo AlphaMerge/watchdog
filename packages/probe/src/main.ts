@@ -1,7 +1,15 @@
 #!/usr/bin/env node
-import { bootstrap, describeError, probeConfigSchema, type ProbeConfig } from '@ms/shared';
+import {
+  bootstrap,
+  describeError,
+  probeConfigSchema,
+  type CheckResult,
+  type ProbeConfig,
+} from '@ms/shared';
 import { standardCatalogue } from '@ms/sensors';
 import { CheckPool } from './runner/pool.js';
+import { ProcessRunner } from './runner/process-runner.js';
+import type { ResultMeta } from './runner/types.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { mkdir } from 'node:fs/promises';
 import { AssignmentStore } from './scheduler/assignments.js';
@@ -53,36 +61,59 @@ async function main(): Promise<void> {
     catchUpMaxRows: config.probe.spoolCatchUpMaxRows,
   });
 
+  // One sink for both runners: a check that ran in a process of its own is spooled, drained and
+  // acknowledged exactly like one that ran in a worker, because to everything downstream it is
+  // the same reading.
+  const spoolResult = (result: CheckResult, meta: ResultMeta): void => {
+    logger.debug(
+      { sensorId: result.sensorId, outcome: result.outcome, phase: meta.phase },
+      'check finished',
+    );
+    // Straight to disk, then woken so the drain offers it immediately if the core is up.
+    // The pool's callback is synchronous and must not wait for a write: `append` serialises
+    // internally, so ordering holds without the scheduler ever blocking on the filesystem.
+    void spool
+      .append([result])
+      .then(() => {
+        drain.wake();
+      })
+      .catch((error: unknown) => {
+        // A spool that cannot write is a probe that will lose readings, and the only thing
+        // worse than losing them is losing them quietly.
+        logger.error(
+          { ...describeError(error), sensorId: result.sensorId },
+          'could not spool a result',
+        );
+      });
+  };
+
   const pool = new CheckPool({
     logger,
     size: config.probe.workerPoolSize,
     queueMaxLength: config.probe.checkQueueMaxLength,
     abortGraceMs: config.probe.checkAbortGraceMs,
-    onResult: (result, meta) => {
-      logger.debug(
-        { sensorId: result.sensorId, outcome: result.outcome, phase: meta.phase },
-        'check finished',
-      );
-      // Straight to disk, then woken so the drain offers it immediately if the core is up.
-      // The pool's callback is synchronous and must not wait for a write: `append` serialises
-      // internally, so ordering holds without the scheduler ever blocking on the filesystem.
-      void spool
-        .append([result])
-        .then(() => {
-          drain.wake();
-        })
-        .catch((error: unknown) => {
-          // A spool that cannot write is a probe that will lose readings, and the only thing
-          // worse than losing them is losing them quietly.
-          logger.error(
-            { ...describeError(error), sensorId: result.sensorId },
-            'could not spool a result',
-          );
-        });
-    },
+    onResult: spoolResult,
   });
   await pool.start();
   lifecycle.onShutdown({ name: 'check-pool', timeoutMs: 10_000, run: () => pool.stop() });
+
+  // Checks that run in a process of their own (`P-03`). Same submit/callback contract as the
+  // pool, same spooling on the way out — the only difference is where the check runs, which is
+  // the sensor type's declaration and not this file's business to decide.
+  const processRunner = new ProcessRunner({
+    logger,
+    maxConcurrent: config.probe.processRunnerMaxConcurrent,
+    queueMaxLength: config.probe.processRunnerQueueMaxLength,
+    memoryLimitMb: config.probe.processMemoryLimitMb,
+    ...(config.probe.processUid > 0 ? { uid: config.probe.processUid } : {}),
+    ...(config.probe.processGid > 0 ? { gid: config.probe.processGid } : {}),
+    onResult: spoolResult,
+  });
+  lifecycle.onShutdown({
+    name: 'process-runner',
+    timeoutMs: 30_000,
+    run: () => processRunner.stop(),
+  });
 
   // Which sensor types are fed by a listener rather than by polling (`T-06`), asked of the
   // catalogue rather than matched on an id here: `T-20`'s syslog receiver is already the second
@@ -91,9 +122,12 @@ async function main(): Promise<void> {
   // Building the catalogue in this thread is cheap and does not load a protocol stack: a type's
   // heavy imports live inside `execute`, which only a worker ever calls.
   const listenerFor = new Map<string, string>();
+  // And which run in a process of their own (`P-03`), asked the same way and for the same reason.
+  const isolated = new Set<string>();
   for (const summary of standardCatalogue().summaries()) {
-    const declared = standardCatalogue().declaration(summary.id).listener;
-    if (declared !== undefined) listenerFor.set(summary.id, declared);
+    const declaration = standardCatalogue().declaration(summary.id);
+    if (declaration.listener !== undefined) listenerFor.set(summary.id, declaration.listener);
+    if (declaration.isolation === 'process') isolated.add(summary.id);
   }
 
   const trapListener = config.trapListener.enabled
@@ -131,7 +165,8 @@ async function main(): Promise<void> {
           wants === LISTENER_ID && trapListener !== undefined
             ? trapListener.drain(sensorId)
             : undefined;
-        pool.submit({
+        const runner = isolated.has(assignment.sensorType) ? processRunner : pool;
+        runner.submit({
           sensorId,
           sensorType: assignment.sensorType,
           target: assignment.target,
