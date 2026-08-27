@@ -9,6 +9,7 @@ import { SNMP_CREDENTIAL_SCHEMA } from '../support/snmp/schema.js';
 import { SSH_CREDENTIAL_SCHEMA } from '../support/ssh/schema.js';
 import { HTTP_CREDENTIAL_SCHEMA } from '../support/http/schema.js';
 import { MAIL_CREDENTIAL_SCHEMA } from '../support/mail/schema.js';
+import { DATABASE_CREDENTIAL_SCHEMA } from '../support/db/schema.js';
 
 /**
  * The credential kinds an installation can store (`A-05`).
@@ -85,6 +86,20 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
       type: 'object',
       additionalProperties: false,
       properties: { ...MAIL_CREDENTIAL_SCHEMA },
+    },
+  },
+  {
+    id: 'database',
+    name: 'Database',
+    description:
+      'Used by every database sensor on this object and everything below it. Give it `SELECT` ' +
+      'on what it is watching and nothing else: these sensors run whatever query they are ' +
+      'given, and the account’s rights are the only thing between a mistyped one and a change ' +
+      'to the data.',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { ...DATABASE_CREDENTIAL_SCHEMA },
     },
   },
 ];

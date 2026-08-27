@@ -207,7 +207,7 @@ through WinRM or a PowerShell `Get-CimInstance` shell-out from a probe running o
 
 | Sensor                         | Description                                                                   |
 | ------------------------------ | ----------------------------------------------------------------------------- |
-| PostgreSQL                     | Connect, run a query, use execution time and/or first result cell as channels |
+| PostgreSQL                     | Connect, run a query, first result cell and further columns as channels, server-side statement timeout |
 | MySQL / MariaDB                | As above                                                                      |
 | Microsoft SQL                  | As above                                                                      |
 | Oracle SQL / Oracle Tablespace | As above `[V2]`                                                               |

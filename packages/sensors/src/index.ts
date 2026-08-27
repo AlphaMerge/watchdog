@@ -62,6 +62,9 @@ import { mailImap } from './types/mail-imap.js';
 import { mailPop3 } from './types/mail-pop3.js';
 import { mailRoundTrip } from './types/mail-roundtrip.js';
 import { mailSmtp } from './types/mail-smtp.js';
+import { dbMssql } from './types/db-mssql.js';
+import { dbMysql } from './types/db-mysql.js';
+import { dbPostgresql } from './types/db-postgresql.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -102,6 +105,9 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   mailPop3,
   mailImap,
   mailRoundTrip,
+  dbPostgresql,
+  dbMysql,
+  dbMssql,
   httpContent,
   httpRequest,
   portTcp,

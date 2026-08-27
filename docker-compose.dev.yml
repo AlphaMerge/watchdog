@@ -26,6 +26,10 @@ services:
       # Integration tests reach PostgreSQL by service name on the compose network. They skip
       # themselves when nothing is listening, so `npm test` still works with the stack down.
       MS_TEST_DB_HOST: postgres
+      # The database sensors (T-18). Behind the `db` compose profile, so these resolve to nothing
+      # unless somebody brought them up; the tests skip themselves in that case.
+      MS_TEST_MYSQL_HOST: mariadb
+      MS_TEST_MSSQL_HOST: mssql
     volumes:
       - .:/workspace
       - npm-cache:/root/.npm
@@ -103,6 +107,59 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # ---------------------------------------------------------------------------------------
+  # MariaDB and SQL Server — targets for the database sensors (Phase 6, T-18).
+  #
+  # PostgreSQL is already here and is the third engine, so it needs no second instance: the
+  # sensor tests point at the same server the core uses, in a database of their own.
+  #
+  # Both are behind the `db` profile rather than starting with `npm run dev`. SQL Server alone is
+  # 1.5 GB and wants 2 GB of memory, which is a great deal to ask of everybody working on the
+  # scheduler — `docker compose -f docker-compose.dev.yml --profile db up -d` brings them up for
+  # whoever is working on T-18, and the tests skip themselves when they are not there.
+  # ---------------------------------------------------------------------------------------
+  mariadb:
+    image: mariadb:11.4
+    profiles: ['db']
+    environment:
+      MARIADB_ROOT_PASSWORD: monitoring
+      MARIADB_DATABASE: monitoring
+      MARIADB_USER: monitoring
+      MARIADB_PASSWORD: monitoring
+    ports:
+      - '127.0.0.1:3306:3306'
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Azure SQL Edge rather than `mcr.microsoft.com/mssql/server`, and the reason is the machine
+  # this is developed on: SQL Server's own image is amd64 only, and under emulation on Apple
+  # silicon it starts, reports healthy, and then segfaults — measured here, `qemu: uncaught
+  # target signal 11`. Edge is built for arm64 as well, speaks the same TDS and the same T-SQL,
+  # and is therefore a real target for the `tedious` driver on every machine rather than on some
+  # of them. It is Microsoft-retired, which matters not at all for something whose whole job is
+  # to answer `select 1` in a development stack; swap the image for the full server on an amd64
+  # host if you want to check something Edge does not implement.
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    profiles: ['db']
+    environment:
+      ACCEPT_EULA: '1'
+      MSSQL_SA_PASSWORD: 'Monitoring-dev-1'
+    ports:
+      - '127.0.0.1:1433:1433'
+    healthcheck:
+      # Edge ships no `sqlcmd`, so this is the plainest thing that proves the listener is up.
+      test: ['CMD', '/bin/sh', '-c', '</dev/tcp/127.0.0.1/1433']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
 
   # ---------------------------------------------------------------------------------------
   # GreenMail — a mail *server* for the mail sensors (Phase 6, T-17).

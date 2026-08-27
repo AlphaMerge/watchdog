@@ -3514,8 +3514,66 @@ because each is a decision rather than a defect:
       one server. `delivered in 342 ms`, `INBOX: 1 message, 1 unread`, `1 message waiting (69
       bytes)`, `delivered in 539 ms after 1 mailbox check`, and IMAP over implicit TLS on 3993
       with the "certificate is not being verified" note on every scan.
-- [ ] **T-18 — Database sensors** · L · P-05 · PostgreSQL, MySQL, MSSQL: connect, run a query,
+- [x] **T-18 — Database sensors** · L · P-05 · PostgreSQL, MySQL, MSSQL: connect, run a query,
       execution time and first-result-cell channels, statement timeout.
+
+      **T-18 outcome.** Three types over `support/db/`, which is one interface and three files
+      that import a driver each — the isolation `support/ssh/session.ts` gives `ssh2`, so
+      replacing one is a file rather than a search and a probe that never runs a MySQL check
+      never loads `mysql2`. The engines differ in how you connect and in how you tell the server
+      to stop, and in nothing an operator configuring a check would notice, so everything else is
+      written once in `db-shared.ts`.
+
+      **Three dependencies, and the rule read the right way round.** CLAUDE.md says syslog,
+      NetFlow and WMI are written here *because npm has no maintained option*. `pg` was already a
+      dependency of `packages/core`, so PostgreSQL costs an installation nothing. MySQL's default
+      authentication since 8.0 is `caching_sha2_password`, an RSA exchange where a subtle mistake
+      means a sensor that works until somebody rotates a password; SQL Server's TDS is a binary
+      protocol with its own TLS-inside-the-protocol arrangement. Both have maintained drivers —
+      `mysql2` and Microsoft's own `tedious` — and writing either by hand would be inventing a
+      bug in the part that hurts most.
+
+      **No connection pool, which is the opposite of the SNMP and SSH decision and deliberately
+      so.** Those pool because a session costs a handshake. A database connection costs the
+      *server* a backend process and a slot against `max_connections`, and a monitoring system
+      holding one open per sensor is a monitoring system that takes a database down on the day it
+      is needed. Connecting per scan also makes the connect time a real reading — exhausted
+      connection slots move it and leave the query time exactly where it was, which is the only
+      way to tell that apart from a slow query.
+
+      **The statement timeout is asked of the server, and the live test is what proved it
+      matters.** A client that gives up and closes its socket leaves the query running: a check
+      that did that every sixty seconds would become the outage it was meant to warn about. So
+      PostgreSQL gets `statement_timeout` on the session, SQL Server gets `LOCK_TIMEOUT` plus
+      `tedious`'s protocol-level cancel, and MySQL gets — **both** of its variables. Setting only
+      MySQL's `max_execution_time` (milliseconds, `SELECT` only) is what this did first, and a
+      live MariaDB let a ten-second query run to completion under a three-second timeout: MariaDB
+      has `max_statement_time` instead, in *seconds*. That was a real defect no unit test would
+      ever have found.
+
+      **`verifyTls` defaults to false here and nowhere else in the catalogue.** Almost every
+      database server is running the self-signed certificate its installer generated; the
+      connection is still encrypted, it is simply authenticated against nobody, and a default of
+      `true` would mean every database sensor in every installation starts Down for a reason that
+      has nothing to do with the database. The parameter description says exactly that rather
+      than leaving it as a surprise.
+
+      The first cell of the first row is the primary channel — not the execution time, because if
+      the timing were what you were watching you would have written a Port sensor. Extra columns
+      of one query become extra channels rather than five more connections, a cell that is not a
+      number is a gap rather than a zero, and `expectRows` catches the query that quietly started
+      returning nothing, which a response time reports as perfectly healthy. The `database`
+      credential kind was already in migration 001's enum, so unlike `T-17` this needed no
+      migration.
+
+      Verified live against all three: `1 row in 13.086 ms; value=1 oldest=0` (PostgreSQL, with a
+      second column as its own channel), `1 row in 3.036 ms` (MariaDB), `1 row in 22.353 ms;
+      value=27` (SQL Server), and the row-count guard reporting `the query returned 1 row and
+      this sensor expects 5`. MariaDB and SQL Server joined the dev stack behind a `db` compose
+      profile — **Azure SQL Edge rather than `mssql/server`**, because SQL Server's image is
+      amd64 only and under emulation on Apple silicon it starts, reports healthy, and then
+      segfaults (`qemu: uncaught target signal 11`, measured). Edge speaks the same TDS, so the
+      driver has a real target on every machine rather than on some of them.
 - [ ] **T-19 — EXE/Script sensors** · L · P-03 · Simple and Advanced variants, documented output
       formats, sandboxing, timeout, working directory and env control.
 - [ ] **T-20 — Syslog Receiver** · L · P-05 · In-house RFC 3164 and 5424 parser, UDP + TCP

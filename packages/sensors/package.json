@@ -24,7 +24,13 @@
     "@ms/shared": "0.1.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
+    "mysql2": "^3.24.2",
     "net-snmp": "3.26.3",
-    "ssh2": "1.17.0"
+    "pg": "^8.23.0",
+    "ssh2": "1.17.0",
+    "tedious": "^20.0.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0"
   }
 }
