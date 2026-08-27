@@ -222,6 +222,7 @@ describe('the built-in catalogue', () => {
       'db.mssql',
       'db.mysql',
       'db.postgresql',
+      'dns.blocklist',
       'dns.record',
       'exe.script',
       'exe.script.advanced',

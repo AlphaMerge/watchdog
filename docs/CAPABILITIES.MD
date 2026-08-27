@@ -128,6 +128,7 @@ account for most real deployments.
 | Port                 | TCP connect check against one port                                |
 | Port Range           | TCP connect across a range of ports                               |
 | DNS                  | Resolves a record; validates the resolved value and response time |
+| DNS Blocklist        | Asks a set of DNSBLs whether this device's address is listed. Added by `T-23` as its worked example — not a PRTG sensor, and cheap enough to be worth having |
 | Traceroute Hop Count | Hop count to a target `[V2]`                                      |
 
 ### 3.2 Web / HTTP `[V1]`

@@ -3811,8 +3811,43 @@ because each is a decision rather than a defect:
       Verified live against `ms-target`: `20-25,161,443,8080` reads "1 of 9 open: 22" at 11.11%
       (161 is UDP and correctly not open over TCP), and ten packets give 0.059 ms of jitter
       against a 0.062–0.391 ms range — well under the spread, which is the estimator working.
-- [ ] **T-23 — Sensor type authoring guide** · S · P-05 · Documentation plus a worked example,
+- [x] **T-23 — Sensor type authoring guide** · S · P-05 · Documentation plus a worked example,
       proving a new type is a one-file, half-day job.
+
+      **T-23 outcome.** `docs/adding-a-sensor-type.md` brought back into line with what the
+      contract has become, and a real worked example added: `dns.blocklist`.
+
+      **The guide had drifted into telling people the wrong thing.** It was written at `P-05`,
+      before the contract grew `isolation` (`P-03`) and `evaluatedBy` (`T-21`) — and its testing
+      section still said that a type which shells out should "set `costHint: 'heavy'` and say so
+      in review", which was true when there was no mechanism and is now simply wrong. It also
+      listed one shared transport where there are ten. A guide that is out of date is worse than
+      no guide: it is confidently wrong in exactly the places somebody new will trust it.
+
+      **The worked example is a real sensor, not a toy.** A mail relay that lands on Spamhaus
+      stops delivering to half the internet and does it silently, while every other sensor on the
+      host stays green. One file, two lines of registration, one test file with a forty-line
+      `node:dgram` DNS simulator in it, and nothing else in the system changed.
+
+      **Writing it found two defects, and the second is the argument for live verification.** The
+      timeout did not work — Node's `Resolver` retries four times by default and `timeout` is per
+      *try*, so a check configured for five seconds takes twenty; the test that found it now
+      asserts elapsed time. And the *live* run, pointed at one real zone and one fictional one,
+      reported "on none of 2 blocklists": `NXDOMAIN` means "not listed" **and** "no such zone", so
+      a typo in a list name is a sensor that reports clean for ever. An unlisted answer is now
+      confirmed by asking whether the zone exists. Both are the same shape — a sensor that always
+      answers the reassuring thing — and the type's own docstring warned about that shape while
+      walking into it.
+
+      **What the guide gained.** `isolation` and `evaluatedBy` sections; the table of all ten
+      shared transports with the ticket that built each; why `support/pattern.ts` exists (86
+      seconds, measured, for `(a+)+$` against forty characters) and why `support/json-path.ts`
+      stops short of filter expressions; the catalogue's defaults check; mutation testing and live
+      verification written down as expectations rather than folklore, with the two real cases
+      where a passing test was asserting nothing.
+
+      **Cost, honestly:** about 190 lines of sensor and 200 of test, in one sitting. The bounded
+      part of the claim holds — nothing outside those files and two lines of registration changed.
 
 ## Phase 7 — Discovery and templates
 

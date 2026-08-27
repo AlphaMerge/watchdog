@@ -46,7 +46,7 @@ probe runs it.
 
 ---
 
-## The six members
+## The members
 
 ### `id`
 
@@ -94,6 +94,29 @@ look like a quiet network.
 The division is fixed and worth following: the listener decodes and buffers, and the *type* does
 all the deciding — filtering, counting, retention are `params`, so they are testable against a
 fabricated batch with no socket in the test. `snmp.trap` is the worked example.
+
+### `isolation` (optional)
+
+`'process'` runs each of this type's checks in a **child process** rather than a pool worker
+(`P-03`). The rule in CLAUDE.md is "if a check can hang, it runs in a child process", and that
+understates the case: a worker thread is terminable and has its own heap limit, so hanging and
+leaking are both survivable in the pool. What is *not* survivable there is a **hard crash** — a
+segmentation fault in a native module, or an `abort()` from something a user's script loaded —
+which takes the entire probe down, every sensor on it. A worker also cannot run as a different
+OS user.
+
+So: set it when your type executes code somebody else wrote. `exe.script` and
+`exe.script.advanced` are the two that do. It costs about 21 ms of Node start-up per check
+(`docs/findings/2026-08-27-process-runner-startup.md`), which is noise beside a script that runs
+`df` and three to twenty times the cost of an ICMP check — hence opt-in per type rather than a
+setting.
+
+### `evaluatedBy` (optional)
+
+`'core'` means the **core** computes this sensor's readings and no probe ever receives it
+(`T-21`). There is exactly one such type — `core.factory`, whose inputs are channel values the
+core already holds — and there should stay that way. Reach for it only when a type's inputs are
+things the core has and a probe does not; anything that talks to a device belongs on a probe.
 
 ### `costHint`
 
@@ -177,6 +200,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
+| the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
 
 ---
 
@@ -192,8 +216,21 @@ Cover at least:
 - **abort**: start a check, abort the signal, assert it returns promptly;
 - schema rejection of the obvious bad parameter.
 
-If the type shells out, it belongs in a child process, not a worker (`P-03`) — set
-`costHint: 'heavy'` and say so in review.
+If the type runs code somebody else wrote, set `isolation: 'process'` (`P-03`) — the mechanism
+exists now and `costHint` is not a substitute for it.
+
+**Mutate your own tests before you believe them.** Every ticket in this repository has done it and
+it has repeatedly found tests that pass against broken code — change the sign of a comparison,
+delete a guard, make a gap a zero, and check that something fails. A test that survives is a test
+that was not asserting what its name claims. Two real examples: a syslog severity floor test where
+"keep the severe ones" and "keep the mild ones" both counted two out of three, and a `parseMeminfo`
+test asserting a value of 0, where multiplying by 1024 is still 0.
+
+**Then run it against something real.** The simulator proves the parsing; a live target proves the
+things a simulator cannot — a hostname that does not resolve where an address would, a credential
+rotation that produces an empty delta, a resolver that retries four times behind your back. Live
+verification has found a defect in most of the tickets in this repository, and none of them were
+reachable from a unit test.
 
 ---
 
@@ -236,6 +273,30 @@ export const snmpUptime: SensorType = {
 Some protocols are too big to re-derive per type, so they live once under
 `packages/sensors/src/support/` and a type imports what it needs from inside `execute`.
 
+What exists, and which ticket built it:
+
+| Directory | For | Built by |
+| --- | --- | --- |
+| `support/snmp/` | v1/v2c/v3 sessions, pooled per device; traps | `T-01`, `T-06` |
+| `support/ssh/` | connections pooled per device, host-key verification | `T-07` |
+| `support/http/` | one request with the redirect rules, two timings, a body bound | `P-09`, `T-13` |
+| `support/tls/` | handshakes, chain and name checks, version probing | `T-11` |
+| `support/mail/` | one line-oriented connection; SMTP, POP3 and IMAP over it | `T-17` |
+| `support/db/` | one driver interface; PostgreSQL, MySQL and SQL Server behind it | `T-18` |
+| `support/syslog/` | RFC 3164/5424 parsing and the UDP/TCP receivers | `T-20` |
+| `support/script/` | resolving a program name inside the probe's script directory | `T-19` |
+| `support/pattern.ts` | an operator-supplied regex, run under a watchdog | `T-03` |
+| `support/json-path.ts` | a bounded JSONPath over a JSON response | `T-16` |
+
+Two of those are worth knowing about even if you never call them. `support/pattern.ts` exists
+because **JavaScript has no interruptible regular expression**: once `exec` is running nothing
+stops it, not `ctx.signal` and not a timer, and `(a+)+$` against forty characters takes 86 seconds
+— measured. It runs matches inside a `node:vm` with a timeout, which *can* interrupt one, at a
+cost of about 100 µs a match. If your type takes a pattern from an operator, use it rather than
+`new RegExp`. And `support/json-path.ts` stops short of JSONPath's filter expressions on purpose:
+the reference implementation evaluates JavaScript in them, which would put an operator-supplied
+expression inside a probe.
+
 **SNMP** (`support/snmp/`, built by `T-01`) is the worked example:
 
 ```ts
@@ -271,8 +332,75 @@ Four things it gives you that are easy to get wrong alone:
   convert when you want them to; neither returns `0` for a missing value, because a Down sensor
   records no value at all.
 
+## A worked example, start to finish
+
+`T-23` asks this guide to prove the claim it opens with — that a new type is one file and half a
+day. So here is one, added while writing this section: **`dns.blocklist`**, which asks a set of
+DNS blocklists whether a device's address is on any of them. A mail relay that lands on Spamhaus
+stops delivering to half the internet and does it silently, while every other sensor on the host
+stays green.
+
+The whole of it is `packages/sensors/src/types/dns-blocklist.ts` plus two lines of registration
+and one test file. Nothing else changed: no migration, no API route, no frontend work. Read the
+file itself for the real thing — what follows is what it exercises of this guide.
+
+**The parameters are the interview.** `zones` is required and bounded at twelve, so one sensor is
+one small burst rather than a scan. `address` defaults to empty and falls back to the device's own
+host, because the address that *sends mail* is usually not the address the device is *reached on*
+behind NAT — and the description says exactly that instead of leaving somebody to find out.
+`resolver` is there because most blocklists refuse queries from public resolvers, so a sensor
+answering "not listed" through 8.8.8.8 may be answering about the resolver's quota.
+
+**The channel is a count, not a verdict.** `listings` is the primary, and "alarm if we are on any
+list" is an upper error limit of zero — which an operator can see and change. A sensor that went
+Down on its own when listed would be a threshold baked into a file, invisible and uneditable.
+
+**The failure and the reading are different things.** Being listed is a reading. A *lookup* that
+fails is a failure — and if every lookup fails the check fails, because reporting zero listings
+would be reporting "we are on no lists" on the strength of no evidence at all. That is the
+CLAUDE.md rule about no-data not being zero, in the shape this particular type takes.
+
+**The reversal has its own exported function and its own test**, because `192.0.2.42` becoming
+`42.2.0.192` is the one piece here that is easy to get backwards, and getting it backwards
+produces a sensor that cheerfully answers "not listed" for ever.
+
+**Writing it found two bugs, and neither was where you would look.**
+
+The first was the timeout: a test asking for 700 ms waited nine seconds. Node's `Resolver`
+**retries four times by default and `timeout` is per try**, so a check configured for five
+seconds takes twenty. A monitoring check has its own deadline and its own scan interval; retrying
+inside one turns a configured timeout into a number that means nothing. `tries: 1` is now in the
+file with that paragraph above it, and the test that found it now asserts the elapsed time so the
+retry cannot come back. If you are writing a type over any Node protocol client, go and look for
+its retry default before you trust its timeout.
+
+The second was found by the *live* run and not by any test, which is the whole argument for doing
+one. Pointed at two zones — one real, one fictional — the sensor reported "on none of 2
+blocklists". `NXDOMAIN` is the protocol's way of saying "not listed" **and also what a zone that
+does not exist answers**, so a typo in a list name is a sensor that reports clean for ever. It now
+confirms an unlisted answer by asking whether the zone itself exists, one extra lookup per clean
+zone. Note the shape of that mistake: it is the same shape as the reversal bug the exported
+function guards against — *a sensor that always answers the reassuring thing* — and the type's own
+docstring warned about the reversal while walking straight into the other one.
+
+**The tests are against a simulator, and the simulator is forty lines.** `node:dgram` answering
+DNS by hand: a header, the question echoed back, `NXDOMAIN` or a synthetic `A` record. The
+alternative is querying a real blocklist, which CLAUDE.md forbids and which would also mean a
+test that fails whenever Spamhaus rate-limits the build machine. Ten tests, covering the happy
+path, a listing, a partial failure, a total failure, the wrong kind of address, an overridden
+address, and abort.
+
+**Cost, honestly.** The type is about 190 lines including the comments that explain *why*; the
+test file is about 200 including its simulator. Both were written in one sitting. The bounded
+part of the claim holds: nothing outside those two files and the two-line registration had to
+change, and the guide's list of what to cover is what made it quick, because none of the
+decisions had to be invented.
+
+---
+
 ## Related
 
 - `docs/ADR-001-architecture.md` — Decision 7, and why this is a plugin contract
 - `docs/CAPABILITIES.MD` — which types are `[V1]`, `[V2]` and `[OUT]`
 - `docs/TASKS.md` — `P-08`…`P-11` are the first four types; `P-06` is the harness
+- `packages/sensors/src/types/dns-blocklist.ts` — the worked example above, in full

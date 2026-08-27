@@ -65,6 +65,7 @@ export {
 import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
+import { dnsBlocklist } from './types/dns-blocklist.js';
 import { dnsRecord } from './types/dns-record.js';
 import { icmpJitter } from './types/icmp-jitter.js';
 import { portRange } from './types/port-range.js';
@@ -112,6 +113,7 @@ import { sshScript } from './types/ssh-script.js';
  */
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,
+  dnsBlocklist,
   dnsRecord,
   icmpJitter,
   portRange,
