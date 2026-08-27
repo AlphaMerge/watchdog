@@ -283,3 +283,105 @@ describe('the wire carries every field the types declare', () => {
     );
   });
 });
+
+/**
+ * The discovery sweep messages (`D-01`).
+ *
+ * **Both directions, and that is the point of this block.** These four members were written into
+ * the wrong union and nothing caught it: the core sent a `sweep-start` the probe's own schema had
+ * never heard of, the probe closed the connection on a protocol violation, and the pair sat in a
+ * reconnect loop. Every message is asserted from the side that receives it *and* refused from the
+ * side that must not — which is the assertion that was missing.
+ */
+describe('discovery sweep messages', () => {
+  const job = {
+    runId: 7,
+    range: '10.0.0.0/24',
+    cursor: 0,
+    timeoutMs: 1_000,
+    concurrency: 32,
+    ratePerSecond: 0,
+  };
+
+  it('carries a sweep from core to probe', () => {
+    const message = parseCoreToProbe({ type: 'sweep-start', job });
+    assert.equal(message.type, 'sweep-start');
+    assert.deepEqual(parseCoreToProbe({ type: 'sweep-cancel', runId: 7 }), {
+      type: 'sweep-cancel',
+      runId: 7,
+    });
+  });
+
+  it('carries progress and an ending from probe to core', () => {
+    const progress = parseProbeToCore({
+      type: 'sweep-progress',
+      runId: 7,
+      cursor: 40,
+      found: [{ address: '10.0.0.5', rttMs: 0.4 }],
+      failed: 1,
+    });
+    assert.equal(progress.type, 'sweep-progress');
+    assert.deepEqual(
+      parseProbeToCore({
+        type: 'sweep-finished',
+        runId: 7,
+        ending: 'done',
+        cursor: 254,
+        message: '',
+      }),
+      { type: 'sweep-finished', runId: 7, ending: 'done', cursor: 254, message: '' },
+    );
+  });
+
+  it('refuses each of them from the wrong direction', () => {
+    // The assertion that was missing. A member in the wrong union parses on the sending side
+    // and is rejected on the receiving one, which shows up as a reconnect loop rather than as
+    // anything naming the message.
+    assert.throws(() => parseProbeToCore({ type: 'sweep-start', job }), ProtocolError);
+    assert.throws(() => parseProbeToCore({ type: 'sweep-cancel', runId: 7 }), ProtocolError);
+    assert.throws(
+      () =>
+        parseCoreToProbe({
+          type: 'sweep-finished',
+          runId: 7,
+          ending: 'done',
+          cursor: 1,
+          message: '',
+        }),
+      ProtocolError,
+    );
+    assert.throws(
+      () => parseCoreToProbe({ type: 'sweep-progress', runId: 7, cursor: 1, found: [], failed: 0 }),
+      ProtocolError,
+    );
+  });
+
+  it('refuses a job with a bound the sweep would not survive', () => {
+    assert.throws(
+      () => parseCoreToProbe({ type: 'sweep-start', job: { ...job, concurrency: 100_000 } }),
+      ProtocolError,
+    );
+    assert.throws(
+      () => parseCoreToProbe({ type: 'sweep-start', job: { ...job, timeoutMs: 0 } }),
+      ProtocolError,
+    );
+    assert.throws(
+      () => parseCoreToProbe({ type: 'sweep-start', job: { ...job, cursor: -1 } }),
+      ProtocolError,
+    );
+  });
+
+  it('refuses an ending it does not know', () => {
+    assert.throws(
+      () =>
+        parseProbeToCore({
+          type: 'sweep-finished',
+          runId: 7,
+          ending: 'paused',
+          cursor: 1,
+          message: '',
+        }),
+      ProtocolError,
+    );
+  });
+});

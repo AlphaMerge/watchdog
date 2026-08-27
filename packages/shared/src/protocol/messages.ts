@@ -5,9 +5,10 @@ import { AppError } from '../errors/app-error.js';
  * The core↔probe wire protocol.
  *
  * Phase 0 carried a versioned handshake and a heartbeat; version 2 added check results and their
- * acknowledgement (S-07); version 3 adds the configuration push (R-04). The rest of spool replay
- * arrives later as new members of these unions — which is why they are discriminated unions
- * rather than one message type with optional fields.
+ * acknowledgement (S-07); version 3 added the configuration push (R-04); version 4 adds the
+ * discovery sweep (D-01). The rest of spool replay arrives later as new members of these
+ * unions — which is why they are discriminated unions rather than one message type with
+ * optional fields.
  */
 
 /**
@@ -19,8 +20,12 @@ import { AppError } from '../errors/app-error.js';
  *
  * Version 3 added the configuration push (R-04). The core will not send `config-*` to a peer
  * below 3 — an older probe simply scans nothing, which is what it did before the push existed.
+ *
+ * Version 4 added the discovery sweep (D-01). Same rule: the core will not send `sweep-*` to a
+ * peer below 4, and a discovery run assigned to such a probe fails saying which probe and what
+ * version it is running, rather than waiting for progress that will never come.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /**
  * The oldest peer version this build still understands.
@@ -116,6 +121,52 @@ export interface CheckResult {
   channels: ChannelReading[];
 }
 
+/**
+ * A sweep a probe has been told to run (`D-01`).
+ *
+ * **The range is sent as text and parsed on the probe**, rather than as a list of addresses.
+ * 65,536 addresses is about a megabyte of JSON to say what forty characters say, it would have
+ * to be re-sent on every resume, and `@ms/shared` gives both ends the same parser — so the two
+ * cannot disagree about what the text means.
+ */
+export interface SweepJob {
+  runId: number;
+  /** The range, in the spelling the operator typed. Parsed by `parseIpRange` at both ends. */
+  range: string;
+  /**
+   * Where to start, as a count of addresses already offered.
+   *
+   * **This is the whole of resumability.** A restarted probe, a reconnect and a core failover
+   * all resume by sending the cursor the core has durably recorded; an iterator would survive
+   * none of them. Re-sweeping a few addresses after a crash is free — a host found twice is the
+   * same host — so the cursor is advanced on acknowledgement rather than on send.
+   */
+  cursor: number;
+  /** Milliseconds a single address waits for a reply before it counts as no answer. */
+  timeoutMs: number;
+  /**
+   * How many addresses may be in flight at once.
+   *
+   * Bounded here rather than by the probe alone so an operator sweeping a lab can go faster and
+   * one sweeping a production VLAN can go slower. It is a ceiling either way: the probe also
+   * yields to its own check pool, because a discovery run that delays live checks has traded a
+   * one-off convenience for the thing the system exists to do.
+   */
+  concurrency: number;
+  /** Addresses per second, averaged. Zero means the concurrency bound is the only limit. */
+  ratePerSecond: number;
+}
+
+/** One address a sweep found alive, with what it cost to find out. */
+export interface SweepHost {
+  /** Dotted-quad. Text rather than the integer, because everything downstream reads it. */
+  address: string;
+  rttMs: number;
+}
+
+/** Why a sweep stopped. Only `done` means the range was covered. */
+export type SweepEnding = 'done' | 'cancelled' | 'failed' | 'superseded';
+
 /** Why a batch of results was refused. Every one of these is retryable except `invalid`. */
 export type NackReason =
   'queue-full' | 'shutting-down' | 'storage-error' | 'unavailable' | 'invalid';
@@ -174,6 +225,32 @@ export type ProbeToCoreMessage =
       /** How many assignments the probe now has scheduled. The core logs any disagreement. */
       scheduled: number;
     }
+  | {
+      /**
+       * How far a sweep has got, and what it found (`D-01`).
+       *
+       * Progress and findings in one message on purpose. They are the same fact — "these
+       * addresses have been offered, and these of them answered" — and splitting them would let
+       * the core record a cursor past a host whose reply had not arrived yet, which is a host
+       * silently missed on the one run that mattered.
+       */
+      type: 'sweep-progress';
+      runId: number;
+      /** Addresses offered so far, counted from the start of the range, not of this session. */
+      cursor: number;
+      /** Alive since the last progress message. Empty is an ordinary and common message. */
+      found: SweepHost[];
+      /** Addresses that could not be attempted at all — no route, no permission to ping. */
+      failed: number;
+    }
+  | {
+      type: 'sweep-finished';
+      runId: number;
+      ending: SweepEnding;
+      cursor: number;
+      /** Empty unless `ending` is `failed`, where it is what to tell the operator. */
+      message: string;
+    }
   | { type: 'bye'; reason: string };
 
 export type CoreToProbeMessage =
@@ -222,6 +299,16 @@ export type CoreToProbeMessage =
   | { type: 'config-delta'; version: string; upserted: SensorAssignment[]; removed: number[] }
   /** The probe's fingerprint already matches. Nothing to send, and nothing to apply. */
   | { type: 'config-unchanged'; version: string }
+  /** Start or resume a sweep (`D-01`). Sending one for a run already running resumes it. */
+  | { type: 'sweep-start'; job: SweepJob }
+  /**
+   * Stop a sweep.
+   *
+   * Cancellation is a message rather than a disconnect because a sweep must stop *promptly* —
+   * an operator who typed the wrong range wants the pings to stop now, not when the last of
+   * 65,536 timeouts expires.
+   */
+  | { type: 'sweep-cancel'; runId: number }
   | { type: 'bye'; reason: string };
 
 export type ProtocolMessage = ProbeToCoreMessage | CoreToProbeMessage;
@@ -324,6 +411,42 @@ const probeToCoreSchema = {
         scheduled: { type: 'integer', minimum: 0 },
       },
       required: ['type', 'version', 'scheduled'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'sweep-progress' },
+        runId: { type: 'integer', minimum: 1 },
+        cursor: { type: 'integer', minimum: 0 },
+        found: {
+          type: 'array',
+          // A batch bound rather than a run bound: a /16 where everything answers is 65,534
+          // hosts, and they arrive across many progress messages.
+          maxItems: 4096,
+          items: {
+            type: 'object',
+            properties: {
+              address: { type: 'string', minLength: 7, maxLength: 15 },
+              rttMs: { type: 'number', minimum: 0 },
+            },
+            required: ['address', 'rttMs'],
+            additionalProperties: false,
+          },
+        },
+        failed: { type: 'integer', minimum: 0 },
+      },
+      required: ['type', 'runId', 'cursor', 'found', 'failed'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'sweep-finished' },
+        runId: { type: 'integer', minimum: 1 },
+        ending: { type: 'string', enum: ['done', 'cancelled', 'failed', 'superseded'] },
+        cursor: { type: 'integer', minimum: 0 },
+        message: { type: 'string', maxLength: 2000 },
+      },
+      required: ['type', 'runId', 'ending', 'cursor', 'message'],
       additionalProperties: false,
     },
     {
@@ -470,6 +593,36 @@ const coreToProbeSchema = {
         version: { type: 'string', maxLength: 128 },
       },
       required: ['type', 'version'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'sweep-start' },
+        job: {
+          type: 'object',
+          properties: {
+            runId: { type: 'integer', minimum: 1 },
+            // The range as text, bounded: a comma-separated list long enough to exceed this is
+            // an operator pasting something that is not a range.
+            range: { type: 'string', minLength: 1, maxLength: 4000 },
+            cursor: { type: 'integer', minimum: 0 },
+            timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
+            concurrency: { type: 'integer', minimum: 1, maximum: 512 },
+            ratePerSecond: { type: 'number', minimum: 0, maximum: 100000 },
+          },
+          required: ['runId', 'range', 'cursor', 'timeoutMs', 'concurrency', 'ratePerSecond'],
+          additionalProperties: false,
+        },
+      },
+      required: ['type', 'job'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'sweep-cancel' },
+        runId: { type: 'integer', minimum: 1 },
+      },
+      required: ['type', 'runId'],
       additionalProperties: false,
     },
     {

@@ -20,6 +20,7 @@ import { objectRoutes } from './routes/objects.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
+import { discoveryRoutes } from './routes/discovery.js';
 import { stateRoutes } from './routes/state.js';
 import { alarmRoutes, ALARM_SCHEMAS } from './routes/alarms.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
@@ -33,6 +34,7 @@ import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
+import type { DiscoveryService } from '../discovery/service.js';
 import type { ScheduleService } from '../schedules/service.js';
 import type { TemplateService } from '../notifications/templates.js';
 import type { TriggerService } from '../triggers/service.js';
@@ -66,6 +68,8 @@ export interface ApiServerOptions {
    * missing should 404 rather than quietly report that it has none.
    */
   schedules?: ScheduleService;
+  /** Absent until D-01 is wired; the discovery routes then simply do not exist. */
+  discovery?: DiscoveryService;
   /**
    * Notification triggers (`N-01`).
    *
@@ -120,6 +124,7 @@ export class ApiServer {
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
   readonly #schedules: ScheduleService | undefined;
+  readonly #discovery: DiscoveryService | undefined;
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -149,6 +154,7 @@ export class ApiServer {
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#schedules = options.schedules;
+    this.#discovery = options.discovery;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -299,6 +305,9 @@ export class ApiServer {
         await scope.register(lookupRoutes, { lookups: this.#lookups });
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });
+        }
+        if (this.#discovery !== undefined) {
+          await scope.register(discoveryRoutes, { discovery: this.#discovery });
         }
         if (this.#triggers !== undefined) {
           await scope.register(triggerRoutes, { triggers: this.#triggers });

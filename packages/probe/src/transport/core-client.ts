@@ -13,6 +13,7 @@ import {
   type ProbeToCoreMessage,
   type NackReason,
   type CheckResult,
+  type SweepJob,
 } from '@ms/shared';
 import type { ConfigUpdate } from '../scheduler/assignments.js';
 import { Backoff } from './backoff.js';
@@ -33,8 +34,19 @@ export interface CoreClientOptions {
    * what the core acknowledges against.
    */
   onConfig?: (config: ConfigUpdate) => number;
+  /**
+   * A discovery sweep to start, resume or stop (`D-01`).
+   *
+   * Same division as `onConfig`: the client owns the socket, not the work. Absent means this
+   * build has no sweep runner wired, and a `sweep-start` is answered with a `failed` finish
+   * saying so — silence would leave the core waiting for progress that never comes.
+   */
+  onSweep?: (message: SweepCommand) => void;
   random?: () => number;
 }
+
+/** What the core asked for. Flattened from the wire so the runner takes one shape. */
+export type SweepCommand = { kind: 'start'; job: SweepJob } | { kind: 'cancel'; runId: number };
 
 export type { ConfigUpdate } from '../scheduler/assignments.js';
 
@@ -266,6 +278,29 @@ export class CoreClient {
         return;
       }
 
+      case 'sweep-start': {
+        const handler = this.#options.onSweep;
+        if (handler === undefined) {
+          // Answered rather than ignored. A core waiting on a run that will never report is a
+          // discovery stuck at 0% with nothing anywhere saying why.
+          this.#connection?.send({
+            type: 'sweep-finished',
+            runId: message.job.runId,
+            ending: 'failed',
+            cursor: message.job.cursor,
+            message: 'this probe has no discovery runner',
+          });
+          return;
+        }
+        handler({ kind: 'start', job: message.job });
+        return;
+      }
+
+      case 'sweep-cancel': {
+        this.#options.onSweep?.({ kind: 'cancel', runId: message.runId });
+        return;
+      }
+
       case 'reject': {
         // Retrying will not fix a bad key or a revoked probe; say so once, loudly, and keep
         // retrying slowly rather than silently giving up — an operator may fix it at the core.
@@ -314,6 +349,21 @@ export class CoreClient {
    * A duplicate write costs nothing — the core's unique index on `(channel_id, time)` makes it
    * a no-op — while a discarded batch is a reading nothing can recover.
    */
+  /**
+   * Reports a sweep's progress or its end (`D-01`).
+   *
+   * Fire-and-forget and **not spooled**, unlike a check result. A sweep's progress is only
+   * useful while the run is alive, and the run's durable record is the core's row: a probe that
+   * loses the link stops the sweep and resumes from the cursor when it comes back, which is
+   * simpler and more correct than replaying stale progress against a run that may have been
+   * cancelled in the meantime.
+   */
+  sendSweep(message: Extract<ProbeToCoreMessage, { type: `sweep-${string}` }>): boolean {
+    if (this.#connection === undefined) return false;
+    this.#connection.send(message);
+    return true;
+  }
+
   async sendResults(results: readonly CheckResult[], backlog = 0): Promise<ResultsOutcome> {
     const connection = this.#connection;
     if (connection === undefined || this.#state !== 'connected') {

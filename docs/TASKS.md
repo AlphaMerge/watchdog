@@ -4041,8 +4041,76 @@ because each is a decision rather than a defect:
 
 ## Phase 7 — Discovery and templates
 
-- [ ] **D-01 — Network sweep** · M · P-08 · Ping sweep across an IP range; resumable,
+- [x] **D-01 — Network sweep** · M · P-08 · Ping sweep across an IP range; resumable,
       cancellable, rate-limited so it never starves live checks.
+
+      **D-01 outcome.** Three properties, three mechanisms, and each is worth naming separately
+      because they are not the same problem.
+
+      *Resumable* is one integer. A run's position is how many addresses have been offered, held
+      in a column on the core rather than on the probe — because the probe is the thing that
+      restarts. A probe crash, a reconnect and a core failover all resume the same way: read the
+      cursor, send it back. **The cursor is a floor, never a promise**: it advances only after
+      the hosts in the same message are stored, and re-sweeping a few addresses after a crash is
+      free because the unique key on `(run_id, address)` makes a repeated host a no-op. Writing
+      the cursor first would be a host silently missed — and the run would report itself
+      complete, so nobody would ever know to look.
+
+      *Cancellable* is an `AbortController` per run, and cancellation is a **message** rather
+      than a disconnect: an operator who typed the wrong range wants the pings to stop now, not
+      when the last of 65,536 timeouts expires. The decision is recorded before it is sent, so a
+      cancel works while the probe is disconnected — otherwise the click did nothing and the
+      sweep resumes the moment it comes back.
+
+      *Rate-limited so it never starves live checks* is the one that needed more than a number.
+      `concurrency` and `ratePerSecond` bound the sweep absolutely, but a bound chosen in advance
+      cannot know what else the probe is doing at three on a Tuesday — so **the sweep watches the
+      check pool and stands down entirely while anything is queued**, and counts the time it
+      spent doing so, because backpressure is visible and never silent. The rate is a token
+      bucket rather than a delay per address: a fixed delay makes the floor the rate, so a
+      network that answers instantly runs at exactly the limit and one that times out runs far
+      below it.
+
+      **`@ms/shared` owns the range parser**, so the core's "that is 16,777,214 addresses" and
+      the probe's enumeration cannot disagree — a disagreement shows up as a progress bar that
+      never reaches the end, which is the kind of bug that gets lived with rather than reported.
+      Four spellings (`10.0.0.0/24`, a pair, the last-octet shorthand, one address) in any comma
+      mix. **A CIDR excludes its network and broadcast addresses**, because pinging `.0` and
+      `.255` draws a reply from every host on some networks and none on others — but a /31 and a
+      /32 keep everything, since RFC 3021 point-to-point links are entirely host addresses and
+      the usual rule would sweep nothing at all. **IPv4 only, stated rather than omitted**: the
+      smallest IPv6 subnet anybody assigns is a /64, so sweeping IPv6 is not slow but impossible,
+      and an IPv6 literal is refused with that sentence.
+
+      One ping per address rather than the sensor's four: a sweep asks "is anything here", and
+      four packets across a /16 is 262,136 packets for an answer that has not improved. **An
+      address that could not be *attempted* is counted separately from one that did not answer**,
+      because a firewalled network and an empty one look identical otherwise.
+
+      **A defect live verification found and nothing else could have.** The four new protocol
+      members were written into the wrong union: `sweep-start` and `sweep-cancel` landed in the
+      *probe→core* schema, so the core sent a message the probe's own validator had never heard
+      of, the probe closed the connection on a protocol violation, and the pair sat in a
+      half-second reconnect loop. Every unit test passed. The fix is two lines; the lasting fix is
+      the test block that now asserts each message from the side that receives it **and refuses
+      it from the side that must not**, which is the assertion that was missing.
+
+      A second defect, found by a test written for it: `ORDER BY address` on a query that renames
+      `host(address) AS address` binds to the *output* column, so the rows came back sorted as
+      strings and `10.0.0.10` preceded `10.0.0.9`. The whole reason the column is `inet` is to
+      sort as an address, and an operator scanning the list for gaps is exactly who a string sort
+      misleads.
+
+      Nineteen mutations, all killed. One turned out to be **equivalent** rather than surviving —
+      `>>> 0` on the CIDR mask does nothing, because `network` and `broadcast` coerce on the way
+      out — so it was deleted rather than tested around; a defensive coercion that cannot be
+      removed by a mutation is a coercion that is not doing anything.
+
+      Verified live against the dev network. A sweep of twenty addresses found eleven in address
+      order with sub-millisecond RTTs; a run left `queued` by the protocol defect above **resumed
+      by itself on the next connect** and completed, which is the resume path proven rather than
+      described; and a /24 cancelled at three seconds stopped at 15/254 with the eleven hosts it
+      had already found still recorded.
 - [ ] **D-02 — Device identification** · L · T-01, T-07, T-09 · SNMP sysObjectID/sysDescr, WMI,
       SSH banner, open ports, reverse DNS → a device fingerprint.
 - [ ] **D-03 — Device templates** · L · D-02 · Fingerprint → sensor set mapping; a built-in

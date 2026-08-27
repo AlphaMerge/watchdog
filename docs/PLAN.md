@@ -554,6 +554,14 @@ sitting**, and until it has, treat the criterion as unproven rather than met.
 
 ---
 
+### Phase 7 progress
+
+| Ticket | Status | Notes |
+| --- | --- | --- |
+| D-01 Network sweep | done | Three properties, three mechanisms. **Resumable is one integer** — how many addresses have been offered — held on the *core*, because the probe is the thing that restarts; it advances only after the hosts in the same message are stored, so it is a floor rather than a promise and a replayed address is free. **Cancellable is a message, not a disconnect**, and is recorded before it is sent so a cancel works while the probe is down. **Not starving live checks** needed more than a number: the sweep stands down entirely while any check is queued and counts the time, and the rate is a token bucket rather than a delay per address. The range parser is in `@ms/shared` so the two ends cannot disagree about how big a range is; a CIDR excludes its network and broadcast addresses, except a /31 and a /32, which are entirely host addresses. IPv4 only, said out loud: a /64 is eighteen million million million addresses. **Live verification earned its keep** — the four new protocol members were written into the wrong union, so the core sent a message the probe's validator rejected and the pair sat in a reconnect loop with every unit test passing |
+
+---
+
 ## Phase 8 — Remote probes
 
 **Deliverables**

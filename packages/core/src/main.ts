@@ -59,6 +59,7 @@ import { HistoryService } from './timeseries/history.js';
 import { SqlTimeSeriesStore } from './timeseries/store.js';
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
+import { DiscoveryService } from './discovery/service.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
 import { SensorStateService } from './state/service.js';
@@ -511,6 +512,20 @@ async function serve(): Promise<void> {
     },
   });
 
+  // Discovery (`D-01`), built before the API so the routes can have it and before the probe
+  // endpoint so the endpoint can have it as a sink. It dispatches *back* through the endpoint,
+  // which does not exist yet — so `dispatch` reads it through a closure, the same shape the
+  // probe's spool drain uses for its client. Nothing is sent until a probe connects, which is
+  // long after both are built.
+  // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
+  let probeEndpointRef: ProbeEndpoint | undefined;
+  const discovery = new DiscoveryService({
+    db,
+    logger,
+    dispatch: (probeObjectId, message) =>
+      probeEndpointRef?.sendSweep(probeObjectId, message) ?? false,
+  });
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -522,6 +537,7 @@ async function serve(): Promise<void> {
     catalogue,
     lookups,
     schedules,
+    discovery,
     triggers,
     templates,
     deliveryHealth,
@@ -589,11 +605,12 @@ async function serve(): Promise<void> {
     states,
   });
 
-  const probeEndpoint = new ProbeEndpoint({
+  const probeEndpoint: ProbeEndpoint = new ProbeEndpoint({
     config: config.probeEndpoint,
     logger,
     coreVersion: VERSION,
     results: ingestion,
+    discovery,
     probeConfig: new ProbeConfigService({
       db,
       resolver,
@@ -608,6 +625,7 @@ async function serve(): Promise<void> {
         catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
     }),
   });
+  probeEndpointRef = probeEndpoint;
   configNotifier.attach(probeEndpoint);
   await probeEndpoint.start();
   lifecycle.onShutdown({

@@ -3,6 +3,7 @@ import { DatabaseError } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
+import { DiscoveryError } from '../discovery/errors.js';
 import { QueryError } from '../timeseries/query.js';
 import { MethodError } from '../notifications/methods.js';
 import { TriggerError } from '../triggers/definition.js';
@@ -100,6 +101,13 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // would not decrypt, which is exactly what an operator needs in the log and exactly what an
     // unauthenticated caller should not be told about the shape of the vault.
     return envelope(503, error.code, 'the credential vault is not usable — see the core log');
+  }
+
+  if (error instanceof DiscoveryError) {
+    // The parser's own sentence goes out unchanged: "that is 16,777,214 addresses and one run
+    // may sweep 65,536 — the usual cause is a /8 where a /24 was meant" is the whole point of
+    // having written it, and a generic "invalid range" would throw it away.
+    return envelope(error.status, error.code, error.message, { ...error.context });
   }
 
   if (error instanceof InheritanceError) {

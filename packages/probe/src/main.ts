@@ -20,6 +20,8 @@ import { AssignmentStore } from './scheduler/assignments.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
 import { TimingWheel } from './scheduler/wheel.js';
+import { SweepRunner } from './discovery/sweep.js';
+import { pingOnce } from './discovery/ping-probe.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
 
@@ -240,6 +242,34 @@ async function main(): Promise<void> {
     },
   });
 
+  // The discovery sweep (`D-01`). Constructed before the client because the client's `onSweep`
+  // hands straight to it, and it reports back through `coreClient` — the same getter pattern
+  // the drain uses, for the same reason: the two need each other and neither can exist first.
+  const sweeps = new SweepRunner({
+    logger,
+    probe: pingOnce,
+    // **What keeps a sweep from starving live checks.** A queued check is a scan that is already
+    // late; the sweep stands down entirely while there is one, and counts the time it spent
+    // doing so, because backpressure is visible and never silent (CLAUDE.md).
+    queueDepth: () => pool.stats().queued,
+    onProgress: (runId, cursor, found, failed) => {
+      coreClient.sendSweep({ type: 'sweep-progress', runId, cursor, found, failed });
+    },
+    onFinished: (runId, ending, cursor, message) => {
+      coreClient.sendSweep({ type: 'sweep-finished', runId, ending, cursor, message });
+    },
+  });
+  lifecycle.onShutdown({
+    name: 'sweep-runner',
+    timeoutMs: 5_000,
+    run: () => {
+      // Each run reports as cancelled, which leaves it `queued` on the core — so a restart
+      // resumes from the cursor rather than starting the range again.
+      sweeps.stop();
+      return Promise.resolve();
+    },
+  });
+
   const coreClient = new CoreClient({
     config,
     logger,
@@ -254,6 +284,10 @@ async function main(): Promise<void> {
       // A deleted sensor should stop costing a cursor. Cheap, and it runs only on a config push.
       trapListener?.retain(assignments.ids());
       return size;
+    },
+    onSweep: (message) => {
+      if (message.kind === 'start') sweeps.start(message.job);
+      else sweeps.cancel(message.runId);
     },
   });
   coreClient.start();

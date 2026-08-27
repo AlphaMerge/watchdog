@@ -16,6 +16,9 @@ import {
   type ProbeToCoreMessage,
   type RejectCode,
   type SensorAssignment,
+  type SweepEnding,
+  type SweepHost,
+  type SweepJob,
 } from '@ms/shared';
 import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
 
@@ -42,6 +45,36 @@ export interface ProbeConfigSource {
   touch(objectId: number): Promise<void>;
 }
 
+/**
+ * What the transport tells the discovery service, and nothing more (`D-01`).
+ *
+ * Same reasoning as `ResultReceiver` and `ProbeConfigSource`: the endpoint stays testable
+ * without a database, and the discovery service never learns about sockets.
+ */
+/** A sweep the core wants started; `job` is the wire shape, built by the discovery service. */
+export interface SweepStart {
+  kind: 'start';
+  job: SweepJob;
+}
+
+export interface SweepCancel {
+  kind: 'cancel';
+  runId: number;
+}
+
+export interface DiscoverySink {
+  /** A probe with this branch has connected, or reconnected. Offer it whatever it should run. */
+  pump(probeObjectId: number): Promise<void>;
+  progress(
+    runId: number,
+    cursor: number,
+    found: readonly SweepHost[],
+    failed: number,
+  ): Promise<void>;
+  finished(runId: number, ending: SweepEnding, cursor: number, message: string): Promise<void>;
+  probeDisconnected(probeObjectId: number): Promise<void>;
+}
+
 export interface ProbeEndpointOptions {
   config: CoreConfig['probeEndpoint'];
   logger: Logger;
@@ -50,6 +83,8 @@ export interface ProbeEndpointOptions {
   results?: ResultReceiver;
   /** Absent until R-04 is wired; probes then receive nothing and scan nothing. */
   probeConfig?: ProbeConfigSource;
+  /** Absent until D-01 is wired; sweeps are then never dispatched and never reported. */
+  discovery?: DiscoverySink;
 }
 
 export interface ConnectedProbe {
@@ -279,12 +314,76 @@ export class ProbeEndpoint {
             );
           }
           return session;
+        case 'sweep-progress':
+          // Never awaited by the message loop, for the same reason results are not: a database
+          // round trip must not delay the heartbeat that keeps this connection alive.
+          this.#queueDiscovery(session, logger, (sink) =>
+            sink.progress(message.runId, message.cursor, message.found, message.failed),
+          );
+          return session;
+        case 'sweep-finished':
+          this.#queueDiscovery(session, logger, (sink) =>
+            sink.finished(message.runId, message.ending, message.cursor, message.message),
+          );
+          return session;
         case 'bye':
           logger.info({ reason: message.reason }, 'probe disconnecting');
           connection.close(`peer said bye: ${message.reason}`);
           return session;
       }
     });
+  }
+
+  /**
+   * Chains a discovery message behind whatever is already in flight for this probe (`D-01`).
+   *
+   * The same queue the results take, on purpose: a sweep's progress and a batch of readings
+   * from the same probe are both writes, and letting them race would let a `sweep-finished`
+   * land before the `sweep-progress` carrying the last hosts it found.
+   */
+  #queueDiscovery(
+    session: ProbeSession,
+    logger: Logger,
+    run: (sink: DiscoverySink) => Promise<void>,
+  ): void {
+    const sink = this.#options.discovery;
+    if (sink === undefined) return;
+    session.pending = session.pending.then(async () => {
+      try {
+        await run(sink);
+      } catch (error) {
+        // A discovery write that fails must not take the connection with it: the probe is still
+        // delivering readings, which matter more than a sweep does.
+        logger.error(describeError(error), 'a discovery message could not be recorded');
+      }
+    });
+  }
+
+  /**
+   * Sends a sweep message to a connected probe, by the *object* id its branch owns.
+   *
+   * Returns false when that probe is not connected, which is not a failure: the run stays
+   * queued and is offered again when it reconnects. That path is also how a probe restart
+   * resumes a sweep, so it is the ordinary one rather than the exception.
+   */
+  sendSweep(probeObjectId: number, message: SweepStart | SweepCancel): boolean {
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId !== probeObjectId) continue;
+      if (session.protocolVersion < 4) {
+        this.#options.logger.warn(
+          { probeObjectId, protocolVersion: session.protocolVersion },
+          'probe is too old to run a discovery sweep',
+        );
+        return false;
+      }
+      session.connection.send(
+        message.kind === 'start'
+          ? { type: 'sweep-start', job: message.job }
+          : { type: 'sweep-cancel', runId: message.runId },
+      );
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -449,6 +548,10 @@ export class ProbeEndpoint {
           if (session.probeObjectId !== null) {
             await source.touch(session.probeObjectId);
             logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
+            // A probe that has just claimed its branch may have a sweep waiting, and a
+            // reconnecting one almost certainly does — a run left `queued` by the disconnect
+            // below. Offering it here rather than on a timer is what makes a resume immediate.
+            this.#offerSweep(session.probeObjectId, logger);
           } else if (presented !== undefined) {
             // Not an error: an unenrolled probe is the ordinary state of a freshly installed
             // one. Saying so once at the handshake beats silence, which a probe cannot tell
@@ -548,9 +651,27 @@ export class ProbeEndpoint {
     }
   }
 
+  /** Fire-and-forget, because the config push it sits inside must not wait on discovery. */
+  #offerSweep(probeObjectId: number, logger: Logger): void {
+    const sink = this.#options.discovery;
+    if (sink === undefined) return;
+    void sink.pump(probeObjectId).catch((error: unknown) => {
+      logger.error(describeError(error), 'could not offer a discovery sweep to this probe');
+    });
+  }
+
   #handleClose(close: ConnectionClose, session: ProbeSession | undefined, logger: Logger): void {
     if (session !== undefined && this.#sessions.get(session.info.gid) === session) {
       this.#sessions.delete(session.info.gid);
+    }
+    // A run this probe was doing goes back to `queued`, not `failed`: a probe that dropped is
+    // coming back, and its sweep is a cursor away from continuing. Marking it failed would make
+    // an operator restart a sweep that only needed to wait.
+    const sink = this.#options.discovery;
+    if (sink !== undefined && session?.probeObjectId != null) {
+      void sink.probeDisconnected(session.probeObjectId).catch((error: unknown) => {
+        logger.error(describeError(error), 'could not release this probe’s discovery runs');
+      });
     }
     logger.info(
       { cause: close.cause, detail: close.detail, gid: session?.info.gid ?? null },

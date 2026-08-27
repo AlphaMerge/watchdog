@@ -25,6 +25,10 @@
     "./windows": {
       "types": "./dist/src/support/windows/index.d.ts",
       "default": "./dist/src/support/windows/index.js"
+    },
+    "./ping": {
+      "types": "./dist/src/support/ping.d.ts",
+      "default": "./dist/src/support/ping.js"
     }
   },
   "scripts": {

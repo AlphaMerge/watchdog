@@ -61,9 +61,23 @@ export type {
   ProtocolMessage,
   RejectCode,
   SensorAssignment,
+  SweepEnding,
+  SweepHost,
+  SweepJob,
 } from './protocol/messages.js';
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';
+
+export {
+  addressAt,
+  contains,
+  IpRangeError,
+  MAX_ADDRESSES,
+  parseIpRange,
+  toNumber,
+  toText,
+} from './net/ip-range.js';
+export type { IpRange, IpSpan } from './net/ip-range.js';

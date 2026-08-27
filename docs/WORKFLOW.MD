@@ -69,6 +69,11 @@ Rules that matter:
   (attempt every compatible sensor type). Higher levels take much longer.
 - **Range size.** PRTG accepts up to 65,536 addresses in one run and warns it may take days.
   Discovery must be resumable, cancellable, and rate-limited so it never starves live checks.
+  `D-01` implements all three: the cursor is a column on the core so it survives a probe restart
+  and a core failover alike, a cancel is recorded before it is sent so it works while the probe
+  is disconnected, and the sweep stands down entirely whenever the probe has a check queued.
+  IPv4 only — a sweep enumerates addresses, and the smallest IPv6 subnet anybody assigns is a
+  /64.
 - **Scheduled rediscovery** (hourly/daily/weekly) may auto-create devices that have appeared
   since. This must be off by default — surprise objects are a support burden.
 - **Templates** carry the mapping from fingerprint → sensor set. Users must be able to save
