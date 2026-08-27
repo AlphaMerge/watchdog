@@ -4428,8 +4428,52 @@ because each is a decision rather than a defect:
       unknown time zone are the caller's mistake, and both answer 400 with the sentence that
       says which value was wrong. A schedule in `Europe/London` set to 03:00 books
       `2026-08-28T02:00:00Z`, which is the zone being honoured rather than assumed.
-- [ ] **D-08 — Discovery run summary** · S · D-04 · Scanned, found, created, errors — persisted
+- [x] **D-08 — Discovery run summary** · S · D-04 · Scanned, found, created, errors — persisted
       and viewable.
+
+      **D-08 outcome.** `GET /discovery/:id/summary`, and the design decision is that the
+      summary is **derived rather than stored**. Every number comes from the run row and the
+      host rows, so it cannot drift from what happened and a second provisioning pass updates it
+      for free. A stored summary blob would have to be rewritten by the sweep, by identification
+      and by every provisioning attempt, and the first writer to forget would leave a page
+      confidently reporting numbers nothing else agreed with. `WORKFLOW.MD §2`'s "auditable
+      summary" is satisfied by the records being immutable, not by copying them.
+
+      **A headline, because the counts alone do not answer the question that was asked.**
+      Somebody runs a discovery to find out whether it worked, and "254 / 18 / 11 / 20 / 2" is a
+      table they then have to interpret. One sentence says what happened and the table underneath
+      says it precisely — the same division `D-06`'s estimate and `T-21`'s factory report make.
+      It is written as a set of cases rather than a template with optional clauses, because the
+      sentences worth reading are the unhappy ones: *"Cancelled after 132 of 254 addresses"* and
+      *"nothing new — 18 devices already existed"* would each be a missing clause in the middle
+      of a success message.
+
+      **Three distinctions the summary refuses to collapse.** `unidentified` is not `unknown` —
+      one is a host identification never looked at (a `ping` run), the other is one the
+      classifier examined and could not place, and merging them would make the most restrained
+      level look like the most broken one. *Not provisioned yet* is not *created nothing* — one
+      is a discovery waiting for an operator to review the plan, which is `D-07`'s whole default
+      posture. And *created nothing* is not *created nothing new*: a re-run that made nothing
+      because everything was already there is idempotency working, which is exactly what
+      somebody re-running is checking.
+
+      **Errors are in the summary rather than behind a second request**, because a run that
+      created eleven devices and could not create two is the case where somebody stops reading
+      at the good number.
+
+      `discovery_run.schedule_id` is now on the row `D-07` wrote it into: the question "where did
+      this run I did not start come from" is asked from the run's end, and a schedule holds only
+      its most recent one. **Known limitation, found by verifying live**: the column is
+      `ON DELETE SET NULL`, so deleting a schedule makes every run it started read as
+      operator-started. There is no cheap right answer at this size — `RESTRICT` would make a
+      schedule undeletable once it had ever run, and dropping the foreign key leaves an id
+      pointing at nothing an operator can look up. Snapshotting the schedule's *name* onto the
+      run at firing time is the fix and it is a migration; it is written down in the code rather
+      than left to be rediscovered.
+
+      The breakdown counts are `count(*)::int` rather than the default bigint, which
+      node-postgres hands over as a *string* to keep 64-bit values exact — `"3" > "12"` would
+      have sorted the breakdown wrong in a way that only appears past ten of something.
 - [ ] **D-09 — Bulk operations** · M · S-03 · Multi-select edit, clone, move, delete across the
       tree.
       **Added by S-03:** `ObjectService.batch(mode, fn)` composes any number of repository

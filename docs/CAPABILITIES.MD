@@ -404,7 +404,8 @@ Template features:
 | Discovery levels                    | Ping only, standard, detailed — with a time estimate per level before starting (`D-06`)                    | `[V1]` |
 | **Device templates**                | Named recommended sensor sets per device class; built-in plus user-authored                               | `[V1]` |
 | Scheduled rediscovery               | Hourly / daily / weekly, optionally auto-creating newly appeared devices. Off by default                  | `[V1]` |
-| Discovery results logged as tickets | `[V2]`                                                                                                    |
+| Discovery run summary               | Scanned, found, identified, created, errors — one sentence and the table under it (`D-08`)                 | `[V1]` |
+| Discovery results logged as tickets | `[V2]` — the summary above is the v1 answer to the same need: a run says what it did without a ticket queue |
 | Bulk edit / clone / move objects    | `[V1]`                                                                                                    |
 | Import/export of configuration      | `[V2]`                                                                                                    |
 

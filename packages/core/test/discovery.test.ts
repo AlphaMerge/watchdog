@@ -635,4 +635,140 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.equal((await mustGet(record.id)).level, 'ping');
     });
   });
+
+  /**
+   * The summary (`D-08`).
+   *
+   * The sentence and the arithmetic are proved without a database in
+   * `discovery-summary.test.ts`; what needs a database is that the summary reads the *right*
+   * columns and that the breakdown aggregates over what was actually stored. A summary assembled
+   * from the wrong column is the failure a pure test cannot see, and it is the one that puts
+   * confident wrong numbers on a page.
+   */
+  describe('the summary', () => {
+    const fingerprint = (address: string, over: Record<string, unknown> = {}) => ({
+      address,
+      ports: [],
+      kind: 'linux',
+      confidence: 45,
+      evidence: ['SSH is open'],
+      ...over,
+    });
+
+    it('reports nothing for a run that is not there', async () => {
+      assert.equal(await discovery.summary(999_999), null);
+    });
+
+    it('counts what was swept, found and identified', async () => {
+      const run = await start();
+      await discovery.progress(
+        run.id,
+        6,
+        [
+          { address: '10.0.0.1', rttMs: 1 },
+          { address: '10.0.0.2', rttMs: 2 },
+        ],
+        1,
+      );
+      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.identified(run.id, 2, [
+        fingerprint('10.0.0.1', { kind: 'windows', vendor: 'Dell' }),
+        fingerprint('10.0.0.2', { vendor: 'Dell' }),
+      ]);
+
+      const summary = await discovery.summary(run.id);
+      assert.ok(summary !== null);
+      assert.equal(summary.scanned.addresses, 6);
+      assert.equal(summary.scanned.swept, 6);
+      assert.equal(summary.scanned.alive, 2);
+      assert.equal(summary.scanned.failed, 1);
+      assert.equal(summary.scanned.unreachable, 3, 'swept, silent, and not an error');
+      assert.equal(summary.scanned.identified, 2);
+      assert.equal(summary.scanned.complete, true);
+      assert.deepEqual(summary.found.byVendor, [{ vendor: 'Dell', count: 2 }]);
+      // Ordered by count, so the breakdown reads as "mostly X" without anybody sorting it.
+      assert.deepEqual(summary.found.byKind.map((one) => one.kind).sort(), ['linux', 'windows']);
+    });
+
+    it('leaves a host whose vendor nothing said out of the vendor breakdown', async () => {
+      // Most hosts have no vendor: nothing said so, and "23 hosts, vendor null" is the default
+      // state of the column rather than a finding. The kind breakdown's null *is* a finding,
+      // which is why only one of the two is filtered — and a null here would reach the API as a
+      // required string. Found by a mutation: the first fixture gave every host a vendor.
+      const run = await start();
+      await discovery.progress(
+        run.id,
+        6,
+        [
+          { address: '10.0.0.1', rttMs: 1 },
+          { address: '10.0.0.2', rttMs: 1 },
+          { address: '10.0.0.3', rttMs: 1 },
+        ],
+        0,
+      );
+      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.identified(run.id, 3, [
+        fingerprint('10.0.0.1', { vendor: 'Cisco' }),
+        fingerprint('10.0.0.2'),
+        fingerprint('10.0.0.3'),
+      ]);
+
+      const summary = await discovery.summary(run.id);
+      assert.deepEqual(summary?.found.byVendor, [{ vendor: 'Cisco', count: 1 }]);
+      // The two that said nothing are still counted as hosts, and still identified as Linux.
+      assert.deepEqual(summary.found.byKind, [{ kind: 'linux', count: 3 }]);
+    });
+
+    it('counts a host nobody identified as unidentified rather than unknown', async () => {
+      // A `ping` run identifies nothing, and that is the level working rather than failing.
+      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level: 'ping' });
+      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(run.id, 'done', 6, '');
+
+      const summary = await discovery.summary(run.id);
+      assert.deepEqual(summary?.found.byKind, [{ kind: 'unidentified', count: 1 }]);
+    });
+
+    it('carries what provisioning did, and what it could not do', async () => {
+      // `ping`, so the sweep's ending is the run's ending — provisioning is what is under test
+      // here and a run parked in `identifying` would only be testing the fixture.
+      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level: 'ping' });
+      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.recordProvisioning(run.id, {
+        devicesCreated: 3,
+        matched: 2,
+        sensorsCreated: 9,
+        problems: [{ address: '10.0.0.4', problem: 'no credential for snmp' }],
+      });
+
+      const summary = await discovery.summary(run.id);
+      assert.ok(summary !== null);
+      assert.equal(summary.created.devices, 3);
+      assert.equal(summary.created.matched, 2);
+      assert.equal(summary.created.sensors, 9);
+      assert.notEqual(summary.created.provisionedAt, null);
+      assert.deepEqual(summary.errors, [
+        { address: '10.0.0.4', problem: 'no credential for snmp' },
+      ]);
+      assert.match(summary.headline, /3 devices and 9 sensors created, 2 already existed, 1 address had problems\./);
+    });
+
+    it('says where a run nobody started came from', async () => {
+      // `D-07`. The schedule id is on the run row, because the question is asked from the run's
+      // end and a schedule holds only its most recent one.
+      const run = await start();
+      const rows = await db.query<{ id: string }>(
+        `INSERT INTO discovery_schedule
+           (group_id, probe_id, name, range_text, cadence)
+         VALUES ($1, $2, 'Nightly', '10.0.0.0/29', 'daily')
+         RETURNING id::text AS id`,
+        [groupId, probeId],
+      );
+      const scheduleId = Number(rows[0]?.id);
+      await db.query(`UPDATE discovery_run SET schedule_id = $2 WHERE id = $1`, [run.id, scheduleId]);
+
+      assert.equal((await discovery.summary(run.id))?.scheduleId, scheduleId);
+    });
+  });
 });

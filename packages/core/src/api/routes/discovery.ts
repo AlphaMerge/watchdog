@@ -266,6 +266,129 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   );
 
   app.get(
+    '/discovery/:id/summary',
+    {
+      schema: {
+        tags: ['discovery'],
+        summary: 'What a run did — scanned, found, created, errors',
+        description:
+          'Derived from the run and its hosts rather than stored, so it cannot drift from what ' +
+          'happened and a second provisioning pass updates it for free. `headline` is one ' +
+          'sentence for the top of a page; everything under it is the same story precisely. ' +
+          'The errors are here rather than behind a second request, because a run that created ' +
+          'eleven devices and could not create two is exactly the case where somebody stops ' +
+          'reading at the good number.',
+        params: idParams,
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['runId', 'range', 'status', 'headline', 'scanned', 'found', 'created', 'errors', 'timing'],
+            properties: {
+              runId: { type: 'integer' },
+              groupId: { type: 'integer' },
+              probeId: { type: 'integer' },
+              scheduleId: {
+                type: ['integer', 'null'],
+                description:
+                  'The rediscovery schedule that started it (`D-07`), or null for a run ' +
+                  'somebody started. What tells an operator where a run they did not start ' +
+                  'came from.',
+              },
+              range: { type: 'string' },
+              level: { type: 'string' },
+              status: { type: 'string' },
+              headline: { type: 'string' },
+              scanned: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['addresses', 'swept', 'alive', 'unreachable', 'failed', 'identified', 'complete'],
+                properties: {
+                  addresses: { type: 'integer' },
+                  swept: { type: 'integer' },
+                  alive: { type: 'integer' },
+                  unreachable: { type: 'integer' },
+                  failed: { type: 'integer' },
+                  identified: { type: 'integer' },
+                  complete: { type: 'boolean' },
+                },
+              },
+              found: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['byKind', 'byVendor'],
+                properties: {
+                  byKind: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['kind', 'count'],
+                      properties: {
+                        // `unidentified` is not a `DeviceKind`: it is a host identification never
+                        // looked at, which is a different answer from the classifier's `unknown`.
+                        kind: { type: 'string' },
+                        count: { type: 'integer' },
+                      },
+                    },
+                  },
+                  byVendor: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['vendor', 'count'],
+                      properties: { vendor: { type: 'string' }, count: { type: 'integer' } },
+                    },
+                  },
+                },
+              },
+              created: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['devices', 'matched', 'sensors'],
+                properties: {
+                  devices: { type: 'integer' },
+                  matched: { type: 'integer' },
+                  sensors: { type: 'integer' },
+                  provisionedAt: { type: ['string', 'null'] },
+                },
+              },
+              errors: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['address', 'problem'],
+                  properties: { address: { type: 'string' }, problem: { type: 'string' } },
+                },
+              },
+              timing: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['createdAt'],
+                properties: {
+                  createdAt: { type: 'string' },
+                  startedAt: { type: ['string', 'null'] },
+                  finishedAt: { type: ['string', 'null'] },
+                  durationMs: { type: ['integer', 'null'] },
+                  addressesPerSecond: { type: ['number', 'null'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: number };
+      const summary = await discovery.summary(id);
+      if (summary === null) throw notFound(id);
+      return summary;
+    },
+  );
+
+  app.get(
     '/discovery/:id/hosts',
     {
       schema: {

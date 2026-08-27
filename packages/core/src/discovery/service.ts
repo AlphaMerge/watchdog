@@ -9,6 +9,7 @@ import {
 } from '@ms/shared';
 import type { DiscoveryLevel, Logger } from '@ms/shared';
 import { DiscoveryError } from './errors.js';
+import { describeRun, type DiscoverySummary } from './summary.js';
 
 /**
  * Discovery runs, from the core's side (`D-01`).
@@ -53,6 +54,22 @@ export interface DiscoveryRunRow {
   templates: string[];
   identified: number;
   identifyCursor: number;
+  /**
+   * The rediscovery schedule that started this run, or null for one somebody started (`D-07`).
+   *
+   * On the row rather than only in `discovery_schedule.last_run_id`, because the question is
+   * asked from the run's end: an operator looking at a run they did not start wants to know
+   * where it came from, and a schedule holds only its most recent one.
+   *
+   * **Deleting the schedule takes this with it** — the column is `ON DELETE SET NULL`, so runs
+   * a deleted schedule made read as operator-started from then on. That is the wrong half of a
+   * trade with no cheap right answer here: `RESTRICT` would make a schedule undeletable once it
+   * had ever run, and dropping the foreign key would leave an id pointing at nothing an
+   * operator could look up. Recording the schedule's *name* on the run at firing time is the
+   * fix, and it is a migration rather than a comment; noted here so it is a known limitation
+   * rather than a surprise.
+   */
+  scheduleId: number | null;
   snmpCommunity: string;
   devicesCreated: number;
   devicesMatched: number;
@@ -687,6 +704,42 @@ export class DiscoveryService {
     }
   }
 
+  /**
+   * Everything a run did, in one object (`D-08`).
+   *
+   * Three statements rather than one join, because the counts are one row and the breakdowns are
+   * aggregates over a different table: a join would multiply the run row by the number of kinds
+   * and leave every count to be divided back out. All three are indexed reads of one run.
+   */
+  async summary(runId: number): Promise<DiscoverySummary | null> {
+    const run = await this.get(runId);
+    if (run === null) return null;
+
+    // A null kind is a host with no fingerprint — never identified — which `describeRun` keeps
+    // distinct from the classifier's own `unknown`. Ordered by count so the breakdown reads as
+    // "mostly Linux" without anybody having to sort it.
+    const kinds = await this.#db.query<{ kind: string | null; count: number }>(
+      `SELECT fingerprint->>'kind' AS kind, count(*)::int AS count
+       FROM discovery_host WHERE run_id = $1
+       GROUP BY 1 ORDER BY count DESC, kind NULLS LAST`,
+      [runId],
+    );
+    // Vendors only where one was found: "23 hosts, vendor unknown" is the default state of a
+    // vendor column and says nothing, where the kind breakdown's null is a real answer.
+    const vendors = await this.#db.query<{ vendor: string; count: number }>(
+      `SELECT fingerprint->>'vendor' AS vendor, count(*)::int AS count
+       FROM discovery_host
+       WHERE run_id = $1 AND fingerprint->>'vendor' IS NOT NULL
+       GROUP BY 1 ORDER BY count DESC, vendor`,
+      [runId],
+    );
+
+    // `count(*)::int` rather than the default bigint, which node-postgres hands over as a
+    // *string* to keep 64-bit values exact — and `"3" > "12"` would have sorted the breakdown
+    // wrong in a way that only shows up past ten of something.
+    return describeRun(run, kinds, vendors, await this.problems(runId));
+  }
+
   /** What a provisioning pass could not create, and why. */
   async problems(runId: number): Promise<{ address: string; problem: string }[]> {
     const rows = await this.#db.query<{ address: string; problem: string }>(
@@ -730,6 +783,7 @@ function read(row: Record<string, unknown>): DiscoveryRunRow {
     templates: Array.isArray(row['templates']) ? (row['templates'] as string[]) : [],
     identified: Number(row['identified'] ?? 0),
     identifyCursor: Number(row['identify_cursor'] ?? 0),
+    scheduleId: row['schedule_id'] == null ? null : Number(row['schedule_id']),
     devicesCreated: Number(row['devices_created'] ?? 0),
     devicesMatched: Number(row['devices_matched'] ?? 0),
     sensorsCreated: Number(row['sensors_created'] ?? 0),
