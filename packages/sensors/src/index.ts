@@ -53,6 +53,7 @@ import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
 import { dnsRecord } from './types/dns-record.js';
+import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
 import { snmpTraffic } from './types/snmp-traffic.js';
 import { snmpCustom } from './types/snmp-custom.js';
@@ -71,8 +72,8 @@ import { sshScript } from './types/ssh-script.js';
 /**
  * The types every installation gets.
  *
- * `P-09` (HTTP) is next, and with it `T-13`…`T-16`; `T-09`/`T-10` add the Windows set, and
- * `T-20` adds the syslog receiver on the listener contract `snmp.trap` established.
+ * `T-13`…`T-16` extend `http`; `T-09`/`T-10` add the Windows set; `T-20` adds the syslog
+ * receiver on the listener contract `snmp.trap` established.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
@@ -80,6 +81,7 @@ import { sshScript } from './types/ssh-script.js';
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,
   dnsRecord,
+  httpRequest,
   portTcp,
   snmpTraffic,
   snmpCustom,

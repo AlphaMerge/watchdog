@@ -411,8 +411,38 @@ because each is a decision rather than a defect:
       and `iproute2`, and the compose service builds from it — which is what let P-08 be tested
       at all. The sensor also names the missing binary rather than failing anonymously, since a
       probe in a minimal production container hits the same wall.
-- [ ] **P-09 — HTTP sensor** · M · P-05 · Status code, response time, size channels; timeout,
+- [x] **P-09 — HTTP sensor** · M · P-05 · Status code, response time, size channels; timeout,
       redirect and TLS-verification options.
+
+      **P-09 outcome.** `http.request`. The host comes from the device and never from a URL in the
+      parameters: a type that took a whole URL would let the two disagree, which is how a device
+      gets renamed and half its sensors keep checking the old address.
+
+      **Two timings, because they fail differently.** Time to first byte is connect, TLS and the
+      server thinking; the total adds transferring the body. A page that got slower because a
+      query got slower moves the first; one that got slower because it got bigger moves only the
+      second — and a single "response time" cannot tell an operator which happened. (The test for
+      this failed on the first run for a good reason: `writeHead` only *stages* headers and Node
+      sends them with the first body chunk, so the test server needed `flushHeaders()` to produce
+      the shape the assertion is about.)
+
+      **The body is counted, never accumulated.** Size is worth having — a page that suddenly
+      halves is a broken deploy — but a check runs in a worker shared by hundreds of sensors, and
+      buffering an accidental multi-gigabyte download takes all of them down. `T-14` needs the
+      content and can bound what it keeps; this needs the count. Tested against a 4 MB response.
+
+      **A redirect that leaves the device is reported, not followed.** Following it means the next
+      reading is about somewhere else, under a sensor named for this device, with nothing on the
+      graph saying the subject changed — so a different host, scheme or port ends the chain and
+      the message says where it pointed. Five hops otherwise, and a loop is named as one.
+
+      An unfollowed 3xx is a **success** when redirects are off, because "check that this still
+      redirects" is a real thing to watch and calling the correct answer a failure would make it
+      inexpressible. So is an expected 404 or 401 — a canary for a page that must stay
+      unpublished, or an endpoint that must stay authenticated. TLS failures are named by their
+      cause (expired, self-signed, wrong host) rather than reported as "request failed", and
+      running with verification off says so in the message on **every** scan rather than once at
+      configuration time.
 - [x] **P-10 — Port sensor** · S · P-05 · TCP connect with timing; optional banner match.
 
       **P-10 outcome.** `port.tcp`. The cheapest check that proves something is *serving*, which
