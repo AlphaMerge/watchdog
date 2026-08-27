@@ -64,6 +64,7 @@ import { DiscoveryService } from './discovery/service.js';
 import { ProvisionService, type ProvisionReport } from './discovery/provision.js';
 import { DiscoveryError } from './discovery/errors.js';
 import { RediscoveryService } from './discovery/rediscovery.js';
+import { ProbeRegistry } from './probes/registry.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
@@ -632,6 +633,14 @@ async function serve(): Promise<void> {
     run: () => rediscoverySweep.stop(),
   });
 
+  // Who is allowed in (`R-01`). Built before the endpoint, because the endpoint asks it on
+  // every handshake and a probe that connects during startup must not be admitted by default.
+  const probeRegistry = new ProbeRegistry({
+    db,
+    logger,
+    enrolmentKeys: config.probeEndpoint.accessKeys,
+  });
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -647,6 +656,7 @@ async function serve(): Promise<void> {
     deviceTemplates,
     provision,
     rediscovery,
+    probeRegistry,
     triggers,
     templates,
     deliveryHealth,
@@ -720,6 +730,7 @@ async function serve(): Promise<void> {
     coreVersion: VERSION,
     results: ingestion,
     discovery,
+    registry: probeRegistry,
     probeConfig: new ProbeConfigService({
       db,
       resolver,

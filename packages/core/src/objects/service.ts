@@ -1775,6 +1775,25 @@ export class ObjectService {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
 
+      if (object.kind === 'probe') {
+        // **The local probe cannot be deleted** (`R-01`), matching PRTG. Deleting it leaves a
+        // core whose own host is unmonitored and no obvious route back: the probe process is
+        // still running and still connecting, but the branch it was approved onto is gone, so
+        // it enrols again as a stranger and every sensor that lived under it has been destroyed
+        // with the subtree.
+        const local = await q.query<{ is_local: boolean }>(
+          'SELECT is_local FROM probe_config WHERE object_id = $1',
+          [id],
+        );
+        if (local[0]?.is_local === true) {
+          throw new ObjectError(
+            'OBJECT_NOT_DELETABLE',
+            `"${object.name}" is this installation's local probe and cannot be deleted`,
+            { context: { objectId: id, phase: 'delete' } },
+          );
+        }
+      }
+
       if (object.kind === 'root') {
         throw new ObjectError('OBJECT_NOT_DELETABLE', 'the root object cannot be deleted', {
           context: { objectId: id, phase: 'delete' },

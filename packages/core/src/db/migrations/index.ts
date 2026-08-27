@@ -28,6 +28,7 @@ import { migration026 } from './026-discovery-identify.js';
 import { migration027 } from './027-discovery-provisioning.js';
 import { migration028 } from './028-discovery-levels.js';
 import { migration029 } from './029-rediscovery.js';
+import { migration030 } from './030-probe-registration.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -65,6 +66,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration027,
   migration028,
   migration029,
+  migration030,
 ];
 
 export type { Migration } from './types.js';

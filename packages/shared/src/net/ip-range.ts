@@ -216,3 +216,88 @@ export function addressAt(range: IpRange, index: number): number | null {
 export function contains(range: IpRange, value: number): boolean {
   return range.spans.some((span) => value >= span.first && value <= span.last);
 }
+
+/**
+ * The same spellings, read as a *permission* rather than as a list of addresses to visit
+ * (`R-01`).
+ *
+ * **Two differences from `parseIpRange`, and both follow from that.** There is no size cap: an
+ * operator whose probes live anywhere in `10.0.0.0/8` is stating a fact about their network, not
+ * asking anything to enumerate sixteen million addresses, and refusing it would push them to
+ * write no allowlist at all. And a CIDR keeps its network and broadcast addresses, because
+ * excluding them is a statement about which addresses will *answer a ping* — true for a sweep,
+ * meaningless for "may this identity connect from here".
+ *
+ * Everything else is deliberately the same code, so an operator who has learnt to write a range
+ * for a discovery already knows how to write one here.
+ */
+export function parseAddressFilter(text: string): IpRange {
+  const trimmed = text.trim();
+  if (trimmed === '') throw new IpRangeError('no addresses were given');
+  if (trimmed.includes(':')) {
+    throw new IpRangeError('an address filter is IPv4 only, and this looks like IPv6');
+  }
+
+  const spans: IpSpan[] = [];
+  for (const part of trimmed.split(',')) {
+    const piece = part.trim();
+    if (piece === '') continue;
+    spans.push(parseFilterPiece(piece));
+  }
+  if (spans.length === 0) throw new IpRangeError('no addresses were given');
+
+  const merged = merge(spans);
+  return {
+    spans: merged,
+    size: merged.reduce((total, span) => total + (span.last - span.first + 1), 0),
+    text: trimmed,
+  };
+}
+
+function parseFilterPiece(piece: string): IpSpan {
+  const slash = piece.indexOf('/');
+  if (slash < 0) return parsePiece(piece);
+
+  const bits = piece.slice(slash + 1);
+  if (!/^\d{1,2}$/.test(bits)) {
+    throw new IpRangeError(`"${piece}" has "${bits}" where a prefix length should be`);
+  }
+  const prefix = Number(bits);
+  if (prefix > 32) throw new IpRangeError(`"${piece}" has a prefix longer than 32 bits`);
+
+  const value = toNumber(piece.slice(0, slash));
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return { first: (value & mask) >>> 0, last: ((value & mask) | (~mask >>> 0)) >>> 0 };
+}
+
+/**
+ * Whether an address is allowed by a filter, an empty filter allowing everything.
+ *
+ * **Empty means any, and it is the default.** An allowlist nobody has written is not a mistake:
+ * most installations have their probes on networks they cannot enumerate in advance, and a
+ * default of "nothing may connect" would mean the first probe is refused for being the first.
+ * The security this buys is real but it is opt-in — a stolen key is worth much less when it
+ * only works from one subnet, and that is a statement only the operator can make.
+ */
+export function addressAllowed(address: string, filters: readonly string[]): boolean {
+  if (filters.length === 0) return true;
+  let value: number;
+  try {
+    value = toNumber(address);
+  } catch {
+    // Not an IPv4 address at all — an IPv6 peer, or a unix socket. A filter is a list of IPv4
+    // ranges, so it cannot say yes to something it cannot express, and refusing is the only
+    // answer that keeps the filter meaning what it says.
+    return false;
+  }
+  return filters.some((filter) => {
+    try {
+      return contains(parseAddressFilter(filter), value);
+    } catch {
+      // A filter that will not parse allows nothing rather than everything. It reached the
+      // column through validation, so this is unreachable in practice — and a corrupted row
+      // opening the door is the wrong way for it to be unreachable.
+      return false;
+    }
+  });
+}

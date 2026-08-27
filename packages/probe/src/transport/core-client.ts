@@ -18,6 +18,13 @@ import {
 } from '@ms/shared';
 import type { ConfigUpdate } from '../scheduler/assignments.js';
 import { Backoff } from './backoff.js';
+import {
+  EMPTY_IDENTITY,
+  identityPath,
+  readIdentity,
+  writeIdentity,
+  type ProbeIdentity,
+} from './identity.js';
 
 export type LinkState = 'disconnected' | 'connecting' | 'handshaking' | 'connected';
 
@@ -78,6 +85,17 @@ export class CoreClient {
   #socket: TLSSocket | undefined;
   #state: LinkState = 'disconnected';
   #gid: string;
+  /**
+   * What this probe is, as last told by the core (`R-01`).
+   *
+   * Loaded from disk on the first connect and written back whenever the core changes it, so a
+   * restart presents the same identity instead of enrolling again and filling the approval
+   * queue with a row per restart.
+   */
+  #identity: ProbeIdentity = { ...EMPTY_IDENTITY };
+  #identityLoaded = false;
+  /** Whether the core has approved this probe. False means it is in somebody's queue. */
+  #approved = false;
   /** In memory only — see the comment where it is sent. */
   #configVersion = '';
   /** Batches offered and not yet answered. Rejected together when the link drops. */
@@ -110,9 +128,57 @@ export class CoreClient {
     return this.#gid;
   }
 
+  /**
+   * Whether the core has approved this probe (`R-01`).
+   *
+   * False means the link is up and the probe is doing nothing on purpose: it holds an identity
+   * and heartbeats while it waits in an administrator's queue. `P-13` reports it, because
+   * "connected but scanning nothing" is otherwise indistinguishable from a broken probe.
+   */
+  get approved(): boolean {
+    return this.#approved;
+  }
+
   start(): void {
     this.#stopped = false;
-    this.#connectNow();
+    // The identity is read before the first dial rather than in the constructor, so a caller
+    // that builds a client and never starts it touches no disk. Awaited by nothing: the connect
+    // is chained behind it, and a read that fails leaves an empty identity, which enrols.
+    void this.#loadIdentity().then(() => {
+      if (!this.#stopped) this.#connectNow();
+    });
+  }
+
+  /** Reads the stored identity once, and prefers it to whatever the config file says. */
+  async #loadIdentity(): Promise<void> {
+    if (this.#identityLoaded) return;
+    this.#identityLoaded = true;
+    const stored = await readIdentity(
+      identityPath(this.#options.config.probe.spoolDir),
+      this.#logger,
+    );
+    // **The stored identity wins over the config file**, because it is the one the core knows.
+    // A config file naming a GID is an operator claiming an identity by hand, which `R-04`
+    // supported and `R-01` replaces with enrolment — so it is only a starting point, and only
+    // while nothing has been stored.
+    if (stored.gid !== '') this.#gid = stored.gid;
+    this.#identity = stored;
+  }
+
+  /** Writes the identity back when the core has changed it. */
+  async #rememberIdentity(gid: string, issuedKey: string | undefined): Promise<void> {
+    const accessKey = issuedKey ?? this.#identity.accessKey;
+    if (gid === this.#identity.gid && accessKey === this.#identity.accessKey) return;
+    this.#identity = { gid, accessKey };
+    await writeIdentity(
+      identityPath(this.#options.config.probe.spoolDir),
+      this.#identity,
+      this.#logger,
+    );
+    this.#logger.info(
+      { gid, issuedKey: issuedKey !== undefined },
+      'stored this probe’s identity',
+    );
   }
 
   async stop(): Promise<void> {
@@ -217,7 +283,10 @@ export class CoreClient {
       gid: this.#gid,
       displayName: config.probe.displayName,
       agentVersion,
-      accessKey: config.core.accessKey,
+      // The key the core issued to this probe alone, once it has one; the shared enrolment key
+      // until then. A probe that has been approved never presents the shared key again, which
+      // is what lets an operator revoke this one machine without rotating everybody's (`R-01`).
+      accessKey: this.#identity.accessKey === '' ? config.core.accessKey : this.#identity.accessKey,
       // What this process is already running. Empty after a restart, which is correct: there is
       // no configuration in memory to keep, so claiming to be current would mean scanning
       // nothing while telling the core everything was fine.
@@ -235,12 +304,20 @@ export class CoreClient {
           return;
         }
         this.#gid = message.gid;
+        // Absent from a version-5 core, which had no notion of approval and trusted whatever
+        // presented the key. Reading that as approved is what keeps an older core working.
+        this.#approved = message.approved ?? true;
         this.#backoff.reset();
         this.#setState('connected');
         this.#logger.info(
-          { gid: message.gid, coreVersion: message.coreVersion },
-          'connected to core',
+          { gid: message.gid, coreVersion: message.coreVersion, approved: this.#approved },
+          this.#approved
+            ? 'connected to core'
+            : 'connected to core and waiting for an administrator to approve this probe',
         );
+        // Fire and forget: a disk write must not delay the heartbeat that keeps this connection
+        // from being declared idle, and a failed write costs a re-enrolment rather than a link.
+        void this.#rememberIdentity(message.gid, message.accessKey);
         this.#startHeartbeat(message.heartbeatIntervalMs);
         return;
       }

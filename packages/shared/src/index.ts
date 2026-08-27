@@ -75,8 +75,10 @@ export type { LoadedTlsMaterial } from './protocol/tls-files.js';
 export {
   addressAt,
   contains,
+  addressAllowed,
   IpRangeError,
   MAX_ADDRESSES,
+  parseAddressFilter,
   parseIpRange,
   toNumber,
   toText,

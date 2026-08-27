@@ -17,7 +17,9 @@ import { logIfUnexpected, toHttpError } from './errors.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { objectRoutes } from './routes/objects.js';
+import { probeRoutes } from './routes/probes.js';
 import { BulkService } from '../objects/bulk.js';
+import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { scheduleRoutes } from './routes/schedules.js';
@@ -82,6 +84,8 @@ export interface ApiServerOptions {
   provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
   /** Absent until D-07 is wired; the rediscovery routes then do not exist. */
   rediscovery?: RediscoveryService;
+  /** Absent until R-01 is wired; the approval queue then has no routes. */
+  probeRegistry?: ProbeRegistry;
   /**
    * Notification triggers (`N-01`).
    *
@@ -140,6 +144,7 @@ export class ApiServer {
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
   readonly #provision: ApiServerOptions['provision'];
   readonly #rediscovery: RediscoveryService | undefined;
+  readonly #probeRegistry: ProbeRegistry | undefined;
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
@@ -173,6 +178,7 @@ export class ApiServer {
     this.#deviceTemplates = options.deviceTemplates;
     this.#provision = options.provision;
     this.#rediscovery = options.rediscovery;
+    this.#probeRegistry = options.probeRegistry;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
@@ -336,6 +342,9 @@ export class ApiServer {
             ...(this.#provision === undefined ? {} : { provision: this.#provision }),
             ...(this.#rediscovery === undefined ? {} : { rediscovery: this.#rediscovery }),
           });
+        }
+        if (this.#probeRegistry !== undefined) {
+          await scope.register(probeRoutes, { registry: this.#probeRegistry });
         }
         if (this.#deviceTemplates !== undefined) {
           const templates = this.#deviceTemplates;

@@ -27,8 +27,14 @@ import { AppError } from '../errors/app-error.js';
  *
  * Version 5 added identification (D-02), which is the sweep's second stage and follows the same
  * shape: a job with a cursor, progress that carries findings, and one finish.
+ *
+ * Version 6 added approval (R-01). A `welcome` now says whether the probe is *approved*, and a
+ * probe that is not gets an identity, a heartbeat and no configuration — so it waits in an
+ * administrator's queue instead of being trusted for having reached the port. The same message
+ * may carry a per-probe `accessKey`, issued once at approval, which is what makes revoking one
+ * probe possible without rotating the enrolment key every other probe shares.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /**
  * The oldest peer version this build still understands.
@@ -321,6 +327,30 @@ export type CoreToProbeMessage =
       /** Identity the core assigned; the probe persists it and presents it next time. */
       gid: string;
       heartbeatIntervalMs: number;
+      /**
+       * Whether an administrator has approved this probe (`R-01`).
+       *
+       * **A welcome rather than a rejection, and that is deliberate.** An unapproved probe is
+       * not an attacker — it is a machine somebody has just installed — so it is let in far
+       * enough to be *seen*: it gets its identity, it heartbeats, and it appears in the
+       * approval queue with the name and version it reported. What it does not get is any
+       * configuration, so it scans nothing at all until a person says so. Rejecting it instead
+       * would leave the administrator approving something they cannot see, and would make the
+       * probe re-enrol under a new identity on every retry.
+       *
+       * Optional so a version-5 core, which never sends it, still reads as approved — that
+       * core had no notion of approval and trusted whatever presented the access key.
+       */
+      approved?: boolean;
+      /**
+       * A key issued to this probe alone, sent once, at the moment it is approved.
+       *
+       * The probe persists it and presents it from then on instead of the shared enrolment key.
+       * That is the whole point of issuing one: revoking a single probe otherwise means
+       * rotating the key every probe in the installation shares, which nobody does, which means
+       * in practice nothing is ever revoked. The core keeps only a hash.
+       */
+      accessKey?: string;
     }
   | { type: 'reject'; code: RejectCode; message: string }
   | { type: 'heartbeat-ack'; seq: number }
@@ -596,6 +626,8 @@ const coreToProbeSchema = {
         coreVersion: { type: 'string', maxLength: 64 },
         gid: { type: 'string', minLength: 1, maxLength: 128 },
         heartbeatIntervalMs: { type: 'integer', minimum: 1000, maximum: 300000 },
+        approved: { type: 'boolean' },
+        accessKey: { type: 'string', minLength: 1, maxLength: 512 },
       },
       required: ['type', 'protocolVersion', 'coreVersion', 'gid', 'heartbeatIntervalMs'],
       additionalProperties: false,

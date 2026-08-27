@@ -4,6 +4,7 @@ import { ObjectError } from '../objects/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { DiscoveryError } from '../discovery/errors.js';
+import { ProbeRegistryError } from '../probes/registry.js';
 import { QueryError } from '../timeseries/query.js';
 import { MethodError } from '../notifications/methods.js';
 import { TriggerError } from '../triggers/definition.js';
@@ -107,6 +108,12 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // The parser's own sentence goes out unchanged: "that is 16,777,214 addresses and one run
     // may sweep 65,536 — the usual cause is a /8 where a /24 was meant" is the whole point of
     // having written it, and a generic "invalid range" would throw it away.
+    return envelope(error.status, error.code, error.message, { ...error.context });
+  }
+
+  if (error instanceof ProbeRegistryError) {
+    // A probe that is not there, an object already claimed by another identity, an address
+    // filter that will not parse. All three are the caller's, and all three have a sentence.
     return envelope(error.status, error.code, error.message, { ...error.context });
   }
 

@@ -4604,7 +4604,7 @@ because each is a decision rather than a defect:
 
 ## Phase 8 — Remote probes
 
-- [ ] **R-01 — Probe identity and approval** · L · F-09 · GID generation, access keys,
+- [x] **R-01 — Probe identity and approval** · L · F-09 · GID generation, access keys,
       source-IP allowlist, per-GID revocation, pending-approval queue and admin action.
       **Added by S-03:** `POST /objects {kind:'probe'}` currently creates a plain object with
       no GID and no access key; enrolment replaces it, which is a documented pre-1.0 API break.
@@ -4617,6 +4617,98 @@ because each is a decision rather than a defect:
       one, the pending-approval queue, per-GID access keys, the source-IP allowlist, revocation,
       and making the local probe undeletable. The endpoint already re-resolves an unclaimed
       session on every push, so approving a connected probe takes effect without a restart.
+
+      **R-01 outcome.** Reaching the port is no longer the same as being trusted, and until this
+      it was: a probe that presented the shared access key was handed configuration immediately
+      — it became part of the installation because it connected. `probe_registration` is the gap
+      between the two.
+
+      **A pending probe is welcomed, not rejected, and that is the central decision.** It gets
+      its identity, it heartbeats, and it appears in the queue with the name, version and address
+      it reported — and it gets **no configuration at all**, so it scans nothing. Rejecting it
+      would leave an administrator approving something they cannot see, and would make the probe
+      re-enrol under a fresh identity on every retry, filling the queue with a row per reconnect.
+      The check lives in `#queueConfig` rather than at its four call sites, so an unapproved
+      probe scans nothing because there is only one door.
+
+      **The session exists before the decision does, and it has to.** Asking the registry is a
+      database round trip and messages keep arriving during it — a probe that says hello and then
+      heartbeats would otherwise be torn down for "a message before the handshake". So the
+      session opens unapproved, every later message chains behind the admission through
+      `pending`, and nothing reaches the probe until the answer is in. A registry that cannot
+      answer is not permission to come in: the probe is rejected and retries.
+
+      **The per-probe key is what makes revocation mean anything.** Revoking one probe otherwise
+      means rotating the enrolment key every probe shares, which nobody does, which means in
+      practice nothing is ever revoked. A key is generated at approval, sent in that one welcome,
+      and stored only as a **SHA-256** — not argon2, deliberately: argon2 exists to make guessing
+      a human-chosen password expensive, this is 32 bytes from `randomBytes` so there is nothing
+      to guess, and a deliberately slow hash on the handshake path would only make a reconnecting
+      probe wait. `A-01`'s account passwords are the opposite case for the opposite reason.
+
+      **The probe now persists what it is.** The assigned GID lived only in memory, so every
+      restart enrolled again under a fresh identity — a queue that grew a row per restart and a
+      probe that could never stay approved. It is stored beside the spool, `0o600`, written to a
+      temporary name and renamed. Keeping it out of the config file also means copying
+      `probe.json` to a second machine does **not** clone an identity: the second machine enrols
+      as itself, where a GID in the config would have had two probes claiming one branch and
+      scanning the same sensors twice.
+
+      **An address filter is a permission, not a sweep.** It shares `D-01`'s spellings, so an
+      operator who has written a discovery range already knows how to write one — but with no
+      size cap, because stating that your probes live in `10.0.0.0/8` is a fact about a network
+      rather than a request to enumerate sixteen million addresses, and refusing it would push
+      somebody to write no filter at all. A CIDR keeps its network and broadcast addresses here,
+      because excluding them is a statement about which addresses answer a ping.
+
+      **Revoked rather than deleted**, so the same GID cannot come back by reconnecting and the
+      record of what was refused survives. Two places had to learn that a revoked identity does
+      not hold a branch — the conflict check and the unique index — or replacing a probe would
+      mean deleting its record first, and deleting the record is exactly how a revoked GID gets
+      back in. **Found by the test that replaces the machine beside the core.**
+
+      **The local probe cannot be deleted**, matching PRTG, and the flag is set explicitly rather
+      than guessed: an address proves nothing on a host with several interfaces, and "the first
+      one approved" is wrong for anybody who stood up a remote probe first. It is only ever
+      raised, never cleared by a later approval, so replacing that machine does not quietly make
+      the branch deletable. The installers (`H-05`, `H-06`) are what will set it automatically.
+
+      Protocol 6: `welcome` carries `approved` and, once, the issued `accessKey`. Both optional,
+      so a version-5 core — which had no notion of approval and trusted whatever presented the
+      key — still reads as approved rather than leaving every probe idle after an upgrade.
+
+      Twenty mutations, seventeen killed on the first pass. **All three survivors were real test
+      gaps, and each was a case I had reasoned about and then not written down:**
+
+      - Nothing tested the *returning* pending probe — which is the only thing a probe waiting
+        for approval actually does, every few seconds, for as long as it takes somebody to look.
+        Reading the second hello as approval would have been approval by persistence.
+      - Nothing tested an address the filter cannot express: an IPv6 peer against a list of IPv4
+        ranges. Refusing is the only answer that keeps the filter meaning what it says, and it
+        was one flipped return from allowing everything.
+      - Nothing tested that a filter CIDR keeps its network and broadcast addresses, which is
+        the whole documented difference from `parseIpRange` — a probe really can sit on
+        `10.0.0.0/31`.
+
+      **Live verification then corrected the design.** Revoking the running probe and approving
+      it again locked it out: the key was minted at *approval* and delivered in the `welcome`,
+      and a probe that is offline at that moment never receives that welcome — it comes back on
+      the enrolment key and is refused by a key it was never told about. Approving a machine that
+      is switched off is an ordinary thing to do, so it cannot be the thing that locks it out.
+
+      **The key is now issued at the next handshake instead**, by `admit`, exactly once. That is
+      better in a second way: nobody ever sees it. It goes straight to the probe over the
+      authenticated link rather than through an operator's clipboard, a browser, or a support
+      ticket — so `POST /probes/:gid/approve` returns the registration and no secret at all.
+      Re-approving clears the stored hash, which makes re-approval the recovery path for a probe
+      whose key has got out of step, and means a key that leaked before a revocation does not
+      survive the decision to let the machine back in.
+
+      Verified live end to end: the upgrade approved the existing probe rather than suspending it
+      into a queue nobody knew to look at; revoking it refused the reconnect with the operator's
+      own sentence and released its branch; re-approving issued a fresh key on the next
+      handshake, after which it claimed its branch and took its 47 sensors; and the local probe
+      refuses deletion through both the object route and a bulk cascade.
 - [x] **R-02 — Disk-backed result spool** · L · F-09 · Bounded size, oldest-first eviction,
       dropped-result counter, crash-safe. _Beats PRTG's RAM-only 500k buffer._
       **R-02 outcome.** Newline-delimited JSON in segments, not a binary format with length

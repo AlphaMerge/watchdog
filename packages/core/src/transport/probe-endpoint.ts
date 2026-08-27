@@ -102,6 +102,36 @@ export interface ProbeEndpointOptions {
   probeConfig?: ProbeConfigSource;
   /** Absent until D-01 is wired; sweeps are then never dispatched and never reported. */
   discovery?: DiscoverySink;
+  /**
+   * Who is allowed in (`R-01`).
+   *
+   * Absent means the old behaviour: whoever presents the shared access key is trusted. Kept as
+   * an option rather than made mandatory so the transport's own tests can drive a handshake
+   * without a database — but `main.ts` always passes one, and an installation without one has
+   * no approval queue at all.
+   */
+  registry?: ProbeAdmission;
+}
+
+/**
+ * The admission decision, as far as the transport cares (`R-01`).
+ *
+ * An interface for the same reason as `ResultReceiver` and `ProbeConfigSource`: the transport
+ * stays testable without a database, and the registry never learns about sockets.
+ */
+export interface ProbeAdmission {
+  admit(hello: {
+    gid: string;
+    displayName: string;
+    agentVersion: string;
+    protocolVersion: number;
+    accessKey: string;
+    remoteAddress: string;
+  }): Promise<
+    | { kind: 'approved'; gid: string; objectId: number | null; issuedKey?: string }
+    | { kind: 'pending'; gid: string }
+    | { kind: 'refused'; code: 'revoked' | 'source-not-allowed' | 'bad-access-key'; detail: string }
+  >;
 }
 
 export interface ConnectedProbe {
@@ -127,6 +157,15 @@ interface ProbeSession {
   pending: Promise<void>;
   /** What this peer speaks. Config is only sent to version 3 and above. */
   protocolVersion: number;
+  /**
+   * Whether an administrator has approved this probe (`R-01`).
+   *
+   * False until the registry says otherwise, and while it is false the probe is given no
+   * configuration at all — it heartbeats, it appears in the approval queue, and it scans
+   * nothing. Every path that would send it work checks this rather than assuming the handshake
+   * settled it, because the handshake is exactly where the decision is still in flight.
+   */
+  approved: boolean;
   /** The branch this probe owns, or null while its GID is unclaimed (R-01 enrols it). */
   probeObjectId: number | null;
   /**
@@ -436,6 +475,23 @@ export class ProbeEndpoint {
     }
 
     session.pending = session.pending.then(async () => {
+      // Chained behind the admission, so this reads the settled answer rather than racing it.
+      // An unapproved probe has no assignments and so nothing to report — this is defence in
+      // depth rather than an expected path, and `invalid` because retrying will not help: what
+      // the probe needs is a person, not a longer backoff.
+      if (!session.approved) {
+        logger.warn(
+          { batchId: message.batchId },
+          'results arrived from a probe that has not been approved',
+        );
+        connection.send({
+          type: 'results-nack',
+          batchId: message.batchId,
+          reason: 'invalid',
+          retryAfterMs: 0,
+        });
+        return;
+      }
       try {
         connection.send(await receiver.acceptResults(session.info.gid, message));
       } catch (error: unknown) {
@@ -477,22 +533,105 @@ export class ProbeEndpoint {
       return undefined;
     }
 
-    if (config.accessKeys.length > 0 && !keyMatches(hello.accessKey, config.accessKeys)) {
-      reject('bad-access-key', 'the access key was not accepted');
-      return undefined;
+    const { registry } = this.#options;
+
+    // Without a registry the endpoint keeps the pre-`R-01` behaviour: whoever presents the
+    // shared key is trusted. `main.ts` always passes one; this path is what the transport's own
+    // tests drive, and leaving it in means those tests are not secretly testing the registry.
+    if (registry === undefined) {
+      if (config.accessKeys.length > 0 && !keyMatches(hello.accessKey, config.accessKeys)) {
+        reject('bad-access-key', 'the access key was not accepted');
+        return undefined;
+      }
+      const gid = hello.gid === '' ? randomUUID() : hello.gid;
+      const session = this.#openSession(gid, hello, connection, context, true);
+      this.#welcome(session, connection, context, true);
+      logger.info(
+        { gid, displayName: hello.displayName, assignedIdentity: hello.gid === '' },
+        'probe connected',
+      );
+      this.#queueConfig(session, logger, hello.configVersion ?? '');
+      return session;
     }
 
-    // A probe connecting for the first time has no identity yet; the core issues one.
-    const gid = hello.gid === '' ? randomUUID() : hello.gid;
+    // **The session exists before the decision does, and it has to.** Asking the registry is a
+    // database round trip, and messages keep arriving during it — a probe that says hello and
+    // then heartbeats would otherwise be torn down for "a message before the handshake". So the
+    // session is opened unapproved, every later message is chained behind the admission through
+    // `pending`, and nothing is sent to the probe until the answer is in.
+    const session = this.#openSession(hello.gid, hello, connection, context, false);
 
-    const existing = this.#sessions.get(gid);
-    if (existing !== undefined) {
-      // A reconnect after a network partition: the old socket is stale by definition.
-      logger.info({ gid }, 'replacing an existing session for this probe');
-      existing.connection.destroy('superseded by a newer connection');
-      this.#sessions.delete(gid);
-    }
+    session.pending = (async () => {
+      let decision: Awaited<ReturnType<ProbeAdmission['admit']>>;
+      try {
+        decision = await registry.admit({
+          gid: hello.gid,
+          displayName: hello.displayName,
+          agentVersion: hello.agentVersion,
+          protocolVersion: hello.protocolVersion,
+          accessKey: hello.accessKey,
+          remoteAddress: context.remoteAddress,
+        });
+      } catch (error) {
+        // A registry that cannot answer is not permission to come in. The probe retries, which
+        // is the right behaviour for a core whose database is briefly unreachable.
+        logger.error(describeError(error), 'the probe registry could not be asked');
+        reject('internal-error', 'this core cannot check probe registrations right now');
+        return;
+      }
 
+      if (decision.kind === 'refused') {
+        reject(decision.code, decision.detail);
+        return;
+      }
+
+      session.info.gid = decision.gid;
+      session.approved = decision.kind === 'approved';
+
+      const existing = this.#sessions.get(decision.gid);
+      if (existing !== undefined && existing !== session) {
+        // A reconnect after a network partition: the old socket is stale by definition.
+        logger.info({ gid: decision.gid }, 'replacing an existing session for this probe');
+        existing.connection.destroy('superseded by a newer connection');
+        this.#sessions.delete(decision.gid);
+      }
+      this.#sessions.set(decision.gid, session);
+
+      this.#welcome(
+        session,
+        connection,
+        context,
+        session.approved,
+        decision.kind === 'approved' ? decision.issuedKey : undefined,
+      );
+
+      logger.info(
+        {
+          gid: decision.gid,
+          displayName: hello.displayName,
+          agentVersion: hello.agentVersion,
+          approved: session.approved,
+          assignedIdentity: hello.gid === '',
+        },
+        session.approved ? 'probe connected' : 'probe connected and is waiting for approval',
+      );
+
+      // **An unapproved probe is sent nothing**, which is the whole of what approval means
+      // here: it holds an identity and a heartbeat and no work at all.
+      if (session.approved) this.#queueConfig(session, logger, hello.configVersion ?? '');
+    })();
+
+    return session;
+  }
+
+  /** The session object, before anyone has decided whether it may do anything. */
+  #openSession(
+    gid: string,
+    hello: Extract<ProbeToCoreMessage, { type: 'hello' }>,
+    connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>,
+    context: { remoteAddress: string },
+    approved: boolean,
+  ): ProbeSession {
     const session: ProbeSession = {
       connection,
       info: {
@@ -505,37 +644,32 @@ export class ProbeEndpoint {
       },
       pending: Promise.resolve(),
       protocolVersion: hello.protocolVersion,
+      approved,
       probeObjectId: null,
       sentVersion: null,
       sentSensors: [],
       sentStamps: new Map(),
     };
-    this.#sessions.set(gid, session);
+    if (approved && gid !== '') this.#sessions.set(gid, session);
+    return session;
+  }
 
+  #welcome(
+    session: ProbeSession,
+    connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>,
+    context: { coreVersion: string },
+    approved: boolean,
+    issuedKey?: string,
+  ): void {
     connection.send({
       type: 'welcome',
       protocolVersion: PROTOCOL_VERSION,
       coreVersion: context.coreVersion,
-      gid,
-      heartbeatIntervalMs: config.heartbeatIntervalMs,
+      gid: session.info.gid,
+      heartbeatIntervalMs: this.#options.config.heartbeatIntervalMs,
+      approved,
+      ...(issuedKey === undefined ? {} : { accessKey: issuedKey }),
     });
-
-    logger.info(
-      {
-        gid,
-        displayName: hello.displayName,
-        agentVersion: hello.agentVersion,
-        assignedIdentity: hello.gid === '',
-      },
-      'probe connected',
-    );
-
-    // Fire and forget, chained behind anything already queued for this probe: the handshake
-    // must not wait on a database round trip, and a heartbeat answered late is a connection
-    // torn down for being idle.
-    this.#queueConfig(session, logger, hello.configVersion ?? '');
-
-    return session;
   }
 
   /**
@@ -552,6 +686,11 @@ export class ProbeEndpoint {
   #queueConfig(session: ProbeSession, logger: Logger, presented?: string): void {
     const source = this.#options.probeConfig;
     if (source === undefined) return;
+    // **The approval check lives here rather than at each call site** (`R-01`). Configuration
+    // reaches a probe from four places — the handshake, a config change, a credential change and
+    // the periodic sweep — and a check repeated four times is a check three of them can be
+    // written without. An unapproved probe scans nothing because this is the only door.
+    if (!session.approved) return;
     if (session.protocolVersion < 3) {
       if (presented !== undefined) {
         logger.info(
