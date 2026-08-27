@@ -58,3 +58,16 @@ export {
 } from './pool.js';
 
 export { SNMP_CREDENTIAL_SCHEMA, snmpParamsSchema } from './schema.js';
+
+export { snmpCheck, type SnmpCheckOptions } from './check.js';
+
+export {
+  compilePattern,
+  extract,
+  MATCH_TIMEOUT_MS,
+  MAX_PATTERN,
+  MAX_SUBJECT,
+  PatternError,
+  type Extracted,
+  type ExtractMode,
+} from './extract.js';

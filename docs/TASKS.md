@@ -2828,8 +2828,56 @@ because each is a decision rather than a defect:
       is no way to populate an interface picker at add time — the core has no route to the
       device. `D-02` (device identification) needs the same pair, and so does any "test this
       sensor now" button.
-- [ ] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and
+- [x] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and
       lookup mapping for strings.
+
+      **T-03 outcome.** Two types — `snmp.custom` for a numeric OID and `snmp.custom.string` for a
+      text one — plus `support/snmp/check.ts`, which is the preamble all four SNMP types now
+      share. That was extracted rather than copied a third time because the failure of copying it
+      is not duplication but *drift*: the fifth type says "authentication failed" where the first
+      names the missing credential kind, and an operator learns that some SNMP sensors explain
+      themselves and some do not.
+
+      **Gauge or counter is asked, not guessed.** `snmp.custom` reuses `T-02`'s counter path, so
+      the two need different arithmetic and the OID alone does not say which the operator wants.
+      Guessing from the varbind type is wrong in both directions — a Counter32 somebody wants
+      graphed as a total would become a rate, an Integer that happens to climb would not. The
+      device is consulted to *check* the answer: a mismatch goes in the message, which is where
+      somebody with a wrong-looking graph actually looks.
+
+      **The regex is the sharp edge, and it is now genuinely bounded.** An operator-supplied
+      pattern against device-supplied text, inside a worker, with no way to interrupt it —
+      JavaScript has no interruptible regular expression, so `ctx.signal` cannot help. Measured
+      while building this: `(a+)+$` against **forty characters** takes **86 seconds**. Truncating
+      the subject does not fix that, and refusing "dangerous" patterns is not decidable.
+
+      What does work is V8's own watchdog: the match runs in a `node:vm` context with a 250 ms
+      timeout, which *can* stop it. Measured cost — **0.19 µs direct against 99.7 µs in the
+      sandbox** — which is five hundred times slower and completely irrelevant beside an SNMP
+      round trip, about 0.5 s of CPU a minute if all 5,000 sensors at the v1 target were this
+      type. A mistyped pattern now fails one check in 250 ms with a sentence naming it, instead of
+      holding a worker until the pool terminates it.
+
+      One bug that cost a debugging round and is worth knowing: what the watchdog throws does not
+      reliably satisfy `instanceof Error` across the realm boundary, so the timeout was being
+      reported as an unexplained pattern failure. It is detected by `code` now.
+
+      **A no-match in match mode is a reading, not a failure.** "The phrase is gone" is exactly
+      what a limit or a lookup is set against, and failing the check instead would make the sensor
+      Down and lose the data point. In number mode the same no-match *is* a failure, and the
+      message carries what the device actually said — the only way to tell "my pattern is wrong"
+      from "the device changed what it reports".
+
+      Verified live against the dev SNMP simulator: `snmp.custom` reading sysUpTime as a gauge
+      (142,261,734 TimeTicks); `snmp.custom` in counter mode on `ifInOctets.2` producing
+      **5,479,022 octets/s** with the channel correctly labelled `octets/s`; and
+      `snmp.custom.string` matching "Linux" in sysDescr with the message
+      `= "Linux zeus 4.8.6.5-smp …" → "Linux"`.
+
+      **Not done here:** the interface/row picker still needs `R-09`, and a *lookup* picker would
+      want the same — an operator has to type a lookup id today rather than choose from what the
+      installation has loaded. The id is validated by the core and a missing one is reported
+      rather than fatal (`M-06`), so this is a convenience gap and not a correctness one.
 - [ ] **T-04 — SNMP Custom Table** · L · T-01 · Walk a table; one sensor per row or channels per
       column; row selection at add time.
 - [ ] **T-05 — SNMP CPU / Memory / Disk Free / Uptime** · M · T-01 · Standard MIB sensors with

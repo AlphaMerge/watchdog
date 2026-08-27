@@ -124,22 +124,10 @@ export const snmpTraffic: SensorType = {
     // Imported inside `execute`: the core loads this catalogue for schemas and channel
     // declarations and never runs a check, so it must not pay for a UDP stack
     // (`docs/adding-a-sensor-type.md`).
-    const { readCredentials, withSnmp, numberOf, stringOf, isException, indexUnder, parseOid } =
+    const { snmpCheck, numberOf, stringOf, isException, indexUnder, parseOid } =
       await import('../support/snmp/index.js');
 
     const host = context.target.host;
-    if (host === '') throw new Error('the device has no host to query');
-
-    const stored = context.credentials['snmp'];
-    if (stored === undefined) {
-      // Named, because "authentication failed" twenty seconds later reads like a broken device.
-      throw new Error(
-        'no SNMP credentials are set on this device or any group above it — add an SNMP ' +
-          'credential set to the device and every SNMP sensor under it will use it',
-      );
-    }
-    const credentials = readCredentials(stored);
-
     const named = context.params['interfaceName'];
     const wantedName = typeof named === 'string' ? named.trim() : '';
     const hintIndex = Number(context.params['ifIndex'] ?? 0);
@@ -152,19 +140,8 @@ export const snmpTraffic: SensorType = {
 
     const declared = context.params['counterWidth'];
     const width = typeof declared === 'string' ? declared : 'auto';
-    const options = {
-      timeoutMs: Number(context.params['timeoutMs'] ?? 5_000),
-      retries: Number(context.params['retries'] ?? 1),
-    };
-    const target = {
-      host,
-      port: Number(context.params['port'] ?? 161),
-      ipVersion: context.target.ipVersion,
-    };
 
-    return withSnmp(target, credentials, options, async (session) => {
-      const signal = context.signal;
-
+    return snmpCheck(context, async (session, signal) => {
       // 1. Which interface. A name is resolved every scan on purpose: the whole reason to name
       //    one is that the index may move, so caching the index would reintroduce the problem.
       let index = hintIndex;

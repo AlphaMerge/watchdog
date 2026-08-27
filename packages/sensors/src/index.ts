@@ -31,6 +31,8 @@ import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
 import { snmpTraffic } from './types/snmp-traffic.js';
+import { snmpCustom } from './types/snmp-custom.js';
+import { snmpCustomString } from './types/snmp-custom-string.js';
 
 /**
  * The types every installation gets.
@@ -41,7 +43,12 @@ import { snmpTraffic } from './types/snmp-traffic.js';
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
  */
-export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [icmpPing, snmpTraffic];
+export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
+  icmpPing,
+  snmpTraffic,
+  snmpCustom,
+  snmpCustomString,
+];
 
 export function standardCatalogue(
   types: readonly SensorType[] = BUILT_IN_SENSOR_TYPES,

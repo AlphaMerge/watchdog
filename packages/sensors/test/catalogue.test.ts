@@ -216,7 +216,13 @@ describe('the built-in catalogue', () => {
     // Building it at all is the assertion: `register` enforces the id format, one primary
     // channel, no duplicate keys and no unreachable `writeOnly`, and throws on any of them. A
     // type that breaks a rule fails here rather than on an operator's first sensor.
-    assert.deepEqual(standardCatalogue().ids(), ['icmp.ping', 'snmp.traffic']);
+    // Sorted by id, not by registration order.
+    assert.deepEqual(standardCatalogue().ids(), [
+      'icmp.ping',
+      'snmp.custom',
+      'snmp.custom.string',
+      'snmp.traffic',
+    ]);
   });
 
   it('is sealed, so nothing can register a type after boot', () => {
@@ -232,11 +238,21 @@ describe('the built-in catalogue', () => {
   });
 
   it('validates every shipped type against its own declared defaults', () => {
-    // A schema whose defaults do not satisfy it is a type nobody can create with an empty form.
+    // A schema whose *defaults* do not satisfy it is a type nobody can fill in — a `default` of
+    // 0 under a `minimum: 1`, an enum default that is not in the enum.
+    //
+    // Missing required properties are excluded, and that is not a loophole: `snmp.custom` has to
+    // have an OID and there is no sensible default for one, so "an empty form is valid" would
+    // rule out a whole legitimate shape of sensor. What is being asserted is that every problem
+    // with an empty form is "you have not typed this yet" and never "the value we put there for
+    // you is wrong".
     const catalogue = standardCatalogue();
     for (const id of catalogue.ids()) {
       const result = catalogue.validate(id, {});
-      assert.ok(result.valid, `${id} rejects its own defaults`);
+      const bad = result.valid
+        ? []
+        : result.problems.filter((problem) => !/required/i.test(problem.message));
+      assert.deepEqual(bad, [], `${id} rejects its own defaults`);
     }
   });
 });
