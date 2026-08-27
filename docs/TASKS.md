@@ -2952,8 +2952,10 @@ because each is a decision rather than a defect:
       to a waiting API call: correlation ids, a timeout, and a bound on how many are in flight.
       **Added by `T-02`:** the protocol is one-way for everything except the handshake, so there
       is no way to populate an interface picker at add time — the core has no route to the
-      device. `D-02` (device identification) needs the same pair, and so does any "test this
-      sensor now" button.
+      device. Any "test this sensor now" button needs the same pair. **`D-02` turned out not
+      to**: identification is a job nobody waits on, so it went down `D-01`'s asynchronous path
+      instead. This ticket is still needed for the cases where a *request is waiting*, which is
+      what makes it a different mechanism rather than a duplicate of one.
       **Added by `T-04`:** and the table row picker, which is the same gap on a bigger surface —
       an operator adding a table sensor currently reads the table with `snmpwalk` and types the
       column positions and the row value they find. Neither sensor type is blocked on it: both
@@ -4111,8 +4113,65 @@ because each is a decision rather than a defect:
       by itself on the next connect** and completed, which is the resume path proven rather than
       described; and a /24 cancelled at three seconds stopped at 15/254 with the eleven hosts it
       had already found still recorded.
-- [ ] **D-02 — Device identification** · L · T-01, T-07, T-09 · SNMP sysObjectID/sysDescr, WMI,
+- [x] **D-02 — Device identification** · L · T-01, T-07, T-09 · SNMP sysObjectID/sysDescr, WMI,
       SSH banner, open ports, reverse DNS → a device fingerprint.
+
+      **D-02 outcome.** **Not blocked on `R-09`, which the ticket above assumed it would be.**
+      That note was written before `D-01` existed. `R-09` is a *synchronous* request/response for
+      an API call that is waiting — an interface picker, a "test this sensor now" button — and
+      identifying two hundred hosts is not something anybody waits on. It is a second stage of
+      the same job `D-01` already established: a job with a cursor, progress that carries
+      findings, one finish. `R-09` is still needed for what it was actually added for.
+
+      **A stage on the same run, not a second run.** An operator starts one discovery and watches
+      one thing finish; two rows would mean two progress bars, two cancels, and a question about
+      what cancelling one does to the other. `status` gains `identifying` between `running` and
+      `done`, and the two stages carry their own cursors so they resume independently — one
+      cursor would make a resumed identification restart the sweep.
+
+      **The classifier is pure and lives in `@ms/shared`**, and that split is the whole design.
+      The probe opens sockets; `classify` draws every conclusion. A misclassified host gets the
+      wrong sensor set from `D-03`, every one of those sensors fails from its first scan, and an
+      operator concludes discovery does not work — so it is the half that has to be exercisable
+      without a network, and every fixture below is a string a real device sends.
+
+      **Evidence is ranked by what it is worth, not by what is easy to check.** `sysObjectID` is
+      a vendor naming its own product and outranks everything; `sysDescr` is prose by the same
+      vendor and is nearly as good; a banner is next; a port is a guess and only decides when
+      nothing better has; a reverse name is what somebody typed years ago and can only *raise* an
+      answer nothing else reached. Two orderings earned their comments. `VMware ESXi` is matched
+      before the Linux rule, because an ESXi agent reports a Linux-looking string and the other
+      order would give every hypervisor in the estate a Linux sensor set. And the generic
+      `switch|router|firewall` rule sits *after* the OS rules — `sysDescr` very often contains the
+      host's own name, so `FreeBSD firewall.example.com 13.2-RELEASE` was being read as network
+      equipment until a test caught it. `445 && !22` is Windows and `445 && 22` is not, because
+      SMB with SSH is a Linux box running Samba.
+
+      **`unknown` is a real answer and the most important one.** A host that answered a ping and
+      nothing else exists, and a Ping sensor is the right thing to create for it. Guessing would
+      create sensors that fail from their first scan.
+
+      **Two defects, both found live and neither reachable from a test that had not seen them.**
+      A service on the development network answered a TCP connect with NUL bytes; `jsonb` cannot
+      hold `\u0000` at all, so the write failed with `22P05` and took the whole batch of
+      fingerprints with it. And then the interesting one: the failure **retried for ever** — 298
+      passes in three minutes. Every component behaved correctly on its own. The endpoint caught
+      the error rather than dropping the connection; the probe answered every job it was handed;
+      the service resumed from the cursor it had. What was missing was anybody noticing that no
+      progress was being made. Banners are now stripped of control characters at the source, and
+      a batch offered more than three times from the same cursor fails the run with a message and
+      a counter — because a stall nobody counts is a stall that recurs.
+
+      A third the compiler could not have caught: `DiscoverySink.identified` takes `unknown[]` and
+      the service's method took `Fingerprint[]`, which compiles because TypeScript's method
+      parameters are bivariant. The wire schema deliberately does not enumerate a fingerprint's
+      fields — the shape grows, and refusing a newer probe's good answer would defeat the version
+      negotiation — so the core validates instead, strictly on `address` and `kind` and
+      permissively on everything else.
+
+      Eighteen mutations, all killed. Verified live: a twenty-address sweep found eleven hosts and
+      identified all eleven — `sysDescr` classified two of them as Linux at 88, the open ports
+      picked up PostgreSQL, MariaDB and SQL Server, and reverse DNS named the rest.
 - [ ] **D-03 — Device templates** · L · D-02 · Fingerprint → sensor set mapping; a built-in
       template set; save-this-device-as-a-template.
 - [ ] **D-04 — Provisioning and idempotency** · L · D-03 · Create devices and sensors; match on

@@ -30,7 +30,12 @@ const runSchema = {
     cursor: { type: 'integer' },
     found: { type: 'integer' },
     failed: { type: 'integer' },
-    status: { type: 'string', enum: ['queued', 'running', 'done', 'cancelled', 'failed'] },
+    status: {
+      type: 'string',
+      enum: ['queued', 'running', 'identifying', 'done', 'cancelled', 'failed'],
+    },
+    level: { type: 'string', enum: ['ping', 'identify'] },
+    identified: { type: 'integer' },
     message: { type: 'string' },
     timeoutMs: { type: 'integer' },
     concurrency: { type: 'integer' },
@@ -130,6 +135,26 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             // 0 means the concurrency bound is the only limit. A rate is what an operator
             // reaches for on a network where a burst of pings sets off an intrusion detector.
             ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000 },
+            level: {
+              type: 'string',
+              enum: ['ping', 'identify'],
+              default: 'identify',
+              description:
+                '`ping` finds the addresses and stops. `identify` also asks each of them what ' +
+                'it is — reverse DNS, a bounded set of ports, an SNMP system group and any ' +
+                'banner a service volunteers — which is what `D-03` matches templates against.',
+            },
+            snmpCommunity: {
+              type: 'string',
+              maxLength: 128,
+              default: '',
+              description:
+                'Tried read-only against every host during identification, and skipped when ' +
+                'empty. `sysDescr` and `sysObjectID` are the two most informative things a ' +
+                'device will tell you, and this is the only credential identification has: it ' +
+                'runs before anybody has told the system anything about these hosts, so v3 — ' +
+                'which needs a username and a passphrase per device — is not available to it.',
+            },
           },
         },
         response: { 201: { $ref: 'ms:discoveryRun' } },
@@ -143,6 +168,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         timeoutMs?: number;
         concurrency?: number;
         ratePerSecond?: number;
+        level?: 'ping' | 'identify';
+        snmpCommunity?: string;
       };
       parse(body.range);
       const run = await discovery.start(body);
@@ -199,6 +226,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                   properties: {
                     address: { type: 'string' },
                     rttMs: { type: ['number', 'null'] },
+                    // Null until identification has run, and for a run at `level: 'ping'`. Null
+                    // rather than absent: "not identified yet" is a state a client renders, and
+                    // a missing key is indistinguishable from a client that did not ask.
+                    fingerprint: { type: ['object', 'null'], additionalProperties: true },
                   },
                 },
               },

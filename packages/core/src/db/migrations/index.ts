@@ -24,6 +24,7 @@ import { migration022 } from './022-trigger-inheritance.js';
 import { migration023 } from './023-channel-counters.js';
 import { migration024 } from './024-mail-credential.js';
 import { migration025 } from './025-discovery-runs.js';
+import { migration026 } from './026-discovery-identify.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -57,6 +58,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration023,
   migration024,
   migration025,
+  migration026,
 ];
 
 export type { Migration } from './types.js';

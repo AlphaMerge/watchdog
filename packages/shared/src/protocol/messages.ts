@@ -24,8 +24,11 @@ import { AppError } from '../errors/app-error.js';
  * Version 4 added the discovery sweep (D-01). Same rule: the core will not send `sweep-*` to a
  * peer below 4, and a discovery run assigned to such a probe fails saying which probe and what
  * version it is running, rather than waiting for progress that will never come.
+ *
+ * Version 5 added identification (D-02), which is the sweep's second stage and follows the same
+ * shape: a job with a cursor, progress that carries findings, and one finish.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /**
  * The oldest peer version this build still understands.
@@ -164,6 +167,33 @@ export interface SweepHost {
   rttMs: number;
 }
 
+/**
+ * An identification pass a probe has been told to run (`D-02`).
+ *
+ * **The addresses are sent, unlike the sweep's range**, and the difference is not an
+ * inconsistency. A range is a rule that generates addresses and compresses to forty characters; a
+ * list of *live* hosts is data the core holds and the probe does not, and there is no rule that
+ * regenerates it. It is also far smaller — the hosts a /24 sweep found, not the 254 it tried.
+ */
+export interface IdentifyJob {
+  runId: number;
+  /** Dotted-quads, in the order the core wants them tried. */
+  addresses: string[];
+  /** Where to resume: how many of `addresses` have already been offered. */
+  cursor: number;
+  /** Per-probe budget, applied to each source rather than to the whole host. */
+  timeoutMs: number;
+  concurrency: number;
+  /**
+   * The SNMP community to try, or empty to skip SNMP.
+   *
+   * The one credential identification has. A community is not a secret in any useful sense —
+   * it travels unencrypted in every v2c packet — but it is still an operator's configuration, so
+   * it goes over the same mutual-TLS channel every other credential does.
+   */
+  community: string;
+}
+
 /** Why a sweep stopped. Only `done` means the range was covered. */
 export type SweepEnding = 'done' | 'cancelled' | 'failed' | 'superseded';
 
@@ -251,6 +281,27 @@ export type ProbeToCoreMessage =
       /** Empty unless `ending` is `failed`, where it is what to tell the operator. */
       message: string;
     }
+  | {
+      /**
+       * Hosts identified since the last message (`D-02`).
+       *
+       * Fingerprints and the cursor together, for the reason the sweep sends hosts and its cursor
+       * together: they are the same fact, and a cursor recorded past a fingerprint that had not
+       * arrived is a host that never gets identified and never gets asked again.
+       */
+      type: 'identify-progress';
+      runId: number;
+      cursor: number;
+      /** JSON, validated against the fingerprint shape by the core rather than by the schema. */
+      found: unknown[];
+    }
+  | {
+      type: 'identify-finished';
+      runId: number;
+      ending: SweepEnding;
+      cursor: number;
+      message: string;
+    }
   | { type: 'bye'; reason: string };
 
 export type CoreToProbeMessage =
@@ -309,6 +360,9 @@ export type CoreToProbeMessage =
    * 65,536 timeouts expires.
    */
   | { type: 'sweep-cancel'; runId: number }
+  /** Identify the hosts a sweep found (`D-02`). Resent to resume, exactly as `sweep-start` is. */
+  | { type: 'identify-start'; job: IdentifyJob }
+  | { type: 'identify-cancel'; runId: number }
   | { type: 'bye'; reason: string };
 
 export type ProtocolMessage = ProbeToCoreMessage | CoreToProbeMessage;
@@ -441,6 +495,31 @@ const probeToCoreSchema = {
     {
       properties: {
         type: { const: 'sweep-finished' },
+        runId: { type: 'integer', minimum: 1 },
+        ending: { type: 'string', enum: ['done', 'cancelled', 'failed', 'superseded'] },
+        cursor: { type: 'integer', minimum: 0 },
+        message: { type: 'string', maxLength: 2000 },
+      },
+      required: ['type', 'runId', 'ending', 'cursor', 'message'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'identify-progress' },
+        runId: { type: 'integer', minimum: 1 },
+        cursor: { type: 'integer', minimum: 0 },
+        // `unknown` items, validated by the core rather than here. A fingerprint is a growing
+        // shape — `D-03` will want fields this build has not thought of — and a wire schema that
+        // enumerated them would refuse a newer probe's perfectly good answer outright, which is
+        // the one failure mode a version negotiation is supposed to prevent.
+        found: { type: 'array', maxItems: 1024 },
+      },
+      required: ['type', 'runId', 'cursor', 'found'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'identify-finished' },
         runId: { type: 'integer', minimum: 1 },
         ending: { type: 'string', enum: ['done', 'cancelled', 'failed', 'superseded'] },
         cursor: { type: 'integer', minimum: 0 },
@@ -620,6 +699,39 @@ const coreToProbeSchema = {
     {
       properties: {
         type: { const: 'sweep-cancel' },
+        runId: { type: 'integer', minimum: 1 },
+      },
+      required: ['type', 'runId'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'identify-start' },
+        job: {
+          type: 'object',
+          properties: {
+            runId: { type: 'integer', minimum: 1 },
+            // The hosts a sweep found, which is bounded by the sweep's own maximum range.
+            addresses: {
+              type: 'array',
+              maxItems: 65536,
+              items: { type: 'string', minLength: 7, maxLength: 15 },
+            },
+            cursor: { type: 'integer', minimum: 0 },
+            timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
+            concurrency: { type: 'integer', minimum: 1, maximum: 128 },
+            community: { type: 'string', maxLength: 128 },
+          },
+          required: ['runId', 'addresses', 'cursor', 'timeoutMs', 'concurrency', 'community'],
+          additionalProperties: false,
+        },
+      },
+      required: ['type', 'job'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'identify-cancel' },
         runId: { type: 'integer', minimum: 1 },
       },
       required: ['type', 'runId'],

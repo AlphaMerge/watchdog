@@ -385,3 +385,95 @@ describe('discovery sweep messages', () => {
     );
   });
 });
+
+/**
+ * The identification messages (`D-02`).
+ *
+ * Same block as the sweep's and for the same reason: `D-01` shipped with four members in the
+ * wrong union, and the assertion that would have caught it is the one that refuses each message
+ * from the side that must not accept it.
+ */
+describe('identification messages', () => {
+  const job = {
+    runId: 7,
+    addresses: ['10.0.0.5', '10.0.0.9'],
+    cursor: 0,
+    timeoutMs: 1_000,
+    concurrency: 8,
+    community: 'public',
+  };
+
+  it('carries a pass from core to probe', () => {
+    assert.equal(parseCoreToProbe({ type: 'identify-start', job }).type, 'identify-start');
+    assert.deepEqual(parseCoreToProbe({ type: 'identify-cancel', runId: 7 }), {
+      type: 'identify-cancel',
+      runId: 7,
+    });
+  });
+
+  it('carries fingerprints and an ending from probe to core', () => {
+    const progress = parseProbeToCore({
+      type: 'identify-progress',
+      runId: 7,
+      cursor: 2,
+      found: [{ address: '10.0.0.5', kind: 'linux', confidence: 45, ports: [], evidence: [] }],
+    });
+    assert.equal(progress.type, 'identify-progress');
+    assert.equal(
+      parseProbeToCore({
+        type: 'identify-finished',
+        runId: 7,
+        ending: 'done',
+        cursor: 2,
+        message: '',
+      }).type,
+      'identify-finished',
+    );
+  });
+
+  it('lets a fingerprint carry a field this build has never heard of', () => {
+    // The wire schema deliberately does not enumerate them: the shape grows, and a schema that
+    // refused a newer probe's perfectly good answer would defeat the version negotiation. The
+    // *core* validates the shape, where the meaning is known.
+    const message = parseProbeToCore({
+      type: 'identify-progress',
+      runId: 7,
+      cursor: 1,
+      found: [{ address: '10.0.0.5', kind: 'linux', somethingNewer: { model: 'X99' } }],
+    });
+    assert.equal(message.type, 'identify-progress');
+  });
+
+  it('refuses each of them from the wrong direction', () => {
+    assert.throws(() => parseProbeToCore({ type: 'identify-start', job }), ProtocolError);
+    assert.throws(() => parseProbeToCore({ type: 'identify-cancel', runId: 7 }), ProtocolError);
+    assert.throws(
+      () => parseCoreToProbe({ type: 'identify-progress', runId: 7, cursor: 1, found: [] }),
+      ProtocolError,
+    );
+    assert.throws(
+      () =>
+        parseCoreToProbe({
+          type: 'identify-finished',
+          runId: 7,
+          ending: 'done',
+          cursor: 1,
+          message: '',
+        }),
+      ProtocolError,
+    );
+  });
+
+  it('bounds the concurrency far below the sweep’s', () => {
+    // Each host opens a dozen TCP connections, a UDP socket and a resolver query, so the sweep's
+    // 512 would be six thousand file descriptors and a burst that looks like a port scan.
+    assert.throws(
+      () => parseCoreToProbe({ type: 'identify-start', job: { ...job, concurrency: 256 } }),
+      ProtocolError,
+    );
+    assert.equal(
+      parseCoreToProbe({ type: 'identify-start', job: { ...job, concurrency: 128 } }).type,
+      'identify-start',
+    );
+  });
+});

@@ -276,11 +276,17 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.equal((await mustGet(run.id)).status, 'cancelled');
     });
 
-    it('tells the probe as well', async () => {
+    it('tells the probe as well — both stages of it', async () => {
+      // The statement that records the cancel has already changed the status, so it no longer
+      // says which stage was running. A cancel for a stage that was not running is a no-op the
+      // probe answers honestly.
       const run = await start();
       sent = [];
       await discovery.cancel(run.id);
-      assert.deepEqual(sent, [{ kind: 'cancel', runId: run.id }]);
+      assert.deepEqual(sent, [
+        { kind: 'cancel', runId: run.id },
+        { kind: 'identify-cancel', runId: run.id },
+      ]);
     });
 
     it('answers null for a run that has already finished', async () => {
@@ -332,6 +338,220 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       const run = await start();
       await harness.service.delete(testActor, groupId, { kind: 'leafOnly' }, { kind: 'none' });
       assert.equal(await discovery.get(run.id), null);
+    });
+  });
+
+  /**
+   * The identification stage (`D-02`).
+   *
+   * A stage on the same run rather than a second run, so what is asserted here is the handover:
+   * that a finished sweep becomes an identification rather than a finished run, that fingerprints
+   * land on the right hosts, and that a probe sending something this build cannot read is
+   * dropped rather than written into a column `D-03` will match templates against.
+   */
+  describe('identification', () => {
+    const fingerprint = (address: string, over: Record<string, unknown> = {}) => ({
+      address,
+      ports: [{ port: 22, transport: 'tcp' }],
+      kind: 'linux',
+      confidence: 45,
+      evidence: ['SSH is open'],
+      ...over,
+    });
+
+    const sweptAndFound = async (addresses: string[]) => {
+      const run = await start();
+      await discovery.progress(
+        run.id,
+        6,
+        addresses.map((address) => ({ address, rttMs: 1 })),
+        0,
+      );
+      await discovery.finished(run.id, 'done', 6, '');
+      return run;
+    };
+
+    it('hands a finished sweep over to identification rather than ending the run', async () => {
+      // An operator starts one discovery and watches one thing finish. Two rows would mean two
+      // progress bars, two cancels, and a question about what a cancel of one does to the other.
+      sent = [];
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'identifying');
+
+      const message = sent.at(-1);
+      assert.ok(message !== undefined && message.kind === 'identify');
+      assert.deepEqual(message.job.addresses, ['10.0.0.1', '10.0.0.2']);
+      assert.equal(message.job.cursor, 0, 'the batch is the remaining work');
+    });
+
+    it('ends the run without identifying when the level says ping only', async () => {
+      const run = await discovery.start({
+        groupId,
+        probeId,
+        range: '10.0.0.0/29',
+        level: 'ping',
+      });
+      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(run.id, 'done', 6, '');
+      assert.equal((await mustGet(run.id)).status, 'done');
+    });
+
+    it('ends the run without identifying when the sweep found nothing', async () => {
+      const run = await start();
+      await discovery.finished(run.id, 'done', 6, '');
+      assert.equal((await mustGet(run.id)).status, 'done');
+    });
+
+    it('stores a fingerprint against the host it belongs to', async () => {
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
+      await discovery.identified(run.id, 2, [
+        fingerprint('10.0.0.1', { kind: 'windows', confidence: 65 }),
+        fingerprint('10.0.0.2'),
+      ]);
+
+      const hosts = await discovery.hosts(run.id);
+      assert.equal(hosts[0]?.fingerprint?.kind, 'windows');
+      assert.equal(hosts[1]?.fingerprint?.kind, 'linux');
+      assert.equal((await mustGet(run.id)).identified, 2);
+    });
+
+    it('refuses a fingerprint for an address this run never found', async () => {
+      // A probe answering about the wrong run would otherwise put a host into a run that never
+      // saw it, and the run's counts would stop adding up.
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.identified(run.id, 1, [fingerprint('192.0.2.99')]);
+      assert.equal((await mustGet(run.id)).identified, 0);
+      assert.equal((await discovery.hosts(run.id))[0]?.fingerprint, null);
+    });
+
+    it('drops what it cannot read rather than writing it into the column', async () => {
+      // The wire schema deliberately does not enumerate a fingerprint's fields, so this is the
+      // boundary. TypeScript would not have caught it either — `DiscoverySink` declares
+      // `unknown[]` and method parameters are bivariant.
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3']);
+      await discovery.identified(run.id, 3, [
+        fingerprint('10.0.0.1'),
+        { address: '10.0.0.2', kind: 'quantum-toaster', confidence: 99, ports: [], evidence: [] },
+        { kind: 'linux', confidence: 10, ports: [], evidence: [] },
+        'not an object',
+        null,
+      ]);
+      assert.equal((await mustGet(run.id)).identified, 1);
+      const hosts = await discovery.hosts(run.id);
+      assert.equal(hosts[0]?.fingerprint?.kind, 'linux');
+      assert.equal(hosts[1]?.fingerprint, null, 'an unknown kind is not written');
+    });
+
+    it('keeps a field it does not know about, because a newer probe may send one', async () => {
+      // The column is jsonb and the shape grows. Dropping an unrecognised field would lose
+      // information a later release knows how to read.
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.identified(run.id, 1, [
+        fingerprint('10.0.0.1', { somethingNewer: { model: 'X99' } }),
+      ]);
+      const stored = (await discovery.hosts(run.id))[0]?.fingerprint as
+        Record<string, unknown> | null | undefined;
+      assert.deepEqual(stored?.['somethingNewer'], { model: 'X99' });
+    });
+
+    it('makes a replayed fingerprint free, as the sweep does for a replayed host', async () => {
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1', { kind: 'windows' })]);
+      assert.equal((await mustGet(run.id)).identified, 1);
+      assert.equal(
+        (await discovery.hosts(run.id))[0]?.fingerprint?.kind,
+        'linux',
+        'and the first answer stands rather than being overwritten by a replay',
+      );
+    });
+
+    it('adds the probe’s cursor to its own rather than replacing it', async () => {
+      // The probe counts from the start of the batch it was handed. Replacing would walk a
+      // resumed pass back to the start of the list.
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3']);
+      await discovery.identified(run.id, 2, []);
+      assert.equal((await mustGet(run.id)).identifyCursor, 2);
+      await discovery.identified(run.id, 1, []);
+      assert.equal((await mustGet(run.id)).identifyCursor, 3);
+    });
+
+    it('finishes the run when a batch comes back empty', async () => {
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identifyFinished(run.id, 'done', '');
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'done');
+      assert.ok(after.finishedAt !== null);
+    });
+
+    it('leaves a pass the probe stopped waiting to be resumed', async () => {
+      // A probe restarting reports `cancelled` for everything it was doing. The run stays
+      // `identifying` so the next connect picks it up from its own cursor.
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
+      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identifyFinished(run.id, 'cancelled', '');
+      assert.equal((await mustGet(run.id)).status, 'identifying');
+
+      sent = [];
+      await discovery.pump(probeId);
+      const message = sent.at(-1);
+      assert.ok(message !== undefined && message.kind === 'identify');
+      assert.deepEqual(message.job.addresses, ['10.0.0.2'], 'and resumes from its own cursor');
+    });
+
+    it('fails the run when identification failed', async () => {
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.identifyFinished(run.id, 'failed', 'the resolver is not reachable');
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'failed');
+      assert.match(after.message, /resolver/);
+    });
+
+    it('cancels both stages, because the status no longer says which was running', async () => {
+      const run = await sweptAndFound(['10.0.0.1']);
+      sent = [];
+      await discovery.cancel(run.id);
+      assert.deepEqual(
+        sent.map((one) => one.kind),
+        ['cancel', 'identify-cancel'],
+      );
+      assert.equal((await mustGet(run.id)).status, 'cancelled');
+    });
+
+    it('fails a run whose batch stops making progress, rather than looping for ever', async () => {
+      // **Found live**, where a fingerprint PostgreSQL refused made the write throw, the cursor
+      // never advanced, and the core and the probe re-ran the same batch 298 times in three
+      // minutes. Every component behaved correctly on its own — the endpoint caught the error,
+      // the probe answered every job, the service resumed from the cursor it had. What was
+      // missing was anybody noticing that no progress was being made.
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await discovery.identifyFinished(run.id, 'done', '');
+      }
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'failed');
+      assert.match(after.message, /stopped making progress/);
+      assert.equal(discovery.stats().stalled, 1, 'and it is counted, not only logged');
+    });
+
+    it('does not count an offer as stalled when the cursor is moving', async () => {
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']);
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await discovery.identified(run.id, 1, []);
+        await discovery.identifyFinished(run.id, 'done', '');
+      }
+      // Four hosts, so the fifth pass finds an empty batch and finishes the run cleanly.
+      assert.equal((await mustGet(run.id)).status, 'done');
+      assert.equal(discovery.stats().stalled, 0);
+    });
+
+    it('does not send a run mid-identification back to the sweep on a disconnect', async () => {
+      // `queued` would re-run the sweep it has already finished.
+      const run = await sweptAndFound(['10.0.0.1']);
+      await discovery.probeDisconnected(probeId);
+      assert.equal((await mustGet(run.id)).status, 'identifying');
     });
   });
 

@@ -16,6 +16,7 @@ import {
   type ProbeToCoreMessage,
   type RejectCode,
   type SensorAssignment,
+  type IdentifyJob,
   type SweepEnding,
   type SweepHost,
   type SweepJob,
@@ -62,6 +63,19 @@ export interface SweepCancel {
   runId: number;
 }
 
+/** The second stage (`D-02`), dispatched down the same path for the same reasons. */
+export interface IdentifyStart {
+  kind: 'identify';
+  job: IdentifyJob;
+}
+
+export interface IdentifyCancel {
+  kind: 'identify-cancel';
+  runId: number;
+}
+
+export type SweepMessage = SweepStart | SweepCancel | IdentifyStart | IdentifyCancel;
+
 export interface DiscoverySink {
   /** A probe with this branch has connected, or reconnected. Offer it whatever it should run. */
   pump(probeObjectId: number): Promise<void>;
@@ -71,6 +85,9 @@ export interface DiscoverySink {
     found: readonly SweepHost[],
     failed: number,
   ): Promise<void>;
+  /** Fingerprints from `D-02`. `unknown[]` here; the service validates the shape. */
+  identified(runId: number, cursor: number, found: readonly unknown[]): Promise<void>;
+  identifyFinished(runId: number, ending: SweepEnding, message: string): Promise<void>;
   finished(runId: number, ending: SweepEnding, cursor: number, message: string): Promise<void>;
   probeDisconnected(probeObjectId: number): Promise<void>;
 }
@@ -326,6 +343,16 @@ export class ProbeEndpoint {
             sink.finished(message.runId, message.ending, message.cursor, message.message),
           );
           return session;
+        case 'identify-progress':
+          this.#queueDiscovery(session, logger, (sink) =>
+            sink.identified(message.runId, message.cursor, message.found),
+          );
+          return session;
+        case 'identify-finished':
+          this.#queueDiscovery(session, logger, (sink) =>
+            sink.identifyFinished(message.runId, message.ending, message.message),
+          );
+          return session;
         case 'bye':
           logger.info({ reason: message.reason }, 'probe disconnecting');
           connection.close(`peer said bye: ${message.reason}`);
@@ -366,21 +393,18 @@ export class ProbeEndpoint {
    * queued and is offered again when it reconnects. That path is also how a probe restart
    * resumes a sweep, so it is the ordinary one rather than the exception.
    */
-  sendSweep(probeObjectId: number, message: SweepStart | SweepCancel): boolean {
+  sendSweep(probeObjectId: number, message: SweepMessage): boolean {
     for (const session of this.#sessions.values()) {
       if (session.probeObjectId !== probeObjectId) continue;
-      if (session.protocolVersion < 4) {
+      const needed = message.kind === 'start' || message.kind === 'cancel' ? 4 : 5;
+      if (session.protocolVersion < needed) {
         this.#options.logger.warn(
-          { probeObjectId, protocolVersion: session.protocolVersion },
-          'probe is too old to run a discovery sweep',
+          { probeObjectId, protocolVersion: session.protocolVersion, needs: needed },
+          'probe is too old for this discovery stage',
         );
         return false;
       }
-      session.connection.send(
-        message.kind === 'start'
-          ? { type: 'sweep-start', job: message.job }
-          : { type: 'sweep-cancel', runId: message.runId },
-      );
+      session.connection.send(wireFor(message));
       return true;
     }
     return false;
@@ -677,5 +701,19 @@ export class ProbeEndpoint {
       { cause: close.cause, detail: close.detail, gid: session?.info.gid ?? null },
       'probe connection closed',
     );
+  }
+}
+
+/** One place that knows what a dispatch means on the wire, so no caller has to. */
+function wireFor(message: SweepMessage): CoreToProbeMessage {
+  switch (message.kind) {
+    case 'start':
+      return { type: 'sweep-start', job: message.job };
+    case 'cancel':
+      return { type: 'sweep-cancel', runId: message.runId };
+    case 'identify':
+      return { type: 'identify-start', job: message.job };
+    case 'identify-cancel':
+      return { type: 'identify-cancel', runId: message.runId };
   }
 }

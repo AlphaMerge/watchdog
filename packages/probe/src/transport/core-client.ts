@@ -14,6 +14,7 @@ import {
   type NackReason,
   type CheckResult,
   type SweepJob,
+  type IdentifyJob,
 } from '@ms/shared';
 import type { ConfigUpdate } from '../scheduler/assignments.js';
 import { Backoff } from './backoff.js';
@@ -46,7 +47,12 @@ export interface CoreClientOptions {
 }
 
 /** What the core asked for. Flattened from the wire so the runner takes one shape. */
-export type SweepCommand = { kind: 'start'; job: SweepJob } | { kind: 'cancel'; runId: number };
+/** What the core asked for. Flattened from the wire so the runners take one shape. */
+export type SweepCommand =
+  | { kind: 'start'; job: SweepJob }
+  | { kind: 'cancel'; runId: number }
+  | { kind: 'identify'; job: IdentifyJob }
+  | { kind: 'identify-cancel'; runId: number };
 
 export type { ConfigUpdate } from '../scheduler/assignments.js';
 
@@ -301,6 +307,27 @@ export class CoreClient {
         return;
       }
 
+      case 'identify-start': {
+        const handler = this.#options.onSweep;
+        if (handler === undefined) {
+          this.#connection?.send({
+            type: 'identify-finished',
+            runId: message.job.runId,
+            ending: 'failed',
+            cursor: message.job.cursor,
+            message: 'this probe has no discovery runner',
+          });
+          return;
+        }
+        handler({ kind: 'identify', job: message.job });
+        return;
+      }
+
+      case 'identify-cancel': {
+        this.#options.onSweep?.({ kind: 'identify-cancel', runId: message.runId });
+        return;
+      }
+
       case 'reject': {
         // Retrying will not fix a bad key or a revoked probe; say so once, loudly, and keep
         // retrying slowly rather than silently giving up — an operator may fix it at the core.
@@ -358,7 +385,9 @@ export class CoreClient {
    * simpler and more correct than replaying stale progress against a run that may have been
    * cancelled in the meantime.
    */
-  sendSweep(message: Extract<ProbeToCoreMessage, { type: `sweep-${string}` }>): boolean {
+  sendSweep(
+    message: Extract<ProbeToCoreMessage, { type: `sweep-${string}` | `identify-${string}` }>,
+  ): boolean {
     if (this.#connection === undefined) return false;
     this.#connection.send(message);
     return true;

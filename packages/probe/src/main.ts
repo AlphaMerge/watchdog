@@ -22,6 +22,8 @@ import { SpoolDrain } from './spool/drain.js';
 import { TimingWheel } from './scheduler/wheel.js';
 import { SweepRunner } from './discovery/sweep.js';
 import { pingOnce } from './discovery/ping-probe.js';
+import { IdentifyRunner } from './discovery/identify-runner.js';
+import { LIVE_SOURCES } from './discovery/sources.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
 
@@ -270,6 +272,29 @@ async function main(): Promise<void> {
     },
   });
 
+  // The second stage (`D-02`). Its own runner rather than a mode on the sweep: the unit of work
+  // is a dozen sockets and a resolver query rather than one UDP echo, so it carries its own far
+  // lower concurrency, and the two resume independently.
+  const identifications = new IdentifyRunner({
+    logger,
+    sources: LIVE_SOURCES,
+    queueDepth: () => pool.stats().queued,
+    onProgress: (runId, cursor, found) => {
+      coreClient.sendSweep({ type: 'identify-progress', runId, cursor, found });
+    },
+    onFinished: (runId, ending, cursor, message) => {
+      coreClient.sendSweep({ type: 'identify-finished', runId, ending, cursor, message });
+    },
+  });
+  lifecycle.onShutdown({
+    name: 'identify-runner',
+    timeoutMs: 5_000,
+    run: () => {
+      identifications.stop();
+      return Promise.resolve();
+    },
+  });
+
   const coreClient = new CoreClient({
     config,
     logger,
@@ -286,8 +311,20 @@ async function main(): Promise<void> {
       return size;
     },
     onSweep: (message) => {
-      if (message.kind === 'start') sweeps.start(message.job);
-      else sweeps.cancel(message.runId);
+      switch (message.kind) {
+        case 'start':
+          sweeps.start(message.job);
+          return;
+        case 'cancel':
+          sweeps.cancel(message.runId);
+          return;
+        case 'identify':
+          identifications.start(message.job);
+          return;
+        case 'identify-cancel':
+          identifications.cancel(message.runId);
+          return;
+      }
     },
   });
   coreClient.start();
