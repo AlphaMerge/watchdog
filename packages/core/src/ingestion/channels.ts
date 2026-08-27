@@ -24,6 +24,14 @@ export interface ResolvedChannel {
   readonly lookupId: string | null;
   /** The definition, or `null` when there is none or the one it names is not loaded. */
   readonly lookup: LookupDefinition | null;
+  /**
+   * Set when this channel reports a counter and the stored sample is a rate (`T-02`).
+   *
+   * Read here rather than asked of the catalogue per reading: it rides with the channel exactly
+   * as `lookupId` does, so the reading path stays one query and a type whose declaration changes
+   * cannot silently reinterpret a channel that already has history.
+   */
+  readonly counterBits: 32 | 64 | null;
 }
 
 export interface ResolvedChannels {
@@ -168,13 +176,14 @@ export class ChannelResolver {
       decimals: number | null;
       limits: unknown;
       lookup_id: string | null;
+      counter_bits: number | null;
       scale_mul: string;
       scale_div: string;
       spike_min: number | null;
       spike_max: number | null;
     }>(
       `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
-              c.lookup_id, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
+              c.lookup_id, c.counter_bits, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
        FROM channel c
        JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
          ON w.sensor_id = c.sensor_id AND w.key = c.key`,
@@ -192,6 +201,7 @@ export class ChannelResolver {
         transform: parseTransform(row),
         lookupId: row.lookup_id,
         lookup: this.#lookupFor(row.lookup_id),
+        counterBits: row.counter_bits === 32 || row.counter_bits === 64 ? row.counter_bits : null,
       };
       ids.set(cacheKey, channel);
       this.#remember(cacheKey, channel);

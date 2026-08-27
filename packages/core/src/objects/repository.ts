@@ -515,10 +515,10 @@ export class ObjectRepository {
   ): Promise<{ created: number; ownerVersion: number | null }> {
     if (drafts.length === 0) return { created: 0, ownerVersion: null };
     const rows = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id)
-       SELECT $1, key, name, unit, is_primary, lookup_id
-       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[])
-            AS d(key, name, unit, is_primary, lookup_id)
+      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits)
+       SELECT $1, key, name, unit, is_primary, lookup_id, counter_bits
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[], $7::smallint[])
+            AS d(key, name, unit, is_primary, lookup_id, counter_bits)
        RETURNING id`,
       [
         sensorId,
@@ -527,6 +527,7 @@ export class ObjectRepository {
         drafts.map((draft) => draft.unit ?? ''),
         drafts.map((draft) => draft.isPrimary ?? false),
         drafts.map((draft) => draft.lookup ?? null),
+        drafts.map((draft) => draft.counterBits ?? null),
       ],
     );
     // A primary-key lookup, and only on sensor creation.

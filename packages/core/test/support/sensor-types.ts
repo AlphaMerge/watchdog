@@ -52,8 +52,10 @@ const snmpTraffic: SensorType = {
     },
   },
   channels: () => [
-    { key: 'in', name: 'Traffic in', unit: 'kbit/s', isPrimary: true },
-    { key: 'out', name: 'Traffic out', unit: 'kbit/s' },
+    // Counters, as the real type declares them (`T-02`): the device reports octets since it was
+    // last reset and the core stores the rate.
+    { key: 'in', name: 'Traffic in', unit: 'octets/s', isPrimary: true, counter: { bits: 64 } },
+    { key: 'out', name: 'Traffic out', unit: 'octets/s', counter: { bits: 64 } },
     // A declared lookup (M-06). A status code is not a measurement, and this is the shape a
     // real SNMP type has: two counters and one enumeration.
     { key: 'status', name: 'Interface status', lookup: 'ms.snmp.if-oper-status' },

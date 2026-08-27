@@ -45,6 +45,20 @@ export interface ChannelDef {
    * rule — the whole point of lookups being files is that a device can disagree with its RFC.
    */
   readonly lookup?: string;
+  /**
+   * This channel reports a *counter*, not a measurement, and the core turns it into a rate
+   * (`T-02`).
+   *
+   * An interface reports octets since it was last reset. Declaring the width here is what lets
+   * the core divide two readings by the time between them — and the width matters, because a
+   * 32-bit counter going backwards has wrapped (2^32 octets is thirty-four seconds of gigabit)
+   * while a 64-bit one going backwards is a device that rebooted.
+   *
+   * A counter channel's readings carry `ChannelReading.counter` — the exact value as text —
+   * rather than being read from `value`, which cannot hold `ifHCInOctets` without losing its
+   * low bits. The stored sample is the rate, in this channel's own unit per second.
+   */
+  readonly counter?: { readonly bits: 32 | 64 };
 }
 
 /**

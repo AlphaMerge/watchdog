@@ -2,6 +2,8 @@ import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from
 import type { Database } from '../db/pool.js';
 import { rollUp, type ChannelOutcome, type ChannelReadingFacts } from '../state/limits.js';
 import { transformReading } from './scaling.js';
+import { parseCounter, rateFrom, type CounterSample } from './counters.js';
+import { CounterStore } from './counter-store.js';
 import type { StateDecisions } from '../state/runtime.js';
 import type { SensorResult, SensorStateService, StateStats } from '../state/service.js';
 import { ChannelResolver } from './channels.js';
@@ -51,6 +53,21 @@ export interface ResultStats {
   discardedReadings: number;
   /** The subset of the above that a spike filter rejected, rather than arithmetic. */
   discardedSpike: number;
+  /**
+   * Counter readings that produced no rate, by why (`T-02`).
+   *
+   * Each is a deliberate gap rather than a zero, and each means something different to an
+   * operator looking at a broken graph: `first` is a sensor that has just been created and is
+   * expected once; `reset` is a device that rebooted, and a *rising* count of them is a device
+   * rebooting repeatedly; `stale` is a monitoring outage long enough that the delta across it
+   * would be meaningless. Counted separately because "the graph has holes in it" has three very
+   * different causes and only these numbers separate them.
+   */
+  counterFirst: number;
+  counterReset: number;
+  counterStale: number;
+  /** Rates computed across a counter going round. Routine on 32 bits; never seen on 64. */
+  counterWrapped: number;
   channelsCreated: number;
   cachedChannels: number;
   /** Absent when no state machine is wired. */
@@ -83,8 +100,14 @@ export class IngestionService {
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
   #discardedUnknownSensor = 0;
+  readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
+  /** Counter readings that produced no rate, by why. Backpressure is visible (CLAUDE.md). */
+  #counterFirst = 0;
+  #counterReset = 0;
+  #counterStale = 0;
+  #counterWrapped = 0;
   #channelsCreated = 0;
 
   constructor(options: IngestionServiceOptions) {
@@ -105,6 +128,10 @@ export class IngestionService {
       discardedUnknownSensor: this.#discardedUnknownSensor,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
+      counterFirst: this.#counterFirst,
+      counterReset: this.#counterReset,
+      counterStale: this.#counterStale,
+      counterWrapped: this.#counterWrapped,
       channelsCreated: this.#channelsCreated,
       cachedChannels: this.#resolver.cached,
       ...(this.#states === undefined ? {} : { state: this.#states.stats() }),
@@ -221,6 +248,22 @@ export class IngestionService {
       this.#discardedUnknownSensor += resolved.droppedReadings;
     }
 
+    // Baselines for every counter channel in the batch, in one query. A probe's batch carries
+    // every interface on every device it watches, so a round trip per channel would make ingest
+    // cost more in bookkeeping than in samples.
+    const counterChannelIds: number[] = [];
+    for (const result of withReadings) {
+      for (const reading of result.channels) {
+        const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
+        if (channel?.counterBits != null) counterChannelIds.push(channel.id);
+      }
+    }
+    const counterBaselines =
+      counterChannelIds.length === 0
+        ? new Map<number, CounterSample>()
+        : await this.#db.tx((q) => this.#counters.load(q, counterChannelIds));
+    const counterSeen = new Map<number, CounterSample>();
+
     const samples: SampleRow[] = [];
     // Keyed by the result itself rather than by sensor id: one batch can carry several scans of
     // the same sensor, and each of them is judged on its own readings.
@@ -232,10 +275,41 @@ export class IngestionService {
         const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
         if (channel === undefined) continue; // counted as dropped by the resolver
 
+        // A counter becomes a rate before anything else touches it (`T-02`), because everything
+        // downstream — scaling, the spike filter, limits, the graph — is about the rate. The raw
+        // counter is a baseline, not a measurement.
+        let measured = reading.value;
+        if (channel.counterBits !== null) {
+          const exact = parseCounter(reading.counter ?? String(reading.value));
+          if (exact === null) {
+            this.#discardedReadings += 1;
+            continue;
+          }
+          const sample = { value: exact, at };
+          counterSeen.set(channel.id, sample);
+
+          // The reading's own width wins: which counter the device actually offered is
+          // discovered at scan time, and the channel's is what the type declared when the
+          // sensor was created.
+          const bits = reading.counterBits ?? channel.counterBits;
+          const outcome = rateFrom(counterBaselines.get(channel.id) ?? null, sample, bits);
+          if (outcome.kind !== 'rate') {
+            // Every one of these is a gap rather than a zero: a first reading has nothing to
+            // divide, a reset has a discontinuity in it, and a stale one spans a gap a 32-bit
+            // counter may have gone round inside. Counted, never silent.
+            if (outcome.kind === 'first') this.#counterFirst += 1;
+            else if (outcome.kind === 'reset') this.#counterReset += 1;
+            else if (outcome.kind === 'stale') this.#counterStale += 1;
+            continue;
+          }
+          if (outcome.wrapped) this.#counterWrapped += 1;
+          measured = outcome.perSecond;
+        }
+
         // Scaled and spike-filtered before anything else looks at it (M-07). The scaled value
         // is what is stored *and* what is judged — one number, so a chart can never disagree
         // with the alarm that fired.
-        const transformed = transformReading(reading.value, channel.transform);
+        const transformed = transformReading(measured, channel.transform);
         if (transformed.kind === 'discarded') {
           this.#discardedReadings += 1;
           if (transformed.reason === 'spike') this.#discardedSpike += 1;
@@ -258,6 +332,13 @@ export class IngestionService {
         });
       }
       if (readings.length > 0) outcomes.set(result, rollUp(readings));
+    }
+
+    // Every counter that was read, including the ones that produced no sample: a reset, a stale
+    // gap and a first reading all have to move the baseline forward, or the next scan divides
+    // against a value the device passed long ago and reports the same failure for ever.
+    if (counterSeen.size > 0) {
+      await this.#db.tx((q) => this.#counters.save(q, counterSeen));
     }
 
     // Every result, whatever its outcome: a check that failed has no readings and is precisely

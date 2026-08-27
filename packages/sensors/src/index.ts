@@ -30,16 +30,18 @@ export {
 import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
+import { snmpTraffic } from './types/snmp-traffic.js';
 
 /**
  * The types every installation gets.
  *
- * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three.
+ * `P-09` (HTTP), `P-10` (Port) and `P-11` (DNS) are the next three; `T-03`…`T-06` are the
+ * rest of the SNMP set.
  *
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
  */
-export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [icmpPing];
+export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [icmpPing, snmpTraffic];
 
 export function standardCatalogue(
   types: readonly SensorType[] = BUILT_IN_SENSOR_TYPES,

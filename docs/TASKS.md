@@ -2766,8 +2766,68 @@ because each is a decision rather than a defect:
       **Not done here:** the `paramsSchema` fragment is written and tested but no sensor type uses
       it yet, and the pool exposes `stats()` in the shape the wheel and worker pool use but
       nothing collects it until `P-13`.
-- [ ] **T-02 — SNMP Traffic sensor** · L · T-01 · In/out/sum channels, 32- vs 64-bit counters,
+- [x] **T-02 — SNMP Traffic sensor** · L · T-01 · In/out/sum channels, 32- vs 64-bit counters,
       wrap and reset detection, interface selection at add time.
+
+      **T-02 outcome.** The sensor type is `packages/sensors/src/types/snmp-traffic.ts`, and most
+      of the work is not in it: turning a counter into a rate is a *core* concern, and this is the
+      first type that needed it.
+
+      **Counters are divided in the core, not on the probe.** An interface reports octets since it
+      was last reset; the rate is the difference between two readings over the time between them,
+      so something has to remember the last one. Not the probe: a check runs in whichever worker
+      is free, so per-worker state would give a sensor its own previous reading only when it
+      happened to land on the same thread twice — and every probe restart, which is every upgrade,
+      would lose the baseline for every interface on the box. `channel_counter` holds one row per
+      channel, and `M-07` already describes this layer: what happens to a reading between arriving
+      and being judged.
+
+      **The rate is stored and the counter is not**, which `scaling.ts` already states the rule
+      for: one number, so a chart can never disagree with the alarm that fired.
+
+      **A 64-bit counter going backwards is a reset, never a wrap.** `ifHCInOctets` at 100 Gbit/s
+      takes about forty-six years to go round, so backwards is a device that rebooted — and
+      "correcting for the wrap" would store one sample of roughly 1.8×10^19, dwarfing the axis for
+      the whole retention window. A **32-bit** counter is the opposite: 2^32 octets is
+      thirty-four seconds of gigabit, wrapping is routine, and correcting for it is the whole job.
+      Reverting that asymmetry to one rule fails seven tests.
+
+      **The width travels on the reading, not only on the channel.** `channels()` runs at
+      sensor-creation time and cannot know what the device offers; `auto` prefers the HC counters
+      and falls back per device. A 32-bit wrap read as a 64-bit counter looks exactly like a
+      reset, so without this every wrap would be a gap — on a gigabit link, every thirty-four
+      seconds. There is a test and its control.
+
+      **Counters cross the wire as decimal text.** `ifHCInOctets` passes 2^53 in about nine days
+      on a 100 Gbit/s link, and above 2^54 a double cannot represent consecutive integers at all.
+      A rate computed from a rounded counter is quietly wrong on exactly the links anyone watches.
+
+      **Found by running it, not by a test: `A-05` was broken on the wire.** `credentials` was
+      added to `SensorAssignment` and not to `sensorAssignmentSchema`, so the first sensor that
+      actually had a credential made the probe reject the whole configuration with "must NOT have
+      additional properties", disconnect, reconnect and do it again — a reconnect loop in which
+      nothing was scanned. Nothing caught it because the core's tests build assignments directly
+      and never send one. Both schemas are fixed and `messages.test.ts` now round-trips every
+      field these types carry.
+
+      Verified live against the dev SNMP simulator: sensor **up**, message `interface 2, 64-bit
+      counters, oper status 1, 100 Mbit/s`, and `total` exactly equal to `in + out`
+      (3,065,958 = 1,623,154 + 1,442,804 octets/s) with the baselines in `channel_counter`.
+
+      **Interface selection is by index *or* by name, and the picker is not built.** Matching
+      `ifName`/`ifDescr`/`ifAlias` is better than an index — indexes move across a reboot on many
+      devices, and a sensor pinned to one then watches a different port with no sign anything
+      happened. What is missing is the *list* at add time, and it needs infrastructure that does
+      not exist: the core cannot reach the device, so listing interfaces means an on-demand
+      request to the probe and an answer routed back to a waiting HTTP request. That is `R-09`
+      below, and `D-02` needs the same thing.
+- [ ] **R-09 — On-demand probe queries** · M · R-01 · A request/response message pair over the
+      probe channel so the core can ask a probe to run something *now* and route the answer back
+      to a waiting API call: correlation ids, a timeout, and a bound on how many are in flight.
+      **Added by `T-02`:** the protocol is one-way for everything except the handshake, so there
+      is no way to populate an interface picker at add time — the core has no route to the
+      device. `D-02` (device identification) needs the same pair, and so does any "test this
+      sensor now" button.
 - [ ] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and
       lookup mapping for strings.
 - [ ] **T-04 — SNMP Custom Table** · L · T-01 · Walk a table; one sensor per row or channels per

@@ -68,6 +68,28 @@ export interface ChannelReading {
   key: string;
   value: number;
   /**
+   * The exact counter, as decimal text, for a channel its type declared a counter (`T-02`).
+   *
+   * Text and not a number, and this is the whole reason the field exists: `ifHCInOctets` is the
+   * counter designed to go past 2^53 — about nine days on a 100 Gbit/s link — and that is where
+   * a double starts dropping low bits. A rate computed from a rounded counter is wrong by
+   * whatever was rounded away, quietly, on exactly the busy links anyone is watching.
+   *
+   * `value` is still sent, and is the same number lossily: it is what a build that does not know
+   * about counters would store, and what a log line shows. The core uses this field.
+   */
+  counter?: string;
+  /**
+   * The width the device's counter actually was, when it differs from what the type declared.
+   *
+   * Discovered rather than declared: `snmp.traffic` prefers `ifHCInOctets` and falls back to the
+   * 32-bit counters per device, so a channel created as 64-bit can legitimately be fed 32-bit
+   * values. Getting this wrong is not a rounding error — a 32-bit wrap read as a 64-bit counter
+   * looks exactly like a device that rebooted, so every wrap would be a gap in the graph rather
+   * than a rate, and on a gigabit link that is every thirty-four seconds.
+   */
+  counterBits?: 32 | 64;
+  /**
    * Display metadata, sent so the core can create the channel the first time it sees it.
    * Absent on every subsequent result; the core already has it.
    */
@@ -274,6 +296,11 @@ const probeToCoreSchema = {
                     // No NaN and no Infinity: JSON cannot carry them, and a channel whose value
                     // is not a number is a gap, which is the absence of a reading.
                     value: { type: 'number' },
+                    // The exact counter and the width it was read at (`T-02`). Text because an
+                    // unsigned 64-bit counter does not survive a double, and 20 digits is the
+                    // most one can have.
+                    counter: { type: 'string', pattern: '^[0-9]{1,20}$' },
+                    counterBits: { type: 'integer', enum: [32, 64] },
                     name: { type: 'string', minLength: 1, maxLength: 200 },
                     unit: { type: 'string', maxLength: 50 },
                   },
@@ -334,6 +361,13 @@ const sensorAssignmentSchema = {
     },
     intervalSeconds: { type: 'integer', minimum: 1, maximum: 86400 },
     timeoutMs: { type: 'integer', minimum: 100, maximum: 3600000 },
+    // Decrypted credential sets, keyed by kind (`A-05`). `additionalProperties: true` inside
+    // each, because a kind's own schema is what validates it and that lives in the catalogue —
+    // the same division `params` above follows.
+    credentials: {
+      type: 'object',
+      additionalProperties: { type: 'object', additionalProperties: true },
+    },
   },
   required: ['sensorId', 'sensorType', 'params', 'target', 'intervalSeconds', 'timeoutMs'],
   additionalProperties: false,

@@ -10,6 +10,8 @@ export interface ChannelDraft {
   isPrimary?: boolean;
   /** The lookup the sensor type declares for this channel (`M-06`), if any. */
   lookup?: string;
+  /** Set when the type declares this channel a counter, so the core stores a rate (`T-02`). */
+  counterBits?: 32 | 64;
 }
 
 /** Params fit to leave the process, and which secrets were taken out of them. */
@@ -147,6 +149,7 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
         ...(def.unit === undefined ? {} : { unit: def.unit }),
         ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
         ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
+        ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
       }));
     },
 

@@ -216,7 +216,7 @@ describe('the built-in catalogue', () => {
     // Building it at all is the assertion: `register` enforces the id format, one primary
     // channel, no duplicate keys and no unreachable `writeOnly`, and throws on any of them. A
     // type that breaks a rule fails here rather than on an operator's first sensor.
-    assert.deepEqual(standardCatalogue().ids(), ['icmp.ping']);
+    assert.deepEqual(standardCatalogue().ids(), ['icmp.ping', 'snmp.traffic']);
   });
 
   it('is sealed, so nothing can register a type after boot', () => {

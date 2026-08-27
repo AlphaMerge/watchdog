@@ -180,3 +180,106 @@ describe('configuration messages', () => {
     assert.deepEqual(message.sensors[0]?.params, { anything: { nested: [1, 2, 3] } });
   });
 });
+
+/**
+ * Every field these two types carry has to be in the schema beside them.
+ *
+ * The failure this exists for, found in a live run rather than by a test: `A-05` added
+ * `credentials` to `SensorAssignment` and not to `sensorAssignmentSchema`, so the moment a
+ * sensor actually had a credential the probe rejected the whole configuration with
+ * `must NOT have additional properties`, disconnected, reconnected and did it again — a
+ * reconnect loop in which nothing was ever scanned. Nothing else caught it: the core's tests
+ * built assignments directly and never sent one, and `additionalProperties: false` means a field
+ * added to the interface is silently unsendable until somebody runs the pair together.
+ */
+describe('the wire carries every field the types declare', () => {
+  const assignment = {
+    sensorId: 1,
+    sensorType: 'snmp.traffic',
+    params: { ifIndex: 2 },
+    target: { host: '192.0.2.1', ipVersion: 'v4' as const },
+    intervalSeconds: 60,
+    timeoutMs: 30_000,
+  };
+
+  it('accepts an assignment carrying decrypted credentials (`A-05`)', () => {
+    const message = {
+      type: 'config-set',
+      version: 'v1',
+      sensors: [{ ...assignment, credentials: { snmp: { version: 'v2c', community: 'public' } } }],
+    };
+    const parsed = parseCoreToProbe(message);
+    assert.ok(parsed.type === 'config-set');
+    assert.deepEqual(parsed.sensors[0]?.credentials, {
+      snmp: { version: 'v2c', community: 'public' },
+    });
+  });
+
+  it('accepts an assignment with no credentials, which most sensors have', () => {
+    const parsed = parseCoreToProbe({ type: 'config-set', version: 'v1', sensors: [assignment] });
+    assert.equal(parsed.type, 'config-set');
+  });
+
+  it('accepts a reading carrying an exact counter and its width (`T-02`)', () => {
+    const parsed = parseProbeToCore({
+      type: 'results',
+      batchId: 'b1',
+      results: [
+        {
+          sensorId: 1,
+          at: '2026-08-27T10:00:00.000Z',
+          outcome: 'ok',
+          message: '',
+          durationMs: 1,
+          channels: [
+            { key: 'in', value: 1.8014398509482e16, counter: '18014398509482000', counterBits: 64 },
+          ],
+        },
+      ],
+    });
+    assert.ok(parsed.type === 'results');
+    assert.equal(parsed.results[0]?.channels[0]?.counter, '18014398509482000');
+  });
+
+  it('refuses a counter that is not an unsigned integer', () => {
+    const withCounter = (counter: string) => () =>
+      parseProbeToCore({
+        type: 'results',
+        batchId: 'b1',
+        results: [
+          {
+            sensorId: 1,
+            at: '2026-08-27T10:00:00.000Z',
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [{ key: 'in', value: 1, counter }],
+          },
+        ],
+      });
+    assert.throws(withCounter('-1'), ProtocolError);
+    assert.throws(withCounter('1.5'), ProtocolError);
+    assert.throws(withCounter('123456789012345678901'), ProtocolError);
+  });
+
+  it('refuses a counter width the core does not understand', () => {
+    assert.throws(
+      () =>
+        parseProbeToCore({
+          type: 'results',
+          batchId: 'b1',
+          results: [
+            {
+              sensorId: 1,
+              at: '2026-08-27T10:00:00.000Z',
+              outcome: 'ok',
+              message: '',
+              durationMs: 1,
+              channels: [{ key: 'in', value: 1, counter: '1', counterBits: 16 }],
+            },
+          ],
+        }),
+      ProtocolError,
+    );
+  });
+});
