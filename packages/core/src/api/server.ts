@@ -192,6 +192,7 @@ export class ApiServer {
    * at startup and asserted in a test.
    */
   readonly #assetRoutes: string[] = [];
+  readonly #routes: { method: string; url: string }[] = [];
   #registeringAssets = false;
 
   constructor(options: ApiServerOptions) {
@@ -247,6 +248,9 @@ export class ApiServer {
       if (schema?.response === undefined) {
         this.#undeclared.push(`${String(route.method)} ${route.url}`);
       }
+      for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
+        this.#routes.push({ method, url: route.url });
+      }
     });
   }
 
@@ -257,6 +261,17 @@ export class ApiServer {
   /** Routes exempted from the response-schema guard because they serve files. Asserted in a test. */
   get assetRoutes(): readonly string[] {
     return this.#assetRoutes;
+  }
+
+  /**
+   * Every route this instance registered.
+   *
+   * Exposed so `A-10` can sweep *all* of them for a credential rather than a list somebody
+   * maintains by hand — a hand-maintained list is exactly the thing that goes stale the day a
+   * route is added, which is the day the test was supposed to catch it.
+   */
+  get routes(): readonly { method: string; url: string }[] {
+    return this.#routes;
   }
 
   async build(version: string, service: ObjectService): Promise<void> {
@@ -412,7 +427,7 @@ export class ApiServer {
             logger: this.#logger,
           });
           await scope.register(groupRoutes, { groups: auth.groups });
-          await scope.register(accessRoutes, { access: auth.access });
+          await scope.register(accessRoutes, { access: auth.access, accounts: auth.accounts });
           await scope.register(tokenRoutes, { tokens: auth.tokens });
         }
         if (this.#deviceTemplates !== undefined) {

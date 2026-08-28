@@ -5406,8 +5406,38 @@ because each is a decision rather than a defect:
       its compiled output behind, which that test exists to notice.
 
       Tests: 18 for the hardening layer, 7 for the sensor SSRF guard.
-- [ ] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
+- [x] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
       and tree position; explicit test that no route leaks a credential to a read-only user.
+
+      **A-10 outcome, and it earned its place by finding a bug the other tickets could not see.**
+      `A-03` proves the resolver and `A-04` proves the ceiling; both were correct. The route
+      called `/objects/:id/access/effective` was calling `resolve` — what an account's *groups*
+      grant — rather than `resolveFor`, which is that capped by the account's role and by the
+      token in hand. A read-only account was told it held `full` on a device it could not edit.
+      **The unit tests could not catch it because the bug was not in the unit**; it was a route
+      that forgot to ask. Fixed, and verified live: the same account now reads `read` with
+      `cappedByRole: true`.
+
+      **The credential sweep is swept, not sampled.** A hand-maintained list of "routes that might
+      leak a credential" goes stale on the day somebody adds a route — precisely the day it was
+      meant to catch something. So `ApiServer` exposes the routes it registered, a real secret is
+      planted in a sensor's `writeOnly` parameter, and **every** GET route is called and checked.
+      A route added tomorrow is covered by construction. There is a guard against the vacuous
+      pass, too: the sweep asserts it found routes at all, because a sweep over an empty list is
+      the worst kind of green.
+
+      **Checked for all three roles, not only the read-only one.** The exit criterion names a
+      read-only user; the system's actual claim is stronger — credentials are write-only *to
+      everyone*, redacted at `ObjectService.#redact`. A test that only checked read-only would
+      pass on a system where the answer was a role check rather than a boundary, which is a
+      weaker system that looks identical from that one test.
+
+      Also asserted: the parameter is reported as *redacted* rather than omitted, because a form
+      that cannot tell "unset" from "set and hidden" makes somebody retype a secret they did not
+      need to; and the audit log's stored summary and diff carry the parameter's name and never
+      its value.
+
+      Tests: 12 matrix rows over HTTP plus 6 credential-boundary tests.
 
 ## Phase 10 — Hardening and release
 

@@ -1,11 +1,13 @@
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { AccessRight, AccessService } from '../../auth/access.js';
+import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import { actorFor, requireRole } from '../authentication.js';
 
 export interface AccessRoutesOptions {
   access: AccessService;
+  accounts: AccountService;
 }
 
 const rightSchema = {
@@ -45,7 +47,7 @@ const idParams = {
  * itself anything by granting its own group `full` one level up.
  */
 export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions): void {
-  const { access } = options;
+  const { access, accounts } = options;
 
   app.get<{ Params: { id: number } }>(
     '/objects/:id/access',
@@ -103,6 +105,17 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
                 description:
                   'The account administers everything, so no grant was consulted at all.',
               },
+              cappedByRole: {
+                type: 'boolean',
+                description:
+                  'The account’s role held the right below what its groups granted (A-04). ' +
+                  'Reported rather than silent: "you have full on this device and may not edit ' +
+                  'it" is incomprehensible without it.',
+              },
+              cappedByToken: {
+                type: 'boolean',
+                description: 'The API token used for this request held it below that (A-06).',
+              },
             },
           },
         },
@@ -119,7 +132,29 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
       if (asked !== undefined && asked !== principal.userId && principal.role !== 'admin') {
         throw new AuthError('AUTH_FORBIDDEN', 'only an administrator may ask about another account');
       }
-      return access.resolve(asked ?? principal.userId, request.params.id);
+
+      // **`resolveFor`, not `resolve`, and the difference is the whole meaning of "effective".**
+      // `resolve` answers what an account's *groups* grant, which is what an administrator wants
+      // when debugging a grant; this route answers what the account may actually *do*, which is
+      // that capped by its role (`A-04`) and by the token in hand (`A-06`). Answering the first
+      // here told a read-only account it held `full` on a device it could not edit.
+      if (asked === undefined || asked === principal.userId) {
+        return access.resolveFor(
+          {
+            userId: principal.userId,
+            role: principal.role,
+            ...(principal.scope === undefined ? {} : { scope: principal.scope }),
+          },
+          request.params.id,
+        );
+      }
+
+      const subject = await accounts.get(asked);
+      if (subject === null) {
+        throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(asked)}`);
+      }
+      // No scope: a token belongs to the request in hand, not to the account being asked about.
+      return access.resolveFor({ userId: subject.id, role: subject.role }, request.params.id);
     },
   );
 
