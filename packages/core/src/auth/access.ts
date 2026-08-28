@@ -53,7 +53,12 @@ const CEILING: Readonly<Record<AccountRole, AccessRight>> = {
 };
 
 export function cappedBy(role: AccountRole, right: AccessRight): AccessRight {
-  return RANK[right] <= RANK[CEILING[role]] ? right : CEILING[role];
+  return lower(right, CEILING[role]);
+}
+
+/** The lesser of two rights. Every ceiling in this system is one of these. */
+export function lower(a: AccessRight, b: AccessRight): AccessRight {
+  return RANK[a] <= RANK[b] ? a : b;
 }
 
 /** How a right was arrived at, which is what an administrator needs to debug a refusal. */
@@ -74,6 +79,8 @@ export interface ResolvedAccess {
    * complaint needs to see that the cap is why.
    */
   cappedByRole?: boolean;
+  /** True when the *token* used for this request held it below what the account could do. */
+  cappedByToken?: boolean;
 }
 
 const DENIED: ResolvedAccess = {
@@ -183,19 +190,33 @@ export class AccessService {
    * may actually do, which is a different question whenever the two disagree.
    */
   async resolveFor(
-    principal: { userId: number; role: AccountRole },
+    principal: { userId: number; role: AccountRole; scope?: AccessRight },
     objectId: number,
     q: Queryable = this.#db,
   ): Promise<ResolvedAccess> {
     const resolved = await this.resolve(principal.userId, objectId, q);
-    const capped = cappedBy(principal.role, resolved.right);
-    if (capped === resolved.right) return resolved;
-    return { ...resolved, right: capped, cappedByRole: true };
+
+    // **Two ceilings, applied in order, and both only ever lower.** The role is what the account
+    // is allowed to be (`A-04`); the scope is what this particular credential may do (`A-06`).
+    // A token cannot exceed its owner, and its owner cannot exceed their role — so a read-only
+    // account's `full` token is still read, and a read-write account's `read` token is still
+    // read even on an object where its groups grant `full`.
+    const afterRole = cappedBy(principal.role, resolved.right);
+    const afterScope =
+      principal.scope === undefined ? afterRole : lower(afterRole, principal.scope);
+
+    if (afterScope === resolved.right) return resolved;
+    return {
+      ...resolved,
+      right: afterScope,
+      cappedByRole: afterRole !== resolved.right,
+      ...(afterScope !== afterRole ? { cappedByToken: true } : {}),
+    };
   }
 
   /** Throws unless the account holds at least this right, after its role's ceiling. */
   async requireFor(
-    principal: { userId: number; role: AccountRole },
+    principal: { userId: number; role: AccountRole; scope?: AccessRight },
     objectId: number,
     needed: AccessRight,
     q: Queryable = this.#db,
@@ -207,6 +228,7 @@ export class AccessService {
         held: resolved.right,
         needed,
         ...(resolved.cappedByRole === true ? { cappedByRole: principal.role } : {}),
+        ...(resolved.cappedByToken === true ? { cappedByToken: principal.scope ?? '' } : {}),
       });
     }
     return resolved;

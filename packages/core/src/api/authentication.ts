@@ -4,6 +4,8 @@ import type { Actor } from '../objects/audit.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
 import type { Principal, SessionService } from '../auth/sessions.js';
+import type { TokenService } from '../auth/tokens.js';
+import type { AccessRight } from '../auth/access.js';
 
 /**
  * Who is making this request (`A-01`).
@@ -20,11 +22,38 @@ import type { Principal, SessionService } from '../auth/sessions.js';
 
 export const SESSION_COOKIE = 'ms_session';
 
+/**
+ * A request's principal, however it authenticated.
+ *
+ * **A token principal carries a `scope` and a session one does not**, and that difference is the
+ * whole of `A-06`'s authorisation story: the scope is a second ceiling, applied on top of the
+ * account's role, so a token can only ever be less than its owner.
+ */
+export type RequestPrincipal = Principal & {
+  /** Present when a token authenticated this request. */
+  tokenId?: number;
+  scope?: AccessRight;
+};
+
 declare module 'fastify' {
   interface FastifyRequest {
     /** Set by the authentication hook on every request. Never undefined inside a handler. */
-    principal?: Principal | undefined;
+    principal?: RequestPrincipal | undefined;
   }
+}
+
+/**
+ * The bearer token on this request, if it presented one.
+ *
+ * `Authorization: Bearer …` and nothing else. An API token in a query string is an API token in
+ * every access log, proxy log and browser history between here and the caller — so a token
+ * offered that way is not read at all rather than read with a warning.
+ */
+export function bearerTokenFrom(request: FastifyRequest): string | undefined {
+  const header = request.headers.authorization;
+  if (header === undefined) return undefined;
+  const match = /^Bearer\s+(\S+)$/i.exec(header);
+  return match?.[1];
 }
 
 /**
@@ -64,6 +93,8 @@ export function sessionTokenFrom(request: FastifyRequest): string | undefined {
 
 export interface AuthenticationOptions {
   sessions: SessionService;
+  /** Absent means this build accepts sessions only. */
+  tokens?: TokenService;
   logger: Logger;
   /**
    * When false, unauthenticated requests are allowed through as `anonymous` and every route
@@ -86,12 +117,33 @@ export function registerAuthentication(app: FastifyInstance, options: Authentica
   const publicPaths = new Set([...ALWAYS_PUBLIC, ...(options.publicPaths ?? [])]);
 
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
-    const token = sessionTokenFrom(request);
-    if (token !== undefined) {
-      // Resolving also *extends* the session, so an active operator stays logged in. A token
-      // that no longer resolves is simply not authenticated — never an error, because a client
-      // holding an expired cookie is the ordinary case and deserves a login page, not a 500.
-      request.principal = (await options.sessions.resolve(token)) ?? undefined;
+    // **The bearer token is tried first, and a request may present only one credential.** A
+    // request carrying both a cookie and a token is a browser that also set an Authorization
+    // header — almost always a client bug, and resolving to whichever happens to work would make
+    // it an intermittent one. The explicit credential wins.
+    const bearer = bearerTokenFrom(request);
+    if (bearer !== undefined && options.tokens !== undefined) {
+      const principal = await options.tokens.resolve(bearer);
+      if (principal !== null) {
+        request.principal = {
+          userId: principal.userId,
+          login: principal.login,
+          role: principal.role,
+          mustChangePassword: principal.mustChangePassword,
+          // A token session id is not a session: nothing may end it through /auth/logout.
+          sessionId: '',
+          tokenId: principal.tokenId,
+          scope: principal.scope,
+        };
+      }
+    } else {
+      const token = sessionTokenFrom(request);
+      if (token !== undefined) {
+        // Resolving also *extends* the session, so an active operator stays logged in. A token
+        // that no longer resolves is simply not authenticated — never an error, because a client
+        // holding an expired cookie is the ordinary case and deserves a login page, not a 500.
+        request.principal = (await options.sessions.resolve(token)) ?? undefined;
+      }
     }
 
     if (!options.required) return;

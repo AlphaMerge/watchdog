@@ -33,6 +33,7 @@ import { migration031 } from './031-accounts.js';
 import { migration032 } from './032-user-groups.js';
 import { migration033 } from './033-object-access.js';
 import { migration034 } from './034-readonly-accounts.js';
+import { migration035 } from './035-api-tokens.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -75,6 +76,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration032,
   migration033,
   migration034,
+  migration035,
 ];
 
 export type { Migration } from './types.js';

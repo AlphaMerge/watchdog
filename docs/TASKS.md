@@ -5267,8 +5267,43 @@ because each is a decision rather than a defect:
       **Left as a follow-up:** a rotation pass that rewrites records onto a new key —
       `key_id`, `VaultKeyring`'s multi-key support and `VaultSealer.isCurrent` are the half that
       makes it a loop rather than a design.
-- [ ] **A-06 — API tokens** · M · A-01 · Per-user tokens, scoped, revocable, with last-used
+- [x] **A-06 — API tokens** · M · A-01 · Per-user tokens, scoped, revocable, with last-used
       tracking.
+
+      **A-06 outcome. A token acts as its owner and never as more than its owner.** Its scope only
+      ever *narrows*: the effective right is the lesser of the scope, the account's role (`A-04`)
+      and what its groups grant on the object (`A-03`). The alternative — a token with rights of
+      its own — is a second access-control system to keep in step with the first, and the two
+      would disagree the first time somebody changed a group.
+
+      **The scope is capped at creation *and* at every use, and both are needed.** Capping only at
+      use would let an account mint a `full` token, be demoted to read-only, and leave a token in
+      somebody's script that the list calls `full` and the system treats as `read`. Capping only
+      at creation would let that later demotion be escaped entirely.
+
+      **A token cannot mint a token.** Otherwise a leaked read-scoped token is one request away
+      from a full-scoped one and the scope stops being a limit at all — verified live as a 403.
+      There is likewise no route to issue or list a token for somebody else: an administrator who
+      could would be one who could act as any account without leaving a trace saying so. Stopping
+      somebody else's tokens is done by disabling their account, which stops all of them at once.
+
+      **Stored as a hash, shown once, identified by a prefix.** The same rule `R-01`'s probe keys
+      and `A-01`'s sessions follow — a value a database dump can yield is a value that works.
+      SHA-256 rather than argon2, because there is nothing to guess in 32 random bytes and a token
+      is presented on *every* request, where a slow hash would tax all of them. The prefix is
+      stored in clear on purpose: somebody with six tokens needs to tell them apart, and it is
+      short enough to be useless to anybody who learns it.
+
+      **`Authorization: Bearer` only.** A token in a query string is a token in every access log,
+      proxy log and browser history between here and the caller, so one offered that way is not
+      read at all rather than read with a warning. A request presenting both a cookie and a bearer
+      token resolves as the token: that combination is almost always a client bug, and picking
+      whichever happens to work would make it an intermittent one.
+
+      **`last_used_at` is written at most once a minute.** A polling script would otherwise turn
+      every read into a write — a lot of WAL for a column nobody reads at that resolution.
+
+      Tests: 24.
 - [ ] **A-07 — TOTP MFA** · M · A-01 · `otpauth` enrolment with QR, recovery codes, enforcement
       per group.
 - [ ] **A-08 — Audit log UI** · M · S-10, U-01 · Per-object history with diffs and actor.
