@@ -76,6 +76,12 @@ jobs:
       - name: shellcheck
         run: shellcheck -S warning scripts/*.sh deploy/*.sh
 
+      # **Production dependencies only, and that is the point** (A-09). A dev-only advisory is
+      # worth knowing about and is not shipped to anybody; failing the build on one would train
+      # everybody to ignore this step, which is how the production advisory gets ignored too.
+      - name: dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
   install-smoke:
     name: install smoke test on a clean box
     needs: build

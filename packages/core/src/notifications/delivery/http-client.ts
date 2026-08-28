@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { describeError, type Logger, type WebhookConfig } from '@ms/shared';
-import { refusedAddresses, sameOrigin, schemeAllowed } from './ssrf.js';
+import { refusedAddresses, sameOrigin, schemeAllowed } from '@ms/shared';
 import { headerSafe, type DeliveryResult } from './transport.js';
 
 export interface GuardedHttpOptions {

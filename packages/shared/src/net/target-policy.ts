@@ -1,7 +1,12 @@
 import { isIPv4, isIPv6 } from 'node:net';
 
 /**
- * What a webhook is allowed to reach (`N-08`).
+ * What a user-supplied URL is allowed to reach (`N-08`, widened to sensors by `A-09`).
+ *
+ * **In `@ms/shared` because both services need it.** It began beside the webhook client in
+ * `@ms/core`, which meant the *sensor* HTTP path — the other place this system fetches a URL
+ * somebody typed — had no guard at all. A guard that covers one of two callers is a guard whose
+ * absence is invisible, so it moved here, where `@ms/sensors` can reach it too.
  *
  * **The default is not "block everything private", and that is deliberate.** A monitoring system
  * lives *inside* the network it watches: an internal ticketing system, a self-hosted Mattermost,

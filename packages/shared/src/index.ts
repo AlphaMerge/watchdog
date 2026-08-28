@@ -77,6 +77,15 @@ export type {
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 
+export {
+  isLinkLocal,
+  isPrivate,
+  refuses,
+  refusedAddresses,
+  sameOrigin,
+  schemeAllowed,
+} from './net/target-policy.js';
+export type { TargetPolicy, TargetRefusal } from './net/target-policy.js';
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';
 

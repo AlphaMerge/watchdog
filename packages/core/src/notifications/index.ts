@@ -97,6 +97,8 @@ export {
 export { EmailTransport, type EmailTransportOptions } from './delivery/email.js';
 export { DeliveryLoop, type DeliveryLoopOptions } from './delivery/loop.js';
 export { WebhookTransport, type WebhookTransportOptions } from './delivery/webhook.js';
+// Re-exported from `@ms/shared`, where the guard moved so `@ms/sensors` could use it too
+// (`A-09`). Kept here so existing importers do not have to care where it lives.
 export {
   isLinkLocal,
   isPrivate,
@@ -106,4 +108,4 @@ export {
   schemeAllowed,
   type TargetPolicy,
   type TargetRefusal,
-} from './delivery/ssrf.js';
+} from '@ms/shared';

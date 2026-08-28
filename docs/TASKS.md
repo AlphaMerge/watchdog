@@ -5355,8 +5355,57 @@ because each is a decision rather than a defect:
       for. Note that a subtree delete writes one entry, on the object the delete was aimed at,
       listing what it destroyed; a destroyed child has no entry of its own, so the UI has to
       look at ancestors to explain where something went.
-- [ ] **A-09 — Security hardening pass** · L · A-03 · Rate limiting, CSRF, security headers,
+- [x] **A-09 — Security hardening pass** · L · A-03 · Rate limiting, CSRF, security headers,
       dependency audit, SSRF guards on all user-supplied URLs, script-sensor sandboxing.
+
+      **A-09 outcome.** Three of the six were already delivered by earlier tickets — script-sensor
+      sandboxing (`T-03`'s `node:vm` watchdog), the webhook SSRF guard (`N-08`), and login
+      throttling (`A-01`). Auditing them first is what turned up the one that mattered.
+
+      **The SSRF guard covered webhooks and not sensors, and sensors are the better vector.**
+      Both fetch a URL somebody typed; only one was checked. An HTTP sensor is worse than a
+      webhook, because a sensor's *response* is stored and rendered — so credentials taken from a
+      cloud metadata service end up on a dashboard rather than merely in flight. The guard moved
+      from `@ms/core`'s notification directory to `@ms/shared`, where `@ms/sensors` can reach it,
+      and now runs on every sensor fetch. **A guard covering one of two callers is a guard whose
+      absence is invisible.**
+
+      The default stays `link-local` and only that. A monitoring system fetches URLs inside the
+      network it watches — that is the job — so a guard blocking private addresses would make the
+      HTTP sensor useless and be switched off within the hour, which is worse than a narrow guard
+      nobody disables. Addresses are checked, not names, because a name that resolves to a
+      blocked address is one DNS record away.
+
+      **Security headers, CSRF and rate limiting are written here rather than taken from
+      plugins.** Each is a few dozen lines and one policy judgement; a plugin is a dependency to
+      audit, update and ship inside an installer, which `CLAUDE.md`'s standalone constraint makes
+      an operator's problem too.
+
+      - **CSP without `unsafe-inline`**, which is what makes an injected `<script>` inert and why
+        the UI ships a stylesheet rather than style attributes. **HSTS only over TLS** — a
+        year-long HSTS issued over plain HTTP makes an installation reachable on both schemes
+        unreachable on one of them, for a year.
+      - **CSRF checks `Origin`, not a token.** A synchroniser token needs to live in a cookie or
+        a meta tag, both readable by the injected script it is supposed to help against; `Origin`
+        is set by the browser and cannot be forged by page script. Token-authenticated requests
+        are exempt and must be — a bearer token carries no ambient authority, and demanding an
+        `Origin` from `curl` would break every integration for nothing.
+      - **Rate limiting is a backstop, not a quota.** Set high enough that no legitimate client
+        meets it, because what it defends against is a loop in somebody's script; a limit low
+        enough to shape traffic would page an operator whenever the UI opened a busy page. Keyed
+        by account where there is one and by address where there is not, so one NAT is not one
+        bucket and an unauthenticated flood is still counted. The budget is reported on *every*
+        response, so a client can slow down before it hits the wall.
+
+      **`npm audit --omit=dev --audit-level=high` in CI.** Production dependencies only: a
+      dev-only advisory is worth knowing and is shipped to nobody, and failing the build on one
+      trains everybody to ignore the step that would have caught the production advisory.
+      Currently zero.
+
+      Caught by the build-hygiene test on the way through: moving `ssrf.ts` between packages left
+      its compiled output behind, which that test exists to notice.
+
+      Tests: 18 for the hardening layer, 7 for the sensor SSRF guard.
 - [ ] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
       and tree position; explicit test that no route leaks a credential to a read-only user.
 

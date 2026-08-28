@@ -1,6 +1,8 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { refuses, type TargetPolicy } from '@ms/shared';
 
 /**
  * One HTTP request, shared by every HTTP sensor type (`P-09`, `T-13`, `T-14`).
@@ -45,6 +47,20 @@ export interface HttpRequestOptions {
    * Absent for every other sensor, which want each scan to stand alone.
    */
   readonly cookies?: Map<string, string>;
+  /**
+   * What this sensor is allowed to reach (`A-09`).
+   *
+   * **Defaults to `link-local`, and the default is the point.** A monitoring system fetches URLs
+   * inside the network it watches — that is the job — so a guard that blocked private addresses
+   * would make the HTTP sensor useless and be turned off within the hour. What it blocks is the
+   * one range that is never a legitimate monitoring target and is a known credential-theft
+   * vector: `169.254.169.254` and its IPv6 equivalents, where every cloud provider parks the
+   * instance-metadata service that hands out IAM credentials to anything that asks.
+   *
+   * An HTTP sensor is a better vector for that than a webhook, because the *response* is stored
+   * and rendered — so the credentials end up on a dashboard rather than merely in flight.
+   */
+  readonly targetPolicy?: TargetPolicy;
 }
 
 export interface HttpResponse {
@@ -65,6 +81,37 @@ export interface HttpResponse {
 
 const round = (value: number): number => Math.round(value * 100) / 100;
 
+/**
+ * Refuses a host whose addresses the policy blocks.
+ *
+ * A literal address needs no resolution and is checked directly; a name is resolved and *every*
+ * address it answers with is checked, because a name with an A record inside the network and one
+ * pointing at metadata is refused on the second.
+ */
+async function refuseBlockedTarget(host: string, policy: TargetPolicy): Promise<void> {
+  if (policy === 'none') return;
+
+  let addresses: string[];
+  try {
+    const resolved = await dnsLookup(host, { all: true });
+    addresses = resolved.map((entry) => entry.address);
+  } catch {
+    // Not this guard's business: a name that will not resolve is the request's own failure, and
+    // reporting it here would replace a diagnosis the caller already produces with a worse one.
+    return;
+  }
+
+  for (const address of addresses) {
+    const reason = refuses(policy, address);
+    if (reason !== null) {
+      throw new Error(
+        `refusing to request ${host}: it resolves to ${address}, which is ${reason} — ` +
+          'this range is where cloud instance-metadata services live',
+      );
+    }
+  }
+}
+
 export async function fetchHttp(
   options: HttpRequestOptions,
   signal: AbortSignal,
@@ -83,6 +130,11 @@ export async function fetchHttp(
   // precisely to say "do not do that", so they preserve both.
   let method = options.method;
   let body = options.body;
+  // **Checked before the first byte leaves, and the addresses are the thing checked, not the
+  // name.** A guard that inspected the hostname would be defeated by any name that resolves to a
+  // blocked address, which is a DNS record away.
+  await refuseBlockedTarget(options.host, options.targetPolicy ?? 'link-local');
+
   let redirects = 0;
   let size = 0;
   let kept = '';

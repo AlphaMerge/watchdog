@@ -10,7 +10,7 @@ import {
   refuses,
   sameOrigin,
   schemeAllowed,
-} from '../src/notifications/delivery/ssrf.js';
+} from '@ms/shared';
 import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { substitute, type MessageContext } from '../src/notifications/placeholders.js';

@@ -15,6 +15,7 @@ import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
+import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
 import { accessRoutes } from './routes/access.js';
@@ -275,6 +276,14 @@ export class ApiServer {
     ])
       this.#app.addSchema(schema);
 
+    // **Security headers on everything, including the app shell and the error pages** (`A-09`).
+    // Registered first so nothing can answer without them.
+    registerSecurityHeaders(this.#app);
+
+    // Rate limiting sits *after* authentication in registration order, so it can key by account
+    // where there is one — everybody behind one NAT would otherwise share a bucket.
+    // CSRF is checked before any handler runs.
+
     // **Before the routes, and before anything else that could answer.** A hook added here runs
     // for every request the instance ever serves; adding it after a route would leave that route
     // unauthenticated, which is a guard with a blind spot (`A-01`).
@@ -285,6 +294,8 @@ export class ApiServer {
         logger: this.#logger,
         required: this.#auth.required,
       });
+      registerCsrfGuard(this.#app, { logger: this.#logger });
+      registerRateLimit(this.#app, { logger: this.#logger });
     }
 
     // Before the routes, because a route declared `websocket: true` needs the plugin in place.
