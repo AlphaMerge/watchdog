@@ -29,7 +29,8 @@ export type AuthErrorCode =
   | 'GROUP_BUILTIN'
   | 'GROUP_NOT_MEMBER'
   | 'ACCESS_TARGET_MISSING'
-  | 'ACCESS_INVALID';
+  | 'ACCESS_INVALID'
+  | 'ACCOUNT_READONLY_ADMIN';
 
 const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // 401, not 403: the credentials were not accepted, and the client may present better ones.
@@ -56,6 +57,8 @@ const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   GROUP_NOT_MEMBER: 400,
   ACCESS_TARGET_MISSING: 404,
   ACCESS_INVALID: 400,
+  // 409: the request is coherent, the installation's current shape refuses it.
+  ACCOUNT_READONLY_ADMIN: 409,
 };
 
 export class AuthError extends AppError {

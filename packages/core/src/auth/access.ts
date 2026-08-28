@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import type { AccountRole } from './accounts.js';
 import { AuthError } from './errors.js';
 
 /**
@@ -36,6 +37,25 @@ export function atLeast(held: AccessRight, needed: AccessRight): boolean {
   return RANK[held] >= RANK[needed];
 }
 
+/**
+ * The most an account of this role may hold, whatever its groups grant (`A-04`).
+ *
+ * **A role is a ceiling, not a starting point.** A read-only account that is a member of a group
+ * holding `full` still may not write: somebody made it read-only on purpose, and a group
+ * membership is not a way to undo that. Applied where the right is resolved rather than at each
+ * route, for the same reason redaction lives at one boundary — a new endpoint cannot forget a
+ * cap it never has to apply.
+ */
+const CEILING: Readonly<Record<AccountRole, AccessRight>> = {
+  admin: 'full',
+  readwrite: 'full',
+  readonly: 'read',
+};
+
+export function cappedBy(role: AccountRole, right: AccessRight): AccessRight {
+  return RANK[right] <= RANK[CEILING[role]] ? right : CEILING[role];
+}
+
 /** How a right was arrived at, which is what an administrator needs to debug a refusal. */
 export interface ResolvedAccess {
   right: AccessRight;
@@ -46,6 +66,14 @@ export interface ResolvedAccess {
   inherited: boolean;
   /** True when the account administers everything and no grant was consulted. */
   viaAdminGroup: boolean;
+  /**
+   * True when the account's role held it below what its groups granted (`A-04`).
+   *
+   * Reported rather than silent: "you have full on this device and may not edit it" is
+   * incomprehensible without it, and an administrator looking at a read-only account's
+   * complaint needs to see that the cap is why.
+   */
+  cappedByRole?: boolean;
 }
 
 const DENIED: ResolvedAccess = {
@@ -147,7 +175,44 @@ export class AccessService {
     };
   }
 
-  /** Throws unless the account holds at least this right. */
+  /**
+   * What this account may do, with its role's ceiling applied (`A-04`).
+   *
+   * The one an authorisation check should call. `resolve` answers what the *groups* grant, which
+   * is what an administrator wants to see when debugging a grant; this answers what the account
+   * may actually do, which is a different question whenever the two disagree.
+   */
+  async resolveFor(
+    principal: { userId: number; role: AccountRole },
+    objectId: number,
+    q: Queryable = this.#db,
+  ): Promise<ResolvedAccess> {
+    const resolved = await this.resolve(principal.userId, objectId, q);
+    const capped = cappedBy(principal.role, resolved.right);
+    if (capped === resolved.right) return resolved;
+    return { ...resolved, right: capped, cappedByRole: true };
+  }
+
+  /** Throws unless the account holds at least this right, after its role's ceiling. */
+  async requireFor(
+    principal: { userId: number; role: AccountRole },
+    objectId: number,
+    needed: AccessRight,
+    q: Queryable = this.#db,
+  ): Promise<ResolvedAccess> {
+    const resolved = await this.resolveFor(principal, objectId, q);
+    if (!atLeast(resolved.right, needed)) {
+      throw new AuthError('AUTH_FORBIDDEN', `this action needs ${needed} on that object`, {
+        objectId,
+        held: resolved.right,
+        needed,
+        ...(resolved.cappedByRole === true ? { cappedByRole: principal.role } : {}),
+      });
+    }
+    return resolved;
+  }
+
+  /** Throws unless the account's *groups* grant at least this right, ignoring its role. */
   async require(
     userId: number,
     objectId: number,

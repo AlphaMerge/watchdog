@@ -23,6 +23,8 @@ export interface Account {
   role: AccountRole;
   disabled: boolean;
   mustChangePassword: boolean;
+  /** A read-only account may acknowledge alarms (`A-04`). Off by default. */
+  mayAcknowledge: boolean;
   lockedUntil: string | null;
   lastLoginAt: string | null;
   createdAt: string;
@@ -42,6 +44,7 @@ export interface UpdateAccountRequest {
   email?: string;
   role?: AccountRole;
   disabled?: boolean;
+  mayAcknowledge?: boolean;
 }
 
 export type AuthOutcome =
@@ -178,14 +181,40 @@ export class AccountService {
     return rows.map(read);
   }
 
+  /**
+   * Changes an account.
+   *
+   * **Making an account read-only while it administers something is refused, not silently
+   * resolved.** The two ways to fix it — drop the role change, or take the account out of the
+   * admin group — mean completely different things, and picking one for the administrator would
+   * be guessing at intent in the one place where guessing is worst. The database refuses it too
+   * (`A-04`'s trigger); this is what turns that into a sentence.
+   */
   async update(id: number, request: UpdateAccountRequest): Promise<Account> {
+    try {
+      return await this.#update(id, request);
+    } catch (error: unknown) {
+      if (isReadonlyAdminViolation(error)) {
+        throw new AuthError(
+          'ACCOUNT_READONLY_ADMIN',
+          'this account is in a group that administers the installation; remove it from that ' +
+            'group before making it read-only',
+          { accountId: id },
+        );
+      }
+      throw error;
+    }
+  }
+
+  async #update(id: number, request: UpdateAccountRequest): Promise<Account> {
     const rows = await this.#db.query<AccountRow>(
       `UPDATE user_account
-       SET display_name = COALESCE($2, display_name),
-           email        = COALESCE($3, email),
-           role         = COALESCE($4, role),
-           disabled     = COALESCE($5, disabled),
-           updated_at   = now()
+       SET display_name    = COALESCE($2, display_name),
+           email           = COALESCE($3, email),
+           role            = COALESCE($4, role),
+           disabled        = COALESCE($5, disabled),
+           may_acknowledge = COALESCE($6, may_acknowledge),
+           updated_at      = now()
        WHERE id = $1
        RETURNING ${COLUMNS}`,
       [
@@ -194,6 +223,7 @@ export class AccountService {
         request.email ?? null,
         request.role ?? null,
         request.disabled ?? null,
+        request.mayAcknowledge ?? null,
       ],
     );
     const row = rows[0];
@@ -287,7 +317,7 @@ export class AccountService {
 }
 
 const COLUMNS = `id, login, display_name, email, role, disabled, must_change_password,
-                 locked_until, last_login_at, created_at`;
+                 may_acknowledge, locked_until, last_login_at, created_at`;
 
 interface AccountRow {
   id: string | number;
@@ -297,6 +327,7 @@ interface AccountRow {
   role: string;
   disabled: boolean;
   must_change_password: boolean;
+  may_acknowledge: boolean;
   locked_until: Date | null;
   last_login_at: Date | null;
   created_at: Date;
@@ -311,6 +342,7 @@ function read(row: AccountRow): Account {
     role: row.role as AccountRole,
     disabled: row.disabled,
     mustChangePassword: row.must_change_password,
+    mayAcknowledge: row.may_acknowledge,
     lockedUntil: row.locked_until === null ? null : row.locked_until.toISOString(),
     lastLoginAt: row.last_login_at === null ? null : row.last_login_at.toISOString(),
     createdAt: row.created_at.toISOString(),
@@ -325,6 +357,19 @@ function read(row: AccountRow): Account {
  * a duplicate login surfaces as a 500 instead of "that name is taken". The raw shape is still
  * accepted, for a query that has not been through the pool.
  */
+/**
+ * The trigger `A-04` installs, seen through the pool's wrapper.
+ *
+ * Matched on SQLSTATE plus the sentence the trigger raises: `check_violation` alone covers every
+ * CHECK constraint on the table, and reporting an unrelated one as "this account administers
+ * something" would send an administrator looking in the wrong place entirely.
+ */
+function isReadonlyAdminViolation(error: unknown): boolean {
+  if (!(error instanceof AppError)) return false;
+  if (error.context['sqlstate'] !== '23514') return false;
+  return error.message.includes('cannot be in a group that administers');
+}
+
 function isUniqueViolation(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   if (error instanceof AppError && error.context['sqlstate'] === '23505') return true;

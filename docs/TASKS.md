@@ -5157,8 +5157,47 @@ because each is a decision rather than a defect:
 
       Tests: 31, including a 13-row table-driven matrix over a real probe → group → device →
       sensor tree — `PLAN.md` Phase 9's first exit criterion.
-- [ ] **A-04 — Read-only account restrictions** · M · A-03 · Enforced at account level: no admin
+- [x] **A-04 — Read-only account restrictions** · M · A-03 · Enforced at account level: no admin
       groups, no credential visibility, optional acknowledge permission.
+
+      **A-04 outcome. A role is a ceiling, not a starting point** — that is the whole ticket.
+      `A-03` answers what an account's *groups* grant on an object; this caps that by what the
+      account is allowed to be. A read-only account holding `full` through some group still may
+      not write, because somebody made it read-only on purpose and a group membership is not a
+      way to undo that. Applied in `resolveFor`, where the right is resolved, rather than at each
+      route — the same reason redaction lives at one boundary. The cap is *reported* rather than
+      silent: "you have full on this device and may not edit it" is incomprehensible without it.
+
+      **There are three ways into a read-only administrator, and writing the tests found the
+      third.** Adding a read-only account to an admin group; making an existing administrator's
+      account read-only; and leaving both alone while making the *group* administrative
+      underneath them. All three are refused by a trigger, and all three were verified live
+      against the running installation. The service turns the first two into sentences a client
+      can act on. Two enforcement points for one rule is usually a smell — worth it here, because
+      the failure is silent and total: an account somebody believes is read-only that administers
+      everything.
+
+      **The refusal is a refusal, not a repair.** Dropping a role change and removing the account
+      from the admin group mean completely different things, and picking one for the
+      administrator would be guessing at intent in the one place guessing is worst.
+
+      **Acknowledging is opt-in per account.** An operator who may look but not change is exactly
+      the person on the end of a phone at 3am, and "silence this, I am dealing with it" is a note
+      on an alarm rather than a change to the monitored estate. Off by default: a permission that
+      grants itself is not a permission.
+
+      **Credential invisibility was already stronger than this ticket asks.** `PLAN.md` Phase 9's
+      second exit criterion — a read-only user cannot retrieve any credential by any route — is
+      not met by a role check but by there being no route that returns one *to anyone*: redacted
+      at `ObjectService.#redact`, with a `credentialView` schema that has no field a secret could
+      occupy. A test now pins that shape, so adding one has to be a deliberate act.
+
+      One defect found on the way, by the tests: a single trigger function branching on
+      `TG_TABLE_NAME` fails at runtime, because PL/pgSQL resolves every field reference in a
+      statement it runs — so naming both `NEW.id` and `NEW.user_id` breaks on whichever table
+      lacks the other, whatever condition guards it. One function per table.
+
+      Tests: 17.
 - [x] **A-05 — Credential vault** · L · A-03 · Credential sets inherited from group/device,
       encrypted at rest with a key from the OS keystore or a key file, **write-only through the
       API** by every route.

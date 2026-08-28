@@ -220,6 +220,16 @@ export class GroupService {
         if (isForeignKeyViolation(error)) {
           throw new AuthError('GROUP_NOT_FOUND', 'no such group or account');
         }
+        // **A read-only account may not join a group that administers the installation**
+        // (`A-04`). Refused rather than quietly promoted or quietly ignored: an account somebody
+        // believes is read-only that administers everything is a silent, total failure.
+        if (isReadonlyAdminViolation(error)) {
+          throw new AuthError(
+            'ACCOUNT_READONLY_ADMIN',
+            'that account is read-only and cannot join a group that administers the installation',
+            { groupId, userId },
+          );
+        }
         throw error;
       }
     });
@@ -341,6 +351,15 @@ function read(row: GroupRow): UserGroup {
     isBuiltin: row.is_builtin,
     memberCount: Number(row.member_count),
   };
+}
+
+/** `A-04`'s trigger, seen through the pool's wrapper. Matched on state *and* sentence. */
+function isReadonlyAdminViolation(error: unknown): boolean {
+  return (
+    sqlstateOf(error) === '23514' &&
+    error instanceof Error &&
+    error.message.includes('cannot be in a group that administers')
+  );
 }
 
 function isUniqueViolation(error: unknown): boolean {
