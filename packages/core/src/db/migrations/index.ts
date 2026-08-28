@@ -31,6 +31,7 @@ import { migration029 } from './029-rediscovery.js';
 import { migration030 } from './030-probe-registration.js';
 import { migration031 } from './031-accounts.js';
 import { migration032 } from './032-user-groups.js';
+import { migration033 } from './033-object-access.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -71,6 +72,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration030,
   migration031,
   migration032,
+  migration033,
 ];
 
 export type { Migration } from './types.js';

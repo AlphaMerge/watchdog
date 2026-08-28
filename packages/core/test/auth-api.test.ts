@@ -6,6 +6,7 @@ import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { LoginThrottle } from '../src/auth/throttle.js';
 import { GroupService } from '../src/auth/groups.js';
+import { AccessService } from '../src/auth/access.js';
 import { AuditRepository } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import type { Database } from '../src/db/pool.js';
@@ -59,7 +60,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
-        auth: { accounts, sessions, throttle, groups: new GroupService({ db, logger: silent }), required },
+        auth: { accounts, sessions, throttle, groups: new GroupService({ db, logger: silent }),
+          access: new AccessService({ db, logger: silent }), required },
       });
       await server.build('9.9.9', harness.service);
       return server.app;

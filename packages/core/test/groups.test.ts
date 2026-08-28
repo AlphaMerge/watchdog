@@ -236,6 +236,27 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       assert.equal(await groups.administers(userId), false);
     });
 
+    it('is false for somebody in ordinary groups, however many', async () => {
+      // **The mutant this exists to kill**: drop the `is_admin` filter and every test that only
+      // ever adds people to Administrators still passes, because they are in nothing else. Then
+      // belonging to any group at all administers the installation.
+      const oncall = await groups.create({ name: 'On call' });
+      const relief = await groups.create({ name: 'Relief' });
+      const users = await builtin('Users');
+      await groups.addMember(oncall.id, userId);
+      await groups.addMember(relief.id, userId);
+      await groups.addMember(users.id, userId);
+      assert.equal(await groups.administers(userId), false);
+    });
+
+    it('is true for somebody in an admin group *and* ordinary ones', async () => {
+      const oncall = await groups.create({ name: 'On call' });
+      const admins = await builtin('Administrators');
+      await groups.addMember(oncall.id, userId);
+      await groups.addMember(admins.id, userId);
+      assert.equal(await groups.administers(userId), true);
+    });
+
     it('is true through any admin group, not only the built-in one', async () => {
       const extra = await groups.create({ name: 'Senior operators', isAdmin: true });
       await groups.addMember(extra.id, userId);

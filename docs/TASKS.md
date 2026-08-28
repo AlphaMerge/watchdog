@@ -5107,8 +5107,56 @@ because each is a decision rather than a defect:
       a valid read-only one, which is the distinction those two codes exist to make.
 
       Tests: 22.
-- [ ] **A-03 — Per-object access rights** · L · A-02, S-04 · none/read/write/full; inherited up
+- [x] **A-03 — Per-object access rights** · L · A-02, S-04 · none/read/write/full; inherited up
       the tree; explicit beats inherited; highest across groups wins.
+
+      **A-03 outcome.** A grant is `(object, group, right)` — never `(object, user, right)`.
+      Rights on a person have to be reissued when somebody else joins the rota and revoked when
+      they leave, and both are jobs somebody forgets. `A-02` exists so this table can point at a
+      group.
+
+      **The three rules are applied per group, then combined, and that order is the whole
+      design.** For each of the account's groups, the nearest ancestor defining a right *for that
+      group* wins; only then is the maximum taken across groups. The other reading of "resolve at
+      the nearest ancestor that defines the right" sounds equivalent and is not: granting one
+      group `read` on a deep device would silently strip another group's inherited `full`. Adding
+      a grant must never take one away — the same principle `A-02` applies to the primary group.
+      The matrix row *highest wins even when the lower right is nearer* is that case, and it was
+      **verified live**: an account whose Beta group holds `full` on a probe and whose Alpha group
+      holds an explicit `read` on a sensor beneath it resolves `full`, sourced from the probe.
+
+      **`none` is a storable right, and revoking is a different operation.** Revoking restores
+      inheritance; granting `none` overrides it. An administrator needs both — one undoes a
+      mistake, the other carves a hole in a branch somebody else has access to.
+
+      **Administrators short-circuit the walk entirely.** "May do anything, including to objects
+      that do not exist yet" is not a statement about a position in the tree, so it is not
+      expressible as a grant — and making it depend on a row is how an installation locks itself
+      out by deleting one.
+
+      **The ordering is a number in two places, and they are checked against each other.**
+      `max()` over the text form would order the rights alphabetically — `full` < `none` < `read`
+      < `write`, wrong in every position — so SQL gets an `access_rank` function and TypeScript a
+      table, with a test asserting they agree.
+
+      **Resolved in one SQL query, and this is the only place that walks the tree for rights**,
+      which is `CLAUDE.md`'s rule about inheritance living in one place. `resolveMany` exists
+      because a list view would otherwise be one walk per row, and a test asserts it agrees with
+      resolving one at a time — a second implementation that disagreed would be an access-control
+      bug visible only in a list.
+
+      **A forbidden object answers 403, not 404.** Hiding existence is the stronger posture and it
+      makes every "why can I not see this?" unanswerable for the operator *and* the administrator.
+      Revisit under `A-04` if the read-only case needs it.
+
+      Mutation-tested at 11/11. The one that survived the first sweep was the important one:
+      dropping `AND g.is_admin` from `administers()` made *any* group membership confer full
+      administration, and every existing test still passed — because they only ever put the
+      account in the administrators group. There is now a test for somebody in three ordinary
+      groups and no admin one.
+
+      Tests: 31, including a 13-row table-driven matrix over a real probe → group → device →
+      sensor tree — `PLAN.md` Phase 9's first exit criterion.
 - [ ] **A-04 — Read-only account restrictions** · M · A-03 · Enforced at account level: no admin
       groups, no credential visibility, optional acknowledge permission.
 - [x] **A-05 — Credential vault** · L · A-03 · Credential sets inherited from group/device,

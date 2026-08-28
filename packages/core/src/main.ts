@@ -68,6 +68,7 @@ import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
+import { AccessService } from './auth/access.js';
 import { SessionService } from './auth/sessions.js';
 import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
@@ -663,6 +664,7 @@ async function serve(): Promise<void> {
   const accounts = new AccountService({ db, logger });
   const sessions = new SessionService({ db, logger });
   const userGroups = new GroupService({ db, logger });
+  const objectAccess = new AccessService({ db, logger });
   const loginThrottle = new LoginThrottle({ db, logger });
 
   // **An installation with no accounts cannot be administered, and one with a known default
@@ -713,6 +715,7 @@ async function serve(): Promise<void> {
       sessions,
       throttle: loginThrottle,
       groups: userGroups,
+      access: objectAccess,
       // **Off until `A-03` lands, and that is deliberate.** Turning the guard on before there
       // are per-object rights would mean an installation where every account sees everything —
       // a worse answer than the honest one, which is that authentication exists and is not yet

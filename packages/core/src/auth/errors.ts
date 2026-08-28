@@ -27,7 +27,9 @@ export type AuthErrorCode =
   | 'GROUP_NOT_FOUND'
   | 'GROUP_INVALID'
   | 'GROUP_BUILTIN'
-  | 'GROUP_NOT_MEMBER';
+  | 'GROUP_NOT_MEMBER'
+  | 'ACCESS_TARGET_MISSING'
+  | 'ACCESS_INVALID';
 
 const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // 401, not 403: the credentials were not accepted, and the client may present better ones.
@@ -52,6 +54,8 @@ const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // group being structural rather than about who is asking.
   GROUP_BUILTIN: 409,
   GROUP_NOT_MEMBER: 400,
+  ACCESS_TARGET_MISSING: 404,
+  ACCESS_INVALID: 400,
 };
 
 export class AuthError extends AppError {

@@ -17,8 +17,10 @@ import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
+import { accessRoutes } from './routes/access.js';
 import type { AccountService } from '../auth/accounts.js';
 import type { GroupService } from '../auth/groups.js';
+import type { AccessService } from '../auth/access.js';
 import type { SessionService } from '../auth/sessions.js';
 import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
@@ -106,6 +108,7 @@ export interface ApiServerOptions {
     sessions: SessionService;
     throttle: LoginThrottle;
     groups: GroupService;
+    access: AccessService;
     /** Whether an API request without a session is refused. */
     required: boolean;
   };
@@ -391,6 +394,7 @@ export class ApiServer {
             logger: this.#logger,
           });
           await scope.register(groupRoutes, { groups: auth.groups });
+          await scope.register(accessRoutes, { access: auth.access });
         }
         if (this.#deviceTemplates !== undefined) {
           const templates = this.#deviceTemplates;
