@@ -6,7 +6,7 @@ import { sshMeminfo } from '../src/types/ssh-meminfo.js';
 import { sshScript } from '../src/types/ssh-script.js';
 import { standardCatalogue } from '../src/index.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { TestSshServer } from './support/ssh-server.js';
+import { TestSshServer } from '@ms/simulators';
 
 let server: TestSshServer;
 

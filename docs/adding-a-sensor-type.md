@@ -217,8 +217,27 @@ All of these fail at startup, loudly, rather than at runtime:
 
 ## Testing it
 
-Tests go against the protocol simulator harness (`P-06`), never a live network target — a test
-that needs the internet is a test that fails in CI on a bad day and teaches everyone to ignore it.
+Tests go against the protocol simulator harness, never a live network target — a test that needs
+the internet is a test that fails in CI on a bad day and teaches everyone to ignore it.
+
+The harness is **`@ms/simulators`** (`P-06`), a `devDependency` of every package that has tests.
+It binds real sockets and speaks real protocols, so what you assert is what would happen on a
+network — there is no interception layer that a redirect or a framing bug could slip past:
+
+| Import | What it gives you |
+| ------ | ----------------- |
+| `HttpSimulator` | Routes with scripted status, headers, body — and **latency**: `delayMs` (no answer yet), `bodyDelayMs` (head now, body later), `dripMs` (a slow trickle), `hang`, `reset`. A route may be a *sequence*, which is how "fails twice then succeeds" is written. Records every request. |
+| `TestSnmpAgent` | A v1/v2c agent that misbehaves on request: never answers, loses the first datagram, walks *backwards*, returns a subtree with no end. |
+| `TestSshServer` | A real SSH server that refuses a password, presents an unexpected host key, or hangs on a command. |
+| `smtpServer` / `pop3Server` / `imapServer` | One shared mailbox, so a round trip is a real round trip. Each can refuse at the step that matters. |
+| `sendUdp` / `sendTcp` | A syslog sender: RFC 3164 and 5424, both of RFC 6587's TCP framings, and `splitAt` to break a frame across two packets. |
+| `installFakePowerShell` | A PowerShell that is not PowerShell, for the Windows transport. |
+| `listen` / `close` | Bind on an ephemeral port and shut down cleanly. Never pick a port number. |
+
+**Reach for the misbehaviour switches.** They are the reason the harness exists: what is worth
+asserting about a check is what it does when a server accepts a connection and then refuses, or
+answers the headers and thinks for four seconds — and none of that is reachable against something
+behaving normally.
 
 Cover at least:
 

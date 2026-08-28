@@ -1,9 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { createSocket } from 'node:dgram';
 import { connect } from 'node:net';
 import { openSyslogReceiver, type ReceivedSyslog } from '../src/support/syslog/receiver.js';
 import { drain } from '../src/support/syslog/receiver.js';
+import { sendTcp, sendUdp } from '@ms/simulators';
 import { parseSyslog, renderSyslog } from '../src/support/syslog/parse.js';
 import { matches, readRules, syslogReceiver, SYSLOG_LISTENER } from '../src/types/syslog.js';
 import type { CheckContext, CheckExecution, ReceivedNotification } from '../src/contract.js';
@@ -193,15 +193,18 @@ describe('the sockets', () => {
 
   it('receives over UDP', async () => {
     seen.length = 0;
-    const socket = createSocket('udp4');
-    await new Promise<void>((resolve, reject) => {
-      socket.send('<38>Aug 27 09:15:00 gw sshd[1]: over udp', port, '127.0.0.1', (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
+    await sendUdp(port, [
+      {
+        format: 'rfc3164',
+        facility: 4,
+        severity: 6,
+        hostname: 'gw',
+        tag: 'sshd[1]',
+        message: 'over udp',
+        timestamp: new Date('2026-08-27T09:15:00Z'),
+      },
+    ]);
     await until(() => seen.length === 1);
-    socket.close();
     assert.deepEqual(
       seen.map((one) => [one.transport, one.message.message]),
       [['udp', 'over udp']],
@@ -224,6 +227,37 @@ describe('the sockets', () => {
       seen.map((one) => [one.transport, one.message.message]),
       [['tcp', 'over tcp with no newline']],
     );
+  });
+
+  it('reads both of RFC 6587’s TCP framings off one connection', async () => {
+    // **Reachable because `P-06`'s sender can produce both.** Guessing the framing wrong is not
+    // a parse error — it silently corrupts message boundaries, and the sender gets blamed for
+    // weeks. Three messages down one connection is what makes a boundary bug visible at all.
+    for (const framing of ['octet-counting', 'non-transparent'] as const) {
+      seen.length = 0;
+      await sendTcp(port, [{ message: 'one' }, { message: 'two' }, { message: 'three' }], {
+        framing,
+      });
+      await until(() => seen.length === 3);
+      assert.deepEqual(
+        seen.map((one) => one.message.message),
+        ['one', 'two', 'three'],
+        `${framing} lost a boundary`,
+      );
+    }
+  });
+
+  it('reassembles a frame that arrived in two pieces', async () => {
+    // TCP is a stream: a receiver that assumes one `data` event is one message works perfectly
+    // until the network disagrees. The sender's `splitAt` makes that day reproducible, and the
+    // pause between the halves is what stops the two writes being coalesced into one segment.
+    seen.length = 0;
+    await sendTcp(port, [{ message: 'a message split down the middle' }], {
+      framing: 'non-transparent',
+      splitAt: 20,
+    });
+    await until(() => seen.length === 1);
+    assert.equal(seen[0]?.message.message, 'a message split down the middle');
   });
 });
 

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { HttpSimulator, type RecordedRequest } from '@ms/simulators';
 import { restCustom } from '../src/types/rest-custom.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 
@@ -11,11 +11,10 @@ import type { CheckContext, CheckExecution } from '../src/contract.js';
  * path found — the channels, the gaps, the failures, and the ones that are not faults.
  */
 
-let server: Server;
+let http: HttpSimulator;
 let port = 0;
-let lastHeaders: IncomingHttpHeaders = {};
-let lastMethod = '';
-let lastBody = '';
+
+const JSON_TYPE = { 'content-type': 'application/json' };
 
 const CLUSTER = {
   status: 'healthy',
@@ -39,84 +38,52 @@ const CLUSTER_XML = `<?xml version="1.0" encoding="UTF-8"?>
 </cluster>`;
 
 before(async () => {
-  server = createServer((req, res) => {
-    lastHeaders = req.headers;
-    lastMethod = req.method ?? '';
-    lastBody = '';
-    req.on('data', (chunk: Buffer) => {
-      lastBody += chunk.toString('utf8');
-    });
-    req.on('end', () => {
-      const url = req.url ?? '/';
-      if (url === '/cluster') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(CLUSTER));
-        return;
-      }
-      if (url === '/degraded') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ...CLUSTER, status: 'degraded' }));
-        return;
-      }
-      if (url === '/empty') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ nodes: [] }));
-        return;
-      }
-      if (url === '/html') {
-        res.writeHead(200, { 'content-type': 'text/html' });
-        res.end('<html><body>not an api</body></html>');
-        return;
-      }
-      if (url === '/cluster.xml') {
-        res.writeHead(200, { 'content-type': 'application/xml' });
-        res.end(CLUSTER_XML);
-        return;
-      }
-      if (url === '/cluster.xml-untyped') {
-        // The case `auto` exists for: an appliance serving XML as octet-stream, which is
-        // commoner than it should be.
-        res.writeHead(200, { 'content-type': 'application/octet-stream' });
-        res.end(CLUSTER_XML);
-        return;
-      }
-      if (url === '/xml-mislabelled') {
-        // A misconfiguration that exists in the field: XML under a JSON content type.
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(CLUSTER_XML);
-        return;
-      }
-      if (url === '/truncated.xml') {
-        res.writeHead(200, { 'content-type': 'application/xml' });
-        res.end('<cluster><node><load>0.4</load>');
-        return;
-      }
-      if (url === '/big') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ pad: 'y'.repeat(20_000), n: 1 }));
-        return;
-      }
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end('{}');
-    });
+  // **The harness rather than a hand-rolled server** (`P-06`). What this file needs from a server
+  // is a dozen static bodies under chosen content types, and expressing that as a chain of
+  // `if (url === …)` blocks was thirty lines that said nothing about the REST sensor. What is
+  // left is the table, which is the part worth reading.
+  http = new HttpSimulator({
+    routes: {
+      '/cluster': { headers: JSON_TYPE, body: JSON.stringify(CLUSTER) },
+      '/degraded': {
+        headers: JSON_TYPE,
+        body: JSON.stringify({ ...CLUSTER, status: 'degraded' }),
+      },
+      '/empty': { headers: JSON_TYPE, body: JSON.stringify({ nodes: [] }) },
+      '/html': {
+        headers: { 'content-type': 'text/html' },
+        body: '<html><body>not an api</body></html>',
+      },
+      '/cluster.xml': { headers: { 'content-type': 'application/xml' }, body: CLUSTER_XML },
+      // The case `auto` exists for: an appliance serving XML as octet-stream, which is commoner
+      // than it should be.
+      '/cluster.xml-untyped': {
+        headers: { 'content-type': 'application/octet-stream' },
+        body: CLUSTER_XML,
+      },
+      // A misconfiguration that exists in the field: XML under a JSON content type.
+      '/xml-mislabelled': { headers: JSON_TYPE, body: CLUSTER_XML },
+      '/truncated.xml': {
+        headers: { 'content-type': 'application/xml' },
+        body: '<cluster><node><load>0.4</load>',
+      },
+      '/big': { headers: JSON_TYPE, body: JSON.stringify({ pad: 'y'.repeat(20_000), n: 1 }) },
+    },
+    fallback: { status: 404, headers: JSON_TYPE, body: '{}' },
   });
-
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      port = typeof address === 'object' && address !== null ? address.port : 0;
-      resolve();
-    });
-  });
+  port = await http.start();
 });
 
 after(async () => {
-  await new Promise<void>((resolve) => {
-    server.close(() => {
-      resolve();
-    });
-  });
+  await http.stop();
 });
+
+/** The last request the simulator saw, which is what the assertions about headers read. */
+function lastRequest(): RecordedRequest {
+  const request = http.requests.at(-1);
+  assert.ok(request !== undefined, 'no request reached the server');
+  return request;
+}
 
 function run(
   params: Record<string, unknown>,
@@ -272,10 +239,11 @@ describe('rest.custom', () => {
       },
       { credentials: { http: { token: 'sekrit' } } },
     );
-    assert.equal(lastMethod, 'POST');
-    assert.equal(lastBody, '{"query":"depth"}');
-    assert.equal(lastHeaders['content-type'], 'application/json');
-    assert.equal(lastHeaders['authorization'], 'Bearer sekrit');
+    const request = lastRequest();
+    assert.equal(request.method, 'POST');
+    assert.equal(request.body, '{"query":"depth"}');
+    assert.equal(request.headers['content-type'], 'application/json');
+    assert.equal(request.headers['authorization'], 'Bearer sekrit');
   });
 
   describe('XML, which is what the appliances answer in', () => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { snmpTraffic } from '../src/types/snmp-traffic.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 const IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
 const IF_NAME = '1.3.6.1.2.1.31.1.1.1.1';

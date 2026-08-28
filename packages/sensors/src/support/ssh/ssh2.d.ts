@@ -8,6 +8,10 @@
  * than an archaeology exercise.
  *
  * The same reasoning, and the same shape, as `net-snmp.d.ts`.
+ *
+ * **The client half only.** The server half moved to `@ms/simulators` with the SSH simulator that
+ * is its one caller (`P-06`) — a declaration for a surface this package never touches is exactly
+ * the kind of thing that rots without anybody noticing, because nothing compiles against it.
  */
 declare module 'ssh2' {
   import type { EventEmitter } from 'node:events';
@@ -53,62 +57,6 @@ declare module 'ssh2' {
     on(event: string, listener: (...args: never[]) => void): this;
   }
 
-  /* ---------------------------------------------------------------------------------------
-   * The server half, used only by the test harness — `T-07`'s tests need a real SSH server
-   * that can refuse a password, present a chosen host key and hang on a command.
-   * ------------------------------------------------------------------------------------- */
-
-  export interface ServerConfig {
-    hostKeys: (string | Buffer)[];
-    ident?: string;
-  }
-
-  export interface AuthContext {
-    readonly method: string;
-    readonly username: string;
-    readonly password?: string;
-    readonly key?: { algo: string; data: Buffer };
-    accept(): void;
-    reject(methods?: string[], partial?: boolean): void;
-  }
-
-  export interface ServerChannel extends EventEmitter {
-    write(chunk: string | Buffer): boolean;
-    stderr: { write(chunk: string | Buffer): boolean };
-    exit(code: number | string): void;
-    end(): void;
-    close(): void;
-  }
-
-  export interface Session extends EventEmitter {
-    on(
-      event: 'exec',
-      listener: (
-        accept: () => ServerChannel,
-        reject: () => void,
-        info: { command: string },
-      ) => void,
-    ): this;
-    on(event: string, listener: (...args: never[]) => void): this;
-  }
-
-  export interface ServerConnection extends EventEmitter {
-    on(event: 'authentication', listener: (context: AuthContext) => void): this;
-    on(event: 'ready' | 'close' | 'end', listener: () => void): this;
-    on(event: 'session', listener: (accept: () => Session, reject: () => void) => void): this;
-    on(event: string, listener: (...args: never[]) => void): this;
-    end(): void;
-  }
-
-  export class Server extends EventEmitter {
-    constructor(config: ServerConfig, connectionListener?: (connection: ServerConnection) => void);
-    listen(port: number, host: string, callback?: () => void): this;
-    address(): { port: number; address: string } | null;
-    close(callback?: (error?: Error) => void): this;
-    on(event: 'connection', listener: (connection: ServerConnection) => void): this;
-    on(event: string, listener: (...args: never[]) => void): this;
-  }
-
   export const utils: {
     generateKeyPairSync(
       type: string,
@@ -123,7 +71,6 @@ declare module 'ssh2' {
    */
   const ssh2: {
     Client: typeof Client;
-    Server: typeof Server;
     utils: typeof utils;
   };
   export default ssh2;

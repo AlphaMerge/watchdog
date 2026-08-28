@@ -8,7 +8,7 @@ import { windowsMemory } from '../src/types/windows-memory.js';
 import { windowsService } from '../src/types/windows-service.js';
 import { windowsVolume } from '../src/types/windows-volume.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { installFakePowerShell } from './support/fake-powershell.js';
+import { installFakePowerShell } from '@ms/simulators';
 
 /**
  * The four Windows sensors (`T-10`).

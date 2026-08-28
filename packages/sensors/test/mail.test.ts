@@ -8,13 +8,7 @@ import { mailImap } from '../src/types/mail-imap.js';
 import { mailPop3 } from '../src/types/mail-pop3.js';
 import { mailRoundTrip } from '../src/types/mail-roundtrip.js';
 import { mailSmtp } from '../src/types/mail-smtp.js';
-import {
-  Mailbox,
-  imapServer,
-  pop3Server,
-  smtpServer,
-  type RunningServer,
-} from './support/mail-servers.js';
+import { Mailbox, imapServer, pop3Server, smtpServer, type RunningServer } from '@ms/simulators';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 
 /**

@@ -455,9 +455,61 @@ because each is a decision rather than a defect:
       checked compiled *tests*, so a deleted `src` module kept shipping in the tarball; widening
       it to `src` across every package immediately found `timeseries/repository.js`, orphaned by
       the S-12 rename and shipped ever since.
-- [ ] **P-06 — Protocol simulator harness** · L · F-02 · Mock SNMP agents, scriptable-latency
+- [x] **P-06 — Protocol simulator harness** · L · F-02 · Mock SNMP agents, scriptable-latency
       HTTP server, SSH server, syslog sender, flow exporter. Shipped as a package, used by every
       sensor test.
+
+      **P-06 outcome.** `packages/simulators` — `@ms/simulators`, a `devDependency` of the
+      packages that have tests and of nothing that ships.
+
+      **Most of it already existed and this is where it was always going.** The SNMP agent said so
+      in its own header from `T-01`: "when `P-06` builds the rest, this is the piece to move rather
+      than to write again." The mail servers came with `T-17`, the SSH server with `T-07`, the
+      PowerShell stand-in with `T-09`. They lived under `packages/sensors/test/support/`, which is
+      why the core's and the probe's tests could not reach them, and why **seven test files each
+      stood up their own `createServer`**. Auditing what was there before building anything is what
+      turned that into a move rather than a rewrite.
+
+      **What was genuinely missing was the latency, and it is the headline for a reason.** Every
+      HTTP-shaped sensor here is really a timing sensor: `T-13` reads a response time, `T-15`
+      follows a redirect that must not re-send its body, `T-14` bounds a body and must fail rather
+      than truncate, `P-02`'s pool needs a check that hangs. `HttpSimulator` makes each of those
+      one field — `delayMs` (no answer yet), `bodyDelayMs` (head now, body later), `dripMs` (a slow
+      trickle), `hang`, `reset` — and a route may be a *sequence*, which is how "fails twice then
+      succeeds" is written at all.
+
+      `bodyDelayMs` carries a lesson this repository already paid for once: **`writeHead` only
+      stages the headers**, and Node sends them with the first body chunk, so without
+      `flushHeaders` a server appears to think for the whole delay and then answer instantly —
+      which is exactly the shape the test was trying to tell apart.
+
+      **The syslog sender renders its own bytes** rather than calling `@ms/sensors`' renderer, for
+      the reason the SNMP agent is hand-written: a harness built from the code under test is a
+      closed loop that passes whether or not either side matches the RFC. It speaks both of RFC
+      6587's TCP framings and can split a frame across two packets — and the **pause between the
+      halves is not decoration**, because two writes with nothing between them are coalesced into
+      one segment and the split would exist only on the sending side. Two socket-level receiver
+      tests that were previously impractical exist now because of it.
+
+      **The harness has its own tests**, which is not ceremony: a `delayMs` that did not delay
+      would turn a timeout test into one that passes for the wrong reason, and every sensor test
+      downstream would stay green. That is worse than no harness.
+
+      **Not built: the flow exporter** the ticket lists. NetFlow and IPFIX are deferred to v2
+      (`CLAUDE.md`), so a simulator for them would be a harness with nothing to test.
+
+      **Not finished: the conversion.** `rest-custom.test.ts` and `syslog.test.ts` use the harness
+      now; `http.test.ts`, `http-advanced.test.ts`, `http-transaction.test.ts`, `jitter-range.test.ts`,
+      `port-dns.test.ts` and `tls.test.ts` still stand up their own servers. Those are green and
+      several have hard-won detail in them (`http.test.ts`'s 4 MB backpressure pump), so converting
+      them is follow-up worth doing deliberately rather than a rewrite bundled into this ticket.
+
+      Tests: 21 (the harness's own) + 4 new socket-level syslog and REST cases.
+
+      Also found: `npm run format:check` — which CI runs — has been failing on 34 tracked files
+      from earlier tickets. Per-file `prettier --check` was passing, so nobody saw it. Fixed in its
+      own commit, and `.prettierignore` now skips agent worktrees the way `eslint.config.js`
+      already did.
 - [ ] **P-07 — ICMP spike and decision** · M · P-06 · Benchmark system-`ping` wrapper vs raw
       socket at 1,000 targets for throughput, accuracy and privilege cost. Record the outcome in
       ADR-001.
@@ -792,15 +844,17 @@ because each is a decision rather than a defect:
       genuinely needed (`M-02`'s `sensor_runtime` row); the answer is to stop paying an HTTP
       request and a transaction for each of five thousand objects, which discovery needs anyway.
 
-      **The serial path now fails its budget, and this is where the fix belongs.** Measured
-      2026-08-28 on an otherwise idle host, four runs: **32.1 s, 32.5 s, 35.7 s, 36.3 s against
-      the 30 s budget** — with one run at 31.8 s that passed. The eight-in-flight path is
-      unchanged at 9.3 s with 69% spare, so this is the serial path specifically, exactly as the
-      finding predicted. **The budget has not been widened**, deliberately: it is telling the
-      truth, and a number moved to fit the code is a performance claim with the measurement taken
-      out of it. Either `P-19` makes the serial path fit again or the budget is re-baselined *with
-      today's numbers written down* — that is a decision, not a maintenance step. `P-21` is the
-      separate question of the suite running against a busy machine; these four runs were not.
+      **The serial path sits on its budget, and `P-21` is the reason it looks worse than it is.**
+      Measured 2026-08-28, five runs on a host that was *not* as idle as it looked — the dev stack
+      up and a mutation sweep finishing: **32.1, 32.5, 35.7, 36.3 s against the 30 s budget**, with
+      one at 31.8 s that passed. Re-measured 2026-08-29 with the stack stopped and nothing else
+      running: **25.2 s, 16% spare**, and eight in flight at 7.8 s with 74% spare.
+
+      So the honest statement is not "this regressed past its budget" — it is **"this is close
+      enough to the budget that machine load decides the outcome"**, which is `P-21`'s complaint
+      exactly. The margin is 16% on a quiet machine against a target that has eroded from 21.0 s
+      across Phase 3, so `P-19` is still the fix; what it is not is a failing test that needs its
+      number moved. The budget has not been widened.
 
 ## Phase 3 — State machine
 

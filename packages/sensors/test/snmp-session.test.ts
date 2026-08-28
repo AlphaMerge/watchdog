@@ -9,7 +9,7 @@ import {
   worstCaseMs,
   type SnmpCredentials,
 } from '../src/support/snmp/index.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 const SYS_DESCR = '1.3.6.1.2.1.1.1.0';
 const IF_DESCR = '1.3.6.1.2.1.2.2.1.2';

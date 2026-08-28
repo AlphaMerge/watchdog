@@ -1,0 +1,84 @@
+/**
+ * The server half of `ssh2`, declared by hand (`P-06`, moved from `T-07`).
+ *
+ * `ssh2` ships no types and `@types/ssh2` is a large third-party surface for a library this
+ * package touches in one file. The same bargain `@ms/sensors` makes for the *client* half:
+ * declaring what the simulator actually calls is fifty lines, the compiler checks them against
+ * real usage, and replacing the dependency is a change to two files rather than an archaeology
+ * exercise.
+ *
+ * Split from the client declaration rather than shared, because sharing would mean the harness
+ * depending on the package it exists to test — which is the closed loop `snmp-agent.ts` explains
+ * at length and refuses.
+ */
+declare module 'ssh2' {
+  import type { EventEmitter } from 'node:events';
+
+  export interface ServerConfig {
+    hostKeys: (string | Buffer)[];
+    ident?: string;
+  }
+
+  export interface AuthContext {
+    readonly method: string;
+    readonly username: string;
+    readonly password?: string;
+    readonly key?: { algo: string; data: Buffer };
+    accept(): void;
+    reject(methods?: string[], partial?: boolean): void;
+  }
+
+  export interface ServerChannel extends EventEmitter {
+    write(chunk: string | Buffer): boolean;
+    stderr: { write(chunk: string | Buffer): boolean };
+    exit(code: number | string): void;
+    end(): void;
+    close(): void;
+  }
+
+  export interface Session extends EventEmitter {
+    on(
+      event: 'exec',
+      listener: (
+        accept: () => ServerChannel,
+        reject: () => void,
+        info: { command: string },
+      ) => void,
+    ): this;
+    on(event: string, listener: (...args: never[]) => void): this;
+  }
+
+  export interface ServerConnection extends EventEmitter {
+    on(event: 'authentication', listener: (context: AuthContext) => void): this;
+    on(event: 'ready' | 'close' | 'end', listener: () => void): this;
+    on(event: 'session', listener: (accept: () => Session, reject: () => void) => void): this;
+    on(event: string, listener: (...args: never[]) => void): this;
+    end(): void;
+  }
+
+  export class Server extends EventEmitter {
+    constructor(config: ServerConfig, connectionListener?: (connection: ServerConnection) => void);
+    listen(port: number, host: string, callback?: () => void): this;
+    address(): { port: number; address: string } | null;
+    close(callback?: (error?: Error) => void): this;
+    on(event: 'connection', listener: (connection: ServerConnection) => void): this;
+    on(event: string, listener: (...args: never[]) => void): this;
+  }
+
+  export const utils: {
+    generateKeyPairSync(
+      type: string,
+      options?: { bits?: number },
+    ): { private: string; public: string };
+  };
+
+  /**
+   * `ssh2` is CommonJS with `module.exports = { Client, Server, utils, … }`, so the runtime
+   * import is the default one.
+   */
+  const ssh2: {
+    Server: typeof Server;
+    utils: typeof utils;
+  };
+  export default ssh2;
+}

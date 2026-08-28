@@ -5,6 +5,9 @@
       "path": "packages/shared"
     },
     {
+      "path": "packages/simulators"
+    },
+    {
       "path": "packages/sensors"
     },
     {

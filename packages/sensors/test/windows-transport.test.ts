@@ -16,7 +16,7 @@ import {
   windowsOptions,
   type PowerShellRun,
 } from '../src/support/windows/index.js';
-import { installFakePowerShell } from './support/fake-powershell.js';
+import { installFakePowerShell } from '@ms/simulators';
 
 /**
  * The Windows transport (`T-09`).

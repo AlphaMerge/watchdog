@@ -10,7 +10,7 @@ import {
   type SshCredentials,
 } from '../src/support/ssh/credentials.js';
 import { fingerprintOf, matchesFingerprint, verifyHostKey } from '../src/support/ssh/host-key.js';
-import { keyPair, TestSshServer } from './support/ssh-server.js';
+import { keyPair, TestSshServer } from '@ms/simulators';
 
 let server: TestSshServer;
 /** Learned from the first connection, so the strict-policy tests have something real to match. */

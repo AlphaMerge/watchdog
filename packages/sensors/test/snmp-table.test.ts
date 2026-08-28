@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { snmpTable } from '../src/types/snmp-table.js';
 import { standardCatalogue } from '../src/index.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 /** `hrStorageEntry`, which is the table this type gets pointed at most often. */
 const TABLE = '1.3.6.1.2.1.25.2.3.1';

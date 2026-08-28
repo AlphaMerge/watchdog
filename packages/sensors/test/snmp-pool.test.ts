@@ -7,7 +7,7 @@ import {
   withSnmp,
   type SnmpCredentials,
 } from '../src/support/snmp/index.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 const SYS_DESCR = '1.3.6.1.2.1.1.1.0';
 const MIB: AgentEntry[] = [{ oid: SYS_DESCR, type: 'OctetString', value: 'ms-target router' }];

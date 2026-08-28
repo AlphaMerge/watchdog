@@ -12,3 +12,8 @@ release/
 # markers, which makes every edit a diff full of noise. They are prose, not code.
 docs/
 CLAUDE.md
+
+# Agent worktrees are whole copies of this repository, build output and all. Formatting one
+# would rewrite files that are not this checkout's, and `--check` on one fails against whatever
+# state that copy happens to be in. `eslint.config.js` ignores them for the same reason.
+.claude/worktrees/

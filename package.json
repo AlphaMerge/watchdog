@@ -10,6 +10,7 @@
   },
   "workspaces": [
     "packages/shared",
+    "packages/simulators",
     "packages/sensors",
     "packages/core",
     "packages/probe",

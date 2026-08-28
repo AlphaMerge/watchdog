@@ -48,6 +48,7 @@
     "tedious": "^20.0.0"
   },
   "devDependencies": {
+    "@ms/simulators": "0.1.0",
     "@types/pg": "^8.11.0"
   }
 }

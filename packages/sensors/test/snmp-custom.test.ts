@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { snmpCustom } from '../src/types/snmp-custom.js';
 import { snmpCustomString } from '../src/types/snmp-custom-string.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 const SYS_DESCR = '1.3.6.1.2.1.1.1.0';
 const UPTIME = '1.3.6.1.2.1.1.3.0';

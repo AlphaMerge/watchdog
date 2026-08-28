@@ -5,7 +5,7 @@ import { snmpDiskFree } from '../src/types/snmp-disk-free.js';
 import { snmpMemory } from '../src/types/snmp-memory.js';
 import { snmpUptime } from '../src/types/snmp-uptime.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { TestSnmpAgent, type AgentEntry } from './support/snmp-agent.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 
 /**
  * The MIB below is the dev target's own agent, copied from a live walk while `T-05` was written.
