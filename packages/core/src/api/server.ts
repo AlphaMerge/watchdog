@@ -42,6 +42,8 @@ import { stateRoutes } from './routes/state.js';
 import { alarmRoutes, ALARM_SCHEMAS } from './routes/alarms.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
 import type { DeliveryHealthReader } from '../notifications/health.js';
+import type { CoreHealthService } from '../health/core-health.js';
+import { coreHealthRoutes } from './routes/core-health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
@@ -140,6 +142,14 @@ export interface ApiServerOptions {
    * should 404 rather than report that everything is fine.
    */
   deliveryHealth?: DeliveryHealthReader;
+  /**
+   * The core's own numbers, live (`P-12`).
+   *
+   * A getter rather than the service, because it is built from the ingestor and the probe
+   * endpoint — both constructed after the API, so that a slow first housekeeping pass cannot
+   * delay the port opening. The route answers 503 for the milliseconds in between.
+   */
+  coreHealth?: () => CoreHealthService | undefined;
   /** What "send test notification" actually sends through (`N-14`). */
   tester?: NotificationTester;
   /**
@@ -181,6 +191,7 @@ export class ApiServer {
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
+  readonly #coreHealth: (() => CoreHealthService | undefined) | undefined;
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #undeclared: string[] = [];
@@ -217,6 +228,7 @@ export class ApiServer {
     this.#triggers = options.triggers;
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
+    this.#coreHealth = options.coreHealth;
     this.#tester = options.tester;
     this.#stream = options.stream;
 
@@ -459,6 +471,9 @@ export class ApiServer {
             db: this.#db,
             health: this.#deliveryHealth,
           });
+        }
+        if (this.#coreHealth !== undefined) {
+          coreHealthRoutes(scope, { coreHealth: this.#coreHealth });
         }
       },
       { prefix: '/api/v1' },

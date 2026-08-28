@@ -83,6 +83,7 @@ import { exeScript } from './types/exe-script.js';
 import { exeScriptAdvanced } from './types/exe-script-advanced.js';
 import { syslogReceiver } from './types/syslog.js';
 import { coreFactory } from './types/core-factory.js';
+import { coreHealth } from './types/core-health.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -115,6 +116,8 @@ import { windowsVolume } from './types/windows-volume.js';
  * A type is added by writing one file under `src/types/` and listing it here. See
  * `docs/adding-a-sensor-type.md`.
  */
+export { coreHealth, CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from './types/core-health.js';
+
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,
   dnsBlocklist,
@@ -135,6 +138,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   exeScriptAdvanced,
   syslogReceiver,
   coreFactory,
+  coreHealth,
   httpContent,
   httpRequest,
   portTcp,

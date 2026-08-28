@@ -525,7 +525,7 @@ because each is a decision rather than a defect:
       between them for ever with nothing wrong. "No such record" and "the lookup failed" are
       separated — different faults, different fixes. MX carries its priority and SRV its weight,
       since a set that kept its hosts and reordered their priorities is a change worth seeing.
-- [ ] **P-12 — Core Health sensor** · M · P-05, S-07 · CPU, memory, ingestion queue depth, DB
+- [x] **P-12 — Core Health sensor** · M · P-05, S-07 · CPU, memory, ingestion queue depth, DB
       write latency, notification queue depth, config age.
       **Added by S-07:** `Ingestor.stats()` and `IngestionService.stats()` carry the ingestion
       half of ADR decision 11 — queue depth, refused and failed batches, duplicate readings, and
@@ -552,6 +552,57 @@ because each is a decision rather than a defect:
       `rollup_watermark.watermark`, which is the number that goes wrong first and silently — plus
       the depth of `rollup_backfill` and `channel_reap`, and the pass duration.
       `Housekeeper.runOnce()` already returns all of it in `HousekeepingReport`.
+
+      **P-12 outcome.** `ms.core.health` in `@ms/sensors`, `CoreHealthService` in
+      `packages/core/src/health/`, a thirty-second sweep, and `GET /api/v1/core-health`. Sixteen
+      channels, every one of them a number some earlier ticket added a `stats()` for. Results go
+      through `acceptResults` exactly as a probe's do, so Core Health has history, limits,
+      triggers and alarms with no special case downstream — and `evaluatedBy: 'core'` keeps it
+      out of every probe's assignment list, the mechanism `T-21` built.
+
+      **What it cannot do, stated rather than implied.** `WORKFLOW.MD §13` says Core Health goes
+      Down when the database is unavailable. **This sensor cannot report that while it is
+      happening**: its reading is a row and its state is a row, and there is nowhere to write
+      either. What it does instead is the more useful half — the queue, the write latency, the
+      notification backlog and the rollup lag all climb *before* a struggling database becomes an
+      unreachable one. The live answer during a total outage is `GET /api/v1/core-health`, which
+      is why there is a route and not only channels; most of it needs no database at all.
+
+      **No "config age" channel**, which the ticket asks for and PRTG has. Theirs measures a core
+      that has stopped persisting its configuration file; ours has no such file — configuration is
+      rows in the same database as everything else, written in the transaction that changed them,
+      so there is no separate write that can fall behind. The risk that number stands in for is a
+      *probe* running configuration older than the core's, which is per-probe and belongs on
+      `P-13` beside version skew.
+
+      **The primary channel is the ingestion queue**, not a health score. It is zero whenever the
+      core is keeping up and climbs whenever anything downstream of a probe is not, which makes it
+      the one number that means "the core is failing at its job" rather than "one of its parts is
+      busy". PRTG's answer is an opaque 0–100 assembled from numbers that each have a meaning of
+      their own, and an operator cannot act on it.
+
+      **Three decisions the tests exist to defend**, each one a way of not lying:
+      *CPU is a gap on the first reading*, because a rate needs two samples and 0% is a claim
+      about the machine rather than about the measurement. *Rollup lag is the excess over each
+      tier's own bucket width*, because a daily tier can only ever be materialised to the last
+      complete day — a channel carrying `now - watermark` would rank a healthy 1d tier far worse
+      than a broken 5m one. *A read that fails records no channel values*, because zeros are
+      exactly what a perfectly idle, perfectly healthy core looks like.
+
+      **The sweep and the route keep separate CPU baselines.** A rate consumes its previous
+      sample, so one shared meter would mean a dashboard polling `/core-health` every two seconds
+      silently turned the *recorded* channel into a two-second sample — every reading honest, the
+      history noisier for being watched.
+
+      The timer came out into `PeriodicSweep` at its second caller, shared with `T-21`'s factory
+      sweep: what they have in common is entirely mechanical — an unref'd interval, a re-entrancy
+      guard, a skip counter, and a failure that must not stop the next pass.
+
+      Mutation: 12 mutants, 12 killed. Live: 16 channels created with the right units and counter
+      widths, three sweeps recorded, the first sample of `cpu` and of all three counters a
+      deliberate gap, and the sensor Up with "0 queued, writes 20 ms, rollup 25 s behind".
+
+      Tests: 24.
 - [ ] **P-13 — Probe Health sensor** · M · P-04 · Scheduler lag, deferred checks, pool
       utilisation, connection state, spool depth, version skew.
 - [ ] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13

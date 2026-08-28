@@ -1,4 +1,4 @@
-import { SensorCatalogue, type SensorType } from '@ms/sensors';
+import { coreHealth, SensorCatalogue, type SensorType } from '@ms/sensors';
 import {
   catalogueSensorTypeGate,
   type SensorTypeGate,
@@ -93,6 +93,9 @@ export function testCatalogue(): SensorCatalogue {
   catalogue.register(ping);
   catalogue.register(snmpTraffic);
   catalogue.register(factory);
+  // The real one, unlike the three above: `ms.core.health` declares no parameters at all, so
+  // there are no schema defaults to make a stored-params assertion about Ajv (`P-12`).
+  catalogue.register(coreHealth);
   return catalogue.seal();
 }
 

@@ -38,6 +38,8 @@ import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
+import { CoreHealthService } from './health/core-health.js';
+import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
 import { StateBroadcaster } from './state/stream.js';
 import type { CommittedStates } from './state/runtime.js';
@@ -698,6 +700,12 @@ async function serve(): Promise<void> {
     );
   }
 
+  // Built after the ingestor and the probe endpoint, which are themselves built after the API so
+  // a slow first housekeeping pass cannot delay the port opening. The route answers 503 for the
+  // milliseconds in between, which is the honest answer: "starting" is not "everything is zero".
+  // eslint-disable-next-line prefer-const -- assigned below, once the ingestor exists.
+  let coreHealthRef: CoreHealthService | undefined;
+
   const api = new ApiServer({
     config: config.api,
     logger,
@@ -731,6 +739,7 @@ async function serve(): Promise<void> {
     triggers,
     templates,
     deliveryHealth,
+    coreHealth: () => coreHealthRef,
     tester,
     stream,
   });
@@ -837,6 +846,47 @@ async function serve(): Promise<void> {
     name: 'probe-endpoint',
     timeoutMs: 5_000,
     run: () => probeEndpoint.stop(),
+  });
+
+  // The core watching itself (P-12), and CLAUDE.md's rule that it must: every subsystem with a
+  // queue, a pool or a connection reports here. Built last because it reads all of them, and the
+  // results go through `acceptResults` exactly as a probe's do — so Core Health has history,
+  // limits, triggers and alarms with no special case anywhere downstream.
+  const coreHealth = new CoreHealthService({
+    db,
+    logger,
+    sources: {
+      ingestion: () => ingestor.stats(),
+      stream: () => stream.stats,
+      probes: () => reachability.stats(),
+      delivery: (q) => deliveryHealth.read(q),
+    },
+    ingest: async (results) => {
+      await ingestion.acceptResults('core-health', {
+        type: 'results',
+        batchId: `core-health-${String(Date.now())}`,
+        results: [...results],
+      });
+    },
+  });
+  coreHealthRef = coreHealth;
+  const coreHealthSweep = new PeriodicSweep({
+    logger,
+    component: 'core-health-sweep',
+    what: 'a Core Health sweep failed',
+    run: () => coreHealth.sweep(),
+    // The same thirty seconds the factory sweep uses, and for the same reason: a floor rather
+    // than a ceiling, so a limit on the ingestion queue notices a stall within half a minute.
+    intervalMs: 30_000,
+  });
+  coreHealthSweep.start();
+  lifecycle.onShutdown({
+    name: 'core-health-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      coreHealthSweep.stop();
+      return Promise.resolve();
+    },
   });
 
   lifecycle.ready(`ms-core ${VERSION}`);
