@@ -51,6 +51,13 @@ export interface HousekeepingReport {
   compressedChunks: number;
   droppedChunks: number;
   prunedAuditEntries: number;
+  /**
+   * Sensors whose state was carried forward past the horizon (`S-15`).
+   *
+   * Non-zero is not a fault: it is the number of quiet sensors that would have lost their state
+   * entirely, and did not.
+   */
+  anchoredSensors: number;
   reapedChannels: number;
   reapedRows: number;
   /** A step that failed. The pass continues: every step is guarded by a watermark, not by the
@@ -245,6 +252,9 @@ export class Housekeeper {
     await this.#step(report, 'rollup', () => this.#rollForward(report));
     await this.#step(report, 'compress', () => this.#compress(report));
     await this.#step(report, 'retention', () => this.#retention(report));
+    // Its own step, after the samples: a failure here must not stop the reap or the audit prune,
+    // and — more to the point — a failure in *those* must not stop a sensor being anchored.
+    await this.#step(report, 'state-retention', () => this.#stateRetention(report));
     await this.#step(report, 'reap', () => this.#reap(report));
     await this.#step(report, 'audit-retention', () => this.#pruneAudit(report));
   }
@@ -485,6 +495,54 @@ export class Housekeeper {
     }
   }
 
+  /**
+   * Retention for the state history, which may never leave a sensor without a state (`S-15`).
+   *
+   * **The order is the whole design.** A sensor that has sat Up for three years has exactly one
+   * row, three years old; dropping the chunk that holds it would take it and the sensor would have
+   * no known state at all — breaking uptime and SLA, which `CLAUDE.md` requires be computed from
+   * this table rather than from samples. So: read what each quiet sensor was in *before* the drop,
+   * drop, then anchor the ones the drop actually emptied.
+   *
+   * **Anchoring after the drop rather than before it is what stops this writing a row every
+   * pass.** The condition is "this sensor now has no rows", which is exact and self-limiting: a
+   * quiet sensor is anchored once, and on the next pass it still has that anchor, so nothing is
+   * written. When the anchor's own chunk eventually ages out it is anchored afresh, which is once
+   * per chunk period rather than once per five minutes.
+   *
+   * No watermark guard and none is needed — nothing downstream summarises this table. The anchor
+   * *is* the guard.
+   */
+  async #stateRetention(report: HousekeepingReport): Promise<void> {
+    const olderThan = await this.#db.tx((q) =>
+      this.#store.horizon(q, this.#config.retention.stateDays),
+    );
+
+    // One transaction for all three steps: the snapshot is only valid for this drop, and a crash
+    // between the drop and the anchor is exactly the "no known state at all" this exists to
+    // prevent.
+    const anchored = await this.#db.tx(async (q) => {
+      const candidates = await this.#store.stateAtHorizon(q, olderThan);
+      const dropped = await this.#store.dropOlderThan(q, 'sensor_state', olderThan);
+      report.droppedChunks += dropped.length;
+      for (const chunk of dropped) {
+        this.#logger.info(
+          { table: 'sensor_state', chunk, olderThan: olderThan.toISOString() },
+          'chunk dropped by retention',
+        );
+      }
+      return this.#store.anchorStates(q, olderThan, candidates);
+    });
+
+    report.anchoredSensors = anchored;
+    if (anchored > 0) {
+      this.#logger.info(
+        { sensors: anchored, at: olderThan.toISOString() },
+        'carried sensor states forward past the retention horizon',
+      );
+    }
+  }
+
   /** Deletes readings belonging to channels that no longer exist (S-05). */
   async #reap(report: HousekeepingReport): Promise<void> {
     const candidates = await this.#db.tx((q) => this.#store.reapCandidates(q, MAX_REAP_PER_PASS));
@@ -588,6 +646,7 @@ function emptyReport(): HousekeepingReport {
     compressedChunks: 0,
     droppedChunks: 0,
     prunedAuditEntries: 0,
+    anchoredSensors: 0,
     reapedChannels: 0,
     reapedRows: 0,
     failures: [],

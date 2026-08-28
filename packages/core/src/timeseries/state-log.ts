@@ -26,6 +26,16 @@ export interface StateLogEntry {
    * transition fell on the other side of a page boundary.
    */
   readonly durationMs: number | null;
+  /**
+   * True on a row retention wrote to carry a state past its horizon, not on a transition
+   * (`S-15`).
+   *
+   * Reported rather than hidden. Nothing changed at this instant — the row exists so the sensor
+   * still has a known state after the chunk holding its last real transition was dropped — and an
+   * operator scrolling to the oldest thing the log still holds deserves to be told that this is
+   * the floor rather than the beginning.
+   */
+  readonly carried: boolean;
 }
 
 export interface StateLogQuery {
@@ -140,11 +150,12 @@ export class StateLogService {
       previous_state: SensorState | null;
       cause: SensorStateCause;
       message: string;
+      carried: boolean;
       duration_ms: string | null;
     }>(
       `
       WITH page AS (
-        SELECT s.time, s.sensor_id, s.state, s.previous_state, s.cause, s.message
+        SELECT s.time, s.sensor_id, s.state, s.previous_state, s.cause, s.message, s.carried
         FROM sensor_state s
         ${filter}
         ORDER BY s.time DESC, s.sensor_id DESC
@@ -153,7 +164,7 @@ export class StateLogService {
       SELECT page.time AS at,
              page.sensor_id::text AS sensor_id,
              coalesce(o.name, '') AS sensor_name,
-             page.state, page.previous_state, page.cause, page.message,
+             page.state, page.previous_state, page.cause, page.message, page.carried,
              (EXTRACT(EPOCH FROM (next.time - page.time)) * 1000)::bigint::text AS duration_ms
       FROM page
       -- Left, on purpose: the transition most worth reading may be the last one a deleted
@@ -184,6 +195,7 @@ export class StateLogService {
       cause: row.cause,
       message: row.message,
       durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+      carried: row.carried,
     }));
   }
 

@@ -2,6 +2,20 @@ import type { Queryable } from '../db/pool.js';
 import { TimescaleEngine, type EngineCapabilities, type StorageEngine } from './engine.js';
 import type { QuerySegment } from './query.js';
 import { SAMPLE_TABLES, type RollupTier, type RollupTierId } from './tiers.js';
+import type { SensorState, SensorStateCause } from '../state/tables.js';
+
+/**
+ * What one sensor's state was at the retention horizon (`S-15`).
+ *
+ * Carries the cause forward as well as the state: an anchor that said "Down" without saying it
+ * was a limit, a lookup or a lost probe would answer half the question an operator asks when
+ * they scroll to the oldest thing the log still holds.
+ */
+export interface StateAnchor {
+  readonly sensorId: number;
+  readonly state: SensorState;
+  readonly cause: SensorStateCause;
+}
 
 /** One bucket of one channel, as every tier and raw are normalised into. */
 export interface SeriesRow {
@@ -77,6 +91,10 @@ export interface TimeSeriesStore {
   compactableChunks(q: Queryable, table: string, before: Date, limit: number): Promise<string[]>;
   compact(q: Queryable, chunk: string): Promise<void>;
   dropOlderThan(q: Queryable, table: string, olderThan: Date): Promise<string[]>;
+  /** The state each sensor was in at the horizon, for those with nothing newer (`S-15`). */
+  stateAtHorizon(q: Queryable, horizon: Date): Promise<StateAnchor[]>;
+  /** Anchors the candidates the drop left with no state at all (`S-15`). */
+  anchorStates(q: Queryable, horizon: Date, candidates: readonly StateAnchor[]): Promise<number>;
   sensorChannels(
     q: Queryable,
     sensorId: number,
@@ -495,6 +513,79 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
     return at;
   }
 
+  /**
+   * The state each sensor was in at the horizon, for sensors with nothing newer (`S-15`).
+   *
+   * Taken **before** the drop, because after it the answer is gone. Only sensors whose newest
+   * transition is already older than the horizon are candidates: one with a later row keeps a
+   * known state whatever is dropped beneath it, and that row's `previous_state` still says what
+   * came before.
+   */
+  async stateAtHorizon(q: Queryable, horizon: Date): Promise<StateAnchor[]> {
+    const rows = await q.query<{
+      sensor_id: string;
+      state: SensorState;
+      cause: SensorStateCause;
+    }>(
+      `SELECT DISTINCT ON (sensor_id) sensor_id::text AS sensor_id, state::text AS state,
+              cause::text AS cause
+       FROM sensor_state
+       WHERE time < $1
+       ORDER BY sensor_id, time DESC`,
+      [horizon],
+    );
+    return rows.map((row) => ({
+      sensorId: Number(row.sensor_id),
+      state: row.state,
+      cause: row.cause,
+    }));
+  }
+
+  /**
+   * Writes an anchor for every candidate the drop left with no state at all (`S-15`).
+   *
+   * **After the drop, and conditioned on the sensor now having no rows** — which is what stops
+   * this writing a row on every pass. A quiet sensor is anchored once; on the next pass its
+   * newest row is that anchor, the drop leaves it alone because its chunk is not old enough yet,
+   * and this finds it still has a row and does nothing. When the anchor's own chunk is eventually
+   * dropped, the sensor is empty again and is anchored afresh.
+   *
+   * A sensor that no longer exists in the tree is not anchored: its history is on its way out
+   * with it, and resurrecting a row for a deleted sensor would keep it alive for ever.
+   */
+  async anchorStates(
+    q: Queryable,
+    horizon: Date,
+    candidates: readonly StateAnchor[],
+  ): Promise<number> {
+    if (candidates.length === 0) return 0;
+    const rows = await q.query<{ sensor_id: string }>(
+      `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message, carried)
+       SELECT $1,
+              candidate.sensor_id,
+              candidate.state::sensor_state_kind,
+              candidate.state::sensor_state_kind,
+              candidate.cause::sensor_state_cause,
+              'state carried forward past the retention horizon',
+              true
+       FROM unnest($2::bigint[], $3::text[], $4::text[])
+            AS candidate(sensor_id, state, cause)
+       WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = candidate.sensor_id)
+         AND NOT EXISTS (
+           SELECT 1 FROM sensor_state s WHERE s.sensor_id = candidate.sensor_id
+         )
+       ON CONFLICT (sensor_id, time) DO NOTHING
+       RETURNING sensor_id::text AS sensor_id`,
+      [
+        horizon,
+        candidates.map((one) => one.sensorId),
+        candidates.map((one) => one.state),
+        candidates.map((one) => one.cause),
+      ],
+    );
+    return rows.length;
+  }
+
   /** Channels that have been deleted and whose readings are therefore orphaned (S-05). */
   async reapCandidates(q: Queryable, limit: number): Promise<number[]> {
     const rows = await q.query<{ channel_id: number }>(
@@ -527,7 +618,9 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
   }
 }
 
-const KNOWN_TABLES = new Set(SAMPLE_TABLES);
+// `sensor_state` joins the sample tables here because `S-15` drops its chunks too — it is
+// the one non-sample hypertable retention touches, and it is a constant like the rest.
+const KNOWN_TABLES = new Set([...SAMPLE_TABLES, 'sensor_state']);
 
 /**
  * The only defence an interpolated identifier gets, and the reason it is enough: every caller

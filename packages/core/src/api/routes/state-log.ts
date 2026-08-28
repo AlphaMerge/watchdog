@@ -56,6 +56,7 @@ const entrySchema = {
     'cause',
     'message',
     'durationMs',
+    'carried',
   ],
   properties: {
     at: { type: 'string' },
@@ -68,6 +69,13 @@ const entrySchema = {
     message: { type: 'string' },
     /** `null` on the state a sensor is still in. */
     durationMs: { type: ['integer', 'null'] },
+    /**
+     * True on a row retention wrote to carry a state past its horizon rather than a transition
+     * (`S-15`). Nothing changed at this instant: the row exists so the sensor still has a known
+     * state after the chunk holding its last real transition was dropped, and it is the floor of
+     * the history rather than its beginning.
+     */
+    carried: { type: 'boolean' },
   },
 } as const;
 

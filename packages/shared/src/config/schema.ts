@@ -76,6 +76,15 @@ export interface HousekeepingConfig {
      * when" is asked about changes made long after the readings around them have been rolled up.
      */
     auditDays: number;
+    /**
+     * State transitions (`S-15`).
+     *
+     * As long as the coarsest sample tier by default, because uptime and SLA are computed from
+     * *this* table rather than from samples (`CLAUDE.md`) — a retention that outlived the state
+     * history would leave a graph with numbers and no way to say how much of it was an outage.
+     * It costs almost nothing: a row per transition, and a quiet sensor produces one a year.
+     */
+    stateDays: number;
   };
   /**
    * Age at which a chunk is compressed. Measured at 12.5x on raw readings
@@ -762,7 +771,14 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
           type: 'object',
           default: {} as HousekeepingConfig['retention'],
           additionalProperties: false,
-          required: ['rawDays', 'fiveMinuteDays', 'hourlyDays', 'dailyDays', 'auditDays'],
+          required: [
+            'rawDays',
+            'fiveMinuteDays',
+            'hourlyDays',
+            'dailyDays',
+            'auditDays',
+            'stateDays',
+          ],
           properties: {
             // 40 days of raw is PRTG's figure (CAPABILITIES.MD §9), and the reason its UI
             // refuses sub-hourly detail beyond that point.
@@ -771,6 +787,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             hourlyDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 730 },
             dailyDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
             auditDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 730 },
+            stateDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
           },
         },
         compression: {

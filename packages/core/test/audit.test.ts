@@ -510,6 +510,7 @@ describe(
             hourlyDays: 730,
             dailyDays: 3_650,
             auditDays: 20,
+            stateDays: 3_650,
           },
           compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
         },

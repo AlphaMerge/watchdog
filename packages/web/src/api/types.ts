@@ -332,6 +332,12 @@ export interface StateLogEntry {
   message: string;
   /** How long the *previous* state lasted. `null` on the newest entry — it has not ended. */
   durationMs: number | null;
+  /**
+   * True on a row retention wrote to carry a state past its horizon, not on a transition
+   * (`S-15`). Nothing changed at this instant — it is the floor of the history rather than its
+   * beginning.
+   */
+  carried: boolean;
 }
 
 export interface StateLogPage {

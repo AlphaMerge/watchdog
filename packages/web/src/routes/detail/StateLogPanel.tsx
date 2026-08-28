@@ -125,8 +125,21 @@ function Row({ entry, isSensor }: { entry: StateLogEntry; isSensor: boolean }): 
       <td className="py-2 pr-3 align-top">
         <span className="flex flex-wrap items-center gap-1.5">
           <StatusBadge state={entry.state} size="sm" />
-          {entry.previousState !== null && (
-            <span className="text-xs text-text-muted">from {entry.previousState}</span>
+          {entry.carried ? (
+            // **Said, not hidden** (`S-15`). Nothing changed at this instant: the row exists so
+            // the sensor still has a known state after the chunk holding its last real
+            // transition was dropped. Showing it as "from up" would invent a transition, and
+            // showing nothing would make the floor of the history look like its beginning.
+            <span
+              className="text-xs text-text-muted"
+              title="Retention carried this state forward; the history before it has been dropped"
+            >
+              carried forward
+            </span>
+          ) : (
+            entry.previousState !== null && (
+              <span className="text-xs text-text-muted">from {entry.previousState}</span>
+            )
           )}
         </span>
       </td>

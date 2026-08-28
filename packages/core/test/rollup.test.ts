@@ -37,6 +37,7 @@ function housekeeping(overrides: Partial<HousekeepingConfig> = {}): Housekeeping
       hourlyDays: 730,
       dailyDays: 3_650,
       auditDays: 730,
+      stateDays: 3_650,
     },
     compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
     ...overrides,
@@ -478,6 +479,7 @@ describe(
             hourlyDays: 730,
             dailyDays: 3_650,
             auditDays: 730,
+            stateDays: 3_650,
           },
         }),
       ).runOnce();

@@ -231,13 +231,51 @@ because each is a decision rather than a defect:
       the ETag trigger fires too late for the insert's own `RETURNING` to see it.
       The lever that remains is fewer *requests*, not fewer statements — a batch create endpoint,
       which the `batch()` seam already supports. Not filed: a pipelining client finishes in 5.9 s.
-- [ ] **S-15 — State-history retention that cannot lose current state** · M · S-06, M-15 ·
+- [x] **S-15 — State-history retention that cannot lose current state** · M · S-06, M-15 ·
       `sensor_state` is deliberately excluded from S-06's retention sweep. A sensor that has sat
       Up for three years has exactly one row, three years old; `drop_chunks` would take it and
       the sensor would have no known state at all, breaking uptime and SLA — which CLAUDE.md
       requires be computed from state history. Retention here has to carry the latest row per
       sensor forward before dropping a chunk, and needs a test that ages a quiet sensor past the
       horizon and asserts its state survives.
+
+      **S-15 outcome.** Migration 037, `stateAtHorizon`/`anchorStates` on the store, a
+      `state-retention` step in the housekeeping pass, and `retention.stateDays` (default 3,650 —
+      as long as the coarsest sample tier, because uptime and SLA are computed from *this* table
+      and a retention that outlived the state history would leave a graph with numbers and no way
+      to say how much of it was an outage).
+
+      **The order is the whole design: snapshot, drop, then anchor.** Read what each quiet sensor
+      was in *before* the drop, because afterwards the answer is gone; drop; then write an anchor
+      only for the sensors the drop actually left with **no rows at all**.
+
+      **Anchoring after the drop rather than before it is what makes this affordable**, and it is
+      the non-obvious half. The natural reading of the ticket — "carry the latest row forward
+      before dropping a chunk" — writes a row on *every* pass for as long as a sensor stays quiet:
+      the horizon moves, the anchor is always older than it, and a five-minute pass would produce
+      288 rows a day per quiet sensor. Conditioning on "this sensor now has no rows" is exact and
+      self-limiting: anchored once, and not again until the anchor's own chunk ages out, which is
+      once per chunk period. A mutant that moved the anchor before the drop is killed by the test
+      that runs three passes.
+
+      **`carried` is a column, not a new `sensor_state_cause`.** A cause says *why the state
+      changed*, and nothing changed here — the row exists so the history has a floor. Removing an
+      enum value on rollback means rewriting the type and every row that used it, where dropping a
+      column is one statement that cannot fail halfway. It is not cosmetic either: `M-02` writes a
+      transition when the *cause* changes without the state changing, so `previous_state = state`
+      was already possible and could not have identified an anchor.
+
+      A deleted sensor is never anchored — its history is on its way out with it, and resurrecting
+      a row would keep it alive one pass at a time. The state log and its API carry `carried`, and
+      the detail panel says "carried forward" instead of inventing a transition from a state to
+      itself: an operator scrolling to the oldest thing the log still holds is looking at the floor
+      of the history, not its beginning.
+
+      Mutation: 10 mutants, 10 killed. Live: a paused sensor with one 900-day-old row had its chunk
+      dropped and its state carried forward to the horizon — `up`, `carried`, "state carried
+      forward past the retention horizon" — and three further passes added nothing.
+
+      Tests: 10.
 - [x] **S-14 — Sibling ordering** · S · S-03 · PRTG has manual "move up / move down" ordering
       within a parent; children here sort by `(name, id)`. An operator migrating a hand-ordered
       tree will notice on day one. One nullable `sort_order` column and a changed `ORDER BY`,
