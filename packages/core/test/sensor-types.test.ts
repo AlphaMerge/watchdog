@@ -92,7 +92,7 @@ describe(
     it('refuses a type nothing has registered, and says what is registered', async () => {
       const error = await rejects(() => createSensor({}, 'nope.missing'));
       assert.equal(error.code, 'OBJECT_INVALID');
-      assert.deepEqual(error.details['registered'], ['core.factory', 'icmp.ping', 'ms.core.health', 'snmp.traffic']);
+      assert.deepEqual(error.details['registered'], ['core.factory', 'icmp.ping', 'ms.core.health', 'ms.probe.health', 'snmp.traffic']);
     });
 
     it('refuses params the type’s schema rejects, listing every problem', async () => {
@@ -337,7 +337,7 @@ describe(
       }>().items;
       assert.deepEqual(
         items.map((item) => item.id),
-        ['core.factory', 'icmp.ping', 'ms.core.health', 'snmp.traffic'],
+        ['core.factory', 'icmp.ping', 'ms.core.health', 'ms.probe.health', 'snmp.traffic'],
       );
 
       // The annotation stays: it is how a form knows to render a password field. It describes

@@ -84,6 +84,7 @@ import { exeScriptAdvanced } from './types/exe-script-advanced.js';
 import { syslogReceiver } from './types/syslog.js';
 import { coreFactory } from './types/core-factory.js';
 import { coreHealth } from './types/core-health.js';
+import { probeHealth } from './types/probe-health.js';
 import { httpContent } from './types/http-content.js';
 import { httpRequest } from './types/http.js';
 import { portTcp } from './types/port-tcp.js';
@@ -117,6 +118,7 @@ import { windowsVolume } from './types/windows-volume.js';
  * `docs/adding-a-sensor-type.md`.
  */
 export { coreHealth, CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from './types/core-health.js';
+export { probeHealth, PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from './types/probe-health.js';
 
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,
@@ -139,6 +141,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   syslogReceiver,
   coreFactory,
   coreHealth,
+  probeHealth,
   httpContent,
   httpRequest,
   portTcp,

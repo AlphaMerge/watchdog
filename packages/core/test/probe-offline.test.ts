@@ -58,7 +58,12 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       settings: harness.resolver,
       unreachableSensors: () => reachability.unreachableSensors(),
     });
-    reachability = new ProbeReachability({ db, logger: silentLogger, states });
+    reachability = new ProbeReachability({
+      db,
+      logger: silentLogger,
+      states,
+      coreEvaluatedTypes: ['core.factory', 'ms.core.health'],
+    });
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -253,6 +258,56 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
     await reachability.found(probeId);
     assert.equal(reachability.reachable(otherSensor.id), false, 'the other probe is still down');
     assert.equal(reachability.reachable(sensorIds[0] ?? 0), true);
+  });
+
+  it('leaves a core-evaluated sensor alone, because the probe never scanned it', async () => {
+    // **Found while building `P-13`, and already wrong for `core.factory`.** A core-evaluated
+    // sensor's readings come from rows this process holds; the probe it happens to sit under has
+    // never asked it anything, and its absence says nothing about it. Marking it Unknown is a
+    // false claim — and for Probe Health it is a disabling one, because the sensor whose job is
+    // to raise the single alarm for a lost probe would be silenced by the outage it reports.
+    const factory = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: deviceId,
+      name: 'Total throughput',
+      sensorType: 'core.factory',
+      params: {},
+    });
+    await scanned([...sensorIds, factory.id]);
+
+    await reachability.lost(probeId);
+
+    for (const sensorId of sensorIds) {
+      assert.equal((await stateOf(sensorId))?.state, 'unknown', 'a scanned sensor is Unknown');
+    }
+    assert.equal(
+      (await stateOf(factory.id))?.state,
+      'up',
+      'the factory keeps the state its own evaluation gave it',
+    );
+    assert.equal(reachability.unreachableSensors().has(factory.id), false);
+  });
+
+  it('gives a core-evaluated sensor nothing back when the probe returns either', async () => {
+    // The other half: `found` walks the set it recorded, so a sensor that was never in it must
+    // not acquire a spurious transition on the way back. One outage, one transition — and for
+    // this sensor, none at all.
+    const factory = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: deviceId,
+      name: 'Total throughput',
+      sensorType: 'core.factory',
+      params: {},
+    });
+    await scanned([...sensorIds, factory.id]);
+    await reachability.lost(probeId);
+    await reachability.found(probeId);
+
+    const history = await db.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM sensor_state WHERE sensor_id = $1',
+      [factory.id],
+    );
+    assert.equal(history[0]?.n, '1', 'the one transition its own first reading made');
   });
 
   it('reports a probe with no sensors without touching anything', async () => {

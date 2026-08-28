@@ -1,0 +1,349 @@
+import { strict as assert } from 'node:assert';
+import { after, before, describe, it } from 'node:test';
+import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
+import { PROTOCOL_VERSION, type CheckResult, type ProbeHealthReport } from '@ms/shared';
+import { ProbeHealthService, readingsFrom } from '../src/health/probe-health.js';
+import type { ProbeLink } from '../src/transport/probe-endpoint.js';
+import type { Database } from '../src/db/pool.js';
+import {
+  createScratchDatabase,
+  databaseAvailable,
+  type ScratchDatabase,
+} from './support/database.js';
+import { buildHarness, silent, testActor } from './support/tree.js';
+
+/**
+ * Probe Health (`P-13`), and `P-04`'s numbers arriving on it.
+ *
+ * The claim the whole design rests on: **a probe cannot report its own absence**, so the core
+ * evaluates this. Every test below is some version of "does it still say something true when the
+ * probe is gone, or old, or silent" — because a sensor that only works while everything works is
+ * not a health sensor.
+ */
+
+const available = await databaseAvailable();
+
+const FULL: ProbeHealthReport = {
+  scheduled: 120,
+  schedulerLagMs: { p50: 2, p95: 11, p99: 30, max: 90 },
+  skippedTicks: 0,
+  clockJumps: 1,
+  poolSize: 48,
+  poolBusy: 12,
+  queued: 3,
+  queueWaitMs: { p50: 1, p95: 40, p99: 90, max: 500 },
+  deferred: 7,
+  refused: 2,
+  timedOut: 1,
+  workerCrashes: 0,
+  spoolPending: 500,
+  spoolBytes: 2 * 1024 * 1024,
+  spoolDropped: 4,
+  spoolCorrupt: 0,
+  cpuPercent: 18.5,
+  memoryMb: 210.4,
+  uptimeSeconds: 3_600,
+};
+
+describe('the Probe Health sensor', { skip: available ? false : 'no database' }, () => {
+  let scratch: ScratchDatabase;
+  let db: Database;
+  let probeId = 0;
+  let sensorId = 0;
+  let orphanId = 0;
+
+  before(async () => {
+    scratch = await createScratchDatabase('probehealth');
+    db = scratch.db;
+    const harness = await buildHarness(db);
+
+    const probe = await harness.service.create(testActor, {
+      kind: 'probe',
+      parentId: harness.rootId,
+      name: 'remote-probe',
+    });
+    probeId = probe.id;
+    const device = await harness.service.create(testActor, {
+      kind: 'device',
+      parentId: probe.id,
+      name: 'probe-box',
+      host: '127.0.0.1',
+    });
+    const sensor = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: device.id,
+      name: 'Probe Health',
+      sensorType: 'ms.probe.health',
+      params: {},
+    });
+    sensorId = sensor.id;
+
+    // A second sensor under a *different* probe, naming the first explicitly — the placement an
+    // operator uses so that losing a probe does not also lose the view of it.
+    const watcher = await harness.service.create(testActor, {
+      kind: 'probe',
+      parentId: harness.rootId,
+      name: 'local-probe',
+    });
+    const watcherDevice = await harness.service.create(testActor, {
+      kind: 'device',
+      parentId: watcher.id,
+      name: 'core-box',
+      host: '127.0.0.1',
+    });
+    const named = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: watcherDevice.id,
+      name: 'Remote probe health',
+      sensorType: 'ms.probe.health',
+      params: { probeId: probe.id },
+    });
+    orphanId = named.id;
+  });
+
+  after(async () => {
+    await scratch.drop();
+  });
+
+  const connected = (
+    overrides: Partial<Extract<ProbeLink, { connected: true }>> = {},
+  ): ProbeLink => ({
+    connected: true,
+    protocolVersion: PROTOCOL_VERSION,
+    connectedAt: new Date('2026-08-28T00:00:00Z'),
+    lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
+    approved: true,
+    agentVersion: '1.0.0',
+    health: FULL,
+    ...overrides,
+  });
+
+  const build = (
+    link: (probeObjectId: number) => ProbeLink,
+    ingest: (results: readonly CheckResult[]) => Promise<void> = () => Promise.resolve(),
+  ): ProbeHealthService =>
+    new ProbeHealthService({
+      db,
+      logger: silent,
+      sources: { link },
+      ingest,
+      now: () => new Date('2026-08-28T00:00:25Z'),
+    });
+
+  describe('a probe that is answering', () => {
+    it('produces every channel the type declares', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      for (const key of PROBE_HEALTH_CHANNELS) {
+        assert.ok(key in reading, `${key} was declared and never read`);
+      }
+      assert.equal(Object.keys(reading).length, PROBE_HEALTH_CHANNELS.length);
+    });
+
+    it('reports the link, the heartbeat age and the probe’s own numbers', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['connected'], 1);
+      assert.equal(reading['heartbeatAge'], 5, 'five seconds since the last one');
+      assert.equal(reading['protocol'], 0, 'the same version as this build');
+      assert.equal(reading['schedulerLag'], 11, 'p95, because a scheduler is late in bursts');
+      assert.equal(reading['checkWait'], 40);
+      assert.equal(reading['poolUsage'], 25, '12 of 48');
+      assert.equal(reading['deferred'], 7);
+      assert.equal(reading['refused'], 2);
+      assert.equal(reading['spoolDepth'], 500);
+      assert.equal(reading['spoolBytes'], 2, 'bytes in, megabytes out');
+      assert.equal(reading['spoolDropped'], 4);
+      assert.equal(reading['cpu'], 18.5);
+    });
+
+    it('says what it is doing, and stays quiet about what is fine', () => {
+      const { message } = build(() => connected()).read(probeId);
+      assert.match(message, /connected, 120 sensors scheduled/);
+      assert.match(message, /scheduler lag 11 ms/);
+      assert.match(message, /pool 25%/);
+      assert.match(message, /500 results spooled/);
+    });
+
+    it('gaps the pool percentage rather than dividing by a pool of none', () => {
+      // 0 busy of 0 slots is not 0% used — it is a pool that does not exist.
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, poolSize: 0, poolBusy: 0 } }),
+      ).read(probeId);
+      assert.equal(reading['poolUsage'], null);
+    });
+
+    it('gaps a heartbeat that has never arrived rather than calling it zero seconds old', () => {
+      const { reading } = build(() => connected({ lastHeartbeatAt: null })).read(probeId);
+      assert.equal(reading['heartbeatAge'], null);
+    });
+  });
+
+  describe('a probe that is not answering', () => {
+    it('reports the link down and every other channel as a gap', () => {
+      // **The reading this sensor exists for.** The probe's numbers are not zero, they are
+      // unknown — and a scheduler lag of 0 ms from a probe that is gone would be the most
+      // confidently wrong number this system could store.
+      const { reading, message } = build(() => ({ connected: false })).read(probeId);
+      assert.equal(reading['connected'], 0);
+      assert.equal(message, 'not connected to the core');
+      for (const key of PROBE_HEALTH_CHANNELS) {
+        if (key === 'connected') continue;
+        assert.equal(reading[key], null, `${key} should be a gap, not a zero`);
+      }
+    });
+
+    it('sends exactly one channel reading, so nothing downstream sees a zero', () => {
+      const { reading } = build(() => ({ connected: false })).read(probeId);
+      assert.deepEqual(
+        readingsFrom(reading).map((one) => one.key),
+        ['connected'],
+      );
+    });
+  });
+
+  describe('a probe too old to report its own numbers', () => {
+    it('still reports what the core knows, and says why the rest is missing', () => {
+      // `R-06`'s rule: a probe that connects and quietly does less than it should is the failure
+      // worth making visible. Silently absent channels would look like a probe with nothing to
+      // report rather than one that cannot report.
+      const old: ProbeLink = {
+        connected: true,
+        protocolVersion: 3,
+        connectedAt: new Date('2026-08-28T00:00:00Z'),
+        lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
+        approved: true,
+        agentVersion: '0.4.0',
+        // No `health` at all: a probe below protocol 7 sends none.
+      };
+      const { reading, message } = build(() => old).read(probeId);
+      assert.equal(reading['connected'], 1);
+      assert.equal(reading['heartbeatAge'], 5);
+      assert.equal(reading['protocol'], 1, 'outdated');
+      assert.equal(reading['schedulerLag'], null);
+      assert.match(message, /its own numbers are unavailable/);
+      assert.match(message, /speaks protocol 3/);
+    });
+
+    it('calls a version below the minimum incompatible rather than merely old', () => {
+      // Down, not Warning: the link is refused, so nothing under that probe is scanned at all.
+      const { reading } = build(() => connected({ protocolVersion: 0 })).read(probeId);
+      assert.equal(reading['protocol'], 2);
+    });
+
+    it('calls a version newer than this build incompatible rather than guessing', () => {
+      const { reading } = build(() => connected({ protocolVersion: PROTOCOL_VERSION + 1 })).read(
+        probeId,
+      );
+      assert.equal(reading['protocol'], 2);
+    });
+  });
+
+  describe('turning a reading into channel readings', () => {
+    it('leaves a gap out rather than sending it as zero', () => {
+      const readings = readingsFrom({ connected: 1, schedulerLag: null });
+      assert.deepEqual(
+        readings.map((one) => one.key),
+        ['connected'],
+      );
+    });
+
+    it('sends the declared counters as counter text', () => {
+      const readings = readingsFrom({ deferred: 7, refused: 2, connected: 1 });
+      for (const reading of readings) {
+        if (PROBE_HEALTH_COUNTERS.has(reading.key)) {
+          assert.equal(reading.counter, String(reading.value), reading.key);
+          assert.equal(reading.counterBits, 64, reading.key);
+        } else {
+          assert.equal(reading.counter, undefined, reading.key);
+        }
+      }
+    });
+  });
+
+  describe('the sweep', () => {
+    it('finds the probe a sensor sits under, however deep', async () => {
+      const batches: CheckResult[][] = [];
+      const seen: number[] = [];
+      await build(
+        (id) => {
+          seen.push(id);
+          return connected();
+        },
+        (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+      ).sweep();
+
+      const results = batches[0] ?? [];
+      assert.equal(results.length, 2);
+      const under = results.find((one) => one.sensorId === sensorId);
+      assert.equal(under?.outcome, 'ok');
+      assert.ok(seen.includes(probeId));
+    });
+
+    it('honours an explicitly named probe over the one it sits under', async () => {
+      // The placement that matters: a sensor watching probe A from under probe B, so that losing
+      // A does not also lose the view of it.
+      const asked = new Map<number, number>();
+      const batches: CheckResult[][] = [];
+      await build(
+        (id) => {
+          asked.set(id, (asked.get(id) ?? 0) + 1);
+          return connected();
+        },
+        (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+      ).sweep();
+
+      const named = (batches[0] ?? []).find((one) => one.sensorId === orphanId);
+      assert.equal(named?.outcome, 'ok');
+      assert.equal(asked.get(probeId), 2, 'both sensors report on the same probe');
+    });
+
+    it('fails a sensor that has no probe to report on, and says how to fix it', async () => {
+      // Not a silent gap: an operator who put this sensor somewhere it cannot answer needs to
+      // be told, and the sentence says what to do.
+      const batches: CheckResult[][] = [];
+      const service = new ProbeHealthService({
+        db: {
+          query: () => Promise.resolve([{ id: '99', params: {}, probe_id: null }]),
+          tx: () => Promise.resolve({}),
+        } as unknown as Database,
+        logger: silent,
+        sources: { link: () => ({ connected: false }) },
+        ingest: (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+      });
+      await service.sweep();
+
+      const result = batches[0]?.[0];
+      assert.ok(result !== undefined);
+      assert.equal(result.outcome, 'error');
+      assert.deepEqual(result.channels, []);
+      assert.match(result.message, /no probe above it and names none/);
+      assert.equal(service.stats().unresolved, 1);
+    });
+
+    it('does nothing at all when no such sensor exists', async () => {
+      let ingested = 0;
+      const service = new ProbeHealthService({
+        db: {
+          query: () => Promise.resolve([]),
+          tx: () => Promise.resolve({}),
+        } as unknown as Database,
+        logger: silent,
+        sources: { link: () => ({ connected: false }) },
+        ingest: () => {
+          ingested += 1;
+          return Promise.resolve();
+        },
+      });
+      assert.equal(await service.sweep(), 0);
+      assert.equal(ingested, 0);
+    });
+  });
+});

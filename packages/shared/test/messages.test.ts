@@ -25,6 +25,51 @@ describe('protocol message validation', () => {
 
   it('accepts heartbeat and bye', () => {
     assert.equal(parseProbeToCore({ type: 'heartbeat', seq: 0, sentAt: 'now' }).type, 'heartbeat');
+  });
+
+  it('accepts a heartbeat carrying the probe’s own health, and one without', () => {
+    // Optional at the schema level, so a probe below protocol 7 still validates (`P-13`). The
+    // absence of a field is a gap on that channel, never a zero — which is why the schema does
+    // not require any of them.
+    const withHealth = parseProbeToCore({
+      type: 'heartbeat',
+      seq: 3,
+      sentAt: 'now',
+      health: {
+        scheduled: 120,
+        schedulerLagMs: { p50: 2, p95: 11, p99: 30, max: 90 },
+        poolSize: 48,
+        poolBusy: 12,
+        deferred: 7,
+        refused: 2,
+      },
+    });
+    assert.equal(withHealth.type, 'heartbeat');
+    assert.equal(withHealth.health?.deferred, 7);
+    // `assert.equal` narrows, so `health` is known present from the line above.
+    assert.equal(withHealth.health.spoolPending, undefined, 'a probe with no spool sends none');
+
+    const bare = parseProbeToCore({ type: 'heartbeat', seq: 4, sentAt: 'now' });
+    assert.equal(bare.type === 'heartbeat' ? bare.health : 'wrong type', undefined);
+  });
+
+  it('refuses a health field the schema does not know', () => {
+    // `additionalProperties: false`, so a peer inventing a channel is refused rather than having
+    // it silently dropped — the same rule every other message on this wire follows.
+    assert.throws(() =>
+      parseProbeToCore({
+        type: 'heartbeat',
+        seq: 5,
+        sentAt: 'now',
+        health: { madeUp: 1 },
+      }),
+    );
+  });
+
+  it('refuses a negative count in the health payload', () => {
+    assert.throws(() =>
+      parseProbeToCore({ type: 'heartbeat', seq: 6, sentAt: 'now', health: { deferred: -1 } }),
+    );
     assert.equal(parseProbeToCore({ type: 'bye', reason: 'shutting down' }).type, 'bye');
   });
 

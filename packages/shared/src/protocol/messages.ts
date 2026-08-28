@@ -33,8 +33,15 @@ import { AppError } from '../errors/app-error.js';
  * administrator's queue instead of being trusted for having reached the port. The same message
  * may carry a per-probe `accessKey`, issued once at approval, which is what makes revoking one
  * probe possible without rotating the enrolment key every other probe shares.
+ *
+ * Version 7 added probe health reporting (`P-13`). The heartbeat may now carry the probe's own
+ * scheduler, pool and spool numbers, which is the half of Probe Health only the probe knows. An
+ * older probe simply omits it, and its Probe Health sensor reports the half the *core* knows —
+ * connected or not, heartbeat age, protocol skew — and says in its message why the rest is
+ * missing. That is the `R-06` rule applied again: a capability the peer does not have is
+ * reported in words, never silently absent.
  */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /**
  * The oldest peer version this build still understands.
@@ -224,6 +231,53 @@ export type RejectCode =
   | 'source-not-allowed'
   | 'internal-error';
 
+/**
+ * What a probe knows about itself and the core does not (`P-13`, `P-04`).
+ *
+ * **Sent on the heartbeat rather than as its own message**, because it is the same fact the
+ * heartbeat already carries — "I am here and this is how I am" — and a second periodic message
+ * would be a second thing to keep in step with the first.
+ *
+ * Every field is optional at the *type* level rather than the schema level being loose: a probe
+ * with no spool configured has no spool numbers to report, and absent is a **gap** on that
+ * channel rather than a zero. Reporting `spoolDepth: 0` for "there is no spool" and for "the
+ * spool is empty" would make the two indistinguishable, which is the one thing this system does
+ * not do with missing data.
+ */
+export interface ProbeHealthReport {
+  /** Sensors the wheel currently has scheduled. Compared against what the core assigned. */
+  scheduled?: number;
+  /** Tick lateness over the last 1,024 ticks, in milliseconds. Only the wheel can measure it. */
+  schedulerLagMs?: { p50: number; p95: number; p99: number; max: number };
+  /** Ticks the wheel skipped entirely, and clock jumps it resynchronised against. */
+  skippedTicks?: number;
+  clockJumps?: number;
+  /** Worker slots, and how many are busy right now. */
+  poolSize?: number;
+  poolBusy?: number;
+  /** Checks waiting for a slot. Rising queue depth is backpressure before anything is refused. */
+  queued?: number;
+  /** How long a check waited for a slot, in milliseconds. */
+  queueWaitMs?: { p50: number; p95: number; p99: number; max: number };
+  /** Checks skipped because the previous scan of that sensor had not finished. Monotonic. */
+  deferred?: number;
+  /** Checks refused because the queue was full. Monotonic, and never silent. */
+  refused?: number;
+  timedOut?: number;
+  workerCrashes?: number;
+  /** Results written to disk and not yet acknowledged by the core. */
+  spoolPending?: number;
+  spoolBytes?: number;
+  /** Results evicted to stay inside the spool cap. The number that must never be a surprise. */
+  spoolDropped?: number;
+  /** Spool lines that did not parse — a torn write at a crash boundary. */
+  spoolCorrupt?: number;
+  /** The probe process itself: percentage of one core, resident megabytes, seconds since start. */
+  cpuPercent?: number;
+  memoryMb?: number;
+  uptimeSeconds?: number;
+}
+
 export type ProbeToCoreMessage =
   | {
       type: 'hello';
@@ -244,7 +298,7 @@ export type ProbeToCoreMessage =
        */
       configVersion?: string;
     }
-  | { type: 'heartbeat'; seq: number; sentAt: string }
+  | { type: 'heartbeat'; seq: number; sentAt: string; health?: ProbeHealthReport }
   | {
       type: 'results';
       /**
@@ -417,6 +471,57 @@ export class ProtocolError extends AppError {
 // CLAUDE.md: validate at boundaries with JSON Schema — API inputs, sensor params, config files
 // and probe messages. A peer is a boundary even when it is our own code on the other end.
 
+/**
+ * The percentile bundle three of the health fields share.
+ *
+ * Bounded rather than open: these arrive on every heartbeat from a peer that is, by definition,
+ * not fully trusted, and an unbounded number is a chart axis somebody else controls.
+ */
+const PERCENTILES_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['p50', 'p95', 'p99', 'max'],
+  properties: {
+    p50: { type: 'number', minimum: 0, maximum: 86_400_000 },
+    p95: { type: 'number', minimum: 0, maximum: 86_400_000 },
+    p99: { type: 'number', minimum: 0, maximum: 86_400_000 },
+    max: { type: 'number', minimum: 0, maximum: 86_400_000 },
+  },
+} as const;
+
+/**
+ * The probe's own numbers, on the heartbeat (`P-13`).
+ *
+ * Nothing is required. A probe with no spool has no spool numbers, and a field that is absent is
+ * a **gap** on its channel rather than a zero — which is the difference between "there is no
+ * spool" and "the spool is empty".
+ */
+const PROBE_HEALTH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    scheduled: { type: 'integer', minimum: 0 },
+    schedulerLagMs: PERCENTILES_SCHEMA,
+    skippedTicks: { type: 'integer', minimum: 0 },
+    clockJumps: { type: 'integer', minimum: 0 },
+    poolSize: { type: 'integer', minimum: 0 },
+    poolBusy: { type: 'integer', minimum: 0 },
+    queued: { type: 'integer', minimum: 0 },
+    queueWaitMs: PERCENTILES_SCHEMA,
+    deferred: { type: 'integer', minimum: 0 },
+    refused: { type: 'integer', minimum: 0 },
+    timedOut: { type: 'integer', minimum: 0 },
+    workerCrashes: { type: 'integer', minimum: 0 },
+    spoolPending: { type: 'integer', minimum: 0 },
+    spoolBytes: { type: 'integer', minimum: 0 },
+    spoolDropped: { type: 'integer', minimum: 0 },
+    spoolCorrupt: { type: 'integer', minimum: 0 },
+    cpuPercent: { type: 'number', minimum: 0 },
+    memoryMb: { type: 'number', minimum: 0 },
+    uptimeSeconds: { type: 'number', minimum: 0 },
+  },
+} as const;
+
 const probeToCoreSchema = {
   type: 'object',
   required: ['type'],
@@ -442,6 +547,9 @@ const probeToCoreSchema = {
         type: { const: 'heartbeat' },
         seq: { type: 'integer', minimum: 0 },
         sentAt: { type: 'string', minLength: 1, maxLength: 64 },
+        // Optional, so a probe below version 7 still validates (`P-13`). Every field inside is
+        // optional too: absent is a gap on that channel, never a zero.
+        health: PROBE_HEALTH_SCHEMA,
       },
       required: ['type', 'seq', 'sentAt'],
       additionalProperties: false,

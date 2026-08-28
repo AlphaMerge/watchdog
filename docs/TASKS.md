@@ -367,7 +367,7 @@ because each is a decision rather than a defect:
       built rather than inherited environment. Not bounded: CPU seconds, address space, file
       descriptors and child count — Node exposes no `setrlimit`, and reaching one would mean a
       shell or a native dependency. `A-09` is where a platform-specific answer belongs.
-- [ ] **P-04 — Backpressure and lag metrics** · M · P-02 · Skip-if-still-running, deferred-check
+- [x] **P-04 — Backpressure and lag metrics** · M · P-02 · Skip-if-still-running, deferred-check
       counter, scheduler lag histogram (p50/p95/p99), pool utilisation.
       **Added by P-01:** `TimingWheel.stats()` already carries the scheduler half — tick lag
       percentiles over the last 1,024 ticks, dispatch count, skipped ticks and clock jumps. Only
@@ -377,6 +377,12 @@ because each is a decision rather than a defect:
       deferred and refused counts, worker crashes, and percentiles for both queue wait and check
       duration. Skip-if-still-running is implemented; what is left for this task is surfacing all
       of it on Probe Health.
+
+      **P-04 outcome: delivered by `P-13`,** which is where "surfacing it" had to happen. The
+      numbers travel on the heartbeat as `ProbeHealthReport` (protocol 7) and become channels —
+      `schedulerLag` (p95, because a scheduler is late in bursts), `poolUsage`, `queued`,
+      `checkWait`, `deferred`, `refused`, `timedOut`, `workerCrashes`, `clockJumps`. Each is a
+      channel an operator can put a limit on rather than a line in a log nobody greps.
 - [x] **P-05 — `SensorType` plugin contract and registry** · L · P-02 · Interface per ADR
       decision 7 (`id`, `category`, `paramsSchema`, `channels()`, `execute()`, `costHint`), startup
       registration, and a documented guide for adding a type. _Highest-leverage task in the backlog._
@@ -603,8 +609,49 @@ because each is a decision rather than a defect:
       deliberate gap, and the sensor Up with "0 queued, writes 20 ms, rollup 25 s behind".
 
       Tests: 24.
-- [ ] **P-13 — Probe Health sensor** · M · P-04 · Scheduler lag, deferred checks, pool
+- [x] **P-13 — Probe Health sensor** · M · P-04 · Scheduler lag, deferred checks, pool
       utilisation, connection state, spool depth, version skew.
+
+      **P-13 outcome.** `ms.probe.health` in `@ms/sensors`, `ProbeHealthService` in
+      `packages/core/src/health/`, a thirty-second sweep, `GET /api/v1/probes/{id}/health`, and
+      protocol 7 carrying the probe's own numbers on the heartbeat.
+
+      **The core evaluates it, and that is the decision the whole ticket turns on.** The obvious
+      design is a sensor that runs on the probe and reports its own numbers — and it fails at the
+      only moment that matters. `R-05` says a lost probe is one alarm, not a thousand: its sensors
+      go Unknown because nobody asked them anything, and the single alarm comes from Probe Health.
+      **A probe cannot report its own absence.** So the reading is two halves: what the core knows
+      (link, heartbeat age, protocol skew), which is always available, and what the probe told it
+      while it still could (scheduler lag, pool, spool), which gaps when the probe is gone.
+
+      **It found a real bug in `R-05` before a line of it was written.** `ProbeReachability`
+      marked *every* sensor under a lost probe Unknown — including core-evaluated ones. That was
+      already wrong for `core.factory`, whose readings come from rows the core holds and which the
+      probe never touched; for Probe Health it would have been disabling, because the sensor whose
+      job is to raise the alarm for a lost probe would have been silenced by that very outage. The
+      walk now excludes core-evaluated types. **Verified live**: with the probe killed, sensor 8
+      went `unknown/probe` while Core Health and Probe Health kept their own states.
+
+      **`connected` is the primary channel**, through a lookup rather than a threshold — the state
+      reads "not connected", not "below 0.5" (`M-06`). Two built-in lookups joined the catalogue,
+      `ms.probe.link` and `ms.probe.protocol`. The protocol one has no code for "not yet known" on
+      purpose: a lookup maps a *reading* to a state and has no Unknown to map to, so an unrecorded
+      version is a **gap**. A fourth code would have had to be Warning, marking every probe after
+      an upgrade until it reconnected.
+
+      **A probe too old to report says so in words.** Below protocol 7 the probe's half is absent;
+      the channels gap and the message reads "its own numbers are unavailable — it speaks protocol
+      3, this build speaks 7, so it cannot …". `R-06`'s rule: a peer that connects and quietly does
+      less than it should is the failure worth making visible.
+
+      Mutation: 14 mutants, 14 killed. One survived first time — moving the primary channel off the
+      link, which nothing asserted — and `packages/sensors/test/health-types.test.ts` now pins the
+      primary and the lookups for both health types. Live: the local probe reported at protocol 7
+      with 47 sensors scheduled and 4.8 ms scheduler lag, `cpu` a gap on its first report, and a
+      sensor watching a probe that has never connected went **Down** with "Link to the core is 0
+      (not connected)" and exactly one channel carrying a reading.
+
+      Tests: 16 (core) + 5 (probe) + 5 (sensors) + 5 (shared) + 2 (reachability).
 - [ ] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13
       exposed for external scraping too.
 - [x] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run: **p95

@@ -1,5 +1,11 @@
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
-import { describeError, type ChannelReading, type CheckResult, type Logger } from '@ms/shared';
+import {
+  CpuMeter,
+  describeError,
+  type ChannelReading,
+  type CheckResult,
+  type Logger,
+} from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
 
@@ -67,37 +73,6 @@ export type CoreHealthReading = Readonly<Record<string, number | null>>;
 const HEALTH_TYPE = 'ms.core.health';
 
 const MB = 1024 * 1024;
-
-/**
- * One CPU baseline.
- *
- * Separated from the service because there are two of them — see `#sweepCpu` and `#liveCpu` —
- * and because a rate that quietly shares its baseline with another reader is the kind of thing
- * that is only ever noticed as "the graph got spiky when I opened the dashboard".
- */
-export class CpuMeter {
-  #usage: NodeJS.CpuUsage | null = null;
-  #at: bigint | null = null;
-
-  /**
-   * The interval since this meter was last read, or `null` the first time.
-   *
-   * **`null`, not zero.** Zero would say the core is idle, which is a claim about the machine
-   * rather than about the measurement — `CLAUDE.md`'s no-data rule, applied to a number that is
-   * not a device reading.
-   */
-  take(usage: NodeJS.CpuUsage, at: bigint): { usedUs: number; elapsedNs: bigint } | null {
-    const previous = this.#usage;
-    const previousAt = this.#at;
-    this.#usage = usage;
-    this.#at = at;
-    if (previous === null || previousAt === null) return null;
-    return {
-      usedUs: usage.user - previous.user + (usage.system - previous.system),
-      elapsedNs: at - previousAt,
-    };
-  }
-}
 
 export class CoreHealthService {
   readonly #db: Database;
@@ -248,11 +223,7 @@ export class CoreHealthService {
    * and a single-threaded event loop at its ceiling is precisely the thing worth alarming on.
    */
   #cpuPercent(meter: CpuMeter): number | null {
-    const previous = meter.take(this.#process.cpuUsage(), this.#process.hrtime());
-    if (previous === null) return null;
-    const elapsedUs = Number(previous.elapsedNs) / 1_000;
-    if (elapsedUs <= 0) return null;
-    return round((previous.usedUs / elapsedUs) * 100, 1);
+    return meter.percent(this.#process.cpuUsage(), this.#process.hrtime());
   }
 
   /**

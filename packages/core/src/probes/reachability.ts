@@ -21,18 +21,12 @@ import { describeError, type Logger } from '@ms/shared';
  */
 
 interface Db {
-  query<T extends Record<string, unknown>>(
-    text: string,
-    values?: readonly unknown[],
-  ): Promise<T[]>;
+  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
   tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
 }
 
 interface Queryable {
-  query<T extends Record<string, unknown>>(
-    text: string,
-    values?: readonly unknown[],
-  ): Promise<T[]>;
+  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
 }
 
 /** What this needs from the state service: re-decide these sensors, and say how many moved. */
@@ -49,6 +43,19 @@ export interface ProbeReachabilityOptions {
   db: Db;
   logger: Logger;
   states: StateReevaluator;
+  /**
+   * Sensor types the **core** evaluates, which a probe outage does not touch (`P-13`).
+   *
+   * Found while building Probe Health, and it was already wrong for `core.factory`. A
+   * core-evaluated sensor's readings come from rows this process holds; the probe it happens to
+   * sit under has never scanned it and its absence changes nothing about it. Marking it Unknown
+   * for that reason is a false claim — and for Probe Health specifically it is a disabling one,
+   * because the sensor whose job is to raise the single alarm for a lost probe would be silenced
+   * by the very outage it exists to report.
+   *
+   * Absent, nothing is excluded, which is the behaviour before this.
+   */
+  coreEvaluatedTypes?: readonly string[];
   now?: () => Date;
 }
 
@@ -56,6 +63,7 @@ export class ProbeReachability {
   readonly #db: Db;
   readonly #logger: Logger;
   readonly #states: StateReevaluator;
+  readonly #coreEvaluatedTypes: readonly string[];
   readonly #now: () => Date;
 
   /**
@@ -76,6 +84,7 @@ export class ProbeReachability {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'probe-reachability' });
     this.#states = options.states;
+    this.#coreEvaluatedTypes = options.coreEvaluatedTypes ?? [];
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -178,14 +187,21 @@ export class ProbeReachability {
    */
   async #sensorsUnder(probeObjectId: number): Promise<number[]> {
     const rows = await this.#db.query<{ id: string }>(
+      // The core-evaluated exclusion is a NOT IN rather than a filter applied afterwards, so a
+      // probe carrying five thousand sensors and one Sensor Factory does not read the factory's
+      // row only to throw it away — and so the empty-list case is one array parameter rather
+      // than a second statement.
       `WITH RECURSIVE below AS (
          SELECT id, kind FROM object WHERE id = $1
          UNION ALL
          SELECT child.id, child.kind
          FROM object child JOIN below ON child.parent_id = below.id
        )
-       SELECT id::text AS id FROM below WHERE kind = 'sensor'`,
-      [probeObjectId],
+       SELECT below.id::text AS id
+       FROM below
+       JOIN sensor_config ON sensor_config.object_id = below.id
+       WHERE below.kind = 'sensor' AND NOT (sensor_config.type = ANY($2::text[]))`,
+      [probeObjectId, [...this.#coreEvaluatedTypes]],
     );
     return rows.map((row) => Number(row.id));
   }

@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { PROTOCOL_VERSION } from '@ms/shared';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -55,7 +56,10 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     gid: '',
     displayName: 'backup-01',
     agentVersion: '0.1.0',
-    protocolVersion: 6,
+    // This build's own version, not a literal: a hardcoded number here turns every protocol bump
+    // into a test that fails for the wrong reason, which is exactly the "a number nobody looks
+    // at" problem `R-06` moved the version table for.
+    protocolVersion: PROTOCOL_VERSION,
     accessKey: 'shared-key',
     remoteAddress: '10.4.2.9',
     ...over,

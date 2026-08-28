@@ -11,6 +11,7 @@ import {
   type Logger,
   type ProbeConfig,
   type ProbeToCoreMessage,
+  type ProbeHealthReport,
   type NackReason,
   type CheckResult,
   type SweepJob,
@@ -50,6 +51,15 @@ export interface CoreClientOptions {
    * saying so — silence would leave the core waiting for progress that never comes.
    */
   onSweep?: (message: SweepCommand) => void;
+  /**
+   * The probe's own numbers, gathered at the moment a heartbeat goes out (`P-13`).
+   *
+   * A callback rather than an object, because these are counters that move between heartbeats
+   * and a snapshot handed over at construction would report the probe as it was at start-up for
+   * ever. Absent means this build reports nothing, and Probe Health then shows only what the
+   * core knows — which is the same shape as a probe too old to send any of it.
+   */
+  health?: () => ProbeHealthReport;
   random?: () => number;
 }
 
@@ -432,10 +442,15 @@ export class CoreClient {
       const connection = this.#connection;
       if (connection === undefined || connection.closed) return;
       this.#heartbeatSeq += 1;
+      // Gathered here rather than on a timer of its own: the heartbeat is already the periodic
+      // "I am here and this is how I am", and a second cadence would be a second thing to keep
+      // in step with the first.
+      const health = this.#options.health?.();
       connection.send({
         type: 'heartbeat',
         seq: this.#heartbeatSeq,
         sentAt: new Date().toISOString(),
+        ...(health === undefined ? {} : { health }),
       });
     }, intervalMs);
     this.#heartbeatTimer.unref();

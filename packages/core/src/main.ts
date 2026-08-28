@@ -39,6 +39,7 @@ import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
 import { CoreHealthService } from './health/core-health.js';
+import { ProbeHealthService } from './health/probe-health.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
 import { StateBroadcaster } from './state/stream.js';
@@ -705,6 +706,8 @@ async function serve(): Promise<void> {
   // milliseconds in between, which is the honest answer: "starting" is not "everything is zero".
   // eslint-disable-next-line prefer-const -- assigned below, once the ingestor exists.
   let coreHealthRef: CoreHealthService | undefined;
+  // eslint-disable-next-line prefer-const -- assigned below, once the probe endpoint exists.
+  let probeHealthRef: ProbeHealthService | undefined;
 
   const api = new ApiServer({
     config: config.api,
@@ -740,6 +743,7 @@ async function serve(): Promise<void> {
     templates,
     deliveryHealth,
     coreHealth: () => coreHealthRef,
+    probeHealth: () => probeHealthRef,
     tester,
     stream,
   });
@@ -806,7 +810,18 @@ async function serve(): Promise<void> {
 
   // A lost probe is one alarm, not a thousand (`R-05`). Built before the endpoint, which is
   // what tells it when a link comes and goes.
-  const reachability = new ProbeReachability({ db, logger, states });
+  const reachability = new ProbeReachability({
+    db,
+    logger,
+    states,
+    // A core-evaluated sensor is not scanned by the probe it happens to sit under, so a probe
+    // outage says nothing about it (`P-13`). Probe Health depends on this: it is a sensor under
+    // the probe it reports on, and without the exclusion the outage it exists to raise would be
+    // the thing that silenced it.
+    coreEvaluatedTypes: catalogue
+      .ids()
+      .filter((id) => catalogue.declaration(id).evaluatedBy === 'core'),
+  });
   reachabilityRef = reachability;
 
   const probeEndpoint: ProbeEndpoint = new ProbeEndpoint({
@@ -870,6 +885,40 @@ async function serve(): Promise<void> {
     },
   });
   coreHealthRef = coreHealth;
+  // The other half of the same rule (P-13). Evaluated by the core because **a probe cannot
+  // report its own absence**, which is the single most important thing this sensor says — R-05
+  // made a lost probe one alarm rather than a thousand, and this is where that one alarm comes
+  // from.
+  const probeHealth = new ProbeHealthService({
+    db,
+    logger,
+    sources: { link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId) },
+    ingest: async (results) => {
+      await ingestion.acceptResults('probe-health', {
+        type: 'results',
+        batchId: `probe-health-${String(Date.now())}`,
+        results: [...results],
+      });
+    },
+  });
+  probeHealthRef = probeHealth;
+  const probeHealthSweep = new PeriodicSweep({
+    logger,
+    component: 'probe-health-sweep',
+    what: 'a Probe Health sweep failed',
+    run: () => probeHealth.sweep(),
+    intervalMs: 30_000,
+  });
+  probeHealthSweep.start();
+  lifecycle.onShutdown({
+    name: 'probe-health-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      probeHealthSweep.stop();
+      return Promise.resolve();
+    },
+  });
+
   const coreHealthSweep = new PeriodicSweep({
     logger,
     component: 'core-health-sweep',

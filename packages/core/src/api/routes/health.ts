@@ -1,18 +1,21 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
-import { CORE_HEALTH_CHANNELS } from '@ms/sensors';
-import { AppError } from '@ms/shared';
+import { CORE_HEALTH_CHANNELS, PROBE_HEALTH_CHANNELS } from '@ms/sensors';
+import { AppError, versionFor } from '@ms/shared';
 import type { FastifyInstance } from 'fastify';
 import type { CoreHealthService } from '../../health/core-health.js';
+import type { ProbeHealthService } from '../../health/probe-health.js';
 import { toHttpError } from '../errors.js';
 
-export interface CoreHealthRoutesOptions {
+export interface HealthRoutesOptions {
   /**
    * Late-bound, because the service is built from the ingestor and the probe endpoint — both of
    * which are constructed after the API so a slow first housekeeping pass cannot delay the port
    * opening. The window is milliseconds; answering honestly during it beats pretending.
    */
   coreHealth: () => CoreHealthService | undefined;
+  /** Late-bound for the same reason, and built after the probe endpoint it reads (`P-13`). */
+  probeHealth?: () => ProbeHealthService | undefined;
 }
 
 /**
@@ -28,9 +31,12 @@ export interface CoreHealthRoutesOptions {
  *    nowhere to write the reading or the state. Most of this answer needs no database at all, so
  *    this route keeps working when the sensor cannot.
  */
-export function coreHealthRoutes(app: FastifyInstance, options: CoreHealthRoutesOptions): void {
+export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions): void {
   const channelProperties: Record<string, { type: ['number', 'null'] }> = {};
   for (const key of CORE_HEALTH_CHANNELS) channelProperties[key] = { type: ['number', 'null'] };
+
+  const probeProperties: Record<string, { type: ['number', 'null'] }> = {};
+  for (const key of PROBE_HEALTH_CHANNELS) probeProperties[key] = { type: ['number', 'null'] };
 
   app.get(
     '/core-health',
@@ -77,6 +83,69 @@ export function coreHealthRoutes(app: FastifyInstance, options: CoreHealthRoutes
         return reply;
       }
       return { at: new Date().toISOString(), channels: await service.read() };
+    },
+  );
+
+  const probeHealth = options.probeHealth;
+  if (probeHealth === undefined) return;
+
+  app.get<{ Params: { id: number } }>(
+    '/probes/:id/health',
+    {
+      schema: {
+        tags: ['health'],
+        summary: 'How one probe is doing, right now',
+        description:
+          '**Answers for a probe that is not connected**, which is the whole reason Probe Health ' +
+          'is evaluated by the core: a probe cannot report its own absence. `connected` is 0 ' +
+          'then and every other channel is `null` — a gap, because the probe’s numbers are not ' +
+          'zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would ' +
+          'be the most misleading reading this system could produce. A probe below protocol ' +
+          `${String(versionFor('healthReporting'))} cannot send its own numbers either; the ` +
+          'message says so in words rather than leaving the channels silently absent.',
+        params: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id'],
+          properties: { id: { type: 'integer', minimum: 1 } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['at', 'probeId', 'message', 'channels'],
+            properties: {
+              at: { type: 'string' },
+              probeId: { type: 'integer' },
+              message: { type: 'string' },
+              channels: {
+                type: 'object',
+                additionalProperties: false,
+                properties: probeProperties,
+              },
+            },
+          },
+          503: { $ref: 'ms:error' },
+        },
+      },
+    },
+    async (request, reply) => {
+      const service = probeHealth();
+      if (service === undefined) {
+        const mapped = toHttpError(
+          new AppError('CORE_STARTING', 'the core is still starting; ask again in a moment'),
+          request.id,
+        );
+        await reply.status(503).send(mapped.body);
+        return reply;
+      }
+      const { reading, message } = service.read(request.params.id);
+      return {
+        at: new Date().toISOString(),
+        probeId: request.params.id,
+        message,
+        channels: reading,
+      };
     },
   );
 }

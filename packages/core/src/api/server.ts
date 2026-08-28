@@ -43,7 +43,8 @@ import { alarmRoutes, ALARM_SCHEMAS } from './routes/alarms.js';
 import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
 import type { DeliveryHealthReader } from '../notifications/health.js';
 import type { CoreHealthService } from '../health/core-health.js';
-import { coreHealthRoutes } from './routes/core-health.js';
+import type { ProbeHealthService } from '../health/probe-health.js';
+import { healthRoutes } from './routes/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
@@ -150,6 +151,8 @@ export interface ApiServerOptions {
    * delay the port opening. The route answers 503 for the milliseconds in between.
    */
   coreHealth?: () => CoreHealthService | undefined;
+  /** One probe's health, live (`P-13`). Late-bound like the core's, and for the same reason. */
+  probeHealth?: () => ProbeHealthService | undefined;
   /** What "send test notification" actually sends through (`N-14`). */
   tester?: NotificationTester;
   /**
@@ -192,6 +195,7 @@ export class ApiServer {
   readonly #templates: TemplateService | undefined;
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
   readonly #coreHealth: (() => CoreHealthService | undefined) | undefined;
+  readonly #probeHealth: (() => ProbeHealthService | undefined) | undefined;
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #undeclared: string[] = [];
@@ -229,6 +233,7 @@ export class ApiServer {
     this.#templates = options.templates;
     this.#deliveryHealth = options.deliveryHealth;
     this.#coreHealth = options.coreHealth;
+    this.#probeHealth = options.probeHealth;
     this.#tester = options.tester;
     this.#stream = options.stream;
 
@@ -473,7 +478,10 @@ export class ApiServer {
           });
         }
         if (this.#coreHealth !== undefined) {
-          coreHealthRoutes(scope, { coreHealth: this.#coreHealth });
+          healthRoutes(scope, {
+            coreHealth: this.#coreHealth,
+            ...(this.#probeHealth === undefined ? {} : { probeHealth: this.#probeHealth }),
+          });
         }
       },
       { prefix: '/api/v1' },

@@ -24,6 +24,7 @@ import { SweepRunner } from './discovery/sweep.js';
 import { pingOnce } from './discovery/ping-probe.js';
 import { IdentifyRunner } from './discovery/identify-runner.js';
 import { LIVE_SOURCES } from './discovery/sources.js';
+import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
 
@@ -295,10 +296,21 @@ async function main(): Promise<void> {
     },
   });
 
+  // The probe's half of Probe Health (`P-13`, `P-04`): scheduler lag, pool saturation, the
+  // deferred and refused counts, and the spool depth. Only the probe can measure any of them —
+  // and the core's half, which is whether this probe is answering at all, is exactly the half
+  // that still works when it is not.
+  const health = new ProbeHealthReporter({
+    scheduler: () => wheel.stats(),
+    pool: () => pool.stats(),
+    spool: () => spool.stats(),
+  });
+
   const coreClient = new CoreClient({
     config,
     logger,
     agentVersion: VERSION,
+    health: () => health.report(),
     onStateChange: (state) => {
       logger.info({ linkState: state }, 'link state changed');
       // The backlog is the first thing to move once the link is back.

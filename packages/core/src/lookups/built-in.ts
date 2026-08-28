@@ -55,4 +55,55 @@ const IF_ADMIN_STATUS: LookupDefinition = {
   ],
 };
 
-export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [IF_OPER_STATUS, IF_ADMIN_STATUS];
+/**
+ * Whether a probe is talking to the core (`P-13`).
+ *
+ * A lookup rather than a threshold on a 1/0 channel, because "not connected" is a *state* and
+ * not a measurement — the same rule that keeps `ifOperStatus` out of a limit. It also makes the
+ * one alarm for a lost probe read as a sentence rather than as "0 is below 0.5".
+ */
+const PROBE_LINK: LookupDefinition = {
+  id: 'ms.probe.link',
+  name: 'Probe link',
+  description: 'Whether the core currently has a connection from this probe.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'down', text: 'not connected' },
+    { value: 1, state: 'up', text: 'connected' },
+  ],
+};
+
+/**
+ * How far a probe's protocol version is from the core's (`R-06`).
+ *
+ * **Outdated is a warning, not an outage**, and the distinction is the whole of `R-06`: an old
+ * probe connects, heartbeats and behaves — and quietly cannot be sent some or all of its work.
+ * That is worth an operator's attention and is not, on its own, a monitoring failure.
+ * Incompatible is Down, because the link is refused and nothing under that probe is scanned.
+ */
+const PROBE_PROTOCOL: LookupDefinition = {
+  id: 'ms.probe.protocol',
+  name: 'Probe protocol skew',
+  description: 'How the probe’s protocol version compares with the core’s.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'up', text: 'same as the core' },
+    { value: 1, state: 'warning', text: 'older than the core' },
+    { value: 2, state: 'down', text: 'incompatible' },
+    // **There is deliberately no code for "not yet known".** A lookup maps a *reading* to a
+    // state, and a lookup has no Unknown to map to — rightly, because a reading exists by
+    // definition. A probe this core has not spoken to since it started has no version recorded,
+    // and the honest answer is no reading at all: the channel gaps, which is what absence looks
+    // like everywhere else in this system. A fourth code would have had to be Warning, marking
+    // every probe after an upgrade until it reconnected.
+  ],
+};
+
+export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
+  IF_OPER_STATUS,
+  IF_ADMIN_STATUS,
+  PROBE_LINK,
+  PROBE_PROTOCOL,
+];

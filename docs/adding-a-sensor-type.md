@@ -114,10 +114,16 @@ setting.
 ### `evaluatedBy` (optional)
 
 `'core'` means the **core** computes this sensor's readings and no probe ever receives it
-(`T-21`). Two types are: `core.factory`, whose inputs are channel values the core already holds,
-and `ms.core.health` (`P-12`), whose inputs are counters in the core's own memory. Both have the
-same shape of reason — **the inputs are things the core has and a probe does not**, so shipping
-them out to be read back would be absurd. Anything that talks to a device belongs on a probe.
+(`T-21`). Three types are: `core.factory`, whose inputs are channel values the core already holds;
+`ms.core.health` (`P-12`), whose inputs are counters in the core's own memory; and
+`ms.probe.health` (`P-13`). The first two share a reason — **the inputs are things the core has
+and a probe does not**, so shipping them out to be read back would be absurd. Anything that talks
+to a device belongs on a probe.
+
+`ms.probe.health` is the interesting one, and its reason is stronger: **a probe cannot report its
+own absence.** A sensor that ran on the probe would fall silent at exactly the moment it is meant
+to raise an alarm. If you are ever tempted to write a sensor about the monitoring system itself,
+that is the question to ask — does it still have to answer when the thing it watches is gone?
 
 A core-evaluated type still writes `execute`, and it should reject with a sentence saying so:
 that path is unreachable unless the assignment filter has broken, and a sensor that started being

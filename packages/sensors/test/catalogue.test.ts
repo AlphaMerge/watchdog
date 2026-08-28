@@ -237,6 +237,7 @@ describe('the built-in catalogue', () => {
       'mail.roundtrip',
       'mail.smtp',
       'ms.core.health',
+      'ms.probe.health',
       'port.range',
       'port.tcp',
       'rest.custom',

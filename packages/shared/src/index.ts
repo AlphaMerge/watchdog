@@ -65,6 +65,7 @@ export type {
   CheckResult,
   CoreToProbeMessage,
   NackReason,
+  ProbeHealthReport,
   ProbeToCoreMessage,
   ProtocolMessage,
   RejectCode,
@@ -74,6 +75,7 @@ export type {
   SweepHost,
   SweepJob,
 } from './protocol/messages.js';
+export { CpuMeter } from './process/cpu-meter.js';
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 

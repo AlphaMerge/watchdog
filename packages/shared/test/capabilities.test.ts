@@ -28,6 +28,7 @@ describe('what a protocol version can do', () => {
       discoverySweep: false,
       identification: false,
       approval: false,
+      healthReporting: false,
     });
   });
 
@@ -64,9 +65,19 @@ describe('what a protocol version can do', () => {
   });
 
   it('agrees with the version each capability says it needs', () => {
-    for (const name of ['configPush', 'discoverySweep', 'identification', 'approval'] as const) {
+    for (const name of [
+      'configPush',
+      'discoverySweep',
+      'identification',
+      'approval',
+      'healthReporting',
+    ] as const) {
       const needed = versionFor(name);
-      assert.equal(capabilitiesFor(needed)[name], true, `${name} should exist at ${String(needed)}`);
+      assert.equal(
+        capabilitiesFor(needed)[name],
+        true,
+        `${name} should exist at ${String(needed)}`,
+      );
       assert.equal(
         capabilitiesFor(needed - 1)[name],
         false,
@@ -77,7 +88,10 @@ describe('what a protocol version can do', () => {
 
   it('names what is missing oldest first, so the worst news comes first', () => {
     const missing = missingCapabilities(1);
-    assert.equal(missing.length, 4);
+    // Every capability there is: a protocol-1 peer has none of them. Counted from the table
+    // rather than written as a literal, so adding one does not make this a two-line change with
+    // a number nobody looks at.
+    assert.equal(missing.length, Object.keys(capabilitiesFor(PROTOCOL_VERSION)).length);
     assert.match(missing[0] ?? '', /sensors to scan/, 'scanning nothing outranks everything else');
   });
 

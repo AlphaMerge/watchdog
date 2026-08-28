@@ -24,6 +24,15 @@ export interface ProbeCapabilities {
   identification: boolean;
   /** Understands approval, so it can wait in a queue rather than assuming it is trusted. */
   approval: boolean;
+  /**
+   * Reports its own scheduler, pool and spool numbers on the heartbeat (`P-13`).
+   *
+   * Below this, Probe Health still works — the core knows whether the link is up, how old the
+   * last heartbeat is and what protocol the probe speaks — and it says in its message that the
+   * rest is unavailable because the probe is too old to send it. A missing capability is
+   * reported in words, never as a channel that quietly reads zero.
+   */
+  healthReporting: boolean;
 }
 
 /**
@@ -38,6 +47,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['discoverySweep', 4],
   ['identification', 5],
   ['approval', 6],
+  ['healthReporting', 7],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -46,6 +56,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   discoverySweep: 'run a discovery sweep',
   identification: 'identify what it found',
   approval: 'be held for approval before it scans',
+  healthReporting: 'report its own scheduler and pool health',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -55,6 +66,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     discoverySweep: has(4),
     identification: has(5),
     approval: has(6),
+    healthReporting: has(7),
   };
 }
 

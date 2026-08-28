@@ -18,6 +18,7 @@ import {
   type CoreToProbeMessage,
   type Logger,
   type ProbeToCoreMessage,
+  type ProbeHealthReport,
   type RejectCode,
   type SensorAssignment,
   type IdentifyJob,
@@ -175,6 +176,26 @@ export interface ConnectedProbe {
   lastHeartbeatAt: Date | null;
 }
 
+/**
+ * One probe's link as the core sees it (`P-13`).
+ *
+ * A discriminated shape rather than a bag of nullables: `connected: false` is a complete answer,
+ * and everything else is meaningless beside it. That is also the answer Probe Health most needs
+ * to be able to give, because it is the one the probe itself can never send.
+ */
+export type ProbeLink =
+  | { connected: false }
+  | {
+      connected: true;
+      protocolVersion: number;
+      connectedAt: Date;
+      lastHeartbeatAt: Date | null;
+      approved: boolean;
+      agentVersion: string;
+      /** Absent from a probe below protocol 7, which cannot report its own numbers. */
+      health?: ProbeHealthReport;
+    };
+
 interface ProbeSession {
   connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>;
   info: ConnectedProbe;
@@ -200,6 +221,8 @@ interface ProbeSession {
   approved: boolean;
   /** The branch this probe owns, or null while its GID is unclaimed (R-01 enrols it). */
   probeObjectId: number | null;
+  /** The last health report this probe sent, or undefined if it has sent none (`P-13`). */
+  health?: ProbeHealthReport;
   /**
    * The configuration this session has been told to run, and its fingerprint.
    *
@@ -382,6 +405,11 @@ export class ProbeEndpoint {
       switch (message.type) {
         case 'heartbeat':
           session.info.lastHeartbeatAt = new Date();
+          // The probe's own numbers, when it is new enough to send them (`P-13`). Held in memory
+          // beside the link, never persisted: this is a live fact about a process that is
+          // currently running, and a value read back from a table after a restart would be a
+          // claim about a probe this core has not spoken to yet.
+          if (message.health !== undefined) session.health = message.health;
           connection.send({ type: 'heartbeat-ack', seq: message.seq });
           return session;
         case 'results':
@@ -855,6 +883,30 @@ export class ProbeEndpoint {
   }
 
   /** Every connected probe. Unchanged configurations send nothing at all. */
+  /**
+   * What the core knows about one probe's link, right now (`P-13`).
+   *
+   * **Answers for a probe that is not connected**, and that is the point of it: the whole reason
+   * Probe Health is evaluated by the core rather than run on the probe is that a probe cannot
+   * report its own absence. A missing session is not an error here — it is the most important
+   * answer this method gives.
+   */
+  linkFor(probeObjectId: number): ProbeLink {
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId !== probeObjectId) continue;
+      return {
+        connected: true,
+        protocolVersion: session.protocolVersion,
+        connectedAt: session.info.connectedAt,
+        lastHeartbeatAt: session.info.lastHeartbeatAt,
+        approved: session.approved,
+        agentVersion: session.info.agentVersion,
+        ...(session.health === undefined ? {} : { health: session.health }),
+      };
+    }
+    return { connected: false };
+  }
+
   pushAllConfigs(): void {
     for (const session of this.#sessions.values()) {
       this.#queueConfig(session, this.#options.logger.child({ probeGid: session.info.gid }));
