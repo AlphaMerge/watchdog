@@ -603,6 +603,60 @@ describe(
         assert.deepEqual(nobody, []);
       });
 
+      it('filters to one actor, which is the question the log gets opened for', async () => {
+        // `actorKinds` narrows to *all* users, which during an incident is everybody. "Everything
+        // this person did" needs the ref, and `audit_log_actor_idx` is (actor_kind, actor_ref,
+        // id DESC) for exactly this.
+        const ada: Actor = { kind: 'user', userId: 4, login: 'ada' };
+        const bob: Actor = { kind: 'user', userId: 5, login: 'bob' };
+        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
+        await service.update(bob, probeId, { kind: 'probe', name: 'by-bob' }, { kind: 'none' });
+
+        const hers = await db.tx((q) =>
+          repository.list(q, { limit: 100, actorKinds: ['user'], actorRef: '4' }),
+        );
+        assert.ok(hers.length > 0);
+        assert.deepEqual(
+          [...new Set(hers.map((entry) => JSON.stringify(entry.actor)))],
+          [JSON.stringify(ada)],
+          'nobody else came back',
+        );
+
+        const both = await db.tx((q) => repository.list(q, { limit: 100, actorKinds: ['user'] }));
+        assert.ok(both.length > hers.length, 'and the kind filter alone is wider');
+      });
+
+      it('needs the kind too, because a ref is unique only within one', async () => {
+        // User 4 and token 4 are different actors. A ref-only filter would report one person's
+        // changes as another's, which in an audit log is worse than reporting none.
+        const ada: Actor = { kind: 'user', userId: 4, login: 'ada' };
+        const token: Actor = { kind: 'token', tokenId: 4 };
+        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
+        await service.update(token, probeId, { kind: 'probe', name: 'by-token' }, { kind: 'none' });
+
+        const shared = await db.tx((q) => repository.list(q, { limit: 100, actorRef: '4' }));
+        assert.equal(
+          new Set(shared.map((entry) => entry.actor.kind)).size,
+          2,
+          'the ref alone spans both, which is why the UI always sends the kind with it',
+        );
+
+        const hers = await db.tx((q) =>
+          repository.list(q, { limit: 100, actorKinds: ['user'], actorRef: '4' }),
+        );
+        assert.ok(hers.length > 0);
+        assert.ok(hers.every((entry) => entry.actor.kind === 'user'));
+      });
+
+      it('treats an empty ref as no filter rather than as an actor named ""', async () => {
+        // A cleared filter box sends `actorRef=`. Matching it literally would answer "nothing
+        // happened", which reads as a fact about the installation rather than about the query.
+        await service.update(testActor, probeId, { kind: 'probe', name: 'x' }, { kind: 'none' });
+        const all = await db.tx((q) => repository.list(q, { limit: 100 }));
+        const empty = await db.tx((q) => repository.list(q, { limit: 100, actorRef: '' }));
+        assert.equal(empty.length, all.length);
+      });
+
       it('filters by time, half-open so two adjacent windows never double-count', async () => {
         await place([500, 501, 502]);
         const at = (n: number): Date => new Date(Date.parse('2026-01-01T00:00:00Z') + n * 1_000);
@@ -667,6 +721,50 @@ describe(
           next.json<{ items: { id: string }[] }>().items.map((entry) => Number(entry.id)),
           [601, 600],
         );
+      });
+
+      it('filters over HTTP to one actor, and says who each entry was', async () => {
+        // The route's half of the same question, and the reason the wire shape matters: the UI
+        // has to be able to build this link out of an entry it was given, so the entry has to
+        // carry the ref. It does — as `userId` on the actor union — and a response schema that
+        // dropped it would break the link silently, because `additionalProperties: false` strips
+        // rather than refuses.
+        const ada: Actor = { kind: 'user', userId: 4, login: 'ada' };
+        // A second *user*, not merely a second actor. With only one user in the log, dropping
+        // the ref and keeping the kind returns exactly the same rows, and the test passes on a
+        // route that ignores the ref altogether — which is the mutant that found this.
+        const bob: Actor = { kind: 'user', userId: 5, login: 'bob' };
+        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
+        await service.update(bob, probeId, { kind: 'probe', name: 'by-bob' }, { kind: 'none' });
+        await service.update(
+          testActor,
+          probeId,
+          { kind: 'probe', name: 'by-system' },
+          {
+            kind: 'none',
+          },
+        );
+
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/audit',
+          query: { actorKind: 'user', actorRef: '4' },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{ items: { actor: Actor }[] }>();
+        assert.ok(body.items.length > 0);
+        for (const entry of body.items) assert.deepEqual(entry.actor, ada);
+      });
+
+      it('refuses an actorRef longer than any ref can be', async () => {
+        // Bounded at the boundary rather than at the query: `actor_ref` is text, and an
+        // unbounded filter value is a free megabyte in a WHERE clause.
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/audit',
+          query: { actorRef: 'x'.repeat(65) },
+        });
+        assert.equal(response.statusCode, 400);
       });
 
       it('refuses a category that is not one', async () => {

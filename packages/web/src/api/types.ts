@@ -114,6 +114,21 @@ export interface LookupSummary {
   source: string;
 }
 
+/**
+ * Who did it — the same discriminated union the API sends, field for field.
+ *
+ * **Typed as the union rather than flattened to `{ kind, label }`**, which is what this was before
+ * `A-08`. The flat shape had no `label` on the wire at all, so every entry in the UI was attributed
+ * to "user" or "anonymous" — the login and the address were both in the response and both thrown
+ * away. A union cannot be read wrongly in that silent way: the field that names the actor differs
+ * per kind, so the compiler makes you say which kind you are looking at.
+ */
+export type AuditActor =
+  | { kind: 'user'; userId: number; login: string }
+  | { kind: 'token'; tokenId: number }
+  | { kind: 'system'; component: string }
+  | { kind: 'anonymous'; remoteAddress: string };
+
 export interface AuditEntry {
   /**
    * `bigint`, so a string on the wire — a JS number stops being exact at 2^53, and this is also
@@ -130,7 +145,7 @@ export interface AuditEntry {
    */
   objectId: number | null;
   objectKind: ObjectKind | null;
-  actor: { kind: string; label?: string };
+  actor: AuditActor;
   summary: Record<string, unknown>;
   diff: { field: string; before: unknown; after: unknown }[];
 }
@@ -516,12 +531,7 @@ export interface TriggerKind {
 export type DiscoveryLevel = 'ping' | 'standard' | 'detailed';
 
 export type DiscoveryStatus =
-  | 'queued'
-  | 'running'
-  | 'identifying'
-  | 'done'
-  | 'cancelled'
-  | 'failed';
+  'queued' | 'running' | 'identifying' | 'done' | 'cancelled' | 'failed';
 
 /** One level, and what it would cost on the range that was previewed (`D-06`). */
 export interface DiscoveryLevelEstimate {

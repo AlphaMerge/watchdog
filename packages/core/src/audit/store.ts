@@ -35,6 +35,15 @@ export interface AuditQuery {
    */
   categories?: readonly string[];
   actorKinds?: readonly string[];
+  /**
+   * One specific actor — a user id, a token id, a component name (`A-08`).
+   *
+   * **"Everything this person did" is the question an audit log is opened for**, and `actorKinds`
+   * cannot answer it: it narrows to *all* users, which during an incident is everybody. Paired
+   * with `actorKinds`, because `actor_ref` is only unique within a kind — user 4 and token 4 are
+   * different actors — and because `audit_log_actor_idx` leads with the kind.
+   */
+  actorRef?: string;
   from?: Date;
   to?: Date;
   /** Entries older than this id, for paging backwards through history. */
@@ -92,6 +101,9 @@ export class AuditRepository {
     }
     if (query.actorKinds !== undefined && query.actorKinds.length > 0) {
       where.push(`actor_kind = ANY($${String(values.push([...query.actorKinds]))})`);
+    }
+    if (query.actorRef !== undefined && query.actorRef !== '') {
+      where.push(`actor_ref = $${String(values.push(query.actorRef))}`);
     }
     if (query.from !== undefined) where.push(`at >= $${String(values.push(query.from))}`);
     if (query.to !== undefined) where.push(`at < $${String(values.push(query.to))}`);

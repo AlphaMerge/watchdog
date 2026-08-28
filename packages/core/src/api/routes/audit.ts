@@ -55,6 +55,15 @@ const logQuery = {
         { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 10 },
       ],
     },
+    actorRef: {
+      type: 'string',
+      maxLength: 64,
+      description:
+        'One specific actor — a user id, a token id, a component name. "Everything this person ' +
+        'did" is the question an audit log gets opened for, and `actorKind` cannot answer it: ' +
+        'it narrows to all users, which during an incident is everybody. Pair it with ' +
+        '`actorKind`, because an id is only unique within a kind.',
+    },
     from: { type: 'string', maxLength: 64 },
     to: { type: 'string', maxLength: 64 },
     before: { type: 'string', pattern: '^[0-9]{1,19}$' },
@@ -66,6 +75,7 @@ interface LogQueryString extends AuditQueryString {
   objectId?: number;
   category?: string | string[];
   actorKind?: string | string[];
+  actorRef?: string;
   from?: string;
   to?: string;
 }
@@ -142,7 +152,7 @@ export async function auditRoutes(
       },
     },
     async (request) => {
-      const { objectId, category, actorKind, from, to, before, limit } = request.query;
+      const { objectId, category, actorKind, actorRef, from, to, before, limit } = request.query;
       const categories = many(category);
       const actorKinds = many(actorKind);
       const since = when(from);
@@ -153,6 +163,7 @@ export async function auditRoutes(
           ...(objectId === undefined ? {} : { objectId }),
           ...(categories === undefined ? {} : { categories }),
           ...(actorKinds === undefined ? {} : { actorKinds }),
+          ...(actorRef === undefined ? {} : { actorRef }),
           ...(since === undefined ? {} : { from: since }),
           ...(until === undefined ? {} : { to: until }),
           ...(before === undefined ? {} : { before }),

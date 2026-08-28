@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { request, useApi, type ApiError } from '../api/client';
+import { actorLabel, actorRef } from '../api/actors';
 import type {
+  AuditActor,
   AuditEntry,
   AuditPage,
   NotificationRequestPage,
@@ -135,15 +137,31 @@ export function usePaged<T, C>(
   loadingMore: boolean;
 } {
   const first = useApi<{ items: T[] }>(path);
-  const [extra, setExtra] = useState<{ path: string; items: T[]; cursor: C | null }>({
+  /**
+   * `paged` separates "no cursor yet" from "the cursor ran out", which are the same value and
+   * opposite meanings.
+   *
+   * Without it, the last page — the one that comes back short and carries a null cursor — fell
+   * through to the *first* page's cursor, which is never null. So the button never went away and
+   * every further press re-fetched and re-appended the final page: measured live on a sensor with
+   * 77 changes, one press past the end took the list to 104, showing 27 entries twice. In a log,
+   * a repeated entry is a second event that did not happen.
+   */
+  const [extra, setExtra] = useState<{
+    path: string;
+    items: T[];
+    cursor: C | null;
+    paged: boolean;
+  }>({
     path,
     items: [],
     cursor: null,
+    paged: false,
   });
   const [loadingMore, setLoadingMore] = useState(false);
 
   const cursor =
-    extra.path === path && extra.cursor !== null
+    extra.path === path && extra.paged
       ? extra.cursor
       : first.status === 'ready'
         ? cursorOf(first.data)
@@ -166,6 +184,7 @@ export function usePaged<T, C>(
           path,
           items: [...(held.path === path ? held.items : []), ...page.items],
           cursor: cursorOf(page),
+          paged: true,
         }));
       })
       .catch(() => {
@@ -186,18 +205,27 @@ export function usePaged<T, C>(
   };
 }
 
-function MoreButton({
+/**
+ * Paging, and — the part that is easy to leave out — saying when there is no more.
+ *
+ * A list that simply stops looks the same whether it ended or was truncated, and the reader has
+ * no way to tell which. Shared with the object detail view's history panel so both answer that
+ * the same way.
+ */
+export function MoreButton({
   more,
   loading,
   count,
+  what = 'log',
 }: {
   more: (() => void) | null;
   loading: boolean;
   count: number;
+  what?: string;
 }): React.JSX.Element | null {
   if (more === null) {
     return count === 0 ? null : (
-      <p className="mt-3 text-xs text-text-muted">That is the whole log.</p>
+      <p className="mt-3 text-xs text-text-muted">That is the whole {what}.</p>
     );
   }
   return (
@@ -368,6 +396,32 @@ function StatusChanges({
 // Object history (S-10).
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The URL's filters, turned into the audit query (`A-08`).
+ *
+ * A pure function of the search string, exported so the rules below can be asserted without
+ * rendering anything — the interesting one is not obvious from the call site.
+ *
+ * **Both actor parameters, or neither.** `actor_ref` is unique only within a kind: user 4 and
+ * token 4 are different actors, so a ref sent without its kind would answer with both, attributing
+ * one person's changes to another. Half a filter is worse than none here, so half is dropped.
+ */
+export function auditQueryFor(params: URLSearchParams, pageSize = PAGE): URLSearchParams {
+  const search = new URLSearchParams({ limit: String(pageSize) });
+  const objectId = params.get('objectId');
+  if (objectId !== null) search.set('objectId', objectId);
+
+  const ref = params.get('actorRef');
+  const kind = params.get('actorKind');
+  if (ref !== null && ref !== '' && kind !== null && kind !== '') {
+    search.set('actorRef', ref);
+    search.set('actorKind', kind);
+  }
+
+  for (const category of params.getAll('category')) search.append('category', category);
+  return search;
+}
+
 function ObjectHistory({
   params,
   set,
@@ -375,17 +429,22 @@ function ObjectHistory({
   params: URLSearchParams;
   set: Setter;
 }): React.JSX.Element {
+  // Depended on by value rather than by the URLSearchParams object, which is a fresh instance on
+  // every render and would rebuild the query — and re-fetch the log — on each one.
   const categories = params.getAll('category').join(',');
   const objectId = params.get('objectId');
+  const refFilter = params.get('actorRef');
+  const kindFilter = params.get('actorKind');
 
   const query = useMemo(() => {
-    const search = new URLSearchParams({ limit: String(PAGE), tab: 'objects' });
-    search.delete('tab');
+    const search = new URLSearchParams();
     if (objectId !== null) search.set('objectId', objectId);
+    if (refFilter !== null) search.set('actorRef', refFilter);
+    if (kindFilter !== null) search.set('actorKind', kindFilter);
     for (const category of categories === '' ? [] : categories.split(','))
       search.append('category', category);
-    return search;
-  }, [categories, objectId]);
+    return auditQueryFor(search);
+  }, [categories, objectId, refFilter, kindFilter]);
 
   const path = `/audit?${query.toString()}`;
   const cursorOf = useCallback(
@@ -431,6 +490,7 @@ function ObjectHistory({
           })}
         </div>
         <ScopeChip params={params} set={set} />
+        <ActorChip params={params} set={set} />
       </div>
 
       {log.status === 'loading' && <Loading what="the object history" />}
@@ -472,7 +532,7 @@ function AuditRow({ entry }: { entry: AuditEntry }): React.JSX.Element {
             {entry.objectKind !== null && ` (${entry.objectKind})`}
           </Link>
         )}
-        <span className="text-xs text-text-muted">{entry.actor.label ?? entry.actor.kind}</span>
+        <ActorLink actor={entry.actor} />
       </div>
       {entry.diff.length > 0 && (
         <ul className="ml-1 space-y-0.5 text-xs text-text-muted">
@@ -484,6 +544,71 @@ function AuditRow({ entry }: { entry: AuditEntry }): React.JSX.Element {
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * The actor on an entry, as a link that filters the feed to them (`A-08`).
+ *
+ * **"Everything this person did" is the question an audit log gets opened for**, and it is not
+ * answerable from a list unless the list gives you a way to ask it. `actorKind` alone narrows to
+ * *all* users, which during an incident is everybody.
+ *
+ * **Every kind links, not only the human ones.** `actor_ref` names one component, not all of
+ * them, so "everything housekeeping did" is as answerable as "everything Ada did" — and one
+ * address's unauthenticated requests is the query an incident actually starts from.
+ */
+export function ActorLink({ actor }: { actor: AuditActor }): React.JSX.Element {
+  const label = actorLabel(actor);
+  const search = new URLSearchParams({
+    tab: 'objects',
+    actorKind: actor.kind,
+    actorRef: actorRef(actor),
+  });
+  return (
+    <Link
+      to={`/logs?${search.toString()}`}
+      className="text-xs text-accent hover:underline"
+      title={`Everything ${label} did`}
+    >
+      {label}
+    </Link>
+  );
+}
+
+/**
+ * Shows an actor filter is on, and takes it off.
+ *
+ * **Says so in a sentence rather than as a chip with a cross**, matching `ScopeChip`: a filtered
+ * log that looks like an unfiltered one is how somebody concludes a change was never made. The
+ * accessible name has to carry that too, so there is no bare ✕ to announce.
+ *
+ * Named by kind and ref, which is what was filtered on — the URL is shareable, and a label
+ * carried alongside it would go stale the moment somebody was renamed.
+ */
+function ActorChip({
+  params,
+  set,
+}: {
+  params: URLSearchParams;
+  set: Setter;
+}): React.JSX.Element | null {
+  const ref = params.get('actorRef');
+  const kind = params.get('actorKind');
+  if (ref === null || ref === '' || kind === null || kind === '') return null;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        set((search) => {
+          search.delete('actorRef');
+          search.delete('actorKind');
+        });
+      }}
+      className="rounded border border-accent bg-surface-muted px-2 py-1 text-xs text-text"
+    >
+      Only {kind} {ref} — show every actor
+    </button>
   );
 }
 

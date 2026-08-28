@@ -4,6 +4,7 @@ import { useApi } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
+  AuditEntry,
   AuditPage,
   ChannelRecord,
   LookupSummary,
@@ -21,6 +22,7 @@ import { ChannelTable } from './detail/ChannelTable';
 import { HistoryPanel } from './detail/HistoryPanel';
 import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
+import { ActorLink, MoreButton, usePaged } from './LogsView';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
@@ -363,41 +365,65 @@ function LiveChannels({
   );
 }
 
+/**
+ * This object's configuration history (`A-08`).
+ *
+ * **Paged, and it has to be.** A device that has been in service two years has more than fifty
+ * changes against it, and a panel that silently stops at the newest fifty is one that answers
+ * "when was this last touched?" correctly and "who changed the interval last spring?" not at
+ * all — while looking identical either way.
+ */
 function AuditPanel({ objectId }: { objectId: number }): React.JSX.Element {
-  const audit = useApi<AuditPage>(`/objects/${String(objectId)}/audit?limit=50`);
+  const base = `/objects/${String(objectId)}/audit?limit=50`;
+  const audit = usePaged<AuditEntry, string>(
+    base,
+    (page) => (page as AuditPage).nextBefore,
+    (cursor) => `${base}&before=${encodeURIComponent(cursor)}`,
+  );
+
   if (audit.status === 'loading') return <Loading what="the audit log" />;
-  if (audit.status === 'error') return <ErrorPanel error={audit.error} retry={audit.reload} />;
-  if (audit.data.items.length === 0) {
+  if (audit.status === 'error' && audit.error !== null) {
+    return <ErrorPanel error={audit.error} retry={audit.reload} />;
+  }
+  if (audit.items.length === 0) {
     return <Empty>Nothing has changed this object.</Empty>;
   }
 
   return (
-    <ul className="divide-y divide-border text-sm">
-      {audit.data.items.map((entry) => (
-        <li key={entry.id} className="space-y-1 py-2">
-          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <time
-              dateTime={entry.at}
-              title={entry.at}
-              className="font-mono text-xs text-text-muted"
-            >
-              {new Date(entry.at).toLocaleString()}
-            </time>
-            <span className="font-medium text-text">{entry.action}</span>
-            <span className="text-xs text-text-muted">{entry.actor.label ?? entry.actor.kind}</span>
-          </div>
-          {entry.diff.length > 0 && (
-            <ul className="ml-1 space-y-0.5 text-xs text-text-muted">
-              {entry.diff.map((change) => (
-                <li key={change.field} className="font-mono">
-                  {change.field}: {JSON.stringify(change.before)} → {JSON.stringify(change.after)}
-                </li>
-              ))}
-            </ul>
-          )}
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="divide-y divide-border text-sm">
+        {audit.items.map((entry) => (
+          <li key={entry.id} className="space-y-1 py-2">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <time
+                dateTime={entry.at}
+                title={entry.at}
+                className="font-mono text-xs text-text-muted"
+              >
+                {new Date(entry.at).toLocaleString()}
+              </time>
+              <span className="font-medium text-text">{entry.action}</span>
+              <ActorLink actor={entry.actor} />
+            </div>
+            {entry.diff.length > 0 && (
+              <ul className="ml-1 space-y-0.5 text-xs text-text-muted">
+                {entry.diff.map((change) => (
+                  <li key={change.field} className="font-mono">
+                    {change.field}: {JSON.stringify(change.before)} → {JSON.stringify(change.after)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+      <MoreButton
+        more={audit.more}
+        loading={audit.loadingMore}
+        count={audit.items.length}
+        what="history of this object"
+      />
+    </>
   );
 }
 

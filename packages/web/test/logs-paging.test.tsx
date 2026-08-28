@@ -78,6 +78,38 @@ describe('paging a log', () => {
     expect(result.current.more).toBeNull();
   });
 
+  it('stops offering more when a *later* page is the one that runs out', async () => {
+    // The bug this was written against, measured live on a sensor with 77 changes: the last page
+    // comes back short and carries a null cursor, and a null cursor was indistinguishable from
+    // "no cursor yet" — so it fell through to the *first* page's cursor, which is never null.
+    // The button stayed, and each further press re-fetched and re-appended the final page. 77
+    // became 104: twenty-seven entries shown twice. In a log, a repeated entry is a second event
+    // that did not happen.
+    const asked = stubFetch({
+      '/api/v1/log?limit=2': { items: [{ id: '9' }, { id: '8' }], nextBefore: '8' },
+      '/api/v1/log?limit=2&before=8': { items: [{ id: '7' }], nextBefore: null },
+    });
+
+    const { result } = renderHook(() =>
+      usePaged<Row, string>('/log?limit=2', cursorOf, (cursor) => `/log?limit=2&before=${cursor}`),
+    );
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+
+    await act(async () => {
+      result.current.more?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.items).toHaveLength(3);
+    });
+
+    expect(result.current.more).toBeNull();
+    expect(asked).toHaveLength(2);
+    expect(result.current.items.map((row) => row.id)).toEqual(['9', '8', '7']);
+  });
+
   it('pages from the second page cursor, not the first, however far it has gone', async () => {
     const asked = stubFetch({
       '/api/v1/log?limit=1': { items: [{ id: '9' }], nextBefore: '9' },
@@ -152,6 +184,51 @@ describe('paging a log', () => {
     await waitFor(() => {
       expect(result.current.items.map((row) => row.id)).toEqual(['5']);
     });
+  });
+
+  it('offers more again after a filter change, even having reached the end of the last one', async () => {
+    // The paging state belongs to the query that produced it. Carried across a filter change, an
+    // exhausted cursor makes the new list look complete at its first page — "that is the whole
+    // log" about a log the reader has seen a fiftieth of.
+    const asked = stubFetch({
+      '/api/v1/log?limit=2': { items: [{ id: '9' }, { id: '8' }], nextBefore: '8' },
+      '/api/v1/log?limit=2&before=8': { items: [{ id: '7' }], nextBefore: null },
+      '/api/v1/log?limit=2&kind=x': { items: [{ id: '5' }, { id: '4' }], nextBefore: '4' },
+      '/api/v1/log?limit=2&kind=x&before=4': { items: [{ id: '3' }], nextBefore: null },
+    });
+
+    const { result, rerender } = renderHook(
+      ({ path }: { path: string }) =>
+        usePaged<Row, string>(path, cursorOf, (cursor) => `${path}&before=${cursor}`),
+      { initialProps: { path: '/log?limit=2' } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.status).toBe('ready');
+    });
+    await act(async () => {
+      result.current.more?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.more).toBeNull();
+    });
+
+    rerender({ path: '/log?limit=2&kind=x' });
+    await waitFor(() => {
+      expect(result.current.items.map((row) => row.id)).toEqual(['5', '4']);
+    });
+    expect(result.current.more).not.toBeNull();
+
+    await act(async () => {
+      result.current.more?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.items.map((row) => row.id)).toEqual(['5', '4', '3']);
+    });
+    // Paged with the *new* query's cursor, not the old one's.
+    expect(asked).toContain('/api/v1/log?limit=2&kind=x&before=4');
   });
 
   it('keeps the button after a failed load rather than hiding the retry', async () => {

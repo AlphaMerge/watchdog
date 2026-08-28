@@ -5347,7 +5347,7 @@ because each is a decision rather than a defect:
       is an assertion that never runs.
 
       Tests: 29.
-- [ ] **A-08 — Audit log UI** · M · S-10, U-01 · Per-object history with diffs and actor.
+- [x] **A-08 — Audit log UI** · M · S-10, U-01 · Per-object history with diffs and actor.
       **Added by S-10:** the per-object route and its paging exist
       (`GET /api/v1/objects/{id}/audit?before=&limit=`), and the entry shape is final. What is
       missing is a **global feed** — "everything that changed this week", "everything this user
@@ -5355,6 +5355,52 @@ because each is a decision rather than a defect:
       for. Note that a subtree delete writes one entry, on the object the delete was aimed at,
       listing what it destroyed; a destroyed child has no entry of its own, so the UI has to
       look at ancestors to explain where something went.
+
+      **A-08 outcome.** Most of the ticket was already standing: `S-10` shipped the global feed
+      with diffs and category, kind and time filters, and `U-01` put a per-object Changes tab on
+      the detail view. Auditing what existed before building anything is what turned up the
+      defect below, which no amount of new UI would have fixed.
+
+      **The audit log named nobody, and nothing failed.** The web types declared the actor as
+      `{ kind, label? }`; the API sends a discriminated union — `{ kind: 'user', userId, login }`
+      and three siblings — with no `label` anywhere in it. `actor.label ?? actor.kind` therefore
+      rendered the word "user" against every entry a person had ever made, and "anonymous" against
+      every address. **The login was in the response the whole time.** A log that attributes
+      nothing looks exactly like a log with nothing to attribute, which is why this survived two
+      tickets and a phase exit. The web type is now the union itself, so the compiler forces the
+      question "which kind?" before anything can be read off it, and `api/actors.ts` answers
+      "what to show" and "what to filter by" in one place for both views.
+
+      **"Everything this person did" is the question an audit log is opened for**, and it was the
+      one filter missing. `actorKind` narrows to *all* users, which during an incident is
+      everybody. `actorRef` now filters to one, and `audit_log_actor_idx` — `(actor_kind,
+      actor_ref, id DESC)` — has been there since `S-10` for exactly this. Every actor on every
+      entry is a link that asks it. **Always with the kind**, because a ref is unique only within
+      one: user 4 and token 4 are different actors, and half this filter would attribute one
+      person's changes to another, which is the single thing an audit log may not do.
+
+      The per-object panel also paged to fifty and stopped. It answered "when was this last
+      touched?" correctly and "who changed the interval last spring?" not at all, while looking
+      identical either way; it is on `usePaged` now, like the global feed.
+
+      **Putting it on `usePaged` is what exposed the paging bug, and it was in `usePaged` itself**
+      — so in every paged log in the UI since `S-10`. A null cursor meant two opposite things,
+      "no cursor yet" and "the cursor ran out", and the exhausted one therefore fell through to
+      the *first* page's cursor, which is never null. The button never went away, and each press
+      past the end re-fetched and re-appended the final page. Measured live on a sensor with 77
+      changes: one press past the end took the list to 104, showing twenty-seven entries twice.
+      **In a log, a repeated entry is a second event that did not happen.** There was already a
+      test for the cursor running out — on the *first* page, the one case where the two meanings
+      coincide. Fixed with a `paged` flag; verified live at both scales, 77 and 512, each ending
+      on the exact row count in the table.
+
+      Mutation: 14 mutants, 14 killed. Two survived first time. A route that ignored `actorRef`
+      entirely, because the test had only one *user* in the log so filtering by kind alone
+      returned the same rows — a second user killed it. And paging state surviving a filter
+      change, which would tell the reader "that is the whole log" about a log they had seen a
+      fraction of.
+
+      Tests: 5 (core) + 19 (web).
 - [x] **A-09 — Security hardening pass** · L · A-03 · Rate limiting, CSRF, security headers,
       dependency audit, SSRF guards on all user-supplied URLs, script-sensor sandboxing.
 
