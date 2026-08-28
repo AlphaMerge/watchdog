@@ -112,7 +112,10 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
     },
   );
 
-  app.put<{ Params: { id: number }; Body: { name?: string; description?: string; isAdmin?: boolean } }>(
+  app.put<{
+    Params: { id: number };
+    Body: { name?: string; description?: string; isAdmin?: boolean };
+  }>(
     '/groups/:id',
     {
       ...adminOnly,

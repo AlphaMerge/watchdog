@@ -292,7 +292,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.ok(first.kind === 'pending');
       await assert.rejects(
         () => registry.setAllowFrom(first.gid, ['10.0.0.0/33']),
-        (error: unknown) => error instanceof Error && /prefix longer than 32 bits/.test(error.message),
+        (error: unknown) =>
+          error instanceof Error && /prefix longer than 32 bits/.test(error.message),
       );
     });
 
@@ -401,7 +402,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
       await registry.admit(
-        hello({ gid: first.gid, displayName: 'renamed-01', agentVersion: '0.2.0', remoteAddress: '10.4.9.9' }),
+        hello({
+          gid: first.gid,
+          displayName: 'renamed-01',
+          agentVersion: '0.2.0',
+          remoteAddress: '10.4.9.9',
+        }),
       );
 
       const stored = await registry.get(first.gid);

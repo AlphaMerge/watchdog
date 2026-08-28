@@ -282,7 +282,11 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
       const first = (await coarse.listFor(userId))[0]?.lastUsedAt;
 
       for (let use = 0; use < 5; use += 1) await coarse.resolve(secret);
-      assert.equal((await coarse.listFor(userId))[0]?.lastUsedAt, first, 'unchanged within the window');
+      assert.equal(
+        (await coarse.listFor(userId))[0]?.lastUsedAt,
+        first,
+        'unchanged within the window',
+      );
     });
 
     it('is written again once the window has passed', async () => {
@@ -338,5 +342,4 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
       assert.notEqual(withRevoked[0]?.revokedAt, null);
     });
   });
-
 });

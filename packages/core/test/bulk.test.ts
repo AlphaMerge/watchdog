@@ -97,9 +97,13 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
     it('counts the request after duplicates, not before', async () => {
       // Otherwise a UI sending the same id 600 times would be refused for a selection of one.
       const one = await device('web01');
-      const report = await bulk.apply(testActor, Array.from({ length: MAX_BULK + 1 }, () => one), {
-        kind: 'resume',
-      });
+      const report = await bulk.apply(
+        testActor,
+        Array.from({ length: MAX_BULK + 1 }, () => one),
+        {
+          kind: 'resume',
+        },
+      );
       assert.equal(report.requested, 1);
     });
   });

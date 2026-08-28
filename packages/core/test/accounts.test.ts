@@ -302,7 +302,11 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // **Locking is a denial of service.** Anybody who knows an operator's login could lock
       // them out of their own monitoring system by failing to log in as them — during the
       // outage they are trying to investigate.
-      const throttle = new LoginThrottle({ db, logger: silentLogger, sleep: () => Promise.resolve() });
+      const throttle = new LoginThrottle({
+        db,
+        logger: silentLogger,
+        sleep: () => Promise.resolve(),
+      });
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await throttle.record('ops', addressOf(attempt), false);
       }

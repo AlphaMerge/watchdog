@@ -49,7 +49,11 @@ export class GroupService {
     this.#logger = options.logger.child({ component: 'groups' });
   }
 
-  async create(request: { name: string; description?: string; isAdmin?: boolean }): Promise<UserGroup> {
+  async create(request: {
+    name: string;
+    description?: string;
+    isAdmin?: boolean;
+  }): Promise<UserGroup> {
     const name = request.name.trim();
     if (name === '' || name.length > 100) {
       throw new AuthError('GROUP_INVALID', 'a group name must be between 1 and 100 characters');
@@ -132,7 +136,10 @@ export class GroupService {
     const existing = await this.get(id);
     if (existing === null) throw new AuthError('GROUP_NOT_FOUND', `no group with id ${String(id)}`);
     if (existing.isBuiltin) {
-      throw new AuthError('GROUP_BUILTIN', `${existing.name} is a built-in group and cannot be deleted`);
+      throw new AuthError(
+        'GROUP_BUILTIN',
+        `${existing.name} is a built-in group and cannot be deleted`,
+      );
     }
 
     // **Members are not deleted with the group**, and their primary group has to survive it.
@@ -174,7 +181,9 @@ export class GroupService {
     }));
   }
 
-  async membersOf(groupId: number): Promise<{ userId: number; login: string; isPrimary: boolean }[]> {
+  async membersOf(
+    groupId: number,
+  ): Promise<{ userId: number; login: string; isPrimary: boolean }[]> {
     const rows = await this.#db.query<{ user_id: string; login: string; is_primary: boolean }>(
       `SELECT m.user_id::text AS user_id, a.login, m.is_primary
        FROM user_group_member m JOIN user_account a ON a.id = m.user_id
@@ -206,7 +215,9 @@ export class GroupService {
       const shouldBePrimary = primary || isFirst;
 
       if (shouldBePrimary) {
-        await q.query(`UPDATE user_group_member SET is_primary = false WHERE user_id = $1`, [userId]);
+        await q.query(`UPDATE user_group_member SET is_primary = false WHERE user_id = $1`, [
+          userId,
+        ]);
       }
       try {
         await q.query(

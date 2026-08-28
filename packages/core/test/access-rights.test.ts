@@ -356,7 +356,12 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
     it('goes away with the object it was granted on', async () => {
       await access.grant(deviceId, alphaId, 'full', 'test');
-      await harness.service.delete(testActor, deviceId, { kind: 'exact', descendants: 1 }, { kind: 'none' });
+      await harness.service.delete(
+        testActor,
+        deviceId,
+        { kind: 'exact', descendants: 1 },
+        { kind: 'none' },
+      );
       assert.deepEqual(await access.grantsOn(deviceId), []);
     });
   });

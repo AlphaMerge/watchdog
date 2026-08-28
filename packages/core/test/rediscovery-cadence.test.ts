@@ -51,7 +51,10 @@ describe('finding the next run', () => {
 
   it('fires on the named weekday, weekly', () => {
     // 0 is Monday, 6 is Sunday.
-    const at = nextRun(spec({ cadence: 'weekly', weekday: 6, minute: 180 }), new Date('2026-06-01T10:00:00Z'));
+    const at = nextRun(
+      spec({ cadence: 'weekly', weekday: 6, minute: 180 }),
+      new Date('2026-06-01T10:00:00Z'),
+    );
     assert.ok(at !== null);
     assert.match(local(at), /Sun.*03:00/);
   });
@@ -127,7 +130,11 @@ describe('a permission window', () => {
       );
       return hour >= 14 && hour < 18;
     };
-    const at = nextRun(spec({ cadence: 'hourly', minute: 0 }), new Date('2026-06-01T09:05:00Z'), onlyAfternoons);
+    const at = nextRun(
+      spec({ cadence: 'hourly', minute: 0 }),
+      new Date('2026-06-01T09:05:00Z'),
+      onlyAfternoons,
+    );
     assert.ok(at !== null);
     assert.match(local(at), /14:00/);
   });
@@ -135,7 +142,10 @@ describe('a permission window', () => {
   it('answers never rather than crashing when the window is never open', () => {
     // A configuration an operator can make, and it should read as "never" rather than as a
     // stack trace on a background sweep.
-    assert.equal(nextRun(spec(), new Date('2026-06-01T10:00:00Z'), () => false), null);
+    assert.equal(
+      nextRun(spec(), new Date('2026-06-01T10:00:00Z'), () => false),
+      null,
+    );
   });
 });
 

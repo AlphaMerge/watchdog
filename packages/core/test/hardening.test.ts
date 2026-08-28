@@ -17,9 +17,7 @@ import { silent } from './support/tree.js';
  * measuring the harness.
  */
 
-const build = async (
-  install: (app: FastifyInstance) => void,
-): Promise<FastifyInstance> => {
+const build = async (install: (app: FastifyInstance) => void): Promise<FastifyInstance> => {
   const app = Fastify({ logger: false });
   app.setErrorHandler((error, request, reply) => {
     const mapped = toHttpError(error, request.id);

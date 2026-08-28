@@ -114,7 +114,11 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
       assert.equal(recoveryCodes.length, 10);
       assert.equal(await totp.isEnrolled(userId), true);
       for (const code of recoveryCodes) {
-        assert.match(code, /^[a-z2-9]{5}-[a-z2-9]{5}$/, 'transcribable by somebody without a phone');
+        assert.match(
+          code,
+          /^[a-z2-9]{5}-[a-z2-9]{5}$/,
+          'transcribable by somebody without a phone',
+        );
       }
     });
 
@@ -149,7 +153,9 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
 
     it('stores no recovery code in the clear', async () => {
       const { recoveryCodes } = await enrol();
-      const rows = await db.query<{ code_hash: string }>('SELECT code_hash FROM user_recovery_code');
+      const rows = await db.query<{ code_hash: string }>(
+        'SELECT code_hash FROM user_recovery_code',
+      );
       const stored = rows.map((r) => r.code_hash).join('|');
       for (const code of recoveryCodes) {
         assert.equal(stored.includes(code), false);

@@ -115,7 +115,11 @@ export class AccessService {
    * so it is not expressible as a grant — and making administrators depend on a row is how an
    * installation locks itself out by deleting one.
    */
-  async resolve(userId: number, objectId: number, q: Queryable = this.#db): Promise<ResolvedAccess> {
+  async resolve(
+    userId: number,
+    objectId: number,
+    q: Queryable = this.#db,
+  ): Promise<ResolvedAccess> {
     const admin = await q.query<{ total: string }>(
       `SELECT count(*)::text AS total
        FROM user_group_member m JOIN user_group g ON g.id = m.group_id
@@ -317,9 +321,9 @@ export class AccessService {
   }
 
   /** Every grant sitting directly on this object. */
-  async grantsOn(objectId: number): Promise<
-    { groupId: number; groupName: string; right: AccessRight; grantedBy: string }[]
-  > {
+  async grantsOn(
+    objectId: number,
+  ): Promise<{ groupId: number; groupName: string; right: AccessRight; grantedBy: string }[]> {
     const rows = await this.#db.query<{
       group_id: string;
       name: string;

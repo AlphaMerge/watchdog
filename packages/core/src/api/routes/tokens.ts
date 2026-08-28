@@ -83,7 +83,9 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
     },
   );
 
-  app.post<{ Body: { name: string; scope?: 'none' | 'read' | 'write' | 'full'; expiresAt?: string } }>(
+  app.post<{
+    Body: { name: string; scope?: 'none' | 'read' | 'write' | 'full'; expiresAt?: string };
+  }>(
     '/auth/tokens',
     {
       schema: {

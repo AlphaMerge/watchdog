@@ -288,7 +288,17 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['runId', 'range', 'status', 'headline', 'scanned', 'found', 'created', 'errors', 'timing'],
+            required: [
+              'runId',
+              'range',
+              'status',
+              'headline',
+              'scanned',
+              'found',
+              'created',
+              'errors',
+              'timing',
+            ],
             properties: {
               runId: { type: 'integer' },
               groupId: { type: 'integer' },
@@ -307,7 +317,15 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               scanned: {
                 type: 'object',
                 additionalProperties: false,
-                required: ['addresses', 'swept', 'alive', 'unreachable', 'failed', 'identified', 'complete'],
+                required: [
+                  'addresses',
+                  'swept',
+                  'alive',
+                  'unreachable',
+                  'failed',
+                  'identified',
+                  'complete',
+                ],
                 properties: {
                   addresses: { type: 'integer' },
                   swept: { type: 'integer' },
@@ -714,7 +732,11 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                   'A cadence is a statement about local time — 02:30 has to be 02:30 in both ' +
                   'halves of the year — so it is stored as one. Null is the core’s own zone.',
               },
-              level: { type: 'string', enum: ['ping', 'standard', 'detailed'], default: 'standard' },
+              level: {
+                type: 'string',
+                enum: ['ping', 'standard', 'detailed'],
+                default: 'standard',
+              },
               templates: { type: 'array', items: { type: 'string' }, default: [] },
               snmpCommunity: { type: 'string', maxLength: 128, default: '' },
               timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000, default: 1_000 },
@@ -768,9 +790,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         const { enabled } = request.body as { enabled: boolean };
         const updated = await rediscovery.setEnabled(id, enabled);
         if (updated === null) {
-          throw new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no rediscovery schedule ${String(id)}`, {
-            context: { id },
-          });
+          throw new DiscoveryError(
+            'DISCOVERY_RUN_NOT_FOUND',
+            `there is no rediscovery schedule ${String(id)}`,
+            {
+              context: { id },
+            },
+          );
         }
         return updated;
       },
@@ -789,9 +815,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       async (request, reply) => {
         const { id } = request.params as { id: number };
         if (!(await rediscovery.remove(id))) {
-          throw new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no rediscovery schedule ${String(id)}`, {
-            context: { id },
-          });
+          throw new DiscoveryError(
+            'DISCOVERY_RUN_NOT_FOUND',
+            `there is no rediscovery schedule ${String(id)}`,
+            {
+              context: { id },
+            },
+          );
         }
         await reply.code(204).send();
         return reply;

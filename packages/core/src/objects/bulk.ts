@@ -136,7 +136,11 @@ export class BulkService {
 
     for (const id of unique) {
       try {
-        outcomes.push({ objectId: id, ok: true, ...(await this.#one(actor, id, operation, alreadyGone)) });
+        outcomes.push({
+          objectId: id,
+          ok: true,
+          ...(await this.#one(actor, id, operation, alreadyGone)),
+        });
       } catch (error) {
         outcomes.push({
           objectId: id,
@@ -218,9 +222,13 @@ export class BulkService {
     try {
       return await this.#objects.delete(actor, id, { kind: 'leafOnly' }, { kind: 'none' });
     } catch (error) {
-      if (!cascade || !(error instanceof ObjectError) || error.code !== 'OBJECT_NOT_EMPTY') throw error;
+      if (!cascade || !(error instanceof ObjectError) || error.code !== 'OBJECT_NOT_EMPTY')
+        throw error;
       const counts = error.details['deleted'];
-      const total = typeof counts === 'object' && counts !== null ? (counts as { total?: unknown }).total : undefined;
+      const total =
+        typeof counts === 'object' && counts !== null
+          ? (counts as { total?: unknown }).total
+          : undefined;
       if (typeof total !== 'number') throw error;
       return await this.#objects.delete(
         actor,

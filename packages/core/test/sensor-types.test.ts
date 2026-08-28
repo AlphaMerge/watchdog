@@ -92,7 +92,13 @@ describe(
     it('refuses a type nothing has registered, and says what is registered', async () => {
       const error = await rejects(() => createSensor({}, 'nope.missing'));
       assert.equal(error.code, 'OBJECT_INVALID');
-      assert.deepEqual(error.details['registered'], ['core.factory', 'icmp.ping', 'ms.core.health', 'ms.probe.health', 'snmp.traffic']);
+      assert.deepEqual(error.details['registered'], [
+        'core.factory',
+        'icmp.ping',
+        'ms.core.health',
+        'ms.probe.health',
+        'snmp.traffic',
+      ]);
     });
 
     it('refuses params the type’s schema rejects, listing every problem', async () => {

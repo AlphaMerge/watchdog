@@ -226,7 +226,11 @@ describe('a disconnect long enough to matter', () => {
     // the failure this guards against loses exactly one batch per flap, silently.
     const dir = await mkdtemp(join(tmpdir(), 'ms-soak-flap-'));
     dirs.push(dir);
-    const spool = await ResultSpool.open({ dir, maxBytes: SHIPPED_SPOOL_MAX_BYTES, logger: silent });
+    const spool = await ResultSpool.open({
+      dir,
+      maxBytes: SHIPPED_SPOOL_MAX_BYTES,
+      logger: silent,
+    });
 
     const total = 5_000;
     for (let written = 0; written < total; written += 500) {

@@ -62,10 +62,16 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
-        auth: { accounts, sessions, throttle, groups: new GroupService({ db, logger: silent }),
+        auth: {
+          accounts,
+          sessions,
+          throttle,
+          groups: new GroupService({ db, logger: silent }),
           access: new AccessService({ db, logger: silent }),
           tokens: new TokenService({ db, logger: silent }),
-          totp: new TotpService({ db, logger: silent }), required },
+          totp: new TotpService({ db, logger: silent }),
+          required,
+        },
       });
       await server.build('9.9.9', harness.service);
       return server.app;

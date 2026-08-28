@@ -57,7 +57,11 @@ export function DiscoveryView(): React.JSX.Element {
   const [startedId, setStartedId] = useState<number | null>(null);
   const [startError, setStartError] = useState<ApiError | null>(null);
 
-  if (probes.status === 'loading' || groups.status === 'loading' || templates.status === 'loading') {
+  if (
+    probes.status === 'loading' ||
+    groups.status === 'loading' ||
+    templates.status === 'loading'
+  ) {
     return <Loading what="discovery" />;
   }
   if (probes.status === 'error') return <ErrorPanel error={probes.error} retry={probes.reload} />;
@@ -181,50 +185,50 @@ function StartPanel({
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Probe" hint="The one that can reach this network. Discovery is a local job.">
           {(describedBy) => (
-          <select
-            className={SELECT}
-            aria-describedby={describedBy}
-            value={draft.probeId ?? ''}
-            onChange={(event) => {
-              const probeId = event.target.value === '' ? null : Number(event.target.value);
-              // The group is cleared with the probe: a group under the old probe would be a
-              // selection that still looks valid and that the core would refuse.
-              onChange({ ...draft, probeId, groupId: null });
-            }}
-          >
-            <option value="">Choose a probe…</option>
-            {probes.map((probe) => (
-              <option key={probe.id} value={probe.id}>
-                {probe.name}
-              </option>
-            ))}
-          </select>
+            <select
+              className={SELECT}
+              aria-describedby={describedBy}
+              value={draft.probeId ?? ''}
+              onChange={(event) => {
+                const probeId = event.target.value === '' ? null : Number(event.target.value);
+                // The group is cleared with the probe: a group under the old probe would be a
+                // selection that still looks valid and that the core would refuse.
+                onChange({ ...draft, probeId, groupId: null });
+              }}
+            >
+              <option value="">Choose a probe…</option>
+              {probes.map((probe) => (
+                <option key={probe.id} value={probe.id}>
+                  {probe.name}
+                </option>
+              ))}
+            </select>
           )}
         </Field>
 
         <Field label="Group" hint="Where the devices it finds are created.">
           {(describedBy) => (
-          <select
-            className={SELECT}
-            aria-describedby={describedBy}
-            value={draft.groupId ?? ''}
-            disabled={draft.probeId === null}
-            onChange={(event) => {
-              onChange({
-                ...draft,
-                groupId: event.target.value === '' ? null : Number(event.target.value),
-              });
-            }}
-          >
-            <option value="">
-              {draft.probeId === null ? 'Choose a probe first' : 'Choose a group…'}
-            </option>
-            {underProbe.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name}
+            <select
+              className={SELECT}
+              aria-describedby={describedBy}
+              value={draft.groupId ?? ''}
+              disabled={draft.probeId === null}
+              onChange={(event) => {
+                onChange({
+                  ...draft,
+                  groupId: event.target.value === '' ? null : Number(event.target.value),
+                });
+              }}
+            >
+              <option value="">
+                {draft.probeId === null ? 'Choose a probe first' : 'Choose a group…'}
               </option>
-            ))}
-          </select>
+              {underProbe.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
           )}
         </Field>
       </div>
@@ -374,9 +378,8 @@ function TemplatePicker({
     <fieldset>
       <legend className="text-sm font-medium text-text">Templates</legend>
       <p className="mt-1 text-xs text-text-muted">
-        None ticked means all of them, which is what you want unless you are deliberately
-        narrowing. A run filtered to templates that match nothing creates the device and no
-        sensors.
+        None ticked means all of them, which is what you want unless you are deliberately narrowing.
+        A run filtered to templates that match nothing creates the device and no sensors.
       </p>
       <div className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded border border-border p-2">
         {templates.length === 0 && <p className="text-sm text-text-muted">No templates loaded.</p>}
@@ -469,7 +472,9 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
     setCancelling(true);
     send('POST', `/discovery/${String(runId)}/cancel`)
       .catch((failure: unknown) => {
-        setProblem(failure instanceof ApiError ? failure.message : 'the run could not be cancelled');
+        setProblem(
+          failure instanceof ApiError ? failure.message : 'the run could not be cancelled',
+        );
       })
       .finally(() => {
         setCancelling(false);
@@ -527,7 +532,10 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
         aria-valuemax={100}
         aria-label={`Discovery of ${run.range}`}
       >
-        <div className="h-full bg-accent transition-[width]" style={{ width: `${String(percent)}%` }} />
+        <div
+          className="h-full bg-accent transition-[width]"
+          style={{ width: `${String(percent)}%` }}
+        />
       </div>
 
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">

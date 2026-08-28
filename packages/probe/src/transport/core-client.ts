@@ -185,10 +185,7 @@ export class CoreClient {
       this.#identity,
       this.#logger,
     );
-    this.#logger.info(
-      { gid, issuedKey: issuedKey !== undefined },
-      'stored this probe’s identity',
-    );
+    this.#logger.info({ gid, issuedKey: issuedKey !== undefined }, 'stored this probe’s identity');
   }
 
   async stop(): Promise<void> {

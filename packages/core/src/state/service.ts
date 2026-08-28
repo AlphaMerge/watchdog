@@ -599,7 +599,9 @@ export class SensorStateService {
     const [loaded, resolved] = await Promise.all([
       runtimes.length === 0
         ? new Map<number, SensorRuntime>()
-        : this.#db.tx((q: Queryable) => loadRuntimes(q, runtimes)).then((loaded) => this.#withProbeFacts(loaded)),
+        : this.#db
+            .tx((q: Queryable) => loadRuntimes(q, runtimes))
+            .then((loaded) => this.#withProbeFacts(loaded)),
       policies.length === 0 || this.#settings === undefined
         ? new Map<number, { value: unknown }>()
         : this.#settings.resolveForObjects(policies, SCAN_RETRY_WARNINGS.key),

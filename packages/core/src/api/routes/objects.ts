@@ -592,15 +592,7 @@ export async function objectRoutes(
             },
             operation: {
               type: 'string',
-              enum: [
-                'pause',
-                'resume',
-                'move',
-                'clone',
-                'delete',
-                'setting',
-                'revertSetting',
-              ],
+              enum: ['pause', 'resume', 'move', 'clone', 'delete', 'setting', 'revertSetting'],
             },
             targetParentId: {
               type: 'integer',

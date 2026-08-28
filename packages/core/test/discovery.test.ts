@@ -799,7 +799,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.deepEqual(summary.errors, [
         { address: '10.0.0.4', problem: 'no credential for snmp' },
       ]);
-      assert.match(summary.headline, /3 devices and 9 sensors created, 2 already existed, 1 address had problems\./);
+      assert.match(
+        summary.headline,
+        /3 devices and 9 sensors created, 2 already existed, 1 address had problems\./,
+      );
     });
 
     it('says where a run nobody started came from', async () => {
@@ -814,7 +817,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         [groupId, probeId],
       );
       const scheduleId = Number(rows[0]?.id);
-      await db.query(`UPDATE discovery_run SET schedule_id = $2 WHERE id = $1`, [run.id, scheduleId]);
+      await db.query(`UPDATE discovery_run SET schedule_id = $2 WHERE id = $1`, [
+        run.id,
+        scheduleId,
+      ]);
 
       assert.equal((await discovery.summary(run.id))?.scheduleId, scheduleId);
     });

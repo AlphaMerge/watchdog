@@ -185,7 +185,10 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     ];
 
     for (const testCase of CASES) {
-      const where = testCase.grant === 'none-at-all' ? 'nothing granted' : `${testCase.grant} on the ${testCase.at}`;
+      const where =
+        testCase.grant === 'none-at-all'
+          ? 'nothing granted'
+          : `${testCase.grant} on the ${testCase.at}`;
       it(`${testCase.role} with ${where} resolves ${testCase.expect}`, async () => {
         await db.query('DELETE FROM object_access');
         if (testCase.grant !== 'none-at-all') {
@@ -236,7 +239,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       const leaked: string[] = [];
       for (const route of server.routes) {
         if (route.method !== 'GET') continue;
-        const response = await app.inject({ method: 'GET', url: fill(route.url), headers: readonly });
+        const response = await app.inject({
+          method: 'GET',
+          url: fill(route.url),
+          headers: readonly,
+        });
         if (response.body.includes(PLANTED_SECRET)) leaked.push(`${route.method} ${route.url}`);
       }
 

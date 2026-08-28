@@ -87,10 +87,7 @@ export class ProbeRegistryError extends AppError {
 }
 
 interface Db {
-  query<T extends Record<string, unknown>>(
-    text: string,
-    values?: readonly unknown[],
-  ): Promise<T[]>;
+  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
 }
 
 export interface ProbeRegistryOptions {
@@ -202,7 +199,11 @@ export class ProbeRegistry {
     if (existing.status === 'pending') {
       // A pending probe still presents the enrolment key, because it has none of its own yet.
       if (!this.#enrolmentKeyMatches(hello.accessKey)) {
-        return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
+        return {
+          kind: 'refused',
+          code: 'bad-access-key',
+          detail: 'the access key was not accepted',
+        };
       }
       return { kind: 'pending', gid: existing.gid };
     }
@@ -218,10 +219,10 @@ export class ProbeRegistry {
     // is stored in the same breath, so the next handshake takes the issued-key path above.
     if (!existing.hasOwnKey) {
       const issuedKey = randomBytes(32).toString('base64url');
-      await this.#db.query(
-        `UPDATE probe_registration SET access_key_hash = $2 WHERE gid = $1`,
-        [existing.gid, hashKey(issuedKey)],
-      );
+      await this.#db.query(`UPDATE probe_registration SET access_key_hash = $2 WHERE gid = $1`, [
+        existing.gid,
+        hashKey(issuedKey),
+      ]);
       this.#logger.info({ gid: existing.gid }, 'issued this probe a key of its own');
       return { kind: 'approved', gid: existing.gid, objectId: existing.objectId, issuedKey };
     }
@@ -312,7 +313,8 @@ export class ProbeRegistry {
     options: { local?: boolean; actorId?: number } = {},
   ): Promise<ProbeRegistration> {
     const existing = await this.get(gid);
-    if (existing === null) throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+    if (existing === null)
+      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
 
     // **A revoked identity does not hold a branch**, which is what revoking means — the row
     // stays so the decision survives and the GID cannot return by reconnecting, but the branch
@@ -357,7 +359,8 @@ export class ProbeRegistry {
 
     this.#logger.info({ gid, objectId, local: options.local ?? false }, 'a probe was approved');
     const row = rows[0];
-    if (row === undefined) throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+    if (row === undefined)
+      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
     return read(row);
   }
 
@@ -378,7 +381,8 @@ export class ProbeRegistry {
       [gid, note.slice(0, 1_000), actorId ?? null],
     );
     const row = rows[0];
-    if (row === undefined) throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+    if (row === undefined)
+      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
 
     // The branch is released so an operator can bind a replacement machine to it — the sensors,
     // their history and their thresholds all live on the objects, and losing them because a
@@ -410,7 +414,8 @@ export class ProbeRegistry {
       [gid, [...filters]],
     );
     const row = rows[0];
-    if (row === undefined) throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+    if (row === undefined)
+      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
     return read(row);
   }
 

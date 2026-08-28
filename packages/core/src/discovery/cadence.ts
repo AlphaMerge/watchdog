@@ -49,7 +49,10 @@ export function cadenceProblems(spec: CadenceSpec): string[] {
       `the minute must be between 0 and ${String(limit - 1)} for an ${spec.cadence} cadence`,
     );
   }
-  if (spec.cadence === 'weekly' && (!Number.isInteger(spec.weekday) || spec.weekday < 0 || spec.weekday > 6)) {
+  if (
+    spec.cadence === 'weekly' &&
+    (!Number.isInteger(spec.weekday) || spec.weekday < 0 || spec.weekday > 6)
+  ) {
     problems.push('the weekday must be 0 (Monday) to 6 (Sunday)');
   }
   if (spec.timezone !== null && !isKnownTimeZone(spec.timezone)) {

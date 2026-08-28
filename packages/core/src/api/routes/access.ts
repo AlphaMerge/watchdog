@@ -130,7 +130,10 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
       // **Asking about somebody else is an administrator's question.** Otherwise any account
       // could map the whole permission structure one probe at a time.
       if (asked !== undefined && asked !== principal.userId && principal.role !== 'admin') {
-        throw new AuthError('AUTH_FORBIDDEN', 'only an administrator may ask about another account');
+        throw new AuthError(
+          'AUTH_FORBIDDEN',
+          'only an administrator may ask about another account',
+        );
       }
 
       // **`resolveFor`, not `resolve`, and the difference is the whole meaning of "effective".**

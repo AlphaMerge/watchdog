@@ -99,7 +99,8 @@ export class AccountService {
         ],
       );
       const row = rows[0];
-      if (row === undefined) throw new AppError('ACCOUNT_NOT_CREATED', 'the account was not created');
+      if (row === undefined)
+        throw new AppError('ACCOUNT_NOT_CREATED', 'the account was not created');
       this.#logger.info({ login, role: request.role }, 'account created');
       return read(row);
     } catch (error: unknown) {
@@ -260,7 +261,10 @@ export class AccountService {
     }
 
     if (options.byAdministrator !== true) {
-      if (options.current === undefined || !(await verifyPassword(row.password_hash, options.current))) {
+      if (
+        options.current === undefined ||
+        !(await verifyPassword(row.password_hash, options.current))
+      ) {
         throw new AuthError('ACCOUNT_PASSWORD_WRONG', 'the current password was not accepted');
       }
     }
@@ -272,7 +276,10 @@ export class AccountService {
        WHERE id = $1`,
       [id, await hashPassword(next), options.byAdministrator === true],
     );
-    this.#logger.info({ accountId: id, byAdministrator: options.byAdministrator === true }, 'password changed');
+    this.#logger.info(
+      { accountId: id, byAdministrator: options.byAdministrator === true },
+      'password changed',
+    );
   }
 
   async delete(id: number): Promise<void> {
@@ -289,7 +296,9 @@ export class AccountService {
   }
 
   async count(q: Queryable = this.#db): Promise<number> {
-    const rows = await q.query<{ total: string }>(`SELECT count(*)::text AS total FROM user_account`);
+    const rows = await q.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM user_account`,
+    );
     return Number(rows[0]?.total ?? 0);
   }
 
@@ -302,7 +311,9 @@ export class AccountService {
    * flagged `must_change_password` so it does not survive the first login. Returning null means
    * accounts already exist and nothing was touched — this runs at every start-up.
    */
-  async ensureFirstAdministrator(login = 'admin'): Promise<{ login: string; password: string } | null> {
+  async ensureFirstAdministrator(
+    login = 'admin',
+  ): Promise<{ login: string; password: string } | null> {
     if ((await this.count()) > 0) return null;
     const password = randomBytes(18).toString('base64url');
     await this.create({

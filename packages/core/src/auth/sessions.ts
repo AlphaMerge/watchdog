@@ -87,7 +87,10 @@ export class SessionService {
         expiresAt,
       ],
     );
-    this.#logger.info({ login: account.login, remoteAddress: context.remoteAddress }, 'session started');
+    this.#logger.info(
+      { login: account.login, remoteAddress: context.remoteAddress },
+      'session started',
+    );
     return { token, expiresAt };
   }
 

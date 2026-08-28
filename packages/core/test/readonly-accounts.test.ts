@@ -88,11 +88,12 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       await groups.addMember(teamId, account.id);
       await access.grant(deviceId, teamId, 'full', 'test');
 
-      assert.equal((await access.resolve(account.id, deviceId)).right, 'full', 'the groups grant full');
-      const capped = await access.resolveFor(
-        { userId: account.id, role: 'readonly' },
-        deviceId,
+      assert.equal(
+        (await access.resolve(account.id, deviceId)).right,
+        'full',
+        'the groups grant full',
       );
+      const capped = await access.resolveFor({ userId: account.id, role: 'readonly' }, deviceId);
       assert.equal(capped.right, 'read', 'and the account may still only read');
       assert.equal(capped.cappedByRole, true);
     });
@@ -118,10 +119,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       const account = await makeAccount('readwrite');
       await groups.addMember(teamId, account.id);
       await access.grant(deviceId, teamId, 'full', 'test');
-      const resolved = await access.resolveFor(
-        { userId: account.id, role: 'readwrite' },
-        deviceId,
-      );
+      const resolved = await access.resolveFor({ userId: account.id, role: 'readwrite' }, deviceId);
       assert.equal(resolved.right, 'full');
       assert.equal(resolved.cappedByRole, undefined);
     });
@@ -130,10 +128,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // A read-write account with no grant has nothing, and the ceiling must not invent one.
       const account = await makeAccount('readwrite');
       await groups.addMember(teamId, account.id);
-      const resolved = await access.resolveFor(
-        { userId: account.id, role: 'readwrite' },
-        deviceId,
-      );
+      const resolved = await access.resolveFor({ userId: account.id, role: 'readwrite' }, deviceId);
       assert.equal(resolved.right, 'none');
     });
 

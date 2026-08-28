@@ -111,14 +111,18 @@ export class TotpService {
    */
   async confirmEnrolment(userId: number, code: string): Promise<{ recoveryCodes: string[] }> {
     const row = await this.#row(userId);
-    if (row === null) throw new AuthError('MFA_NOT_ENROLLED', 'this account has not started enrolment');
+    if (row === null)
+      throw new AuthError('MFA_NOT_ENROLLED', 'this account has not started enrolment');
     if (row.confirmed_at != null) {
       throw new AuthError('MFA_ALREADY_ENROLLED', 'this account is already enrolled');
     }
 
     const step = this.#verifyCode(row.secret, code, null);
     if (step === null) {
-      throw new AuthError('MFA_CODE_INVALID', 'that code was not accepted; check your device clock');
+      throw new AuthError(
+        'MFA_CODE_INVALID',
+        'that code was not accepted; check your device clock',
+      );
     }
 
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () => newRecoveryCode());
@@ -206,7 +210,10 @@ export class TotpService {
   async regenerateRecoveryCodes(userId: number): Promise<string[]> {
     const row = await this.#row(userId);
     if (row === null || row.confirmed_at == null) {
-      throw new AuthError('MFA_NOT_ENROLLED', 'this account does not have multi-factor authentication');
+      throw new AuthError(
+        'MFA_NOT_ENROLLED',
+        'this account does not have multi-factor authentication',
+      );
     }
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () => newRecoveryCode());
     await this.#db.tx(async (q) => {

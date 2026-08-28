@@ -41,7 +41,10 @@ const RUN: DiscoveryRunRow = {
   finishedAt: '2026-08-27T16:28:01.000Z',
 };
 
-const run = (overrides: Partial<DiscoveryRunRow> = {}): DiscoveryRunRow => ({ ...RUN, ...overrides });
+const run = (overrides: Partial<DiscoveryRunRow> = {}): DiscoveryRunRow => ({
+  ...RUN,
+  ...overrides,
+});
 
 const describe_ = (
   overrides: Partial<DiscoveryRunRow> = {},
@@ -80,10 +83,15 @@ describe('the headline', () => {
   });
 
   it('leads with the problems rather than burying them', () => {
-    const summary = describe_({}, [], [], [
-      { address: '10.0.0.5', problem: 'no credential' },
-      { address: '10.0.0.9', problem: 'the template made no sensors' },
-    ]);
+    const summary = describe_(
+      {},
+      [],
+      [],
+      [
+        { address: '10.0.0.5', problem: 'no credential' },
+        { address: '10.0.0.9', problem: 'the template made no sensors' },
+      ],
+    );
     assert.match(summary.headline, /2 addresses had problems\.$/);
     assert.equal(summary.errors.length, 2, 'and they are in the summary, not behind a second call');
   });
@@ -157,10 +165,14 @@ describe('the breakdown', () => {
 
   it('passes vendors through as they were found', () => {
     assert.deepEqual(
-      describe_({}, [], [
-        { vendor: 'Cisco', count: 4 },
-        { vendor: 'HP', count: 1 },
-      ]).found.byVendor,
+      describe_(
+        {},
+        [],
+        [
+          { vendor: 'Cisco', count: 4 },
+          { vendor: 'HP', count: 1 },
+        ],
+      ).found.byVendor,
       [
         { vendor: 'Cisco', count: 4 },
         { vendor: 'HP', count: 1 },

@@ -13,11 +13,7 @@ import {
   whyNotStartable,
 } from '../src/routes/discovery-model';
 import { descendantsOf } from '../src/routes/DiscoveryView';
-import type {
-  DiscoveryLevelEstimate,
-  DiscoveryRun,
-  ObjectSummary,
-} from '../src/api/types';
+import type { DiscoveryLevelEstimate, DiscoveryRun, ObjectSummary } from '../src/api/types';
 
 /**
  * The discovery page's arithmetic and wording (`D-10`).
@@ -208,7 +204,10 @@ describe('the level list', () => {
   });
 
   it('does not reorder the caller’s array', () => {
-    const levels = [level({ id: 'detailed', maxSeconds: 64 }), level({ id: 'ping', maxSeconds: 8 })];
+    const levels = [
+      level({ id: 'detailed', maxSeconds: 64 }),
+      level({ id: 'ping', maxSeconds: 8 }),
+    ];
     orderedLevels(levels);
     expect(levels[0]?.id).toBe('detailed');
   });

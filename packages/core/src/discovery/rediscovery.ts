@@ -1,7 +1,13 @@
 import type { Logger } from '@ms/shared';
 import type { DiscoveryLevel } from '@ms/shared';
 import { isActiveAt, type ScheduleDefinition } from '../schedules/definition.js';
-import { cadenceProblems, describeCadence, nextRun, type Cadence, type CadenceSpec } from './cadence.js';
+import {
+  cadenceProblems,
+  describeCadence,
+  nextRun,
+  type Cadence,
+  type CadenceSpec,
+} from './cadence.js';
 import { DiscoveryError } from './errors.js';
 import type { DiscoveryService } from './service.js';
 
@@ -52,10 +58,7 @@ export interface RediscoverySchedule {
 }
 
 interface Db {
-  query<T extends Record<string, unknown>>(
-    text: string,
-    values?: readonly unknown[],
-  ): Promise<T[]>;
+  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
 }
 
 export interface RediscoveryOptions {
@@ -123,7 +126,8 @@ export class RediscoveryService {
     }
     // Computed before the insert so a schedule is never enabled with no next run — a row the
     // sweep would ignore for ever while the UI said it was on.
-    const next = input.enabled === true ? await this.#nextFor(spec, input.scheduleId ?? null) : null;
+    const next =
+      input.enabled === true ? await this.#nextFor(spec, input.scheduleId ?? null) : null;
 
     const rows = await this.#db.query<Record<string, unknown>>(
       `INSERT INTO discovery_schedule
@@ -306,7 +310,11 @@ export class RediscoveryService {
   }
 
   /** The next firing, honouring a permission window when one is attached. */
-  async #nextFor(spec: CadenceSpec, scheduleId: number | null, from?: Date): Promise<string | null> {
+  async #nextFor(
+    spec: CadenceSpec,
+    scheduleId: number | null,
+    from?: Date,
+  ): Promise<string | null> {
     const start = from ?? this.#now();
     if (scheduleId === null) {
       // A minute past, so a schedule enabled at exactly its firing time books the *next* one
@@ -321,8 +329,9 @@ export class RediscoveryService {
       return nextRun(spec, new Date(start.getTime() + 60_000))?.toISOString() ?? null;
     }
     return (
-      nextRun(spec, new Date(start.getTime() + 60_000), (at) => isActiveAt(definition, at))?.toISOString() ??
-      null
+      nextRun(spec, new Date(start.getTime() + 60_000), (at) =>
+        isActiveAt(definition, at),
+      )?.toISOString() ?? null
     );
   }
 }
