@@ -708,6 +708,34 @@ Phase 3.
 
 ---
 
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| A-01 accounts and authentication | done | Everything before it ran as `anonymous` — the `Actor` union carried a `user` variant nothing produced, so the audit log recorded *that* a thing happened without *who*. argon2id for passwords and SHA-256 for session tokens, which look like the same problem and are opposites. Server-side sessions per `ADR-001`, because revoking a stateless token means a deny-list — a table, so nothing was saved. Throttling counts per address *and* per account, because locking an account is a denial of service anybody can trigger and counting only addresses stops nothing distributed |
+| A-02 user groups and primary group | done | Rights hang off groups so they survive the person leaving. The primary group is the *default*, answering only which group owns what a user creates; access is the union of all groups, because otherwise *adding* somebody to a group could take access away |
+| A-03 per-object access rights | done | Rules applied **per group, then combined** — the other reading lets a `read` grant on a leaf strip another group's inherited `full`. `none` is storable and distinct from revoking. Administrators short-circuit the walk, because "may do anything, including to objects that do not exist yet" is not a position in the tree. Mutation-tested 11/11 |
+| A-04 read-only restrictions | done | A role is a **ceiling**, not a starting point. Three ways into a read-only administrator, all refused by trigger — and writing the tests found the third, making the *group* administrative under an existing read-only member |
+| A-05 credential vault | done | Already complete; `A-10` pinned the boundary it provides |
+| A-06 API tokens | done | A token is never more than its owner: scope capped at creation *and* at every use, because either alone leaves a gap. A token cannot mint a token |
+| A-07 TOTP MFA | done | Enrolment is two-step, so a mistyped setup cannot lock somebody out. A code cannot be replayed inside its own window. Enforcement is per group |
+| A-08 audit log UI | not started | The per-object route exists (`S-10`); what is missing is the global feed |
+| A-09 security hardening | done | Three of six already existed; auditing first found the one that mattered — the SSRF guard covered webhooks and not sensors, and a sensor is the *better* vector because its response is stored and rendered |
+| A-10 access-control matrix | done | Found a real bug: `/access/effective` answered what the *groups* granted rather than what the account could do, so a read-only account was told it held `full`. The credential sweep covers every registered route by construction |
+
+Both exit criteria are met:
+
+- **An access-control test matrix passes for every combination of role, group and tree
+  position** — 12 rows over HTTP in `access-matrix.test.ts`, on top of `A-03`'s 13-row matrix
+  against the resolver. The HTTP layer is where the one real defect was: a route that resolved
+  the right without applying the role's ceiling.
+- **A read-only user cannot retrieve any credential by any route, including historic-data and
+  export endpoints** — met by a boundary rather than a role check, which is the stronger
+  property: no route returns a credential *to anyone*. Proved by sweeping every registered GET
+  route with a planted secret, for all three roles.
+
+---
+
 ## Phase 10 — Hardening and release
 
 **Deliverables**
