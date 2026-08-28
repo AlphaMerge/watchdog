@@ -138,7 +138,7 @@ describe(
       const server = await serverWith(root);
       // One wildcard, registered by @fastify/static, covering HEAD and GET. Anything else
       // appearing in this list is a JSON route that lost its response schema.
-      assert.deepEqual(server.assetRoutes, ['HEAD,GET /*']);
+      assert.deepEqual(server.unfilteredRoutes, ['HEAD,GET /*']);
     });
   },
 );

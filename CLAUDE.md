@@ -68,7 +68,7 @@ Probes always dial **out** to the core. The local probe runs the same code as a 
 | Storage           | PostgreSQL + TimescaleDB, single database for config **and** metrics     |
 | Scheduling        | In-house hashed timing wheel — not BullMQ, not `setTimeout`-per-sensor   |
 | Auth              | Server-side sessions + API tokens, `argon2`, `otpauth` TOTP              |
-| Logging / metrics | `pino`, `prom-client`                                                    |
+| Logging / metrics | `pino`, `@prometheus-io/client` (`prom-client` under its current name)   |
 | Tests             | `node:test` (backend), `vitest` (frontend), in-house protocol simulators |
 
 ---

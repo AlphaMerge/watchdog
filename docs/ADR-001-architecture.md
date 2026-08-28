@@ -448,7 +448,8 @@ has been in beta for years. Neither is an option.
 ## Decision 11 — Observability of the monitor itself
 
 **Decision.** Ship Core Health and Probe Health as real sensors from Phase 1, backed by
-`prom-client` metrics and structured `pino` logs.
+`@prometheus-io/client` metrics (`prom-client` under its current name) and structured
+`pino` logs.
 
 Metrics that must exist before we have any right to trust the system: scheduler lag p50/p95/p99,
 deferred-check count, worker pool utilisation, check duration by sensor type, ingestion queue
@@ -490,7 +491,7 @@ these numbers.
 | Auth                   | Sessions + API tokens, argon2, TOTP; LDAP/OIDC later         |
 | Supervision            | systemd (Linux), WinSW (Windows)                             |
 | Dev environment        | Docker Compose — **development only**                        |
-| Observability          | pino, prom-client, self-monitoring sensors                   |
+| Observability          | pino, @prometheus-io/client, self-monitoring sensors        |
 
 ## Open questions to resolve before Phase 1 closes
 

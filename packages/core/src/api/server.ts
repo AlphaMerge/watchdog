@@ -44,6 +44,8 @@ import { stateLogRoutes, STATE_LOG_SCHEMAS } from './routes/state-log.js';
 import type { DeliveryHealthReader } from '../notifications/health.js';
 import type { CoreHealthService } from '../health/core-health.js';
 import type { ProbeHealthService } from '../health/probe-health.js';
+import type { MetricsExporter } from '../metrics/exporter.js';
+import { AuthError } from '../auth/errors.js';
 import { healthRoutes } from './routes/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
@@ -153,6 +155,13 @@ export interface ApiServerOptions {
   coreHealth?: () => CoreHealthService | undefined;
   /** One probe's health, live (`P-13`). Late-bound like the core's, and for the same reason. */
   probeHealth?: () => ProbeHealthService | undefined;
+  /**
+   * The Prometheus exporter (`P-14`). Late-bound like the health services it reads.
+   *
+   * Optional like the rest: a build without it has no `/metrics` at all, which is a 404 an
+   * operator can diagnose rather than an endpoint that answers with nothing.
+   */
+  metrics?: () => MetricsExporter | undefined;
   /** What "send test notification" actually sends through (`N-14`). */
   tester?: NotificationTester;
   /**
@@ -196,19 +205,23 @@ export class ApiServer {
   readonly #deliveryHealth: DeliveryHealthReader | undefined;
   readonly #coreHealth: (() => CoreHealthService | undefined) | undefined;
   readonly #probeHealth: (() => ProbeHealthService | undefined) | undefined;
+  readonly #metrics: (() => MetricsExporter | undefined) | undefined;
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #undeclared: string[] = [];
   /**
-   * Routes exempted from the response-schema guard because they serve files, not JSON.
+   * Routes exempted from the response-schema guard, and why each one is.
    *
    * Recorded rather than skipped silently: the guard is the structural half of the credential
    * defence, and an exemption nobody can enumerate is an exemption nobody reviews. It is logged
-   * at startup and asserted in a test.
+   * at startup and asserted in a test. The reason travels with the route because two exemptions
+   * with different justifications — bytes off disk, and a text format that is not JSON — are two
+   * decisions, and a boolean would have collapsed them into one.
    */
-  readonly #assetRoutes: string[] = [];
+  readonly #unfiltered: { route: string; why: string }[] = [];
   readonly #routes: { method: string; url: string }[] = [];
-  #registeringAssets = false;
+  /** Non-null while registering routes that are exempt, holding the reason. */
+  #exempting: string | null = null;
 
   constructor(options: ApiServerOptions) {
     this.#config = options.config;
@@ -234,6 +247,7 @@ export class ApiServer {
     this.#deliveryHealth = options.deliveryHealth;
     this.#coreHealth = options.coreHealth;
     this.#probeHealth = options.probeHealth;
+    this.#metrics = options.metrics;
     this.#tester = options.tester;
     this.#stream = options.stream;
 
@@ -255,10 +269,14 @@ export class ApiServer {
     // registered by a plugin before our own. A guard with a blind spot is not a guard.
     this.#app.addHook('onRoute', (route) => {
       if (route.method === 'HEAD' || route.method === 'OPTIONS') return;
-      // The static plugin serves bytes off disk; `fast-json-stringify` has nothing to filter
-      // and no schema to filter it against. The exemption is bounded to the one registration.
-      if (this.#registeringAssets) {
-        this.#assetRoutes.push(`${String(route.method)} ${route.url}`);
+      // Bounded to the registration that sets it: the static plugin serves bytes off disk and
+      // `/metrics` serves a text format, and `fast-json-stringify` has nothing to filter in
+      // either. Everything else must declare its responses.
+      if (this.#exempting !== null) {
+        this.#unfiltered.push({
+          route: `${String(route.method)} ${route.url}`,
+          why: this.#exempting,
+        });
         return;
       }
       const schema = route.schema as { response?: unknown } | undefined;
@@ -275,9 +293,9 @@ export class ApiServer {
     return this.#app;
   }
 
-  /** Routes exempted from the response-schema guard because they serve files. Asserted in a test. */
-  get assetRoutes(): readonly string[] {
-    return this.#assetRoutes;
+  /** Routes exempted from the response-schema guard. Asserted in a test, so it stays reviewed. */
+  get unfilteredRoutes(): readonly string[] {
+    return this.#unfiltered.map((one) => one.route);
   }
 
   /**
@@ -487,6 +505,52 @@ export class ApiServer {
       { prefix: '/api/v1' },
     );
 
+    /**
+     * The Prometheus scrape endpoint (`P-14`).
+     *
+     * **At `/metrics` rather than under `/api/v1`**, because that is the path every scraper
+     * config, service-discovery rule and Helm chart in the world already assumes, and a
+     * monitoring system that made people configure a non-standard path would be picking a fight
+     * it cannot win.
+     *
+     * **Which means it must be guarded here, explicitly.** `registerAuthentication` only guards
+     * paths under `/api/`, on the reasoning that the app shell has to be public — so a route
+     * outside that prefix is public by default. That default is right for `index.html` and wrong
+     * for this: the scrape body carries every queue depth, the sensor counts per probe and the
+     * probe names, which together is a map of the installation. A scraper authenticates with an
+     * API token (`A-06`), which is what `authorization` in a Prometheus `scrape_config` is for.
+     *
+     * Exempt from the response-schema rule for the same reason the OpenAPI document is: the body
+     * is a text format, and serialising it as JSON would destroy it.
+     */
+    if (this.#metrics !== undefined) {
+      const metrics = this.#metrics;
+      this.#exempting = 'the Prometheus text format, which is not JSON to filter';
+      const authRequired = this.#auth?.required ?? false;
+      this.#app.get('/metrics', async (request, reply) => {
+        if (authRequired && request.principal === undefined) {
+          throw new AuthError(
+            'AUTH_REQUIRED',
+            'this request needs an API token; Prometheus sends one as a bearer token',
+          );
+        }
+        const exporter = metrics();
+        if (exporter === undefined) {
+          // 503 in the scraper's own terms: an empty body would be recorded as "every series
+          // vanished", which is worse than a failed scrape it will simply retry.
+          await reply
+            .status(503)
+            .header('content-type', 'text/plain; charset=utf-8')
+            .send('# the core is still starting; scrape again shortly\n');
+          return reply;
+        }
+        const { body, contentType } = await exporter.scrape();
+        await reply.header('content-type', contentType).send(body);
+        return reply;
+      });
+      this.#exempting = null;
+    }
+
     // The OpenAPI document is exempt from the response-schema rule on purpose: it *is* a
     // schema document, and serialising it against a strict schema of our own would strip it.
     this.#app.get(
@@ -500,7 +564,7 @@ export class ApiServer {
     // absolute path so the plugin's traversal checks have something stable to resolve against.
     if (this.#config.webRoot !== '') {
       const root = resolve(this.#config.webRoot);
-      this.#registeringAssets = true;
+      this.#exempting = 'bytes off disk, with no JSON to filter';
       await this.#app.register(fastifyStatic, {
         root,
         prefix: '/',
@@ -515,8 +579,8 @@ export class ApiServer {
           }
         },
       });
-      this.#registeringAssets = false;
-      this.#logger.info({ webRoot: root, routes: this.#assetRoutes }, 'serving the web UI');
+      this.#exempting = null;
+      this.#logger.info({ webRoot: root, routes: this.unfilteredRoutes }, 'serving the web UI');
     }
 
     await this.#app.ready();

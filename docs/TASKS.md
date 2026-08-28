@@ -652,8 +652,56 @@ because each is a decision rather than a defect:
       (not connected)" and exactly one channel carrying a reading.
 
       Tests: 16 (core) + 5 (probe) + 5 (sensors) + 5 (shared) + 2 (reachability).
-- [ ] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13
+- [x] **P-14 — `prom-client` metrics endpoint** · S · P-04 · Everything in P-04, P-12 and P-13
       exposed for external scraping too.
+
+      **P-14 outcome.** `MetricsExporter` in `packages/core/src/metrics/` and `GET /metrics`.
+
+      **The library is `prom-client` under its current name.** npm answers an install of
+      `prom-client` with "has been replaced by `@prometheus-io/client`" — the same project, now
+      published under the Prometheus organisation's scope. `CLAUDE.md`'s stack row is updated
+      rather than quietly diverged from; this is a rename, not a different decision.
+
+      **Read from the health services, not from the subsystems a second time.** The rule `N-13`
+      set for delivery health: a second implementation of a health question is a second answer to
+      it, and the day they disagree is the day nobody trusts either. `/metrics` and the two health
+      sensors are the same numbers from the same call, differing only in how they are spelled —
+      base units, because that is what every dashboard and alert expression assumes.
+
+      **A gap is an absent series.** Prometheus has no null, so the honest translation of the
+      no-data rule is to stop exporting the series for that scrape; a graph then breaks the line,
+      exactly as ours does. Every gauge is reset before each collection, because a gauge that kept
+      its last value would report a probe that has gone as still running at whatever it was doing
+      when it left. Verified live: a probe that has never connected exports `ms_probe_connected 0`
+      and its info series, and nothing else at all.
+
+      **Live verification found the same mistake in the opposite direction.** A labelled counter
+      does not exist in the client library until something touches it, so skipping a zero delta
+      left `ms_probe_checks_refused_total` *absent* on a probe that had refused nothing —
+      indistinguishable from a probe that never reported. **A reported zero is a reading**; only a
+      missing reading may be an absent series. Counters are now initialised at zero, which is also
+      the baseline `rate()` and any "no data" alert need.
+
+      **The endpoint is at `/metrics` and had to be guarded explicitly.**
+      `registerAuthentication` guards paths under `/api/` only, because the app shell must be
+      public — so a route outside that prefix is public by default. That default is right for
+      `index.html` and wrong for a body carrying every queue depth, the sensor count per probe and
+      the probe names, which together is a map of the installation. A scraper authenticates with
+      an API token (`A-06`), which is what `authorization` in a Prometheus `scrape_config` is for.
+
+      The response-schema guard — the structural half of the credential defence (`A-10`) — gained
+      its second exemption, and the mechanism now records *why* each one is exempt rather than a
+      boolean: bytes off disk, and a text format that is not JSON. Two justifications are two
+      decisions, and an exemption nobody can enumerate is one nobody reviews.
+
+      The core's own CPU, memory, heap and uptime are deliberately **not** re-exported as channels
+      of ours: the default collector already publishes `process_resident_memory_bytes`,
+      `nodejs_heap_size_used_bytes` and `process_cpu_seconds_total`, which is what a Prometheus
+      user's existing Node dashboards read — and a total lets the scraper pick its own rate window
+      rather than being handed ours. The *probe's* process numbers have no such standard series,
+      so those are exported.
+
+      Mutation: 10 mutants, 10 killed. Tests: 17.
 - [x] **P-15 — 5,000-sensor benchmark** · L · P-08…P-11, P-06 · Sustained 1-hour run: **p95
       dispatch jitter < 1 s on 8 cores**. Results recorded in the repo. _Architecture go/no-go
       gate._
@@ -705,6 +753,16 @@ because each is a decision rather than a defect:
       23.7 s by guarding `M-08`'s ancestor query. What remains is per-object work that is
       genuinely needed (`M-02`'s `sensor_runtime` row); the answer is to stop paying an HTTP
       request and a transaction for each of five thousand objects, which discovery needs anyway.
+
+      **The serial path now fails its budget, and this is where the fix belongs.** Measured
+      2026-08-28 on an otherwise idle host, four runs: **32.1 s, 32.5 s, 35.7 s, 36.3 s against
+      the 30 s budget** — with one run at 31.8 s that passed. The eight-in-flight path is
+      unchanged at 9.3 s with 69% spare, so this is the serial path specifically, exactly as the
+      finding predicted. **The budget has not been widened**, deliberately: it is telling the
+      truth, and a number moved to fit the code is a performance claim with the measurement taken
+      out of it. Either `P-19` makes the serial path fit again or the budget is re-baselined *with
+      today's numbers written down* — that is a decision, not a maintenance step. `P-21` is the
+      separate question of the suite running against a busy machine; these four runs were not.
 
 ## Phase 3 — State machine
 

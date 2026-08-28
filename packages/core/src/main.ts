@@ -40,6 +40,7 @@ import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
 import { CoreHealthService } from './health/core-health.js';
 import { ProbeHealthService } from './health/probe-health.js';
+import { MetricsExporter } from './metrics/exporter.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
 import { StateBroadcaster } from './state/stream.js';
@@ -708,6 +709,8 @@ async function serve(): Promise<void> {
   let coreHealthRef: CoreHealthService | undefined;
   // eslint-disable-next-line prefer-const -- assigned below, once the probe endpoint exists.
   let probeHealthRef: ProbeHealthService | undefined;
+  // eslint-disable-next-line prefer-const -- assigned below, once both health services exist.
+  let metricsRef: MetricsExporter | undefined;
 
   const api = new ApiServer({
     config: config.api,
@@ -744,6 +747,7 @@ async function serve(): Promise<void> {
     deliveryHealth,
     coreHealth: () => coreHealthRef,
     probeHealth: () => probeHealthRef,
+    metrics: () => metricsRef,
     tester,
     stream,
   });
@@ -929,6 +933,16 @@ async function serve(): Promise<void> {
     intervalMs: 30_000,
   });
   coreHealthSweep.start();
+
+  // The same numbers again for an external scraper (P-14), read from the health services rather
+  // than from the subsystems a second time — a second implementation of a health question is a
+  // second answer to it, and the day they disagree is the day nobody trusts either.
+  metricsRef = new MetricsExporter({
+    db,
+    logger,
+    coreHealth: () => coreHealthRef,
+    probeHealth: () => probeHealthRef,
+  });
   lifecycle.onShutdown({
     name: 'core-health-sweep',
     timeoutMs: 2_000,
