@@ -5,12 +5,15 @@ import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import type { SessionService } from '../../auth/sessions.js';
 import type { LoginThrottle } from '../../auth/throttle.js';
+import type { TotpService } from '../../auth/totp.js';
 import { SESSION_COOKIE, sessionTokenFrom } from '../authentication.js';
 
 export interface AuthRoutesOptions {
   accounts: AccountService;
   sessions: SessionService;
   throttle: LoginThrottle;
+  /** Absent means this build has no second factor. */
+  totp?: TotpService;
   logger: Logger;
 }
 
@@ -41,7 +44,7 @@ const principalSchema = {
  * rather than replacing it.
  */
 export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): void {
-  const { accounts, sessions, throttle, logger } = options;
+  const { accounts, sessions, throttle, totp, logger } = options;
 
   /**
    * **`Secure` is decided per request rather than configured**, because guessing it wrong is bad
@@ -65,6 +68,15 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
     return parts.join('; ');
   };
 
+  /** The caller's own principal, or a 401. Every route below is about the caller's own account. */
+  const mine = (request: FastifyRequest) => {
+    const principal = request.principal;
+    if (principal === undefined) {
+      throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
+    }
+    return principal;
+  };
+
   const setSessionCookie = (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -81,7 +93,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
     void reply.header('Set-Cookie', cookieParts(request, '', 'Thu, 01 Jan 1970 00:00:00 GMT'));
   };
 
-  app.post<{ Body: { login: string; password: string } }>(
+  app.post<{ Body: { login: string; password: string; code?: string } }>(
     '/auth/login',
     {
       schema: {
@@ -98,6 +110,13 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           properties: {
             login: { type: 'string', minLength: 1, maxLength: 64 },
             password: { type: 'string', minLength: 1, maxLength: 512 },
+            code: {
+              type: 'string',
+              maxLength: 64,
+              description:
+                'A TOTP code or a recovery code, when the account needs one. A login without it ' +
+                'answers 401 MFA_REQUIRED, which is how a client knows to ask.',
+            },
           },
         },
         response: {
@@ -128,6 +147,40 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
         await throttle.waitOut(verdict);
         logger.warn({ login, remoteAddress: address, reason: outcome.reason }, 'login rejected');
         throw new AuthError('AUTH_REJECTED', 'that login and password were not accepted');
+      }
+
+      // **The second factor is checked after the password and before the session.** After,
+      // because an account that does not exist must not be told whether it would have needed a
+      // code — that is the same enumerator the password path is careful about. Before the
+      // session, because a session issued and then withheld is a session that exists.
+      if (totp !== undefined && (await totp.isRequired(outcome.account.id))) {
+        if (!(await totp.isEnrolled(outcome.account.id))) {
+          // Required but not enrolled. Refusing outright would lock out everybody the policy was
+          // just switched on for; a client is told to walk them through setup instead.
+          await throttle.record(login, address, true);
+          logger.warn({ login }, 'a group requires MFA and this account has not enrolled');
+          throw new AuthError(
+            'MFA_REQUIRED',
+            'a group this account belongs to requires multi-factor authentication, and it has ' +
+              'not been set up yet',
+            { enrolled: 'false' },
+          );
+        }
+
+        const code = request.body.code;
+        if (code === undefined || code === '') {
+          throw new AuthError('MFA_REQUIRED', 'this account needs a second factor', {
+            enrolled: 'true',
+          });
+        }
+        if (!(await totp.verify(outcome.account.id, code))) {
+          // Counted as a failed login: a code is guessable in a way a password is not — six
+          // digits is a million tries — so the throttle has to see these too.
+          await throttle.record(login, address, false);
+          await throttle.waitOut(verdict);
+          logger.warn({ login, remoteAddress: address }, 'login rejected: second factor');
+          throw new AuthError('MFA_CODE_INVALID', 'that code was not accepted');
+        }
       }
 
       await throttle.record(login, address, true);
@@ -188,6 +241,170 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
         role: principal.role,
         mustChangePassword: principal.mustChangePassword,
       };
+    },
+  );
+
+  // ── multi-factor authentication (A-07) ──────────────────────────────────────────────────
+
+  app.get(
+    '/auth/mfa',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Whether this account has, or needs, a second factor',
+        description:
+          '`required` and `confirmed` are reported separately because the gap between them is ' +
+          'the interesting state: an account a policy now demands MFA of, which has not set it ' +
+          'up, has to be walked through enrolment before it can do anything.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['enrolled', 'confirmed', 'required', 'recoveryCodesLeft'],
+            properties: {
+              enrolled: { type: 'boolean' },
+              confirmed: { type: 'boolean' },
+              required: { type: 'boolean' },
+              recoveryCodesLeft: {
+                type: 'integer',
+                description: 'Zero, with MFA on, is a lockout waiting for a lost phone.',
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const principal = mine(request);
+      if (totp === undefined) {
+        return { enrolled: false, confirmed: false, required: false, recoveryCodesLeft: 0 };
+      }
+      return totp.status(principal.userId);
+    },
+  );
+
+  app.post(
+    '/auth/mfa/enrol',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Begin enrolment',
+        description:
+          'Returns a secret and an otpauth:// URI for a QR code. **Nothing changes until the ' +
+          'enrolment is confirmed with a code from the device** — an unconfirmed secret does ' +
+          'nothing at all, which is what stops a mistyped setup locking somebody out.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['secret', 'uri'],
+            properties: {
+              secret: { type: 'string', description: 'Base32, for typing in by hand.' },
+              uri: { type: 'string', description: 'otpauth:// URI to render as a QR code.' },
+            },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const principal = mine(request);
+      if (totp === undefined) {
+        throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
+      }
+      return totp.beginEnrolment(principal.userId, principal.login);
+    },
+  );
+
+  app.post<{ Body: { code: string } }>(
+    '/auth/mfa/confirm',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Confirm enrolment with a code, and receive recovery codes',
+        description:
+          'The recovery codes are in this response and nowhere else, ever again. They exist ' +
+          'because an installation that can only be entered with a device somebody is holding ' +
+          'is one that a dropped phone takes down.',
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['code'],
+          properties: { code: { type: 'string', minLength: 1, maxLength: 64 } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['recoveryCodes'],
+            properties: { recoveryCodes: { type: 'array', items: { type: 'string' } } },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const principal = mine(request);
+      if (totp === undefined) {
+        throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
+      }
+      return totp.confirmEnrolment(principal.userId, request.body.code);
+    },
+  );
+
+  app.post<{ Body: { password: string } }>(
+    '/auth/mfa/disable',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Turn off multi-factor authentication',
+        description:
+          'Needs the account password. Turning off a second factor from a session alone would ' +
+          'make a stolen session enough to remove the thing protecting against stolen sessions.',
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['password'],
+          properties: { password: { type: 'string', minLength: 1, maxLength: 512 } },
+        },
+        response: { 204: { type: 'null' } },
+      },
+    },
+    async (request, reply) => {
+      const principal = mine(request);
+      if (totp === undefined) {
+        throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
+      }
+      const confirmed = await accounts.authenticate(principal.login, request.body.password);
+      if (confirmed.kind !== 'ok') {
+        throw new AuthError('ACCOUNT_PASSWORD_WRONG', 'that password was not accepted');
+      }
+      await totp.disable(principal.userId);
+      return reply.status(204).send();
+    },
+  );
+
+  app.post(
+    '/auth/mfa/recovery-codes',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Issue a fresh set of recovery codes',
+        description: 'The previous set stops working immediately.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['recoveryCodes'],
+            properties: { recoveryCodes: { type: 'array', items: { type: 'string' } } },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const principal = mine(request);
+      if (totp === undefined) {
+        throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
+      }
+      return { recoveryCodes: await totp.regenerateRecoveryCodes(principal.userId) };
     },
   );
 

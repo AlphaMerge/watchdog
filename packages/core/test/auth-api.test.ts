@@ -8,6 +8,7 @@ import { LoginThrottle } from '../src/auth/throttle.js';
 import { GroupService } from '../src/auth/groups.js';
 import { AccessService } from '../src/auth/access.js';
 import { TokenService } from '../src/auth/tokens.js';
+import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import type { Database } from '../src/db/pool.js';
@@ -63,7 +64,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         catalogue: testCatalogue(),
         auth: { accounts, sessions, throttle, groups: new GroupService({ db, logger: silent }),
           access: new AccessService({ db, logger: silent }),
-          tokens: new TokenService({ db, logger: silent }), required },
+          tokens: new TokenService({ db, logger: silent }),
+          totp: new TotpService({ db, logger: silent }), required },
       });
       await server.build('9.9.9', harness.service);
       return server.app;

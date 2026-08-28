@@ -25,6 +25,7 @@
     "argon2": "^0.45.1",
     "fastify": "^5.0.0",
     "nodemailer": "^9.0.5",
+    "otpauth": "^9.5.1",
     "pg": "^8.23.0"
   },
   "devDependencies": {

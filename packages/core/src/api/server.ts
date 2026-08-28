@@ -23,6 +23,7 @@ import type { AccountService } from '../auth/accounts.js';
 import type { GroupService } from '../auth/groups.js';
 import type { AccessService } from '../auth/access.js';
 import type { TokenService } from '../auth/tokens.js';
+import type { TotpService } from '../auth/totp.js';
 import type { SessionService } from '../auth/sessions.js';
 import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
@@ -112,6 +113,7 @@ export interface ApiServerOptions {
     groups: GroupService;
     access: AccessService;
     tokens: TokenService;
+    totp: TotpService;
     /** Whether an API request without a session is refused. */
     required: boolean;
   };
@@ -395,6 +397,7 @@ export class ApiServer {
             accounts: auth.accounts,
             sessions: auth.sessions,
             throttle: auth.throttle,
+            totp: auth.totp,
             logger: this.#logger,
           });
           await scope.register(groupRoutes, { groups: auth.groups });

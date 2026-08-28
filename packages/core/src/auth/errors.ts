@@ -33,7 +33,11 @@ export type AuthErrorCode =
   | 'ACCOUNT_READONLY_ADMIN'
   | 'TOKEN_INVALID'
   | 'TOKEN_EXISTS'
-  | 'TOKEN_NOT_FOUND';
+  | 'TOKEN_NOT_FOUND'
+  | 'MFA_REQUIRED'
+  | 'MFA_CODE_INVALID'
+  | 'MFA_NOT_ENROLLED'
+  | 'MFA_ALREADY_ENROLLED';
 
 const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // 401, not 403: the credentials were not accepted, and the client may present better ones.
@@ -65,6 +69,11 @@ const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   TOKEN_INVALID: 400,
   TOKEN_EXISTS: 409,
   TOKEN_NOT_FOUND: 404,
+  // 401: the password was right and the login is not finished. A client should ask for a code.
+  MFA_REQUIRED: 401,
+  MFA_CODE_INVALID: 401,
+  MFA_NOT_ENROLLED: 409,
+  MFA_ALREADY_ENROLLED: 409,
 };
 
 export class AuthError extends AppError {

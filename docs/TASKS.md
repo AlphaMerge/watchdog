@@ -5304,8 +5304,49 @@ because each is a decision rather than a defect:
       every read into a write — a lot of WAL for a column nobody reads at that resolution.
 
       Tests: 24.
-- [ ] **A-07 — TOTP MFA** · M · A-01 · `otpauth` enrolment with QR, recovery codes, enforcement
+- [x] **A-07 — TOTP MFA** · M · A-01 · `otpauth` enrolment with QR, recovery codes, enforcement
       per group.
+
+      **A-07 outcome. Enrolment is two steps, and the second is what makes it safe.** A secret is
+      generated and stored *unconfirmed*, doing nothing at all, until the person proves they can
+      read a code from it. Confirming immediately is how somebody locks themselves out of their
+      own monitoring system with a mistyped setup — their authenticator never received the
+      secret, and the account now demands codes from it.
+
+      **A used code cannot be used again inside its own window**, enforced by recording the step.
+      Without it an observed code works for the whole thirty seconds it is displayed, which is
+      the entire attack against a code read over a shoulder or pasted into the wrong window.
+      **Verified live**: the same code replayed immediately is refused.
+
+      **A window of ±1 step, not 0 and not 3.** Zero refuses anybody whose phone clock is a
+      second out, which is most phones; three accepts a code for ninety seconds either way, which
+      gives away most of the point of rotating it.
+
+      **Recovery codes exist because a dropped phone should not take down an installation.**
+      Hashed with argon2 like passwords rather than SHA-256 like tokens — each is short enough to
+      be worth attacking offline — single-use under concurrency via `used_at IS NULL` in the
+      UPDATE, and drawn from an alphabet without `0`, `1`, `l` or `o`, because somebody typing
+      one has just lost their phone and a code they cannot transcribe is not a recovery code.
+
+      **Enforcement is a property of a group, not an account.** "Everybody who can change the
+      monitoring configuration uses MFA" is the policy an administrator actually wants to write,
+      and per-account means remembering it whenever somebody joins. Required if *any* group
+      demands it — the same "highest wins" shape `A-03` gives to rights, so joining a group never
+      quietly relaxes a requirement.
+
+      **Required-but-not-enrolled answers `MFA_REQUIRED` with `enrolled: false` rather than
+      refusing outright**, or switching the policy on would lock out everybody it was just
+      switched on for. Disabling MFA needs the account password: doing it from a session alone
+      would make a stolen session enough to remove the thing that protects against stolen
+      sessions.
+
+      Found by the tests: recovery codes were hashed in their displayed form (`abcde-fghij`) and
+      compared in their typed form (`abcdefghij`), so every one of them failed — and failed
+      looking exactly like a wrong code, to somebody who had just lost their phone. Normalised in
+      one function used by both paths. Lint found the other: an unawaited `assert.rejects`, which
+      is an assertion that never runs.
+
+      Tests: 29.
 - [ ] **A-08 — Audit log UI** · M · S-10, U-01 · Per-object history with diffs and actor.
       **Added by S-10:** the per-object route and its paging exist
       (`GET /api/v1/objects/{id}/audit?before=&limit=`), and the entry shape is final. What is
