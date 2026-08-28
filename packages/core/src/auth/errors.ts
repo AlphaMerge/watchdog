@@ -22,7 +22,12 @@ export type AuthErrorCode =
   | 'ACCOUNT_LOGIN_INVALID'
   | 'ACCOUNT_PASSWORD_WEAK'
   | 'ACCOUNT_PASSWORD_WRONG'
-  | 'ACCOUNT_LAST_ADMIN';
+  | 'ACCOUNT_LAST_ADMIN'
+  | 'GROUP_EXISTS'
+  | 'GROUP_NOT_FOUND'
+  | 'GROUP_INVALID'
+  | 'GROUP_BUILTIN'
+  | 'GROUP_NOT_MEMBER';
 
 const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // 401, not 403: the credentials were not accepted, and the client may present better ones.
@@ -40,6 +45,13 @@ const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // password. The session is perfectly valid; the body is wrong.
   ACCOUNT_PASSWORD_WRONG: 400,
   ACCOUNT_LAST_ADMIN: 409,
+  GROUP_EXISTS: 409,
+  GROUP_NOT_FOUND: 404,
+  GROUP_INVALID: 400,
+  // 409 rather than 403: the caller may well be an administrator, and the refusal is about the
+  // group being structural rather than about who is asking.
+  GROUP_BUILTIN: 409,
+  GROUP_NOT_MEMBER: 400,
 };
 
 export class AuthError extends AppError {

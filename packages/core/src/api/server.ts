@@ -16,7 +16,9 @@ import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
 import { authRoutes } from './routes/auth.js';
+import { groupRoutes } from './routes/groups.js';
 import type { AccountService } from '../auth/accounts.js';
+import type { GroupService } from '../auth/groups.js';
 import type { SessionService } from '../auth/sessions.js';
 import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
@@ -103,6 +105,7 @@ export interface ApiServerOptions {
     accounts: AccountService;
     sessions: SessionService;
     throttle: LoginThrottle;
+    groups: GroupService;
     /** Whether an API request without a session is refused. */
     required: boolean;
   };
@@ -387,6 +390,7 @@ export class ApiServer {
             throttle: auth.throttle,
             logger: this.#logger,
           });
+          await scope.register(groupRoutes, { groups: auth.groups });
         }
         if (this.#deviceTemplates !== undefined) {
           const templates = this.#deviceTemplates;

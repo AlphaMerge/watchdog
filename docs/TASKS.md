@@ -5068,8 +5068,45 @@ because each is a decision rather than a defect:
       said `anonymous | 172.19.0.1`.
 
       Tests: 34 against the services, 19 over HTTP.
-- [ ] **A-02 — User groups and primary group** · M · A-01 · Group membership, one primary group
+- [x] **A-02 — User groups and primary group** · M · A-01 · Group membership, one primary group
       per user.
+
+      **A-02 outcome.** Groups exist so that rights are not granted per person. `A-03` hangs
+      per-object access off a group rather than an account, because an installation with forty
+      operators and six hundred devices cannot be administered one grant at a time — and because
+      a right attached to a person has to be reissued when somebody else joins the rota, while a
+      right attached to a group is one somebody is added to.
+
+      **The primary group is the *default* one, not the strongest one.** It answers exactly one
+      question — which group owns an object this user creates — and nothing else. What a user may
+      see and change is the union of all their groups, because any other rule would make *adding*
+      somebody to a group able to take access away, which is the opposite of what an
+      administrator expects when they do it.
+
+      **The invariant is "at most one primary, and never zero while they have any", and only half
+      of it is a database rule.** A partial unique index gives the first half. The second cannot
+      be a constraint, because a membership row exists before anything decides which is primary —
+      so the service holds it, and the cases that could break it sideways all have tests: leaving
+      the primary group, having it deleted out from under you, and being re-added to a group you
+      are already in. A user with groups and no primary among them is a state object ownership
+      would have no answer for.
+
+      **Built-in groups can be described and nothing else.** Renaming Administrators or clearing
+      its admin flag is a one-way door out of your own installation. Deleting a group does not
+      delete its members — an account belonging to no group is a real state, and it is what a
+      suspended operator looks like.
+
+      **`administers()` asks the groups, not the account's role.** `A-01`'s role says what an
+      account is allowed to be; membership says what it currently grants, and removing somebody
+      from the administrators group has to take effect without anybody remembering to change
+      their role as well.
+
+      Every route needs an administrator, because group membership *is* the access-control
+      mechanism — an account that can add itself to a group can grant itself whatever that group
+      holds. Verified live: **401 `AUTH_REQUIRED`** with no session, **403 `AUTH_FORBIDDEN`** with
+      a valid read-only one, which is the distinction those two codes exist to make.
+
+      Tests: 22.
 - [ ] **A-03 — Per-object access rights** · L · A-02, S-04 · none/read/write/full; inherited up
       the tree; explicit beats inherited; highest across groups wins.
 - [ ] **A-04 — Read-only account restrictions** · M · A-03 · Enforced at account level: no admin
