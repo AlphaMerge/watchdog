@@ -93,6 +93,24 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   { key: 'probesDown', name: 'Probes not connected', unit: 'probes' },
+  // **The alarm scheduler's own two numbers** (`P-22`). It had a `stats()` like every other
+  // subsystem and nothing read it, which is how a counter that was wrong stayed wrong through
+  // `P-12` — `P-20` found it by hand.
+  //
+  // Overdue rather than `nextWakeAt`, because a channel holds a number and a timestamp would
+  // have to be read against the clock by whoever looked. Zero whenever the scheduler is asleep
+  // with a wake still ahead of it, which is almost always; anything else is a sweep that should
+  // have happened and has not, and it climbs by a second a second until somebody notices.
+  { key: 'alarmOverdue', name: 'Alarm sweep overdue by', unit: 's' },
+  // A counter, so the counter path turns it into alarms-per-minute — which is the number an
+  // alarm storm shows up in. `M-17` is a scenario test for the same rule; this is the rule
+  // visible on a graph while it is happening.
+  {
+    key: 'alarmsFired',
+    name: 'Notification steps fired',
+    unit: 'steps',
+    counter: { bits: 64 },
+  },
 ];
 
 export const coreHealth: SensorType = {

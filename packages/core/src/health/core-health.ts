@@ -37,6 +37,8 @@ export interface CoreHealthSources {
   stream: () => { overflowed: number };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number };
+  /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
+  alarms: () => { fired: number; nextWakeAt: Date | null };
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -129,6 +131,7 @@ export class CoreHealthService {
     const ingestion = this.#sources.ingestion();
     const stream = this.#sources.stream();
     const probes = this.#sources.probes();
+    const alarms = this.#sources.alarms();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#db.tx(async (q) => ({
@@ -155,6 +158,11 @@ export class CoreHealthService {
       streamCutoffs: stream.overflowed,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
+      // Never negative: a wake that is still ahead is not "minus forty seconds overdue", it is
+      // on time. A scheduler that has never armed anything has no wake at all, which is also on
+      // time — a gap here would read as "unknown" for a state that is simply quiet.
+      alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
+      alarmsFired: alarms.fired,
     };
   }
 
@@ -294,6 +302,10 @@ function describe(reading: CoreHealthReading): string {
   }
   const lag = reading['rollupLag'];
   if (lag !== null && lag !== undefined && lag > 0) parts.push(`rollup ${String(lag)} s behind`);
+  const overdue = reading['alarmOverdue'];
+  if (overdue !== null && overdue !== undefined && overdue > 0) {
+    parts.push(`alarm sweep ${String(overdue)} s overdue`);
+  }
   const down = reading['probesDown'];
   if (down !== null && down !== undefined && down > 0) parts.push(`${String(down)} probes down`);
   return parts.join(', ');
@@ -302,6 +314,12 @@ function describe(reading: CoreHealthReading): string {
 async function count(q: Queryable, sql: string): Promise<number> {
   const rows = await q.query<{ n: number }>(sql);
   return rows[0]?.n ?? 0;
+}
+
+/** How late the next sweep is, in whole seconds. Zero when it is still ahead, or unarmed. */
+function overdueSeconds(nextWakeAt: Date | null, now: Date): number {
+  if (nextWakeAt === null) return 0;
+  return Math.max(0, Math.round((now.getTime() - nextWakeAt.getTime()) / 1_000));
 }
 
 function round(value: number, places: number): number {

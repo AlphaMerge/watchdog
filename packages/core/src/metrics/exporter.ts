@@ -128,6 +128,17 @@ const CORE_METRICS: readonly Metric[] = [
     name: 'ms_core_probes_disconnected',
     help: 'Approved probes the core currently has no connection from.',
   },
+  {
+    key: 'alarmOverdue',
+    name: 'ms_core_alarm_sweep_overdue_seconds',
+    help: 'How late the alarm scheduler is for the sweep it said it would run. Zero when idle.',
+  },
+  {
+    key: 'alarmsFired',
+    name: 'ms_core_alarm_steps_fired_total',
+    help: 'Notification steps the alarm scheduler has fired. Its rate is the alarm rate.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

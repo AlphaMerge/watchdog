@@ -3588,7 +3588,7 @@ because each is a decision rather than a defect:
       Now covered deterministically with no database and no clock: a fake engine reports one full
       round then an empty one and reads the counter *from inside the second round*, which is a
       moment that genuinely exists. Mutation 4/4, including the original bug re-introduced.
-- [ ] **P-22 — The alarm scheduler's stats reach nothing** · S · P-20 · `AlarmSchedulerStats`
+- [x] **P-22 — The alarm scheduler's stats reach nothing** · S · P-20 · `AlarmSchedulerStats`
       — sweeps, fired, wakes, idle wakes, `nextWakeAt` — is computed, exported from
       `notifications/index.ts` and read by no one. `P-12` gave Core Health the *delivery* side
       (`notifyPending`, `notifyOldest`, `notifyFailed`) and left the scheduler's own numbers
@@ -3597,6 +3597,33 @@ because each is a decision rather than a defect:
       to survive precisely because nothing reads it. Decide whether these are health (a channel
       each) or diagnostics (`/metrics` only) — `nextWakeAt` slipping into the past is the one
       that would tell an operator something is stuck.
+
+      **P-22 outcome: two channels of the five numbers, and the other three stay internal.**
+      `CLAUDE.md` asks a subsystem with a queue to add *a* metric, not all of them, and `sweeps`,
+      `wakes` and `idleWakes` are debugging aids — they answer "what has this loop been doing",
+      which nobody asks until they are already looking at a stack trace. The two that describe
+      the *system* are on Core Health, and reach `/metrics` through the same read rather than
+      being counted a second time (`N-13`'s rule, `P-14`'s wiring).
+
+      **`alarmOverdue`, in seconds, rather than `nextWakeAt`.** A channel holds a number, and a
+      timestamp would have to be read against the clock by whoever looked at it. It is **zero
+      whenever the scheduler is asleep with a wake ahead of it, and zero when nothing is armed** —
+      both of those are on time, and a gap for either would make the channel noisy when nothing is
+      wrong, which is how a channel stops being looked at. Anything else is a sweep that should
+      have happened and has not, climbing a second a second.
+
+      This is the one number that catches the scheduler's actual failure mode, which is
+      **silence**: it stops, no notification goes out, and every other channel on this sensor
+      stays exactly as healthy as it was. So the message says it too.
+
+      **`alarmsFired` is a counter**, so the counter path turns it into steps per minute — the
+      shape an alarm storm has while it is happening. `M-17` is a scenario test for the same rule;
+      this is it on a graph.
+
+      Mutation 8/8, 6/8 on the first round: nothing asserted the counter *declarations*, on either
+      the channel or the exported series. A monotonic number published as a gauge is not an error
+      anywhere — `rate()` just returns something wrong — so both are now named explicitly rather
+      than checked against whatever the declaration happens to say.
 - [x] **P-21 — The performance suite must not run against a busy machine** · M · — · Four
       measured budgets — `tree-build-performance`, `ingestion-performance` (two of them) and
       `notification-timers` — pass in isolation and fail inside the full core suite, where 1,300

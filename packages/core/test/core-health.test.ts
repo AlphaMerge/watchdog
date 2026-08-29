@@ -46,6 +46,8 @@ function sources(
     failed: number;
     oldestPendingAgeMs: number;
     deliveryThrows: boolean;
+    alarmsFired: number;
+    nextWakeAt: Date | null;
   }> = {},
 ): CoreHealthSources {
   return {
@@ -56,6 +58,10 @@ function sources(
       writeMs: { p95: overrides.p95 ?? 0 },
     }),
     stream: () => ({ overflowed: overrides.overflowed ?? 0 }),
+    alarms: () => ({
+      fired: overrides.alarmsFired ?? 0,
+      nextWakeAt: overrides.nextWakeAt ?? null,
+    }),
     probes: () => ({ probesDown: overrides.probesDown ?? 0 }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
@@ -149,6 +155,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     overrides: Parameters<typeof sources>[0] = {},
     script: Parameters<typeof fakeProcess>[0] = { cpuUs: [], elapsedNs: [] },
     ingest: (results: readonly CheckResult[]) => Promise<void> = () => Promise.resolve(),
+    now?: () => Date,
   ): CoreHealthService =>
     new CoreHealthService({
       db,
@@ -156,6 +163,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       sources: sources(overrides),
       ingest,
       process: fakeProcess(script),
+      ...(now === undefined ? {} : { now }),
     });
 
   describe('reading the numbers', () => {
@@ -270,6 +278,30 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['notifyOldest'], 125, 'milliseconds in, seconds out');
     });
 
+    it('reports the alarm sweep as overdue only once it actually is', async () => {
+      // `P-22`. Zero is the answer almost always — a scheduler asleep with a wake ahead of it is
+      // on time, and so is one that has never armed anything. Reporting "minus forty seconds" or
+      // a gap for either would make the channel noise, and a channel that is noisy when nothing
+      // is wrong is a channel nobody looks at when something is.
+      const NOW = new Date('2026-08-29T10:00:00.000Z');
+      const at = (offsetMs: number): Date => new Date(NOW.getTime() + offsetMs);
+      const overdue = async (nextWakeAt: Date | null): Promise<number | null | undefined> =>
+        (await build({ nextWakeAt }, undefined, undefined, () => NOW).read())['alarmOverdue'];
+
+      assert.equal(await overdue(null), 0, 'nothing armed is not the same as stuck');
+      assert.equal(await overdue(at(30_000)), 0, 'a wake still ahead is on time');
+      assert.equal(await overdue(at(-1)), 0, 'a millisecond late is on time');
+      assert.equal(await overdue(at(-40_000)), 40);
+      assert.equal(await overdue(at(-3_600_000)), 3_600);
+    });
+
+    it('passes the alarm scheduler’s fired count through as a counter', async () => {
+      // A counter rather than a gauge, so the counter path turns it into alarms per minute —
+      // which is the shape an alarm storm has. It only ever climbs within one process.
+      const reading = await build({ alarmsFired: 217 }).read();
+      assert.equal(reading['alarmsFired'], 217);
+    });
+
     it('counts what is actually queued in the housekeeping tables', async () => {
       await db.query(
         `INSERT INTO rollup_backfill (from_time, to_time, reason)
@@ -347,6 +379,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         ingestRefused: 12,
         streamCutoffs: 1,
         dependencyPauses: 4,
+        alarmsFired: 217,
         ingestQueue: 0,
       });
       for (const reading of readings) {
@@ -357,7 +390,16 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 4);
+      assert.equal(readings.length, 5);
+
+      // Named rather than left to the loop above, which agrees with whatever the declaration
+      // says and would go on passing if a channel quietly stopped being a counter. These four
+      // only ever climb, and a monotonic number sent as a gauge is a graph of a running total
+      // where somebody wanted a rate.
+      assert.deepEqual(
+        readings.filter((reading) => reading.counter !== undefined).map((reading) => reading.key),
+        ['ingestRefused', 'streamCutoffs', 'dependencyPauses', 'alarmsFired'],
+      );
     });
 
     it('drops a value that is not finite', () => {
@@ -516,6 +558,25 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.match(message, /3 notifications undelivered/);
       assert.match(message, /1 probes down/);
       assert.equal(/rollup/.test(message), false, 'a tier that is not behind is not mentioned');
+      assert.equal(/alarm sweep/.test(message), false, 'a scheduler on time is not mentioned');
+    });
+
+    it('says so when the alarm sweep is overdue, because nothing else would', async () => {
+      // The failure this describes is silence: the scheduler stops, no notification goes out,
+      // and every other number on this sensor stays exactly as healthy as it was.
+      const NOW = new Date('2026-08-29T10:00:00.000Z');
+      const batches: CheckResult[][] = [];
+      const service = build(
+        { nextWakeAt: new Date(NOW.getTime() - 90_000) },
+        { cpuUs: [], elapsedNs: [] },
+        (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+        () => NOW,
+      );
+      await service.sweep();
+      assert.match(batches[0]?.[0]?.message ?? '', /alarm sweep 90 s overdue/);
     });
 
     it('counts its sweeps whether or not there was anything to report', async () => {

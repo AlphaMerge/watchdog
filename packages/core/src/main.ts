@@ -879,6 +879,7 @@ async function serve(): Promise<void> {
       stream: () => stream.stats,
       probes: () => reachability.stats(),
       delivery: (q) => deliveryHealth.read(q),
+      alarms: () => alarmScheduler.stats,
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {

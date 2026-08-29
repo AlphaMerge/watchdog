@@ -81,6 +81,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         }),
         stream: () => ({ overflowed: 2 }),
         probes: () => ({ probesDown: 1 }),
+        alarms: () => ({ fired: 6, nextWakeAt: null }),
         delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       },
       ingest: () => Promise.resolve(),
@@ -141,6 +142,10 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get('ms_core_db_write_p95_seconds'), 0.0125);
       assert.equal(metrics.get('ms_core_notification_oldest_seconds'), 125);
       assert.equal(metrics.get('ms_core_probes_disconnected'), 1);
+      // `P-22`: the alarm scheduler's numbers reach a scrape through the same read as the
+      // sensor's, rather than being counted a second time from the same object.
+      assert.equal(metrics.get('ms_core_alarm_sweep_overdue_seconds'), 0);
+      assert.equal(metrics.get('ms_core_alarm_steps_fired_total'), 6);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {
@@ -179,6 +184,24 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       for (const name of ['ms_core_ingestion_queue_rows', 'ms_probe_connected']) {
         assert.match(body, new RegExp(`# HELP ${name} `));
         assert.match(body, new RegExp(`# TYPE ${name} `));
+      }
+    });
+
+    it('declares the right type, since a `_total` gauge is a rate nobody can take', async () => {
+      // `rate()` on a gauge is silently wrong rather than an error — it ignores resets, so a core
+      // restart turns into a negative rate or a hole. The suffix is a naming convention and the
+      // TYPE line is the part Prometheus acts on, so the two have to agree.
+      const body = (await exporter().scrape()).body;
+      for (const name of [
+        'ms_core_ingestion_refused_rows_total',
+        'ms_core_stream_cutoffs_total',
+        'ms_core_dependency_pauses_total',
+        'ms_core_alarm_steps_fired_total',
+      ]) {
+        assert.match(body, new RegExp(`# TYPE ${name} counter`), name);
+      }
+      for (const name of ['ms_core_ingestion_queue_rows', 'ms_core_alarm_sweep_overdue_seconds']) {
+        assert.match(body, new RegExp(`# TYPE ${name} gauge`), name);
       }
     });
   });
