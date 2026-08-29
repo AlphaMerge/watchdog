@@ -4068,6 +4068,32 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [ ] **P-26 — The pool's shrink policy cannot fire on a probe that is doing anything** · M ·
+      P-18 · `#considerShrink` gives a worker back only when the pool has been idle for
+      `idleShrinkMs`, and `#busySince` is reset by **every `submit`** — so "idle" means "no check
+      has been handed to the pool at all for a minute". A probe watching 5,000 sensors on a
+      60-second interval submits about eighty-three checks a second, so the window never opens,
+      and the one that grew a large pool is exactly the one that can never give it back.
+
+      **Measured during `H-01`'s soak**, which is where it showed up: 5,047 sensors, the pool grew
+      to 48 workers in 20 events during the provisioning burst, and in the following 70 minutes
+      shrank **zero** times while `poolUsage` sat between 0% and 3%. Forty-five workers spare at
+      all times, none returned. `P-18`'s own numbers say 48 workers cost 557 MB at start against
+      16 MB for four, so the policy is inert precisely where it was worth the most.
+
+      The measure of idleness is wrong rather than the interval: what matters is that a *worker*
+      has been spare for the window, not that no work has arrived. Per-slot idle tracking would
+      express that directly and would decay a burst-sized pool one worker a minute.
+
+      **`check-pool.test.ts` asserts the current behaviour on purpose** — "does not give a worker
+      back while work is still arriving", whose reasoning is that a shrink between a check
+      queueing and a worker picking it up would take the worker that was about to run it. That
+      hazard is real and is answered by only retiring a slot that is ready, jobless *and* idle for
+      the whole window. Change that test deliberately, with a measurement, not incidentally.
+
+      Not fixed on the spot because doing so restarts the probe, and that would have thrown away
+      the 24-hour soak that found it.
+
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
       full runs of that package on the same machine reported 781/781. **The arithmetic says which
