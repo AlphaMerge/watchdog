@@ -6357,6 +6357,23 @@ because each is a decision rather than a defect:
 
 - [ ] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
       growth, no scheduler lag drift, rollups correct throughout.
+
+      **Harness landed; the 24 hours are running.** `scripts/soak.sh` provisions 5,000 `port.tcp`
+      sensors, samples the installation's own Core Health and Probe Health once a minute, checks
+      every settled rollup bucket against a fresh aggregate of the rows beneath it every fifteen,
+      and reports a verdict on the slope rather than the maximum — a run that ended at 400 MB says
+      nothing, one that rose 4 MB an hour for a day says it falls over in a fortnight. The first
+      fifteen minutes are dropped as warm-up and a window under an hour reports no verdict at all,
+      because a per-hour slope fitted to five minutes is extrapolation.
+
+      **Building it found a defect that silently stopped all result delivery.** A probe that had
+      drained its spool to empty stopped delivering for ever the next time it rolled a segment:
+      `peek` returned an empty batch while the spool reported thousands pending, the drain read
+      that as "no work", and readings accumulated on disk until the spool cap began dropping them
+      — link up, nothing logged, nothing counted. The dev stack had 30,193 results stranded and no
+      probe-executed sensor had stored a reading in hours; only the core-evaluated types had any.
+      Fixed in `615c9f3`, with the sequence reproduced as a test, and `92ec56a` makes the drain
+      notice when it is making no progress so that the next one of these cannot be silent.
 - [x] **H-02 — Failure-mode verification** · L · H-01 · Every row of `WORKFLOW.MD §13` tested:
       core restart, DB loss, probe loss, delivery failure, hung check, scheduler lag, disk full,
       clock jump.
