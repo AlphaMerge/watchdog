@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 
@@ -35,6 +35,47 @@ describe('build hygiene', () => {
       [],
       `compiled output with no source — delete it, or run "npm run clean" and rebuild:\n  ${orphans.join('\n  ')}`,
     );
+  });
+
+  /**
+   * `P-21` moved the measured budgets out of `npm test` and behind `npm run test:perf`, which
+   * buys an ordinary run that never reports a perf failure and costs the thing this checks: a
+   * suite nothing runs automatically is a suite that can rot for weeks without anybody noticing.
+   *
+   * So the wiring is asserted rather than assumed. A new file under `test/perf/` that no script
+   * globs, or a `test` script that quietly starts running them again, fails here — in the suite
+   * that *does* run on every push.
+   */
+  it('has every perf test behind test:perf, and none of them in the ordinary run', async () => {
+    const packagesRoot = join(import.meta.dirname, '..', '..', '..');
+    const problems: string[] = [];
+
+    for (const pkg of await readdir(packagesRoot).catch(() => [])) {
+      const perfDir = join(packagesRoot, pkg, 'test', 'perf');
+      const perfTests = (await readdir(perfDir).catch(() => [])).filter((name) =>
+        name.endsWith('.test.ts'),
+      );
+      if (perfTests.length === 0) continue;
+
+      const manifest = JSON.parse(
+        await readFile(join(packagesRoot, pkg, 'package.json'), 'utf8'),
+      ) as { scripts?: Record<string, string> };
+      const scripts = manifest.scripts ?? {};
+
+      if (scripts['test:perf'] === undefined) {
+        problems.push(`${pkg} has ${String(perfTests.length)} perf tests and no test:perf script`);
+      }
+      // `dist/test/*.test.js` does not descend into `perf/`; `**` does, which is the mistake
+      // this catches — it is one character and it puts the budgets back in the ordinary run.
+      for (const key of ['test', 'test:unit']) {
+        const script = scripts[key];
+        if (script !== undefined && script.includes('dist/test/**')) {
+          problems.push(`${pkg}'s ${key} script globs perf tests: ${script}`);
+        }
+      }
+    }
+
+    assert.deepEqual(problems, [], problems.join('\n  '));
   });
 });
 

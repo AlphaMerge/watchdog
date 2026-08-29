@@ -11,7 +11,8 @@
     "build": "tsc -b",
     "start": "node ./dist/src/main.js",
     "pretest": "tsc -b",
-    "test": "npm run test:perf && npm run test:unit",
+    "pretest:perf": "tsc -b",
+    "test": "npm run test:unit",
     "test:unit": "node --test \"dist/test/*.test.js\"",
     "test:perf": "node --test --test-concurrency=1 \"dist/test/perf/*.test.js\""
   },

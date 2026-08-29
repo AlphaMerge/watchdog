@@ -138,6 +138,11 @@ subsystem with a queue, a pool or a connection adds a metric to one of them.
   tests — these are where the subtle bugs live.
 - Anything touching alarm volume needs a scenario test (see `M-17` in `TASKS.md`).
 - Performance claims need a measurement committed to the repo, not an assertion.
+- **`npm test` is the unit suites; `npm run test:perf` is the measured budgets.** They are
+  separate because a budget measured while 1,300 other tests share the machine is not a
+  measurement of anything, and four false failures on an ordinary run teach everyone to stop
+  reading the output. Run `test:perf` on a quiet machine — stop `ms-server` first — and put
+  the numbers in `docs/findings/`. CI runs the unit suites only (`P-21`).
 
 ## Things that have already been decided — don't relitigate without an ADR
 

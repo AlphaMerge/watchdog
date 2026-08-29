@@ -26,6 +26,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "npm run test --workspaces --if-present",
+    "test:perf": "npm run test:perf --workspaces --if-present",
     "dev": "docker compose -f docker-compose.dev.yml up -d",
     "dev:services": "scripts/dev-services.sh start",
     "dev:ui": "docker compose -f docker-compose.dev.yml --profile ui up -d web",

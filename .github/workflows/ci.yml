@@ -59,6 +59,12 @@ jobs:
       - name: typecheck and build the web UI
         run: npm run build:web
 
+      # `npm test` is the unit suites only. The measured budgets live behind
+      # `npm run test:perf` and are deliberately not run here (`P-21`): a two-core hosted runner
+      # cannot measure an eight-core budget, so asserting one would either fail honestly for the
+      # wrong reason or pass after being loosened until it meant nothing. They are taken by hand
+      # on the reference machine and committed to `docs/findings/`. What CI still protects is that
+      # they compile — `npm run typecheck` is `tsc -b`, which covers them.
       - name: tests
         run: npm test
 

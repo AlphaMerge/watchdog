@@ -3570,7 +3570,7 @@ because each is a decision rather than a defect:
       **Added by `T-08`:** a test that fails under load and not alone is a test that will be
       re-run rather than read, and this one guards real behaviour. It wants an injected clock like
       the one `T-07`'s pool eviction test uses, not a longer timeout.
-- [ ] **P-21 — The performance suite must not run against a busy machine** · M · — · Four
+- [x] **P-21 — The performance suite must not run against a busy machine** · M · — · Four
       measured budgets — `tree-build-performance`, `ingestion-performance` (two of them) and
       `notification-timers` — pass in isolation and fail inside the full core suite, where 1,300
       tests and the same PostgreSQL are competing for the machine. **Added by `T-15`:** a suite
@@ -3580,6 +3580,33 @@ because each is a decision rather than a defect:
       nothing else on the database — and the main suite should skip them unless asked, the way
       `P-15` will need for the 5,000-sensor benchmark. Related to `P-20`, which is the same
       disease in one timing assertion.
+
+      **P-21 outcome.** `npm test` is the unit suites; `npm run test:perf` is the budgets, serial,
+      in every workspace that has them. Half of this existed already — `@ms/core` had a
+      `test:perf` script — and did nothing, because `test` was `test:perf && test:unit`: the perf
+      tests ran on every ordinary run *and* a single missed budget short-circuited 1,850 unit
+      tests that were never the problem. `@ms/probe` was worse and nobody had noticed: its glob
+      was `dist/test/**`, so the 5,000-sensor benchmark and both soak tests ran inside `npm test`
+      too, ninety seconds at a time.
+
+      **The diagnosis was right and it was the suite, not the host.** The failure that prompted
+      finishing this read `1000 rows/write p99 90.9 ms` against `5000 rows/write p99 90.2 ms` —
+      all three batch sizes converged into one band and the comparison flipped. Re-run alone on
+      the *same busy machine* (load average 7.7 on eight cores) it reads **40.0 ms against
+      108.2 ms**, a 2.7x margin. What contends is 1,300 unit tests and the shared PostgreSQL, not
+      whatever else the operator has open, which is why isolation fixes it and a longer timeout
+      would not have.
+
+      **CI runs the unit suites only, deliberately.** A two-core hosted runner cannot measure an
+      eight-core budget: asserting one there either fails honestly for the wrong reason or gets
+      loosened until it means nothing. The budgets are taken by hand on the reference machine and
+      committed to `docs/findings/`, which is what `CLAUDE.md` asks for anyway.
+
+      **The cost of that is a suite nothing runs automatically, so the wiring is asserted rather
+      than assumed.** `build-hygiene.test.ts` — which does run on every push — fails if a package
+      has perf tests and no `test:perf` script, or if a `test` glob starts descending into
+      `perf/` again. That last one is a single character, and it is how the budgets get back into
+      the ordinary run without anybody deciding to put them there.
 - [ ] **P-19 — One session pool for every transport** · M · T-09 · `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
