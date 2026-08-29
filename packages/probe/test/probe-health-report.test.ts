@@ -25,6 +25,9 @@ const WHEEL: WheelStats = {
 
 const POOL: PoolStats = {
   size: 48,
+  maxSize: 48,
+  grown: 0,
+  shrunk: 0,
   busy: 12,
   queued: 3,
   submitted: 900,

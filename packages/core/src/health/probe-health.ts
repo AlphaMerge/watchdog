@@ -128,7 +128,10 @@ export class ProbeHealthService {
       uptime: health?.uptimeSeconds ?? null,
     };
 
-    return { reading, message: describe(reading, skew, health !== undefined) };
+    return {
+      reading,
+      message: describe(reading, skew, health !== undefined, health?.poolSize),
+    };
   }
 
   /**
@@ -272,6 +275,16 @@ function describe(
   reading: ProbeHealthReading,
   skew: ReturnType<typeof describeSkew>,
   reporting: boolean,
+  /**
+   * Workers the probe is currently holding.
+   *
+   * Named in the message since `P-18`, because the pool is no longer a fixed size an operator
+   * can be assumed to know: "pool 0%" is the same sentence for four workers and for
+   * forty-eight, and the difference between them is whether a probe has room. The *channel*
+   * stays a percentage — that is the number a limit is set on — and the size belongs in the
+   * sentence beside it rather than as a channel of its own.
+   */
+  poolSize?: number,
 ): string {
   const parts: string[] = [];
   const scheduled = reading['scheduled'];
@@ -291,7 +304,13 @@ function describe(
   const lag = reading['schedulerLag'];
   if (lag !== null && lag !== undefined) parts.push(`scheduler lag ${String(lag)} ms`);
   const usage = reading['poolUsage'];
-  if (usage !== null && usage !== undefined) parts.push(`pool ${String(usage)}%`);
+  if (usage !== null && usage !== undefined) {
+    parts.push(
+      poolSize === undefined
+        ? `pool ${String(usage)}%`
+        : `pool ${String(usage)}% of ${String(poolSize)}`,
+    );
+  }
   const spool = reading['spoolDepth'];
   if (spool !== null && spool !== undefined && spool > 0) {
     parts.push(`${String(spool)} results spooled`);

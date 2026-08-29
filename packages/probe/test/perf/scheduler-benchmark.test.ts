@@ -75,12 +75,24 @@ interface Run {
   label: string;
   checkMs: number;
   poolSize: number;
+  /** Workers the pool started with, which `rssMb` is the cost of. */
+  startSize: number;
+  /** Workers it was holding when the run ended — not the same as `poolSize` since `P-18`. */
+  finalSize: number;
+  grown: number;
   /**
-   * Resident memory the pool cost, in MB.
+   * Resident memory the pool cost at *start-up*, in MB.
    *
-   * Worker threads share the process's RSS, so the difference across `pool.start()` is the whole
-   * of what N workers cost — and it is the other half of the sizing decision. Jitter says how
+   * Worker threads share the process's RSS, so the difference across `pool.start()` is what the
+   * workers it started cost — and it is the other half of the sizing decision. Jitter says how
    * many slots the workload wants; this says what they are worth paying.
+   *
+   * **Since `P-18` this is what the pool *started* with, and `finalSize` says whether it stayed
+   * there.** A figure taken at the end of a run would be the honest one to compare — except
+   * that these runs share a process, so the previous soak's 500 MB being reclaimed lands in the
+   * next one's delta and produces numbers like `-275 MB`. Measured at start-up it is clean, and
+   * for the case this matters in — a small installation, where the pool never grows — start-up
+   * is the whole cost.
    */
   rssMb: number;
   dispatched: number;
@@ -102,14 +114,20 @@ interface Run {
 async function soak(options: {
   label: string;
   poolSize: number;
+  /** Absent means a fixed pool, which is what every case but `P-18`'s measures. */
+  minSize?: number;
+  /** Sensors on the wheel. Defaults to the v1 target; `P-18`'s small case is the exception. */
+  sensors?: number;
   queueMaxLength: number;
   checkMs: number;
   forMs: number;
 }): Promise<Run> {
   const { label, poolSize, queueMaxLength, checkMs, forMs } = options;
+  const sensors = options.sensors ?? SENSORS;
   const pool = new CheckPool({
     logger: silent,
     size: poolSize,
+    minSize: options.minSize ?? (poolSize > 0 ? poolSize : defaultPoolSize()),
     queueMaxLength,
     registryModule: FIXTURES,
     onResult: (result, meta) => {
@@ -148,19 +166,19 @@ async function soak(options: {
     },
   });
 
-  for (let id = 1; id <= SENSORS; id += 1) {
+  for (let id = 1; id <= sensors; id += 1) {
     wheel.add({ id, intervalSeconds: INTERVAL_SECONDS });
   }
   // The phase spread is what stops five thousand sensors firing on the same second. Asserted
   // rather than assumed: without it this measures a stampede and nothing else.
   const perSecond = new Map<number, number>();
-  for (let id = 1; id <= SENSORS; id += 1) {
+  for (let id = 1; id <= sensors; id += 1) {
     const phase = phaseFor(id, INTERVAL_SECONDS);
     perSecond.set(phase, (perSecond.get(phase) ?? 0) + 1);
   }
   const busiest = Math.max(...perSecond.values());
   assert.ok(
-    busiest < SENSORS / 10,
+    busiest < Math.max(2, sensors / 10),
     `the phase spread put ${String(busiest)} sensors on one second; this would measure a stampede`,
   );
 
@@ -169,6 +187,7 @@ async function soak(options: {
   // After the workers have imported their registry and settled, not the instant they spawned.
   await new Promise((resolve) => setTimeout(resolve, 500));
   const rssMb = Number(((process.memoryUsage().rss - rssBefore) / (1024 * 1024)).toFixed(1));
+  const startSize = pool.size;
   wheel.start();
   const startedAt = process.hrtime.bigint();
   await new Promise((resolve) => setTimeout(resolve, forMs));
@@ -201,7 +220,12 @@ async function soak(options: {
     label,
     checkMs,
     rssMb,
-    poolSize: poolStats.size,
+    // The configured ceiling, and where the pool actually ended up. Equal for every fixed case;
+    // the whole point of `P-18`'s case is that they are not.
+    poolSize: poolStats.maxSize,
+    startSize,
+    finalSize: poolStats.size,
+    grown: poolStats.grown,
     dispatched: wheelStats.dispatched,
     completed: samples.length,
     deferred: poolStats.deferred,
@@ -215,12 +239,15 @@ async function soak(options: {
 function report(runs: Run[]): string {
   const row = (run: Run): string =>
     `      ${run.label.padEnd(26)} ${String(run.checkMs).padStart(4)} ms check  ` +
-    `pool ${String(run.poolSize).padStart(3)}  ` +
+    `pool ${String(run.poolSize).padStart(3)}` +
+    (run.finalSize === run.poolSize ? '     ' : `->${String(run.finalSize).padStart(3)}`) +
+    '  ' +
     `jitter p50 ${run.jitter.p50.toFixed(0).padStart(5)} ms  ` +
     `p95 ${run.jitter.p95.toFixed(0).padStart(6)} ms  ` +
     `p99 ${run.jitter.p99.toFixed(0).padStart(6)} ms  ` +
     `(wheel p95 ${run.wheel.p95.toFixed(0)} ms, wait p95 ${run.wait.p95.toFixed(0)} ms)  ` +
-    `rss +${run.rssMb.toFixed(0).padStart(4)} MB  refused ${String(run.refused)}`;
+    `rss +${run.rssMb.toFixed(0).padStart(4)} MB at ${String(run.startSize).padStart(2)} workers  ` +
+    `refused ${String(run.refused)}`;
   return runs.map(row).join('\n');
 }
 
@@ -287,6 +314,74 @@ describe('scheduler benchmark (P-15)', () => {
       run.jitter.p95 > P95_BUDGET_MS,
       'the old default failed the criterion; if this passes, the model no longer reflects the ' +
         'workload and the default should be reconsidered rather than trusted',
+    );
+  });
+
+  it('reaches the same jitter starting from four workers as from forty-eight', async () => {
+    // `P-18`'s claim, against `P-15`'s gate. The pool starts at the shipped minimum and is
+    // allowed the shipped maximum, so what this measures is whether growing *while* the first
+    // tranches arrive costs a sensor anything an operator would notice — the whole risk of
+    // demand-driven sizing, and the reason it is measured rather than argued.
+    const run = await soak({
+      label: `demand-driven (4 -> ${String(defaultPoolSize())})`,
+      poolSize: 0,
+      minSize: 4,
+      queueMaxLength: 50_000,
+      checkMs: CHECK_MS,
+      forMs: durationMs,
+    });
+    runs.push(run);
+
+    assert.ok(run.completed > 0, 'checks ran');
+    assert.equal(run.refused, 0, 'nothing was refused, so the queue is not hiding a delay');
+    assert.ok(
+      run.jitter.p95 < P95_BUDGET_MS,
+      `p95 dispatch jitter was ${run.jitter.p95.toFixed(0)} ms, budget ${String(P95_BUDGET_MS)} ms`,
+    );
+    assert.ok(run.grown > 0, 'and it actually had to grow, or this measured nothing');
+  });
+
+  it('costs a small installation a fraction of what a fixed pool reserves', async () => {
+    // **The claim `P-18` was written for**, and the only case in this file where the load is not
+    // the v1 target: fifty sensors is what most installations actually are, and a flat 48
+    // workers reserves the same memory for them as for five thousand. Both runs are short —
+    // what is being compared is resident memory, not jitter, and neither pool is under any
+    // pressure at this size.
+    const SMALL = 50;
+    const fixed = await soak({
+      label: 'small, fixed 48',
+      poolSize: 48,
+      sensors: SMALL,
+      queueMaxLength: 1_000,
+      checkMs: CHECK_MS,
+      forMs: 15_000,
+    });
+    const driven = await soak({
+      label: 'small, demand-driven',
+      poolSize: 48,
+      minSize: 4,
+      sensors: SMALL,
+      queueMaxLength: 1_000,
+      checkMs: CHECK_MS,
+      forMs: 15_000,
+    });
+    runs.push(fixed, driven);
+
+    assert.ok(driven.completed > 0, 'checks ran');
+    assert.ok(
+      driven.finalSize < fixed.finalSize,
+      `the demand-driven pool held ${String(driven.finalSize)} workers against ` +
+        `${String(fixed.finalSize)}; fifty sensors should not need the ceiling`,
+    );
+    assert.equal(driven.grown, 0, 'and it should never have needed to grow at this size');
+    // Compared at start-up rather than at the end, because these runs share a process and the
+    // previous soak's memory being reclaimed lands in a later delta — which is how a comparison
+    // like this passes for the wrong reason. At this size the demand-driven pool never grows, so
+    // start-up is its whole cost.
+    assert.ok(
+      driven.rssMb * 2 < fixed.rssMb,
+      `demand-driven reserved ${driven.rssMb.toFixed(0)} MB against the fixed pool's ` +
+        `${fixed.rssMb.toFixed(0)} MB, which is not the saving this exists for`,
     );
   });
 

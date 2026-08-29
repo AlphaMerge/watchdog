@@ -159,7 +159,10 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { message } = build(() => connected()).read(probeId);
       assert.match(message, /connected, 120 sensors scheduled/);
       assert.match(message, /scheduler lag 11 ms/);
-      assert.match(message, /pool 25%/);
+      // The size as well as the percentage since `P-18`: the pool is no longer a fixed number
+      // an operator can be assumed to know, and "pool 25%" is the same sentence for four
+      // workers and for forty-eight.
+      assert.match(message, /pool 25% of 48/);
       assert.match(message, /500 results spooled/);
     });
 

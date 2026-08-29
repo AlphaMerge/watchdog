@@ -19,7 +19,13 @@ const MAX_CONSECUTIVE_START_FAILURES = 3;
 export type SubmitOutcome = 'accepted' | 'already-running' | 'queue-full' | 'stopped';
 
 export interface PoolStats {
+  /** Workers held right now. Since `P-18` this moves with the load. */
   size: number;
+  /** The ceiling it will not grow past. `size` at it is a probe that wants a bigger one. */
+  maxSize: number;
+  /** Workers added because checks were waiting, and given up again while nothing was. */
+  grown: number;
+  shrunk: number;
   busy: number;
   queued: number;
   submitted: number;
@@ -37,8 +43,35 @@ export interface PoolStats {
 
 export interface CheckPoolOptions {
   logger: Logger;
-  /** 0 derives from the machine. */
+  /**
+   * The most workers this pool will ever hold. 0 derives it from the machine.
+   *
+   * A ceiling rather than a headcount since `P-18`: the pool starts at `minSize` and grows
+   * towards this only while work is actually waiting.
+   */
   size?: number;
+  /**
+   * Workers to start with, and never to drop below (`P-18`).
+   *
+   * **The asymmetry is the design.** Growth happens the instant a check has nowhere to go —
+   * every worker busy and something queued — because a delayed check is a measurement taken
+   * late, and `P-15` measured what an undersized pool costs: 21% of checks refused and the rest
+   * delayed by a p95 of 15.8 seconds. Shrinking waits for a whole quiet minute and gives up one
+   * worker at a time, because the only thing it buys is memory, and buying memory back at the
+   * cost of a re-spawn during the next spike is a bad trade.
+   *
+   * Equal to `size` means the old fixed-size behaviour, which is what a probe with a known
+   * steady workload should set.
+   */
+  minSize?: number;
+  /**
+   * How long every worker must have been idle before one is given up. Default 60 s.
+   *
+   * Long, on purpose: a one-minute scan interval means a probe is idle between ticks by design,
+   * and a shrink policy shorter than the interval would spend its life dropping workers it is
+   * about to re-spawn.
+   */
+  idleShrinkMs?: number;
   queueMaxLength?: number;
   /**
    * How long a check has to honour its abort before the worker is terminated.
@@ -134,7 +167,9 @@ export function defaultPoolSize(): number {
 
 export class CheckPool {
   readonly #logger: Logger;
-  readonly #size: number;
+  readonly #maxSize: number;
+  readonly #minSize: number;
+  readonly #idleShrinkMs: number;
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
   readonly #registryModule: string;
@@ -149,6 +184,13 @@ export class CheckPool {
 
   #nextJobId = 0;
   #nextWorkerId = 0;
+  /** Spawns in flight, so a burst of pumps does not order the same worker several times over. */
+  #growing = 0;
+  #grown = 0;
+  #shrunk = 0;
+  /** When every slot was last seen busy, or the queue non-empty. Monotonic (`CLAUDE.md`). */
+  #busySince = 0n;
+  #shrinkTimer: NodeJS.Timeout | undefined;
   #startFailures = 0;
   #stopped = false;
   #disabled = false;
@@ -163,7 +205,13 @@ export class CheckPool {
 
   constructor(options: CheckPoolOptions) {
     this.#logger = options.logger.child({ component: 'check-pool' });
-    this.#size = options.size !== undefined && options.size > 0 ? options.size : defaultPoolSize();
+    this.#maxSize =
+      options.size !== undefined && options.size > 0 ? options.size : defaultPoolSize();
+    // Clamped rather than trusted: a minimum above the maximum is a configuration file that says
+    // two contradictory things, and starting more workers than the ceiling allows would make
+    // every later decision arithmetic on a number that was already wrong.
+    this.#minSize = Math.max(1, Math.min(options.minSize ?? this.#maxSize, this.#maxSize));
+    this.#idleShrinkMs = options.idleShrinkMs ?? 60_000;
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#registryModule =
@@ -171,15 +219,34 @@ export class CheckPool {
     this.#onResult = options.onResult;
   }
 
+  /** Workers held right now, which since `P-18` is not the same as the configured maximum. */
   get size(): number {
-    return this.#size;
+    return this.#slots.length;
+  }
+
+  /** The ceiling. What `stats().size` used to report, and what a capacity alarm compares to. */
+  get maxSize(): number {
+    return this.#maxSize;
   }
 
   /** Resolves once every worker has loaded its registry and is ready for work. */
   async start(): Promise<void> {
     if (this.#slots.length > 0) return;
-    await Promise.all(Array.from({ length: this.#size }, () => this.#spawn()));
-    this.#logger.info({ size: this.#size, registry: this.#registryModule }, 'check pool started');
+    await Promise.all(Array.from({ length: this.#minSize }, () => this.#spawn()));
+    this.#busySince = process.hrtime.bigint();
+    // Zero means never give a worker back, which is what a probe on a machine with memory to
+    // spare and spiky work should choose: the pool then only ever climbs.
+    if (this.#minSize < this.#maxSize && this.#idleShrinkMs > 0) {
+      this.#shrinkTimer = setInterval(() => {
+        this.#considerShrink();
+      }, this.#idleShrinkMs);
+      // The sizing loop must never be the reason the process stays alive.
+      this.#shrinkTimer.unref();
+    }
+    this.#logger.info(
+      { size: this.#slots.length, max: this.#maxSize, registry: this.#registryModule },
+      'check pool started',
+    );
   }
 
   /**
@@ -191,6 +258,8 @@ export class CheckPool {
    */
   async stop(): Promise<void> {
     this.#stopped = true;
+    if (this.#shrinkTimer !== undefined) clearInterval(this.#shrinkTimer);
+    this.#shrinkTimer = undefined;
     for (const job of this.#queue.splice(0)) this.#settle(job, 'pool-stopped', 'probe is stopping');
     await Promise.all(
       this.#slots.map(async (slot) => {
@@ -236,13 +305,20 @@ export class CheckPool {
       settled: false,
     });
     this.#active.add(request.sensorId);
+    // The pool is not idle from this moment, whatever happens next: a check that queues and a
+    // check that dispatches immediately are both work, and a shrink between the two would take
+    // the worker that was about to run it.
+    this.#busySince = process.hrtime.bigint();
     this.#pump();
     return 'accepted';
   }
 
   stats(): PoolStats {
     return {
-      size: this.#size,
+      size: this.#slots.length,
+      maxSize: this.#maxSize,
+      grown: this.#grown,
+      shrunk: this.#shrunk,
       busy: this.#slots.filter((slot) => slot.job !== undefined).length,
       queued: this.#queue.length,
       submitted: this.#submitted,
@@ -259,13 +335,87 @@ export class CheckPool {
 
   #pump(): void {
     for (const slot of this.#slots) {
-      if (this.#queue.length === 0) return;
+      if (this.#queue.length === 0) break;
       if (!slot.ready || slot.job !== undefined) continue;
       const job = this.#queue.shift();
       /* c8 ignore next -- guarded by the length check above */
-      if (job === undefined) return;
+      if (job === undefined) break;
       this.#dispatch(slot, job);
     }
+    // After the loop, never inside it: `#grow` appends to `#slots`, and growing a collection
+    // while iterating it is how a worker gets skipped or visited twice.
+    this.#grow();
+  }
+
+  /**
+   * Adds workers while checks have nowhere to go (`P-18`).
+   *
+   * The trigger is not "the queue is long" but "a check has nowhere to go", and **`#pump` has
+   * already established that** — it is called immediately above, and it hands work to every
+   * ready idle worker there is. So a queue that is still non-empty when it returns is a queue
+   * behind workers that are all busy, which is the only state in which another worker would have
+   * started a check that is instead waiting. Re-checking for an idle slot here would be a
+   * condition that cannot be false, which is a condition that is not doing anything.
+   *
+   * **The step is a doubling, and that is a judgement rather than a measurement.** The load this
+   * exists for arrives in tranches — the wheel hands over a whole second's worth at once
+   * (`P-15`) — and a growth event only happens on a pump, so a linear step climbs in as many
+   * rounds as it needs workers where a doubling takes a handful. One-at-a-time was not measured
+   * against it; what *was* measured is the ramp as shipped, which costs nothing at the p95
+   * (`docs/findings/2026-08-29-pool-sizing.md`), so there is no case open against it either.
+   *
+   * Bounded twice over: by the configured maximum, and by what is actually queued — forty
+   * workers for three waiting checks is memory bought for work that does not exist.
+   */
+  #grow(): void {
+    if (this.#stopped || this.#disabled) return;
+    const held = this.#slots.length + this.#growing;
+    if (held >= this.#maxSize) return;
+    if (this.#queue.length === 0) return;
+
+    const want = Math.min(this.#maxSize, held * 2, held + this.#queue.length);
+    const add = want - held;
+    if (add <= 0) return;
+
+    this.#grown += add;
+    this.#growing += add;
+    this.#logger.info(
+      { from: held, to: want, queued: this.#queue.length },
+      'growing the check pool',
+    );
+    for (let i = 0; i < add; i += 1) {
+      void this.#spawn().finally(() => {
+        this.#growing -= 1;
+        this.#pump();
+      });
+    }
+  }
+
+  /**
+   * Gives up one worker after a whole quiet interval (`P-18`).
+   *
+   * One at a time and only when *nothing* has been waiting for the full interval, because the
+   * only thing shrinking buys is resident memory — about six megabytes a worker — and paying a
+   * spawn during the next spike to have saved it is a bad trade. The clock is monotonic, so a
+   * wall-clock jump cannot make a busy pool look idle.
+   */
+  #considerShrink(): void {
+    if (this.#stopped || this.#slots.length <= this.#minSize) return;
+    const idleFor = Number(process.hrtime.bigint() - this.#busySince) / 1e6;
+    if (idleFor < this.#idleShrinkMs) return;
+
+    const spare = this.#slots.find((slot) => slot.ready && slot.job === undefined);
+    if (spare === undefined) return;
+
+    this.#shrunk += 1;
+    this.#logger.info(
+      { from: this.#slots.length, idleForMs: Math.round(idleFor) },
+      'shrinking the check pool',
+    );
+    spare.retired = true;
+    const index = this.#slots.indexOf(spare);
+    if (index >= 0) this.#slots.splice(index, 1);
+    void spare.worker.terminate();
   }
 
   #dispatch(slot: Slot, job: Job): void {

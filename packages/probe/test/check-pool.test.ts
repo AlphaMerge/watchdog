@@ -19,13 +19,23 @@ interface Seen {
 const pools: CheckPool[] = [];
 
 async function poolOf(
-  options: { size?: number; abortGraceMs?: number; queueMaxLength?: number } = {},
+  options: {
+    size?: number;
+    minSize?: number;
+    idleShrinkMs?: number;
+    abortGraceMs?: number;
+    queueMaxLength?: number;
+  } = {},
 ) {
   const seen: Seen[] = [];
   const pool = new CheckPool({
     logger: silent,
     size: options.size ?? 2,
+    // Fixed unless a test says otherwise, so the sizing loop (`P-18`) is exercised where it is
+    // the subject and cannot quietly change the answer everywhere else.
+    minSize: options.minSize ?? options.size ?? 2,
     registryModule: FIXTURES,
+    ...(options.idleShrinkMs === undefined ? {} : { idleShrinkMs: options.idleShrinkMs }),
     ...(options.abortGraceMs === undefined ? {} : { abortGraceMs: options.abortGraceMs }),
     ...(options.queueMaxLength === undefined ? {} : { queueMaxLength: options.queueMaxLength }),
     onResult: (result, meta) => seen.push({ result, meta }),
@@ -268,6 +278,115 @@ describe('check pool', () => {
 });
 
 /**
+ * Sizing the pool to the work (`P-18`).
+ *
+ * **The asymmetry is the whole design and is what these pin.** `P-15` measured what an
+ * undersized pool costs — 21% of checks refused and the rest delayed by a p95 of 15.8 seconds —
+ * and what an oversized one costs is memory, about six megabytes a worker. So growth is
+ * immediate and shrinking waits out a whole quiet interval: the first mistake loses
+ * measurements, the second loses nothing but bytes.
+ */
+describe('growing and shrinking with the load', () => {
+  it('starts at the minimum rather than at the ceiling', async () => {
+    const { pool } = await poolOf({ size: 8, minSize: 2 });
+    assert.equal(pool.size, 2);
+    assert.equal(pool.maxSize, 8, 'and knows what it is allowed to reach');
+  });
+
+  it('grows the moment a check has nowhere to go', async () => {
+    // The trigger is not a long queue: it is a queued check with every worker busy, which is the
+    // only state in which another worker would have started something that is instead waiting.
+    const { pool, seen } = await poolOf({ size: 8, minSize: 1 });
+    for (let i = 0; i < 6; i += 1) {
+      pool.submit(request(100 + i, 'test.slow', { delayMs: 300 }));
+    }
+
+    await until(() => pool.size > 1, 'the pool to grow');
+    await until(() => seen.length === 6, 'every check to finish', 10_000);
+    assert.ok(pool.size > 1, `pool stayed at ${String(pool.size)}`);
+    assert.ok(pool.size <= 8, 'and never past its ceiling');
+    assert.ok(pool.stats().grown > 0, 'and says that it grew');
+  });
+
+  it('never grows past the ceiling, however much is queued', async () => {
+    const { pool, seen } = await poolOf({ size: 3, minSize: 1, queueMaxLength: 100 });
+    for (let i = 0; i < 40; i += 1) {
+      pool.submit(request(200 + i, 'test.slow', { delayMs: 100 }));
+    }
+    await until(() => seen.length === 40, 'every check to finish', 20_000);
+    assert.equal(pool.size, 3);
+  });
+
+  it('does not grow for work an idle worker is about to pick up', async () => {
+    // A queue behind an idle worker is not a shortage. Growing here would buy a worker for a
+    // check that was never going to wait, which over a day is a pool that only ever climbs —
+    // and `#pump` runs first, so three checks against four workers leaves nothing queued.
+    const { pool, seen } = await poolOf({ size: 8, minSize: 4 });
+    for (const id of [300, 301, 302]) pool.submit(request(id, 'test.slow', { delayMs: 120 }));
+    await until(() => seen.length === 3, 'the checks to finish', 8_000);
+    assert.equal(pool.size, 4, 'the pool should not have grown');
+    assert.equal(pool.stats().grown, 0);
+  });
+
+  it('does not give a worker back while work is still arriving', async () => {
+    // The idle clock has to be reset by *submitting*, not only by finishing: a shrink between a
+    // check queueing and a worker picking it up would take the worker that was about to run it.
+    // The interval here is far shorter than the work, so a policy that did not wait would fire.
+    // The interval is five times the submit cadence, so the two cannot be confused: a pool that
+    // reset its idle clock only on *completion* would still be inside the window, while one that
+    // never reset it would shrink at every tick.
+    const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 200 });
+    for (let i = 0; i < 6; i += 1) pool.submit(request(700 + i, 'test.slow', { delayMs: 60 }));
+    await until(() => pool.size > 1, 'the pool to grow');
+
+    for (let round = 0; round < 12; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      pool.submit(request(800 + round, 'test.slow', { delayMs: 60 }));
+    }
+    assert.equal(pool.stats().shrunk, 0, 'a busy pool gave a worker back');
+
+    await until(() => seen.length === 18, 'every check to finish', 15_000);
+  });
+
+  it('never shrinks below the minimum, however long it is quiet', async () => {
+    const { pool } = await poolOf({ size: 8, minSize: 3, idleShrinkMs: 50 });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(pool.size, 3);
+    assert.equal(pool.stats().shrunk, 0, 'and it should not even have tried');
+  });
+
+  it('holds its size when the minimum is the maximum, which is the old behaviour', async () => {
+    // What a probe with a known steady workload should configure: the sizing loop buys nothing
+    // there, and a re-spawn during a spike costs something.
+    const { pool, seen } = await poolOf({ size: 2, minSize: 2, idleShrinkMs: 50 });
+    for (let i = 0; i < 6; i += 1) pool.submit(request(500 + i, 'test.slow', { delayMs: 60 }));
+    await until(() => seen.length === 6, 'every check to finish', 10_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(pool.size, 2);
+    assert.equal(pool.stats().grown, 0);
+    assert.equal(pool.stats().shrunk, 0);
+  });
+
+  it('refuses a minimum above its own ceiling rather than starting more than it allows', async () => {
+    // A configuration file saying two contradictory things. Starting six workers in a pool
+    // bounded at two would make every later sizing decision arithmetic on a number already wrong
+    // — so what is asserted is the workers it actually starts, not the number it stored.
+    const pool = new CheckPool({
+      logger: silent,
+      size: 2,
+      minSize: 6,
+      registryModule: FIXTURES,
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await pool.start();
+    assert.equal(pool.maxSize, 2);
+    assert.equal(pool.size, 2, 'it started more workers than its own ceiling allows');
+  });
+});
+
+/**
  * The number `P-15` changed, and why.
  *
  * A value test alone would pass just as happily on the old default; what these pin is the
@@ -280,9 +399,11 @@ describe('the default pool size', () => {
     // pool wants; a check holds a slot while awaiting a packet and uses almost no CPU, so the
     // machine's width has nothing to do with how many packets are in the air.
     assert.notEqual(defaultPoolSize(), Math.max(1, availableParallelism() - 1));
+    // Against `maxSize` since `P-18`, because `size` is now what the pool is holding rather than
+    // what it is allowed to hold — and before it starts, that is nothing.
     assert.equal(
       defaultPoolSize(),
-      new CheckPool({ logger: silent, onResult: () => undefined }).size,
+      new CheckPool({ logger: silent, onResult: () => undefined }).maxSize,
       'and the pool actually uses it',
     );
   });

@@ -905,12 +905,67 @@ because each is a decision rather than a defect:
       costs ~290 MB whether the probe watches 5,000 sensors or 50) and the fact that our own
       `icmp.ping` is a three-second check, which at the v1 target would want 250 slots. Neither
       is urgent; both are what Phase 6 walks into.
-- [ ] **P-18 — Demand-driven worker pool sizing** · M · P-15 · Grow the check pool when the queue
+- [x] **P-18 — Demand-driven worker pool sizing** · M · P-15 · Grow the check pool when the queue
       is persistently non-empty and shrink it when idle, within a configured bound, so a probe
       pays for the slots its workload needs rather than for a fixed default. `P-15` measured the
       cost of getting it wrong in both directions: 7 slots refused 21% of checks and delayed the
       rest by 15.8 s, while a flat 48 costs ~290 MB of resident memory on a probe watching fifty
       sensors. The sweep in `scheduler-benchmark.test.ts` is the harness to prove it against.
+
+      **P-18 outcome.** `workerPoolSize` becomes a ceiling; `workerPoolMinSize` (default 4) is
+      where the pool starts, and `workerPoolIdleShrinkMs` (default 60 s) is how long everything
+      must have been idle before a worker is given back. Measured on `P-15`'s own harness
+      (`docs/findings/2026-08-29-pool-sizing.md`):
+
+      | Pool | p95 jitter | Refused | Memory |
+      | --- | --- | --- | --- |
+      | fixed 48 (what shipped) | 218 ms | 0 | 557 MB at 48 workers |
+      | demand-driven 4 → 48 | **217 ms** | 0 | 16 MB at 4 |
+      | fixed 7 (pre-`P-15`) | 29,176 ms | 3,494 | 34 MB at 7 |
+
+      **The ramp costs nothing measurable** — one millisecond at the p95, over ninety seconds
+      that include growing from four workers to forty-eight — because the delay is spent once, on
+      the first tranche, and does not reach the percentile the gate is stated at. At fifty
+      sensors the pool never grows at all: **4 workers and 16 MB against 48 and 263 MB**, which
+      is the case this ticket was written for.
+
+      **The policy is asymmetric because the mistakes are.** Growth is immediate — a queued check
+      with every worker busy is the only state in which another worker would have started
+      something that is instead waiting, and `#pump` runs first, so a still-non-empty queue *is*
+      that state. Shrinking waits out a whole quiet interval and gives up one worker at a time,
+      because all it buys is about six megabytes and paying a spawn during the next spike to have
+      saved them is a bad trade. The idle clock is monotonic and is reset by *submitting*, not
+      only by finishing: a shrink between a check queueing and a worker picking it up would take
+      the worker that was about to run it.
+
+      Setting `workerPoolMinSize` equal to `workerPoolSize` restores the old fixed pool exactly,
+      which is what a probe with a known steady workload should do.
+
+      **Probe Health's message names the size now**, which live verification is what showed was
+      needed: `pool 0%` is the same sentence for four workers and for forty-eight, and with a
+      fixed pool an operator could be assumed to know the denominator. The channel stays a
+      percentage — that is what a limit is set on — and the size goes in the sentence beside it
+      rather than becoming a channel of its own.
+
+      Mutation 9/10 after two withdrawals. One targeted a redundant condition — `#grow` re-checked
+      for an idle worker that `#pump` had just proved could not exist — which was deleted rather
+      than tested around. The survivor is the growth *step*: doubling versus one at a time is a
+      judgement about a ramp, not a contract, and a unit test pinning it would be testing the
+      implementation; the ramp as shipped is measured end to end instead. A third was withdrawn
+      as equivalent — a sizing timer that a fixed pool starts and that changes nothing observable.
+- [ ] **P-23 — `ingestion` nack test hangs for its full flush delay under load** · S · — ·
+      "passes a refusal back to the probe as a nack it can retry" in
+      `packages/core/test/ingestion.test.ts` failed once inside the full core suite at exactly
+      **60,076 ms**, which is its own `batchMaxDelayMs: 60_000`: the held batch waited out the
+      flush timer instead of being drained by the `stop()` on the line above it. It passes alone
+      and passed on an immediate re-run of the whole suite, so this is load-dependent.
+      **Found by `P-18`**, which did not touch ingestion. Worth an hour because the failure mode
+      is a *sixty-second* test rather than a failing assertion — a suite that occasionally takes
+      a minute longer for no visible reason is one people stop waiting for — and because the
+      shape it points at may be real: `Ingestor.submit` and `Ingestor.stop` race, and the
+      question is whether a batch can be queued in the window where `stop` has already decided
+      the queue was empty. If it can, a shutting-down core loses a batch a probe was told to
+      forget. Reproduce by running the suite on a loaded machine, or by delaying `#prepare`.
 - [ ] **P-19 — Bulk provisioning path** · M · S-16, D-04 · Create a subtree in one request rather
       than one object per request. `docs/findings/2026-08-25-tree-build-measurement.md` records
       the serial 5,000-object build eroding from 21.0 s to 29.3 s across Phase 3, recovered to

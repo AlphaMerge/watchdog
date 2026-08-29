@@ -111,6 +111,8 @@ async function main(): Promise<void> {
   const pool = new CheckPool({
     logger,
     size: config.probe.workerPoolSize,
+    minSize: config.probe.workerPoolMinSize,
+    idleShrinkMs: config.probe.workerPoolIdleShrinkMs,
     queueMaxLength: config.probe.checkQueueMaxLength,
     abortGraceMs: config.probe.checkAbortGraceMs,
     onResult: spoolResult,

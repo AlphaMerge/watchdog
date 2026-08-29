@@ -356,6 +356,28 @@ export interface ProbeConfig {
      */
     workerPoolSize: number;
     /**
+     * Workers to start with, and never to drop below (`P-18`).
+     *
+     * `workerPoolSize` is a *ceiling*, not a headcount: the pool starts here and grows towards
+     * it only while checks are actually waiting, then gives workers back after a quiet minute.
+     * A probe watching fifty sensors therefore costs about thirty megabytes rather than the
+     * ~290 MB a flat 48 workers reserves, while one watching five thousand reaches the same
+     * ceiling `P-15` measured within the first tranche of work.
+     *
+     * **Set this equal to `workerPoolSize` for a fixed pool**, which is what a probe with a
+     * known steady workload wants — the sizing loop is worth nothing there and a re-spawn during
+     * a spike is worth something.
+     */
+    workerPoolMinSize: number;
+    /**
+     * How long every worker must have been idle before one is given up. 0 never shrinks.
+     *
+     * Longer than a scan interval on purpose: a probe is idle between ticks by design, and a
+     * shrink policy shorter than the interval would spend its life dropping workers it is about
+     * to re-spawn.
+     */
+    workerPoolIdleShrinkMs: number;
+    /**
      * Checks that may wait for a worker before further ones are refused.
      *
      * A refused check is counted and skipped, never queued indefinitely: the next scan of that
@@ -852,6 +874,8 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'spoolBatchMaxRows',
         'spoolCatchUpMaxRows',
         'workerPoolSize',
+        'workerPoolMinSize',
+        'workerPoolIdleShrinkMs',
         'checkQueueMaxLength',
         'checkAbortGraceMs',
         'processRunnerMaxConcurrent',
@@ -881,6 +905,13 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         spoolBatchMaxRows: { type: 'integer', minimum: 1, maximum: 5_000, default: 500 },
         spoolCatchUpMaxRows: { type: 'integer', minimum: 1, maximum: 5_000, default: 2_000 },
         workerPoolSize: { type: 'integer', minimum: 0, maximum: 1_024, default: 0 },
+        workerPoolMinSize: { type: 'integer', minimum: 1, maximum: 1_024, default: 4 },
+        workerPoolIdleShrinkMs: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 3_600_000,
+          default: 60_000,
+        },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },
         // Four at once, because each is a Node process rather than a thread awaiting a packet.
