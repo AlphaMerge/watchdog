@@ -953,19 +953,29 @@ because each is a decision rather than a defect:
       judgement about a ramp, not a contract, and a unit test pinning it would be testing the
       implementation; the ramp as shipped is measured end to end instead. A third was withdrawn
       as equivalent — a sizing timer that a fixed pool starts and that changes nothing observable.
-- [ ] **P-23 — `ingestion` nack test hangs for its full flush delay under load** · S · — ·
+- [x] **P-23 — `ingestion` nack test raced for the queue slot it was asserting about** · S · — ·
       "passes a refusal back to the probe as a nack it can retry" in
-      `packages/core/test/ingestion.test.ts` failed once inside the full core suite at exactly
-      **60,076 ms**, which is its own `batchMaxDelayMs: 60_000`: the held batch waited out the
-      flush timer instead of being drained by the `stop()` on the line above it. It passes alone
-      and passed on an immediate re-run of the whole suite, so this is load-dependent.
-      **Found by `P-18`**, which did not touch ingestion. Worth an hour because the failure mode
-      is a *sixty-second* test rather than a failing assertion — a suite that occasionally takes
-      a minute longer for no visible reason is one people stop waiting for — and because the
-      shape it points at may be real: `Ingestor.submit` and `Ingestor.stop` race, and the
-      question is whether a batch can be queued in the window where `stop` has already decided
-      the queue was empty. If it can, a shutting-down core loses a batch a probe was told to
-      forget. Reproduce by running the suite on a loaded machine, or by delaying `#prepare`.
+      `packages/core/test/ingestion.test.ts` failed once inside the full core suite, reading
+      `results-ack` where it wanted `results-nack` — and took **60,076 ms** to get there.
+      **Found by `P-18`**, which did not touch ingestion.
+
+      **P-23 outcome: the test, not the ingestor.** It offered two batches without awaiting the
+      first, and both resolve their channels against the database before reaching the queue —
+      so nothing made the first of them win. When the second got the only slot it was *accepted*,
+      and an accepted batch of one row then waits out `batchMaxDelayMs`, which this test sets to
+      sixty seconds. Hence a minute of silence followed by an assertion about the wrong batch.
+      It now waits for `queuedRows` to reach two before offering the second, and runs in 12 ms.
+
+      **The production race it was filed against does not exist, and that is worth writing down
+      rather than leaving open.** `Ingestor.submit` has no `await` between reading `#stopping`
+      and pushing to the queue, so a batch cannot be enqueued in the window where `stop()` has
+      already decided the queue was empty: a submit either sees the flag and is refused, or is
+      queued before it is set. Checked by reading, and the code is short enough for that to
+      settle it.
+
+      Worth the hour for the reason a sixty-second test is worse than a failing one: a suite that
+      occasionally takes a minute longer for no visible reason is a suite people stop waiting
+      for. It is the only place in the core's tests that offers a batch without awaiting it.
 - [ ] **P-19 — Bulk provisioning path** · M · S-16, D-04 · Create a subtree in one request rather
       than one object per request. `docs/findings/2026-08-25-tree-build-measurement.md` records
       the serial 5,000-object build eroding from 21.0 s to 29.3 s across Phase 3, recovered to

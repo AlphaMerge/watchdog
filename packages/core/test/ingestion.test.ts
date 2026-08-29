@@ -32,6 +32,15 @@ function ingestion(overrides: Partial<IngestionConfig> = {}): IngestionConfig {
 
 const AT = new Date('2026-08-20T10:00:00.000Z');
 
+/** Waits for a condition, or fails rather than leaving the runner to sit on it. */
+async function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function samples(channelId: number, count: number, from = AT): SampleRow[] {
   return Array.from({ length: count }, (_, index) => ({
     channelId,
@@ -600,6 +609,14 @@ describe(
         batchId: 'held',
         results: [result('a'), result('b')],
       });
+      // **Waited for rather than assumed, which is what `P-23` was filed for.** Both calls
+      // resolve channels against the database before they reach the queue, and nothing makes
+      // the first of them win that race. When the second got the slot instead, the assertion
+      // below read `results-ack` — and the test took *sixty seconds* getting there, because an
+      // accepted batch of one row waits out `batchMaxDelayMs` before it is written. A test
+      // whose failure mode is a minute of silence is one people stop waiting for.
+      await until(() => created.stats().queuedRows === 2, 'the first batch to fill the queue');
+
       const refused = await svc.acceptResults('probe-1', {
         type: 'results',
         batchId: 'refused',
