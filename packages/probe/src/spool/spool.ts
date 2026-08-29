@@ -190,8 +190,14 @@ export class ResultSpool {
           ? { segment: next.name, offset: 0 }
           : { segment: current, offset };
 
-      // Nothing more was readable here and there is nowhere else to go.
-      if (consumed === 0) break;
+      // Nothing readable in this segment. Break only if we did not just step to another one:
+      // a cursor parked exactly on a boundary — which is where a drain that caught up leaves it,
+      // since there was no next segment at the time — consumes nothing from the segment it is in
+      // and must still be allowed to read the one that has since been rolled. Breaking here
+      // regardless made `peek` return an empty batch for ever while `pending` climbed, which the
+      // drain reads as "no work": link up, nothing logged, results piling up until the spool hits
+      // its size cap and begins dropping them.
+      if (consumed === 0 && position.segment === current) break;
     }
 
     this.#peeked = results.length === 0 ? undefined : { records: results.length, ...position };

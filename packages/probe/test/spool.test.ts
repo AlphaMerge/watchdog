@@ -44,18 +44,61 @@ describe('result spool', () => {
     dir = await scratch();
   });
 
-  it('gives results back in the order they were written', async () => {
-    const spool = await openSpool(dir);
-    await spool.append([result(1), result(2)]);
-    await spool.append([result(3)]);
+  /**
+   * **Drain to empty, then write more, and the spool must still hand the new results over.**
+   *
+   * When a drain catches up completely, the cursor parks at the end of what was then the last
+   * segment — there is no next segment to move to, so it stays at that offset. The moment the
+   * writer rolls a new segment, `peek` starts at a cursor sitting exactly on a boundary: it
+   * consumes nothing from the old segment, and the guard meant to stop an unproductive pass fired
+   * *after* the code had already advanced to the new one. From then on `peek` returned an empty
+   * batch every time while `pending` climbed into the thousands.
+   *
+   * The drain reads that as "no work": the link stays up, nothing is logged, nothing is counted,
+   * and results accumulate on disk until the spool hits its size cap and starts dropping them.
+   * It is not a rare interleaving — it is what happens to every healthy probe the first time it
+   * fills a segment after catching up.
+   */
+  it('still delivers results written after a drain caught up and rolled a segment', async () => {
+    // Segments small enough that a handful of results fills one.
+    const spool = await openSpool(dir, { segmentMaxBytes: 400 });
 
-    assert.deepEqual(
-      (await spool.peek(10)).map((r) => r.sensorId),
-      [1, 2, 3],
-      'a replay out of order would write samples the core then has to sort',
+    for (let id = 1; id <= 6; id += 1) await spool.append([result(id)]);
+
+    // Drain to empty, exactly as `SpoolDrain` does. This is what parks the cursor.
+    const seen: number[] = [];
+    const drain = async (): Promise<void> => {
+      for (let pass = 0; pass < 200; pass += 1) {
+        const batch = await spool.peek(50);
+        if (batch.length === 0) return;
+        seen.push(...batch.map((one) => one.sensorId));
+        await spool.commit();
+      }
+      assert.fail('the spool never reported itself empty');
+    };
+    await drain();
+    assert.equal(spool.stats().pending, 0, 'the first drain should have emptied the spool');
+
+    // More results arrive, and enough of them to roll a new segment.
+    for (let id = 7; id <= 20; id += 1) await spool.append([result(id)]);
+    const segments = (await readdir(dir)).filter((name) => name.endsWith('.ndjson'));
+    assert.ok(
+      segments.length > 1,
+      `expected the writer to have rolled a segment, saw ${String(segments.length)}`,
     );
-    assert.equal(spool.stats().pending, 3);
-    await spool.close();
+
+    await drain();
+
+    assert.equal(
+      spool.stats().pending,
+      0,
+      `the spool still reports ${String(spool.stats().pending)} pending — peek is handing back nothing`,
+    );
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 20 }, (_, at) => at + 1),
+      'every appended result should come back exactly once, in order',
+    );
   });
 
   it('keeps results until they are confirmed', async () => {
