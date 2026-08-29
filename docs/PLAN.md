@@ -244,7 +244,8 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | P-13 Probe Health sensor, and P-04's numbers on it | done | **Evaluated by the core, because a probe cannot report its own absence** — `R-05` made a lost probe one alarm rather than a thousand, and this is the sensor that alarm comes from, so a sensor running *on* the probe would fall silent at the only moment that matters. Two halves: what the core knows (link, heartbeat age, protocol skew) and what the probe sent while it could (scheduler lag, pool, spool, protocol 7). It found a real bug in `R-05` before it was written: every sensor under a lost probe was marked Unknown, core-evaluated ones included — already wrong for `core.factory`, and disabling for this. Mutation 14/14 |
 | P-14 metrics endpoint | done | The same numbers as the two health sensors, read from the same call rather than recomputed — `N-13`'s rule, because two implementations of a health question are two answers to it. **A gap is an absent series**, since Prometheus has no null and a gauge that kept its last value would report a probe that has gone as still running. Live verification found the mirror-image mistake: a *reported* zero counter was being omitted too, which is a reading, not an absence. `/metrics` is outside `/api/`, so the authentication guard does not cover it and it is guarded explicitly. Mutation 10/10 |
 | P-06 protocol simulator harness | done | `@ms/simulators`. Most of it already existed, built ticket by ticket and stranded under one package's `test/support` — so the core and the probe could not reach it and seven files each stood up their own HTTP server. What was missing was the **scriptable latency**, which is what every HTTP-shaped sensor here actually tests: no-answer-yet, head-now-body-later, a slow trickle, a hang, a reset, and response *sequences* for retry tests. The harness has its own tests, because a `delayMs` that did not delay would leave every sensor test green and wrong. Flow exporter not built — flow monitoring is v2 |
-| P-07, P-09…P-11 | not started | |
+| P-07 ICMP spike and decision | done | **No raw socket, and the fix was a flag.** ADR-001 predicted three seconds a check and no pool that absorbs it — right about the number, wrong about the cause: `ping` idles a second between packets and `P-08` never overrode it. `-i 0.2` took 1,000 targets from 20 to **99 checks a second on 64 workers**, identical reply counts, 4.9x flat across the concurrency curve; the v1 requirement of 83/s was unreachable before at any pool size worth having (77/s at 256 workers) and needs about 55 now. The addon a raw socket would cost is therefore declined on a measurement, not deferred. It also caught a shipped bug: `-c` with `-w` waits for `count` *replies* and keeps transmitting, so a down host got five packets instead of four and would have got twenty-five under the new interval — `-W` now (`docs/findings/2026-08-29-icmp-throughput.md`) |
+| P-09…P-11 | not started | |
 
 Two of the four exit criteria are covered by tests already: **a deliberately hung check does not
 delay any other check**, and **killing a worker mid-check loses exactly one result and recycles
@@ -271,6 +272,14 @@ governing quantity turned out to be the *dispatch batch*: the wheel hands over a
 worth at once, so the queue drains in tranches of `ceil(batch / slots)`. The default is now a
 flat 48, chosen from a measured sweep and recorded in
 `docs/findings/2026-08-26-scheduler-benchmark.md`.
+
+**P-07 supplies what that benchmark could not: the cost of a real check.** `P-15` sized the pool
+against synthetic work, so it measured the scheduler and not the sensor. Ping — the most-used type
+there is — costs 1.3 ms of CPU and about 0.6 s of wall clock per check once `-i 0.2` is set,
+which is 99 checks a second on 64 workers. The shipped default of 48 carries roughly 75 a second,
+so an installation that is *entirely* ping at the v1 count of 5,000 on a one-minute interval wants
+about 55 rather than 48. That is a tuning note, not a defect: the two numbers now come from the
+same place, and before `P-07` the same installation was unreachable at any pool size.
 
 P-05 landed the plugin contract, which is what the rest of the phase is built from, and P-08 put
 the first type in it. Sensors can now be created and the check runs correctly against a real

@@ -32,9 +32,22 @@ export const icmpJitter: SensorType = {
         title: 'Packets',
         description:
           'Jitter is a property of the *gaps* between replies, so it needs a run of them — five ' +
-          'packets give four gaps, which is not much of a sample. Ping waits about a second ' +
-          'between packets, so twenty takes roughly twenty seconds; keep the scan interval well ' +
+          'packets give four gaps, which is not much of a sample. At the default spacing of one ' +
+          'second, twenty packets take roughly twenty seconds; keep the scan interval well ' +
           'above that.',
+      },
+      intervalSeconds: {
+        type: 'number',
+        minimum: 0.2,
+        maximum: 10,
+        default: 1,
+        title: 'Seconds between packets',
+        description:
+          'One second here, unlike `icmp.ping`’s 0.2 (`P-07`), and the difference is deliberate: ' +
+          'jitter is a measurement of the network *over time*, and twenty packets spaced 0.2 s ' +
+          'apart sample four seconds of it rather than twenty. Congestion that comes and goes on ' +
+          'a ten-second cycle is invisible in a four-second window. Lower it to make the check ' +
+          'cheaper, knowing that is the trade.',
       },
       packetSize: {
         type: 'integer',
@@ -78,6 +91,7 @@ export const icmpJitter: SensorType = {
       count,
       packetSize: Number(context.params['packetSize'] ?? 32),
       timeoutMs: Number(context.params['timeoutMs'] ?? 60_000),
+      intervalSeconds: Number(context.params['intervalSeconds'] ?? 1),
     };
 
     const { command, args } = pingCommand(pingPlatform(process.platform), context.target, params);

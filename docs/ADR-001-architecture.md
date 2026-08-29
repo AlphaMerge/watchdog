@@ -271,12 +271,39 @@ is. One example of why: Windows counts an ICMP "Destination host unreachable" as
 packet, so its own summary reports `Received = 2, Lost = 0 (0% loss)` for a host that is not
 there. Loss is therefore computed from timed echo replies, never from the summary line.
 
-**Still open, and still `P-07`:** the raw-socket fast path, and the measurement at 1,000 targets
-that would justify it. One number is already visible without it — `ping` waits about a second
-between packets, so the default count of 4 holds a worker for roughly three seconds. At 5,000
-sensors on a one-minute interval that is 5,000 process spawns a minute and 15,000 worker-seconds,
-which no plausible pool size absorbs. `P-07` and `P-15` are where that gets confronted; the
-sensor is written so a second implementation slots in behind the same pure parser.
+**Left open by `P-08`, and settled below by `P-07`:** the raw-socket fast path, and the
+measurement at 1,000 targets that would justify it. One number was already visible without it —
+`ping` waits about a second between packets, so the default count of 4 holds a worker for roughly
+three seconds. At 5,000 sensors on a one-minute interval that is 5,000 process spawns a minute and
+15,000 worker-seconds, which no plausible pool size absorbs. The sensor is written so a second
+implementation slots in behind the same pure parser.
+
+### Amended 2026-08-29 (P-07) — no raw socket; the interval was the whole problem
+
+Measured: `docs/findings/2026-08-29-icmp-throughput.md`, 1,000 targets, replayable.
+
+**The arithmetic above was right and its conclusion was wrong.** Three seconds a check *is* more
+than any pool absorbs — but that three seconds was not the cost of spawning a process, it was
+`ping` idling between packets because iputils defaults to one second and `P-08` never set `-i`.
+Setting it to 0.2 s — the lowest an unprivileged process may use, so it is a floor rather than a
+preference — took 1,000 targets from **20 to 99 checks a second at 64 workers**, with identical
+reply counts and 4.9x holding flat across the concurrency curve. The v1 target of 5,000 sensors on
+a one-minute interval is 83 checks a second: the old configuration missed it at *any* pool size
+worth having (77/s at 256 workers), and the new one clears it at about 55.
+
+**Decision: the raw-socket fast path is not built, and this is a measured no rather than a
+deferral.** Node still cannot open one — `dgram` exposes udp4 and udp6 and not Linux's
+unprivileged ping sockets — so it means a native addon, a compiler on the operator's machine, a
+per-platform artefact in the tarball, and an unmaintained dependency in the hottest path we have.
+The requirement it was meant to rescue is now met with headroom by a flag. Revisit above ~10,000
+ping sensors on one probe at a one-minute interval, or below a 30-second interval at the v1 count;
+the row in the table above should be read as "system `ping`", with the fast path struck.
+
+**One correction to the shipped behaviour came out of it.** `-c` and `-w` interact: with a
+deadline, iputils waits for `count` *replies* and keeps transmitting until the deadline expires,
+so `P-08`'s `-c 4 -w 5` sent five packets to a host that was down, and lowering the interval under
+it would have sent twenty-five. Linux now uses `-W` (per packet). The count means what the form
+says, and the dead-host case got twice as fast as a side effect.
 
 ### Amended 2026-08-27 (T-01) — `net-snmp` is isolated rather than vendored
 

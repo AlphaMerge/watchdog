@@ -18,7 +18,33 @@ export interface PingParams {
   readonly count: number;
   readonly packetSize: number;
   readonly timeoutMs: number;
+  /**
+   * Seconds between echo requests (`P-07`).
+   *
+   * **Measured, and the measurement is why this exists.** `ping` waits one second between packets
+   * by default, so a count of 4 holds a worker for roughly three seconds — and at 5,000 sensors on
+   * a one-minute interval that is more worker-seconds than any plausible pool has. At `-i 0.2` the
+   * same check takes about 0.6 s and the same 64 workers move **99 targets a second instead of
+   * 20**, with identical reply counts: 4.9x for no privileges, no dependency and no second code
+   * path (`docs/findings/2026-08-29-icmp-throughput.md`).
+   *
+   * **0.2 is the floor, and not an arbitrary one.** iputils documents 200 ms as the lowest a
+   * process without `CAP_NET_RAW` may use, and BSD refuses below 0.1 s to anyone but the
+   * superuser. Below 0.2 the behaviour depends on how `ping` was installed on the operator's
+   * machine, which is not something a default may assume.
+   *
+   * Absent, or on Windows, no interval flag is passed at all: Windows' `ping` has none, and
+   * passing an unknown flag makes it print usage and fail every check.
+   */
+  readonly intervalSeconds?: number;
 }
+
+/**
+ * The lowest interval that is safe on every platform without extra privileges (`P-07`).
+ *
+ * Not a preference — a documented boundary. See `PingParams.intervalSeconds`.
+ */
+export const MIN_PING_INTERVAL_SECONDS = 0.2;
 
 export interface PingCommand {
   readonly command: string;
@@ -29,6 +55,30 @@ export interface PingCommand {
 export function pingPlatform(platform: string): PingPlatform {
   if (platform === 'win32' || platform === 'darwin') return platform;
   return 'linux';
+}
+
+/**
+ * `-i <seconds>`, or nothing.
+ *
+ * Shared by the two platforms that have the flag. **Windows does not**, and never gets it: its
+ * `ping` would print usage and exit, turning a tuning parameter into an outage on every Windows
+ * probe.
+ */
+function intervalFlag(params: PingParams): string[] {
+  const interval = params.intervalSeconds;
+  if (interval === undefined || !Number.isFinite(interval) || interval <= 0) return [];
+  return ['-i', String(Math.max(MIN_PING_INTERVAL_SECONDS, interval))];
+}
+
+/**
+ * How long to wait for one reply, in seconds.
+ *
+ * The operator's overall timeout divided by the packets they asked for, floored at a second: a
+ * budget of five seconds over four packets is a wait of two, and a sub-second per-packet wait
+ * would call a slow link down.
+ */
+function perPacketSeconds(params: PingParams): number {
+  return Math.max(1, Math.ceil(params.timeoutMs / 1_000 / Math.max(1, params.count)));
 }
 
 export function pingCommand(
@@ -68,6 +118,7 @@ export function pingCommand(
         '-n',
         '-c',
         String(params.count),
+        ...intervalFlag(params),
         '-t',
         String(seconds),
         '-s',
@@ -86,9 +137,22 @@ export function pingCommand(
       '-n',
       '-c',
       String(params.count),
-      // -w is the overall deadline; -W would be per packet and would not bound the whole run.
-      '-w',
-      String(seconds),
+      ...intervalFlag(params),
+      // **`-W` per packet, not `-w` overall, and this is `P-07`'s other finding.**
+      //
+      // `-c` and `-w` interact in a way the iputils manual states and nothing else does: *with a
+      // deadline, ping waits for `count` **replies** and keeps transmitting until the deadline
+      // expires.* So `-c 4 -w 5` against a host that is down sends five packets over five
+      // seconds, not four — measured — and `-c 4 -i 0.2 -w 5` would have sent twenty-five.
+      // Lowering the interval without this would have multiplied the traffic aimed at exactly
+      // the hosts already in trouble.
+      //
+      // With `-W` the count means what the form says: **four packets, live or dead**. The run is
+      // bounded by `(count - 1) x interval + W` rather than by ping's own deadline, and the
+      // check's `AbortSignal` — which `CLAUDE.md` requires anyway — is the outer bound. Measured
+      // against a dead host: 1.6 s here against 5.0 s before, and four packets instead of five.
+      '-W',
+      String(perPacketSeconds(params)),
       '-s',
       String(params.packetSize),
       target.host,

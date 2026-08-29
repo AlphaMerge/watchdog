@@ -81,12 +81,56 @@ Ping statistics for 192.0.2.1:
 `;
 
 describe('ping command construction', () => {
-  it('bounds the whole run on Linux, not each packet', () => {
+  it('bounds each packet on Linux, so the count means what it says', () => {
+    // **This was `-w`, the overall deadline, until `P-07` measured what that does.** `-c` and
+    // `-w` interact: with a deadline, ping waits for `count` *replies* and keeps transmitting
+    // until it expires — so `-c 4 -w 5` against a host that is down sent **five** packets over
+    // five seconds, and at a 0.2 s interval would have sent twenty-five. `-W` bounds the wait for
+    // each reply instead, the count is honoured whether or not anything answers, and the run is
+    // bounded by `(count - 1) x interval + W` with the check's `AbortSignal` outside that.
     const { command, args } = pingCommand('linux', target('192.0.2.9'), PARAMS);
     assert.equal(command, 'ping');
-    // -w is the overall deadline. -W would bound each packet and leave the total unbounded,
-    // which is the flag most ping wrappers reach for by mistake.
-    assert.deepEqual([...args], ['-n', '-c', '4', '-w', '5', '-s', '32', '192.0.2.9']);
+    assert.deepEqual([...args], ['-n', '-c', '4', '-W', '2', '-s', '32', '192.0.2.9']);
+  });
+
+  it('spaces the packets when asked, and never below the floor', () => {
+    // 0.2 s is where iputils stops allowing it without `CAP_NET_RAW` and BSD without the
+    // superuser, so a smaller number is clamped rather than passed on to fail at the far end.
+    const fast = pingCommand('linux', target('h'), { ...PARAMS, intervalSeconds: 0.2 });
+    assert.deepEqual([...fast.args].slice(0, 6), ['-n', '-c', '4', '-i', '0.2', '-W']);
+
+    const clamped = pingCommand('linux', target('h'), { ...PARAMS, intervalSeconds: 0.01 });
+    assert.equal([...clamped.args][clamped.args.indexOf('-i') + 1], '0.2');
+  });
+
+  it('spaces the packets on macOS too, where the flag reads the same and nothing else does', () => {
+    // BSD shares `-i` and disagrees about everything around it, so the darwin branch builds its
+    // own argument list — which means the interval has to be put into it a second time, and
+    // forgetting to would leave every Mac probe on ping's one-second default with no test saying
+    // so.
+    const { args } = pingCommand('darwin', target('192.0.2.9'), {
+      ...PARAMS,
+      intervalSeconds: 0.5,
+    });
+    assert.deepEqual([...args], ['-n', '-c', '4', '-i', '0.5', '-t', '5', '-s', '32', '192.0.2.9']);
+  });
+
+  it('lets ping keep its own spacing when the interval is nonsense, rather than inventing one', () => {
+    // Zero, negative, NaN and Infinity all mean "no usable interval", and the two wrong answers
+    // are both worse than doing nothing: clamping them to the floor invents a tuning nobody
+    // asked for, and passing them through produces `-i NaN`, which makes ping print its usage
+    // and fail every check on that sensor — a flag bug wearing the costume of an outage.
+    for (const interval of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { args } = pingCommand('linux', target('h'), { ...PARAMS, intervalSeconds: interval });
+      assert.equal(args.includes('-i'), false, `-i survived an interval of ${String(interval)}`);
+    }
+  });
+
+  it('passes no interval flag to Windows, which has no such flag', () => {
+    // It would print usage and exit, turning a tuning parameter into an outage on every Windows
+    // probe — a failure that would look like the network rather than like a flag.
+    const { args } = pingCommand('win32', target('h'), { ...PARAMS, intervalSeconds: 0.2 });
+    assert.equal(args.includes('-i'), false);
   });
 
   it('divides the budget per packet on Windows, which has no overall deadline', () => {
@@ -113,9 +157,28 @@ describe('ping command construction', () => {
     assert.equal(pingCommand('win32', target('h', 'v6'), PARAMS).args[0], '-6');
   });
 
-  it('never lets the deadline round down to zero', () => {
+  it('never lets the per-packet wait round down to zero', () => {
+    // A zero there is not "no wait" but "wait forever" on some builds, and a sub-second wait
+    // would call a slow link down. One second is the floor.
     const { args } = pingCommand('linux', target('h'), { ...PARAMS, timeoutMs: 100 });
-    assert.equal(args[args.indexOf('-w') + 1], '1', 'a 0-second deadline means "no deadline"');
+    assert.equal(args[args.indexOf('-W') + 1], '1');
+
+    // The floor is load-bearing at exactly one input and unreachable at every other, which is
+    // why it is worth a case of its own: `Math.ceil` already returns 1 for any positive budget,
+    // so a timeout of zero is the only thing standing between `-W 1` and `-W 0` — and `-W 0` is
+    // the one value that means "wait forever", turning a nonsense timeout into a check that
+    // never ends rather than one that ends immediately.
+    const untimed = pingCommand('linux', target('h'), { ...PARAMS, timeoutMs: 0 });
+    assert.equal(untimed.args[untimed.args.indexOf('-W') + 1], '1');
+  });
+
+  it('keeps the per-packet wait finite even when asked for no packets', () => {
+    // A count of zero divides the budget by nothing. Unguarded that is `-W Infinity`, which is
+    // the same hang as `-W 0` reached by a different route: the schema forbids the input, and
+    // this function is exported and does not get to assume the schema ran.
+    const { args } = pingCommand('linux', target('h'), { ...PARAMS, count: 0 });
+    const wait = Number(args[args.indexOf('-W') + 1]);
+    assert.ok(Number.isFinite(wait) && wait >= 1, `implausible per-packet wait: ${String(wait)}`);
   });
 
   it('treats an unfamiliar platform as iputils', () => {

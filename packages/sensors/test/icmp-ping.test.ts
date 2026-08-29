@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext, CheckTarget } from '../src/contract.js';
 import { icmpPing } from '../src/types/icmp-ping.js';
 
@@ -43,6 +44,40 @@ describe('icmp.ping', () => {
     // An operator who submits an empty form gets count 4; the check must work with no params.
     const execution = await icmpPing.execute(context({}));
     assert.match(execution.message ?? '', /4\/4 replies/);
+  });
+
+  it('defaults to the spacing P-07 measured, not to ping’s own', () => {
+    // This default is the whole of what `P-07` bought. At ping's one second a four-packet check
+    // holds a worker for three, and 5,000 of those do not fit in a minute at any pool size worth
+    // having; at 0.2 s the same 64 workers move 99 targets a second instead of 20. Asserted
+    // through the catalogue rather than off the schema literal, because the catalogue is what
+    // fills a default in before a check ever runs — a default nothing applies is not a default.
+    const result = new SensorCatalogue().register(icmpPing).seal().validate('icmp.ping', {});
+    assert.ok(result.valid);
+    assert.equal(result.params['intervalSeconds'], 0.2);
+  });
+
+  it('refuses a spacing below the floor an unprivileged ping allows', () => {
+    // 0.2 s is where iputils stops allowing it without `CAP_NET_RAW`. Below that whether the
+    // check works at all depends on how ping was installed on the operator's machine, so it is
+    // refused at the form rather than discovered in production.
+    const catalogue = new SensorCatalogue().register(icmpPing).seal();
+    assert.equal(catalogue.validate('icmp.ping', { intervalSeconds: 0.1 }).valid, false);
+  });
+
+  it('spaces the packets it sends, which is the only place the default can be seen', async () => {
+    // A default that never reaches `pingCommand` does nothing, and every other test in this file
+    // would still pass — the readings are identical either way, only the clock knows. Four
+    // loopback packets at 0.2 s take about 0.6 s; at ping's own second they take over three. The
+    // budget below is 3x the expected and half the alternative, so this asserts the flag rather
+    // than the speed of the machine it runs on.
+    const started = process.hrtime.bigint();
+    await icmpPing.execute(context({}));
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(
+      elapsedMs < 2_000,
+      `four loopback packets took ${elapsedMs.toFixed(0)} ms — ping was not given -i`,
+    );
   });
 
   it('fails, rather than reporting zero, when nothing replies', async () => {

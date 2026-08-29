@@ -40,8 +40,20 @@ export const icmpPing: SensorType = {
         default: 4,
         title: 'Packets',
         description:
-          'ICMP echo requests per check. Ping waits about a second between packets, so a ' +
-          'count of 4 takes roughly three seconds.',
+          'ICMP echo requests per check. At the default spacing of 0.2 s, a count of 4 takes ' +
+          'about six-tenths of a second.',
+      },
+      intervalSeconds: {
+        type: 'number',
+        minimum: 0.2,
+        maximum: 10,
+        default: 0.2,
+        title: 'Seconds between packets',
+        description:
+          'Ping’s own default is one second, which makes a four-packet check a three-second ' +
+          'check — measured, that is 20 targets a second across 64 workers where 0.2 s gives ' +
+          '99, with identical reply counts (`P-07`). 0.2 is the floor: below it iputils needs ' +
+          'CAP_NET_RAW and BSD needs the superuser. Windows has no such flag and ignores this.',
       },
       packetSize: {
         type: 'integer',
@@ -74,6 +86,7 @@ export const icmpPing: SensorType = {
       count: Number(context.params['count'] ?? 4),
       packetSize: Number(context.params['packetSize'] ?? 32),
       timeoutMs: Number(context.params['timeoutMs'] ?? 5_000),
+      intervalSeconds: Number(context.params['intervalSeconds'] ?? 0.2),
     };
 
     const host = context.target.host;

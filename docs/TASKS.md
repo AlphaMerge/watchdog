@@ -510,9 +510,28 @@ because each is a decision rather than a defect:
       from earlier tickets. Per-file `prettier --check` was passing, so nobody saw it. Fixed in its
       own commit, and `.prettierignore` now skips agent worktrees the way `eslint.config.js`
       already did.
-- [ ] **P-07 — ICMP spike and decision** · M · P-06 · Benchmark system-`ping` wrapper vs raw
+- [x] **P-07 — ICMP spike and decision** · M · P-06 · Benchmark system-`ping` wrapper vs raw
       socket at 1,000 targets for throughput, accuracy and privilege cost. Record the outcome in
       ADR-001.
+      **Outcome: no raw socket, and the answer was a flag.** ADR-001 predicted three seconds a
+      check and no pool that absorbs it. The three seconds were real; the cause was not process
+      spawn but `ping` idling one second between packets, which `P-08` never overrode. `-i 0.2` —
+      the floor an unprivileged process may use, not a preference — took 1,000 targets from **20
+      to 99 checks a second on 64 workers**, identical reply counts, 4.9x flat across the
+      concurrency curve. The v1 target is 83 checks a second: the old flags missed it at 256
+      workers (77/s), the new ones clear it at about 55.
+      **So the fast path is declined on a measurement rather than deferred.** Node still cannot
+      open a raw or unprivileged ping socket without a native addon — a compiler on the operator's
+      machine, a per-platform artefact, an unmaintained dependency in the hottest path here — and
+      the requirement it existed to rescue is now met with headroom. Revisit above ~10,000 ping
+      sensors per probe, or below a 30 s interval at the v1 count.
+      **It also found a shipped bug.** `-c` and `-w` interact: with a deadline iputils waits for
+      `count` *replies* and keeps transmitting, so `P-08`'s `-c 4 -w 5` sent **five** packets to a
+      host that was down, and `-i 0.2` under it would have sent twenty-five — five times the
+      traffic at exactly the hosts already in trouble. Linux uses `-W` now; the count means what
+      the form says and the dead-host case halved. Jitter keeps a one-second default deliberately:
+      twenty packets at 0.2 s sample four seconds of network, and congestion on a ten-second cycle
+      is invisible in a four-second window. `docs/findings/2026-08-29-icmp-throughput.md`.
 - [x] **P-08 — Ping sensor** · M · P-05, P-07 · Availability, RTT, packet loss channels;
       configurable count, size, timeout.
       **P-08 outcome.** Built against the ADR's already-made decision (system `ping` binary)

@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { createServer, type Server } from 'node:net';
+import { SensorCatalogue } from '../src/catalogue.js';
 import { icmpJitter } from '../src/types/icmp-jitter.js';
 import { parsePorts, portRange } from '../src/types/port-range.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
@@ -199,6 +200,31 @@ describe('icmp.jitter', () => {
     );
     assert.equal(valueOf(execution, 'loss'), 0);
     assert.match(execution.message ?? '', /ms jitter over 5 replies/);
+  });
+
+  it('keeps a one-second default on purpose, where ping uses a fifth of that', () => {
+    // Deliberately *not* `icmp.ping`'s 0.2 s, and the difference is the point: jitter measures
+    // the variation of a link over time, so twenty packets at 0.2 s sample four seconds of
+    // network rather than twenty. Congestion on a ten-second cycle is invisible in a four-second
+    // window, and a faster default would have made this sensor quietly worse at the one thing it
+    // does while making every other ICMP check better.
+    const result = new SensorCatalogue().register(icmpJitter).seal().validate('icmp.jitter', {});
+    assert.ok(result.valid);
+    assert.equal(result.params['intervalSeconds'], 1);
+  });
+
+  it('passes the interval it was given to ping, which only the clock can show', async () => {
+    // Same reasoning as the ping sensor's: the readings are identical whether or not `-i`
+    // reaches the command line, so nothing but elapsed time distinguishes a parameter that works
+    // from one that is silently dropped. Five packets at 0.2 s is about 0.8 s; at the default
+    // second it is over four.
+    const started = process.hrtime.bigint();
+    await run(icmpJitter, { count: 5, intervalSeconds: 0.2, timeoutMs: 20_000 });
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(
+      elapsedMs < 2_500,
+      `five loopback packets took ${elapsedMs.toFixed(0)} ms — ping was not given -i`,
+    );
   });
 
   it('fails rather than reporting a steady link that never answered', async () => {
