@@ -780,6 +780,12 @@ Both exit criteria are met:
 - A clean install on Ubuntu and on Windows Server, monitoring 100 real devices for a week
   without intervention.
 
+### Progress
+
+| Task | State | Notes |
+| --- | --- | --- |
+| H-02 failure-mode verification | done | `WORKFLOW.MD §13` audited row by row, with the test that proves each claim named — `docs/findings/2026-08-29-failure-modes.md`. Five rows held and were better covered than expected; restart and database loss had every part proved and the *sentence* not, so `failure-modes.test.ts` adds it: a batch offered three times across two ingestor lifetimes is stored once, and a batch accepted into the queue and then hit by an outage still comes back as a nack, because `submit` resolves at the commit and not the enqueue. Two gaps filed rather than folded in — `S-17`, nothing knows how full the disk is (row 7 is absent, not untested); `S-18`, the health sensors ship with no thresholds, which is what makes rows 6 and 7 say "warns" where the system only "records". Verified against forced conditions, which proves the behaviour and not the sizing: the numbers want `H-01` behind them |
+
 ---
 
 ## What we are explicitly not building in v1

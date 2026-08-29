@@ -262,6 +262,41 @@ because each is a decision rather than a defect:
       precisely that case. The digest covers chain *membership* as well as chain versions.
       It also folds in the build version, because the last input to a resolved setting is its
       registry default, and that lives in code rather than in a row.
+- [ ] **S-17 — Nothing knows how full the disk is** · L · S-06, P-12 · `WORKFLOW.MD §13` row 7
+      says "housekeeping escalates, oldest raw data is evicted first, a critical alarm fires
+      before ingestion stops". **The system does none of the three.** There is no free-space read
+      anywhere in `packages/`, no disk channel on Core Health, and the housekeeper's retention is
+      by *age* only. A full disk today stops PostgreSQL, and the first thing an operator learns
+      about it is that ingestion has stopped — which is the failure mode this whole project
+      exists to not have.
+      **Found by `H-02`** auditing §13 row by row (`docs/findings/2026-08-29-failure-modes.md`).
+      Three parts, and the middle one is the interesting one. Measuring free space is a
+      `statfs` on the data directory, plus `pg_database_size` for the share this installation is
+      responsible for. Alarming on it is a Core Health channel and a default limit, which is
+      `S-18`. **Evicting oldest raw data first interacts with the rollups**: raw behind the
+      rollup watermark can go and raw ahead of it cannot, because dropping it would lose the
+      rollup that has not been computed yet — and the watermark is already what
+      `Housekeeper#rollForward` maintains, so the eviction order is a query rather than a new
+      concept. `drop_chunks` is Apache-licensed (`CLAUDE.md`), so the mechanism is available.
+      Wants an ADR paragraph on one thing: whether the emergency eviction is allowed to violate
+      the operator's configured retention. It should be — data that cannot be written is worse
+      than data that was kept less long than promised — but that is a decision, not an
+      implementation detail, and it must be said out loud in the alarm.
+- [ ] **S-18 — The health sensors ship with no thresholds** · M · M-04, P-12, P-13 · `ChannelDef`
+      has no way to declare a default limit, and neither `ms.core.health` nor `ms.probe.health`
+      seeds one: `channel.limits` is a `jsonb` column that starts empty and nothing fills it. So
+      **a fresh install alarms on none of its own numbers** — scheduler lag, deferred checks,
+      spool depth, rollup lag, undelivered notifications are all measured, all correct, and all
+      silent until an operator writes a threshold by hand.
+      **Found by `H-02`.** It is what makes §13 rows 6 and 7 say "warns" where the system only
+      "records". The difference is between a system that *can* be monitored and one that *is*.
+      The shape is a `limits` field on `ChannelDef` applied at channel creation, not a migration
+      seeding rows: a limit that only existed for installations created after this ticket would
+      be the worst of both. An operator override must keep winning, and a channel whose limit the
+      operator has cleared must not have it put back on the next start — so "never set" and "set
+      to nothing" have to be distinguishable, which they are not today.
+      Pick the numbers from `H-01`'s soak rather than by taste; a default that fires on a healthy
+      installation teaches people to ignore it.
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to
       1.55 ms (`docs/findings/2026-08-25-tree-build-measurement.md`).
@@ -6219,9 +6254,49 @@ because each is a decision rather than a defect:
 
 - [ ] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
       growth, no scheduler lag drift, rollups correct throughout.
-- [ ] **H-02 — Failure-mode verification** · L · H-01 · Every row of `WORKFLOW.MD §13` tested:
+- [x] **H-02 — Failure-mode verification** · L · H-01 · Every row of `WORKFLOW.MD §13` tested:
       core restart, DB loss, probe loss, delivery failure, hung check, scheduler lag, disk full,
       clock jump.
+
+      **H-02 outcome. Five rows hold and are proved; two were proved only in pieces and now have
+      a scenario; one is not implemented.** The audit is
+      `docs/findings/2026-08-29-failure-modes.md`, row by row, naming the test that proves each
+      claim — because "we tested the failure modes" is exactly the kind of statement that decays
+      into folklore unless it says which test.
+
+      Held already, and better than expected: probe loss (`probe-offline.test.ts`, thirteen tests
+      including Unknown-not-Down and one transition per sensor rather than two), delivery failure
+      (`notification-health.test.ts`, including the distinction between a retryable failure and a
+      rejection no waiting fixes), the hung check (`check-pool.test.ts` terminates and replaces
+      the worker, and reports the timeout at the deadline rather than when the check notices),
+      and the clock jump (`timing-wheel.test.ts` ignores a wall-clock step **and says it saw
+      one**). Restart and database loss each had every part covered and the sentence not.
+
+      New: `packages/core/test/failure-modes.test.ts`, 8 tests. The restart half asserts what
+      replay actually rests on — that a batch offered three times across two ingestor lifetimes
+      is stored once — plus a pause found by a service built from nothing. The database half runs
+      against a wrapper that can be taken away and given back: nacks while it is gone, nothing
+      written, an overlapping replay after, and the distinct count. The test worth naming is the
+      last: **a batch accepted into the queue and then hit by the outage still comes back as a
+      nack**, because `submit` resolves at the commit and not at the enqueue. Resolving early
+      would have a probe drop from its spool a batch the core never wrote, and nothing anywhere
+      would say so.
+
+      **Two gaps found, both filed rather than folded in.** `S-17`: nothing knows how full the
+      disk is — row 7 is not untested, it is absent, and a full disk today is discovered when
+      ingestion stops. `S-18`: the health sensors ship with no thresholds, so a fresh install
+      alarms on none of its own numbers; that is what makes rows 6 and 7 say "warns" where the
+      system only "records".
+
+      Mutation 4/4 against the ingestor, which is the right check for a ticket whose deliverable
+      is tests: break the behaviour, see whether the new tests bite. **One did not, at first.**
+      Removing `ON CONFLICT DO NOTHING` was killed by the *second* restart test and not the
+      first, because without it the replay does not duplicate — it errors on the unique index,
+      leaving the row count right and the probe unable to clear its spool. The first test now
+      asserts the replay was **accepted** as well as counted, and dies on its own mutant.
+
+      What this is not: the soak. Rows 6 and 7 are verified against forced conditions, which
+      proves the behaviour and not the sizing — the numbers want `H-01` behind them.
 - [ ] **H-03 — Upgrade and migration path** · L · S-01 · Schema migration with rollback, config
       backup before upgrade, version-skew handling between core and probes.
 - [ ] **H-04 — Backup and restore procedure** · M · H-03 · Documented and tested end to end,
