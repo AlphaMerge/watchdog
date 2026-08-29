@@ -354,7 +354,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
     }): Promise<FastifyInstance> => {
       const harness = await buildHarness(db);
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '' },
+        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
         logger: silent,
         version: '9.9.9',
         service: harness.service,
@@ -421,7 +421,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       // enumerate is an exemption nobody reviews, so it is listed and asserted.
       const exports = exporter();
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '' },
+        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
         logger: silent,
         version: '9.9.9',
         service: (await buildHarness(db)).service,

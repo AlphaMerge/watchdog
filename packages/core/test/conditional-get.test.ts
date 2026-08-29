@@ -43,7 +43,7 @@ describe(
       h = await buildHarness(db);
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '' },
+        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
         logger: silent,
         version: '9.9.9',
         service: h.service,
@@ -258,7 +258,7 @@ describe(
       const first = await get(deviceId, { include: 'settings' });
 
       const upgraded = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '' },
+        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
         logger: silent,
         version: '9.9.10',
         service: h.service,

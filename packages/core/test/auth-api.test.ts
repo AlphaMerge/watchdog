@@ -37,6 +37,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   let accounts: AccountService;
   let app: FastifyInstance;
   let guarded: FastifyInstance;
+  let proxied: FastifyInstance;
 
   before(async () => {
     scratch = await createScratchDatabase('authapi');
@@ -52,9 +53,12 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       sleep: () => Promise.resolve(),
     });
 
-    const build = async (required: boolean): Promise<FastifyInstance> => {
+    const build = async (
+      required: boolean,
+      allowedOrigins: string[] = [],
+    ): Promise<FastifyInstance> => {
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '' },
+        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins },
         logger: silent,
         version: '9.9.9',
         service: harness.service,
@@ -79,6 +83,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
 
     app = await build(false);
     guarded = await build(true);
+    proxied = await build(false, ['http://ui.test']);
   });
 
   after(async () => {
@@ -331,6 +336,40 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       // before anybody has an account.
       const response = await app.inject({ method: 'GET', url: '/api/v1/objects/root' });
       assert.equal(response.statusCode, 200);
+    });
+  });
+
+  /**
+   * That the configured origins reach the guard (`A-11`).
+   *
+   * `hardening.test.ts` proves what the guard does with a list; what it cannot prove is that
+   * anything hands it one — which is the bug `A-11` was. The wiring is a single field on a
+   * single call, and the failure it had was that nobody wrote it.
+   */
+  describe('the configured origin allowlist', () => {
+    const headers = { origin: 'http://ui.test', host: 'core.test' };
+
+    it('reaches the guard, so a listed origin may write', async () => {
+      // 401, not 403: the CSRF guard let it past and the login handler answered on its merits.
+      // A route that needed no credentials could not tell those two refusals apart.
+      const response = await proxied.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login: 'ops', password: 'wrong-password-entirely' },
+        headers,
+      });
+      assert.equal(response.statusCode, 401);
+    });
+
+    it('and an installation that configured none still refuses the same request', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login: 'ops', password: 'correct-horse-battery' },
+        headers,
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_FORBIDDEN');
     });
   });
 });

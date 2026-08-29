@@ -3879,6 +3879,20 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
+      `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
+      full runs of that package on the same machine reported 781/781. **The arithmetic says which
+      shape it is**: 755 + 1 + 25 = 781, so twenty-five tests were *cancelled*, which is what
+      node:test does to a suite whose `before` hook throws. One hook, one suite, about twenty-five
+      tests in it.
+      Which one is not known, because the failure line was never captured — the run was filtered
+      to the summary counters, and `cancelled` was not among them. That is the first thing to fix:
+      a full run should keep its whole log rather than a grep of it.
+      Candidate suites by size are the SNMP and SSH ones, all of which bind a listener or dial a
+      dev-stack container in `before`; a port still in `TIME_WAIT` from the suite before is the
+      obvious mechanism and would explain why it is rare. Worth pinning before `H-01`'s soak,
+      because a harness that fails once in four runs is indistinguishable from the system failing
+      once in four runs.
 - [ ] **P-24 — One session pool for every transport** · M · T-09 · _(Was a second `P-19`; renumbered, because two open tickets sharing a number is how the wrong one gets ticked.)_  `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
@@ -6073,7 +6087,7 @@ because each is a decision rather than a defect:
       its compiled output behind, which that test exists to notice.
 
       Tests: 18 for the hardening layer, 7 for the sensor SSRF guard.
-- [ ] **A-11 — `allowedOrigins` is an option nothing can set** · S · A-09 · The cross-origin
+- [x] **A-11 — `allowedOrigins` is an option nothing can set** · S · A-09 · The cross-origin
       write guard in `api/hardening.ts` takes an `allowedOrigins` list and **no caller ever passes
       one** — it is not in the config schema, not in `main.ts`, and not in `dev/core.json`. So the
       only origin that can write is the one serving the API, and every other is refused with "this
@@ -6085,6 +6099,38 @@ because each is a decision rather than a defect:
       right, and an installation behind a reverse proxy on a different hostname needs the same
       key for the same reason. Worth doing before `H-07`'s documentation set describes a
       development setup that does not work.
+
+      **A-11 outcome.** `api.allowedOrigins` is now a config key, defaulting to `[]`; `server.ts`
+      passes it to `registerCsrfGuard` (not `main.ts` — the api block reaches the server whole);
+      `dev/core.json` lists both spellings of the dev server. The guard itself is unchanged.
+
+      **The failure is more general than the dev server, and the ticket had it slightly wrong.**
+      It is not that :5173 and :8080 are different origins in the browser's sense — with Vite's
+      `changeOrigin` the browser sees a same-origin call to :5173 and sends no preflight at all.
+      It is that the *proxy* rewrites `Host` while forwarding `Origin`, so the two headers the
+      guard compares disagree about a request that was never cross-site. Every reverse proxy in
+      front of a production install does the same thing, which is why this is a shipped config
+      key rather than a development flag.
+
+      **Entries are normalised and refused at startup, not skipped.** `https://ms.example.com/`
+      and `https://ms.example.com/app` both become the origin a browser would send. A value that
+      could never appear in an `Origin` header — `127.0.0.1:5173` with no scheme, a `file:` or
+      `ftp:` URL — throws by name at registration. Skipping it would have looked exactly like a
+      config file that was never read, which is the bug this ticket is.
+
+      Not CORS, and deliberately: the API sends no `Access-Control-*` headers, so this does not
+      make it callable from another origin. Listing an origin an attacker controls would hand
+      them every session cookie's authority, and the doc comment says so.
+
+      Verified live: with the dev stack running, a `POST` through the Vite proxy from
+      `http://127.0.0.1:5173` creates an object (201) where it was refused before, and the same
+      request carrying `Origin: http://evil.test` through that same proxy is still refused (403).
+
+      Tests: 8 new in `hardening.test.ts` — a proxied write accepted, a pasted URL with a path
+      matched on its origin, scheme and port distinguished from an accepted neighbour, everything
+      unlisted still refused, and three shapes refused at startup — plus 2 in `auth-api.test.ts`
+      for the wiring itself, which is the half `hardening.test.ts` cannot see and the half that
+      was missing. Mutation 6/6, each killed by a named test rather than by the compiler.
 - [x] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
       and tree position; explicit test that no route leaks a credential to a read-only user.
 

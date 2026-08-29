@@ -281,6 +281,19 @@ export interface CoreConfig {
      * headless install or a development run against the Vite dev server wants.
      */
     webRoot: string;
+    /**
+     * Origins whose writes are accepted even though they are not this API's own (`A-11`).
+     *
+     * The CSRF guard compares the browser's `Origin` against the request's `Host`, and a proxy
+     * that rewrites `Host` — Vite's `changeOrigin` in development, and most reverse proxies in
+     * production — makes those two differ for a request that is not cross-site at all. Without
+     * this key every write from such a deployment is refused, which is the guard being right
+     * about the headers and wrong about the situation.
+     *
+     * Full origins: `https://ms.example.com`, not a host and not a wildcard. Empty accepts only
+     * same-origin writes, which is what a direct install wants.
+     */
+    allowedOrigins: string[];
   };
   /** What a notification needs to know about this installation (`N-06`). */
   notifications: {
@@ -624,11 +637,14 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as CoreConfig['api'],
       additionalProperties: false,
-      required: ['host', 'port', 'webRoot'],
+      required: ['host', 'port', 'webRoot', 'allowedOrigins'],
       properties: {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
         port: { type: 'integer', minimum: 1, maximum: 65_535, default: 8080 },
         webRoot: { type: 'string', default: '' },
+        // Not validated by pattern here: what makes an entry usable is that it parses to the
+        // origin a browser would send, and `registerCsrfGuard` says so by name at startup.
+        allowedOrigins: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
       },
     },
     notifications: {

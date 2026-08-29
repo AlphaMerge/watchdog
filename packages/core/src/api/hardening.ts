@@ -74,14 +74,27 @@ export function registerSecurityHeaders(app: FastifyInstance): void {
  */
 export interface CsrfOptions {
   logger: Logger;
-  /** Extra origins to accept — a UI served from somewhere other than the API. */
+  /**
+   * Extra origins to accept — a UI served from somewhere other than the API (`A-11`).
+   *
+   * The case is not exotic: **any proxy that rewrites `Host` produces it**. Vite's
+   * `changeOrigin` does in development, so the UI on `:5173` forwards to the core on `:8080`
+   * with `Origin: http://127.0.0.1:5173` and `Host: 127.0.0.1:8080` — headers that look
+   * cross-origin for a request the browser considers same-origin. A reverse proxy in front of a
+   * production install does the same thing.
+   *
+   * This is *not* a CORS allowlist and does not make the API callable from another origin: a
+   * genuinely cross-origin browser call needs `Access-Control-*` headers this API does not send,
+   * and would be blocked before it arrived. What is listed here is trusted to the extent that
+   * naming an origin an attacker controls hands them every session cookie's authority.
+   */
   allowedOrigins?: readonly string[];
 }
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export function registerCsrfGuard(app: FastifyInstance, options: CsrfOptions): void {
-  const allowed = new Set(options.allowedOrigins ?? []);
+  const allowed = new Set((options.allowedOrigins ?? []).map(normaliseOrigin));
 
   app.addHook('onRequest', (request: FastifyRequest, _reply: FastifyReply, done) => {
     if (!UNSAFE_METHODS.has(request.method)) {
@@ -128,6 +141,40 @@ export function registerCsrfGuard(app: FastifyInstance, options: CsrfOptions): v
     );
     done(new AuthError('AUTH_FORBIDDEN', 'this request came from another origin', { origin }));
   });
+}
+
+/**
+ * What a browser would actually send, from what an operator actually wrote.
+ *
+ * `https://ms.example.com/` and `https://ms.example.com/app` both become `https://ms.example.com`,
+ * because an `Origin` header carries no path and a value pasted out of an address bar would
+ * otherwise match nothing. **Anything that could never appear in an `Origin` throws at startup
+ * rather than being skipped**: an allowlist that quietly ignores its own entry is
+ * indistinguishable from a config file that was never read, and the operator would then be
+ * debugging the guard.
+ */
+function normaliseOrigin(configured: string): string {
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    // What a bare "ms.example.com" or "127.0.0.1:5173" does: neither is a URL, and the scheme is
+    // the part people leave off.
+    throw new Error(
+      `api.allowedOrigins: "${configured}" is not a URL — an origin needs a scheme, as in ` +
+        '"https://ms.example.com" or "http://127.0.0.1:5173"',
+    );
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    // `file:` and `data:` have no origin at all (a browser sends `Origin: null` for those, which
+    // is not something to match on), and no other scheme reaches an HTTP API. Accepting one would
+    // be an entry that parses, sits in the config looking configured, and matches nothing.
+    throw new Error(
+      `api.allowedOrigins: "${configured}" is ${url.protocol} — a browser only sends an http or ` +
+        'https origin to this API',
+    );
+  }
+  return url.origin;
 }
 
 /**

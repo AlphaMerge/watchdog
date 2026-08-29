@@ -359,7 +359,10 @@ export class ApiServer {
         logger: this.#logger,
         required: this.#auth.required,
       });
-      registerCsrfGuard(this.#app, { logger: this.#logger });
+      registerCsrfGuard(this.#app, {
+        logger: this.#logger,
+        allowedOrigins: this.#config.allowedOrigins,
+      });
       registerRateLimit(this.#app, { logger: this.#logger });
     }
 

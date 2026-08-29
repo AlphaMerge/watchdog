@@ -169,6 +169,120 @@ describe('the CSRF guard', () => {
   });
 });
 
+/**
+ * The allowlist (`A-11`).
+ *
+ * It exists because **a proxy that rewrites `Host` makes a same-site request look cross-origin**:
+ * Vite's `changeOrigin` sends `Origin: http://127.0.0.1:5173` with `Host: 127.0.0.1:8080`, and so
+ * does a reverse proxy in front of a production install. Before this key, every write from either
+ * was refused — the guard reading the headers correctly and the deployment wrongly.
+ */
+describe('the CSRF guard with configured origins', () => {
+  let app: FastifyInstance;
+
+  before(async () => {
+    app = await build((instance) => {
+      registerCsrfGuard(instance, {
+        logger: silent,
+        // The trailing slash and the path are deliberate: this is what gets pasted out of a
+        // browser's address bar, and an allowlist that only matches a hand-trimmed origin is one
+        // an operator gives up on.
+        allowedOrigins: ['http://127.0.0.1:5173', 'https://ui.example.test/app'],
+      });
+    });
+  });
+
+  after(async () => {
+    await app.close();
+  });
+
+  it('lets a configured origin write through a proxy that rewrote Host', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://127.0.0.1:5173', host: '127.0.0.1:8080' },
+    });
+    assert.equal(response.statusCode, 200);
+  });
+
+  it('matches on the origin a browser would send, not on the string configured', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'https://ui.example.test', host: 'core.example.test' },
+    });
+    assert.equal(response.statusCode, 200);
+  });
+
+  it('still refuses everything not on the list', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://evil.test', host: '127.0.0.1:8080' },
+    });
+    assert.equal(response.statusCode, 403);
+  });
+
+  it('distinguishes the scheme and the port', async () => {
+    // `https://127.0.0.1:5173` and `http://127.0.0.1:5174` are different origins to a browser,
+    // and a guard that compared hosts alone would accept both from a listener on the same box.
+    for (const origin of ['https://127.0.0.1:5173', 'http://127.0.0.1:5174', 'http://127.0.0.1'])
+      assert.equal(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/v1/thing',
+            headers: { origin, host: '127.0.0.1:8080' },
+          })
+        ).statusCode,
+        403,
+        `${origin} was accepted`,
+      );
+  });
+
+  it('leaves same-origin writes working, allowlist or no allowlist', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://direct.test', host: 'direct.test' },
+    });
+    assert.equal(response.statusCode, 200);
+  });
+});
+
+describe('an allowlist that could never match', () => {
+  // Refused at startup rather than skipped, because an entry that is quietly ignored looks
+  // exactly like a config file that was never read — and what the operator would then debug is
+  // the guard.
+  const registering = (allowedOrigins: string[]) => (): void => {
+    registerCsrfGuard(Fastify(), { logger: silent, allowedOrigins });
+  };
+
+  it('names a value that is not a URL', () => {
+    assert.throws(registering(['not a url']), /"not a url" is not a URL/);
+  });
+
+  it('names a host and port written without a scheme', () => {
+    // The likeliest mistake, since this is how the address is written everywhere else in the
+    // config file.
+    assert.throws(registering(['127.0.0.1:5173']), /needs a scheme/);
+  });
+
+  it('names a scheme that never appears in an Origin', () => {
+    // `file:` and `data:` have no origin — a browser sends the literal `null` — and no other
+    // scheme reaches an HTTP API. Each of these parses, so a check for "is it a URL" alone would
+    // leave an entry that looks configured and matches nothing.
+    assert.throws(registering(['file:///opt/ms/web']), /a browser only sends an http/);
+    assert.throws(registering(['ftp://ui.example.com']), /is ftp:/);
+  });
+
+  it('accepts the shapes an operator actually writes', () => {
+    assert.doesNotThrow(
+      registering(['http://127.0.0.1:5173', 'https://ms.example.com/', 'https://ms.example.com']),
+    );
+  });
+});
+
 describe('rate limiting', () => {
   let app: FastifyInstance;
   let clock = 0;

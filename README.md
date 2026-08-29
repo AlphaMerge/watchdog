@@ -142,6 +142,11 @@ npm run dev:ui
 to the core. In production there is no dev server: `ms-core` serves the built assets itself from
 `api.webRoot` (`ADR-001` Decision 8). See [`packages/web/README.md`](packages/web/README.md).
 
+The proxy rewrites `Host`, so a write from `:5173` reaches the core looking cross-origin and the
+CSRF guard would refuse it. `dev/core.json` lists both spellings of the dev server in
+`api.allowedOrigins`, which is the same key an install behind a reverse proxy on a different
+hostname needs, for the same reason (`A-11`).
+
 ### Making it actually scan something
 
 A probe branch has to be claimed by the probe that connects, or it is told to scan nothing:

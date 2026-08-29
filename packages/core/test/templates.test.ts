@@ -211,7 +211,7 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
     triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
 
     const server = new ApiServer({
-      config: { host: '127.0.0.1', port: 0, webRoot: '' },
+      config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
       logger: silent,
       version: '9.9.9',
       service: h.service,
