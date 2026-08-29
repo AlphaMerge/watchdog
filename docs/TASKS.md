@@ -88,7 +88,7 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       tests caught are written up there too: a backfill window wider than one pass being deleted
       part-read, and `ON CONFLICT DO UPDATE` being unable to shrink a bucket whose source rows
       had gone.
-- [ ] **S-07 — Ingestion pipeline** · L · S-05 · Batched writes with a bounded queue, a
+- [x] **S-07 — Ingestion pipeline** · L · S-05 · Batched writes with a bounded queue, a
       backpressure signal to probes, and per-batch metrics. Target 100k samples/min sustained,
       p99 write < 100 ms.
       **Added by S-06:** when a batch's oldest sample precedes the five-minute watermark — which
@@ -96,6 +96,35 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       to, reason)`. Without it those readings land in raw, correct and invisible, and no rollup
       ever looks at that window again. Cheap enough to call for any batch that qualifies; a
       redundant window costs one row and one pass.
+
+      **S-07 outcome.** `packages/core/src/ingestion/`. Both targets are cleared by more than an
+      order of magnitude and the measurement is committed rather than asserted
+      (`docs/findings/2026-08-25-ingestion-measurements.md`, reproduced by
+      `packages/core/test/perf/ingestion-performance.test.ts`): at the shipped 1,000-row batch,
+      **3,653,796 samples a minute at a p99 write of 28.9 ms**, against 100,000 and 100 ms. Larger
+      batches are not better — 5,000 rows buys no throughput and triples the p99 to 85.9 ms —
+      which is the reason the default is what it is rather than the largest number that fit.
+
+      **Backpressure rides on the acknowledgement, not on the refusal.** `results-ack` carries
+      `retryAfterMs`: zero means keep going, anything else asks the probe to wait before offering
+      more. By the time batches are being *refused* it is too late to be polite, so the signal has
+      to exist while everything is still working. Measured under the load it exists for: two
+      probes replaying a spool alongside one reporting live cost the live probe **1.02x** its
+      quiet latency against a 3x budget, with the replaying probes asked to wait up to 50 ms and
+      the live one never asked at all.
+
+      **The late-data hook went in tighter than S-06 asked for.** Rather than the ingestor
+      deciding a batch is late and calling `noteLateSamples` afterwards, it hands every written
+      range to `Housekeeper.noteWrittenRange` *inside its own write transaction*, and the
+      watermark comparison happens there in one statement. The readings and the promise to re-roll
+      them therefore commit or fail together — a replayed spool cannot leave the rollups quietly
+      wrong because the process died between the two writes.
+
+      **The state machine's share is a number, not a hope**: 7.0% of throughput, and a run where
+      *every* sensor changes state on *every* scan still writes at a p99 of 31.0 ms. The same
+      measurement caught something that reads as a bug and is not — one probe offering one batch
+      at a time spends 250 ms of a 275 ms round trip in the flush timer, because a single probe
+      never fills a write.
 - [x] **S-08 — Historic data query API** · M · S-06 · Automatic rollup selection for the
       requested resolution; reject > 500-day ranges (shorten to 365); force ≥ 60-minute averaging
       on 40–500 day ranges.
