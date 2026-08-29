@@ -19,3 +19,8 @@ dev/data/
 # monitored-device credential to whoever can read the repository.
 vault.key
 *.vault.key
+
+# A soak in progress writes here once a minute for 24 hours (H-01). The finished run is
+# committed deliberately, with its report; a half-written one is not a measurement.
+docs/findings/soak-*.jsonl
+docs/findings/soak-*-rollups.txt
