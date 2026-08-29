@@ -41,7 +41,7 @@ import {
  * monitor Windows at all. That is a deployment fact an operator should meet as a clear message,
  * not as `spawn powershell ENOENT`, which is why this refuses early and says so.
  *
- * **No pool, and that is why `P-19` should not wait for this ticket.** `P-19` is written as
+ * **No pool, and that is why `P-24` should not wait for this ticket.** `P-24` is written as
  * "extract the pool at the third transport, when the shape is known", with `T-09` named as the
  * third. It is not: a shell-out has no session to keep. The two pools are still two.
  */

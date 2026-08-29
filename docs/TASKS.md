@@ -976,7 +976,7 @@ because each is a decision rather than a defect:
       Worth the hour for the reason a sixty-second test is worse than a failing one: a suite that
       occasionally takes a minute longer for no visible reason is a suite people stop waiting
       for. It is the only place in the core's tests that offers a batch without awaiting it.
-- [ ] **P-19 — Bulk provisioning path** · M · S-16, D-04 · Create a subtree in one request rather
+- [x] **P-19 — Bulk provisioning path** · M · S-16, D-04 · Create a subtree in one request rather
       than one object per request. `docs/findings/2026-08-25-tree-build-measurement.md` records
       the serial 5,000-object build eroding from 21.0 s to 29.3 s across Phase 3, recovered to
       23.7 s by guarding `M-08`'s ancestor query. What remains is per-object work that is
@@ -3738,7 +3738,7 @@ because each is a decision rather than a defect:
       faithfully to be wrong about any of them.
 
       **Not done here:** no sensor type uses this yet — that is `T-08`. The pool duplicates the
-      SNMP pool's lease counting and idle eviction; extracting the shared half is `P-19` below,
+      SNMP pool's lease counting and idle eviction; extracting the shared half is `P-24` below,
       deliberately deferred until `T-09` makes it a third instance and the shape is actually
       known rather than guessed from two.
 - [x] **P-20 — `alarm-scheduler` sweep test is timing-flaky** · S · — · "counts what it did, for
@@ -3839,7 +3839,7 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
-- [ ] **P-19 — One session pool for every transport** · M · T-09 · `support/snmp/pool.ts` and
+- [ ] **P-24 — One session pool for every transport** · M · T-09 · _(Was a second `P-19`; renumbered, because two open tickets sharing a number is how the wrong one gets ticked.)_  `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
       **Added by `T-07`:** extracting it at two instances would have guessed which half varies;
@@ -3960,9 +3960,9 @@ because each is a decision rather than a defect:
       that runs the *actual* wrapper wherever a `pwsh` exists (`MS_TEST_PWSH` to point at one),
       which is what would have caught `-Command -` on the first day.
 
-      **`P-19` should not wait for this ticket.** It is written as "extract the pool at the third
+      **`P-24` should not wait for this ticket.** It is written as "extract the pool at the third
       transport", with `T-09` named as the third. A shell-out has no session to keep, so there is
-      no third instance; the two pools are still two, and whoever picks `P-19` up should decide on
+      no third instance; the two pools are still two, and whoever picks `P-24` up should decide on
       that basis rather than on this dependency.
 - [x] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
 
@@ -4456,7 +4456,7 @@ because each is a decision rather than a defect:
       `CheckContext.received` hands each sensor what it has not seen. A second protocol arrived
       and the seam held.
 
-      **The ring came out at the second caller, and that is not the same call `P-19` made.** It
+      **The ring came out at the second caller, and that is not the same call `P-24` made.** It
       says extracting the SNMP and SSH session pools at two instances would have guessed which
       half varies. These two are not *similar*: the ring, the cursor arithmetic, the drop
       counting and the retain sweep are byte-for-byte identical, and what varies — which socket,
