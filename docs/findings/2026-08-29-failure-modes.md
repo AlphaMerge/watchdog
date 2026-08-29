@@ -79,6 +79,19 @@ core never wrote, and nothing anywhere would say so.
 three that are easy to get wrong: Unknown rather than Down, **one transition per sensor rather
 than two**, and a core-evaluated sensor left alone because no probe ever scanned it.
 
+**Amended 2026-08-29 (`H-01`).** This row is about what the *core* does when a probe goes away,
+and it is right. What it does not cover — and what this audit did not think to ask — is whether
+the readings the probe spooled during the outage ever come back. They did not: a cursor parked on
+a segment boundary made the spool hand back an empty batch for ever, so a probe that had once
+caught up stopped delivering anything the next time it rolled a segment, with the link up and
+nothing logged (`615c9f3`). Every test on this row passed throughout, because they all assert on
+state transitions and none of them drains a spool, rolls a segment and drains again.
+
+The lesson for the audit rather than the code: a row that reads "the system survives X" is
+answered by the state machine, and the question underneath it — "and the data survives X too" —
+is a different test. `92ec56a` makes the drain say when it is making no progress, so the next one
+of these is loud rather than silent.
+
 ### 4. Notification delivery fails
 
 > Logged, retried with backoff, surfaced on Core Health; the alarm itself is not lost
