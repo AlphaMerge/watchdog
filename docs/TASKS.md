@@ -6400,8 +6400,61 @@ because each is a decision rather than a defect:
 
       What this is not: the soak. Rows 6 and 7 are verified against forced conditions, which
       proves the behaviour and not the sizing — the numbers want `H-01` behind them.
-- [ ] **H-03 — Upgrade and migration path** · L · S-01 · Schema migration with rollback, config
+- [x] **H-03 — Upgrade and migration path** · L · S-01 · Schema migration with rollback, config
       backup before upgrade, version-skew handling between core and probes.
+
+      **H-03 outcome. Two of the three held; the middle one did not exist, and the first had a
+      hole exactly where an upgrade goes wrong.**
+
+      *Schema migration with rollback* held. Every migration ships a `down`, `migrator.test.ts`
+      applies the real set forward and all the way back, and drift and newer-than-this-build were
+      already refused by `migrate up`. **The hole was start-up.** With `autoMigrate: false` the
+      core only counted *pending* migrations — and a build older than its database has none, the
+      schema being past it rather than before it, so a **downgrade started happily against tables
+      it was never written for**. That is the likeliest of the three in practice: rolling back a
+      bad upgrade is what an operator does at 3 a.m. `refuseSchema` now knows all three shapes,
+      and reports the downgrade *before* the pending count, because "run migrate up" is the first
+      thing anybody would try and is wrong for a mismatched pair — `migrate up` refuses it too, so
+      the advice would send them round the loop. That ordering was found by writing the test's
+      comment honestly and noticing it contradicted the code.
+
+      *Config backup before upgrade* did not exist. `install.sh` never clobbered a configuration,
+      which is right, and that is exactly what leaves a new binary reading a file written for an
+      old one: a setting renamed or made required is discovered when the service fails to start —
+      after the old one has been stopped, with the answer in `journalctl` rather than in front of
+      whoever ran the installer. So: a timestamped `.bak` (0600, root) before anything touches
+      `/etc/ms`, and a new `config check` verb that validates a file against *this* build without
+      connecting to anything. `install.sh` runs it for every service **before it restarts
+      anything**, and refuses — leaving the installation up on the previous version — rather than
+      taking it down to report a typo.
+
+      `config check` lives in `@ms/shared`, not the core, because `ms-probe` had **no
+      command-line verbs at all**: `ms-probe config check` would have started a second probe on a
+      host that already had one.
+
+      *Version skew* held, and needed nothing. `MIN_PROTOCOL_VERSION`, the `incompatible` verdict
+      distinguishing "too old" from "newer than this build", the capability gates and Probe
+      Health's skew channel were all in place and tested.
+
+      **Found by running the smoke test, which had been red and unnoticed.** Two of its
+      assertions were wrong. `grep -q` in a pipeline under `set -o pipefail` reports *failure on a
+      match*: grep exits at the first hit, the producer takes SIGPIPE and returns 141, and
+      `pipefail` propagates it — so "housekeeping pass complete" was in the journal and the
+      assertion said it was not. And "the probe was told what to scan" had been wrong since
+      `R-01`: a fresh install's probe is registered pending and given nothing until approved,
+      which is what `smoke-enrol.sh` exists to prove. Both fixed. `smoke-install.sh` also built
+      its tarball with the host's `npm` when one was present — and a host `npm` can be present
+      and wrong, which is what failed here minutes into a run that looked healthy.
+
+      Tests: 8 in `config-check.test.ts`, 5 in `schema-gate.test.ts`, 2 in `cli-args.test.ts`,
+      and 4 new assertions in `smoke-install.sh` — configuration kept and backed up at 0600 root,
+      `config check` accepting what the services run on, an installer re-run refusing a broken
+      configuration **with both services still active**, and the schema gate refusing a core
+      older than its database. The whole smoke test passes end to end.
+
+      Moving `config check` into `@ms/shared` left its compiled output behind in the core's
+      `dist`, and `build-hygiene.test.ts` failed on exactly that — the trap `A-09` documented,
+      caught by the test written for it.
 - [ ] **H-04 — Backup and restore procedure** · M · H-03 · Documented and tested end to end,
       including a restore onto a clean host.
 - [ ] **H-05 — Linux installers** · M · F-07 · `.deb` and `.rpm` in addition to the tarball, with

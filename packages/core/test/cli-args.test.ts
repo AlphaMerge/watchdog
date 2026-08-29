@@ -33,6 +33,27 @@ describe('command line parsing', () => {
     assert.equal(parseArgs(['migrate', 'down', '--steps', 'lots']).steps, 1);
   });
 
+  it('recognises the configuration check, before or after the flags', () => {
+    // `install.sh` runs this against a live installation's config with the *new* build, before
+    // it restarts anything (`H-03`). Mistaking it for the server would start a second core.
+    assert.equal(parseArgs(['config', 'check']).command, 'config-check');
+    assert.equal(
+      parseArgs(['--config', '/etc/ms/core.json', 'config', 'check']).command,
+      'config-check',
+    );
+    assert.equal(
+      parseArgs(['config', 'check', '--config', '/etc/ms/core.json']).command,
+      'config-check',
+    );
+  });
+
+  it('refuses a mistyped config verb rather than starting the server', () => {
+    // The failure that matters: `ms-core config chekc` binding a port on a machine that already
+    // has a core running on it.
+    assert.equal(parseArgs(['config', 'chekc']).command, 'help');
+    assert.equal(parseArgs(['config']).command, 'help');
+  });
+
   it('shows help for an unrecognised migrate action', () => {
     assert.equal(parseArgs(['migrate', 'sideways']).command, 'help');
     assert.equal(parseArgs(['--help']).command, 'help');

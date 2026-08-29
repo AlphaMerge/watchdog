@@ -146,6 +146,13 @@ for svc in "${components[@]}"; do
   # Configuration is never clobbered on upgrade.
   if [ -f "${CONFDIR}/${svc}.json" ]; then
     echo "==> keeping existing ${CONFDIR}/${svc}.json"
+    # A timestamped copy before anything else touches this directory (H-03). Nothing here edits
+    # the file, so this is not undoing our own change — it is the copy an operator wants when
+    # *their* edit, made to satisfy the new build, turns out to be the thing that broke it.
+    # Owned by root and mode 0600: a configuration file holds the database password.
+    backup="${CONFDIR}/${svc}.json.$(date -u +%Y%m%dT%H%M%SZ).bak"
+    install -m 0600 -o root -g root "${CONFDIR}/${svc}.json" "${backup}"
+    echo "    backed up to ${backup}"
     install -m 0640 -o root -g "${user}" "${here}/etc/${svc}.json" "${CONFDIR}/${svc}.json.new"
   else
     echo "==> installing ${CONFDIR}/${svc}.json"
@@ -167,6 +174,40 @@ done
 if [ -d "${here}/../docs" ]; then
   rm -rf "${PREFIX:?}/docs"
   cp -R "${here}/../docs" "${PREFIX}/docs"
+fi
+
+# --- will the configuration this installation already has load under the new build? ---------
+#
+# **Asked before anything is restarted**, which is the whole point: the old service is still
+# running, so a setting that was renamed or made required is something an operator finds out
+# about while they still have a working system rather than from `journalctl` afterwards
+# (`H-03`). A `.json.new` sits beside each file for the diff.
+#
+# `--no-start` skips it: that mode exists for a machine that is being staged, and the
+# configuration it will run with is not necessarily the one on disk yet.
+if [ "${start_services}" -eq 1 ]; then
+  config_bad=0
+  for svc in "${components[@]}"; do
+    [ -f "${CONFDIR}/${svc}.json" ] || continue
+    if ! out="$("${PREFIX}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
+      echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
+      echo "${out}" | sed 's/^/    /' >&2
+      config_bad=1
+    fi
+  done
+  if [ "${config_bad}" -ne 0 ]; then
+    cat >&2 <<'BADCONFIG'
+
+The new application is installed and the running services have NOT been restarted, so the
+installation is still up on the previous version. Fix the configuration above and run:
+
+    systemctl restart ms-core ms-probe
+
+Each service's previous configuration was copied to a timestamped .bak beside it, and the
+version this release ships is at .json.new.
+BADCONFIG
+    exit 1
+  fi
 fi
 
 systemctl daemon-reload

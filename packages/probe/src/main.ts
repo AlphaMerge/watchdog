@@ -3,6 +3,7 @@ import {
   bootstrap,
   describeError,
   probeConfigSchema,
+  runConfigCheck,
   type CheckResult,
   type ProbeConfig,
 } from '@ms/shared';
@@ -29,7 +30,44 @@ import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { VERSION } from './version.js';
 
+/**
+ * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
+ *
+ * `install.sh` runs it against the configuration already on disk, with the *new* build, before
+ * it restarts anything. Handled before `bootstrap` because bootstrap is what would fail on a bad
+ * configuration, with the process's own error path rather than the message this exists to print.
+ *
+ * Anything else is the server, exactly as before. A typo must not silently start a second probe,
+ * so `config <anything but check>` is a usage error rather than a fall-through.
+ */
+function configCheckRequested(argv: readonly string[]): 'check' | 'usage' | 'none' {
+  const positional = argv.filter((one) => !one.startsWith('-'));
+  // `--config <path>` puts a path in the positional list; the verb is only ever the first word.
+  if (positional[0] !== 'config') return 'none';
+  return argv[argv.indexOf('config') + 1] === 'check' ? 'check' : 'usage';
+}
+
 async function main(): Promise<void> {
+  const requested = configCheckRequested(process.argv.slice(2));
+  if (requested !== 'none') {
+    if (requested === 'usage') {
+      process.stderr.write(
+        `ms-probe ${VERSION}\n\n  ms-probe [--config <file>]\n  ms-probe config check\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    process.exitCode = runConfigCheck({
+      schema: probeConfigSchema,
+      service: 'ms-probe',
+      version: VERSION,
+      argv: process.argv.slice(2),
+      write: (line) => process.stdout.write(`${line}\n`),
+      writeError: (line) => process.stderr.write(`${line}\n`),
+    });
+    return;
+  }
+
   const { config, logger, lifecycle } = bootstrap<ProbeConfig>({
     schema: probeConfigSchema,
     version: VERSION,

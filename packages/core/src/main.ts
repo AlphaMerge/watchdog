@@ -6,6 +6,7 @@ import {
   bootstrap,
   coreConfigSchema,
   describeError,
+  runConfigCheck,
   type CoreConfig,
   type Logger,
 } from '@ms/shared';
@@ -57,6 +58,7 @@ import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
+import { refuseSchema } from './db/schema-gate.js';
 import { loadLookups } from './lookups/loader.js';
 import { loadDeviceTemplates } from './device-templates/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
@@ -95,12 +97,13 @@ const USAGE = `ms-core ${VERSION}
   ms-core migrate status                 show applied and pending migrations
   ms-core migrate up                     apply pending migrations
   ms-core migrate down [--steps <n>]     roll back the most recent migration(s)
+  ms-core config check                   validate the configuration and exit
 
 Configuration is layered: schema defaults, then the file, then MS_* environment variables.
 `;
 
 export interface ParsedArgs {
-  command: 'serve' | 'migrate' | 'help';
+  command: 'serve' | 'migrate' | 'config-check' | 'help';
   migrateAction: MigrateAction;
   steps: number;
 }
@@ -127,6 +130,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
   if (argv.includes('--help') || argv.includes('-h') || positional[0] === 'help') {
     return { command: 'help', migrateAction: 'status', steps: 1 };
+  }
+
+  if (positional[0] === 'config') {
+    // Only `check` for now. An unknown verb prints the usage rather than being taken for the
+    // server: `ms-core config` with a typo must not start listening on a port.
+    if (positional[1] !== 'check') return { command: 'help', migrateAction: 'status', steps: 1 };
+    return { command: 'config-check', migrateAction: 'status', steps: 1 };
   }
 
   if (positional[0] === 'migrate') {
@@ -193,14 +203,11 @@ async function serve(): Promise<void> {
   if (config.database.autoMigrate) {
     await migrateOnStart(db, logger);
   } else {
+    // Refusing to start is the safe failure: the alternative is running against a schema this
+    // build was not written for. `refuseSchema` knows all three ways that happens (`H-03`).
     const status = await new Migrator({ db, logger, migrations: MIGRATIONS }).status();
-    if (status.pending.length > 0) {
-      // Refusing to start is the safe failure: the alternative is running against a schema
-      // this build was not written for.
-      throw new Error(
-        `${String(status.pending.length)} schema migration(s) are pending and autoMigrate is off; run "ms-core migrate up"`,
-      );
-    }
+    const refusal = refuseSchema(status);
+    if (refusal !== null) throw new Error(refusal);
   }
 
   const resolver = new InheritanceResolver({ db, logger });
@@ -1032,6 +1039,21 @@ async function main(): Promise<void> {
 
   if (args.command === 'help') {
     process.stdout.write(USAGE);
+    return;
+  }
+
+  if (args.command === 'config-check') {
+    // Before the bootstrap, deliberately: `bootstrap` loads the configuration and would exit on
+    // a bad one with the process's own error path, which is exactly the message this command
+    // exists to render properly.
+    process.exitCode = runConfigCheck({
+      schema: coreConfigSchema,
+      service: 'ms-core',
+      version: VERSION,
+      argv: process.argv.slice(2),
+      write: (line) => process.stdout.write(`${line}\n`),
+      writeError: (line) => process.stderr.write(`${line}\n`),
+    });
     return;
   }
 
