@@ -21,17 +21,37 @@ if (path === undefined) {
 }
 const asMarkdown = argv.includes('--markdown');
 
+/**
+ * **Warm-up is dropped, and the window has a floor. Both are methodology, not convenience.**
+ *
+ * The minutes after five thousand sensors are provisioned are the configuration load, the first
+ * scan of everything at once, and a JIT that has not seen the hot path yet. Resident memory in
+ * that stretch falls by hundreds of megabytes as the initial allocation is collected. Fitting a
+ * line through it and reporting the gradient "per hour" produced −251 MB/h and +2,607 MB/h in the
+ * same run, from the same five minutes — numbers that describe a transient and nothing else.
+ *
+ * The floor is the other half of the same point: a slope per hour taken from a window shorter
+ * than an hour is extrapolation, and this reports no verdict at all rather than a confident one
+ * drawn from twelve times less evidence than it claims.
+ */
+const WARMUP_MINUTES = Number(argv.includes('--warmup') ? argv[argv.indexOf('--warmup') + 1] : 15);
+const MIN_WINDOW_HOURS = 1;
+
 const lines = readFileSync(path, 'utf8')
   .split('\n')
   .filter((one) => one !== '');
 const records = lines.map((one) => JSON.parse(one));
 const meta = records.find((one) => one.kind === 'meta') ?? {};
-const samples = records.filter((one) => one.kind === 'sample');
+const all = records.filter((one) => one.kind === 'sample');
+const samples = all.filter((one) => one.elapsedS >= WARMUP_MINUTES * 60);
 const errors = records.filter((one) => one.kind === 'error');
 
 if (samples.length < 4) {
-  stdout.write(`only ${String(samples.length)} samples in ${path}; nothing to conclude\n`);
-  exit(1);
+  stdout.write(
+    `${String(all.length)} samples in ${path}, ${String(samples.length)} of them past the ` +
+      `${String(WARMUP_MINUTES)}-minute warm-up. Nothing to conclude yet.\n`,
+  );
+  exit(2);
 }
 
 /** Least-squares slope of y against elapsed hours, and the mean, for one series. */
@@ -123,7 +143,9 @@ for (const key of ['ingestion queue (readings)', 'rollup lag (s)']) {
   check(key, result, result === null ? 0 : Math.max(Math.abs(result.mean) * 0.01, 0.5), '');
 }
 
-const passed = verdicts.every((one) => one.ok);
+const windowHours = elapsedHours - WARMUP_MINUTES / 60;
+const tooShort = windowHours < MIN_WINDOW_HOURS;
+const passed = !tooShort && verdicts.every((one) => one.ok);
 
 if (asMarkdown) {
   stdout.write(`| Series | n | mean | min | max | slope/h | first ¼ → last ¼ |\n`);
@@ -146,9 +168,16 @@ if (asMarkdown) {
       `- ${verdict.ok ? '**pass**' : '**FAIL**'} — ${verdict.name}: ${verdict.detail}\n`,
     );
   }
+  if (tooShort) {
+    stdout.write(
+      `\n**No verdict**: ${windowHours.toFixed(2)} h of steady state, against a ` +
+        `${String(MIN_WINDOW_HOURS)} h minimum.\n`,
+    );
+  }
 } else {
   stdout.write(
-    `soak of ${elapsedHours.toFixed(2)} h · ${String(samples.length)} samples · ${String(errors.length)} errors\n`,
+    `soak of ${elapsedHours.toFixed(2)} h · ${String(samples.length)} samples past warm-up ` +
+      `(of ${String(all.length)}) · ${String(errors.length)} errors\n`,
   );
   stdout.write(
     `started ${String(meta.startedAt)} · ${String(samples[0]?.sensorCount ?? '?')} sensors\n\n`,
@@ -164,6 +193,13 @@ if (asMarkdown) {
   stdout.write('\n');
   for (const verdict of verdicts) {
     stdout.write(`${verdict.ok ? 'pass' : 'FAIL'}  ${verdict.name}: ${verdict.detail}\n`);
+  }
+  if (tooShort) {
+    stdout.write(
+      `\nNO VERDICT: ${windowHours.toFixed(2)} h of steady state, and a slope per hour needs at ` +
+        `least ${String(MIN_WINDOW_HOURS)}. The pass/fail lines above are what the fit says, not ` +
+        `what the run has earned.\n`,
+    );
   }
   if (errors.length > 0) {
     stdout.write(
