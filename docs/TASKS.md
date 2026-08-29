@@ -4100,9 +4100,12 @@ because each is a decision rather than a defect:
       hook opens a real session and reads the host key back — 34 tests behind one handshake. Its
       timeout is 15 s, though, which is not a threshold a loopback handshake crosses easily.
 
-      **Not reproduced in eight isolated runs of `@ms/sensors` or two full parallel runs.** It
-      stays open rather than closed-as-unreproducible, because the point of the logging fix is
-      that the next occurrence will say what it was instead of leaving arithmetic to infer it.
+      **Not reproduced in ten runs**: eight of `@ms/sensors` alone (803/803 each) and two full
+      parallel `npm test` runs, which is the condition the original was seen in — 3,165/3,165,
+      nothing cancelled. Four of those ran while the `H-01` soak had the machine at 5,000 sensors,
+      so it is not simply an idle-machine result. It stays open rather than
+      closed-as-unreproducible, because the point of the logging fix is that the next occurrence
+      will say what it was instead of leaving arithmetic to infer it.
       One caution for whoever picks it up: a "reproduction" here turned out to be a deliberately
       failing probe file leaking into a concurrent background run. Do not plant one while runs of
       the same suite are in flight.
