@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
-import { pino } from 'pino';
+import { pino, type Logger } from 'pino';
 import type { CheckResult } from '@ms/shared';
 import { SpoolDrain, type ResultSender } from '../src/spool/drain.js';
 import { ResultSpool } from '../src/spool/spool.js';
@@ -44,7 +44,15 @@ class StubCore implements ResultSender {
   }
 }
 
-async function harness(over: { batchMaxRows?: number; catchUpMaxRows?: number } = {}) {
+async function harness(
+  over: {
+    batchMaxRows?: number;
+    catchUpMaxRows?: number;
+    stallAfterMs?: number;
+    now?: () => number;
+    logger?: Logger;
+  } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'ms-drain-'));
   dirs.push(dir);
   const spool = await ResultSpool.open({ dir, maxBytes: 1_000_000, logger: silent });
@@ -52,13 +60,89 @@ async function harness(over: { batchMaxRows?: number; catchUpMaxRows?: number } 
   const drain = new SpoolDrain({
     spool,
     client: core,
-    logger: silent,
+    logger: over.logger ?? silent,
     batchMaxRows: over.batchMaxRows ?? 100,
     ...(over.catchUpMaxRows === undefined ? {} : { catchUpMaxRows: over.catchUpMaxRows }),
+    ...(over.stallAfterMs === undefined ? {} : { stallAfterMs: over.stallAfterMs }),
+    ...(over.now === undefined ? {} : { now: over.now }),
     idleMs: 5,
   });
   return { spool, core, drain };
 }
+
+/**
+ * A spool that will not move, with the link up, must say so.
+ *
+ * The segment-boundary defect made `peek` return an empty batch for ever while the spool reported
+ * thousands pending. The drain read that as "no work" and idled: connected, quiet, and thirty
+ * thousand readings accumulating on disk with nothing anywhere to say it. CLAUDE.md's rule is
+ * that backpressure is visible and never silent, and what broke it was not the bug — it was that
+ * nothing was watching for progress at all.
+ *
+ * A stubbed `peek` is the right stand-in for the bug here: this is testing that the drain notices
+ * a spool that holds results and hands back none, whatever the reason.
+ */
+async function stalledDrain(lines: string[]) {
+  let clock = 0;
+  const captured = pino(
+    { level: 'error' },
+    { write: (line: string) => lines.push(line) },
+  ) as unknown as Logger;
+  const { spool, drain } = await harness({
+    stallAfterMs: 1_000,
+    now: () => clock,
+    logger: captured,
+  });
+  await spool.append([result(1), result(2)]);
+  // Holds results, hands back none — the shape of a stalled spool, whatever caused it.
+  Object.defineProperty(spool, 'peek', { value: () => Promise.resolve([]) });
+  return { drain, advance: (ms: number) => (clock += ms) };
+}
+
+describe('a spool that will not drain', () => {
+  it('says so when results sit with the link up and nothing moves', async () => {
+    const lines: string[] = [];
+    const { drain, advance } = await stalledDrain(lines);
+
+    drain.start();
+    await until(() => drain.stats().stalledForMs === 0, 'the first pass');
+    advance(2_000);
+    await until(() => lines.length > 0, 'a stall to be reported');
+    await drain.stop();
+
+    const reported = lines.map((line) => JSON.parse(line) as { level: number; msg: string });
+    assert.equal(reported.length, 1, 'reported once, not once a second');
+    assert.match(reported[0]?.msg ?? '', /nothing has moved/);
+    assert.ok(drain.stats().stalledForMs >= 1_000, 'the stall should be in the stats');
+  });
+
+  it('does not call a disconnected probe stalled — that is what the spool is for', async () => {
+    // R-02: a probe that cannot reach the core spools on purpose. Calling that a fault would be
+    // an alarm for the system doing exactly what it was built to do, and an alarm like that is
+    // the one people learn to ignore.
+    const lines: string[] = [];
+    const captured = pino(
+      { level: 'error' },
+      { write: (line: string) => lines.push(line) },
+    ) as unknown as Logger;
+    let clock = 0;
+    const { spool, core, drain } = await harness({
+      stallAfterMs: 1_000,
+      now: () => clock,
+      logger: captured,
+    });
+    await spool.append([result(1)]);
+    core.connected = false;
+
+    drain.start();
+    clock += 5_000;
+    await until(() => drain.stats().stalledForMs === 0, 'a pass with the link down');
+    await drain.stop();
+
+    assert.deepEqual(lines, [], 'a disconnected probe is not a stalled one');
+    assert.equal(drain.stats().stalledForMs, 0);
+  });
+});
 
 /** Waits for a condition rather than for a duration, or fails instead of hanging the suite. */
 async function until(predicate: () => boolean, what: string, timeoutMs = 3_000): Promise<void> {

@@ -22,6 +22,17 @@ export interface SpoolDrainOptions {
   /** How long to wait before looking again when there is nothing to do. */
   idleMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * How long the spool may hold results, with the link up, before this says so out loud.
+   *
+   * **Because it once held them for ever and said nothing.** A cursor parked on a segment
+   * boundary made `peek` return an empty batch while the spool reported thousands pending, and
+   * the drain read that as "no work": connected, idle, silent, and thirty thousand readings on
+   * disk. CLAUDE.md's rule is that backpressure is visible and never silent, and the failure that
+   * broke it was not the bug — it was that nothing here was watching for progress.
+   */
+  stallAfterMs?: number;
+  now?: () => number;
 }
 
 export interface DrainStats {
@@ -35,9 +46,22 @@ export interface DrainStats {
   rejected: number;
   /** Batches the core asked us to retry. */
   retried: number;
+  /**
+   * Milliseconds the spool has held results with the link up and nothing moving. Zero when it is
+   * making progress or has nothing to make progress on.
+   */
+  stalledForMs: number;
 }
 
 const DEFAULT_IDLE_MS = 1_000;
+/**
+ * Five minutes of a connected link and a spool that will not move.
+ *
+ * Long enough that a core pacing a catch-up with `retryAfterMs`, or a slow batch, never trips it;
+ * short enough that an operator hears about it on the same shift rather than from a disk alert a
+ * week later.
+ */
+const DEFAULT_STALL_AFTER_MS = 300_000;
 
 /**
  * Moves spooled results to the core, oldest first (R-02).
@@ -61,11 +85,23 @@ export class SpoolDrain {
   readonly #catchUpMaxRows: number;
   readonly #idleMs: number;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #stallAfterMs: number;
+  readonly #now: () => number;
 
   #running = false;
   #loop: Promise<void> | undefined;
   #wake: (() => void) | undefined;
-  #stats: DrainStats = { sent: 0, backlog: 0, maxRetryAfterMs: 0, rejected: 0, retried: 0 };
+  /** When the spool last had nothing pending, or last moved a batch. Used only for the stall. */
+  #lastProgressAt: number;
+  #stallReported = false;
+  #stats: DrainStats = {
+    sent: 0,
+    backlog: 0,
+    maxRetryAfterMs: 0,
+    rejected: 0,
+    retried: 0,
+    stalledForMs: 0,
+  };
 
   constructor(options: SpoolDrainOptions) {
     this.#spool = options.spool;
@@ -77,6 +113,9 @@ export class SpoolDrain {
       options.batchMaxRows,
     );
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
+    this.#stallAfterMs = options.stallAfterMs ?? DEFAULT_STALL_AFTER_MS;
+    this.#now = options.now ?? Date.now;
+    this.#lastProgressAt = this.#now();
     this.#sleep =
       options.sleep ??
       ((ms) =>
@@ -133,9 +172,43 @@ export class SpoolDrain {
     }
   }
 
+  /** The spool moved, or had nothing to move. Either way it is not stuck. */
+  #progress(): void {
+    this.#lastProgressAt = this.#now();
+    this.#stats.stalledForMs = 0;
+    if (this.#stallReported) {
+      this.#logger.warn('the spool is draining again');
+      this.#stallReported = false;
+    }
+  }
+
+  /**
+   * Results on disk, the link up, and nothing moving.
+   *
+   * Reported once when it starts rather than every second, and again when it clears, because an
+   * operator needs to know it happened and a log that repeats every second is a log nobody reads.
+   * `stalledForMs` keeps climbing regardless, so Probe Health can carry it.
+   */
+  #noteStalled(pending: number): void {
+    const stalledFor = this.#now() - this.#lastProgressAt;
+    this.#stats.stalledForMs = stalledFor;
+    if (stalledFor < this.#stallAfterMs || this.#stallReported) return;
+    this.#stallReported = true;
+    this.#logger.error(
+      { pending, stalledForMs: stalledFor },
+      'the spool holds results, the core is reachable, and nothing has moved — results are ' +
+        'accumulating on disk and will be dropped when the spool fills',
+    );
+  }
+
   /** One pass. Returns how long to wait before the next one; zero means "immediately". */
   async #step(): Promise<number> {
-    if (!this.#client.connected) return this.#idleMs;
+    // A link that is down is not a stall: the spool is doing its job, and R-02 is the whole
+    // point of it. The clock restarts so a long outage does not report a stall on reconnection.
+    if (!this.#client.connected) {
+      this.#progress();
+      return this.#idleMs;
+    }
 
     // Behind, so take bigger bites. `pending` is what is on disk right now, so this reads the
     // backlog before deciding how much of it to move.
@@ -145,6 +218,11 @@ export class SpoolDrain {
     const batch = await this.#spool.peek(take);
     if (batch.length === 0) {
       this.#stats.backlog = 0;
+      // **An empty batch with results still on disk is the shape of the bug this exists for.**
+      // A spool that says it holds thousands and hands back nothing is not idle, and treating it
+      // as idle is what made a permanent stall invisible for hours.
+      if (pending > 0) this.#noteStalled(pending);
+      else this.#progress();
       return this.#idleMs;
     }
 
@@ -168,6 +246,7 @@ export class SpoolDrain {
         'sent a batch of spooled results',
       );
       await this.#spool.commit();
+      this.#progress();
       // Zero means straight back round. Anything else is the core pacing this probe's catch-up,
       // which it can do and this probe cannot: only the core knows how many others are replaying.
       return outcome.retryAfterMs;
@@ -183,10 +262,12 @@ export class SpoolDrain {
         'the core refused a batch as invalid; discarding it rather than blocking the spool',
       );
       await this.#spool.commit();
+      this.#progress();
       return 0;
     }
 
     this.#stats.retried += 1;
+    this.#progress();
     this.#logger.info(
       { reason: outcome.reason, retryAfterMs: outcome.retryAfterMs, results: batch.length },
       'the core asked us to retry a batch',
