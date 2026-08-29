@@ -319,7 +319,50 @@ function assertOnePrimaryChannel(type: SensorType): void {
       );
     }
     keys.add(def.key);
+    if (def.limits !== undefined) assertUsableLimits(type.id, def);
   }
+}
+
+/**
+ * Declared thresholds that could never do anything, refused at registration (`S-18`).
+ *
+ * The catalogue's rule: a mistake that can be caught when a type is registered is not left to be
+ * discovered at the first reading. All three of these read as configured and produce either
+ * nothing or nonsense — and the third is the one that would actually happen, since "warn at 80,
+ * fail at 95" is easy to type in the wrong order.
+ */
+function assertUsableLimits(id: string, def: ChannelDef): void {
+  const limits = def.limits ?? {};
+  const where = `sensor type "${id}" channel "${def.key}"`;
+  const bounds = [
+    limits.upperError,
+    limits.upperWarning,
+    limits.lowerWarning,
+    limits.lowerError,
+  ].filter((one): one is number => one !== undefined);
+
+  if (bounds.length === 0) {
+    throw new SensorTypeError(
+      'BAD_SENSOR_TYPE',
+      `${where} declares limits with no bound in them; leave the field off instead`,
+    );
+  }
+  if (bounds.some((one) => !Number.isFinite(one))) {
+    throw new SensorTypeError('BAD_SENSOR_TYPE', `${where} declares a limit that is not a number`);
+  }
+
+  const { upperError, upperWarning, lowerWarning, lowerError } = limits;
+  const ordered = (below: number | undefined, above: number | undefined, why: string): void => {
+    if (below !== undefined && above !== undefined && below > above) {
+      throw new SensorTypeError('BAD_SENSOR_TYPE', `${where} declares ${why}`);
+    }
+  };
+  // Warning is crossed on the way to error, so it sits inside it on both sides. The other order
+  // makes the warning unreachable: every reading past it is already an error.
+  ordered(upperWarning, upperError, 'an upper warning above its upper error');
+  ordered(lowerError, lowerWarning, 'a lower error above its lower warning');
+  ordered(lowerWarning, upperWarning, 'a lower warning above its upper warning');
+  ordered(lowerError, upperError, 'a lower error above its upper error');
 }
 
 /**

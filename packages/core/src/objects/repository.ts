@@ -1,5 +1,5 @@
 import type { Queryable } from '../db/pool.js';
-import { parseLimits, type ChannelLimits } from '../state/limits.js';
+import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
 import type { SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
@@ -515,10 +515,14 @@ export class ObjectRepository {
   ): Promise<{ created: number; ownerVersion: number | null }> {
     if (drafts.length === 0) return { created: 0, ownerVersion: null };
     const rows = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits)
-       SELECT $1, key, name, unit, is_primary, lookup_id, counter_bits
-       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[], $7::smallint[])
-            AS d(key, name, unit, is_primary, lookup_id, counter_bits)
+      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits,
+                            limits, limits_source)
+       SELECT $1, key, name, unit, is_primary, lookup_id, counter_bits,
+              COALESCE(limits, '{}'::jsonb),
+              CASE WHEN limits IS NULL THEN 'unset' ELSE 'declared' END
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::text[], $7::smallint[],
+                   $8::jsonb[])
+            AS d(key, name, unit, is_primary, lookup_id, counter_bits, limits)
        RETURNING id`,
       [
         sensorId,
@@ -528,6 +532,7 @@ export class ObjectRepository {
         drafts.map((draft) => draft.isPrimary ?? false),
         drafts.map((draft) => draft.lookup ?? null),
         drafts.map((draft) => draft.counterBits ?? null),
+        drafts.map((draft) => declaredLimitsJson(draft)),
       ],
     );
     // A primary-key lookup, and only on sensor creation.
@@ -644,7 +649,11 @@ export class ObjectRepository {
     limits: ChannelLimits,
   ): Promise<boolean> {
     const rows = await q.query<{ id: number }>(
-      `UPDATE channel SET limits = $3::jsonb
+      // `limits_source` moves to `operator` and stays there. A person clearing every threshold
+      // writes `{}`, which is indistinguishable from a channel nobody has touched — so without
+      // this the next start would put the declared default back on top of a deliberate removal
+      // (`S-18`).
+      `UPDATE channel SET limits = $3::jsonb, limits_source = 'operator'
        WHERE sensor_id = $1 AND key = $2
        RETURNING id`,
       [sensorId, key, JSON.stringify(limits)],
@@ -1008,9 +1017,14 @@ export class ObjectRepository {
   ): Promise<number> {
     if (drafts.length === 0) return 0;
     const rows = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits)
-       SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::boolean[],
-                            $6::text[], $7::smallint[])
+      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits,
+                            limits, limits_source)
+       SELECT sensor_id, key, name, unit, is_primary, lookup_id, counter_bits,
+              COALESCE(limits, '{}'::jsonb),
+              CASE WHEN limits IS NULL THEN 'unset' ELSE 'declared' END
+       FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::boolean[],
+                   $6::text[], $7::smallint[], $8::jsonb[])
+            AS d(sensor_id, key, name, unit, is_primary, lookup_id, counter_bits, limits)
        RETURNING id`,
       [
         drafts.map((entry) => entry.sensorId),
@@ -1020,6 +1034,7 @@ export class ObjectRepository {
         drafts.map((entry) => entry.draft.isPrimary ?? false),
         drafts.map((entry) => entry.draft.lookup ?? null),
         drafts.map((entry) => entry.draft.counterBits ?? null),
+        drafts.map((entry) => declaredLimitsJson(entry.draft)),
       ],
     );
     return rows.length;
@@ -1355,3 +1370,14 @@ function escapeLike(value: string): string {
 }
 
 export type { CloneCounts };
+
+/**
+ * A draft's declared thresholds as a `jsonb` parameter, or null where the type declares none.
+ *
+ * Null rather than `'{}'`, because the two insert statements read it to decide `limits_source`:
+ * a channel with no declaration is `unset` and eligible for one later, and one with a
+ * declaration is `declared` from the moment it exists (`S-18`).
+ */
+function declaredLimitsJson(draft: ChannelDraft): string | null {
+  return draft.limits === undefined ? null : JSON.stringify(limitsFromDeclaration(draft.limits));
+}

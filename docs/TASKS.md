@@ -282,7 +282,7 @@ because each is a decision rather than a defect:
       the operator's configured retention. It should be — data that cannot be written is worse
       than data that was kept less long than promised — but that is a decision, not an
       implementation detail, and it must be said out loud in the alarm.
-- [ ] **S-18 — The health sensors ship with no thresholds** · M · M-04, P-12, P-13 · `ChannelDef`
+- [x] **S-18 — The health sensors ship with no thresholds** · M · M-04, P-12, P-13 · `ChannelDef`
       has no way to declare a default limit, and neither `ms.core.health` nor `ms.probe.health`
       seeds one: `channel.limits` is a `jsonb` column that starts empty and nothing fills it. So
       **a fresh install alarms on none of its own numbers** — scheduler lag, deferred checks,
@@ -297,6 +297,50 @@ because each is a decision rather than a defect:
       to nothing" have to be distinguishable, which they are not today.
       Pick the numbers from `H-01`'s soak rather than by taste; a default that fires on a healthy
       installation teaches people to ignore it.
+
+      **S-18 outcome.** `ChannelDef.limits` is a declaration a sensor type makes, applied when the
+      channel is created and by a start-up pass to channels that already exist. Migration 038 adds
+      `channel.limits_source` — `unset` | `declared` | `operator` — and everything turns on it.
+
+      **The column is the ticket.** `{}` meant both "nobody has configured this" and "somebody
+      deliberately cleared it", and a default cannot be applied safely without telling those
+      apart: a backfill reading the *value* would put a threshold back on the next restart that an
+      operator had just removed, and do it silently. `operator` is written the moment anybody
+      patches a limit — including patching it to nothing — and is never written over. The
+      migration marks existing non-empty limits `operator` on the way in, because before this
+      there was no other way to fill that column.
+
+      **A start-up pass rather than a migration**, because a migration is checksummed SQL and
+      cannot read the catalogue — and the alternative, hardcoding the two health types in SQL, is
+      the switch statement `CLAUDE.md` forbids. The pass builds its map from
+      `catalogue.channelsFor`, so a type that gains a declaration needs no change here. It writes
+      only where the value would change: writing a channel bumps its sensor's version and
+      invalidates every open ETag (`S-13`), so a pass that touched every health channel on every
+      start would make a restart look like a configuration change to every client watching.
+
+      **The numbers are provisional and say so.** Ten channels across the two health types:
+      ingestion queue, rollup lag, oldest undelivered notification and alarm-sweep overdue on
+      Core Health; scheduler lag, pool usage and dropped spool results on Probe Health. Each is
+      argued from something structural rather than from taste — the shortest interval a sensor may
+      have is 10 s, so a p95 scheduler lag of 5 s is half of it and the graph's spacing has
+      stopped meaning what it says. `H-01`'s soak should revisit them.
+
+      `spoolDropped` is the one that is not a matter of degree: a counter becomes a rate, and any
+      rate above zero is measurements that no longer exist anywhere. Its bound is 0.00001 rather
+      than 0, because a limit of exactly zero fires on the floating-point residue of a rate that
+      has returned to none.
+
+      The catalogue refuses a declaration with no bound, one that is not a number, and one whose
+      warning sits outside its error — at registration, where every other channel rule is checked.
+
+      Verified live against the running dev stack: migration 038 applied, 10 channels took their
+      declared limits on the first start and 0 on the second, the `icmp.ping` limits somebody had
+      set by hand were marked `operator` and left alone, and both health sensors are **Up** under
+      the new thresholds — which is the requirement, since a default that fires on a healthy
+      installation teaches people to ignore it.
+
+      Tests: 12 in `declared-limits.test.ts`, 5 in `catalogue.test.ts` for the registration rules
+      plus one asserting only the two self-monitoring types ship thresholds at all. Mutation 8/8.
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to
       1.55 ms (`docs/findings/2026-08-25-tree-build-measurement.md`).

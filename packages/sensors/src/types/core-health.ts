@@ -51,6 +51,15 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Ingestion queue',
     unit: 'readings',
     isPrimary: true,
+    // Zero whenever the core is keeping up. The default queue is 200,000 rows, so a *sustained*
+    // fifth of it is a database that has stopped keeping pace rather than a busy minute — and
+    // half of it is close enough to refusals that somebody should be looking already.
+    limits: {
+      upperWarning: 40_000,
+      upperError: 100_000,
+      warningMessage: 'readings are arriving faster than they are being written',
+      errorMessage: 'the ingestion queue is close to refusing batches; check the database',
+    },
   },
   { key: 'writeLatency', name: 'Database write time (p95)', unit: 'ms' },
   {
@@ -71,12 +80,39 @@ const CHANNELS: readonly ChannelDef[] = [
   // The rollup number that goes wrong first and silently (`S-06`). Worst of the tiers rather than
   // one channel each: a single tier falling behind is the fault, and which one it is belongs in
   // the message.
-  { key: 'rollupLag', name: 'Rollup lag (worst tier)', unit: 's' },
+  {
+    key: 'rollupLag',
+    name: 'Rollup lag (worst tier)',
+    unit: 's',
+    // The rollup runs every housekeeping pass, so an hour behind is several passes that did not
+    // finish. A day behind is a graph that is wrong at every zoom level above raw, which is
+    // exactly the failure this channel exists to catch before somebody reports it as missing
+    // data.
+    limits: {
+      upperWarning: 3_600,
+      upperError: 86_400,
+      warningMessage: 'the rollups are behind; older graphs are stale',
+      errorMessage: 'the rollups are a day behind; summarised graphs are wrong',
+    },
+  },
   { key: 'backfillQueue', name: 'Rollup backfill queue', unit: 'windows' },
   { key: 'reapQueue', name: 'Channels awaiting reap', unit: 'channels' },
   { key: 'notifyPending', name: 'Notifications undelivered', unit: 'notifications' },
   // The one that goes wrong first when a relay dies: the count stays small while the age climbs.
-  { key: 'notifyOldest', name: 'Oldest undelivered notification', unit: 's' },
+  {
+    key: 'notifyOldest',
+    name: 'Oldest undelivered notification',
+    unit: 's',
+    // On the age rather than on the count, because that is what goes wrong first when a relay
+    // dies: the count stays small and the age climbs. Fifteen minutes is longer than any
+    // ordinary retry sequence; an hour is an alarm nobody has received and probably will not.
+    limits: {
+      upperWarning: 900,
+      upperError: 3_600,
+      warningMessage: 'an alarm has been waiting to be delivered',
+      errorMessage: 'an alarm has been undelivered for an hour; check the relay',
+    },
+  },
   { key: 'notifyFailed', name: 'Notifications given up on (1 h)', unit: 'notifications' },
   {
     key: 'streamCutoffs',
@@ -101,7 +137,20 @@ const CHANNELS: readonly ChannelDef[] = [
   // have to be read against the clock by whoever looked. Zero whenever the scheduler is asleep
   // with a wake still ahead of it, which is almost always; anything else is a sweep that should
   // have happened and has not, and it climbs by a second a second until somebody notices.
-  { key: 'alarmOverdue', name: 'Alarm sweep overdue by', unit: 's' },
+  {
+    key: 'alarmOverdue',
+    name: 'Alarm sweep overdue by',
+    unit: 's',
+    // Zero whenever the scheduler is asleep with a wake still ahead of it, which is almost
+    // always. Anything sustained is a sweep that should have happened, and every second of it is
+    // a second an escalation is not escalating.
+    limits: {
+      upperWarning: 60,
+      upperError: 300,
+      warningMessage: 'the alarm sweep is late',
+      errorMessage: 'the alarm sweep has not run; escalations are not firing',
+    },
+  },
   // A counter, so the counter path turns it into alarms-per-minute — which is the number an
   // alarm storm shows up in. `M-17` is a scenario test for the same rule; this is the rule
   // visible on a graph while it is happening.

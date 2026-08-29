@@ -1,6 +1,8 @@
 import { pino } from 'pino';
 import { Migrator } from '../../src/db/migrator.js';
 import { MIGRATIONS } from '../../src/db/migrations/index.js';
+import type { SensorType } from '@ms/sensors';
+import { catalogueSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
 import type { Database } from '../../src/db/pool.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
 import {
@@ -15,7 +17,7 @@ import { DependencyPauses } from '../../src/dependencies/pauses.js';
 import { DependencyRepository } from '../../src/dependencies/repository.js';
 import { ScheduleRepository } from '../../src/schedules/repository.js';
 import { SensorStateService, type AlarmReactor } from '../../src/state/service.js';
-import { testSensorTypes } from './sensor-types.js';
+import { testCatalogue } from './sensor-types.js';
 import type { Queryable } from '../../src/db/pool.js';
 import { CredentialVault } from '../../src/vault/service.js';
 import { VaultKeyring } from '../../src/vault/keyring.js';
@@ -80,7 +82,7 @@ export interface Harness {
 
 export async function buildHarness(
   db: Database,
-  options: { states?: boolean; alarms?: AlarmReactor } = {},
+  options: { states?: boolean; alarms?: AlarmReactor; types?: readonly SensorType[] } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
 
@@ -123,7 +125,7 @@ export async function buildHarness(
     resolver,
     audit,
     vault,
-    sensorTypes: testSensorTypes(),
+    sensorTypes: catalogueSensorTypeGate(testCatalogue(options.types ?? [])),
     ...(states === undefined ? {} : { states }),
     ...(dependencies === undefined ? {} : { dependencyDelays: dependencies }),
     // Read-only, and unconditional: the pause view has to be able to say a schedule is holding

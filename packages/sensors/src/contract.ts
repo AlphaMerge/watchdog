@@ -23,6 +23,31 @@ export type CostHint = 'light' | 'medium' | 'heavy';
  * by. `S-07` created channels lazily from whatever arrived on the wire and could not set
  * `isPrimary`, because nothing had said which one it was.
  */
+/**
+ * Thresholds a type declares for one of its channels (`S-18`).
+ *
+ * **For channels whose badness is a number, and only those.** A type that can judge a condition
+ * itself should judge it and fail the check; this is for the ones where the fault is "too high"
+ * or "too low" and the boundary is a matter of degree — scheduler lag, queue depth, rollup lag.
+ *
+ * They are a **default, not a policy**: written once when the channel is created, and never
+ * again. An operator who changes or clears them owns them from then on, because a default that
+ * reappeared after somebody deliberately removed it is worse than no default at all.
+ *
+ * At least one bound is required — a declaration with none would be a value that reads as
+ * configured and does nothing — and the catalogue refuses one whose bounds contradict each other
+ * at registration rather than at the first reading.
+ */
+export interface ChannelLimitDefaults {
+  readonly upperError?: number;
+  readonly upperWarning?: number;
+  readonly lowerWarning?: number;
+  readonly lowerError?: number;
+  /** Appended to the sensor's message when the error bound is crossed. Say what to do. */
+  readonly errorMessage?: string;
+  readonly warningMessage?: string;
+}
+
 export interface ChannelDef {
   /** Stable within the sensor and matched against `ChannelReading.key`. Never the label. */
   readonly key: string;
@@ -59,6 +84,17 @@ export interface ChannelDef {
    * low bits. The stored sample is the rate, in this channel's own unit per second.
    */
   readonly counter?: { readonly bits: 32 | 64 };
+  /**
+   * Thresholds this channel starts life with (`S-18`).
+   *
+   * Absent for almost every channel, and that is right: a threshold on a response time depends
+   * on what is being measured and belongs to the operator. Declare one only where the number
+   * means the same thing on every installation — which is nearly always a channel about *this
+   * system* rather than about a monitored device.
+   *
+   * Applied when the channel is created and never re-applied. See `ChannelLimitDefaults`.
+   */
+  readonly limits?: ChannelLimitDefaults;
 }
 
 /**

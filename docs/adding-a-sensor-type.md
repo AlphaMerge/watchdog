@@ -147,6 +147,15 @@ channel the sensor is judged by.
   display labels; `name` is.
 - **Must be pure.** It runs in the core, which has no network access to your target and no
   business doing I/O to answer "what channels does this type have".
+- **`limits` on a channel declares default thresholds** (`S-18`). Almost no channel should have
+  one: a threshold on a monitored device's response time depends on that device and belongs to the
+  operator. Declare one only where the number means the same thing on every installation, which in
+  practice means a channel about *this system* rather than about somebody's network. They are
+  written when the channel is created and never re-applied — an operator who changes or clears
+  them owns them from then on, because a default that came back after somebody removed it is worse
+  than no default. The catalogue refuses a declaration with no bound in it, one that is not a
+  number, and one whose warning sits outside its error, at registration rather than at the first
+  reading.
 
 ### `execute(context)`
 

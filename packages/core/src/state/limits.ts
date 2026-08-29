@@ -16,6 +16,7 @@
  * full, and waiting another interval to say so helps nobody.
  */
 
+import type { ChannelLimitDefaults } from '@ms/sensors';
 import { applyLookup, type LookupDefinition } from '../lookups/definition.js';
 import { ROLLUP_SEVERITY, type RollupState } from './tables.js';
 import type { SensorStateCause } from './tables.js';
@@ -45,6 +46,25 @@ export interface ChannelLimits {
   /** Appended to the generated message when an error limit is breached. */
   readonly errorMessage: string;
   readonly warningMessage: string;
+}
+
+/**
+ * What a sensor type's declared thresholds look like once they are in the column (`S-18`).
+ *
+ * `enabled` is true and the messages default to empty, which is what every other path already
+ * writes. Nothing here decides *whether* to apply them — that is `limits_source`'s job, and
+ * keeping the two apart is what lets the same function serve a create and a backfill.
+ */
+export function limitsFromDeclaration(declared: ChannelLimitDefaults): ChannelLimits {
+  return {
+    enabled: true,
+    upperError: declared.upperError ?? null,
+    upperWarning: declared.upperWarning ?? null,
+    lowerWarning: declared.lowerWarning ?? null,
+    lowerError: declared.lowerError ?? null,
+    errorMessage: declared.errorMessage ?? '',
+    warningMessage: declared.warningMessage ?? '',
+  };
 }
 
 export const NO_LIMITS: ChannelLimits = {

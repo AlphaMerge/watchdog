@@ -41,8 +41,34 @@ const CHANNELS: readonly ChannelDef[] = [
   },
   // **Only the wheel can measure this**, because only it knows the instant each tick should have
   // run at (`P-01`). p95 rather than the mean: a scheduler is late in bursts.
-  { key: 'schedulerLag', name: 'Scheduler lag (p95)', unit: 'ms' },
-  { key: 'poolUsage', name: 'Worker pool in use', unit: '%' },
+  {
+    key: 'schedulerLag',
+    name: 'Scheduler lag (p95)',
+    unit: 'ms',
+    // The shortest interval a sensor can be given is 10 s (`M-01`), so a p95 lag of a second is
+    // 10% of it — late, and not yet wrong. Five seconds is half the shortest interval, at which
+    // point a scan is nearly overlapping the next one and the graph's spacing has stopped
+    // meaning what it says.
+    limits: {
+      upperWarning: 1_000,
+      upperError: 5_000,
+      warningMessage: 'checks are starting late',
+      errorMessage: 'checks are starting so late that their spacing is no longer their interval',
+    },
+  },
+  {
+    key: 'poolUsage',
+    name: 'Worker pool in use',
+    unit: '%',
+    // The pool grows to its maximum before this stays high (`P-18`), so a sustained 80% is a
+    // pool that has already grown as far as it may. At 95% the next burst is deferred checks.
+    limits: {
+      upperWarning: 80,
+      upperError: 95,
+      warningMessage: 'the worker pool is nearly full',
+      errorMessage: 'the worker pool is full; checks are about to be deferred',
+    },
+  },
   { key: 'queued', name: 'Checks waiting for a worker', unit: 'checks' },
   { key: 'checkWait', name: 'Wait for a worker (p95)', unit: 'ms' },
   // Skip-if-still-running: the previous scan of that sensor had not finished. Counted, never
@@ -59,7 +85,21 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'spoolBytes', name: 'Spool on disk', unit: 'MB' },
   // **The number that must never be a surprise**: readings evicted to stay inside the cap. Every
   // one is a measurement that no longer exists anywhere.
-  { key: 'spoolDropped', name: 'Results dropped', unit: 'results', counter: { bits: 64 } },
+  {
+    key: 'spoolDropped',
+    name: 'Results dropped',
+    unit: 'results',
+    counter: { bits: 64 },
+    // **The one default that is not a matter of degree.** A counter becomes a rate, so this is
+    // results dropped per second, and any rate above zero is measurements that no longer exist
+    // anywhere. The bound is below the smallest rate a single drop can produce rather than at
+    // zero, because a limit of exactly zero fires on the floating-point residue of a rate that
+    // has returned to none.
+    limits: {
+      upperError: 0.000_01,
+      errorMessage: 'the spool is full and readings are being discarded',
+    },
+  },
   { key: 'clockJumps', name: 'Clock jumps', unit: 'jumps', counter: { bits: 64 } },
   { key: 'cpu', name: 'CPU', unit: '%' },
   { key: 'memory', name: 'Memory (resident)', unit: 'MB' },

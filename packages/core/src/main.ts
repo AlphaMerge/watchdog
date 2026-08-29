@@ -16,6 +16,7 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/
 import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
+import { applyDeclaredLimits } from './state/declared-limits.js';
 import { CredentialVault } from './vault/service.js';
 import { VaultKeyring } from './vault/keyring.js';
 import { VaultSealer } from './vault/sealer.js';
@@ -358,6 +359,21 @@ async function serve(): Promise<void> {
     logger,
   });
   logSensorTypes(logger, catalogue);
+
+  // **After the migration and before anything reads a channel's limits.** A default that only
+  // reached installations created after the build declaring it would leave the same version of
+  // the same software alarming on a new install and silent on an old one (`S-18`). Nothing an
+  // operator has decided is touched, including a decision to clear a threshold.
+  const declaredLimits = await applyDeclaredLimits({ db, logger, catalogue });
+  if (declaredLimits.unmatched.length > 0) {
+    // A declaration matching no channel is not an error — an installation with no probes has no
+    // Probe Health sensor — but it is worth saying, because the other cause is a key that was
+    // renamed on one side only.
+    logger.debug(
+      { channels: declaredLimits.unmatched },
+      'sensor types declare limits for channels this installation has none of',
+    );
+  }
 
   // The library itself. Its own audit sink, so a schedule edit re-derives the flags in the same
   // transaction that changed it — the same composite the object service uses, because a

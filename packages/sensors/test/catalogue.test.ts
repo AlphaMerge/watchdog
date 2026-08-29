@@ -65,6 +65,79 @@ describe('registration', () => {
     );
   });
 
+  /**
+   * Declared thresholds (`S-18`).
+   *
+   * Refused at registration rather than at the first reading, because all four of these read as
+   * configured and do nothing — and the ordering one is the mistake that would actually be made,
+   * since "warn at 80, fail at 95" is easy to type in the wrong order.
+   */
+  it('refuses declared limits with no bound in them', () => {
+    assert.throws(
+      () =>
+        new SensorCatalogue().register(
+          variant({ channels: () => [{ key: 'a', name: 'A', limits: { errorMessage: 'oh' } }] }),
+        ),
+      /no bound in them/,
+    );
+  });
+
+  it('refuses a declared bound that is not a number', () => {
+    assert.throws(
+      () =>
+        new SensorCatalogue().register(
+          variant({ channels: () => [{ key: 'a', name: 'A', limits: { upperError: NaN } }] }),
+        ),
+      /not a number/,
+    );
+  });
+
+  it('refuses a warning bound the error bound has already passed', () => {
+    // The warning would be unreachable: every reading past it is already an error.
+    assert.throws(
+      () =>
+        new SensorCatalogue().register(
+          variant({
+            channels: () => [{ key: 'a', name: 'A', limits: { upperWarning: 95, upperError: 80 } }],
+          }),
+        ),
+      /upper warning above its upper error/,
+    );
+    assert.throws(
+      () =>
+        new SensorCatalogue().register(
+          variant({
+            channels: () => [{ key: 'a', name: 'A', limits: { lowerError: 9, lowerWarning: 5 } }],
+          }),
+        ),
+      /lower error above its lower warning/,
+    );
+  });
+
+  it('refuses a band that is upside down', () => {
+    assert.throws(
+      () =>
+        new SensorCatalogue().register(
+          variant({
+            channels: () => [
+              { key: 'a', name: 'A', limits: { lowerWarning: 90, upperWarning: 10 } },
+            ],
+          }),
+        ),
+      /lower warning above its upper warning/,
+    );
+  });
+
+  it('takes a one-sided declaration, which is what a counter wants', () => {
+    // "Any rate above zero is a fault" has no lower bound and no warning, and refusing it would
+    // push every such channel into inventing numbers to satisfy a shape.
+    assert.doesNotThrow(() =>
+      new SensorCatalogue().register(
+        variant({ channels: () => [{ key: 'a', name: 'A', limits: { upperError: 0.000_01 } }] }),
+      ),
+    );
+  });
+
   it('refuses a paramsSchema Ajv cannot compile', () => {
     assert.throws(
       () => new SensorCatalogue().register(variant({ paramsSchema: { type: 'not-a-type' } })),
@@ -266,6 +339,19 @@ describe('the built-in catalogue', () => {
 
   it('is sealed, so nothing can register a type after boot', () => {
     assert.equal(standardCatalogue().sealed, true);
+  });
+
+  it('ships thresholds only on the sensors that watch this system', () => {
+    // A default threshold on a monitored device's channel would be a guess about somebody else's
+    // network. On our own numbers it is a statement about this software, which is the only place
+    // the same number means the same thing on every installation (`S-18`).
+    const catalogue = standardCatalogue();
+    const withLimits = catalogue
+      .ids()
+      .filter((id) =>
+        catalogue.channelsFor(id, {}).some((channel) => channel.limits !== undefined),
+      );
+    assert.deepEqual(withLimits, ['ms.core.health', 'ms.probe.health']);
   });
 
   it('declares exactly one primary channel per shipped type', () => {

@@ -1,5 +1,6 @@
 export type {
   ChannelDef,
+  ChannelLimitDefaults,
   CheckContext,
   CheckExecution,
   CheckTarget,

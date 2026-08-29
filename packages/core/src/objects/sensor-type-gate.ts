@@ -1,4 +1,4 @@
-import type { SensorCatalogue } from '@ms/sensors';
+import type { ChannelLimitDefaults, SensorCatalogue } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { ObjectError } from './errors.js';
 import type { ChannelRecord } from './types.js';
@@ -12,6 +12,13 @@ export interface ChannelDraft {
   lookup?: string;
   /** Set when the type declares this channel a counter, so the core stores a rate (`T-02`). */
   counterBits?: 32 | 64;
+  /**
+   * The thresholds the type declares for this channel (`S-18`), if any.
+   *
+   * Written once, when the channel is created, and marked `declared` so an operator's later
+   * decision — including a decision to clear them — is never overwritten by a restart.
+   */
+  limits?: ChannelLimitDefaults;
 }
 
 /** Params fit to leave the process, and which secrets were taken out of them. */
@@ -150,6 +157,7 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
         ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
         ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
         ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
+        ...(def.limits === undefined ? {} : { limits: def.limits }),
       }));
     },
 
