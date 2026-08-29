@@ -208,4 +208,7 @@ if (asMarkdown) {
   }
 }
 
-exit(passed ? 0 : 1);
+// **Three outcomes, not two.** 0 passed, 1 failed, 2 could not conclude — too few samples past
+// warm-up, or a window shorter than the minimum. Collapsing "no verdict" into "failed" is how a
+// soak that has not run long enough gets read as a soak that found something.
+exit(tooShort ? 2 : passed ? 0 : 1);
