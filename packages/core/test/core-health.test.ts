@@ -49,9 +49,15 @@ function sources(
     alarmsFired: number;
     nextWakeAt: Date | null;
     queriesRefused: number;
+    disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
+    evictedChunks: number;
   }> = {},
 ): CoreHealthSources {
   return {
+    // Null by default, which is a core that cannot speak for a disk (`S-17`) — the case every
+    // other test in this file is in, and the one whose channels must be gaps rather than zeros.
+    disk: () => overrides.disk ?? null,
+    evictedChunks: () => overrides.evictedChunks ?? 0,
     ingestion: () => ({
       queuedRows: overrides.queuedRows ?? 0,
       refusedRows: overrides.refusedRows ?? 0,

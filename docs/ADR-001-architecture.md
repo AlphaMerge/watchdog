@@ -375,6 +375,48 @@ needed. Recharts is SVG and folds at that density; visx is primitives, not chart
 See the `dataviz` guidance before building any chart: consistent palette, accessible contrast,
 light and dark themes.
 
+### Amended 2026-08-29 (S-17) — a full disk may cost retention, and says so
+
+Decision 4 sized the data lifecycle by **age**: forty days of raw, a year of five-minute buckets,
+and so on. That is the right shape for a healthy installation and it has no answer at all for the
+one whose disk fills anyway — a budget that fitted last year, a sensor count that doubled, a
+volume something else grew into. `WORKFLOW.MD §13` row 7 already said what should happen;
+auditing it in `H-02` found that nothing did.
+
+**Decision.** Below a configured free-space threshold, the housekeeping loop drops the oldest
+readings **ahead of the retention the operator configured**, and keeps doing so until the disk is
+healthy again.
+
+The alternative was to stop at the configured horizons and let PostgreSQL run out of room. That is
+worse, and not marginally: a monitoring system whose database has stopped accepting writes is both
+broken and *silent*, which is the failure this project exists not to have. Data that cannot be
+written is worse than data kept less long than promised.
+
+It is still a promise being broken, so nothing about it is quiet. Every eviction is an
+error-level log line naming the table and the horizon; `evictedChunks` is a counter channel on
+Core Health with a declared limit that fires on any rate above zero (`S-18`); and `diskFree` warns
+at 20% and errors at 10%, which is the same event as the eviction threshold rather than a number
+chosen separately.
+
+Four bounds, each closing a way this could do more harm than the full disk it is answering:
+
+- **Never past what the tier above has summarised.** The same cap ordinary retention uses. Raw
+  that has not been rolled up is the only copy of that hour, not a detailed copy of it.
+- **Never into a window a pending backfill still has to re-read.**
+- **Never newer than `minimumRetainedHours`** (48 by default). Evicting what is being written this
+  minute would not save the disk and would take the graph an operator is looking at while they fix
+  it.
+- **Coarsest tier last, daily never.** A decade of daily buckets is a rounding error on disk and
+  the last thing worth keeping.
+
+**Which disk** is the part that needed care rather than the measurement. The readings are on
+PostgreSQL's volume and the core is on its own; on a single-host install those are one filesystem
+and on a split one they are not. A core that watched its own disk and called it the database's
+would show a healthy number in front of a volume about to fill. So: a configured path wins, a
+loopback or unix-socket database means the data directory's filesystem is the right one, and a
+database on another host produces **no reading at all** — a gap, and eviction off, because
+dropping real data on the strength of an unrelated disk's fullness is the worst outcome available.
+
 ### Amended 2026-08-25 (U-01) — the two slots this decision left open
 
 The original decision named the framework, the build tool and the charting libraries, and said

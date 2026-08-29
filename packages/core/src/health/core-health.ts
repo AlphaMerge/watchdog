@@ -41,6 +41,19 @@ export interface CoreHealthSources {
   alarms: () => { fired: number; nextWakeAt: Date | null };
   /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
   queries: () => { refused: number };
+  /**
+   * The last housekeeping pass's view of the disk (`S-17`).
+   *
+   * Read from the *report* rather than measured here, and that is deliberate: the number Core
+   * Health shows has to be the number eviction acted on. Two independent `statfs` calls a few
+   * seconds apart would disagree during exactly the incident this channel exists for, and an
+   * operator comparing the graph with the log would be told two different stories.
+   *
+   * Null until the first pass, and on any core that cannot honestly speak for a disk.
+   */
+  disk: () => { freePercent: number; freeBytes: number; databaseBytes: number } | null;
+  /** Chunks dropped ahead of the configured retention because the disk was filling (`S-17`). */
+  evictedChunks: () => number;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -135,6 +148,7 @@ export class CoreHealthService {
     const probes = this.#sources.probes();
     const alarms = this.#sources.alarms();
     const queries = this.#sources.queries();
+    const disk = this.#sources.disk();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#db.tx(async (q) => ({
@@ -154,6 +168,12 @@ export class CoreHealthService {
       uptime: Math.round(this.#process.uptime()),
       rollupLag: queues.rollup,
       backfillQueue: queues.backfill,
+      // Gaps, not zeros, when this core has no disk it can speak for. `CLAUDE.md`: a Down sensor
+      // records no channel values, and a channel that cannot be measured is the same case.
+      diskFree: disk === null ? null : disk.freePercent,
+      diskFreeBytes: disk === null ? null : round(disk.freeBytes / MB, 1),
+      databaseSize: disk === null ? null : round(disk.databaseBytes / MB, 1),
+      evictedChunks: this.#sources.evictedChunks(),
       reapQueue: queues.reap,
       notifyPending: queues.delivery.pending,
       notifyOldest: Math.round(queues.delivery.oldestPendingAgeMs / 1_000),

@@ -1,6 +1,7 @@
 import { describeError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import { AuditRepository } from '../audit/store.js';
 import type { Database, Queryable } from '../db/pool.js';
+import type { DiskReading, DiskWatcher } from './disk.js';
 import type { EngineCapabilities } from './engine.js';
 import { SqlTimeSeriesStore, type TimeSeriesStore } from './store.js';
 import { ROLLUP_TIERS, type RollupTier, type RollupTierId } from './tiers.js';
@@ -33,6 +34,17 @@ const MAX_REAP_PER_PASS = 32;
 const MAX_AUDIT_PER_STATEMENT = 5_000;
 const MAX_AUDIT_STATEMENTS_PER_PASS = 10;
 
+/**
+ * How far one eviction step reaches, and how many it may take in a pass (`S-17`).
+ *
+ * A day at a time so the disk is re-measured often enough to stop as soon as it is healthy; a
+ * bound on the steps so a pass cannot spend an unlimited time evicting — the loop runs again in
+ * five minutes, and a core that never returned from housekeeping would stop doing everything
+ * else this class is for.
+ */
+const EVICTION_STEP_MS = 24 * 3_600_000;
+const MAX_EVICTION_STEPS = 60;
+
 export interface TierReport {
   bucketsWritten: number;
   /** Where the tier is materialised to after this pass, ISO-8601, or null if it never ran. */
@@ -60,6 +72,21 @@ export interface HousekeepingReport {
   anchoredSensors: number;
   reapedChannels: number;
   reapedRows: number;
+  /**
+   * How full the watched filesystem is, or null where this core cannot honestly say (`S-17`).
+   *
+   * Null rather than a zero, and every consumer treats it as a gap: a core whose database is on
+   * another host is not looking at a full disk, it is not looking at the disk.
+   */
+  disk: DiskReading | null;
+  /**
+   * Chunks dropped **ahead of the configured retention** because the disk was filling (`S-17`).
+   *
+   * Separate from `droppedChunks` on purpose. That number is the system working as configured;
+   * this one is the system deciding that keeping the promise would cost more than breaking it,
+   * and it is never zero quietly — every one is logged at error and alarmed on.
+   */
+  evictedChunks: number;
   /** A step that failed. The pass continues: every step is guarded by a watermark, not by the
    *  success of the one before it, so a compression failure must not stop retention. */
   failures: { step: string; message: string }[];
@@ -71,6 +98,13 @@ export interface HousekeeperOptions {
   config: HousekeepingConfig;
   store?: TimeSeriesStore;
   auditRepository?: AuditRepository;
+  /**
+   * How full the disk is (`S-17`). Absent leaves the loop exactly as it was before that ticket:
+   * retention by age and nothing else, which is what a build with no disk to watch should do.
+   */
+  disk?: DiskWatcher;
+  /** Injectable so an eviction test does not have to wait out a real clock. */
+  now?: () => Date;
 }
 
 /**
@@ -98,6 +132,10 @@ export class Housekeeper {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #config: HousekeepingConfig;
+  readonly #disk: DiskWatcher | undefined;
+  readonly #now: () => Date;
+  #lastDisk: DiskReading | null = null;
+  #evictedChunks = 0;
   readonly #store: TimeSeriesStore;
   readonly #audit: AuditRepository;
   readonly #abort = new AbortController();
@@ -112,6 +150,8 @@ export class Housekeeper {
     this.#config = options.config;
     this.#store = options.store ?? new SqlTimeSeriesStore();
     this.#audit = options.auditRepository ?? new AuditRepository();
+    this.#disk = options.disk;
+    this.#now = options.now ?? (() => new Date());
   }
 
   /**
@@ -187,6 +227,22 @@ export class Housekeeper {
     return this.#abort.signal.aborted;
   }
 
+  /**
+   * What Core Health reports about the disk (`S-17`).
+   *
+   * The last pass's reading rather than a fresh measurement, so the number on the graph is the
+   * number eviction acted on. Two `statfs` calls seconds apart disagree during exactly the
+   * incident this is for, and an operator comparing the graph with the log would be told two
+   * different stories about the same minute.
+   *
+   * `evictedChunks` accumulates across passes because it is declared a counter, and a counter
+   * that reset every five minutes would report the rate of the current pass rather than of the
+   * incident.
+   */
+  get stats(): { disk: DiskReading | null; evictedChunks: number } {
+    return { disk: this.#lastDisk, evictedChunks: this.#evictedChunks };
+  }
+
   async #tick(): Promise<void> {
     if (this.#inFlight !== undefined) {
       this.#logger.debug('previous pass still running, skipping this tick');
@@ -200,6 +256,19 @@ export class Housekeeper {
     } finally {
       this.#inFlight = undefined;
     }
+  }
+
+  /**
+   * The disk guard on its own (`S-17`).
+   *
+   * Public for the same reason `runOnce` is, and for one more: inside a full pass the rollup has
+   * already run, so the watermark eviction is capped by is whatever the rollup just advanced it
+   * to. That is right in production and useless in a test, which needs to pin the cap and see
+   * that it holds. Called by `runOnce`; nothing else in the core calls it.
+   */
+  async guardDisk(report: HousekeepingReport = emptyReport()): Promise<HousekeepingReport> {
+    await this.#step(report, 'disk', () => this.#guardDisk(report));
+    return report;
   }
 
   /** One bounded pass. Safe to call directly; tests do. */
@@ -252,6 +321,10 @@ export class Housekeeper {
     await this.#step(report, 'rollup', () => this.#rollForward(report));
     await this.#step(report, 'compress', () => this.#compress(report));
     await this.#step(report, 'retention', () => this.#retention(report));
+    // **After ordinary retention, and only if that was not enough.** Dropping data the operator
+    // asked us to keep is a last resort, so it runs once the configured horizons have already
+    // taken what they are entitled to (`S-17`).
+    await this.guardDisk(report);
     // Its own step, after the samples: a failure here must not stop the reap or the audit prune,
     // and — more to the point — a failure in *those* must not stop a sensor being anchored.
     await this.#step(report, 'state-retention', () => this.#stateRetention(report));
@@ -496,6 +569,115 @@ export class Housekeeper {
   }
 
   /**
+   * What happens as the disk fills (`S-17`, `WORKFLOW.MD §13` row 7).
+   *
+   * **Retention by age is the plan; this is what happens when the plan was wrong.** A budget that
+   * fitted last year, a volume something else grew into, a sensor count that doubled — all end the
+   * same way, and the end is PostgreSQL refusing writes. At that point the monitoring system is
+   * both broken and silent, which is the failure mode this project exists to not have.
+   *
+   * So it evicts, ahead of the retention the operator configured, and **says out loud that it
+   * did**. The decision is deliberate and is written down in ADR-001: data that cannot be written
+   * is worse than data kept less long than promised. It is not a decision to make quietly, which
+   * is why every eviction is an error-level log line and a counter on Core Health rather than an
+   * `info` beside the ordinary drops.
+   *
+   * Four things bound it, and each closes a way this could do more harm than the full disk:
+   *
+   * - **Never past what the tier above has summarised.** The same cap ordinary retention uses:
+   *   raw data that has not been rolled up is the only copy of that hour.
+   * - **Never into a window a pending backfill still has to re-read.** Likewise.
+   * - **Never newer than `minimumRetainedHours`.** Evicting what is being written this minute
+   *   would not save a full disk and would take the graph an operator is staring at while they
+   *   fix it.
+   * - **Coarsest tier last, and daily never.** A decade of daily buckets is a rounding error on
+   *   disk and the only thing left when the rest has gone.
+   *
+   * It re-measures after each drop and stops at `recoverAbovePercent`, which is above the
+   * trigger: evicting exactly to the trigger point means the next pass evicts again, and the
+   * installation spends its life at the threshold shedding a chunk at a time.
+   */
+  async #guardDisk(report: HousekeepingReport): Promise<void> {
+    const watcher = this.#disk;
+    if (watcher === undefined) return;
+    let reading = await this.#db.tx((q) => watcher.read(q));
+    report.disk = reading;
+    this.#lastDisk = reading;
+    if (reading === null) return;
+
+    const { evictBelowPercent, recoverAbovePercent, minimumRetainedHours } = this.#config.disk;
+    if (reading.freePercent >= evictBelowPercent) return;
+
+    this.#logger.error(
+      {
+        path: reading.path,
+        freePercent: reading.freePercent,
+        freeBytes: reading.freeBytes,
+        databaseBytes: reading.databaseBytes,
+      },
+      'free disk space is below the eviction threshold; dropping the oldest readings ahead of ' +
+        'the configured retention',
+    );
+
+    const watermarks = await this.#db.tx((q) => this.#store.watermarks(q));
+    const pending = await this.#db.tx((q) => this.#store.earliestPendingBackfill(q));
+    const floor = new Date(this.#now().getTime() - minimumRetainedHours * 3_600_000);
+
+    // Raw first: it is the largest by an order of magnitude and the tier whose loss costs the
+    // least, because everything above it has already been summarised from it.
+    const targets: { table: string; consumedBy: RollupTierId }[] = [
+      { table: 'sample', consumedBy: 'sample_5m' },
+      { table: 'sample_5m', consumedBy: 'sample_1h' },
+      { table: 'sample_1h', consumedBy: 'sample_1d' },
+    ];
+
+    for (const target of targets) {
+      if (this.#aborted()) return;
+      // Never null past the guard above: the inner loop returns the moment a re-read is.
+      if (reading.freePercent >= recoverAbovePercent) break;
+
+      const cap = this.#limit(floor, watermarks.get(target.consumedBy), pending);
+      if (cap === null) continue;
+
+      for (let step = 0; step < MAX_EVICTION_STEPS; step += 1) {
+        if (this.#aborted()) return;
+        const oldest = await this.#db.tx((q) => this.#store.oldestAt(q, target.table));
+        if (oldest === null || oldest.getTime() >= cap.getTime()) break;
+
+        // A day at a time rather than straight to the cap: each drop is a measurement, and
+        // stopping as soon as the disk is healthy is the difference between shedding what is
+        // needed and shedding everything eviction is allowed to.
+        const to = new Date(Math.min(oldest.getTime() + EVICTION_STEP_MS, cap.getTime()));
+        const dropped = await this.#db.tx((q) => this.#store.dropOlderThan(q, target.table, to));
+        if (dropped.length === 0) break;
+
+        report.evictedChunks += dropped.length;
+        this.#evictedChunks += dropped.length;
+        this.#logger.error(
+          { table: target.table, chunks: dropped.length, olderThan: to.toISOString() },
+          'evicted readings ahead of the configured retention to keep the disk writable',
+        );
+
+        reading = await this.#db.tx((q) => watcher.read(q));
+        report.disk = reading;
+        this.#lastDisk = reading;
+        if (reading === null || reading.freePercent >= recoverAbovePercent) return;
+      }
+    }
+
+    if (reading.freePercent < evictBelowPercent) {
+      // Everything eviction was allowed to take has gone and the disk is still filling. Said
+      // plainly, because the next thing that happens is the database refusing writes and the
+      // remedy is not one this process has.
+      this.#logger.error(
+        { path: reading.path, freePercent: reading.freePercent },
+        'the disk is still below the eviction threshold with nothing left that may be evicted; ' +
+          'ingestion will stop when it fills',
+      );
+    }
+  }
+
+  /**
    * Retention for the state history, which may never leave a sensor without a state (`S-15`).
    *
    * **The order is the whole design.** A sensor that has sat Up for three years has exactly one
@@ -649,6 +831,8 @@ function emptyReport(): HousekeepingReport {
     anchoredSensors: 0,
     reapedChannels: 0,
     reapedRows: 0,
+    disk: null,
+    evictedChunks: 0,
     failures: [],
   };
 }

@@ -6,9 +6,10 @@
 the specification. This is the audit of what actually holds today: what proves each row, where
 the proof is only at unit level, and where the behaviour does not exist at all.
 
-The short version: **five rows hold and are proved end to end; two are proved in pieces and now
-have a scenario; one is not implemented.** Two further gaps cut across rows and are filed
-separately.
+The short version at the time of writing: **five rows held and were proved end to end; two were
+proved in pieces and got a scenario; one was not implemented.** Two further gaps cut across rows
+and were filed separately — `S-17` and `S-18`, both since closed, and this document is updated
+where they changed the answer.
 
 ---
 
@@ -105,20 +106,29 @@ only it knows when each tick *should* have run), `deferred`, `refused`, `queued`
 on Probe Health and all in `report.ts`. Nothing is silently dropped — `CLAUDE.md`'s visible-
 backpressure rule is met.
 
-**"Warns" is not met, and the reason is `G2` below: no channel ships with a limit.** The numbers
-are alarmable; nothing alarms on them until an operator writes a threshold by hand.
+**"Warns" was not met, and the reason was `G2` below: no channel shipped with a limit.** `S-18`
+closed that — `schedulerLag` now warns at 1 s and errors at 5 s out of the box, and `poolUsage` at
+80/95 — so the row holds. The numbers themselves are provisional until `H-01`'s soak.
 
 ### 7. Disk fills
 
 > Housekeeping escalates, oldest raw data is evicted first, a critical alarm fires before
 > ingestion stops
 
-**Not implemented.** Not untested — absent. Searched: no `statfs`, no free-space read anywhere in
-`packages/`, no disk channel on Core Health, and the housekeeper's retention is by **age** only
-(`#retention`, `#stateRetention`, `#pruneAudit`). A full disk today stops Postgres, and the first
-thing an operator learns about it is that ingestion has stopped.
+**Was not implemented at all; `S-17` implemented it.** When this audit was written there was no
+`statfs` anywhere in `packages/`, no disk channel on Core Health, and retention by **age** only — a
+full disk stopped PostgreSQL and the first thing an operator learned about it was that ingestion
+had stopped.
 
-Filed as `S-17`.
+All three clauses hold now. *Housekeeping escalates*: a `disk` step after retention, measuring the
+filesystem the readings are on. *Oldest raw data is evicted first*: raw before five-minute before
+hourly, oldest forward, a day at a time, re-measuring after each drop. *A critical alarm fires
+before ingestion stops*: `diskFree` errors at 10% — the same point eviction begins — and
+`evictedChunks` fires on any rate above zero.
+
+The decision that had to be written down rather than coded is in ADR-001: **emergency eviction may
+break the configured retention**, because data that cannot be written is worse than data kept less
+long than promised. It is never quiet about it.
 
 ### 8. Clock jumps
 
@@ -133,18 +143,20 @@ indistinguishable from the wheel drifting.
 
 ## Gaps that cut across rows
 
-### `G1` → `S-17` — nothing knows how full the disk is
+### `G1` → `S-17` — nothing knows how full the disk is · **closed**
 
-Row 7, above. The behaviour §13 specifies has three parts and the system has none of them: no
-free-space measurement, no escalation as it falls, and no eviction of oldest raw data ahead of
-ingestion stopping.
+Row 7, above. Worth keeping the reason this was not merely "add a channel": **evicting oldest raw
+data first is a policy that interacts with rollups.** Raw that has not been rolled up cannot be
+dropped without losing the rollup, so the eviction order is "oldest raw *behind the rollup
+watermark*" — and the watermark is already what `Housekeeper#rollForward` maintains, so the cap
+was a query rather than a new concept.
 
-Worth stating why this is not merely "add a channel": **evicting oldest raw data first is a
-policy that interacts with rollups.** Raw data that has not been rolled up yet cannot be dropped
-without losing the rollup, so the eviction order is "oldest raw *behind the rollup watermark*",
-and the watermark is already what `Housekeeper#rollForward` maintains.
+What the audit did not anticipate, and `S-17` had to answer: **which disk**. The readings are on
+PostgreSQL's volume and the core is on its own. A core that watched the wrong one would show a
+healthy number in front of a volume about to fill, so a database on another host now produces no
+reading at all rather than a misleading one.
 
-### `G2` → `S-18` — the health sensors ship with no thresholds
+### `G2` → `S-18` — the health sensors ship with no thresholds · **closed**
 
 `ChannelDef` has no way to declare a default limit, and neither `ms.core.health` nor
 `ms.probe.health` seeds one: `channel.limits` is a `jsonb` column that starts empty, and there is

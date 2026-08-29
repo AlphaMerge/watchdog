@@ -262,7 +262,7 @@ because each is a decision rather than a defect:
       precisely that case. The digest covers chain *membership* as well as chain versions.
       It also folds in the build version, because the last input to a resolved setting is its
       registry default, and that lives in code rather than in a row.
-- [ ] **S-17 — Nothing knows how full the disk is** · L · S-06, P-12 · `WORKFLOW.MD §13` row 7
+- [x] **S-17 — Nothing knows how full the disk is** · L · S-06, P-12 · `WORKFLOW.MD §13` row 7
       says "housekeeping escalates, oldest raw data is evicted first, a critical alarm fires
       before ingestion stops". **The system does none of the three.** There is no free-space read
       anywhere in `packages/`, no disk channel on Core Health, and the housekeeper's retention is
@@ -282,6 +282,65 @@ because each is a decision rather than a defect:
       the operator's configured retention. It should be — data that cannot be written is worse
       than data that was kept less long than promised — but that is a decision, not an
       implementation detail, and it must be said out loud in the alarm.
+
+      **S-17 outcome, and the ADR paragraph the ticket asked for is written** (ADR-001, amended
+      2026-08-29): below a configured free-space threshold, housekeeping drops the oldest readings
+      **ahead of the retention the operator configured**. The alternative is letting PostgreSQL
+      run out of room, and that is worse — a monitoring system whose database has stopped
+      accepting writes is both broken and *silent*.
+
+      **The hard part was not the measurement, it was being sure of the disk.** The readings are
+      on PostgreSQL's volume; this process is on its own. A core that watched its own and called
+      it the database's would show a healthy number in front of a volume about to fill. So a
+      configured `housekeeping.disk.path` wins; a loopback or unix-socket database means the data
+      directory's filesystem is the right one; and **a database on another host produces no
+      reading at all** — a gap, not a zero, with eviction off, because dropping real data on the
+      strength of an unrelated disk's fullness is the worst outcome available.
+
+      Four bounds, each closing a way this could do more harm than the full disk it answers:
+      never past what the tier above has summarised (raw that has not been rolled up is the only
+      copy of that hour); never into a window a pending backfill has to re-read; never newer than
+      `minimumRetainedHours`, 48 by default; and coarsest tier last, daily never. It drops a day
+      at a time and re-measures after each, stopping at `recoverAbovePercent` — above the trigger,
+      or the installation spends its life at the threshold shedding a chunk at a time.
+
+      Nothing about it is quiet. Every eviction is an error-level log line naming the table and
+      the horizon; `evictedChunks` is a counter channel whose declared limit (`S-18`) fires on any
+      rate above zero; `diskFree` warns at 20% and errors at 10%, which is *the same event* as the
+      eviction threshold rather than a number picked separately. There is also a distinct message
+      for the case that matters most: everything eviction was allowed to take has gone and the
+      disk is still filling.
+
+      **The guard is a public method as well as a step**, and the reason is a test that failed
+      for the right reason: inside a full pass the rollup has already advanced the very watermark
+      eviction is capped by, so a test pinning that cap could not see it hold. Production calls
+      `runOnce`; the cap tests call `guardDisk` directly.
+
+      Tests: 15 in `disk-guard.test.ts` against a real database with real chunks and a faked
+      filesystem — filling a real one would be a test about the filesystem. Every bound has its
+      own test, because **eviction is a bug that destroys data** and the failure is silent and
+      permanent.
+
+      Mutation 9/9, after two rounds, and each survivor was worth the round. One test passed for
+      the wrong reason: with no rollup watermark planted there was no cap, so eviction bailed
+      before it ever looked at the disk. Nothing covered the remote-database branch at all, which
+      is the branch whose whole point is not guessing. And `bavail` versus `bfree` — the root
+      reserve — was only reachable through the un-injected `statfs`, so it now has a test against
+      a real one that discriminates wherever the filesystem has a reserve. The last survivor was
+      the threshold check itself, which the recovery check subsumes: deleting it drops nothing and
+      logs an error every five minutes on a healthy installation, which is how an operator learns
+      to ignore the log. That is a test about what is *logged*.
+
+      **Found while verifying live, and fixed in this commit**: a channel created by the ingestion
+      path — a probe reporting a key for the first time — got no declared limits, so `S-18`'s
+      defaults arrived a restart late for every channel added to an existing type. Which is
+      exactly what these new Core Health channels were. `ChannelResolver` now takes the same
+      lookup the start-up pass uses.
+
+      Also fixed in passing: `credentials.ts` held a **raw NUL byte** as its digest separator.
+      Written as `'\0'` now — the raw byte is invisible in every editor and diff, and the same
+      character had silently found its way into a `split(' ')` in this ticket's own code, where it
+      made the start-up backfill match nothing.
 - [x] **S-18 — The health sensors ship with no thresholds** · M · M-04, P-12, P-13 · `ChannelDef`
       has no way to declare a default limit, and neither `ms.core.health` nor `ms.probe.health`
       seeds one: `channel.limits` is a `jsonb` column that starts empty and nothing fills it. So

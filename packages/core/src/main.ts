@@ -16,7 +16,8 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/
 import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
-import { applyDeclaredLimits } from './state/declared-limits.js';
+import { applyDeclaredLimits, declaredLimitsLookup } from './state/declared-limits.js';
+import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
 import { VaultKeyring } from './vault/keyring.js';
 import { VaultSealer } from './vault/sealer.js';
@@ -256,7 +257,14 @@ async function serve(): Promise<void> {
   // Built here rather than beside the ingestion service, because the audit sink below has to
   // hold them: they cache channel limits and sensor states, and an edited limit that only took
   // effect after a restart would not be the "immediate effect" M-04 promises.
-  const channels = new ChannelResolver({ logger, lookups });
+  // The declared limits reach a channel created here as well as one created with its sensor
+  // (`S-18`): a channel a probe reports for the first time would otherwise wait for the next
+  // start-up pass, which is how `S-17`'s new Core Health channels were found sitting unset.
+  const channels = new ChannelResolver({
+    logger,
+    lookups,
+    declaredLimits: declaredLimitsLookup(catalogue),
+  });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.
   // What arms and stands down notification chains (N-02). Built before the state service,
@@ -817,7 +825,21 @@ async function serve(): Promise<void> {
   // The data lifecycle: rollups, compression, retention, orphan reaping. Started after the API
   // so a slow first pass — the one catching up after a long stop — cannot delay the port
   // opening.
-  const housekeeper = new Housekeeper({ db, logger, config: config.housekeeping, store });
+  // What the housekeeper watches to decide whether the disk is about to stop it (`S-17`). Built
+  // here rather than inside the housekeeper because it needs the data directory, which is a
+  // service setting and not a housekeeping one.
+  const disk = new DiskWatcher({
+    logger,
+    path: config.housekeeping.disk.path,
+    dataDir: config.service.dataDir,
+  });
+  const housekeeper = new Housekeeper({
+    db,
+    logger,
+    config: config.housekeeping,
+    store,
+    disk,
+  });
   housekeeper.start();
   lifecycle.onShutdown({
     name: 'housekeeping',
@@ -923,6 +945,8 @@ async function serve(): Promise<void> {
       probes: () => reachability.stats(),
       delivery: (q) => deliveryHealth.read(q),
       alarms: () => alarmScheduler.stats,
+      disk: () => housekeeper.stats.disk,
+      evictedChunks: () => housekeeper.stats.evictedChunks,
       queries: () => probeQueries.stats(),
     },
     ingest: async (results) => {

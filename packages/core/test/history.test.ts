@@ -37,6 +37,7 @@ const housekeeping = {
     stateDays: 3_650,
   },
   compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
+  disk: { path: '', evictBelowPercent: 10, recoverAbovePercent: 15, minimumRetainedHours: 48 },
 };
 
 /**

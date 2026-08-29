@@ -73,6 +73,8 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       db,
       logger: silent,
       sources: {
+        disk: () => null,
+        evictedChunks: () => 0,
         ingestion: () => ({
           queuedRows: 41,
           refusedRows: 7,

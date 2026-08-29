@@ -96,6 +96,49 @@ const CHANNELS: readonly ChannelDef[] = [
     },
   },
   { key: 'backfillQueue', name: 'Rollup backfill queue', unit: 'windows' },
+  // **The disk the readings are on** (`S-17`), which until that ticket nothing in this system
+  // knew anything about. A percentage rather than bytes for the alarm, because a threshold in
+  // gigabytes is wrong on every installation but the one it was written for; the bytes are here
+  // too, because "12% free" is not something an operator can act on without knowing of what.
+  //
+  // A **gap** on a core whose database is on another host: that core is not looking at a full
+  // disk, it is not looking at the disk, and a zero here would raise exactly the alarm this
+  // exists to make meaningful.
+  {
+    key: 'diskFree',
+    name: 'Free disk space',
+    unit: '%',
+    // Lower limits, which is the whole reason `S-18`'s declaration has them: on this channel the
+    // fault is *below*. Ten percent is where `housekeeping.disk` begins evicting the oldest
+    // readings ahead of their retention, so the error limit and the eviction threshold are the
+    // same event — the alarm and the action agree by construction rather than by coincidence.
+    limits: {
+      lowerWarning: 20,
+      lowerError: 10,
+      warningMessage: 'the disk holding the readings is filling',
+      errorMessage: 'the disk is nearly full; the oldest readings are being evicted early',
+    },
+  },
+  { key: 'diskFreeBytes', name: 'Free disk space', unit: 'MB' },
+  // What this installation's own database occupies. The number that answers "is it us", which is
+  // the first question when a shared volume fills.
+  { key: 'databaseSize', name: 'Database size', unit: 'MB' },
+  // **Never a rounding error.** Every one of these is a reading somebody asked us to keep for
+  // longer than we kept it (`S-17`). A counter, so the counter path turns it into a rate: what
+  // matters is not that an eviction happened once during an incident but that it is still
+  // happening.
+  {
+    key: 'evictedChunks',
+    name: 'Chunks evicted early',
+    unit: 'chunks',
+    counter: { bits: 64 },
+    limits: {
+      // As with `spoolDropped`: any rate above zero is data that was promised and is gone, and a
+      // bound of exactly zero fires on the floating-point residue of a rate returning to none.
+      upperError: 0.000_01,
+      errorMessage: 'readings are being evicted ahead of their retention to keep the disk writable',
+    },
+  },
   { key: 'reapQueue', name: 'Channels awaiting reap', unit: 'channels' },
   { key: 'notifyPending', name: 'Notifications undelivered', unit: 'notifications' },
   // The one that goes wrong first when a relay dies: the count stays small while the age climbs.

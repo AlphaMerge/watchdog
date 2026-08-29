@@ -96,6 +96,45 @@ export interface HousekeepingConfig {
     rawAfterDays: number;
     fiveMinuteAfterDays: number;
   };
+  /**
+   * What happens as the disk fills (`S-17`, `WORKFLOW.MD §13` row 7).
+   *
+   * Retention by age keeps a healthy installation inside its budget. This is the other case: the
+   * budget was wrong, or something else on the volume grew, and the choice is between evicting
+   * the oldest readings early and letting the database stop accepting writes. **It evicts**, and
+   * says so loudly — data that cannot be written is worse than data kept less long than promised,
+   * and a monitoring system that goes silent because its disk filled is the failure this project
+   * exists to not have (ADR-001 Decision 4 amendment).
+   */
+  disk: {
+    /**
+     * The filesystem to watch. Empty watches the one holding `service.dataDir`.
+     *
+     * **Set it when PostgreSQL's data directory is on a different volume**, which is the case
+     * that matters: the readings are on the database's disk, not the core's, and watching the
+     * wrong one would guard nothing while reporting a healthy number. A core whose database is
+     * on another *host* cannot see that disk at all, and says so rather than guessing.
+     */
+    path: string;
+    /** Free space, as a percentage, below which the oldest readings are evicted early. */
+    evictBelowPercent: number;
+    /**
+     * Free space, as a percentage, at which eviction stops.
+     *
+     * Above `evictBelowPercent` on purpose: evicting exactly to the trigger point means the next
+     * pass starts evicting again, and the system spends its life at the threshold dropping data
+     * a chunk at a time.
+     */
+    recoverAbovePercent: number;
+    /**
+     * How much recent history is never evicted, whatever the disk says.
+     *
+     * A floor rather than a policy: evicting what is being written this minute would not save an
+     * installation whose disk is full, and would take the readings an operator is looking at
+     * while they try to fix it.
+     */
+    minimumRetainedHours: number;
+  };
 }
 
 export interface IngestionConfig {
@@ -798,7 +837,14 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as HousekeepingConfig,
       additionalProperties: false,
-      required: ['enabled', 'intervalSeconds', 'rollupLagSeconds', 'retention', 'compression'],
+      required: [
+        'enabled',
+        'intervalSeconds',
+        'rollupLagSeconds',
+        'retention',
+        'compression',
+        'disk',
+      ],
       properties: {
         enabled: { type: 'boolean', default: true },
         // Five minutes matches the finest rollup tier: running more often just re-reads the
@@ -826,6 +872,21 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             dailyDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
             auditDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 730 },
             stateDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
+          },
+        },
+        disk: {
+          type: 'object',
+          default: {} as HousekeepingConfig['disk'],
+          additionalProperties: false,
+          required: ['path', 'evictBelowPercent', 'recoverAbovePercent', 'minimumRetainedHours'],
+          properties: {
+            path: { type: 'string', default: '' },
+            // Ten percent of a disk is enough room for the database to keep writing while an
+            // operator reads the alarm, and low enough that it is not reached by an installation
+            // whose retention is sized correctly.
+            evictBelowPercent: { type: 'number', minimum: 1, maximum: 90, default: 10 },
+            recoverAbovePercent: { type: 'number', minimum: 1, maximum: 95, default: 15 },
+            minimumRetainedHours: { type: 'integer', minimum: 1, maximum: 8_760, default: 48 },
           },
         },
         compression: {

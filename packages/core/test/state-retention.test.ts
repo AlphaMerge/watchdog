@@ -39,6 +39,7 @@ function housekeeping(stateDays: number): HousekeepingConfig {
       stateDays,
     },
     compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
+    disk: { path: '', evictBelowPercent: 10, recoverAbovePercent: 15, minimumRetainedHours: 48 },
   };
 }
 

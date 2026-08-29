@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { SensorCatalogue, type SensorType } from '@ms/sensors';
 import type { Database } from '../src/db/pool.js';
-import { applyDeclaredLimits } from '../src/state/declared-limits.js';
+import { ChannelResolver } from '../src/ingestion/channels.js';
+import { applyDeclaredLimits, declaredLimitsLookup } from '../src/state/declared-limits.js';
 import { limitsFromDeclaration, NO_LIMITS, parseLimits } from '../src/state/limits.js';
 import {
   createScratchDatabase,
@@ -230,6 +231,50 @@ describe(
         const options = { db, logger: silent, catalogue: catalogueOf(revised) };
         assert.equal((await applyDeclaredLimits(options)).applied, 1);
         assert.equal((await applyDeclaredLimits(options)).applied, 0);
+      });
+
+      it('reaches a channel ingestion creates, not only one created with its sensor', async () => {
+        // Found live: `S-17` added channels to `ms.core.health`, whose sensors already existed,
+        // so the first reading created them through the ingestion path — where nothing knew what
+        // the type declared. They sat unset until the *next* restart, which is a default that
+        // arrives a restart late for every channel added to an existing type.
+        const resolver = new ChannelResolver({
+          logger: silent,
+          declaredLimits: declaredLimitsLookup(catalogueOf(watched)),
+        });
+        await db.tx((q) =>
+          resolver.resolve(q, [
+            {
+              sensorId,
+              at: new Date().toISOString(),
+              outcome: 'ok',
+              message: '',
+              durationMs: 1,
+              channels: [{ key: 'late', value: 1 }],
+            },
+          ]),
+        );
+
+        // `late` is not declared, so it is `unset` — and the one that *is* declared proves the
+        // lookup reached this path at all.
+        assert.equal((await channel('late')).source, 'unset');
+
+        await db.query('DELETE FROM channel WHERE sensor_id = $1 AND key = $2', [sensorId, 'lag']);
+        await db.tx((q) =>
+          resolver.resolve(q, [
+            {
+              sensorId,
+              at: new Date().toISOString(),
+              outcome: 'ok',
+              message: '',
+              durationMs: 1,
+              channels: [{ key: 'lag', value: 1 }],
+            },
+          ]),
+        );
+        const lag = await channel('lag');
+        assert.equal(lag.source, 'declared');
+        assert.equal(parseLimits(lag.limits).upperError, 5_000);
       });
 
       it('reports a declaration this installation has no channel for', async () => {

@@ -91,6 +91,8 @@ export interface TimeSeriesStore {
   compactableChunks(q: Queryable, table: string, before: Date, limit: number): Promise<string[]>;
   compact(q: Queryable, chunk: string): Promise<void>;
   dropOlderThan(q: Queryable, table: string, olderThan: Date): Promise<string[]>;
+  /** The oldest instant a table still holds, or null when it holds nothing (`S-17`). */
+  oldestAt(q: Queryable, table: string): Promise<Date | null>;
   /** The state each sensor was in at the horizon, for those with nothing newer (`S-15`). */
   stateAtHorizon(q: Queryable, horizon: Date): Promise<StateAnchor[]>;
   /** Anchors the candidates the drop left with no state at all (`S-15`). */
@@ -364,6 +366,21 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
   async dropOlderThan(q: Queryable, table: string, olderThan: Date): Promise<string[]> {
     assertKnownTable(table);
     return this.#engine.dropOlderThan(q, table, olderThan);
+  }
+
+  /**
+   * Where a table's history starts (`S-17`).
+   *
+   * Read rather than assumed, because emergency eviction walks *forward* from it: an
+   * installation whose oldest raw data is a week old has nothing to evict however full the disk
+   * is, and one whose oldest is a year old has a year to work through a day at a time. A
+   * `min(time)` over a hypertable is per-chunk index scans, which is affordable in a loop that
+   * runs every five minutes and is not on any request path.
+   */
+  async oldestAt(q: Queryable, table: string): Promise<Date | null> {
+    assertKnownTable(table);
+    const rows = await q.query<{ at: Date | null }>(`SELECT min(time) AS at FROM ${table}`);
+    return rows[0]?.at ?? null;
   }
 
   /**

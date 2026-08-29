@@ -92,6 +92,23 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Windows waiting to be rolled up again after late data arrived.',
   },
   {
+    key: 'diskFree',
+    name: 'ms_core_disk_free_percent',
+    help: 'Free space on the filesystem holding the readings. Absent where the core cannot say.',
+  },
+  {
+    key: 'databaseSize',
+    name: 'ms_core_database_bytes',
+    help: 'What this installation’s database occupies.',
+    scale: MB,
+  },
+  {
+    key: 'evictedChunks',
+    name: 'ms_core_evicted_chunks_total',
+    help: 'Chunks dropped ahead of their configured retention because the disk was filling.',
+    counter: true,
+  },
+  {
     key: 'reapQueue',
     name: 'ms_core_channel_reap_queue',
     help: 'Channels whose rows are still being deleted after their sensor went.',
