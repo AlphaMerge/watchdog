@@ -104,43 +104,63 @@ const elapsedHours = hours(samples[samples.length - 1]);
 
 // **The thresholds, and why each is where it is.**
 //
-// Memory: 1% of the mean per hour. Over 24 hours that is a quarter of the footprint, which is
-// growth anybody would call growth, and it is well above the sawtooth a garbage-collected heap
-// produces at a steady workload.
+// **Every check is one-sided.** Only growth is a finding. The first version compared the absolute
+// slope, and duly reported FAIL for an ingestion queue that was *draining* — which is the system
+// working, described as a fault. A soak that cries wolf on a healthy run is worse than no soak,
+// because the next person reads past it.
 //
-// Scheduler lag: 1% of the *budget* per hour, not of the mean. `P-15` set the budget at 1,000 ms
-// p95, so this permits 10 ms an hour — 240 ms over a day, a quarter of the budget. Scaling to the
-// mean instead would make a healthy installation running at 5 ms lag fail on a 2 ms rise.
+// **Where a channel declares limits, those are the yardstick** (`S-18`). Judging rollup lag
+// against 1% of its own mean called +4.6 s/h a failure on a run whose lag never exceeded 226 s
+// against a declared warning threshold of 3,600 — stricter than the product's own definition of
+// "bad" by a factor of forty. The question an operator actually has is whether the trend takes a
+// channel to the threshold it already has, so that is the question this asks: at this slope, is
+// the channel still below its declared warning bound after twenty-four hours?
 //
-// Counters that are supposed to be flat — queue depth, rollup lag — are checked the same way as
-// memory, because an installation that is keeping up has no reason for any of them to trend.
-const BUDGET_LAG_MS = 1000;
-const verdicts = [];
-const check = (name, result, limitPerHour, unit) => {
-  if (result === null) {
-    verdicts.push({ name, ok: false, detail: 'no data' });
-    return;
-  }
-  const ok = Math.abs(result.slopePerHour) <= limitPerHour;
-  verdicts.push({
-    name,
-    ok,
-    detail: `${result.slopePerHour >= 0 ? '+' : ''}${result.slopePerHour.toFixed(3)} ${unit}/h against ±${limitPerHour.toFixed(3)}`,
-  });
+// Memory has no declared limits — a footprint is whatever the installation's hardware allows — so
+// it keeps a proportional test: 1% of the mean per hour, which over a day is a quarter of the
+// footprint. That is growth anybody would call growth, and well above the sawtooth a
+// garbage-collected heap produces at a steady workload.
+const PROJECT_HOURS = 24;
+
+/** The declared warning bound for the channels that have one, from `ms.*.health`. */
+const DECLARED_WARNING = {
+  'scheduler lag p95 (ms)': 1000,
+  'ingestion queue (readings)': 40_000,
+  'rollup lag (s)': 3600,
+  'pool in use (%)': 80,
 };
 
-for (const [name, key] of [
-  ['core RSS (MB)', 'core RSS (MB)'],
-  ['core heap (MB)', 'core heap (MB)'],
-  ['probe RSS (MB)', 'probe RSS (MB)'],
-]) {
-  const result = measured[key];
-  check(name, result, result === null ? 0 : Math.abs(result.mean) * 0.01, 'MB');
+const verdicts = [];
+
+/** Growth this series may show per hour before it is a finding, and the reason in words. */
+function budgetFor(name, result) {
+  const declared = DECLARED_WARNING[name];
+  if (declared !== undefined) {
+    // Headroom to the declared bound, spread over a day. Floored so a channel already sitting at
+    // its threshold does not get a budget of zero and fail on rounding.
+    const headroom = Math.max(declared - result.mean, declared * 0.01);
+    return {
+      limit: headroom / PROJECT_HOURS,
+      why: `reaches ${String(declared)} in ${String(PROJECT_HOURS)} h`,
+    };
+  }
+  return { limit: Math.abs(result.mean) * 0.01, why: '1%/h of the mean' };
 }
-check('scheduler lag p95 (ms)', measured['scheduler lag p95 (ms)'], BUDGET_LAG_MS * 0.01, 'ms');
-for (const key of ['ingestion queue (readings)', 'rollup lag (s)']) {
-  const result = measured[key];
-  check(key, result, result === null ? 0 : Math.max(Math.abs(result.mean) * 0.01, 0.5), '');
+
+for (const [name, result] of Object.entries(measured)) {
+  if (result === null) {
+    verdicts.push({ name, ok: false, detail: 'no data' });
+    continue;
+  }
+  const { limit, why } = budgetFor(name, result);
+  const slope = result.slopePerHour;
+  verdicts.push({
+    name,
+    ok: slope <= limit,
+    detail:
+      `${slope >= 0 ? '+' : ''}${slope.toFixed(3)}/h against +${limit.toFixed(3)} (${why})` +
+      (slope < 0 ? ' — falling' : ''),
+  });
 }
 
 const windowHours = elapsedHours - WARMUP_MINUTES / 60;
