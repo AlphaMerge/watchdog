@@ -160,7 +160,8 @@ list — and verified that `date_bin` reproduces `time_bucket` exactly
 | S-14 sibling ordering | done | Manual arrangement within a parent, honoured by the tree and by `sort=manual`, falling back to name where nobody has arranged anything |
 | S-13 conditional GET | done | ETags that cover the inheritance chain, so the common UI read is conditional again |
 | S-15 state-history retention | done | `sensor_state` was excluded from retention because a sensor Up for three years has one row, three years old, and dropping it would leave the sensor with **no known state at all** — which breaks uptime and SLA. Snapshot, drop, then anchor only the sensors the drop actually emptied. **Anchoring after the drop rather than before it is what makes it affordable**: the obvious order writes a row per quiet sensor per pass, 288 a day. Mutation 10/10 |
-| S-09, S-11 | not started | S-09 is mostly delivered by S-05 through S-08; what is left is the UI side |
+| S-09 gap semantics | done | Mostly delivered by S-05 through S-08 and finished on the UI side by U-04/U-05; what this ticket added is the **composed** test. `no-data is not zero` is not a property of storage, or the rollup, or the query, or the chart — it is a property of the five together, and a zero could appear at any seam without failing a test written for one stage. Sixty scans of a constant 100 ms with ten failures, walked from the failed check to the JSON: a one-hour bucket averages 100 and not 83.3, a failed check carrying a zero is discarded and counted, and the gap is ten minutes while the outage is nine — which is why uptime comes from `sensor_state` and not from where the samples stop. Mutation 6/6 |
+| S-11 | not started | |
 
 All four exit criteria are met and measured:
 

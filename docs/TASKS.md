@@ -142,7 +142,7 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       fewer rows (`docs/findings/2026-08-25-historic-query-measurements.md`). A *default*
       resolution is steered onto a width a tier can compose — 45 minutes rather than 44 — while an
       explicit one is honoured as asked and `source` says where it came from.
-- [ ] **S-09 — Gap semantics** · M · S-08 · No-data distinct from zero in storage, query results
+- [x] **S-09 — Gap semantics** · M · S-08 · No-data distinct from zero in storage, query results
       and wire format. Averaging never interpolates across a gap.
       **Mostly delivered already, deliberately:** storage cannot hold a gap as anything but a
       missing row (`sample.value` is `NOT NULL`, S-05); ingestion refuses to store channel values
@@ -159,8 +159,34 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       withheld rather than shown, because a stale number is no-data wearing a value.
       **Finished on the UI side by U-05:** the uPlot panels keep `spanGaps` false and no code path
       turns a null into a number, so an outage is a break in the line rather than a dip to the
-      floor; the tooltip says "no reading" and the table view a dash. What remains is only the
-      end-to-end scenario test — a gap walked from a Down sensor to a rendered chart.
+      floor; the tooltip says "no reading" and the table view a dash.
+
+      **S-09 outcome: the scenario test, `packages/core/test/gap-scenario.test.ts`.** One sensor,
+      sixty one-minute scans, ten of them failing, walked from the failed check to the JSON a
+      chart is drawn from. Every stage of that already had its own tests, which is the reason the
+      composed test was still worth writing: *no-data is not zero* is not a property of storage,
+      or of the rollup, or of the query, or of the chart — it is a property of the five of them
+      together, and a zero could appear at any seam between them without failing a test written
+      for one stage.
+
+      **The reading is a constant 100 ms, so arithmetic is the assertion.** Anything that
+      interpolates, zero-fills or divides by elapsed time instead of by readings produces a number
+      that is not 100, and the failure names the stage that produced it. The sharpest case is a
+      single bucket over the whole hour: fifty readings of 100 must average **100**, not 83.3.
+
+      **Two things it makes concrete that were only written down before.** The scan at minute 25
+      is a *failed* check that carries a reading of zero anyway — what a sensor type that reports
+      `0` on failure looks like from the core's side — and it is discarded and counted rather than
+      trusted. And the gap and the outage are **different lengths**: readings stop at the first
+      failed scan, but `scan.retryWarnings` defaults to 1, so the sensor is not Down until the
+      second. Ten minutes of gap, nine minutes of downtime. Anything computing uptime from where
+      the samples stop would invent a minute of downtime that never happened, which is why
+      `CLAUDE.md` computes it from `sensor_state`.
+
+      Mutation 6/6, and the first round was 4/6: the test asserted `null` on the averages and not
+      on `min`, `max` and `count`. A min-max band drawing to the floor while the line correctly
+      breaks is the same bug wearing a different array, so a gap is now asserted `null` in every
+      series a bucket has, through `JSON.stringify` as well — the cheapest place to lose one.
 - [x] **S-10 — Audit log** · M · S-03 · Every create/update/delete recorded with actor,
       timestamp and diff; queryable per object.
       **S-10 outcome:** migration 005, `packages/core/src/audit/`, and
