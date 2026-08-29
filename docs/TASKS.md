@@ -6455,8 +6455,53 @@ because each is a decision rather than a defect:
       Moving `config check` into `@ms/shared` left its compiled output behind in the core's
       `dist`, and `build-hygiene.test.ts` failed on exactly that — the trap `A-09` documented,
       caught by the test written for it.
-- [ ] **H-04 — Backup and restore procedure** · M · H-03 · Documented and tested end to end,
+- [x] **H-04 — Backup and restore procedure** · M · H-03 · Documented and tested end to end,
       including a restore onto a clean host.
+
+      **H-04 outcome.** `ms-backup` and `ms-restore` in `bin` — not beside the installer, because
+      they are run for the life of an installation, long after the unpacked tarball is gone, and a
+      procedure whose first step is "find the release you installed from" is one nobody runs.
+      The runbook is `docs/runbook-backup-restore.md`.
+
+      **"Onto a clean host" is the whole ticket, and it is the reason the test is two containers.**
+      Restoring over the installation a backup came from proves almost nothing: the data is
+      already there, the vault key is already there, the certificates are already there, and a
+      restore that quietly did nothing would pass. `scripts/smoke-restore.sh` installs onto a
+      second box that has never seen the first one, restores, starts the service, and asserts the
+      object tree by id, 500 readings unchanged, and the credential by **both** of its inputs —
+      the vault key and the stored ciphertext, each byte-identical. That pair yielding the
+      plaintext is the vault's own property (`vault-crypto.test.ts`); what a *backup* gets wrong
+      is losing or substituting one of them.
+
+      **The archive holds the vault key, and that is not optional.** Without it a restore produces
+      a system that cannot log in to anything it monitors, unrecoverably. It also makes the
+      archive equivalent to the plaintext of every stored credential — 0600, and the runbook says
+      where it belongs. What is deliberately *not* in it: the probe's result spool, which is a
+      queue rather than data and would replay readings a rebuilt machine never took; and
+      `/opt/ms`, which comes from the release tarball and whose restore over a newer install is a
+      downgrade nobody asked for.
+
+      **Writing the test found three real defects, in the order a hand-rolled restore hits them.**
+      All three are TimescaleDB, and all three produce a database that looks restored:
+      `COMMENT ON EXTENSION` aborts a `--exit-on-error` restore hundreds of tables in, because
+      only the extension's owner may set it; hypertable chunks come back as **ordinary tables**
+      unless `timescaledb_pre_restore()` ran first, which needs a superuser; and the dump COPYs
+      into `_timescaledb_catalog`, where the application's role has no rights, because on the
+      original machine the extension wrote those rows with its own privileges. `ms-restore`
+      filters the extension out of the archive's table of contents, tries the application role
+      then a local `postgres` for restore mode and refuses with the exact statements to run by
+      hand if neither works, and grants the catalog rights for the restore — which gives the role
+      nothing it did not already have, and keeps the restored objects owned by the application
+      rather than by `postgres`.
+
+      Also asserted: the archive is 0600, and a restore **refuses while ms-core is active** —
+      restoring under a live core would have it writing into a database being replaced beneath
+      it. Both smoke tests run in CI.
+
+      One of `S-17`'s own tests turned out to be flaky and was fixed here: it compared the
+      watcher's `statfs` with its own, taken a moment later on a live filesystem, and the free
+      block count moves between them. It now compares against the *reserve*, which is a
+      percentage of the disk where the drift is kilobytes — and still kills the `bfree` mutant.
 - [ ] **H-05 — Linux installers** · M · F-07 · `.deb` and `.rpm` in addition to the tarball, with
       upgrade paths.
 - [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and

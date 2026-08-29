@@ -112,6 +112,12 @@ jobs:
       - name: install smoke test
         run: scripts/smoke-install.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
 
+      # Backs one host up and restores onto a second, clean one (H-04). Two containers, because
+      # restoring over the installation the backup came from proves almost nothing — the data is
+      # already there, and a restore that quietly did nothing would pass.
+      - name: backup and restore smoke test
+        run: scripts/smoke-restore.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -5,6 +5,7 @@
 #   bin/ms-core, bin/ms-probe     launcher scripts
 #   app/{core,probe,shared}/dist  compiled JavaScript
 #   app/node_modules              production dependencies, including native addons
+#   bin/ms-backup, bin/ms-restore the backup and restore procedure (H-04)
 #   deploy/systemd/*.service      unit files
 #   deploy/winsw/*.xml            Windows service definitions
 #   etc/{core,probe}.json         example configuration
@@ -145,7 +146,13 @@ else
   cp "${repo_root}/deploy/install.sh" "${stage}/install.sh"
   # The enrolment tool belongs on the core, because the CA does (R-07).
   cp "${repo_root}/deploy/enrol-probe.sh" "${stage}/bin/ms-enrol"
-  chmod +x "${stage}/install.sh" "${stage}/bin/ms-enrol"
+  # Backup and restore go in `bin`, not beside the installer (`H-04`): they are run for the
+  # life of the installation, long after the unpacked tarball has been deleted, and a procedure
+  # whose first step is "find the release you installed from" is one nobody runs.
+  cp "${repo_root}/deploy/backup.sh" "${stage}/bin/ms-backup"
+  cp "${repo_root}/deploy/restore.sh" "${stage}/bin/ms-restore"
+  chmod +x "${stage}/install.sh" "${stage}/bin/ms-enrol" "${stage}/bin/ms-backup" \
+           "${stage}/bin/ms-restore"
 fi
 printf '%s\n' "${version}" > "${stage}/VERSION"
 

@@ -12,15 +12,16 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 
 ## The documents
 
-| Document                                                       | What it is                                                               |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| [`docs/CAPABILITIES.MD`](docs/CAPABILITIES.MD)                 | What PRTG does, with `[V1]`/`[V2]`/`[OUT]` markers. The scope contract.  |
-| [`docs/WORKFLOW.MD`](docs/WORKFLOW.MD)                         | How the system must behave over time — loops, lifecycles, state machines |
-| [`docs/ADR-001-architecture.md`](docs/ADR-001-architecture.md) | Stack and architecture decisions, with rationale                         |
-| [`docs/PLAN.md`](docs/PLAN.md)                                 | Phased roadmap with exit criteria                                        |
-| [`docs/TASKS.md`](docs/TASKS.md)                               | Ticket-sized backlog — **pick work from here**                           |
-| [`docs/findings/`](docs/findings/)                             | Measured results that change a documented assumption                     |
-| [`docs/adding-a-sensor-type.md`](docs/adding-a-sensor-type.md) | How to write a sensor type. One file, six members.                       |
+| Document                                                           | What it is                                                               |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| [`docs/CAPABILITIES.MD`](docs/CAPABILITIES.MD)                     | What PRTG does, with `[V1]`/`[V2]`/`[OUT]` markers. The scope contract.  |
+| [`docs/WORKFLOW.MD`](docs/WORKFLOW.MD)                             | How the system must behave over time — loops, lifecycles, state machines |
+| [`docs/ADR-001-architecture.md`](docs/ADR-001-architecture.md)     | Stack and architecture decisions, with rationale                         |
+| [`docs/PLAN.md`](docs/PLAN.md)                                     | Phased roadmap with exit criteria                                        |
+| [`docs/TASKS.md`](docs/TASKS.md)                                   | Ticket-sized backlog — **pick work from here**                           |
+| [`docs/findings/`](docs/findings/)                                 | Measured results that change a documented assumption                     |
+| [`docs/adding-a-sensor-type.md`](docs/adding-a-sensor-type.md)     | How to write a sensor type. One file, six members.                       |
+| [`docs/runbook-backup-restore.md`](docs/runbook-backup-restore.md) | Backing up, and restoring onto a host that is not the one it came from   |
 
 ## Layout
 

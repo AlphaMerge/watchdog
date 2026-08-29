@@ -252,12 +252,21 @@ describe(
         const reading = await watcher.read(db);
 
         assert.ok(reading !== null);
-        assert.equal(reading.freeBytes, stats.bavail * stats.bsize);
-        if (stats.bavail !== stats.bfree) {
-          assert.notEqual(
-            reading.freeBytes,
-            stats.bfree * stats.bsize,
-            'this filesystem has a reserve, and it is not being counted',
+
+        // Not an equality: the two `statfs` calls are a moment apart on a live filesystem, and
+        // the free-block count moves between them. What discriminates is the *reserve*, which
+        // is a percentage of the disk — gigabytes where the drift is kilobytes — so a tolerance
+        // far above the one and far below the other separates them cleanly.
+        const SLACK = 8 * 1024 * 1024;
+        assert.ok(
+          Math.abs(reading.freeBytes - stats.bavail * stats.bsize) < SLACK,
+          'the reading is the space this account may use',
+        );
+        const reserve = (stats.bfree - stats.bavail) * stats.bsize;
+        if (reserve > SLACK) {
+          assert.ok(
+            Math.abs(reading.freeBytes - stats.bfree * stats.bsize) > SLACK,
+            `this filesystem reserves ${String(reserve)} bytes for root, and they are not counted`,
           );
         }
       });
