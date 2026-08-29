@@ -3249,7 +3249,7 @@ because each is a decision rather than a defect:
 
 ## Phase 6 — Sensor breadth
 
-- [ ] **U-12 — Repeating fields in the generated form** · M · U-08 · An array of objects in a
+- [x] **U-12 — Repeating fields in the generated form** · M · U-08 · An array of objects in a
       `paramsSchema` renders as `U-08`'s JSON fallback — an editable textarea holding the raw
       value. It round-trips correctly and deletes nothing, which is why the fallback exists, but
       an operator configuring one types JSON by hand.
@@ -3260,6 +3260,46 @@ because each is a decision rather than a defect:
       **Still open after `T-15` and `T-16`:** `http.transaction.steps` and `rest.custom.extract`
       are arrays of objects with arrays of objects *inside* them, so this is now the shape of
       every new sensor type's most important parameter rather than an edge case.
+
+      **U-12 outcome.** `kind: 'array'` in `forms/schema.ts` and an `ArrayField` beside the
+      object fieldset. Add, remove and reorder; `minItems`/`maxItems` honoured in the control and
+      in the client-side check; a free-form array with no `items` still falls back to the JSON
+      box, because where "add an entry" has nothing to add the honest control is the one that
+      hands the operator the value.
+
+      **Entries render through the same `Field` as everything else**, at paths carrying their
+      index (`steps.0.method`), and three things fall out of that rather than being built:
+      nesting works, because an entry containing an array is another `ArrayField` — which is what
+      `http.transaction.steps` and `rest.custom.extract` actually need; server problems land on
+      the right control, because the core reports Ajv's `instancePath` and that is the same path;
+      and write-only entries keep their behaviour, which a bespoke editor would have had to
+      reimplement.
+
+      **The path helpers had to learn about arrays**, and that is the change with the sharpest
+      failure mode. `writeAt` decides a container's shape from the *next* segment, so
+      `steps.0.method` builds `{steps: [{…}]}` — a walk that always made objects would produce
+      `{steps: {"0": {…}}}`, which serialises to JSON that looks almost right, validates as the
+      wrong type, and is refused with a message about the parameter rather than about the form.
+
+      **Reordering is one position at a time from a button**, not drag-and-drop: order is
+      meaningful in every one of these — a transaction's steps run in order — and `U-11`'s WCAG
+      pass rules out a drag target as the only way to do it.
+
+      **`items.title` names an entry.** The fieldset is named for the parameter ("Steps") and an
+      entry inside it wants the singular; nothing can derive one from the other without guessing
+      at English plurals, so twelve shipped array parameters now declare theirs and the buttons
+      read "Remove Step 2".
+
+      Verified live against the running UI: `http.transaction` renders its steps as a repeating
+      fieldset with per-entry headers and captures nested inside, and the body the form assembles
+      is accepted by the API unchanged. Mutation 16/16, after two rounds — one survivor was a
+      bounds check on the reorder that nothing can reach, since the edge buttons are disabled,
+      and it was deleted rather than tested around; the other was the fixture giving an array and
+      its items the same title, which let the fallback pass for the feature.
+
+      **Filed on the way past: `A-11`.** Driving the real form in a browser found that the
+      `dev:ui` profile cannot save anything — the cross-origin write guard takes an
+      `allowedOrigins` list that no caller ever passes.
 - [ ] **U-13 — Mapping editor for REST Custom** · M · T-16, U-04 · The form that writes
       `rest.custom`'s `extract` array: paste a response, see what each path selects against it,
       name the channel. **Split out by `T-16`:** the sensor works without it — the paths go in
@@ -6033,6 +6073,18 @@ because each is a decision rather than a defect:
       its compiled output behind, which that test exists to notice.
 
       Tests: 18 for the hardening layer, 7 for the sensor SSRF guard.
+- [ ] **A-11 — `allowedOrigins` is an option nothing can set** · S · A-09 · The cross-origin
+      write guard in `api/hardening.ts` takes an `allowedOrigins` list and **no caller ever passes
+      one** — it is not in the config schema, not in `main.ts`, and not in `dev/core.json`. So the
+      only origin that can write is the one serving the API, and every other is refused with "this
+      request came from another origin".
+      **Found by `U-12`**, driving the real form in a browser: `docker-compose.dev.yml` has a
+      `ui` profile that serves Vite on :5173 against the core on :8080, and **nothing in that UI
+      can save**. Every developer who uses it hits this on their first click.
+      The fix is a config key and a line in `main.ts`, not a change to the guard: the guard is
+      right, and an installation behind a reverse proxy on a different hostname needs the same
+      key for the same reason. Worth doing before `H-07`'s documentation set describes a
+      development setup that does not work.
 - [x] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
       and tree position; explicit test that no route leaks a credential to a read-only user.
 

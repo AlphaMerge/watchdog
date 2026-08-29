@@ -77,6 +77,9 @@ export const snmpTrap: SensorType = {
           'that got past “only this device” counts. Within one rule every field given must ' +
           'match, so adding a field always narrows.',
         items: {
+          // The singular, for `U-12`'s repeating control: the fieldset is named for the
+          // parameter and an entry inside it wants this.
+          title: 'Rule',
           type: 'object',
           additionalProperties: false,
           properties: {

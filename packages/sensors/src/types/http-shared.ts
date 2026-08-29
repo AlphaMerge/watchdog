@@ -106,6 +106,9 @@ export const HTTP_REQUEST_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'credential on the device instead, so a hundred sensors against one API rotate their ' +
       'token in one place rather than a hundred.',
     items: {
+      // The singular, for `U-12`'s repeating control: the fieldset is named for the
+      // parameter and an entry inside it wants this.
+      title: 'Header',
       type: 'object',
       additionalProperties: false,
       required: ['name'],

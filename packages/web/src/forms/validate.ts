@@ -1,4 +1,4 @@
-import type { FieldModel } from './schema';
+import type { FieldModel, JsonSchema } from './schema';
 
 export interface FieldProblem {
   readonly path: string;
@@ -70,6 +70,18 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
     add('is not one of the allowed values');
   }
 
+  if (field.kind === 'array' && Array.isArray(value)) {
+    // The count only. What is *in* each entry is checked as its own field, at its own path, by
+    // the same walk that checks everything else — a second opinion here would report the same
+    // fault twice, once against a control and once against the fieldset around it.
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      add(`needs at least ${String(schema.minItems)}`);
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      add(`takes at most ${String(schema.maxItems)}`);
+    }
+  }
+
   return problems;
 }
 
@@ -91,14 +103,28 @@ export function allProblems(
   fields: readonly FieldModel[],
   values: Record<string, unknown>,
   read: (values: Record<string, unknown>, path: string) => unknown,
+  fieldsFor: (schema: JsonSchema, prefix: string) => FieldModel[] = () => [],
 ): FieldProblem[] {
   const problems: FieldProblem[] = [];
   for (const field of fields) {
     if (field.kind === 'object') {
-      problems.push(...allProblems(field.children, values, read));
+      problems.push(...allProblems(field.children, values, read, fieldsFor));
       continue;
     }
     problems.push(...problemsFor(field, read(values, field.path)));
+
+    // **Into each entry, at the path the form gave it** (`U-12`). Without this a form would
+    // submit an array whose entries are missing required properties and learn so from a 400 —
+    // which is exactly the round trip this convenience exists to save, and it would be missing
+    // for the one parameter shape that is hardest to type correctly.
+    const entries = read(values, field.path);
+    if (field.kind !== 'array' || field.items === undefined || !Array.isArray(entries)) continue;
+    const items = field.items;
+    entries.forEach((_entry, index) => {
+      problems.push(
+        ...allProblems(fieldsFor(items, `${field.path}.${String(index)}`), values, read, fieldsFor),
+      );
+    });
   }
   return problems;
 }

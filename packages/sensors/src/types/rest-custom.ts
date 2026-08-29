@@ -152,6 +152,9 @@ export const restCustom: SensorType = {
           'finds nothing leaves a gap in its channel rather than a zero — a metric an API ' +
           'stopped publishing is missing data, not a reading of none.',
         items: {
+          // The singular, for `U-12`'s repeating control: the fieldset is named for the
+          // parameter and an entry inside it wants this.
+          title: 'Channel',
           type: 'object',
           additionalProperties: false,
           required: ['key', 'path'],

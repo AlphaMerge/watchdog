@@ -153,6 +153,9 @@ export const DB_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'The first cell of the first row is always a channel. These are for the other columns of ' +
       'a query that answers several questions at once — one connection instead of five.',
     items: {
+      // The singular, for `U-12`'s repeating control: the fieldset is named for the
+      // parameter and an entry inside it wants this.
+      title: 'Channel',
       type: 'object',
       additionalProperties: false,
       required: ['key'],

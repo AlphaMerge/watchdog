@@ -38,6 +38,9 @@ export const coreFactory: SensorType = {
           'Each row is one channel and one formula. The first is the channel this sensor is ' +
           'judged by.',
         items: {
+          // The singular, for `U-12`'s repeating control: the fieldset is named for the
+          // parameter and an entry inside it wants this.
+          title: 'Channel',
           type: 'object',
           additionalProperties: false,
           required: ['key', 'formula'],

@@ -133,6 +133,9 @@ export const syslogReceiver: SensorType = {
           'this meant “any”, adding a second rule would widen the sensor, which is the opposite ' +
           'of what anybody typing one intends.',
         items: {
+          // The singular, for `U-12`'s repeating control: the fieldset is named for the
+          // parameter and an entry inside it wants this.
+          title: 'Rule',
           type: 'object',
           additionalProperties: false,
           properties: {

@@ -3,8 +3,10 @@ import {
   defaultFor,
   fieldsOf,
   labelFor,
+  newEntryFor,
   readAt,
   removeAt,
+  seedDefaults,
   writeAt,
   type JsonSchema,
 } from '../src/forms/schema';
@@ -87,12 +89,15 @@ describe('reading a schema', () => {
     const fields = fieldsOf({
       type: 'object',
       properties: {
+        // `U-12` took this one out of the fallback: an array whose entries are described is a
+        // repeating control now. What is left here is what genuinely cannot be drawn.
         ports: { type: 'array', items: { type: 'integer' } },
+        loose: { type: 'array' },
         blob: { type: 'object' },
         weird: {},
       },
     });
-    expect(fields.map((field) => field.kind)).toEqual(['json', 'json', 'json']);
+    expect(fields.map((field) => field.kind)).toEqual(['array', 'json', 'json', 'json']);
   });
 
   it('builds a control for the non-null half of a nullable type', () => {
@@ -217,5 +222,159 @@ describe('checking a value against its schema', () => {
     };
     const problems = allProblems(fieldsOf(schema), { port: 70_000 }, readAt);
     expect(problems.map((problem) => problem.path).sort()).toEqual(['auth.user', 'port']);
+  });
+});
+
+/**
+ * Repeating parameters (`U-12`).
+ *
+ * The shape this exists for is `http.transaction.steps` and `rest.custom.extract` — arrays of
+ * objects, sometimes with arrays of objects inside them, which since `T-04` is the shape of every
+ * new sensor type's most important parameter rather than an edge case. Before this they rendered
+ * as `U-08`'s JSON textarea, which round-trips correctly and means typing JSON by hand.
+ */
+const STEPS: JsonSchema = {
+  type: 'object',
+  properties: {
+    steps: {
+      type: 'array',
+      title: 'Step',
+      minItems: 1,
+      maxItems: 3,
+      items: {
+        type: 'object',
+        required: ['method'],
+        properties: {
+          method: { enum: ['GET', 'POST'], default: 'GET' },
+          path: { type: 'string', minLength: 1 },
+          headers: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    tags: { type: 'array', items: { type: 'string' } },
+    freeform: { type: 'array' },
+  },
+};
+
+describe('repeating parameters', () => {
+  it('renders a described array as an array, and an undescribed one as JSON', () => {
+    const fields = fieldsOf(STEPS);
+    expect(fields.map((field) => `${field.name}:${field.kind}`)).toEqual([
+      'steps:array',
+      'tags:array',
+      // No `items`, so "add an entry" has nothing to add — the honest answer is the JSON box,
+      // which is the same rule a free-form object follows.
+      'freeform:json',
+    ]);
+  });
+
+  it('carries the item schema, since an entry’s path depends on where it lands', () => {
+    const steps = fieldsOf(STEPS)[0];
+    expect(steps?.items?.type).toBe('object');
+    expect(fieldsOf(STEPS)[2]?.items).toBeUndefined();
+  });
+
+  it('names an entry’s fields by index, which is the path the server reports too', () => {
+    const items = fieldsOf(STEPS)[0]?.items;
+    expect(items).toBeDefined();
+    expect(fieldsOf(items as JsonSchema, 'steps.2').map((field) => field.path)).toEqual([
+      'steps.2.method',
+      'steps.2.path',
+      'steps.2.headers',
+    ]);
+  });
+
+  it('seeds a new entry from the item schema’s own defaults', () => {
+    const items = fieldsOf(STEPS)[0]?.items;
+    // The core applies and stores defaults at validation time, so an entry that started
+    // somewhere else would show one thing and save another.
+    expect(newEntryFor(items as JsonSchema)).toEqual({ method: 'GET' });
+    expect(newEntryFor({ type: 'string' })).toBe('');
+    expect(newEntryFor({ type: 'integer' })).toBe(0);
+    expect(newEntryFor({ enum: ['a', 'b'] })).toBe('a');
+    expect(newEntryFor({ type: 'object' })).toEqual({});
+  });
+
+  it('does not seed an array itself, since an absent one is not an empty one', () => {
+    // The schema tells those two apart — `minItems: 1` refuses the second and says nothing about
+    // the first — so seeding `[]` would make every form save a parameter nobody set.
+    expect(seedDefaults(STEPS)).toEqual({});
+    const steps = fieldsOf(STEPS)[0];
+    expect(steps).toBeDefined();
+    expect(steps === undefined ? 'missing' : defaultFor(steps)).toBeUndefined();
+  });
+});
+
+describe('paths through an array', () => {
+  it('creates an array where the path says index, not an object with a "0" key', () => {
+    // The bug this prevents serialises to JSON that looks almost right, validates as the wrong
+    // type, and is refused by the server with a message about the parameter rather than the form.
+    const written = writeAt({}, 'steps.0.method', 'POST');
+    expect(Array.isArray(written['steps'])).toBe(true);
+    expect(written).toEqual({ steps: [{ method: 'POST' }] });
+  });
+
+  it('reads back through the index it wrote', () => {
+    const written = writeAt(writeAt({}, 'steps.0.method', 'GET'), 'steps.1.method', 'POST');
+    expect(readAt(written, 'steps.1.method')).toBe('POST');
+    expect(readAt(written, 'steps.0.method')).toBe('GET');
+    expect(readAt(written, 'steps.9.method')).toBeUndefined();
+  });
+
+  it('goes through an array into an array', () => {
+    const written = writeAt({}, 'steps.0.headers.1', 'accept: json');
+    expect(written).toEqual({ steps: [{ headers: [undefined, 'accept: json'] }] });
+    expect(readAt(written, 'steps.0.headers.1')).toBe('accept: json');
+  });
+
+  it('does not mutate the array it was given', () => {
+    const before = { steps: [{ method: 'GET' }] };
+    const after = writeAt(before, 'steps.0.method', 'POST');
+    expect(before.steps[0]?.method).toBe('GET');
+    expect(readAt(after, 'steps.0.method')).toBe('POST');
+  });
+
+  it('reads undefined rather than throwing when a path names an index into an object', () => {
+    expect(readAt({ steps: { method: 'GET' } }, 'steps.0.method')).toBeUndefined();
+  });
+
+  it('replaces a value of the wrong shape rather than writing into it', () => {
+    // A parameter that was a string and is now an array — a sensor type's schema changed under a
+    // stored value. Writing into the string would throw; keeping it would save something the
+    // schema refuses.
+    expect(writeAt({ steps: 'nonsense' }, 'steps.0.method', 'GET')).toEqual({
+      steps: [{ method: 'GET' }],
+    });
+  });
+});
+
+describe('checking a repeating parameter', () => {
+  it('reports the count against minItems and maxItems', () => {
+    const steps = fieldsOf(STEPS)[0];
+    expect(steps).toBeDefined();
+    if (steps === undefined) return;
+    expect(problemsFor(steps, []).map((problem) => problem.message)).toEqual(['needs at least 1']);
+    expect(problemsFor(steps, [{}, {}, {}, {}]).map((problem) => problem.message)).toEqual([
+      'takes at most 3',
+    ]);
+    expect(problemsFor(steps, [{}])).toEqual([]);
+  });
+
+  it('reports a problem inside an entry, at that entry’s own path', () => {
+    // Without this a form would submit an array whose entries are missing required properties
+    // and learn so from a 400 — the exact round trip this convenience exists to save, missing
+    // for the parameter shape that is hardest to type correctly.
+    const problems = allProblems(
+      fieldsOf(STEPS),
+      { steps: [{ method: 'GET' }, { path: '/health' }] },
+      readAt,
+      fieldsOf,
+    );
+    expect(problems).toContainEqual({ path: 'steps.1.method', message: 'required' });
+    expect(problems.some((problem) => problem.path === 'steps.0.method')).toBe(false);
+  });
+
+  it('says nothing about entries that are not there', () => {
+    expect(allProblems(fieldsOf(STEPS), {}, readAt, fieldsOf)).toEqual([]);
   });
 });

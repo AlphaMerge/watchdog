@@ -39,7 +39,7 @@ export function AddSensor(): React.JSX.Element {
     types.status === 'ready' ? types.data.items.find((t) => t.id === typeId) : undefined;
   const schema = useMemo(() => (chosen?.paramsSchema ?? {}) as JsonSchema, [chosen]);
   const fields = useMemo(() => fieldsOf(schema), [schema]);
-  const problems = useMemo(() => allProblems(fields, values, readAt), [fields, values]);
+  const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
 
   /** Picking a type replaces the parameters entirely — they belong to the type, not the form. */
   const pickType = useCallback(

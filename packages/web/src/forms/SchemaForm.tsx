@@ -2,6 +2,7 @@ import { useCallback, useId, useMemo, useState } from 'react';
 import {
   defaultFor,
   fieldsOf,
+  newEntryFor,
   readAt,
   removeAt,
   writeAt,
@@ -96,6 +97,9 @@ interface FieldProps {
 
 function Field(props: FieldProps): React.JSX.Element {
   const { field } = props;
+  if (field.kind === 'array' && field.items !== undefined) {
+    return <ArrayField {...props} items={field.items} />;
+  }
   if (field.kind === 'object') {
     return (
       <fieldset className="rounded border border-border px-3 pb-3 pt-1">
@@ -212,6 +216,210 @@ function Control({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * A repeating parameter — an array whose entries the schema describes (`U-12`).
+ *
+ * **This replaces a textarea holding raw JSON**, which is what `U-08`'s fallback gave these and
+ * is why the fallback exists: it round-trips correctly and deletes nothing. What it does not do
+ * is let anybody configure `http.transaction.steps` without typing JSON by hand — and since
+ * `T-04`, `T-15` and `T-16`, an array of objects is the shape of every new sensor type's *most
+ * important* parameter rather than an edge case.
+ *
+ * **Entries are rendered through the same `Field` as everything else**, at paths carrying their
+ * index (`steps.0.method`). Three things fall out of that rather than being built: nesting works,
+ * because an entry containing an array is just another `ArrayField`; server problems land on the
+ * right control, because the core reports Ajv's `instancePath` and that is the same path; and
+ * write-only entries keep their behaviour, which a bespoke editor would have had to reimplement.
+ *
+ * **Reordering is by one position at a time, not drag-and-drop.** Order is meaningful in every
+ * one of these — a transaction's steps run in order — so it has to be changeable; and buttons are
+ * reachable from a keyboard, which `U-11`'s WCAG pass requires and a drag target is not.
+ */
+function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): React.JSX.Element {
+  const { field, values, onChange, disabled } = props;
+  // **The entry's own noun, where the item schema gives one.** The fieldset is named for the
+  // parameter — "Steps" — and an entry inside it wants the singular. Nothing here can derive one
+  // from the other without guessing at English plurals, so `items.title` is the hook: a type
+  // author writes `title: 'Step'` on the item and gets "Step 2" instead of "Steps 2".
+  const entryLabel = items.title ?? field.label;
+  const raw = readAt(values, field.path);
+  const entries: unknown[] = Array.isArray(raw) ? (raw as unknown[]) : [];
+
+  const replace = (next: unknown[]): void => {
+    // An array emptied back to nothing is removed rather than saved as `[]`: the schema tells
+    // those two apart, and `params` is replaced wholesale on save.
+    onChange(
+      next.length === 0 && !field.required
+        ? removeAt(values, field.path)
+        : writeAt(values, field.path, next),
+    );
+  };
+
+  /**
+   * Swaps an entry with its neighbour.
+   *
+   * No bounds check: the first entry's "up" and the last one's "down" are *disabled*, which is
+   * the mechanism rather than a hint, and a guard here would be a branch nothing can reach —
+   * which is a branch no test can hold to account.
+   */
+  const move = (from: number, to: number): void => {
+    const next: unknown[] = [...entries];
+    const held = next.splice(from, 1);
+    next.splice(to, 0, ...held);
+    replace(next);
+  };
+
+  const atLimit = field.schema.maxItems !== undefined && entries.length >= field.schema.maxItems;
+
+  return (
+    <fieldset className="rounded border border-border px-3 pb-3 pt-1">
+      <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
+        {field.label}
+      </legend>
+      {field.description !== undefined && (
+        <p className="mb-2 text-xs text-text-muted">{field.description}</p>
+      )}
+
+      {entries.length === 0 ? (
+        <p className="mb-2 text-xs text-text-muted">Nothing here yet.</p>
+      ) : (
+        <ol className="mb-2 space-y-3">
+          {entries.map((_entry, index) => (
+            <li
+              // Position, deliberately: these entries have no identity of their own, and a key
+              // derived from their contents would remount a control on every keystroke — which
+              // takes the caret with it.
+              key={index}
+              className="rounded border border-border-subtle p-2"
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-text-muted">
+                  {entryLabel} {String(index + 1)}
+                </span>
+                <div className="flex gap-1">
+                  <EntryButton
+                    label={`Move ${entryLabel} ${String(index + 1)} up`}
+                    text="↑"
+                    disabled={disabled || index === 0}
+                    onClick={() => {
+                      move(index, index - 1);
+                    }}
+                  />
+                  <EntryButton
+                    label={`Move ${entryLabel} ${String(index + 1)} down`}
+                    text="↓"
+                    disabled={disabled || index === entries.length - 1}
+                    onClick={() => {
+                      move(index, index + 1);
+                    }}
+                  />
+                  <EntryButton
+                    label={`Remove ${entryLabel} ${String(index + 1)}`}
+                    text="Remove"
+                    disabled={disabled}
+                    onClick={() => {
+                      replace(entries.filter((_value, at) => at !== index));
+                    }}
+                  />
+                </div>
+              </div>
+              <Entry {...props} items={items} index={index} />
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <button
+        type="button"
+        disabled={disabled || atLimit}
+        onClick={() => {
+          replace([...entries, newEntryFor(items)]);
+        }}
+        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text disabled:opacity-50"
+      >
+        Add {entryLabel.toLowerCase()}
+      </button>
+      {atLimit && (
+        <span className="ml-2 text-xs text-text-muted">
+          {String(field.schema.maxItems)} is the most this parameter takes.
+        </span>
+      )}
+    </fieldset>
+  );
+}
+
+/** One entry: the item schema's own fields, at a path carrying this entry's index. */
+function Entry({
+  items,
+  index,
+  ...props
+}: FieldProps & { items: JsonSchema; index: number }): React.JSX.Element {
+  const path = `${props.field.path}.${String(index)}`;
+  const children = useMemo(() => fieldsOf(items, path), [items, path]);
+  const entryLabel = items.title ?? props.field.label;
+
+  // An array *of scalars* has no properties to lay out, so the entry is one control at the entry's
+  // own path — a list of strings is as legitimate a repeating parameter as a list of objects.
+  if (children.length === 0) {
+    return (
+      <Field
+        {...props}
+        field={{
+          path,
+          name: String(index),
+          label: `${entryLabel} ${String(index + 1)}`,
+          description: undefined,
+          kind: scalarKindOf(items),
+          schema: items,
+          required: true,
+          writeOnly: items.writeOnly === true,
+          children: [],
+          items: items.items,
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {children.map((child) => (
+        <Field key={child.path} {...props} field={child} />
+      ))}
+    </div>
+  );
+}
+
+/** What a scalar entry's control should be. `fieldsOf` cannot say, because there is no property. */
+function scalarKindOf(items: JsonSchema): FieldModel['kind'] {
+  const [only] = fieldsOf({ type: 'object', properties: { value: items } });
+  return only?.kind ?? 'json';
+}
+
+function EntryButton({
+  label,
+  text,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  text: string;
+  disabled: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+    >
+      {text}
+    </button>
   );
 }
 

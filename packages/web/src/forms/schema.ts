@@ -24,10 +24,13 @@ export interface JsonSchema {
   readonly required?: readonly string[];
   readonly additionalProperties?: boolean | JsonSchema;
   readonly items?: JsonSchema;
+  readonly minItems?: number;
+  readonly maxItems?: number;
 }
 
 /** What kind of control a property gets. `json` is the honest fallback, never a silent drop. */
-export type FieldKind = 'string' | 'number' | 'integer' | 'boolean' | 'enum' | 'object' | 'json';
+export type FieldKind =
+  'string' | 'number' | 'integer' | 'boolean' | 'enum' | 'object' | 'array' | 'json';
 
 export interface FieldModel {
   /** Dotted path from the root of `params`, which is also the key the API expects. */
@@ -42,6 +45,14 @@ export interface FieldModel {
   readonly writeOnly: boolean;
   /** Set for `kind: 'object'`. */
   readonly children: readonly FieldModel[];
+  /**
+   * What one entry of an array looks like. Set for `kind: 'array'` and nothing else.
+   *
+   * The schema rather than a `FieldModel`, because an entry's path depends on where it ends up:
+   * `steps.0.method` and `steps.3.method` are the same declaration at two positions, and a model
+   * built once would have to carry a path that is wrong for every entry but one.
+   */
+  readonly items: JsonSchema | undefined;
 }
 
 function typeOf(schema: JsonSchema): string | undefined {
@@ -67,6 +78,11 @@ function kindOf(schema: JsonSchema): FieldKind {
       // Only when it declares what is in it. A free-form object is a JSON blob and is shown as
       // one, because a form with no fields to draw is not a form.
       return schema.properties === undefined ? 'json' : 'object';
+    case 'array':
+      // Same rule, one level down (`U-12`): an array whose entries are undescribed is a JSON
+      // blob, because "add an entry" has nothing to add. `snmp.table.columns`,
+      // `http.transaction.steps` and `rest.custom.extract` all describe theirs.
+      return schema.items === undefined ? 'json' : 'array';
     default:
       return 'json';
   }
@@ -115,6 +131,7 @@ export function fieldsOf(schema: JsonSchema, prefix = ''): FieldModel[] {
       required: required.has(name),
       writeOnly: property.writeOnly === true,
       children: kind === 'object' ? fieldsOf(property, path) : [],
+      items: kind === 'array' ? property.items : undefined,
     };
   });
 }
@@ -129,7 +146,32 @@ export function defaultFor(field: FieldModel): unknown {
   if (field.schema.default !== undefined) return field.schema.default;
   if (field.kind === 'boolean') return false;
   if (field.kind === 'enum') return field.schema.enum?.[0];
+  // **Not `[]` for an array with no declared default.** An absent optional array and an empty one
+  // are different things to the schema — `minItems: 1` refuses the second and says nothing about
+  // the first — and seeding one would make every form save a parameter nobody set.
   return undefined;
+}
+
+/**
+ * A new entry for an array field, pre-filled from its item schema's own defaults (`U-12`).
+ *
+ * The same rule the whole form follows: the core applies and *stores* defaults at validation
+ * time, so an entry that started somewhere else would show one thing and save another. An entry
+ * whose schema declares nothing is an empty object, which is what "add a row" should give you.
+ */
+export function newEntryFor(items: JsonSchema): unknown {
+  if (items.default !== undefined) return items.default;
+  if (items.properties !== undefined) return seedDefaults(items);
+  const kind = kindOf(items);
+  if (kind === 'boolean') return false;
+  if (kind === 'enum') return items.enum?.[0] ?? '';
+  if (kind === 'integer' || kind === 'number') return 0;
+  // A free-form container starts as that container rather than as a string. It renders as a JSON
+  // box either way, and a box that opened on `""` for something declared an object would make
+  // the operator's first action deleting what the form put there.
+  if (typeOf(items) === 'object') return {};
+  if (typeOf(items) === 'array') return [];
+  return '';
 }
 
 /**
@@ -154,6 +196,8 @@ export function seedDefaults(schema: JsonSchema): Record<string, unknown> {
         visit(field.children);
         continue;
       }
+      // An array's *entries* have defaults; the array does not have entries yet. Descending here
+      // would seed `steps.0.method` into a document with no `steps`.
       const value = defaultFor(field);
       if (value !== undefined) seeded = writeAt(seeded, field.path, value);
     }
@@ -162,17 +206,41 @@ export function seedDefaults(schema: JsonSchema): Record<string, unknown> {
   return seeded;
 }
 
-/** Reads a dotted path out of a params object. */
+/**
+ * Whether a path segment addresses an array position rather than a property.
+ *
+ * A digit string and nothing else. A property genuinely called `0` would be indistinguishable —
+ * which is why this is only ever asked about paths *this form produced*, where an index segment
+ * comes from an array field and a property name comes from a schema's `properties`.
+ */
+function isIndex(segment: string): boolean {
+  return /^\d+$/.test(segment);
+}
+
+/** Reads a dotted path out of a params object, descending through arrays by index (`U-12`). */
 export function readAt(source: Record<string, unknown>, path: string): unknown {
   let cursor: unknown = source;
   for (const segment of path.split('.')) {
-    if (typeof cursor !== 'object' || cursor === null || Array.isArray(cursor)) return undefined;
+    if (typeof cursor !== 'object' || cursor === null) return undefined;
+    if (Array.isArray(cursor)) {
+      if (!isIndex(segment)) return undefined;
+      cursor = cursor[Number(segment)];
+      continue;
+    }
     cursor = (cursor as Record<string, unknown>)[segment];
   }
   return cursor;
 }
 
-/** Writes a dotted path into a params object, creating the objects on the way. */
+/**
+ * Writes a dotted path, creating the containers on the way.
+ *
+ * **The container's shape comes from the *next* segment, not from this one** (`U-12`). Writing
+ * `steps.0.method` into an empty document has to produce `{steps: [{method: …}]}`, and a walk
+ * that always created objects would produce `{steps: {"0": {method: …}}}` — which serialises to
+ * JSON that looks almost right, validates as the wrong type, and is refused by the server with a
+ * message about `steps` rather than about the form.
+ */
 export function writeAt(
   target: Record<string, unknown>,
   path: string,
@@ -180,21 +248,40 @@ export function writeAt(
 ): Record<string, unknown> {
   const segments = path.split('.');
   const next = { ...target };
-  let cursor = next;
+  let cursor: Record<string, unknown> | unknown[] = next;
+
   for (let index = 0; index < segments.length - 1; index += 1) {
     const segment = segments[index];
-    if (segment === undefined) break;
-    const child = cursor[segment];
-    const copy =
-      typeof child === 'object' && child !== null && !Array.isArray(child)
-        ? { ...(child as Record<string, unknown>) }
-        : {};
-    cursor[segment] = copy;
+    const lookahead = segments[index + 1];
+    if (segment === undefined || lookahead === undefined) break;
+    const child = readChild(cursor, segment);
+    const copy = copyContainer(child, isIndex(lookahead));
+    writeChild(cursor, segment, copy);
     cursor = copy;
   }
+
   const last = segments[segments.length - 1];
-  if (last !== undefined) cursor[last] = value;
+  if (last !== undefined) writeChild(cursor, last, value);
   return next;
+}
+
+type Container = Record<string, unknown> | unknown[];
+
+function readChild(container: Container, segment: string): unknown {
+  return Array.isArray(container) ? container[Number(segment)] : container[segment];
+}
+
+function writeChild(container: Container, segment: string, value: unknown): void {
+  if (Array.isArray(container)) container[Number(segment)] = value;
+  else container[segment] = value;
+}
+
+/** A copy of what is there, or a fresh container of the shape the path needs. */
+function copyContainer(child: unknown, wantArray: boolean): Container {
+  if (wantArray) return Array.isArray(child) ? [...(child as unknown[])] : [];
+  return typeof child === 'object' && child !== null && !Array.isArray(child)
+    ? { ...(child as Record<string, unknown>) }
+    : {};
 }
 
 /**

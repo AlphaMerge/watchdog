@@ -33,7 +33,8 @@ export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'Passed one per entry, never joined into a command line and never through a shell — so a ' +
       'space or a quote in an argument is just a character. `%host`, `%sensorid` and `%device` ' +
       'are substituted.',
-    items: { type: 'string', maxLength: 1_000 },
+    // The singular, for `U-12`'s repeating control.
+    items: { title: 'Argument', type: 'string', maxLength: 1_000 },
   },
   env: {
     type: 'array',
@@ -45,6 +46,9 @@ export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'inherit this probe’s environment, which holds whatever arrived through MS_* overrides — ' +
       'handing that to a script is how a credential leaves the machine.',
     items: {
+      // The singular, for `U-12`'s repeating control: the fieldset is named for the
+      // parameter and an entry inside it wants this.
+      title: 'Variable',
       type: 'object',
       additionalProperties: false,
       required: ['name'],

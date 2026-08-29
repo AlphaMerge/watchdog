@@ -41,7 +41,7 @@ export function ParamsForm({
   // field models, and with them the identities the form's own memos hang off.
   const schema = useMemo(() => (type?.paramsSchema ?? {}) as JsonSchema, [type]);
   const fields = useMemo(() => fieldsOf(schema), [schema]);
-  const problems = useMemo(() => allProblems(fields, values, readAt), [fields, values]);
+  const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
   const dirty = JSON.stringify(values) !== JSON.stringify(stored) || replacing.size > 0;
 
   const onReplace = useCallback((path: string, on: boolean) => {

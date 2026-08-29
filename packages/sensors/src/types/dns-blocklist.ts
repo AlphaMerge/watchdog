@@ -44,7 +44,8 @@ export const dnsBlocklist: SensorType = {
           'The zones to ask, one per entry — zen.spamhaus.org, bl.spamcop.net, b.barracuda' +
           'central.org. Check each list’s terms before pointing a monitoring system at it: most ' +
           'refuse queries from public resolvers and several rate-limit by source address.',
-        items: { type: 'string', minLength: 3, maxLength: 253 },
+        // The singular, for `U-12`'s repeating control.
+        items: { title: 'Blocklist', type: 'string', minLength: 3, maxLength: 253 },
       },
       address: {
         type: 'string',

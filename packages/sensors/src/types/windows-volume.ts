@@ -47,7 +47,8 @@ export const windowsVolume: SensorType = {
         description:
           'Drive letters to watch — C:, D:. Empty watches every local fixed disk, which is what ' +
           'most machines want and what keeps a new volume from being invisible.',
-        items: { type: 'string', minLength: 1, maxLength: 4 },
+        // The singular, for `U-12`'s repeating control.
+        items: { title: 'Volume', type: 'string', minLength: 1, maxLength: 4 },
       },
       includeNetwork: {
         type: 'boolean',

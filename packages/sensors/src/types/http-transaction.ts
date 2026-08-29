@@ -141,6 +141,9 @@ export function substitute(
 }
 
 const STEP_SCHEMA: JsonSchema = {
+  // The singular, for `U-12`'s repeating control: the fieldset is named for the parameter
+  // ("Steps") and an entry inside it wants this.
+  title: 'Step',
   type: 'object',
   additionalProperties: false,
   required: ['path'],
@@ -176,6 +179,9 @@ const STEP_SCHEMA: JsonSchema = {
       default: [],
       title: 'Request headers',
       items: {
+        // The singular, for `U-12`'s repeating control: the fieldset is named for the
+        // parameter and an entry inside it wants this.
+        title: 'Header',
         type: 'object',
         additionalProperties: false,
         required: ['name'],
