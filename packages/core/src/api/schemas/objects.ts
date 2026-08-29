@@ -383,6 +383,114 @@ export const createObjectSchema = {
 } as const;
 
 /**
+ * One node of a subtree created in a single request (`P-19`).
+ *
+ * The create schema with `parentId` swapped for a `parentRef`, and every conditional rule kept
+ * as it stands: a bulk create that validated less than the single one would be a second, laxer
+ * way in, which is how the strict path becomes the one nobody uses.
+ */
+export const treeNodeSchema = {
+  $id: 'ms:treeNode',
+  type: 'object',
+  required: ['kind', 'name'],
+  additionalProperties: false,
+  properties: {
+    kind: { enum: ['probe', 'group', 'device', 'sensor'] },
+    ref: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
+      description: 'A handle for this node, unique in the request, so later nodes can hang off it.',
+    },
+    parentRef: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
+      description: 'The `ref` of this node’s parent. Absent means the request’s own `parentId`.',
+    },
+    ...objectFields,
+    host: { type: 'string', minLength: 1, maxLength: 255 },
+    ipVersion: { enum: ['auto', 'v4', 'v6'] },
+    sensorType: { type: 'string', pattern: '^[a-z0-9]+(\\.[a-z0-9-]+)+$', maxLength: 100 },
+    params: { type: 'object', additionalProperties: true },
+    gid: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
+  },
+  allOf: [
+    {
+      if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
+      then: { required: ['host'] },
+    },
+    {
+      if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
+      then: { required: ['sensorType'] },
+    },
+    {
+      if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
+      then: { not: { anyOf: [{ required: ['host'] }, { required: ['sensorType'] }] } },
+    },
+    {
+      if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
+      then: { not: { required: ['gid'] } },
+    },
+    {
+      if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
+      then: { not: { required: ['sensorType'] } },
+    },
+    {
+      if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
+      then: { not: { required: ['host'] } },
+    },
+  ],
+} as const;
+
+export const createTreeSchema = {
+  $id: 'ms:createTree',
+  type: 'object',
+  required: ['parentId', 'nodes'],
+  additionalProperties: false,
+  properties: {
+    parentId: { type: 'integer', minimum: 1 },
+    nodes: {
+      type: 'array',
+      minItems: 1,
+      // The v1 target exactly: five thousand objects is the largest tree `PLAN.md` states a
+      // criterion for, so one request can build a whole v1 installation and no more.
+      maxItems: 5_000,
+      items: { $ref: 'ms:treeNode' },
+    },
+  },
+} as const;
+
+export const createTreeResultSchema = {
+  $id: 'ms:createTreeResult',
+  type: 'object',
+  required: ['count', 'objects'],
+  additionalProperties: false,
+  properties: {
+    count: { type: 'integer' },
+    /**
+     * Ids in the order the nodes were sent, so a caller matches by position without a `ref`.
+     *
+     * Ids rather than details: five thousand full objects is megabytes of response for something
+     * the caller already knows, and the one thing they cannot know is what the ids came out as.
+     */
+    objects: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['id', 'kind'],
+        additionalProperties: false,
+        properties: {
+          ref: { type: 'string' },
+          id: { type: 'integer' },
+          kind: { enum: OBJECT_KINDS },
+        },
+      },
+    },
+  },
+} as const;
+
+/**
  * `parentId` is absent from every branch, so `PATCH {parentId: 7}` is a 400 from the schema
  * rather than a hand-written special case. `sensorType` is absent because a sensor's type is
  * immutable: changing it would keep the channel rows and their history while the measurement
@@ -552,6 +660,9 @@ export const SHARED_SCHEMAS = [
   moveResultSchema,
   cloneResultSchema,
   createObjectSchema,
+  treeNodeSchema,
+  createTreeSchema,
+  createTreeResultSchema,
   updateObjectSchema,
   errorSchema,
 ];

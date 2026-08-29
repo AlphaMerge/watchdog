@@ -6,6 +6,7 @@ import { ObjectError } from '../../objects/errors.js';
 import { actorFor } from '../authentication.js';
 import type { ObjectService } from '../../objects/service.js';
 import type { BulkOperation, BulkService } from '../../objects/bulk.js';
+import type { TreePlanInput } from '../../objects/tree-plan.js';
 import { MAX_BULK } from '../../objects/bulk.js';
 import { settingRegistry } from '../../settings/registry.js';
 import type {
@@ -346,6 +347,37 @@ export async function objectRoutes(
         .header('Location', `/api/v1/objects/${String(created.id)}`)
         .header('ETag', etagFor(created.version))
         .send(created);
+    },
+  );
+
+  // ── 3. create a subtree (`P-19`) ─────────────────────────────────────────────────────────
+  app.post<{ Body: TreePlanInput }>(
+    '/objects/tree',
+    {
+      schema: {
+        tags: ['objects'],
+        summary: 'Create a whole subtree in one request',
+        description:
+          'Creates many objects at once, under one `parentId`, with nodes naming their parent ' +
+          'by `ref` where that parent is also being created here. **One transaction**: the ' +
+          'whole subtree appears or none of it does, which is what a discovery run needs — a ' +
+          'half-provisioned device is worse than a failed one, because nothing says which ' +
+          'half.\n\n' +
+          'Every object goes through the same validation, the same hierarchy rules, the same ' +
+          'channel declaration and the same audit log as `POST /objects`; what is not paid is a ' +
+          'request, a transaction and a tree lock **per object**. Refusals name the node by its ' +
+          'index and its `ref`, because a caller sending five thousand cannot act on ' +
+          '"invalid request".\n\n' +
+          'The answer is ids in the order the nodes were sent, not full objects: five thousand ' +
+          'of those is megabytes of response describing what the caller already wrote, and the ' +
+          'one thing they could not know is the ids.',
+        body: { $ref: 'ms:createTree' },
+        response: { 201: { $ref: 'ms:createTreeResult' } },
+      },
+    },
+    async (request, reply) => {
+      const result = await service.createTree(actorFor(request), request.body);
+      await reply.status(201).send(result);
     },
   );
 

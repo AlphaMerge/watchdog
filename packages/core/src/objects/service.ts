@@ -23,10 +23,11 @@ import { PauseRepository, flattenActor } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
+import { planTree, type TreeNodeInput, type TreePlanInput } from './tree-plan.js';
 import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
-import type { SensorTypeGate } from './sensor-type-gate.js';
+import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
 import type {
   AcknowledgementView,
   SimulatedErrorView,
@@ -45,6 +46,7 @@ import type {
   ObjectDetail,
   ObjectFilter,
   ObjectId,
+  ObjectKind,
   ObjectRef,
   ObjectSummary,
   Page,
@@ -1413,6 +1415,127 @@ export class ObjectService {
 
       return safe;
     });
+  }
+
+  /**
+   * Creates a whole subtree in one transaction (`P-19`).
+   *
+   * **What this stops paying, rather than what it does differently.** Every object still goes
+   * through the same validation, the same hierarchy trigger, the same channel declaration and
+   * the same audit sink — the tree that comes out is the tree five thousand `create` calls would
+   * have made. What it does not pay is five thousand HTTP requests, five thousand transactions,
+   * five thousand tree locks and five thousand pause checks: those are per-*request* costs that
+   * a caller building a subtree was paying per *object*.
+   *
+   * **One transaction is the point and also the constraint.** The whole subtree appears at once
+   * or none of it does, which is what a discovery run wants — a half-provisioned device is worse
+   * than a failed one, because nothing says which half. It is also why the node count is bounded:
+   * the tree lock is shared, but a transaction that runs for a minute is still a minute in which
+   * nothing can restructure the tree.
+   *
+   * **The pause cascade runs once, at the root.** `create` guards it with `anyActive` because
+   * paying it per object is what `P-04`'s budget noticed; here it is one recompute over the
+   * subtree that was just written, which is the same answer for a fraction of the work.
+   */
+  async createTree(
+    actor: Actor,
+    input: TreePlanInput,
+  ): Promise<{ count: number; objects: { ref?: string; id: ObjectId; kind: ObjectKind }[] }> {
+    return this.#db.tx(async (q) => {
+      await this.#repo.lockTreeShared(q);
+
+      const parent = await this.#repo.get(q, input.parentId);
+      if (parent === null) throw parentNotFound(input.parentId);
+
+      // Refused before a single row is written, and every refusal names the node. A caller
+      // sending five thousand of them cannot act on a constraint violation from row 3,417.
+      const plan = planTree(input, parent.kind);
+
+      const ids = new Map<number, ObjectId>();
+      const drafts: { sensorId: ObjectId; draft: ChannelDraft }[] = [];
+
+      for (const level of plan.levels) {
+        const written = await this.#repo.createLevel(
+          q,
+          level.map((node) => ({
+            // Resolved here rather than in the planner because only this point knows the ids:
+            // the planner works in indices, which is what makes it testable without a database.
+            parentId: node.parentId ?? ids.get(node.parentIndex ?? -1) ?? input.parentId,
+            input: this.#normalisedFor(node.input, input.parentId),
+          })),
+        );
+        level.forEach((node, at) => {
+          const id = written[at];
+          /* c8 ignore next -- createLevel returns one id per node or throws */
+          if (id === undefined) return;
+          ids.set(node.index, id);
+          if (node.input.kind !== 'sensor') return;
+          for (const draft of this.#sensorTypes.channelsFor(
+            node.input.sensorType,
+            node.input.params ?? {},
+          )) {
+            drafts.push({ sensorId: id, draft });
+          }
+        });
+      }
+
+      // Every sensor's channels in one statement, after every level — they depend only on the
+      // sensor ids, so there is nothing to gain from doing it level by level and a statement per
+      // level to lose.
+      await this.#repo.createChannelsFor(q, drafts);
+
+      const now = new Date();
+      if (await this.#pauses.anyActive(q, now)) {
+        const affected = await this.#pauses.recompute(q, input.parentId, now);
+        await this.#states?.reevaluate(q, affected, now, {
+          message: 'created under a paused parent',
+        });
+      }
+
+      // **In the caller's own order**, which is neither the order the rows were written in nor
+      // the order the levels produced. A caller matching answers to requests by position would
+      // otherwise attach the wrong id to the wrong node.
+      const objects = input.nodes.map((node, index) => ({
+        ...(node.ref === undefined ? {} : { ref: node.ref }),
+        id: ids.get(index) ?? 0,
+        kind: node.kind,
+      }));
+
+      // One audit entry per object, in one write, and each carrying what the serial path records
+      // — the log has to be able to answer "what was this object when it was created", and an
+      // entry saying "5,000 objects were created" answers nothing. Read back in one statement
+      // rather than assembled from the inputs, so what is logged is what is stored: defaults the
+      // schema filled in, the version the triggers landed on, and the redaction every read goes
+      // through.
+      const details = await this.#repo.getMany(q, [...ids.values()]);
+      await this.#audit.record(
+        q,
+        actor,
+        details.map((detail) => {
+          const safe = this.#redact(detail);
+          return {
+            action: 'object.created' as const,
+            objectId: safe.id,
+            kind: safe.kind,
+            after: safe,
+          };
+        }),
+        now,
+      );
+
+      return { count: plan.count, objects };
+    });
+  }
+
+  /** A node's input as `create` would have normalised it, with its parent id filled in. */
+  #normalisedFor(node: TreeNodeInput, parentId: ObjectId): CreateObjectInput {
+    const withParent = { ...node, parentId } as CreateObjectInput;
+    return withParent.kind === 'sensor'
+      ? {
+          ...withParent,
+          params: this.#sensorTypes.normalise(withParent.sensorType, withParent.params ?? {}),
+        }
+      : withParent;
   }
 
   async update(

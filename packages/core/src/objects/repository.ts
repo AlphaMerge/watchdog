@@ -884,6 +884,148 @@ export class ObjectRepository {
   }
 
   /**
+   * Writes one level of a subtree in one statement each (`P-19`).
+   *
+   * **The ids come back in input order, and the sort is what recovers it.** The sequence is
+   * advanced once per row as the rows are produced, so sorting the returned ids ascending gives
+   * back the order they were produced in. Relying on the order of the `RETURNING` rows
+   * themselves would not be sound; relying on the order a sequence hands numbers out within one
+   * statement is.
+   *
+   * The `ORDER BY d.ord` asks for the production order explicitly. **A function scan over
+   * `jsonb_to_recordset` yields array order anyway, so no test can currently tell whether it is
+   * there** — it is a guarantee requested rather than one demonstrated, and it costs a sort of a
+   * few thousand rows. What *is* demonstrated is the property it protects: a test builds a wide
+   * subtree and checks every child against its parent in the database.
+   *
+   * The hierarchy trigger still fires per row, which is right: the kind rules are the database's
+   * and this path does not get a private version of them. What it stops paying is a statement, a
+   * round trip and a transaction per object.
+   */
+  async createLevel(
+    q: Queryable,
+    nodes: readonly { parentId: ObjectId; input: CreateObjectInput }[],
+  ): Promise<ObjectId[]> {
+    if (nodes.length === 0) return [];
+
+    // **`jsonb_to_recordset` rather than parallel `unnest` arrays, and `tags` is the reason.**
+    // `unnest` flattens a multidimensional array completely, so a column of *lists* cannot go
+    // through it — five nodes with two tags each arrive as ten rows of one string. JSON carries
+    // the nesting, and ragged lists as well, which a Postgres array literal does not.
+    const rows = await q.query<{ id: string }>(
+      `INSERT INTO object (parent_id, kind, name, tags, priority, comments)
+       SELECT d.parent_id, d.kind::object_kind, d.name,
+              ARRAY(SELECT jsonb_array_elements_text(d.tags)),
+              d.priority, d.comments
+       FROM jsonb_to_recordset($1::jsonb)
+            AS d(ord int, parent_id bigint, kind text, name text, tags jsonb,
+                 priority smallint, comments text)
+       ORDER BY d.ord
+       RETURNING id`,
+      [
+        JSON.stringify(
+          nodes.map((node, index) => ({
+            ord: index,
+            parent_id: node.parentId,
+            kind: node.input.kind,
+            name: node.input.name,
+            tags: node.input.tags ?? [],
+            priority: node.input.priority ?? 3,
+            comments: node.input.comments ?? '',
+          })),
+        ),
+      ],
+    );
+    const ids = rows.map((row) => Number(row.id)).sort((a, b) => a - b);
+    /* c8 ignore next 3 -- the insert either writes every row or throws */
+    if (ids.length !== nodes.length) {
+      throw new Error(`inserted ${String(ids.length)} objects for ${String(nodes.length)} nodes`);
+    }
+
+    // One statement per kind rather than per object. Probes, devices and sensors each have a
+    // side table, and a level is usually all one kind — a level of five hundred devices is one
+    // insert here, not five hundred.
+    const probes: { id: ObjectId; gid: string | null }[] = [];
+    const devices: { id: ObjectId; host: string; ipVersion: string }[] = [];
+    const sensors: { id: ObjectId; type: string; params: string }[] = [];
+    nodes.forEach((node, index) => {
+      const id = ids[index];
+      /* c8 ignore next -- lengths were checked above */
+      if (id === undefined) return;
+      if (node.input.kind === 'probe') {
+        probes.push({ id, gid: node.input.gid ?? null });
+      } else if (node.input.kind === 'device') {
+        devices.push({
+          id,
+          host: node.input.host,
+          ipVersion: node.input.ipVersion ?? 'auto',
+        });
+      } else if (node.input.kind === 'sensor') {
+        sensors.push({
+          id,
+          type: node.input.sensorType,
+          params: JSON.stringify(node.input.params ?? {}),
+        });
+      }
+    });
+
+    if (probes.length > 0) {
+      await q.query(
+        `INSERT INTO probe_config (object_id, gid)
+         SELECT * FROM unnest($1::bigint[], $2::text[])`,
+        [probes.map((p) => p.id), probes.map((p) => p.gid)],
+      );
+    }
+    if (devices.length > 0) {
+      await q.query(
+        `INSERT INTO device_config (object_id, host, ip_version)
+         SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[])`,
+        [devices.map((d) => d.id), devices.map((d) => d.host), devices.map((d) => d.ipVersion)],
+      );
+    }
+    if (sensors.length > 0) {
+      await q.query(
+        `INSERT INTO sensor_config (object_id, type, params)
+         SELECT object_id, type, params::jsonb
+         FROM unnest($1::bigint[], $2::text[], $3::text[]) AS d(object_id, type, params)`,
+        [sensors.map((s) => s.id), sensors.map((s) => s.type), sensors.map((s) => s.params)],
+      );
+    }
+
+    return ids;
+  }
+
+  /**
+   * Declares channels for many sensors at once (`P-19`).
+   *
+   * The single-sensor version reads the owner's version back so a caller gets an ETag that does
+   * not 412 on its own first write. Nothing here needs that: a bulk create answers with ids
+   * rather than with details, and a caller who wants an ETag reads the object.
+   */
+  async createChannelsFor(
+    q: Queryable,
+    drafts: readonly { sensorId: ObjectId; draft: ChannelDraft }[],
+  ): Promise<number> {
+    if (drafts.length === 0) return 0;
+    const rows = await q.query<{ id: number }>(
+      `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits)
+       SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::boolean[],
+                            $6::text[], $7::smallint[])
+       RETURNING id`,
+      [
+        drafts.map((entry) => entry.sensorId),
+        drafts.map((entry) => entry.draft.key),
+        drafts.map((entry) => entry.draft.name),
+        drafts.map((entry) => entry.draft.unit ?? ''),
+        drafts.map((entry) => entry.draft.isPrimary ?? false),
+        drafts.map((entry) => entry.draft.lookup ?? null),
+        drafts.map((entry) => entry.draft.counterBits ?? null),
+      ],
+    );
+    return rows.length;
+  }
+
+  /**
    * The version predicate *is* the lock — no `SELECT … FOR UPDATE` on this path. Zero rows
    * updated plus an existence re-check inside the same transaction tells 404 from 412.
    */

@@ -23,12 +23,17 @@ import {
 describe('what a protocol version can do', () => {
   it('grants nothing to a version below the first capability', () => {
     const capabilities = capabilitiesFor(1);
+    // **Every capability listed, not a subset**, which is the point of `deepEqual` here: a new
+    // one added to the interface and forgotten in `capabilitiesFor` would be `undefined` for
+    // every peer, and `undefined` is falsy — so a subset check would pass while a probe was
+    // refused a feature it should have had.
     assert.deepEqual(capabilities, {
       configPush: false,
       discoverySweep: false,
       identification: false,
       approval: false,
       healthReporting: false,
+      onDemandQuery: false,
     });
   });
 

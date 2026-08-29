@@ -176,6 +176,77 @@ describe(
       return Number(process.hrtime.bigint() - startedAt) / 1e6;
     }
 
+    /** The same plan, as one `POST /objects/tree` body. */
+    function bulkBody(label: string, probeId: number): Record<string, unknown> {
+      const nodes = plan(`probe-${label}`).map((item) => ({
+        ...item.body,
+        ref: item.key,
+        // The probe is the request's own `parentId`; everything else names a node in the body.
+        ...(item.parentKey === `probe-${label}` ? {} : { parentRef: item.parentKey }),
+      }));
+      return { parentId: probeId, nodes };
+    }
+
+    it('creates the same tree in one request, which is what P-19 is for', async () => {
+      // **The measurement the ticket exists for**, over the same HTTP, against the same wiring,
+      // building the same 5,000 objects. What changes is not how the tree is described but what
+      // is paid to write it: one request, one transaction and one tree lock instead of five
+      // thousand of each.
+      const probeId = await create({ kind: 'probe', name: 'probe-bulk' }, rootId);
+      const body = bulkBody('bulk', probeId);
+
+      const startedAt = process.hrtime.bigint();
+      const response = await fetch(`${base}/objects/tree`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      const bulkMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      assert.equal(response.status, 201, text.slice(0, 500));
+
+      const result = JSON.parse(text) as { count: number; objects: { id: number }[] };
+      assert.equal(result.count, TARGET_OBJECTS - 1, 'every node but the probe');
+
+      const built = await db.query<{ count: string }>(
+        `SELECT count(*) AS count FROM object
+         WHERE id IN (
+           WITH RECURSIVE t AS (
+             SELECT id FROM object WHERE name = 'probe-bulk'
+             UNION ALL SELECT c.id FROM object c JOIN t ON c.parent_id = t.id
+           ) SELECT id FROM t
+         )`,
+      );
+      assert.equal(Number(built[0]?.count), TARGET_OBJECTS, 'the tree is the size claimed');
+
+      // The channels too: a bulk path that wrote the objects and forgot what makes a sensor
+      // useful would be faster and worthless.
+      const channels = await db.query<{ count: string }>(
+        `SELECT count(*) AS count FROM channel c
+         JOIN object o ON o.id = c.sensor_id WHERE o.name LIKE 'sensor-%'
+           AND o.id IN (
+             WITH RECURSIVE t AS (
+               SELECT id FROM object WHERE name = 'probe-bulk'
+               UNION ALL SELECT ch.id FROM object ch JOIN t ON ch.parent_id = t.id
+             ) SELECT id FROM t
+           )`,
+      );
+      assert.ok(Number(channels[0]?.count) > 0, 'the sensors have channels');
+
+      process.stdout.write(
+        `\n    measured, the same ${TARGET_OBJECTS.toLocaleString('en-GB')} objects in ` +
+          `**one** request (P-19):\n` +
+          `      bulk            ${(bulkMs / 1_000).toFixed(1).padStart(5)} s  ` +
+          `${`${Math.round((TARGET_OBJECTS / bulkMs) * 1_000).toLocaleString('en-GB')} objects/s`.padStart(18)}  ` +
+          `${`${Math.round(((BUDGET_MS - bulkMs) / BUDGET_MS) * 100).toString()}% spare`.padStart(10)}\n`,
+      );
+
+      assert.ok(
+        bulkMs < BUDGET_MS,
+        `one request took ${(bulkMs / 1_000).toFixed(1)} s against a ${String(BUDGET_MS / 1_000)} s budget`,
+      );
+    });
+
     it('creates a 5,000-object tree through the API inside its budget', async () => {
       // Serial first, because that is what a provisioning script written the obvious way does,
       // and the criterion should be met without anyone having to be clever.

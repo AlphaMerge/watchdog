@@ -995,6 +995,44 @@ because each is a decision rather than a defect:
       across Phase 3, so `P-19` is still the fix; what it is not is a failing test that needs its
       number moved. The budget has not been widened.
 
+      **P-19 outcome.** `POST /api/v1/objects/tree`. Nodes name their parent by `ref` where that
+      parent is also being created, so a caller describes a subtree rather than sorting one.
+      Measured on the same harness, over the same HTTP, building the same 5,000 objects
+      (`docs/findings/2026-08-29-bulk-tree-create.md`):
+
+      | How | Wall | Rate | Against the 30 s budget |
+      | --- | --- | --- | --- |
+      | serial, one request per object | 28.8 s | 174 objects/s | 4% spare |
+      | 8 requests in flight | 8.8 s | 570 objects/s | 71% spare |
+      | **one request** | **2.8 s** | **1,798 objects/s** | **91% spare** |
+
+      **10.3x the serial path**, and 3.1x a client clever enough to pipeline eight at a time. What
+      it stops paying is not the inserts — `S-16` already established the remaining per-object
+      work is genuinely needed — but the costs that are really *per request*: a transaction and
+      its commit, `lockTreeShared`, the `anyActive` probe, and a `SELECT` of a parent whose kind
+      the caller already knew. Eight statements for 4,999 objects, against roughly fifteen
+      thousand.
+
+      **The tree is the same tree, and that is asserted rather than asserted-to.** A test creates
+      one sensor each way and compares the *stored rows*, because a hard-coded expectation would
+      go on passing if normalisation moved and only one path followed it. The audit log gets one
+      entry per object, each built from a read-back so it carries the defaults the schema filled
+      in, the version the triggers landed on and `A-05`'s redaction — an entry saying "5,000
+      objects were created" answers no question anybody has.
+
+      **Two things are deliberately different.** It is all-or-nothing, because a half-provisioned
+      device is worse than a failed one — nothing says which half — which is also why the node
+      count is capped at the v1 target. And the answer is ids rather than objects, in the order
+      the nodes were sent: five thousand full objects is megabytes describing what the caller
+      already wrote, and the one thing they could not know is the ids.
+
+      Mutation 13/14. The survivor is an `ORDER BY` on the batched insert that no test can
+      distinguish, because a function scan over `jsonb_to_recordset` yields array order anyway —
+      kept and labelled as a guarantee requested rather than demonstrated, with the property it
+      protects covered end to end instead. Two rounds were needed: the first pass's pause-cascade
+      mutant matched the *serial* path's identical line, and passing it was the tests being right
+      about the wrong code.
+
 ## Phase 3 — State machine
 
 - [x] **M-01 — Write the state and pause precedence tables** · S · — · Document every transition
