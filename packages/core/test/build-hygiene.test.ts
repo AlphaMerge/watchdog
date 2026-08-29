@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
@@ -80,6 +81,38 @@ describe('build hygiene', () => {
 });
 
 /** Walks compiled output, reporting any `.js` with no matching `.ts` beside its source. */
+/**
+ * The two generated documents (`H-07`).
+ *
+ * `docs/sensor-reference.md` and `docs/api-reference.md` are rendered from the catalogue and from
+ * the OpenAPI document, and the whole reason they are generated is that a hand-written reference
+ * is right on the day it is written and silently wrong from then on. That only holds if something
+ * fails when they drift, and this is that something: a parameter renamed, a channel added, a
+ * route registered — any of them makes the committed file stale, and the build goes red rather
+ * than the documentation going quietly wrong.
+ *
+ * Each generator's own `--check` does the comparing, so there is one renderer and no second
+ * implementation of it here to disagree.
+ */
+describe('generated documentation', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+
+  for (const generator of ['sensor-reference', 'api-reference']) {
+    it(`has docs/${generator}.md in step with the code`, () => {
+      const run = spawnSync(
+        process.execPath,
+        [join(repoRoot, 'scripts', 'docs', `${generator}.mjs`), '--check'],
+        { cwd: repoRoot, encoding: 'utf8' },
+      );
+      assert.equal(
+        run.status,
+        0,
+        `${run.stdout}${run.stderr}\nRegenerate with: node scripts/docs/${generator}.mjs`,
+      );
+    });
+  }
+});
+
 async function compare(
   compiledDir: string,
   sourceDir: string,

@@ -103,6 +103,7 @@ export async function auditRoutes(
     '/objects/:id/audit',
     {
       schema: {
+        tags: ['audit'],
         description:
           "An object's configuration history, newest first: who changed it, when, and what " +
           'changed. Page with `before`, using the `nextBefore` from the previous page. ' +
@@ -140,6 +141,7 @@ export async function auditRoutes(
     '/audit',
     {
       schema: {
+        tags: ['audit'],
         description:
           'Configuration history across the whole installation, newest first — the object ' +
           'history third of the Logs view (`CAPABILITIES.MD §6`). Filter by `category` (the ' +

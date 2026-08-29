@@ -6506,8 +6506,33 @@ because each is a decision rather than a defect:
       upgrade paths.
 - [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and
       an upgrade path.
-- [ ] **H-07 — Documentation set** · L · — · Installation, administration, sensor reference,
+- [x] **H-07 — Documentation set** · L · — · Installation, administration, sensor reference,
       API reference generated from OpenAPI, troubleshooting runbook.
+
+      **H-07 outcome.** Five documents: `installation.md`, `administration.md`,
+      `troubleshooting.md` hand-written, and `sensor-reference.md` and `api-reference.md`
+      generated — from the catalogue and from the OpenAPI document respectively, with
+      `--check` modes that `build-hygiene.test.ts` runs. A hand-written reference is correct on
+      the day it is written and silently wrong from then on, so the two that can be derived are
+      derived, and the build goes red when they drift.
+
+      **Writing the generators found four defects, all in the API surface rather than the
+      prose.** 36 of 68 routes carried no OpenAPI tag, so a generated client had a third of the
+      API in one unnamed bucket — now tagged, and 22 groups instead of 9. Ten route modules
+      register only when an optional service is passed, so the first generator silently produced
+      a reference missing a third of the routes; the completeness guard that catches that is
+      derived from `server.ts` rather than from a list, so a route group added later cannot go
+      quietly undocumented. `/metrics` was missing for the same reason and had no schema at all —
+      found by diffing the generated page against a **running** core, which the module scan could
+      not have caught because that route is declared inline. And `@fastify/websocket` sets
+      `schema.hide = true` on every websocket route unconditionally, so `/api/v1/stream` can
+      never reach the OpenAPI document; it is now recovered from the router and documented.
+
+      Verified against the running dev stack: 119 live routes and 21 live tags match the
+      reference exactly, plus the one deliberate addition (`/api/v1/stream`); all 43 sensor
+      types, every parameter, and every `writeOnly` marker match the live catalogue. The sizing
+      section cites the measured figures rather than inventing any — CPU and RAM guidance stays
+      absent until `H-08`, which is honest rather than helpful-sounding.
 - [ ] **H-08 — Published sizing guidance** · M · H-01 · Measured numbers per hardware tier, not
       estimates.
 - [ ] **H-09 — Release candidate field test** · L · H-01…H-07 · Clean installs on Ubuntu and

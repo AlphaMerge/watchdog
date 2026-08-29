@@ -209,6 +209,7 @@ export async function objectRoutes(
     '/objects',
     {
       schema: {
+        tags: ['objects'],
         querystring: listQuery,
         description:
           'Flat filtered listing, keyset-paginated. Note: under sort=name an object renamed ' +
@@ -278,6 +279,7 @@ export async function objectRoutes(
     '/objects/root',
     {
       schema: {
+        tags: ['objects'],
         querystring: {
           type: 'object',
           additionalProperties: false,
@@ -297,6 +299,7 @@ export async function objectRoutes(
     '/setting-definitions',
     {
       schema: {
+        tags: ['settings'],
         response: {
           200: {
             type: 'object',
@@ -338,7 +341,11 @@ export async function objectRoutes(
   app.post<{ Body: CreateObjectInput }>(
     '/objects',
     {
-      schema: { body: { $ref: 'ms:createObject' }, response: { 201: { $ref: 'ms:objectDetail' } } },
+      schema: {
+        tags: ['objects'],
+        body: { $ref: 'ms:createObject' },
+        response: { 201: { $ref: 'ms:objectDetail' } },
+      },
     },
     async (request, reply) => {
       const created = await service.create(actorFor(request), request.body);
@@ -386,6 +393,7 @@ export async function objectRoutes(
     '/objects/:id',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         querystring: {
           type: 'object',
@@ -428,6 +436,7 @@ export async function objectRoutes(
     '/objects/:id',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         body: { $ref: 'ms:updateObject' },
         response: { 200: { $ref: 'ms:objectDetail' } },
@@ -446,6 +455,7 @@ export async function objectRoutes(
     '/objects/:id',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         querystring: {
           type: 'object',
@@ -496,6 +506,7 @@ export async function objectRoutes(
     '/objects/:id/order',
     {
       schema: {
+        tags: ['objects'],
         description:
           "Moves an object within its parent's children, the way PRTG's move up / move down " +
           'does. Siblings nobody has arranged keep sorting by name, so a tree that has never ' +
@@ -528,6 +539,7 @@ export async function objectRoutes(
     '/objects/:id/move',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         body: {
           type: 'object',
@@ -558,6 +570,7 @@ export async function objectRoutes(
     '/objects/:id/clone',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         body: {
           type: 'object',
@@ -598,6 +611,7 @@ export async function objectRoutes(
     '/objects/bulk',
     {
       schema: {
+        tags: ['objects'],
         description:
           'Applies one operation to a selection. **Each object is atomic and the batch is ' +
           'best-effort**: the report names every object that did not change and why, rather ' +
@@ -703,6 +717,7 @@ export async function objectRoutes(
     '/objects/:id/tree',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         querystring: treeQuery,
         response: {
@@ -741,6 +756,7 @@ export async function objectRoutes(
     '/objects/:id/ancestors',
     {
       schema: {
+        tags: ['objects'],
         params: idParams,
         response: {
           200: {
@@ -762,6 +778,7 @@ export async function objectRoutes(
     '/objects/:id/channels',
     {
       schema: {
+        tags: ['channels'],
         params: idParams,
         response: {
           200: {
@@ -797,6 +814,7 @@ export async function objectRoutes(
     '/objects/:id/channels/:key',
     {
       schema: {
+        tags: ['channels'],
         description:
           'Sets a channel’s error and warning limits, the lookup that decides its state, or ' +
           'both. `limits` is a patch: `null` clears one threshold, an absent field leaves it ' +
@@ -853,6 +871,7 @@ export async function objectRoutes(
     '/objects/:id/pause',
     {
       schema: {
+        tags: ['state'],
         description:
           'Pauses an object and every sensor beneath it. Give `minutes` for a duration, `until` ' +
           'for a moment, or neither to pause indefinitely — until a person says otherwise. ' +
@@ -895,6 +914,7 @@ export async function objectRoutes(
     '/objects/:id/pause',
     {
       schema: {
+        tags: ['state'],
         description:
           'Resumes an object, or cancels a maintenance window it has not reached yet. Only the ' +
           'object that was directly paused can be resumed — a sensor paused because its device ' +
@@ -919,6 +939,7 @@ export async function objectRoutes(
     '/objects/:id/pause',
     {
       schema: {
+        tags: ['state'],
         description:
           'Whether this object is paused, why, until when, and whether this is the one that can ' +
           'be resumed.',
@@ -942,6 +963,7 @@ export async function objectRoutes(
     '/objects/:id/acknowledge',
     {
       schema: {
+        tags: ['state'],
         description:
           'Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications stop, ' +
           'and monitoring carries on exactly as before. Give `minutes` for a duration, `until` ' +
@@ -975,6 +997,7 @@ export async function objectRoutes(
     '/objects/:id/acknowledge',
     {
       schema: {
+        tags: ['state'],
         description:
           'Withdraws an acknowledgement, so the alarm reads Down again and notifications ' +
           'resume. The three things that clear one on their own — recovery, expiry and ' +
@@ -995,6 +1018,7 @@ export async function objectRoutes(
     '/objects/:id/simulate-error',
     {
       schema: {
+        tags: ['state'],
         description:
           'Forces sensors Down so a notification chain can be tested end to end. ' +
           '**This fires the real chain at real people** — which is the point, since a chain ' +
@@ -1028,6 +1052,7 @@ export async function objectRoutes(
     '/objects/:id/simulate-error',
     {
       schema: {
+        tags: ['state'],
         description:
           'Lifts a simulated error. The sensors return to what they actually measure straight ' +
           'away — unlike a resume, which yields Unknown, because a forced sensor never stopped ' +
@@ -1054,6 +1079,7 @@ export async function objectRoutes(
     '/objects/:id/dependency',
     {
       schema: {
+        tags: ['dependencies'],
         description:
           'Sets what this object depends on. `parent` inherits from above, `object` names a ' +
           'master sensor, `none` depends on nothing, and `device` makes **this sensor** the ' +
@@ -1096,6 +1122,7 @@ export async function objectRoutes(
     '/objects/:id/settings',
     {
       schema: {
+        tags: ['settings'],
         params: idParams,
         querystring: {
           type: 'object',
@@ -1136,6 +1163,7 @@ export async function objectRoutes(
     '/objects/:id/settings/:key',
     {
       schema: {
+        tags: ['settings'],
         params: settingKeyParams,
         body: {
           type: 'object',
@@ -1168,6 +1196,7 @@ export async function objectRoutes(
     '/objects/:id/settings/:key',
     {
       schema: {
+        tags: ['settings'],
         params: settingKeyParams,
         response: {
           200: {
@@ -1212,6 +1241,7 @@ export async function objectRoutes(
     '/objects/:id/credentials',
     {
       schema: {
+        tags: ['credentials'],
         params: idParams,
         querystring: {
           type: 'object',
@@ -1241,6 +1271,7 @@ export async function objectRoutes(
     '/credential-kinds',
     {
       schema: {
+        tags: ['credentials'],
         description:
           'The credential kinds this build can use, with the JSON Schema a form is generated ' +
           'from (`A-05`). Fields marked `writeOnly` are the secret half: they are encrypted at ' +
@@ -1283,6 +1314,7 @@ export async function objectRoutes(
     '/objects/:id/credentials/:kind',
     {
       schema: {
+        tags: ['credentials'],
         description:
           'Stores the credential set of this kind on this object, where everything below it ' +
           'inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a ' +
@@ -1318,6 +1350,7 @@ export async function objectRoutes(
     '/objects/:id/credentials/:kind',
     {
       schema: {
+        tags: ['credentials'],
         description:
           'Removes the credential set defined *on this object*. It does not leave the object ' +
           'without credentials: whatever an ancestor defines comes back into force, and the ' +

@@ -551,27 +551,43 @@ export class ApiServer {
       const metrics = this.#metrics;
       this.#exempting = 'the Prometheus text format, which is not JSON to filter';
       const authRequired = this.#auth?.required ?? false;
-      this.#app.get('/metrics', async (request, reply) => {
-        if (authRequired && request.principal === undefined) {
-          throw new AuthError(
-            'AUTH_REQUIRED',
-            'this request needs an API token; Prometheus sends one as a bearer token',
-          );
-        }
-        const exporter = metrics();
-        if (exporter === undefined) {
-          // 503 in the scraper's own terms: an empty body would be recorded as "every series
-          // vanished", which is worse than a failed scrape it will simply retry.
-          await reply
-            .status(503)
-            .header('content-type', 'text/plain; charset=utf-8')
-            .send('# the core is still starting; scrape again shortly\n');
+      this.#app.get(
+        '/metrics',
+        {
+          schema: {
+            tags: ['meta'],
+            summary: 'Prometheus scrape endpoint — text format, not JSON',
+            description:
+              'Outside `/api/v1` because that is the path every scraper config already ' +
+              'assumes, and guarded here explicitly because of it: the scrape body is a map of ' +
+              'the installation, and a route outside that prefix would otherwise be public. A ' +
+              'scraper authenticates with an API token, which is what `authorization` in a ' +
+              'Prometheus `scrape_config` is for. 503 while the core is still starting, ' +
+              'because an empty body would be recorded as every series vanishing at once.',
+          },
+        },
+        async (request, reply) => {
+          if (authRequired && request.principal === undefined) {
+            throw new AuthError(
+              'AUTH_REQUIRED',
+              'this request needs an API token; Prometheus sends one as a bearer token',
+            );
+          }
+          const exporter = metrics();
+          if (exporter === undefined) {
+            // 503 in the scraper's own terms: an empty body would be recorded as "every series
+            // vanished", which is worse than a failed scrape it will simply retry.
+            await reply
+              .status(503)
+              .header('content-type', 'text/plain; charset=utf-8')
+              .send('# the core is still starting; scrape again shortly\n');
+            return reply;
+          }
+          const { body, contentType } = await exporter.scrape();
+          await reply.header('content-type', contentType).send(body);
           return reply;
-        }
-        const { body, contentType } = await exporter.scrape();
-        await reply.header('content-type', contentType).send(body);
-        return reply;
-      });
+        },
+      );
       this.#exempting = null;
     }
 
@@ -579,7 +595,13 @@ export class ApiServer {
     // schema document, and serialising it against a strict schema of our own would strip it.
     this.#app.get(
       '/api/v1/openapi.json',
-      { schema: { response: { 200: { type: 'object', additionalProperties: true } } } },
+      {
+        schema: {
+          tags: ['meta'],
+          summary: 'This API, as an OpenAPI 3 document',
+          response: { 200: { type: 'object', additionalProperties: true } },
+        },
+      },
       () => this.#app.swagger(),
     );
 

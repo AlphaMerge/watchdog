@@ -21,6 +21,11 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 | [`docs/TASKS.md`](docs/TASKS.md)                                   | Ticket-sized backlog — **pick work from here**                           |
 | [`docs/findings/`](docs/findings/)                                 | Measured results that change a documented assumption                     |
 | [`docs/adding-a-sensor-type.md`](docs/adding-a-sensor-type.md)     | How to write a sensor type. One file, six members.                       |
+| [`docs/installation.md`](docs/installation.md)                     | Installing, upgrading, and adding a remote probe                         |
+| [`docs/administration.md`](docs/administration.md)                 | Roles and rights, credentials, pausing, what to watch                    |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md)               | Symptoms, and the number that diagnoses each one                         |
+| [`docs/sensor-reference.md`](docs/sensor-reference.md)             | Every sensor type — **generated from the catalogue**                     |
+| [`docs/api-reference.md`](docs/api-reference.md)                   | Every route — **generated from the OpenAPI document**                    |
 | [`docs/runbook-backup-restore.md`](docs/runbook-backup-restore.md) | Backing up, and restoring onto a host that is not the one it came from   |
 
 ## Layout

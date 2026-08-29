@@ -57,6 +57,7 @@ export async function historyRoutes(
     '/sensors/:id/values',
     {
       schema: {
+        tags: ['sensors'],
         description:
           "Each channel's current reading, for a sensor detail page's channel table. " +
           'A `null` value means no reading inside the window, which is a gap and never a zero: ' +
@@ -74,6 +75,7 @@ export async function historyRoutes(
     '/sensors/:id/history',
     {
       schema: {
+        tags: ['sensors'],
         description:
           'Historic channel data for a sensor. The resolution is snapped up to a supported ' +
           `averaging interval (${String(ALLOWED_RESOLUTIONS[0])}s upwards); ranges over ` +

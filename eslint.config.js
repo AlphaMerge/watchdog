@@ -2,6 +2,7 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
+import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
@@ -87,9 +88,14 @@ export default tseslint.config(
   },
   {
     // Config files and plain scripts sit outside the TypeScript projects, so the type-aware
-    // rules have nothing to work with.
+    // rules have nothing to work with. They do run on Node, though — without its globals
+    // declared, `process` and `Buffer` read as undefined variables in every one of them.
     files: ['**/*.js', '**/*.mjs', '**/*.cjs'],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { ...globals.node },
+    },
     rules: {
       ...tseslint.configs.disableTypeChecked.rules,
       'no-console': 'off',

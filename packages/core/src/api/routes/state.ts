@@ -34,6 +34,7 @@ export function stateRoutes(app: FastifyInstance, options: StateRoutesOptions): 
     '/sensors/:id/state',
     {
       schema: {
+        tags: ['sensors'],
         description:
           'A sensor’s current state, why it is in it, and since when. `pausedBy` lists every ' +
           'pause source holding the sensor, not only the one `cause` reports: the four are an ' +
