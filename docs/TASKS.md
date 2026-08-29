@@ -3269,7 +3269,7 @@ because each is a decision rather than a defect:
       not exist: the core cannot reach the device, so listing interfaces means an on-demand
       request to the probe and an answer routed back to a waiting HTTP request. That is `R-09`
       below, and `D-02` needs the same thing.
-- [ ] **R-09 — On-demand probe queries** · M · R-01 · A request/response message pair over the
+- [x] **R-09 — On-demand probe queries** · M · R-01 · A request/response message pair over the
       probe channel so the core can ask a probe to run something *now* and route the answer back
       to a waiting API call: correlation ids, a timeout, and a bound on how many are in flight.
       **Added by `T-02`:** the protocol is one-way for everything except the handshake, so there
@@ -3283,6 +3283,81 @@ because each is a decision rather than a defect:
       column positions and the row value they find. Neither sensor type is blocked on it: both
       resolve the row on every scan either way, so this is the add-time convenience and not the
       monitoring.
+
+      **R-09 outcome.** Protocol 8, capability `onDemandQuery`. `query` / `query-cancel` out,
+      `query-result` back, correlated by a per-process UUID — `ProbeQueryService` in the core, a
+      `QueryRunner` on the probe, and `POST /api/v1/sensors/{id}/check` as the first consumer.
+
+      **This is the only message in the protocol the core waits for**, and that is what makes it a
+      mechanism rather than another message. Everything else is one-way on its own clock, which is
+      why `D-02` identifies two hundred hosts down the discovery path instead of this one. Here a
+      person is looking at a spinner, so three things have to be true that are true nowhere else:
+      the request is correlated to its answer, it is bounded in time, and it is bounded in number.
+
+      **Three failures it exists to make impossible.** A promise that never settles — every path
+      that removes a pending query settles it, including the disconnect and the shutdown, because
+      an HTTP handler awaiting a promise nobody will resolve is a socket held until the client
+      gives up. An unbounded queue — past a small in-flight bound a query is refused *and
+      counted*, since a refusal an operator can retry beats a spinner queued behind other people's
+      deadlines. And an answer delivered to the wrong caller, which the ids exist for.
+
+      **Its own pool on the probe, one worker wide.** A scheduled scan is work the system owes and
+      can be late; this is somebody watching. Sharing the scan pool would cost both — the query
+      queues behind whatever was due on that tick, and monitoring loses a worker to something
+      nobody is measuring — and a separate pool also means a flood of queries cannot displace
+      monitoring at all.
+
+      **A failing check is a 200.** The question is "what does this sensor say right now", and
+      "the device refused the credential" is the answer somebody pressed the button to get; an
+      error status would send it down a client's failure path. The error statuses are reserved for
+      the *query* failing, and each one is a different thing to do: 503 offline or busy (wait),
+      504 timeout (look at the device), 409 too old (upgrade the probe). Two phases the probe
+      reports as ordinary check errors are re-labelled for the same reason — `pool-stopped` and
+      `unknown-type` are the *probe's* fault, and "probe is stopping" printed under a device's
+      name would send an operator to look at a machine that is working.
+
+      **Nothing is stored, and the response says so on every reply.** A reading taken outside the
+      schedule is not history: ten presses would draw ten spikes into a channel whose interval is
+      a minute. **A paused sensor can still be checked** — a pause stops the monitoring, not an
+      operator asking whether the thing they just fixed works, which is exactly when a sensor is
+      most likely to be paused.
+
+      **It took a hazard out of `R-04` on the way past.** `ProbeConfigService` kept credential
+      rotation stamps in an instance field, reassigned at the top of every resolve and read back
+      after it — sound for one caller and a shared mutable buffer for two, and this ticket is the
+      second caller. `pushAllConfigs()` already started a resolve per probe without awaiting
+      between them. What it could cost is not cosmetic: a fingerprint that stops moving when a
+      credential is rotated is a probe told `config-unchanged` afterwards, scanning a device with
+      a password that no longer works.
+      **Said plainly: no interleaving was demonstrated.** Two candidates were traced by hand and
+      written as tests, and neither reproduced against the old shape — every write goes through
+      the field as it stands, and the read follows the last write with no yield between them. The
+      stamps are returned rather than stashed, which removes the question for the cost of one
+      object instead of answering it with a scheduler; the test that remains asserts concurrent
+      resolves agree with serial ones, and it is a guard rather than a regression test.
+
+      Verified live: ping answered in 678 ms end to end (`durationMs` 648, which is `P-07`'s
+      spacing), an SNMP sensor answered through the credential path, five checks in a row added
+      **zero** rows to `sample`, an unknown sensor 404s and an out-of-range timeout 400s.
+      **The bound is on Core Health**, as `queriesRefused` — the one number from this
+      subsystem an operator needs on a graph, since `CLAUDE.md` requires backpressure to be
+      visible and the alternative is people quietly retrying a button that keeps refusing. Not
+      the in-flight count (zero except while somebody is looking) and not the answered/timed-out
+      counters (the checks already say that). `P-22` had just been filed for exactly this
+      omission in another subsystem, so making a second one would have been careless.
+
+      Mutation 17/17, after two of the original nineteen were withdrawn rather than fixed: one
+      targeted a branch that turned out to be dead code, and one modelled a defect that could not
+      be reproduced. Two survivors on the first pass were real: an answered query was leaking
+      its deadline timer, which later fired against an id nobody held and sent the probe a
+      `query-cancel` for work it had finished; and the probe's "cancelled" set turned out to be
+      a branch no mutation could reach, because forgetting the entry in `#waiting` is already the
+      whole mechanism — deleted rather than tested around, which is the same call `D-01` made
+      about a coercion that did nothing.
+
+      **Still not built here:** the interface picker and the table-row picker the notes above
+      wanted. Those are UI work on top of this — a second `ProbeQuery` kind each, which is what
+      the union is shaped for — and neither sensor type is blocked on them.
 - [x] **T-03 — SNMP Custom + Custom String** · M · T-01 · Arbitrary OIDs; regex extraction and
       lookup mapping for strings.
 

@@ -139,6 +139,12 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Notification steps the alarm scheduler has fired. Its rate is the alarm rate.',
     counter: true,
   },
+  {
+    key: 'queriesRefused',
+    name: 'ms_core_probe_queries_refused_total',
+    help: 'On-demand checks turned away because too many were already in flight.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

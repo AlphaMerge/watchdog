@@ -13,12 +13,15 @@ import {
   PROTOCOL_VERSION,
   versionFor,
   withCorrelation,
+  type CheckResult,
   type ConnectionClose,
   type CoreConfig,
   type CoreToProbeMessage,
   type Logger,
+  type ProbeQuery,
   type ProbeToCoreMessage,
   type ProbeHealthReport,
+  type QueryFailure,
   type RejectCode,
   type SensorAssignment,
   type IdentifyJob,
@@ -134,6 +137,22 @@ export interface ProbeEndpointOptions {
    * the sensors keep their last reading for ever.
    */
   reachability?: ProbeReachabilitySink;
+  /**
+   * Where an on-demand answer goes (`R-09`). Absent means nothing here can be asked anything —
+   * `sendQuery` still refuses politely, so a caller gets a reason rather than a hang.
+   */
+  queries?: ProbeQuerySink;
+}
+
+/** What the transport tells `R-09`, and nothing more. */
+export interface ProbeQuerySink {
+  deliver(message: {
+    queryId: string;
+    result?: CheckResult;
+    failure?: QueryFailure;
+    message?: string;
+  }): void;
+  probeDisconnected(probeObjectId: number): void;
 }
 
 /** What the transport tells `R-05`, and nothing more. */
@@ -415,6 +434,12 @@ export class ProbeEndpoint {
         case 'results':
           this.#queueResults(message, connection, logger, session);
           return session;
+        case 'query-result':
+          // Straight through, and never queued behind `pending`: a query has a caller holding a
+          // deadline, and chaining it behind a results batch that is mid-write would spend that
+          // deadline waiting for work nobody is watching.
+          this.#options.queries?.deliver(message);
+          return session;
         case 'config-ack':
           if (message.version !== session.sentVersion) {
             // Not fatal — the next push corrects it — but a probe running a configuration the
@@ -509,6 +534,41 @@ export class ProbeEndpoint {
         return { kind: 'too-old', protocolVersion: session.protocolVersion, needs };
       }
       session.connection.send(wireFor(message));
+      return { kind: 'sent' };
+    }
+    return { kind: 'offline' };
+  }
+
+  /**
+   * Sends one on-demand query, or says why it could not (`R-09`).
+   *
+   * The same three answers as `sendSweep`, and for the same reason — `offline` waits, `too-old`
+   * never will — with one difference that matters: nothing here queues. A sweep offered to an
+   * offline probe stays queued and is offered again on reconnect, because a discovery run is
+   * work the system owes. A query is a person waiting, and work nobody is waiting for any more
+   * is not work.
+   */
+  sendQuery(
+    probeObjectId: number,
+    message:
+      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | { kind: 'cancel'; queryId: string },
+  ): { kind: 'sent' } | { kind: 'offline' } | { kind: 'too-old'; protocolVersion: number } {
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId !== probeObjectId) continue;
+      if (!capabilitiesFor(session.protocolVersion).onDemandQuery) {
+        return { kind: 'too-old', protocolVersion: session.protocolVersion };
+      }
+      session.connection.send(
+        message.kind === 'ask'
+          ? {
+              type: 'query',
+              queryId: message.queryId,
+              query: message.query,
+              timeoutMs: message.timeoutMs,
+            }
+          : { type: 'query-cancel', queryId: message.queryId },
+      );
       return { kind: 'sent' };
     }
     return { kind: 'offline' };
@@ -952,6 +1012,12 @@ export class ProbeEndpoint {
       void reachability.lost(session.probeObjectId).catch((error: unknown) => {
         logger.error(describeError(error), 'could not mark this probe’s sensors as Unknown');
       });
+    }
+    // Anyone waiting on this probe learns now rather than at their own deadline: the socket
+    // that would have carried the answer has gone, and waiting out a timeout for a fact the
+    // core already knows is the slowest possible way to be told it (`R-09`).
+    if (session?.probeObjectId != null) {
+      this.#options.queries?.probeDisconnected(session.probeObjectId);
     }
     logger.info(
       { cause: close.cause, detail: close.detail, gid: session?.info.gid ?? null },

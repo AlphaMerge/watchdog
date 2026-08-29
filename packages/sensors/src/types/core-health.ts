@@ -111,6 +111,17 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'steps',
     counter: { bits: 64 },
   },
+  // `R-09`'s bound, which is the only part of it an operator needs on a graph. In-flight is a
+  // number that is zero except while somebody is looking at it, and the counters for answered
+  // and timed-out queries say the same thing the checks themselves already do. What is worth
+  // seeing is the refusals: `CLAUDE.md` requires backpressure to be visible, and a rising line
+  // here is a bound somebody has to raise rather than a spinner they keep retrying.
+  {
+    key: 'queriesRefused',
+    name: 'On-demand checks refused',
+    unit: 'queries',
+    counter: { bits: 64 },
+  },
 ];
 
 export const coreHealth: SensorType = {

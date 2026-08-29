@@ -12,6 +12,8 @@ import {
   type ProbeConfig,
   type ProbeToCoreMessage,
   type ProbeHealthReport,
+  type ProbeQuery,
+  type QueryFailure,
   type NackReason,
   type CheckResult,
   type SweepJob,
@@ -60,11 +62,25 @@ export interface CoreClientOptions {
    * core knows — which is the same shape as a probe too old to send any of it.
    */
   health?: () => ProbeHealthReport;
+  /**
+   * A query to run right now, with the core waiting on the answer (`R-09`).
+   *
+   * Same division as `onConfig` and `onSweep`: the client owns the socket, not the work. Absent
+   * means this build has no query runner, and a `query` is answered `unsupported` at once —
+   * silence would spend the core's whole deadline before it learned a fact available
+   * immediately.
+   */
+  onQuery?: (message: QueryCommand) => void;
   random?: () => number;
 }
 
 /** What the core asked for. Flattened from the wire so the runner takes one shape. */
 /** What the core asked for. Flattened from the wire so the runners take one shape. */
+/** What the core asked for, flattened from the wire the way `SweepCommand` is (`R-09`). */
+export type QueryCommand =
+  | { kind: 'run'; queryId: string; query: ProbeQuery; timeoutMs: number }
+  | { kind: 'cancel'; queryId: string };
+
 export type SweepCommand =
   | { kind: 'start'; job: SweepJob }
   | { kind: 'cancel'; runId: number }
@@ -412,6 +428,31 @@ export class CoreClient {
         return;
       }
 
+      case 'query': {
+        const handler = this.#options.onQuery;
+        if (handler === undefined) {
+          this.#connection?.send({
+            type: 'query-result',
+            queryId: message.queryId,
+            failure: 'unsupported',
+            message: 'this probe has no query runner',
+          });
+          return;
+        }
+        handler({
+          kind: 'run',
+          queryId: message.queryId,
+          query: message.query,
+          timeoutMs: message.timeoutMs,
+        });
+        return;
+      }
+
+      case 'query-cancel': {
+        this.#options.onQuery?.({ kind: 'cancel', queryId: message.queryId });
+        return;
+      }
+
       case 'reject': {
         // Retrying will not fix a bad key or a revoked probe; say so once, loudly, and keep
         // retrying slowly rather than silently giving up — an operator may fix it at the core.
@@ -480,6 +521,23 @@ export class CoreClient {
     if (this.#connection === undefined) return false;
     this.#connection.send(message);
     return true;
+  }
+
+  /**
+   * Answers one query (`R-09`).
+   *
+   * Not awaited and not acknowledged: the core is holding a deadline, and a probe that is no
+   * longer connected has nothing useful to say about an answer nobody can receive. The core's
+   * own disconnect handling settles those callers immediately, which is faster and more honest
+   * than anything this end could retry.
+   */
+  sendQueryResult(message: {
+    queryId: string;
+    result?: CheckResult;
+    failure?: QueryFailure;
+    message?: string;
+  }): void {
+    this.#connection?.send({ type: 'query-result', ...message });
   }
 
   async sendResults(results: readonly CheckResult[], backlog = 0): Promise<ResultsOutcome> {

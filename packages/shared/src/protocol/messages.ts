@@ -41,7 +41,7 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /**
  * The oldest peer version this build still understands.
@@ -82,6 +82,39 @@ export interface SensorAssignment {
    */
   credentials?: Record<string, Record<string, unknown>>;
 }
+
+/**
+ * Something the core wants a probe to do **now**, with an API call waiting on the answer
+ * (`R-09`).
+ *
+ * A discriminated union rather than a name and a bag of arguments, so a second query kind is a
+ * new member the compiler makes both ends handle rather than a string one end has never heard
+ * of. There is one kind today; `T-02`'s interface picker and `T-04`'s table-row picker are the
+ * next two, and each is a member here rather than a parameter of this one.
+ */
+export type ProbeQuery = {
+  /** Run one check and hand back its result, storing nothing. */
+  kind: 'check';
+  /**
+   * Exactly what a scheduled scan of this sensor would run.
+   *
+   * The whole assignment, not a subset, and that is the point of this shape: an operator pressing
+   * "check now" is asking what the *sensor* does, so a query built from different parameters
+   * would answer a question nobody asked — and would be the version that works when the real one
+   * does not.
+   */
+  assignment: SensorAssignment;
+};
+
+/**
+ * Why a query produced no answer.
+ *
+ * Separated because an operator does something different about each: `offline` waits, `too-old`
+ * upgrades a probe, `busy` retries, `timeout` looks at the device, and `failed` is the check
+ * itself reporting — which is a successful *query* about a failing target, and the one case that
+ * is not a fault in this mechanism at all.
+ */
+export type QueryFailure = 'offline' | 'too-old' | 'busy' | 'timeout' | 'unsupported' | 'failed';
 
 /** A single channel's reading inside a check result. */
 export interface ChannelReading {
@@ -371,6 +404,23 @@ export type ProbeToCoreMessage =
       cursor: number;
       message: string;
     }
+  | {
+      /**
+       * The answer to one `query` (`R-09`).
+       *
+       * **Always sent, including when the probe cannot do the thing.** The core has an API call
+       * waiting on this id: a query that is simply not answered becomes a request that hangs
+       * until the timeout for a reason nobody can see, where a refusal arrives immediately and
+       * says what to do about it.
+       */
+      type: 'query-result';
+      queryId: string;
+      /** The check's own result. Present when `failure` is absent, and never both. */
+      result?: CheckResult;
+      /** Why there is no result. `failed` is the check reporting a fault at the target. */
+      failure?: QueryFailure;
+      message?: string;
+    }
   | { type: 'bye'; reason: string };
 
 export type CoreToProbeMessage =
@@ -456,6 +506,23 @@ export type CoreToProbeMessage =
   /** Identify the hosts a sweep found (`D-02`). Resent to resume, exactly as `sweep-start` is. */
   | { type: 'identify-start'; job: IdentifyJob }
   | { type: 'identify-cancel'; runId: number }
+  /**
+   * Run this now and answer on `queryId` (`R-09`).
+   *
+   * The only message in this protocol the core *waits* for. Everything else is one-way — the
+   * core tells a probe what to scan and the probe reports what it found, each on its own clock —
+   * which is why `D-02` went down the asynchronous discovery path instead of this one. What
+   * makes this different is that a person is looking at a spinner.
+   */
+  | { type: 'query'; queryId: string; query: ProbeQuery; timeoutMs: number }
+  /**
+   * Stop caring about a query.
+   *
+   * Sent when the core's own deadline passes, so the probe abandons work whose answer nothing
+   * is waiting for any more. Advisory: a probe that has already replied, or has never heard of
+   * this id, does nothing and says nothing.
+   */
+  | { type: 'query-cancel'; queryId: string }
   | { type: 'bye'; reason: string };
 
 export type ProtocolMessage = ProbeToCoreMessage | CoreToProbeMessage;
@@ -522,6 +589,49 @@ const PROBE_HEALTH_SCHEMA = {
   },
 } as const;
 
+/**
+ * One check result on the wire.
+ *
+ * Extracted so `results` and `R-09`'s `query-result` cannot drift: an on-demand check answers
+ * with the same shape a scheduled one reports, and two copies of this would eventually disagree
+ * about a field in exactly the case an operator was using to find out why the real one failed.
+ */
+const CHECK_RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    sensorId: { type: 'integer', minimum: 1 },
+    at: { type: 'string', minLength: 1, maxLength: 64 },
+    outcome: { type: 'string', enum: ['ok', 'error'] },
+    message: { type: 'string', maxLength: 2000 },
+    durationMs: { type: 'number', minimum: 0 },
+    channels: {
+      type: 'array',
+      maxItems: 500,
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', minLength: 1, maxLength: 100 },
+          // No NaN and no Infinity: JSON cannot carry them, and a channel whose value is not a
+          // number is a gap, which is the absence of a reading.
+          value: { type: 'number' },
+          // The exact counter and the width it was read at (`T-02`). Text because an unsigned
+          // 64-bit counter does not survive a double, and 20 digits is the most one can have.
+          counter: { type: 'string', pattern: '^[0-9]{1,20}$' },
+          counterBits: { type: 'integer', enum: [32, 64] },
+          name: { type: 'string', minLength: 1, maxLength: 200 },
+          unit: { type: 'string', maxLength: 50 },
+        },
+        required: ['key', 'value'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['sensorId', 'at', 'outcome', 'message', 'durationMs', 'channels'],
+  additionalProperties: false,
+} as const;
+
+const QUERY_FAILURES = ['offline', 'too-old', 'busy', 'timeout', 'unsupported', 'failed'] as const;
+
 const probeToCoreSchema = {
   type: 'object',
   required: ['type'],
@@ -566,40 +676,7 @@ const probeToCoreSchema = {
           // Bounded here as well as by the 4 MB frame cap, so a malformed peer is refused by
           // the schema with a message rather than by the decoder with a socket reset.
           maxItems: 5000,
-          items: {
-            type: 'object',
-            properties: {
-              sensorId: { type: 'integer', minimum: 1 },
-              at: { type: 'string', minLength: 1, maxLength: 64 },
-              outcome: { type: 'string', enum: ['ok', 'error'] },
-              message: { type: 'string', maxLength: 2000 },
-              durationMs: { type: 'number', minimum: 0 },
-              channels: {
-                type: 'array',
-                maxItems: 500,
-                items: {
-                  type: 'object',
-                  properties: {
-                    key: { type: 'string', minLength: 1, maxLength: 100 },
-                    // No NaN and no Infinity: JSON cannot carry them, and a channel whose value
-                    // is not a number is a gap, which is the absence of a reading.
-                    value: { type: 'number' },
-                    // The exact counter and the width it was read at (`T-02`). Text because an
-                    // unsigned 64-bit counter does not survive a double, and 20 digits is the
-                    // most one can have.
-                    counter: { type: 'string', pattern: '^[0-9]{1,20}$' },
-                    counterBits: { type: 'integer', enum: [32, 64] },
-                    name: { type: 'string', minLength: 1, maxLength: 200 },
-                    unit: { type: 'string', maxLength: 50 },
-                  },
-                  required: ['key', 'value'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['sensorId', 'at', 'outcome', 'message', 'durationMs', 'channels'],
-            additionalProperties: false,
-          },
+          items: CHECK_RESULT_SCHEMA,
         },
       },
       required: ['type', 'batchId', 'results'],
@@ -673,6 +750,21 @@ const probeToCoreSchema = {
         message: { type: 'string', maxLength: 2000 },
       },
       required: ['type', 'runId', 'ending', 'cursor', 'message'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'query-result' },
+        queryId: { type: 'string', minLength: 1, maxLength: 64 },
+        // Neither is required, and both are optional rather than a `oneOf`: a result with no
+        // failure is an answer, a failure with no result is a refusal, and a peer that sends
+        // neither is a probe reporting that it did nothing — which the core reads as a failure
+        // it can name rather than as a promise it must keep waiting on.
+        result: CHECK_RESULT_SCHEMA,
+        failure: { type: 'string', enum: QUERY_FAILURES },
+        message: { type: 'string', maxLength: 2000 },
+      },
+      required: ['type', 'queryId'],
       additionalProperties: false,
     },
     {
@@ -890,6 +982,41 @@ const coreToProbeSchema = {
         runId: { type: 'integer', minimum: 1 },
       },
       required: ['type', 'runId'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'query' },
+        queryId: { type: 'string', minLength: 1, maxLength: 64 },
+        query: {
+          type: 'object',
+          required: ['kind'],
+          discriminator: { propertyName: 'kind' },
+          oneOf: [
+            {
+              properties: {
+                kind: { const: 'check' },
+                assignment: sensorAssignmentSchema,
+              },
+              required: ['kind', 'assignment'],
+              additionalProperties: false,
+            },
+          ],
+        },
+        // Bounded well below the frame's own limits: this is a person waiting, and a query that
+        // may run for an hour is a connection slot held for an hour on a probe that has scans to
+        // get on with.
+        timeoutMs: { type: 'integer', minimum: 100, maximum: 300000 },
+      },
+      required: ['type', 'queryId', 'query', 'timeoutMs'],
+      additionalProperties: false,
+    },
+    {
+      properties: {
+        type: { const: 'query-cancel' },
+        queryId: { type: 'string', minLength: 1, maxLength: 64 },
+      },
+      required: ['type', 'queryId'],
       additionalProperties: false,
     },
     {

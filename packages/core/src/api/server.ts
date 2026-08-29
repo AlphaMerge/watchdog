@@ -29,6 +29,7 @@ import type { SessionService } from '../auth/sessions.js';
 import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
+import { queryRoutes } from './routes/queries.js';
 import { objectRoutes } from './routes/objects.js';
 import { probeRoutes } from './routes/probes.js';
 import { BulkService } from '../objects/bulk.js';
@@ -55,6 +56,9 @@ import type { StateBroadcaster } from '../state/stream.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
 import { HISTORY_SCHEMAS } from './schemas/history.js';
+import { QUERY_SCHEMAS } from './schemas/queries.js';
+import type { ProbeQueryService } from '../probes/queries.js';
+import type { ProbeConfigService } from '../probes/config.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
@@ -104,6 +108,12 @@ export interface ApiServerOptions {
   rediscovery?: RediscoveryService;
   /** Absent until R-01 is wired; the approval queue then has no routes. */
   probeRegistry?: ProbeRegistry;
+  /**
+   * Running a check on demand (`R-09`). Both are needed or neither route exists: asking a probe
+   * requires knowing what to ask it, and half of that pair is a route that always 404s.
+   */
+  queries?: ProbeQueryService;
+  probeConfig?: ProbeConfigService;
   /**
    * Accounts, sessions and login throttling (`A-01`).
    *
@@ -199,6 +209,8 @@ export class ApiServer {
   readonly #provision: ApiServerOptions['provision'];
   readonly #rediscovery: RediscoveryService | undefined;
   readonly #probeRegistry: ProbeRegistry | undefined;
+  readonly #queries: ProbeQueryService | undefined;
+  readonly #probeConfig: ProbeConfigService | undefined;
   readonly #auth: ApiServerOptions['auth'];
   readonly #triggers: TriggerService | undefined;
   readonly #templates: TemplateService | undefined;
@@ -241,6 +253,8 @@ export class ApiServer {
     this.#provision = options.provision;
     this.#rediscovery = options.rediscovery;
     this.#probeRegistry = options.probeRegistry;
+    this.#queries = options.queries;
+    this.#probeConfig = options.probeConfig;
     this.#auth = options.auth;
     this.#triggers = options.triggers;
     this.#templates = options.templates;
@@ -323,6 +337,7 @@ export class ApiServer {
       ...TRIGGER_SCHEMAS,
       ...TEMPLATE_SCHEMAS,
       ...NOTIFICATION_SCHEMAS,
+      ...QUERY_SCHEMAS,
     ])
       this.#app.addSchema(schema);
 
@@ -433,6 +448,12 @@ export class ApiServer {
           bulk: new BulkService({ objects: service, logger: this.#logger }),
         });
         await scope.register(historyRoutes, { history: this.#history });
+        if (this.#queries !== undefined && this.#probeConfig !== undefined) {
+          await scope.register(queryRoutes, {
+            queries: this.#queries,
+            probeConfig: this.#probeConfig,
+          });
+        }
         await scope.register(stateRoutes, { db: this.#db });
         await scope.register(stateLogRoutes, { log: this.#stateLog });
         alarmRoutes(scope, { alarms: this.#alarms });

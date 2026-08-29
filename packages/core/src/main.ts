@@ -82,6 +82,7 @@ import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
+import { ProbeQueryService } from './probes/queries.js';
 import { SensorStateService } from './state/service.js';
 import { ConfigChangeNotifier } from './probes/notifier.js';
 import { VERSION } from './version.js';
@@ -587,6 +588,41 @@ async function serve(): Promise<void> {
     },
   });
 
+  // What a probe should be scanning (`R-04`), built here rather than inline in the endpoint so
+  // `R-09` can ask it about one sensor without a second copy of the rules — an assignment
+  // assembled twice is an on-demand check that works when the scheduled one does not.
+  const probeConfig = new ProbeConfigService({
+    db,
+    resolver,
+    vault,
+    // Only the kinds a type declared, so a probe running Ping never receives an SNMP community
+    // string (`A-05`).
+    credentialKindsFor: (sensorType) =>
+      catalogue.has(sensorType) ? (catalogue.declaration(sensorType).credentialKinds ?? []) : [],
+    // A Sensor Factory is computed here, from readings this process already holds, so it never
+    // appears in a probe's assignment list (`T-21`).
+    coreEvaluated: (sensorType) =>
+      catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
+  });
+
+  // On-demand queries (`R-09`), reaching the endpoint through the same closure discovery uses
+  // and for the same reason: the endpoint is built later, and until it is, `offline` is the
+  // honest answer rather than a promise nobody can keep.
+  const probeQueries = new ProbeQueryService({
+    logger,
+    sender: {
+      sendQuery: (probeObjectId, message) =>
+        probeEndpointRef?.sendQuery(probeObjectId, message) ?? { kind: 'offline' },
+    },
+  });
+  lifecycle.onShutdown({
+    name: 'probe-queries',
+    timeoutMs: 1_000,
+    run: () => {
+      probeQueries.stop();
+    },
+  });
+
   // Provisioning (`D-04`). Built after the templates and before the API, and it takes the
   // object service rather than the database: creating a device or a sensor has to go through
   // the same validation, audit and version bookkeeping every other creation does — a discovery
@@ -728,6 +764,8 @@ async function serve(): Promise<void> {
     provision,
     rediscovery,
     probeRegistry,
+    queries: probeQueries,
+    probeConfig,
     auth: {
       accounts,
       sessions,
@@ -836,19 +874,8 @@ async function serve(): Promise<void> {
     discovery,
     registry: probeRegistry,
     reachability,
-    probeConfig: new ProbeConfigService({
-      db,
-      resolver,
-      vault,
-      // Only the kinds a type declared, so a probe running Ping never receives an SNMP
-      // community string (`A-05`).
-      credentialKindsFor: (sensorType) =>
-        catalogue.has(sensorType) ? (catalogue.declaration(sensorType).credentialKinds ?? []) : [],
-      // A Sensor Factory is computed here, from readings this process already holds, so it never
-      // appears in a probe's assignment list (`T-21`).
-      coreEvaluated: (sensorType) =>
-        catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
-    }),
+    probeConfig,
+    queries: probeQueries,
   });
   probeEndpointRef = probeEndpoint;
   configNotifier.attach(probeEndpoint);
@@ -880,6 +907,7 @@ async function serve(): Promise<void> {
       probes: () => reachability.stats(),
       delivery: (q) => deliveryHealth.read(q),
       alarms: () => alarmScheduler.stats,
+      queries: () => probeQueries.stats(),
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {

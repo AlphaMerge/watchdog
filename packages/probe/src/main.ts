@@ -11,6 +11,7 @@ import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
+import { QueryRunner } from './queries/runner.js';
 import type { ResultMeta } from './runner/types.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { LISTENER_ID as SYSLOG_LISTENER_ID, SyslogListener } from './listeners/syslog-listener.js';
@@ -245,6 +246,18 @@ async function main(): Promise<void> {
     },
   });
 
+  // On-demand queries (`R-09`). Its own pool of one, beside the scheduled one, because a person
+  // watching a spinner should not queue behind whatever was due on the same tick — and because a
+  // query must never be able to displace monitoring, however many arrive.
+  const queries = new QueryRunner({
+    logger,
+    answer: (message) => {
+      coreClient.sendQueryResult(message);
+    },
+  });
+  await queries.start();
+  lifecycle.onShutdown({ name: 'query-runner', timeoutMs: 10_000, run: () => queries.stop() });
+
   // The discovery sweep (`D-01`). Constructed before the client because the client's `onSweep`
   // hands straight to it, and it reports back through `coreClient` — the same getter pattern
   // the drain uses, for the same reason: the two need each other and neither can exist first.
@@ -335,6 +348,16 @@ async function main(): Promise<void> {
           return;
         case 'identify-cancel':
           identifications.cancel(message.runId);
+          return;
+      }
+    },
+    onQuery: (message) => {
+      switch (message.kind) {
+        case 'run':
+          queries.run(message.queryId, message.query, message.timeoutMs);
+          return;
+        case 'cancel':
+          queries.cancel(message.queryId);
           return;
       }
     },

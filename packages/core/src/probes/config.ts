@@ -69,8 +69,6 @@ export class ProbeConfigService {
   readonly #vault: CredentialVault | undefined;
   readonly #credentialKindsFor: (sensorType: string) => readonly string[];
   readonly #coreEvaluated: (sensorType: string) => boolean;
-  /** Rotation markers from the last resolve, keyed by sensor. Never contents — see below. */
-  #stamps = new Map<number, string>();
 
   constructor(options: ProbeConfigOptions) {
     this.#db = options.db;
@@ -153,8 +151,7 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>(sensorIds, 'scan.timeoutMs'),
     ]);
 
-    const credentials = await this.#credentialsFor(assignable);
-    const stamps = this.#stamps;
+    const { values: credentials, stamps } = await this.#credentialsFor(assignable);
 
     const sensors: SensorAssignment[] = assignable.map((row) => {
       const sensorId = Number(row.sensor_id);
@@ -177,6 +174,81 @@ export class ProbeConfigService {
   }
 
   /**
+   * One sensor's assignment, and the probe that owns it (`R-09`).
+   *
+   * **The same assignment a scheduled scan would run, built by the same rules**, because an
+   * operator pressing "check now" is asking what the *sensor* does. An assignment assembled
+   * differently here would be the version that works when the real one does not, which is worse
+   * than no answer at all.
+   *
+   * Deliberately not `assignmentsFor(probe).find(...)`: that resolves and decrypts credentials
+   * for every sensor on the branch — thousands, on an interactive path — to answer about one.
+   *
+   * A paused sensor is **not** excluded, and that is the difference from the scheduled path. A
+   * pause stops the monitoring; it does not stop an operator asking whether the thing they just
+   * fixed is working, which is exactly when a sensor is most likely to be paused.
+   */
+  async assignmentFor(
+    sensorId: number,
+  ): Promise<{ probeObjectId: number; assignment: SensorAssignment } | null> {
+    const [row] = await this.#db.query<{
+      probe_id: string | null;
+      sensor_type: string;
+      params: Record<string, unknown> | null;
+      host: string | null;
+      ip_version: string | null;
+    }>(
+      `
+      WITH RECURSIVE up AS (
+        SELECT id, parent_id, kind, 0 AS depth FROM object WHERE id = $1
+        UNION ALL
+        SELECT o.id, o.parent_id, o.kind, up.depth + 1
+        FROM object o
+        JOIN up ON up.parent_id = o.id
+        WHERE up.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT (SELECT id::text FROM up WHERE kind = 'probe' ORDER BY depth LIMIT 1) AS probe_id,
+             sc.type       AS sensor_type,
+             sc.params     AS params,
+             dc.host       AS host,
+             dc.ip_version AS ip_version
+      FROM object s
+      JOIN sensor_config sc ON sc.object_id = s.id
+      JOIN device_config dc ON dc.object_id = s.parent_id
+      WHERE s.id = $1 AND s.kind = 'sensor'
+      `,
+      [sensorId],
+    );
+    if (row === undefined || row.probe_id === null) return null;
+    // A core-evaluated type has no probe to ask: its reading is computed here, so "run it on the
+    // probe now" is a question with no answer rather than one that times out.
+    if (this.#coreEvaluated(row.sensor_type)) return null;
+
+    const [intervals, timeouts, credentials] = await Promise.all([
+      this.#resolver.resolveForObjects<number>([sensorId], 'scan.intervalSeconds'),
+      this.#resolver.resolveForObjects<number>([sensorId], 'scan.timeoutMs'),
+      this.#credentialsFor([{ sensor_id: String(sensorId), sensor_type: row.sensor_type }]),
+    ]);
+    const forSensor = credentials.values.get(sensorId);
+
+    return {
+      probeObjectId: Number(row.probe_id),
+      assignment: {
+        sensorId,
+        sensorType: row.sensor_type,
+        params: row.params ?? {},
+        target: {
+          host: row.host ?? '',
+          ipVersion: (row.ip_version ?? 'auto') as SensorAssignment['target']['ipVersion'],
+        },
+        intervalSeconds: intervals.get(sensorId)?.value ?? 60,
+        timeoutMs: timeouts.get(sensorId)?.value ?? 30_000,
+        ...(forSensor === undefined ? {} : { credentials: forSensor }),
+      },
+    };
+  }
+
+  /**
    * The decrypted credentials each sensor needs, and the stamps that go into the fingerprint.
    *
    * Grouped by the *set of kinds* a sensor type declares rather than resolved per sensor: a
@@ -185,9 +257,9 @@ export class ProbeConfigService {
    */
   async #credentialsFor(
     rows: readonly { sensor_id: string; sensor_type: string }[],
-  ): Promise<Map<number, Record<string, Record<string, unknown>>>> {
-    this.#stamps = new Map();
-    if (this.#vault === undefined) return new Map();
+  ): Promise<ResolvedCredentials> {
+    const stamps = new Map<number, string>();
+    if (this.#vault === undefined) return { values: new Map(), stamps };
 
     const byKindSet = new Map<string, { kinds: string[]; sensorIds: number[] }>();
     for (const row of rows) {
@@ -198,7 +270,7 @@ export class ProbeConfigService {
       bucket.sensorIds.push(Number(row.sensor_id));
       byKindSet.set(key, bucket);
     }
-    if (byKindSet.size === 0) return new Map();
+    if (byKindSet.size === 0) return { values: new Map(), stamps };
 
     const out = new Map<number, Record<string, Record<string, unknown>>>();
     for (const { kinds, sensorIds } of byKindSet.values()) {
@@ -215,11 +287,36 @@ export class ProbeConfigService {
           marks.push(`${kind}=${entry.stamp}`);
         }
         out.set(sensorId, values);
-        this.#stamps.set(sensorId, marks.join('|'));
+        stamps.set(sensorId, marks.join('|'));
       }
     }
-    return out;
+    return { values: out, stamps };
   }
+}
+
+/**
+ * What a credential resolve produced, returned rather than stashed on the service.
+ *
+ * **This used to be an instance field**, reassigned at the top of every resolve and read back
+ * after it — sound for one caller and a shared mutable buffer for two. `R-09` added the second
+ * caller, and `pushAllConfigs()` already started a resolve per probe without awaiting between
+ * them.
+ *
+ * What that could cost is not cosmetic: a fingerprint assembled with another probe's rotation
+ * stamps, and a fingerprint that stops moving when a credential is rotated is a probe told
+ * `config-unchanged` afterwards — a device scanned with a password that no longer works, and a
+ * sensor Down for a reason nothing explains.
+ *
+ * **Whether a real interleaving reached that is not established.** Two candidates were traced
+ * and written as tests; neither reproduced against the old shape, because every write goes
+ * through the field as it stands at that moment and the read follows the last write with no
+ * yield between them. Returning the map removes the question for the cost of one object, which
+ * is cheaper than the scheduler it would take to answer it.
+ */
+interface ResolvedCredentials {
+  values: Map<number, Record<string, Record<string, unknown>>>;
+  /** Rotation markers, keyed by sensor. Never contents — see `fingerprint`. */
+  stamps: Map<number, string>;
 }
 
 /**

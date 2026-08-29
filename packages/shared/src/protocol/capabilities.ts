@@ -33,6 +33,14 @@ export interface ProbeCapabilities {
    * reported in words, never as a channel that quietly reads zero.
    */
   healthReporting: boolean;
+  /**
+   * Answers an on-demand query — a check run *now*, with an API call waiting (`R-09`).
+   *
+   * The gate matters more here than for the others because a person is looking at a spinner: a
+   * probe too old for this must be told so immediately, not left to a timeout that looks
+   * identical to a device that will not answer.
+   */
+  onDemandQuery: boolean;
 }
 
 /**
@@ -48,6 +56,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['identification', 5],
   ['approval', 6],
   ['healthReporting', 7],
+  ['onDemandQuery', 8],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -57,6 +66,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   identification: 'identify what it found',
   approval: 'be held for approval before it scans',
   healthReporting: 'report its own scheduler and pool health',
+  onDemandQuery: 'run a check on demand',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -67,6 +77,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     identification: has(5),
     approval: has(6),
     healthReporting: has(7),
+    onDemandQuery: has(8),
   };
 }
 

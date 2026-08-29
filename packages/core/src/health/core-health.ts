@@ -39,6 +39,8 @@ export interface CoreHealthSources {
   probes: () => { probesDown: number };
   /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
   alarms: () => { fired: number; nextWakeAt: Date | null };
+  /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
+  queries: () => { refused: number };
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -132,6 +134,7 @@ export class CoreHealthService {
     const stream = this.#sources.stream();
     const probes = this.#sources.probes();
     const alarms = this.#sources.alarms();
+    const queries = this.#sources.queries();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#db.tx(async (q) => ({
@@ -163,6 +166,7 @@ export class CoreHealthService {
       // time — a gap here would read as "unknown" for a state that is simply quiet.
       alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
       alarmsFired: alarms.fired,
+      queriesRefused: queries.refused,
     };
   }
 

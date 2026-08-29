@@ -48,6 +48,7 @@ function sources(
     deliveryThrows: boolean;
     alarmsFired: number;
     nextWakeAt: Date | null;
+    queriesRefused: number;
   }> = {},
 ): CoreHealthSources {
   return {
@@ -62,6 +63,7 @@ function sources(
       fired: overrides.alarmsFired ?? 0,
       nextWakeAt: overrides.nextWakeAt ?? null,
     }),
+    queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
     probes: () => ({ probesDown: overrides.probesDown ?? 0 }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
@@ -302,6 +304,14 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['alarmsFired'], 217);
     });
 
+    it('carries the on-demand checks that were turned away', async () => {
+      // `R-09` bounds how many run at once, and `CLAUDE.md` requires that bound to be visible:
+      // a rising line here is a limit somebody has to raise, where the alternative is operators
+      // quietly retrying a button that keeps refusing.
+      const reading = await build({ queriesRefused: 5 }).read();
+      assert.equal(reading['queriesRefused'], 5);
+    });
+
     it('counts what is actually queued in the housekeeping tables', async () => {
       await db.query(
         `INSERT INTO rollup_backfill (from_time, to_time, reason)
@@ -380,6 +390,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         streamCutoffs: 1,
         dependencyPauses: 4,
         alarmsFired: 217,
+        queriesRefused: 5,
         ingestQueue: 0,
       });
       for (const reading of readings) {
@@ -390,7 +401,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 5);
+      assert.equal(readings.length, 6);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These four
@@ -398,7 +409,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // where somebody wanted a rate.
       assert.deepEqual(
         readings.filter((reading) => reading.counter !== undefined).map((reading) => reading.key),
-        ['ingestRefused', 'streamCutoffs', 'dependencyPauses', 'alarmsFired'],
+        ['ingestRefused', 'streamCutoffs', 'dependencyPauses', 'alarmsFired', 'queriesRefused'],
       );
     });
 

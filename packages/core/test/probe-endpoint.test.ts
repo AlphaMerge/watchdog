@@ -15,7 +15,11 @@ import {
   type ProbeToCoreMessage,
   type SensorAssignment,
 } from '@ms/shared';
-import { ProbeEndpoint, type ResultReceiver } from '../src/transport/probe-endpoint.js';
+import {
+  ProbeEndpoint,
+  type ProbeQuerySink,
+  type ResultReceiver,
+} from '../src/transport/probe-endpoint.js';
 import { fingerprint, type ProbeAssignments } from '../src/probes/config.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -666,12 +670,14 @@ describe(
       source: StubSource,
       body: (probe: TestProbe, endpoint: ProbeEndpoint) => Promise<void>,
       helloOverrides: Partial<Extract<ProbeToCoreMessage, { type: 'hello' }>> = {},
+      queries?: ProbeQuerySink,
     ): Promise<void> {
       const endpoint = new ProbeEndpoint({
         config: endpointConfig(dir),
         logger: silentLogger,
         coreVersion: '9.9.9',
         probeConfig: source,
+        ...(queries === undefined ? {} : { queries }),
       });
       const address = await endpoint.start();
       try {
@@ -889,5 +895,119 @@ describe(
         await Promise.resolve();
       });
     });
+
+    /**
+     * On-demand queries over the real socket (`R-09`).
+     *
+     * The service's own logic is covered without a socket in `probe-queries.test.ts`. What is
+     * here is the half that only a wire can prove: that the message survives framing and
+     * validation in both directions, that the capability gate is applied by the thing holding
+     * the connection, and that a dropped socket reaches the sink that settles the callers.
+     */
+    describe('on-demand queries', () => {
+      const query = {
+        kind: 'check' as const,
+        assignment: sensor(1),
+      };
+
+      it('carries a query out and its answer back', async () => {
+        const source = new StubSource();
+        const answered: { queryId: string; result?: unknown }[] = [];
+
+        await withProbe(
+          source,
+          async (probe, endpoint) => {
+            const delivery = endpoint.sendQuery(7, {
+              kind: 'ask',
+              queryId: 'q1',
+              query,
+              timeoutMs: 5_000,
+            });
+            assert.equal(delivery.kind, 'sent');
+
+            const sent = await probe.waitFor((m) => m.type === 'query');
+            assert.ok(sent.type === 'query');
+            assert.equal(sent.queryId, 'q1');
+            assert.equal(sent.timeoutMs, 5_000);
+            assert.equal(sent.query.assignment.sensorId, 1);
+
+            probe.send({
+              type: 'query-result',
+              queryId: 'q1',
+              result: {
+                sensorId: 1,
+                at: '2026-08-29T10:00:00.000Z',
+                outcome: 'ok',
+                message: '4/4 replies',
+                durationMs: 612,
+                channels: [{ key: 'rtt', value: 1.2 }],
+              },
+            });
+            await waitUntil(() => answered.length === 1);
+            assert.equal(answered[0]?.queryId, 'q1');
+          },
+          {},
+          { deliver: (m) => answered.push(m), probeDisconnected: () => undefined },
+        );
+      });
+
+      it('cancels through the same channel', async () => {
+        const source = new StubSource();
+        await withProbe(source, async (probe, endpoint) => {
+          endpoint.sendQuery(7, { kind: 'cancel', queryId: 'q9' });
+          const sent = await probe.waitFor((m) => m.type === 'query-cancel');
+          assert.ok(sent.type === 'query-cancel');
+          assert.equal(sent.queryId, 'q9');
+        });
+      });
+
+      it('refuses a probe too old to be asked, rather than sending into silence', async () => {
+        // The reason the gate lives here: a person is watching a spinner, and a probe that will
+        // never answer must be reported now rather than at the deadline, where it would look
+        // exactly like a device that will not reply.
+        const source = new StubSource();
+        await withProbe(
+          source,
+          async (_probe, endpoint) => {
+            await Promise.resolve();
+            const delivery = endpoint.sendQuery(7, {
+              kind: 'ask',
+              queryId: 'q1',
+              query,
+              timeoutMs: 5_000,
+            });
+            assert.equal(delivery.kind, 'too-old');
+            assert.equal(delivery.protocolVersion, 7);
+          },
+          { protocolVersion: 7 },
+        );
+      });
+
+      it('tells the query sink when a probe’s connection goes', async () => {
+        const source = new StubSource();
+        const gone: number[] = [];
+
+        await withProbe(
+          source,
+          async (probe) => {
+            await Promise.resolve();
+            probe.close();
+            await waitUntil(() => gone.length === 1);
+          },
+          {},
+          { deliver: () => undefined, probeDisconnected: (id) => gone.push(id) },
+        );
+        assert.deepEqual(gone, [7]);
+      });
+    });
   },
 );
+
+/** Polls a condition rather than sleeping a fixed time, so a slow machine is not a failure. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) assert.fail('timed out waiting for a condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

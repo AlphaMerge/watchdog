@@ -82,6 +82,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         stream: () => ({ overflowed: 2 }),
         probes: () => ({ probesDown: 1 }),
         alarms: () => ({ fired: 6, nextWakeAt: null }),
+        queries: () => ({ refused: 2 }),
         delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       },
       ingest: () => Promise.resolve(),
@@ -146,6 +147,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       // sensor's, rather than being counted a second time from the same object.
       assert.equal(metrics.get('ms_core_alarm_sweep_overdue_seconds'), 0);
       assert.equal(metrics.get('ms_core_alarm_steps_fired_total'), 6);
+      assert.equal(metrics.get('ms_core_probe_queries_refused_total'), 2);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {
@@ -197,6 +199,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         'ms_core_stream_cutoffs_total',
         'ms_core_dependency_pauses_total',
         'ms_core_alarm_steps_fired_total',
+        'ms_core_probe_queries_refused_total',
       ]) {
         assert.match(body, new RegExp(`# TYPE ${name} counter`), name);
       }

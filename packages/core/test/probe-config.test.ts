@@ -301,6 +301,81 @@ describe(
       assert.equal((await config.assignmentsFor(destination.id)).sensors.length, 1);
     });
 
+    /**
+     * One sensor's assignment, for `R-09`'s "check now".
+     *
+     * **The claim being tested is that it is the same assignment**, not merely a similar one:
+     * an on-demand check built by a second set of rules would be the version that works when
+     * the scheduled one does not, which is worse than having no button at all.
+     */
+    describe('one sensor at a time', () => {
+      it('builds exactly what the scheduled path would send for that sensor', async () => {
+        const sensor = await addSensor();
+        const { sensors } = await config.assignmentsFor(probeId);
+        const scheduled = sensors.find((s) => s.sensorId === sensor.id);
+        const one = await config.assignmentFor(sensor.id);
+
+        assert.ok(one !== null);
+        assert.equal(one.probeObjectId, probeId);
+        assert.deepEqual(one.assignment, scheduled);
+      });
+
+      it('finds the probe however deep the sensor is under it', async () => {
+        // Groups nest arbitrarily, and the probe is whichever ancestor is nearest — walking to
+        // the root and taking the first probe found would be the same answer only by luck.
+        const group = await h.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: 'nested',
+        });
+        const inner = await h.service.create(testActor, {
+          kind: 'group',
+          parentId: group.id,
+          name: 'deeper',
+        });
+        const device = await h.service.create(testActor, {
+          kind: 'device',
+          parentId: inner.id,
+          name: 'buried',
+          host: '192.0.2.51',
+          ipVersion: 'v4',
+        });
+        const sensor = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device.id,
+          name: 'Ping',
+          sensorType: 'icmp.ping',
+          params: { count: 4 },
+        });
+
+        const one = await config.assignmentFor(sensor.id);
+        assert.ok(one !== null);
+        assert.equal(one.probeObjectId, probeId);
+        assert.equal(one.assignment.target.host, '192.0.2.51');
+      });
+
+      it('answers for a paused sensor, which the scheduled path deliberately does not', async () => {
+        // A pause stops the monitoring. It does not stop an operator asking whether the thing
+        // they just fixed is working — which is exactly when a sensor is most likely to be
+        // paused, and would be the most useless moment for the button to stop working.
+        const sensor = await addSensor();
+        await h.service.pause(testActor, sensor.id, { kind: 'indefinite' }, 'fixing it');
+
+        const { sensors } = await config.assignmentsFor(probeId);
+        assert.equal(
+          sensors.some((s) => s.sensorId === sensor.id),
+          false,
+          'a paused sensor is not in the scheduled set',
+        );
+        assert.ok((await config.assignmentFor(sensor.id)) !== null);
+      });
+
+      it('answers nothing for what cannot be asked of a probe', async () => {
+        assert.equal(await config.assignmentFor(999_999), null, 'no such sensor');
+        assert.equal(await config.assignmentFor(deviceId), null, 'a device is not a sensor');
+      });
+    });
+
     it('is empty, with a stable fingerprint, for a probe with nothing under it', async () => {
       const first = await config.assignmentsFor(probeId);
       const second = await config.assignmentsFor(probeId);
@@ -414,6 +489,68 @@ describe(
         assignments.sensors.find((s) => s.sensorId === sensor.id)?.credentials,
         undefined,
       );
+    });
+
+    it('answers the same for concurrent resolves as for serial ones', async () => {
+      // `R-09` gave `ProbeConfigService` a second caller, and the credential rotation stamps
+      // were an instance field — reassigned at the top of every resolve and read back after it,
+      // which is sound for one caller and a shared mutable buffer for two. `pushAllConfigs()`
+      // starts a resolve per probe without awaiting between them.
+      //
+      // **What that could cost, if an interleaving lined up:** a fingerprint assembled with
+      // another probe's stamps, and a fingerprint that stops moving when a credential is rotated
+      // is a probe told `config-unchanged` afterwards — a device scanned with a password that no
+      // longer works, and a sensor Down for a reason nothing explains.
+      //
+      // **Honest about what this test is.** Several interleavings were traced by hand and a
+      // damaging one was written twice; neither reproduced, so this is a guard rather than a
+      // regression test for a defect that was demonstrated. The stamps are returned now instead
+      // of stashed, which removes the question rather than answering it — the cheaper move when
+      // the answer needs a scheduler to pin down.
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'first' });
+      await addSensor('snmp.traffic', 'traffic');
+
+      const bare = await h.service.create(testActor, {
+        kind: 'probe',
+        parentId: h.rootId,
+        name: `probe-bare-${String(process.hrtime.bigint())}`,
+        gid: `gid-bare-${String(process.hrtime.bigint())}`,
+      });
+      const bareDevice = await h.service.create(testActor, {
+        kind: 'device',
+        parentId: bare.id,
+        name: 'no credentials here',
+        host: '192.0.2.60',
+        ipVersion: 'v4',
+      });
+      await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: bareDevice.id,
+        name: 'ping',
+        sensorType: 'icmp.ping',
+        params: {},
+      });
+
+      const alone = (await config.assignmentsFor(probeId)).version;
+      const [together] = await Promise.all([
+        config.assignmentsFor(probeId),
+        config.assignmentsFor(bare.id),
+      ]);
+
+      assert.equal(
+        together.version,
+        alone,
+        'a concurrent resolve dropped this probe’s credential stamps',
+      );
+
+      // And the point of the stamps, proven against the same interleaving: a rotation still
+      // moves the fingerprint when somebody else is resolving at the same moment.
+      await h.service.setCredential(testActor, deviceId, 'snmp', { community: 'second' });
+      const [rotated] = await Promise.all([
+        config.assignmentsFor(probeId),
+        config.assignmentsFor(bare.id),
+      ]);
+      assert.notEqual(rotated.version, alone, 'a rotation must change the fingerprint');
     });
 
     it('changes the fingerprint when a credential is rotated', async () => {
