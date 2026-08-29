@@ -207,9 +207,15 @@ export class AlarmScheduler {
       for (let round = 0; round < this.#maxRounds; round += 1) {
         const result = await this.#db.tx((q) => this.#engine.sweep(q, now));
         fired += result.fired;
+        // **Counted as each round commits, not once the loop ends** (`P-20`). The requests are
+        // committed inside that transaction, so between the commit and the end of the loop the
+        // rows exist and the counter describing them says zero — and the loop only continues
+        // when a round came back *full*, which is precisely the backlog where the gap is widest
+        // and Core Health is most worth reading. A counter that lags what it counts is a counter
+        // that reports quiet at the busiest moment there is.
+        this.#fired += result.fired;
         if (result.fired === 0) break;
       }
-      this.#fired += fired;
       if (fired === 0) this.#idleWakes += 1;
       return fired;
     } catch (error: unknown) {

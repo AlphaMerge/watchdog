@@ -3563,13 +3563,40 @@ because each is a decision rather than a defect:
       SNMP pool's lease counting and idle eviction; extracting the shared half is `P-19` below,
       deliberately deferred until `T-09` makes it a third instance and the shape is actually
       known rather than guessed from two.
-- [ ] **P-20 — `alarm-scheduler` sweep test is timing-flaky** · S · — · "counts what it did, for
+- [x] **P-20 — `alarm-scheduler` sweep test is timing-flaky** · S · — · "counts what it did, for
       Core Health" in `packages/core/test/alarm-scheduler.test.ts` asserts a timer *fired* within a
       real wall-clock window. It passes 17/17 in isolation and fails about one run in ten inside
       the full suite, where the machine is busy — it read `{"sweeps":3,"fired":0,"wakes":1}`.
       **Added by `T-08`:** a test that fails under load and not alone is a test that will be
       re-run rather than read, and this one guards real behaviour. It wants an injected clock like
       the one `T-07`'s pool eviction test uses, not a longer timeout.
+
+      **P-20 outcome: it was not a timing assertion, and it was not the test.** The ticket
+      assumed a wall-clock window and prescribed an injected clock; the test actually polls with
+      `until`, and the reading it reported — sweeps 3, **fired 0**, wakes 1 — was true. It was a
+      counter bug in `AlarmScheduler.sweep`, and a busy machine is only what made the window wide
+      enough to catch it.
+
+      `sweep()` drains a backlog in rounds. Each round commits its own transaction, so the
+      `notification_request` rows are visible the moment it returns — but `#fired` was accumulated
+      across the loop and applied once at the end. Between those two points the requests exist and
+      the number describing them says zero, **and the loop only continues when a round came back
+      full**: the gap is widest during exactly the backlog those numbers are most worth reading
+      during. Counting each round as it commits is a one-line move and the flake is gone at its
+      cause rather than waited out.
+
+      Now covered deterministically with no database and no clock: a fake engine reports one full
+      round then an empty one and reads the counter *from inside the second round*, which is a
+      moment that genuinely exists. Mutation 4/4, including the original bug re-introduced.
+- [ ] **P-22 — The alarm scheduler's stats reach nothing** · S · P-20 · `AlarmSchedulerStats`
+      — sweeps, fired, wakes, idle wakes, `nextWakeAt` — is computed, exported from
+      `notifications/index.ts` and read by no one. `P-12` gave Core Health the *delivery* side
+      (`notifyPending`, `notifyOldest`, `notifyFailed`) and left the scheduler's own numbers
+      behind, which is what the comment in `alarm-scheduler.test.ts` calls "P-12 is where these
+      land". **Found by `P-20`:** it fixed a counter nothing was reading, which is a bug that gets
+      to survive precisely because nothing reads it. Decide whether these are health (a channel
+      each) or diagnostics (`/metrics` only) — `nextWakeAt` slipping into the past is the one
+      that would tell an operator something is stuck.
 - [x] **P-21 — The performance suite must not run against a busy machine** · M · — · Four
       measured budgets — `tree-build-performance`, `ingestion-performance` (two of them) and
       `notification-timers` — pass in isolation and fail inside the full core suite, where 1,300

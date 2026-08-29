@@ -85,6 +85,73 @@ describe('how long the scheduler sleeps', () => {
 });
 
 // -------------------------------------------------------------------------------------------
+// What the stats say while a sweep is still running, with no database and no clock.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * `P-20` was filed as a flaky test — "counts what it did, for Core Health" reading
+ * `{"sweeps":3,"fired":0,"wakes":1}` about one run in ten inside the full suite — and the ticket
+ * guessed at an injected clock. It was not a timing assertion. It was a real counter bug that
+ * only a busy machine made wide enough to see.
+ *
+ * `sweep()` drains a backlog in rounds. Each round commits its own transaction, so the
+ * `notification_request` rows are visible the moment it returns — but `#fired` was added up
+ * across the whole loop and applied once at the end. Between those two points the requests
+ * exist and the number describing them is zero, and the loop only *continues* when a round came
+ * back full: the gap is widest during exactly the backlog Core Health is most worth reading
+ * during. The test was not flaky, it was right one time in ten.
+ *
+ * Deterministic here because nothing real is involved: a fake engine reports one full round then
+ * an empty one, and reads the counter from inside the second round — which is a moment that
+ * genuinely exists, after the first round's commit and before the loop ends.
+ */
+describe('what the stats say while a sweep is still running', () => {
+  it('counts a fired step as its round commits, not once the loop ends', async () => {
+    const readings: number[] = [];
+    let rounds = 0;
+
+    const engine = {
+      sweep: () => {
+        rounds += 1;
+        if (rounds === 1) return Promise.resolve({ fired: 3, queued: 3 });
+        // Round one has committed. Anything reading the stats at this moment must already know
+        // about its three requests. Reading `scheduler` here is safe and deliberate: the closure
+        // captures the binding, and nothing calls it until `sweep()` is under way.
+        readings.push(scheduler.stats.fired);
+        return Promise.resolve({ fired: 0, queued: 0 });
+      },
+    } as unknown as AlarmEngine;
+
+    // Never touched: the fake engine ignores the queryable it is handed.
+    const db = {
+      tx: <T>(fn: (q: never) => Promise<T>): Promise<T> => fn(undefined as never),
+    } as unknown as Database;
+
+    const scheduler = new AlarmScheduler({ db, engine, logger: silent });
+    const fired = await scheduler.sweep();
+
+    assert.equal(fired, 3);
+    assert.deepEqual(readings, [3], 'the counter lagged the rows it counts');
+    assert.equal(scheduler.stats.fired, 3);
+    assert.equal(scheduler.stats.sweeps, 1, 'one sweep, however many rounds it took');
+  });
+
+  it('counts nothing, and calls the wake idle, when every round is empty', async () => {
+    const engine = {
+      sweep: () => Promise.resolve({ fired: 0, queued: 0 }),
+    } as unknown as AlarmEngine;
+    const db = {
+      tx: <T>(fn: (q: never) => Promise<T>): Promise<T> => fn(undefined as never),
+    } as unknown as Database;
+
+    const scheduler = new AlarmScheduler({ db, engine, logger: silent });
+    assert.equal(await scheduler.sweep(), 0);
+    assert.equal(scheduler.stats.fired, 0);
+    assert.equal(scheduler.stats.idleWakes, 1);
+  });
+});
+
+// -------------------------------------------------------------------------------------------
 // Against a real database.
 // -------------------------------------------------------------------------------------------
 
