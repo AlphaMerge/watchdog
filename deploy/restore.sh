@@ -19,6 +19,11 @@
 # **The restored installation may be older than the archive.** A backup taken from a newer
 # release carries a newer schema, and `ms-core` refuses to start against one (`H-03`). That is
 # the correct failure and this script says so rather than letting the service discover it.
+# The `cfg_*` variables are produced by an `eval` of generated assignments below. shellcheck
+# cannot follow that and reports each of them as referenced but never assigned; the directive is
+# file-scoped because it has to sit before the first command to be, and it is the reason the
+# generator emits a fixed, known set of names rather than whatever the config happens to hold.
+# shellcheck disable=SC2154
 set -euo pipefail
 
 CONFDIR=/etc/ms

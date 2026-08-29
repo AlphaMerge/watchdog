@@ -64,175 +64,28 @@ if [ -d "${here}/web" ]; then
 fi
 printf '%s\n' "${version}" > "${PREFIX}/VERSION"
 
-install -d -m 0755 "${CONFDIR}"
-# 0755: the directory must be traversable by every service user. What is secret here are the
-# private keys, and they are protected per file below.
-install -d -m 0755 "${CONFDIR}/tls"
 
-# --- probe-channel PKI ---------------------------------------------------------------------
-# The core and its probes speak mutual TLS (WORKFLOW.MD §10), so a working install needs a CA
-# and a key pair for each side. We issue them here rather than making the operator do it: an
-# install that will not start until you have read an OpenSSL manual is not an install.
-# Replace these with your own PKI if you have one; probe enrolment gets a proper flow in R-01.
-if [ ! -f "${CONFDIR}/tls/ca.crt" ]; then
-  echo "==> issuing probe-channel certificates"
-  hostname_fqdn="$(hostname -f 2>/dev/null || hostname)"
-  (
-    umask 077
-    cd "${CONFDIR}/tls"
-
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-      -keyout ca.key -out ca.crt \
-      -subj "/CN=MonitoringSystem probe CA/O=MonitoringSystem" \
-      -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-      -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
-
-    issue_cert() {
-      local name="$1" cn="$2"
-      openssl req -newkey rsa:2048 -sha256 -nodes \
-        -keyout "${name}.key" -out "${name}.csr" \
-        -subj "/CN=${cn}/O=MonitoringSystem" 2>/dev/null
-      openssl x509 -req -in "${name}.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
-        -out "${name}.crt" -days 825 -sha256 -extfile "${name}.ext" 2>/dev/null
-      rm -f "${name}.csr" "${name}.ext"
-    }
-
-    cat > core.ext <<EXT
-basicConstraints=CA:FALSE
-keyUsage=critical,digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth,clientAuth
-subjectAltName=DNS:localhost,DNS:${hostname_fqdn},IP:127.0.0.1
-EXT
-    issue_cert core "ms-core"
-
-    cat > probe.ext <<EXT
-basicConstraints=CA:FALSE
-keyUsage=critical,digitalSignature,keyEncipherment
-extendedKeyUsage=clientAuth
-EXT
-    issue_cert probe "ms-probe"
-
-    rm -f ca.srl
-  )
-  # A CA certificate is public by definition; both services and any operator need to read it.
-  chmod 644 "${CONFDIR}/tls/ca.crt"
-  chmod 640 "${CONFDIR}"/tls/core.crt "${CONFDIR}"/tls/probe.crt
-  chmod 600 "${CONFDIR}"/tls/*.key
-fi
-
-# A shared secret the probe presents alongside its certificate (CAPABILITIES.MD §8). Generated
-# once; remote probes are given it at enrolment.
-if [ ! -f "${CONFDIR}/access-key" ]; then
-  ( umask 077; openssl rand -hex 32 > "${CONFDIR}/access-key" )
-fi
-access_key="$(cat "${CONFDIR}/access-key")"
-
-for svc in "${components[@]}"; do
-  user="ms-${svc}"
-
-  if ! getent passwd "${user}" >/dev/null; then
-    echo "==> creating service user ${user}"
-    useradd --system --no-create-home --home-dir "/var/lib/${user}" \
-            --shell /usr/sbin/nologin --comment "MonitoringSystem ${svc}" "${user}"
-  fi
-
-  install -d -m 0750 -o "${user}" -g "${user}" "/var/lib/${user}"
-  install -d -m 0750 -o "${user}" -g "${user}" "/var/log/${user}"
-
-  # Each side reads its own key pair and nothing else; the CA certificate is world-readable.
-  chgrp "${user}" "${CONFDIR}/tls/${svc}.crt" "${CONFDIR}/tls/${svc}.key"
-  chmod 640 "${CONFDIR}/tls/${svc}.crt" "${CONFDIR}/tls/${svc}.key"
-
-  # Configuration is never clobbered on upgrade.
-  if [ -f "${CONFDIR}/${svc}.json" ]; then
-    echo "==> keeping existing ${CONFDIR}/${svc}.json"
-    # A timestamped copy before anything else touches this directory (H-03). Nothing here edits
-    # the file, so this is not undoing our own change — it is the copy an operator wants when
-    # *their* edit, made to satisfy the new build, turns out to be the thing that broke it.
-    # Owned by root and mode 0600: a configuration file holds the database password.
-    backup="${CONFDIR}/${svc}.json.$(date -u +%Y%m%dT%H%M%SZ).bak"
-    install -m 0600 -o root -g root "${CONFDIR}/${svc}.json" "${backup}"
-    echo "    backed up to ${backup}"
-    install -m 0640 -o root -g "${user}" "${here}/etc/${svc}.json" "${CONFDIR}/${svc}.json.new"
-  else
-    echo "==> installing ${CONFDIR}/${svc}.json"
-    install -m 0640 -o root -g "${user}" "${here}/etc/${svc}.json" "${CONFDIR}/${svc}.json"
-    # Wire the generated access key into a freshly installed configuration.
-    node -e '
-      const { readFileSync, writeFileSync } = require("node:fs");
-      const [path, key, svc] = process.argv.slice(1);
-      const cfg = JSON.parse(readFileSync(path, "utf8"));
-      if (svc === "core") cfg.probeEndpoint.accessKeys = [key];
-      else cfg.core.accessKey = key;
-      writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
-    ' "${CONFDIR}/${svc}.json" "${access_key}" "${svc}"
-  fi
-
-  install -m 0644 "${here}/deploy/systemd/ms-${svc}.service" "/etc/systemd/system/ms-${svc}.service"
-done
-
+# The example configuration, the units and the docs, where `ms-setup` expects to find them —
+# the packages get these from dpkg/rpm, and the tarball puts them there itself so that setup
+# reads one layout regardless of which installer ran.
+install -d -m 0755 "${PREFIX}/etc" "${PREFIX}/deploy/systemd" "${PREFIX}/libexec"
+cp "${here}"/etc/*.json "${PREFIX}/etc/"
+cp "${here}"/deploy/systemd/*.service "${PREFIX}/deploy/systemd/"
 if [ -d "${here}/../docs" ]; then
   rm -rf "${PREFIX:?}/docs"
   cp -R "${here}/../docs" "${PREFIX}/docs"
 fi
+install -m 0755 "${here}/deploy/setup.sh" "${PREFIX}/libexec/ms-setup"
 
-# --- will the configuration this installation already has load under the new build? ---------
+# --- everything that is not file placement --------------------------------------------------
 #
-# **Asked before anything is restarted**, which is the whole point: the old service is still
-# running, so a setting that was renamed or made required is something an operator finds out
-# about while they still have a working system rather than from `journalctl` afterwards
-# (`H-03`). A `.json.new` sits beside each file for the diff.
-#
-# `--no-start` skips it: that mode exists for a machine that is being staged, and the
-# configuration it will run with is not necessarily the one on disk yet.
-if [ "${start_services}" -eq 1 ]; then
-  config_bad=0
-  for svc in "${components[@]}"; do
-    [ -f "${CONFDIR}/${svc}.json" ] || continue
-    if ! out="$("${PREFIX}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
-      echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
-      echo "${out}" | sed 's/^/    /' >&2
-      config_bad=1
-    fi
-  done
-  if [ "${config_bad}" -ne 0 ]; then
-    cat >&2 <<'BADCONFIG'
-
-The new application is installed and the running services have NOT been restarted, so the
-installation is still up on the previous version. Fix the configuration above and run:
-
-    systemctl restart ms-core ms-probe
-
-Each service's previous configuration was copied to a timestamped .bak beside it, and the
-version this release ships is at .json.new.
-BADCONFIG
-    exit 1
-  fi
-fi
-
-systemctl daemon-reload
-
-for svc in "${components[@]}"; do
-  systemctl enable "ms-${svc}.service" >/dev/null
-done
-
-if [ "${start_services}" -eq 1 ]; then
-  for svc in "${components[@]}"; do
-    echo "==> starting ms-${svc}"
-    systemctl restart "ms-${svc}.service"
-  done
-
-  # Type=notify means systemctl returns only once the service reported READY=1, so a
-  # successful restart above is already the readiness check. Confirm anyway.
-  sleep 1
-  failed=0
-  for svc in "${components[@]}"; do
-    state="$(systemctl is-active "ms-${svc}.service" || true)"
-    printf '    ms-%s: %s\n' "${svc}" "${state}"
-    [ "${state}" = "active" ] || failed=1
-  done
-  [ "${failed}" -eq 0 ] || die "one or more services failed to start; see journalctl -u ms-core -u ms-probe"
-fi
+# **The same script the `.deb` and the `.rpm` run** (`H-05`): the service users, the
+# probe-channel PKI, the access key, the configuration that survives an upgrade, and the
+# `config check` that runs before anything is restarted. Three installers that each did this
+# their own way would be three chances for the one nobody smoke-tests to be wrong.
+setup_args=(--prefix "${PREFIX}" --confdir "${CONFDIR}" --components "$(IFS=,; echo "${components[*]}")")
+[ "${start_services}" -eq 1 ] || setup_args+=(--no-start)
+"${PREFIX}/libexec/ms-setup" "${setup_args[@]}"
 
 cat <<SUMMARY
 

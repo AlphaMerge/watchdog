@@ -64,19 +64,46 @@ against a schema it does not recognise rather than running against one it might 
 
 ## 2. The application
 
-Unpack the release and run the installer from inside it:
+Three ways in, and they do the same thing: the package or the tarball puts files on disk, and
+then all three run the same `ms-setup`, which creates the `ms-core` and `ms-probe` service users,
+lays out `/opt/ms`, `/etc/ms` and `/var/lib/ms-*`, issues the probe-channel CA and certificates,
+generates the probe access key, installs both systemd units, and enables and starts them.
+
+**Debian, Ubuntu:**
+
+```bash
+sudo dpkg -i ms_0.1.0_amd64.deb
+```
+
+**RHEL, Rocky, AlmaLinux, Fedora:**
+
+```bash
+sudo rpm -i ms-0.1.0-1.x86_64.rpm
+```
+
+**Anywhere else** — unpack the release and run the installer from inside it:
 
 ```bash
 sudo ./install.sh
 ```
 
-That creates the `ms-core` and `ms-probe` service users, lays out `/opt/ms`, `/etc/ms` and
-`/var/lib/ms-*`, issues the probe-channel CA and certificates, generates the probe access key,
-installs both systemd units, and enables and starts them.
+The tarball installer takes three flags the packages have no equivalent for, because a package
+either contains a core or it does not:
 
-- `--probe-only` on a host that is only running a remote probe.
+- `--probe-only` on a host that is only running a remote probe. The `ms-probe` package is the
+  packaged form of this, and it conflicts with `ms` so a host cannot end up with both.
 - `--core-only` where the probe is somewhere else entirely.
-- `--no-start` to stage a machine that is not meant to come up yet.
+- `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
+  the same for a package install, which is what baking a golden image wants.
+
+### Why Node is not a package dependency
+
+Neither the `.deb` nor the `.rpm` hard-depends on Node, and that is deliberate rather than an
+oversight: no Debian or enterprise release ships one new enough, so the Node an operator has
+came from NodeSource, from a version manager, or from the official tarball — and none of those
+satisfy a dependency on the distribution's own package. A hard dependency would make the packages
+uninstallable on exactly the machines they are for. The installer checks for a real Node 22+ and
+says what it found instead.
 
 ## 3. The connection
 
@@ -186,14 +213,11 @@ and its core costs you the outage and not the data.
 
 ## Upgrading
 
-Unpack the new release and run the same installer:
+Install the new version the same way you installed the old one — `dpkg -i`, `rpm -U`, or unpack
+the new release and run `sudo ./install.sh`.
 
-```bash
-sudo ./install.sh
-```
-
-It replaces `/opt/ms/app`, `/opt/ms/bin` and `/opt/ms/web`, and **never overwrites anything in
-`/etc/ms`**. Each configuration file is copied to a timestamped `.bak` beside it, and the version
+All three replace `/opt/ms/app`, `/opt/ms/bin` and `/opt/ms/web`, and **never overwrite anything
+in `/etc/ms`**. Each configuration file is copied to a timestamped `.bak` beside it, and the version
 this release ships is written alongside as `.json.new` so you can diff them.
 
 Before restarting, the installer runs `config check` against every configuration file. **If a
@@ -205,6 +229,12 @@ Migrations run on startup and are reversible. A build started against a database
 *newer* build refuses to start; install the matching release rather than migrating backwards.
 
 ## Uninstalling
+
+```bash
+sudo dpkg -P ms          # or: sudo rpm -e ms
+```
+
+From a tarball install:
 
 ```bash
 sudo systemctl disable --now ms-core ms-probe

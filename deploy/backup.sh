@@ -17,6 +17,11 @@
 # application itself, which comes from the release tarball. A backup of /opt/ms would be a copy
 # of something already reproducible, and restoring it over a newer install is a downgrade nobody
 # asked for.
+# The `cfg_*` variables are produced by an `eval` of generated assignments below. shellcheck
+# cannot follow that and reports each of them as referenced but never assigned; the directive is
+# file-scoped because it has to sit before the first command to be, and it is the reason the
+# generator emits a fixed, known set of names rather than whatever the config happens to hold.
+# shellcheck disable=SC2154
 set -euo pipefail
 
 CONFIG=/etc/ms/core.json

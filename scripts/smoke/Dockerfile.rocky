@@ -1,0 +1,48 @@
+# Clean-box target for the .rpm half of the package smoke test (TASKS.md H-05).
+#
+# Development/CI only — this image exists to prove the .rpm installs, upgrades and removes
+# against a real systemd on an RPM distribution. It is not a way to run MonitoringSystem in a
+# container.
+#
+# **No PostgreSQL here, unlike `Dockerfile`.** The package test runs `ms-setup` with
+# `MS_SETUP_NO_START=1` and asserts what a *package* is responsible for: files in the right
+# places, service users, the PKI, and scriptlets that behave differently on an upgrade than on a
+# removal. Whether the services then reach "active" is the tarball installer's smoke test
+# (`smoke-install.sh`), and since H-05 both run the same `ms-setup`, proving it once proves it
+# for all three installers.
+#
+# It is also the honest option on this hardware: TimescaleDB publishes no aarch64 RPMs for EL9 —
+# the repository exists and is empty — so a Rocky box with a working Timescale cannot be built on
+# an arm64 machine at all. Making the .rpm test depend on one would mean it only ever ran on
+# x86_64, which is a test that does not run.
+FROM rockylinux:9
+
+ARG NODE_VERSION=24.19.0
+
+# `curl` rather than the `curl-minimal` the base image ships: they conflict, and `--allowerasing`
+# is how dnf is told to replace one with the other rather than to give up.
+RUN dnf install -y --allowerasing --setopt=install_weak_deps=False \
+      systemd procps-ng ca-certificates curl xz openssl shadow-utils \
+ && dnf clean all
+
+# Node from the official tarball: the same way an operator installs it, no distro packaging —
+# and the reason both packages express Node as a recommendation rather than a hard dependency.
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) node_arch=x64 ;; \
+      aarch64) node_arch=arm64 ;; \
+      *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+      -o /tmp/node.tar.xz; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version
+
+# Trim units that are pointless in a container and slow the boot.
+RUN systemctl mask systemd-udevd systemd-udev-trigger systemd-firstboot \
+      systemd-journald-audit.socket getty.target
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

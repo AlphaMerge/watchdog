@@ -118,11 +118,21 @@ jobs:
       - name: backup and restore smoke test
         run: scripts/smoke-restore.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
 
+      # Installs the .deb on Debian and the .rpm on Rocky, upgrades each in place and removes it
+      # (H-05). The upgrade is the point: rpm installs the new version before removing the old,
+      # so a %preun written like a dpkg prerm leaves the host with nothing enabled and no error
+      # anywhere. `scripts/package.sh` already ran above, so this packages what it staged.
+      - name: package smoke test
+        run: scripts/smoke-packages.sh
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: release-tarball
-          path: release/*.tar.gz
+          name: release-artifacts
+          path: |
+            release/*.tar.gz
+            release/*.deb
+            release/*.rpm
           retention-days: 7
 
   enrol-smoke:

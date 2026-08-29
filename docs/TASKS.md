@@ -6502,8 +6502,48 @@ because each is a decision rather than a defect:
       watcher's `statfs` with its own, taken a moment later on a live filesystem, and the free
       block count moves between them. It now compares against the *reserve*, which is a
       percentage of the disk where the drift is kilobytes — and still kills the `bfree` mutant.
-- [ ] **H-05 — Linux installers** · M · F-07 · `.deb` and `.rpm` in addition to the tarball, with
+- [x] **H-05 — Linux installers** · M · F-07 · `.deb` and `.rpm` in addition to the tarball, with
       upgrade paths.
+
+      **H-05 outcome.** `scripts/package-deb.sh` and `scripts/package-rpm.sh`, both packaging the
+      tree `package.sh` already staged rather than building a second time, so the three artefacts
+      are the same bits by construction. Neither ships `/etc/ms/*.json`: configuration is created
+      by the installer and never overwritten, so shipping it as a conffile would put dpkg's merge
+      prompt in front of an operator for a file the installer already knows to leave alone.
+
+      **The real work was `deploy/setup.sh`.** `install.sh` had grown the service users, the PKI,
+      the access key, the config-preservation rule and the `config check` gate inline — and a
+      `postinst` and a `%post` each need all of it. Three copies would have meant the one nobody
+      smoke-tests being the one that is wrong, so it is now one script that all three installers
+      run, and `install.sh` is reduced to placing files and calling it.
+
+      **Two defects found by running it.** rpm gives a scriptlet
+      `/sbin:/bin:/usr/sbin:/usr/bin` and nothing more, while dpkg follows Debian policy and adds
+      `/usr/local/*` — so the identical setup script found Node under dpkg and failed under rpm.
+      That is the normal case, not an edge one: no enterprise distribution ships a Node this new,
+      so the one an operator installs comes from the official tarball and lands in `/usr/local`.
+      Separately, `chmod` from a container onto a macOS bind mount does not persist, so rpm was
+      silently stripping the executable bit off every document in the payload; `rpmbuild` now
+      works in the container's own filesystem, which is also faster.
+
+      **And a pre-existing one: CI's `shellcheck` step has been failing since `H-04`.**
+      `backup.sh` and `restore.sh` read their connection settings through an `eval`, which
+      shellcheck cannot follow, and eight `SC2154` warnings had been red since they landed.
+
+      `scripts/smoke-packages.sh` installs, upgrades in place and removes each package on a real
+      systemd — Debian for the `.deb`, Rocky for the `.rpm` — asserting the configuration, the CA
+      and the access key survive, a 0600 backup and a `.json.new` appear, and the units are still
+      enabled afterwards. That last one is the rpm trap: `%preun` runs for the old package *after*
+      the new one is installed, so a scriptlet written like a dpkg `prerm` disables the service on
+      every upgrade and nothing reports it. Mutating the guard away fails the test, as does
+      mutating the config-preservation rule.
+
+      **Not covered, and deliberately: the package tests do not start the services.** TimescaleDB
+      publishes no aarch64 RPMs for EL9 — the repository exists and is empty — so a Rocky box with
+      a working database cannot be built on an arm64 machine at all, and a test that only ran on
+      x86_64 would be a test that did not run. What a *package* owns is files, users, PKI and
+      scriptlet semantics; that the services then reach `active` is `smoke-install.sh`, and since
+      all three installers now run the same `ms-setup`, proving it there proves it everywhere.
 - [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and
       an upgrade path.
 - [x] **H-07 — Documentation set** · L · — · Installation, administration, sensor reference,

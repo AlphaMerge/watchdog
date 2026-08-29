@@ -131,6 +131,10 @@ if [ "${probe_only}" -eq 0 ]; then
 fi
 
 mkdir -p "${stage}/deploy/systemd" "${stage}/deploy/winsw"
+# The shared post-install (`H-05`). `install.sh` copies it to ${PREFIX}/libexec/ms-setup, and the
+# .deb and .rpm ship it to the same place, so all three run one script rather than three.
+cp "${repo_root}/deploy/setup.sh" "${stage}/deploy/setup.sh"
+chmod +x "${stage}/deploy/setup.sh"
 for svc in "${services[@]}"; do
   cp "${repo_root}/deploy/systemd/ms-${svc}.service" "${stage}/deploy/systemd/ms-${svc}.service"
   cp "${repo_root}/deploy/winsw/ms-${svc}.xml" "${stage}/deploy/winsw/ms-${svc}.xml"
