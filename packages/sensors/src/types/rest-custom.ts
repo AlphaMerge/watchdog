@@ -1,8 +1,19 @@
-import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import type {
+  ChannelDef,
+  CheckContext,
+  CheckExecution,
+  PreviewExpectation,
+  PreviewInput,
+  PreviewResult,
+  PreviewRow,
+  PreviewSelection,
+  SensorType,
+} from '../contract.js';
 import {
   aggregateOf,
   JsonPathError,
   MAX_PATH,
+  numericValue,
   parsePath,
   selectPath,
   type Aggregate,
@@ -349,7 +360,148 @@ export const restCustom: SensorType = {
           : ''),
     };
   },
+
+  /**
+   * The same reading, against a document somebody pasted instead of one this fetched (`U-13`).
+   *
+   * **Every step below is the one `execute` takes**, in the same order and through the same
+   * functions — the format guess, the parse, the path compile, the selection, the aggregate, the
+   * scale, the gap rule and the two check-level failures. A preview that agreed with the sensor
+   * only most of the time would be worse than none: it would teach a path that does not work.
+   *
+   * What differs is that nothing here throws. `execute` fails a check on a mistyped path because
+   * a sensor with one is broken; the form this feeds has a mistyped path in it every few
+   * keystrokes, so a row reports its own error and its neighbours still answer.
+   */
+  async preview(input: PreviewInput): Promise<PreviewResult> {
+    const mappings = readMappings(input.params);
+    const expectations = readExpectations(input.params);
+
+    const declaredFormat = input.params['format'];
+    const wanted = declaredFormat === 'json' || declaredFormat === 'xml' ? declaredFormat : 'auto';
+    const { looksLikeXml, parseXml } = await import('../support/xml.js');
+    const asXml =
+      wanted === 'xml' || (wanted === 'auto' && looksLikeXml(input.document, input.contentType));
+    const format = asXml ? 'xml' : 'json';
+
+    let document: unknown;
+    try {
+      document = asXml ? parseXml(input.document) : (JSON.parse(input.document) as unknown);
+    } catch (error) {
+      return {
+        format,
+        error:
+          `this is not ${asXml ? 'XML' : 'JSON'}: ` +
+          (error instanceof Error ? error.message : String(error)),
+        rows: [],
+        expectations: [],
+        problems: [],
+      };
+    }
+
+    const rows: PreviewRow[] = mappings.map((mapping) => {
+      let steps;
+      try {
+        steps = parsePath(mapping.path);
+      } catch (error) {
+        return {
+          key: mapping.key,
+          path: mapping.path,
+          error: error instanceof JsonPathError ? error.message : String(error),
+          selected: [],
+          selectedCount: 0,
+          value: null,
+        };
+      }
+      const found = selectPath(document, steps);
+      const value = aggregateOf(found, mapping.aggregate);
+      return {
+        key: mapping.key,
+        path: mapping.path,
+        selected: found.slice(0, MAX_SHOWN).map(describe),
+        selectedCount: found.length,
+        // The same rounding `execute` applies, so a preview and a reading never disagree in the
+        // last decimal — which is exactly the difference somebody would spend an hour on.
+        value: value === null ? null : Math.round(value * mapping.scale * 1e6) / 1e6,
+      };
+    });
+
+    const checked: PreviewExpectation[] = expectations.map((expectation) => {
+      let steps;
+      try {
+        steps = parsePath(expectation.path);
+      } catch (error) {
+        return {
+          path: expectation.path,
+          error: error instanceof JsonPathError ? error.message : String(error),
+          actual: '',
+          ok: false,
+        };
+      }
+      const found = selectPath(document, steps);
+      if (found.length === 0) {
+        return { path: expectation.path, actual: '', ok: false };
+      }
+      const actual = asText(found[0]);
+      const ok =
+        (expectation.equals === '' || actual === expectation.equals) &&
+        (expectation.contains === '' ||
+          actual.toLowerCase().includes(expectation.contains.toLowerCase()));
+      return { path: expectation.path, actual: cut(actual), ok };
+    });
+
+    const problems: string[] = [];
+    if (mappings.length === 0) problems.push('this sensor declares no channels to extract');
+    for (const row of rows) {
+      if (row.error !== undefined) problems.push(`channel "${row.key}": ${row.error}`);
+    }
+    // `execute` compiles every path *before* it sends the request, so a sensor with an
+    // unparseable one never reaches the question of what matched. Reporting both would invent a
+    // second fault out of the first — and would send somebody looking at their document when the
+    // problem is a bracket.
+    if (mappings.length > 0 && !rows.some((row) => row.error !== undefined)) {
+      if (rows.every((row) => row.value === null)) {
+        // `execute`'s other check-level failure, and the one that matters most here: every path
+        // finding nothing is a sensor pointed at the wrong document, not a set of gaps.
+        problems.push(
+          `none of these ${String(mappings.length)} paths matched anything in this response`,
+        );
+      }
+    }
+    for (const one of checked) {
+      if (one.error !== undefined) problems.push(`${one.path}: ${one.error}`);
+      else if (!one.ok) {
+        problems.push(
+          one.actual === ''
+            ? `${one.path} is not in this response`
+            : `${one.path} is "${one.actual}", which is not what this sensor expects`,
+        );
+      }
+    }
+
+    return { format, rows, expectations: checked, problems };
+  },
 };
+
+/** Enough selections to see what a wildcard caught, and few enough to render. */
+const MAX_SHOWN = 10;
+
+/** Long enough to recognise a value, short enough that a whole document cannot come back. */
+const MAX_TEXT = 200;
+
+const cut = (text: string): string =>
+  text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…` : text;
+
+/**
+ * One selected node, as the operator needs to see it.
+ *
+ * `numeric` is the answer to the question the row raises when it shows five values and no
+ * reading: an aggregate other than `count` uses only what is a number, and a JSON API returning
+ * `"42"` as a string is the commonest reason a correct-looking path yields a gap.
+ */
+function describe(value: unknown): PreviewSelection {
+  return { text: cut(asText(value)), numeric: numericValue(value) !== null };
+}
 
 /**
  * What a selected value looks like in a message.

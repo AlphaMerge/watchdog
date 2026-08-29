@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { HttpSimulator, type RecordedRequest } from '@ms/simulators';
 import { restCustom } from '../src/types/rest-custom.js';
-import type { CheckContext, CheckExecution } from '../src/contract.js';
+import type { CheckContext, CheckExecution, PreviewResult, PreviewRow } from '../src/contract.js';
 
 /**
  * The REST sensor against a server that answers like the APIs it is for.
@@ -338,5 +338,265 @@ describe('rest.custom', () => {
         /none of this sensor’s 1 paths matched anything/,
       );
     });
+  });
+});
+
+/**
+ * The dry run behind `U-13`'s mapping editor.
+ *
+ * **The property worth testing is agreement, not correctness.** What each path selects is
+ * `json-path`'s business and is covered there; what matters here is that the preview and a real
+ * check reach the *same* number from the same document — because the whole value of the editor
+ * is that a path proved against a pasted response then works against the device. So most of what
+ * follows runs both halves and compares them.
+ */
+describe('previewing against a pasted response', () => {
+  /** `preview` is optional on the contract, so every case goes through this. */
+  const preview = (
+    params: Record<string, unknown>,
+    document = JSON.stringify(CLUSTER),
+    contentType = 'application/json',
+  ): Promise<PreviewResult> => {
+    assert.ok(restCustom.preview !== undefined, 'rest.custom declares no preview');
+    return restCustom.preview({ document, contentType, params });
+  };
+
+  const rowFor = (result: PreviewResult, key: string): PreviewRow => {
+    const row = result.rows.find((one) => one.key === key);
+    assert.ok(row !== undefined, `no row for ${key}`);
+    return row;
+  };
+
+  it('reaches the same numbers a real check reaches, for every aggregate', async () => {
+    // The differential test, and the reason the preview calls the sensor's own functions rather
+    // than reimplementing the walk. A preview that agreed most of the time would be worse than
+    // none: it would certify a path that does not work.
+    const extract = [
+      { key: 'depth', path: '$.queue.depth' },
+      { key: 'oldest', path: '$.queue.oldest' },
+      { key: 'down', path: "$.nodes[?(@.state=='down')]", aggregate: 'count' },
+      { key: 'worst', path: '$.nodes[*].load', aggregate: 'max' },
+      { key: 'mean', path: '$.nodes[*].load', aggregate: 'avg' },
+      { key: 'total', path: '$..load', aggregate: 'sum' },
+      { key: 'scaled', path: '$.nodes[0].load', scale: 100 },
+    ];
+
+    const execution = await run({ extract });
+    const previewed = await preview({ extract });
+
+    for (const mapping of extract) {
+      assert.equal(
+        rowFor(previewed, mapping.key).value,
+        valueOf(execution, mapping.key),
+        `${mapping.key} disagrees`,
+      );
+    }
+  });
+
+  it('shows what a path selected, not only what it became', async () => {
+    // The question the editor exists to answer. "$.nodes[*].load selected three values and the
+    // worst is 0.95" is what makes a path believable; a bare number is not.
+    const result = await preview({
+      extract: [{ key: 'worst', path: '$.nodes[*].load', aggregate: 'max' }],
+    });
+    const row = rowFor(result, 'worst');
+    assert.equal(row.selectedCount, 3);
+    assert.deepEqual(
+      row.selected.map((one) => one.text),
+      ['0.4', '0.95', '0.7'],
+    );
+    assert.equal(row.value, 0.95);
+  });
+
+  it('says which selected values an aggregate can actually use', async () => {
+    // The commonest confusion this feature exists to end: a path selects five things, the reading
+    // is a gap, and nothing about the values as printed says why. `oldest` is the string "4.5",
+    // which *is* usable; a name is not.
+    const result = await preview({
+      extract: [
+        { key: 'names', path: '$.nodes[*].name' },
+        { key: 'oldest', path: '$.queue.oldest' },
+      ],
+    });
+    assert.deepEqual(
+      rowFor(result, 'names').selected.map((one) => one.numeric),
+      [false, false, false],
+    );
+    assert.equal(rowFor(result, 'names').value, null, 'three strings make no reading');
+    assert.equal(rowFor(result, 'oldest').selected[0]?.numeric, true, '"4.5" is a number');
+    assert.equal(rowFor(result, 'oldest').value, 4.5);
+  });
+
+  it('reports a mistyped path on its own row and answers the others anyway', async () => {
+    // The state this form is in every few keystrokes. `execute` fails the whole check on a bad
+    // path, correctly — a sensor with one is broken — but a preview that went blank while
+    // somebody typed would be useless exactly when it is being used.
+    const result = await preview({
+      extract: [
+        { key: 'broken', path: '$.nodes[?(@.state' },
+        { key: 'depth', path: '$.queue.depth' },
+      ],
+    });
+    assert.ok(rowFor(result, 'broken').error !== undefined);
+    assert.equal(rowFor(result, 'broken').value, null);
+    assert.equal(rowFor(result, 'depth').value, 12, 'the neighbour still answers');
+    assert.ok(result.problems.some((one) => one.includes('broken')));
+  });
+
+  it('does not add "nothing matched" on top of a path that did not parse', async () => {
+    // Found by driving the real form: a single mistyped path produced *two* problems, and the
+    // second — "none of these 1 paths matched anything in this response" — is one `execute`
+    // would never report, because it compiles every path before it sends the request. It also
+    // sends somebody looking at their document when the problem is a bracket.
+    const result = await preview({ extract: [{ key: 'only', path: '$.nodes[?(@.load' }] });
+    assert.equal(result.problems.length, 1, result.problems.join(' | '));
+    assert.match(result.problems[0] ?? '', /never closed/);
+  });
+
+  it('still says nothing matched when the paths are fine and the document is wrong', async () => {
+    const result = await preview({
+      extract: [
+        { key: 'a', path: '$.missing' },
+        { key: 'b', path: "$.nodes[?(@.state=='nowhere')]" },
+      ],
+    });
+    assert.ok(result.problems.some((one) => one.includes('none of these 2 paths')));
+  });
+
+  it('names the format it read the document as', async () => {
+    // `auto` is a guess, and a preview that did not say which way it went would leave an operator
+    // writing JSONPath against a document this parsed as XML.
+    assert.equal((await preview({ extract: [] })).format, 'json');
+    assert.equal(
+      (await preview({ extract: [] }, CLUSTER_XML, 'application/octet-stream')).format,
+      'xml',
+      'the appliance serving XML as octet-stream, which is what auto is for',
+    );
+    assert.equal(
+      (await preview({ extract: [], format: 'json' }, CLUSTER_XML, 'application/xml')).format,
+      'json',
+      'an explicit format is not overridden by what the document looks like',
+    );
+  });
+
+  it('lets the pasted Content-Type decide where the document alone cannot', async () => {
+    // The case the field is *for*, and the only one where it changes the answer: a fragment
+    // starting with `<` looks like XML to the guess, and `text/html` is what says it is an error
+    // page rather than data. A preview that dropped the header would read one as the other.
+    const fragment = '<div>hello</div>';
+    assert.equal((await preview({ extract: [] }, fragment, '')).format, 'xml');
+
+    const asHtml = await preview({ extract: [] }, fragment, 'text/html; charset=utf-8');
+    assert.equal(asHtml.format, 'json');
+    assert.match(asHtml.error ?? '', /not JSON/);
+  });
+
+  it('reads XPath against XML, and agrees with a check that did', async () => {
+    const extract = [
+      { key: 'depth', path: '/cluster/queue/@depth' },
+      { key: 'worst', path: '/cluster/node/load', aggregate: 'max' },
+    ];
+    const execution = await run({ path: '/cluster.xml', extract });
+    const previewed = await preview({ extract }, CLUSTER_XML, 'application/xml');
+
+    assert.equal(previewed.format, 'xml');
+    assert.equal(rowFor(previewed, 'depth').value, valueOf(execution, 'depth'));
+    assert.equal(rowFor(previewed, 'worst').value, valueOf(execution, 'worst'));
+  });
+
+  it('says the document did not parse, rather than reporting every path as missing', async () => {
+    // The difference matters: "none of your paths matched" sends somebody to rewrite paths that
+    // were right, when what they pasted was an HTML error page.
+    const result = await preview({ extract: [{ key: 'n', path: '$.n' }] }, '<html>nope</html>');
+    assert.ok(result.error !== undefined);
+    assert.match(result.error, /not JSON/);
+    assert.deepEqual(result.rows, []);
+  });
+
+  it('reports the check-level failure a set of empty paths would be', async () => {
+    // `execute`'s own rule: every path finding nothing is not a set of gaps, it is a sensor
+    // pointed at the wrong document.
+    const result = await preview({
+      extract: [
+        { key: 'a', path: '$.missing' },
+        { key: 'b', path: '$.absent' },
+      ],
+    });
+    assert.deepEqual(
+      result.rows.map((row) => row.value),
+      [null, null],
+    );
+    assert.ok(result.problems.some((one) => one.includes('none of these 2 paths')));
+  });
+
+  it('leaves a single missing path as a gap, because that is what it is', async () => {
+    const result = await preview({
+      extract: [
+        { key: 'depth', path: '$.queue.depth' },
+        { key: 'gone', path: '$.queue.removed' },
+      ],
+    });
+    assert.equal(rowFor(result, 'gone').value, null);
+    assert.equal(rowFor(result, 'gone').selectedCount, 0);
+    assert.deepEqual(result.problems, [], 'one channel with no data is not a failure');
+  });
+
+  it('checks the expected values too, since a wrong one fails the check whatever the channels say', async () => {
+    const result = await preview({
+      extract: [{ key: 'depth', path: '$.queue.depth' }],
+      expect: [
+        { path: '$.status', equals: 'healthy' },
+        { path: '$.version', contains: '9.' },
+        { path: '$.missing', equals: 'anything' },
+      ],
+    });
+    assert.equal(rowFor(result, 'depth').value, 12, 'the channels still read');
+    assert.deepEqual(
+      result.expectations.map((one) => one.ok),
+      [true, false, false],
+    );
+    assert.equal(result.expectations[1]?.actual, '4.2.1');
+    assert.ok(result.problems.some((one) => one.includes('$.version')));
+    assert.ok(result.problems.some((one) => one.includes('$.missing is not in this response')));
+  });
+
+  it('bounds what it sends back, and says how many there really were', async () => {
+    // A wildcard over a large document selects more than anybody reads, and the whole document
+    // coming back one value at a time would be a worse way to send it than sending it.
+    const many = { rows: Array.from({ length: 40 }, (_v, i) => ({ v: i })) };
+    const result = await preview(
+      { extract: [{ key: 'all', path: '$.rows[*].v', aggregate: 'count' }] },
+      JSON.stringify(many),
+    );
+    const row = rowFor(result, 'all');
+    assert.equal(row.selectedCount, 40, 'the count is honest');
+    assert.equal(row.selected.length, 10, 'what comes back is not');
+    assert.equal(row.value, 40, 'and the reading is of all of them');
+  });
+
+  it('truncates a selected value rather than returning a document inside a field', async () => {
+    const long = { note: 'x'.repeat(5_000) };
+    const result = await preview(
+      { extract: [{ key: 'note', path: '$.note' }] },
+      JSON.stringify(long),
+    );
+    const text = rowFor(result, 'note').selected[0]?.text ?? '';
+    assert.ok(text.length < 250, `sent back ${String(text.length)} characters`);
+    assert.ok(text.endsWith('…'), 'and says it was cut');
+  });
+
+  it('answers a half-filled form without throwing, which is its normal state', async () => {
+    // Everything the editor sends before the operator has finished: no rows, a row with no path,
+    // a row with no key. None of these is an error worth refusing a preview over.
+    for (const params of [
+      {},
+      { extract: [] },
+      { extract: [{ key: 'a' }] },
+      { extract: [{ path: '$.queue.depth' }] },
+      { extract: 'not even an array' },
+    ]) {
+      const result = await preview(params);
+      assert.ok(Array.isArray(result.rows), `${JSON.stringify(params)} threw or answered wrongly`);
+    }
   });
 });

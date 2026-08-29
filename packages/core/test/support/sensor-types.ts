@@ -88,7 +88,7 @@ const factory: SensorType = {
   execute: () => Promise.reject(new Error('a Sensor Factory is evaluated by the core')),
 };
 
-export function testCatalogue(): SensorCatalogue {
+export function testCatalogue(extra: readonly SensorType[] = []): SensorCatalogue {
   const catalogue = new SensorCatalogue();
   catalogue.register(ping);
   catalogue.register(snmpTraffic);
@@ -97,6 +97,10 @@ export function testCatalogue(): SensorCatalogue {
   // there are no schema defaults to make a stored-params assertion about Ajv (`P-12`).
   catalogue.register(coreHealth);
   catalogue.register(probeHealth);
+  // `extra` is for a test that needs a type the rest of the suite must not see — `U-13`'s
+  // preview route registers the real `rest.custom`, and putting it here for everybody would
+  // change what every "list the catalogue" assertion expects.
+  for (const type of extra) catalogue.register(type);
   return catalogue.seal();
 }
 

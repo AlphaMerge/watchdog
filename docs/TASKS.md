@@ -3300,12 +3300,63 @@ because each is a decision rather than a defect:
       **Filed on the way past: `A-11`.** Driving the real form in a browser found that the
       `dev:ui` profile cannot save anything — the cross-origin write guard takes an
       `allowedOrigins` list that no caller ever passes.
-- [ ] **U-13 — Mapping editor for REST Custom** · M · T-16, U-04 · The form that writes
+- [x] **U-13 — Mapping editor for REST Custom** · M · T-16, U-04 · The form that writes
       `rest.custom`'s `extract` array: paste a response, see what each path selects against it,
       name the channel. **Split out by `T-16`:** the sensor works without it — the paths go in
       the parameter form like any other array — but writing JSONPath blind against an API you
       cannot see is the part that makes people give up. It wants the response and the paths side
       by side, which is a UI job and not a sensor one.
+
+      **U-13 outcome, and the ticket's "a UI job and not a sensor one" is half right.** The
+      *layout* is a UI job. The evaluation is not, and doing it in the browser was the first
+      design considered and rejected: `support/json-path.ts` is dependency-free and would have
+      run there, but the aggregate, the scale, the format guess and the gap rule live in
+      `rest-custom.ts`, and reimplementing them next to the form would have been a second
+      implementation of the sensor. **A preview that agreed with the check only most of the time
+      is worse than none — it certifies a path that does not work.**
+
+      So the dry run is a **member of the sensor type**: `preview?(input)` on the contract,
+      reached over `POST /sensor-types/:id/preview`. `rest.custom`'s implementation calls the
+      same `parsePath`, `selectPath` and `aggregateOf` its `execute` calls, applies the same
+      rounding, and takes the same two check-level failures. The tests that matter are
+      **differential** — they run `execute` against the simulator and `preview` against the same
+      body and compare the numbers, for every aggregate.
+
+      **A contract member rather than a route keyed to `rest.custom`,** which would have been a
+      switch statement of size one and the end of "adding a type is a one-file job". The
+      catalogue summary carries `hasPreview` and the UI shows the panel off that flag, the same
+      way `listener` and `evaluatedBy` are declared rather than matched on the id. A second type
+      with a mapping language gets the editor by writing one method.
+
+      `numericValue` moved out of `aggregateOf` and is exported, because the panel marks which
+      selected values an aggregate can use — the commonest confusion here is five values on
+      screen and no reading, and the answer is almost always that they are strings. Two
+      implementations of "is this a number" would have made that annotation lie.
+
+      **Found by driving the real form**, not by the tests: a single mistyped path produced
+      *two* problems, the second being "none of these 1 paths matched anything in this response".
+      `execute` compiles every path before it sends the request, so it would never report that —
+      and it sends somebody looking at their document when the problem is a bracket. Fixed, with
+      a test named after the disagreement.
+
+      Also found there: the "not a number" marking was shading plus a `title`, which is colour
+      alone to anybody using a screen reader (WCAG 1.4.1). It is `sr-only` text now, and the
+      test reads the accessible text rather than the attribute.
+
+      Bounded on purpose: 256 kB of document (the panel refuses more without a round trip), ten
+      selections shown per row with the honest total beside them, 200 characters per value. The
+      route stores nothing, fetches nothing and reads no credential, and there is a test that
+      says so by counting rows before and after.
+
+      Tests: 16 in `rest-custom.test.ts` (differential, per-aggregate, XML, bounds, the
+      half-filled form), 9 over HTTP in `sensor-types.test.ts`, 14 in `mapping-preview.test.tsx`
+      (debounce, stale-answer, gap-not-zero, the size refusal). Verified live in the dev UI end
+      to end.
+
+      Mutation 19/19, after one round. The survivor was the route dropping the pasted
+      `Content-Type`, and it survived because every fixture either looked like XML or looked like
+      JSON — the header only decides for a document the shape cannot, which is the HTML fragment
+      starting with `<`. Two tests now turn on exactly that, one at the type and one over HTTP.
 - [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
 

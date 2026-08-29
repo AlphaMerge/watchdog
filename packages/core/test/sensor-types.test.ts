@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
@@ -11,6 +11,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { BUILT_IN_SENSOR_TYPES, type SensorCatalogue } from '@ms/sensors';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
@@ -37,6 +38,7 @@ describe(
     let db: Database;
     let h: Harness;
     let app: FastifyInstance;
+    let mapping: FastifyInstance;
     let deviceId: number;
 
     before(async () => {
@@ -44,18 +46,29 @@ describe(
       db = scratch.db;
       h = await buildHarness(db);
 
-      const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
-        logger: silent,
-        version: '9.9.9',
-        service: h.service,
-        history: new HistoryService({ db, logger: silent }),
-        db,
-        audit: new AuditRepository(),
-        catalogue: testCatalogue(),
-      });
-      await server.build('9.9.9', h.service);
-      app = server.app;
+      const build = async (catalogue: SensorCatalogue): Promise<FastifyInstance> => {
+        const server = new ApiServer({
+          config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+          logger: silent,
+          version: '9.9.9',
+          service: h.service,
+          history: new HistoryService({ db, logger: silent }),
+          db,
+          audit: new AuditRepository(),
+          catalogue,
+        });
+        await server.build('9.9.9', h.service);
+        return server.app;
+      };
+
+      app = await build(testCatalogue());
+      // The shipped `rest.custom`, not a stand-in: what the preview route is for is running the
+      // type's own code, and a fake with a fake preview would prove the plumbing while leaving
+      // the only interesting question — does a path proved here work against the device —
+      // untested at this level.
+      const restCustom = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'rest.custom');
+      assert.ok(restCustom !== undefined, 'rest.custom is not a built-in type any more');
+      mapping = await build(testCatalogue([restCustom]));
     });
 
     after(async () => {
@@ -354,6 +367,151 @@ describe(
         { writeOnly?: boolean }
       >;
       assert.equal(properties['community']?.writeOnly, true);
+    });
+
+    it('says which types have a mapping language to preview', async () => {
+      // The form reads this instead of asking `if (type === 'rest.custom')`, which is the same
+      // rule `listener` and `evaluatedBy` follow: adding a type stays a one-file job.
+      const items = (await mapping.inject({ method: 'GET', url: '/api/v1/sensor-types' })).json<{
+        items: { id: string; hasPreview: boolean }[];
+      }>().items;
+      assert.equal(items.find((item) => item.id === 'rest.custom')?.hasPreview, true);
+      assert.equal(items.find((item) => item.id === 'icmp.ping')?.hasPreview, false);
+    });
+
+    // ── the mapping preview (`U-13`) ────────────────────────────────────────────────────────
+
+    describe('previewing a mapping over HTTP', () => {
+      const preview = (
+        body: Record<string, unknown>,
+        typeId = 'rest.custom',
+      ): Promise<LightMyRequestResponse> =>
+        mapping.inject({
+          method: 'POST',
+          url: `/api/v1/sensor-types/${typeId}/preview`,
+          payload: body,
+        });
+
+      const CLUSTER = JSON.stringify({
+        status: 'healthy',
+        queue: { depth: 12 },
+        nodes: [{ load: 0.4 }, { load: 0.95 }],
+      });
+
+      it('runs the type’s own paths over the document in the request', async () => {
+        const response = await preview({
+          document: CLUSTER,
+          contentType: 'application/json',
+          params: {
+            extract: [
+              { key: 'depth', path: '$.queue.depth' },
+              { key: 'worst', path: '$.nodes[*].load', aggregate: 'max' },
+            ],
+          },
+        });
+        assert.equal(response.statusCode, 200);
+
+        const result = response.json<{
+          format: string;
+          rows: { key: string; value: number | null; selectedCount: number }[];
+          problems: string[];
+        }>();
+        assert.equal(result.format, 'json');
+        assert.deepEqual(
+          result.rows.map((row) => [row.key, row.value]),
+          [
+            ['depth', 12],
+            ['worst', 0.95],
+          ],
+        );
+        assert.deepEqual(result.problems, []);
+      });
+
+      it('keeps every field of a row, since the response schema strips what it does not name', async () => {
+        // `additionalProperties: false` on a Fastify response schema silently removes a field
+        // the schema forgot, and a preview missing `selected` or `numeric` would look like a
+        // path that found nothing.
+        const response = await preview({
+          document: CLUSTER,
+          params: { extract: [{ key: 'loads', path: '$.nodes[*].load' }] },
+        });
+        const row = response.json<{
+          rows: { selected: { text: string; numeric: boolean }[]; selectedCount: number }[];
+        }>().rows[0];
+        assert.ok(row !== undefined, 'no row came back at all');
+        assert.deepEqual(row.selected, [
+          { text: '0.4', numeric: true },
+          { text: '0.95', numeric: true },
+        ]);
+        assert.equal(row.selectedCount, 2);
+      });
+
+      it('passes the pasted Content-Type through, since it decides how the document is read', async () => {
+        // A fragment starting with `<` looks like XML to the format guess; `text/html` is what
+        // says it is an error page rather than data. A route that dropped the header would
+        // read one as the other, and nothing about the rows would say so.
+        const fragment = '<div>hello</div>';
+        const guessed = (await preview({ document: fragment, params: {} })).json<{
+          format: string;
+        }>();
+        assert.equal(guessed.format, 'xml');
+
+        const told = (
+          await preview({ document: fragment, contentType: 'text/html', params: {} })
+        ).json<{ format: string }>();
+        assert.equal(told.format, 'json');
+      });
+
+      it('answers a half-typed path with a row that says so, not with a 400', async () => {
+        const response = await preview({
+          document: CLUSTER,
+          params: { extract: [{ key: 'broken', path: '$.nodes[?(@.load' }] },
+        });
+        assert.equal(response.statusCode, 200, 'this is the normal state of the form');
+        const result = response.json<{ rows: { error?: string }[]; problems: string[] }>();
+        assert.ok(result.rows[0]?.error !== undefined);
+        assert.ok(result.problems.length > 0);
+      });
+
+      it('reports a document that did not parse as the document’s problem', async () => {
+        const result = (
+          await preview({ document: '<html>nope</html>', params: { extract: [] } })
+        ).json<{ error?: string; rows: unknown[] }>();
+        assert.match(result.error ?? '', /not JSON/);
+        assert.deepEqual(result.rows, []);
+      });
+
+      it('refuses a type with no mapping language, and says which', async () => {
+        // 400 rather than 404: the type exists and the thing being asked of it does not, so a
+        // 404 would send a client looking for a typo in an id it spelled right.
+        const response = await preview({ document: '{}', params: {} }, 'icmp.ping');
+        assert.equal(response.statusCode, 400);
+        assert.match(response.json<{ error: { message: string } }>().error.message, /icmp\.ping/);
+      });
+
+      it('404s a type nobody registered', async () => {
+        const response = await preview({ document: '{}', params: {} }, 'not.a.type');
+        assert.equal(response.statusCode, 404);
+      });
+
+      it('refuses a document larger than a preview reads', async () => {
+        // Bounded well below what the sensor itself will read: this one is walked once per path
+        // while somebody types.
+        const response = await preview({ document: 'x'.repeat(300_000), params: {} });
+        assert.equal(response.statusCode, 400);
+      });
+
+      it('stores nothing and fetches nothing', async () => {
+        // The property that makes this safe to expose: it is a pure function of the request.
+        const before = await db.query<{ n: string }>('SELECT count(*) AS n FROM object');
+        await preview({
+          document: CLUSTER,
+          params: { extract: [{ key: 'depth', path: '$.queue.depth' }] },
+        });
+        const after = await db.query<{ n: string }>('SELECT count(*) AS n FROM object');
+        assert.equal(after[0]?.n, before[0]?.n);
+        assert.deepEqual(h.audit.recorded, [], 'and nothing to audit, because nothing changed');
+      });
     });
   },
 );

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { ApiError, problemPath, send } from '../../api/client';
 import type { ObjectDetail, SensorTypeSummary } from '../../api/types';
+import { MappingPreview } from '../../forms/MappingPreview';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt, type JsonSchema } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
@@ -125,6 +126,8 @@ export function ParamsForm({
         disabled={saving}
         serverProblems={serverProblems}
       />
+
+      {type.hasPreview && <MappingPreview typeId={type.id} params={values} />}
 
       <div className="flex flex-wrap items-center gap-3">
         <button

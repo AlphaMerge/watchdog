@@ -77,6 +77,13 @@ export interface SensorTypeSummary {
   category: string;
   costHint: 'light' | 'medium' | 'heavy';
   paramsSchema: Record<string, unknown>;
+  /**
+   * Whether this type can dry-run its parameters' paths against a pasted response (`U-13`).
+   *
+   * Read rather than matched on the id: `if (type === 'rest.custom')` here would mean editing
+   * this file for every type with a mapping language added after it.
+   */
+  hasPreview: boolean;
 }
 
 export interface ChannelRecord {

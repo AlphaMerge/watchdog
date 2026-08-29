@@ -500,6 +500,25 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export type Aggregate = 'first' | 'last' | 'count' | 'sum' | 'min' | 'max' | 'avg';
 
 /**
+ * The number an aggregate can make of one selected value, or null where there is none.
+ *
+ * **Exported because `U-13`'s preview shows this per selected node.** A path that selects five
+ * values and still produces a gap is almost always five strings that are not numbers, and nothing
+ * about the values as printed says so — `"n/a"` and `"42"` look equally like data. Having one
+ * implementation is the point: a preview that disagreed with the aggregate about what counts as a
+ * number would be teaching a path that does not work.
+ */
+export function numericValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  // A gauge sent as a string is what half the world's REST endpoints do.
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
  * The one number a set of selected values becomes.
  *
  * **`count` counts what the path selected; every other aggregate counts what is a number.** That
@@ -513,12 +532,8 @@ export function aggregateOf(values: readonly unknown[], how: Aggregate): number 
 
   const numbers: number[] = [];
   for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) numbers.push(value);
-    else if (typeof value === 'boolean') numbers.push(value ? 1 : 0);
-    else if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
-      // A gauge sent as a string is what half the world's REST endpoints do.
-      numbers.push(Number(value));
-    }
+    const one = numericValue(value);
+    if (one !== null) numbers.push(one);
   }
   if (numbers.length === 0) return null;
 

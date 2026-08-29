@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, problemPath, send, useApi } from '../api/client';
 import type { ObjectDetail, SensorTypeSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
+import { MappingPreview } from '../forms/MappingPreview';
 import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
 import { allProblems, type FieldProblem } from '../forms/validate';
@@ -178,6 +179,7 @@ export function AddSensor(): React.JSX.Element {
                 disabled={saving}
                 serverProblems={serverProblems}
               />
+              {chosen.hasPreview && <MappingPreview typeId={chosen.id} params={values} />}
             </fieldset>
           )}
 

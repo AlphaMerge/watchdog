@@ -5,6 +5,8 @@ import type {
   ChannelDef,
   CostHint,
   JsonSchema,
+  PreviewInput,
+  PreviewResult,
   SensorType,
   SensorTypeDeclaration,
 } from './contract.js';
@@ -43,6 +45,15 @@ export interface SensorTypeSummary {
   readonly category: string;
   readonly costHint: CostHint;
   readonly paramsSchema: JsonSchema;
+  /**
+   * Whether this type can dry-run its mapping language against a pasted document (`U-13`).
+   *
+   * Declared here rather than matched on the id, for the reason `listener` and `evaluatedBy` are:
+   * a form that asked `if (type === 'rest.custom')` would need editing for every type with a
+   * mapping language added after it, and the rule in CLAUDE.md is that adding a type is a
+   * one-file job.
+   */
+  readonly hasPreview: boolean;
 }
 
 /**
@@ -140,6 +151,7 @@ export class SensorCatalogue {
         category: type.category,
         costHint: type.costHint,
         paramsSchema: type.paramsSchema,
+        hasPreview: type.preview !== undefined,
       };
     });
   }
@@ -247,6 +259,24 @@ export class SensorCatalogue {
       if (deleteAtPath(clone, path.split('.'))) redacted.push(path);
     }
     return { params: clone, redacted };
+  }
+
+  /**
+   * A dry run of this type's mapping language against a pasted document (`U-13`).
+   *
+   * Returns null where the type declares none, which is almost all of them — the caller turns
+   * that into a refusal naming the type rather than an empty result that looks like a document
+   * nothing matched.
+   *
+   * Parameters are **not** validated first, on purpose: the form asking for this has a
+   * half-finished parameter set in it by definition, and a preview that refused until the whole
+   * form was valid would be unavailable exactly while it is needed.
+   */
+  async preview(id: string, input: PreviewInput): Promise<PreviewResult | null> {
+    // Called on the type rather than through a detached reference, so a type is free to build
+    // its preview out of its own members later without that becoming a `this` bug.
+    const type = this.#require(id);
+    return type.preview === undefined ? null : type.preview(input);
   }
 
   #require(id: string): SensorType {

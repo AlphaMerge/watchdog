@@ -162,6 +162,35 @@ channel the sensor is judged by.
 - **Errors carry context.** "ETIMEDOUT" alone is not a diagnosis. Say what you were connecting
   to and what phase you were in.
 
+### `preview(input)` (optional)
+
+Almost no type has one. It exists for types whose **parameters contain a mapping language** —
+paths into a document the device returns. `rest.custom` is the only one today: its `extract` array
+is a list of JSONPath or XPath expressions, and writing those blind against an API you cannot see
+is the part people give up on. `preview` runs those paths against a response the operator pasted
+into the form and reports what each one selected (`U-13`).
+
+- **Run the same functions `execute` runs.** This is the whole reason it is a member of the type
+  rather than something the UI does: a preview that agreed with the check only most of the time is
+  worse than no preview, because it certifies a path that does not work. `rest.custom`'s takes the
+  same format guess, the same parser, the same path compiler, the same aggregate, the same scale
+  and the same gap rule, and its tests are differential — they run both halves and compare the
+  numbers.
+- **No I/O.** It runs **in the core**, like `channels`, against a document that arrived in the
+  request. A preview that fetched anything would be a second request path with the sensor's
+  credentials in it, audited by nobody. It is `async` only so a type can still `await import()` a
+  parser it would otherwise load into every probe.
+- **Never throw.** The form this feeds has a half-typed path in it every few keystrokes, and a
+  preview that went blank while somebody typed would be useless exactly when it is being used. A
+  path that does not parse is reported on its own row; a document that does not parse sets
+  `error` on the result.
+- **Bound what comes back.** A wildcard over a large document selects more than anybody reads.
+  `rest.custom` returns the first ten selections per row with the honest total beside them, and
+  cuts each value at 200 characters.
+
+Declaring it turns on `hasPreview` in the catalogue summary, and the UI shows the panel off that
+flag — never off the type id. Nothing else is needed to wire it up.
+
 ---
 
 ## Secrets

@@ -160,6 +160,73 @@ export interface CheckExecution {
 }
 
 /**
+ * A dry run of a type's mapping language against a document the operator pasted (`U-13`).
+ *
+ * **Only types with a mapping language declare one.** `rest.custom` has an `extract` array whose
+ * entries are paths into a response, and writing those blind against an API you cannot see is the
+ * part people give up on. A Ping has nothing to preview and says so by not implementing this.
+ *
+ * **No I/O.** Everything it needs is in the input, which is what lets it run in the core against
+ * a body the operator supplied rather than on a probe against a device. A type whose preview
+ * fetched anything would be a second, unaudited request path with the sensor's credentials in it.
+ */
+export interface PreviewInput {
+  /** The response, verbatim, as it was pasted. */
+  readonly document: string;
+  /** What the server called it, where the operator knows. Empty is honest, and common. */
+  readonly contentType: string;
+  /** The parameters as the form currently holds them — not assumed to be valid or complete. */
+  readonly params: Readonly<Record<string, unknown>>;
+}
+
+/** One node a path selected, rendered the way the type reads it. */
+export interface PreviewSelection {
+  readonly text: string;
+  /** Whether an aggregate could use it. A path selecting ten strings produces no reading. */
+  readonly numeric: boolean;
+}
+
+/** What one mapping — one channel — would do with this document. */
+export interface PreviewRow {
+  /** The mapping's key, or empty while the operator is still filling the row in. */
+  readonly key: string;
+  readonly path: string;
+  /** Why this row could not be evaluated. An unparseable path names itself here. */
+  readonly error?: string;
+  /** Bounded: a wildcard over a large document selects more than anybody reads. */
+  readonly selected: readonly PreviewSelection[];
+  /** How many were selected in total, which is the number `count` would report. */
+  readonly selectedCount: number;
+  /** The reading, aggregated and scaled. `null` is the gap this channel would record. */
+  readonly value: number | null;
+}
+
+/** One expected value, checked the same way — a wrong one fails the check, channels or no. */
+export interface PreviewExpectation {
+  readonly path: string;
+  readonly error?: string;
+  /** What the path found, as text. Empty when it found nothing. */
+  readonly actual: string;
+  readonly ok: boolean;
+}
+
+export interface PreviewResult {
+  /** How the document was read. `auto` resolves to one of these, and seeing which one matters. */
+  readonly format: string;
+  /** Set when the document itself did not parse; `rows` is then empty. */
+  readonly error?: string;
+  readonly rows: readonly PreviewRow[];
+  readonly expectations: readonly PreviewExpectation[];
+  /**
+   * Why this check would fail on this document, even where every row above has a value.
+   *
+   * The preview exists to answer "what will this sensor do", and a list of green rows above a
+   * check that fails on an expectation would answer it wrongly.
+   */
+  readonly problems: readonly string[];
+}
+
+/**
  * A sensor type, per ADR-001 Decision 7.
  *
  * One type is one file. `execute` is the only member the probe uses and the only one the core
@@ -227,6 +294,17 @@ export interface SensorType {
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;
+  /**
+   * A dry run against a pasted document (`U-13`), for types with a mapping language.
+   *
+   * Optional, and absent for almost every type. It runs **in the core**, like `channels`, so it
+   * must do no I/O — but it is `async` so that a type can still `await import()` a parser it
+   * would otherwise load into every probe at startup.
+   *
+   * It must not throw for bad input: a half-typed path is the normal state of the form this
+   * feeds, and the row says so in its `error` instead.
+   */
+  preview?(input: PreviewInput): Promise<PreviewResult>;
 }
 
 /** A type as the core sees it: everything except the half that does I/O. */
