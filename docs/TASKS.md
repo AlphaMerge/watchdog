@@ -4082,6 +4082,30 @@ because each is a decision rather than a defect:
       obvious mechanism and would explain why it is rare. Worth pinning before `H-01`'s soak,
       because a harness that fails once in four runs is indistinguishable from the system failing
       once in four runs.
+
+      **Progress 2026-08-29. The first fix is done and the hypothesis is disproved.**
+
+      `scripts/test-all.sh` keeps the whole log under `dev/data/test-logs/` and **fails on
+      `cancelled` as loudly as on `failed`** — a cancelled test did not pass, it never ran, and a
+      summary carrying only pass/fail reads twenty-five tests that never ran as a suite that was
+      fine. Verified by planting a suite whose `before` throws: without the check the same run
+      prints "803 pass, 0 fail" and exits clean.
+
+      **The `TIME_WAIT` mechanism is not it.** Every listener in these suites binds port 0 —
+      `port-dns`, `jitter-range` and `tls` through their own `listen` helpers, and
+      `TestSnmpAgent`/`TestSshServer` in `packages/simulators`, which say so in a comment. There
+      is no fixed port anywhere to collide on.
+
+      What can still throw in a `before`: the simulator starts, and `ssh-session.test.ts`, whose
+      hook opens a real session and reads the host key back — 34 tests behind one handshake. Its
+      timeout is 15 s, though, which is not a threshold a loopback handshake crosses easily.
+
+      **Not reproduced in eight isolated runs of `@ms/sensors` or two full parallel runs.** It
+      stays open rather than closed-as-unreproducible, because the point of the logging fix is
+      that the next occurrence will say what it was instead of leaving arithmetic to infer it.
+      One caution for whoever picks it up: a "reproduction" here turned out to be a deliberately
+      failing probe file leaking into a concurrent background run. Do not plant one while runs of
+      the same suite are in flight.
 - [ ] **P-24 — One session pool for every transport** · M · T-09 · _(Was a second `P-19`; renumbered, because two open tickets sharing a number is how the wrong one gets ticked.)_  `support/snmp/pool.ts` and
       `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
       unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
