@@ -1,0 +1,5 @@
+{"cores":8,"sensors":100,"intervalSeconds":60,"checkMs":200,"seconds":60,"completed":100,"p50":1.5,"p95":13.8,"p99":34.8,"max":34.8,"poolFinal":4,"poolGrown":0,"deferred":0,"refused":0,"rssMb":117.2,"poolRssMb":40.3}
+{"cores":8,"sensors":500,"intervalSeconds":60,"checkMs":200,"seconds":60,"completed":500,"p50":4.4,"p95":8.2,"p99":60,"max":78.4,"poolFinal":14,"poolGrown":10,"deferred":0,"refused":0,"rssMb":215.7,"poolRssMb":138.9}
+{"cores":8,"sensors":1000,"intervalSeconds":60,"checkMs":200,"seconds":60,"completed":1000,"p50":2.5,"p95":9.1,"p99":129.5,"max":135.6,"poolFinal":24,"poolGrown":20,"deferred":0,"refused":0,"rssMb":312.4,"poolRssMb":236.4}
+{"cores":8,"sensors":2500,"intervalSeconds":60,"checkMs":200,"seconds":60,"completed":2500,"p50":2.6,"p95":70.2,"p99":223.5,"max":334.8,"poolFinal":48,"poolGrown":44,"deferred":0,"refused":0,"rssMb":547.2,"poolRssMb":469.6}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":200,"seconds":60,"completed":5000,"p50":6.9,"p95":214.6,"p99":359,"max":495.1,"poolFinal":48,"poolGrown":44,"deferred":0,"refused":0,"rssMb":571,"poolRssMb":493.7}

@@ -328,24 +328,63 @@ describe('growing and shrinking with the load', () => {
     assert.equal(pool.stats().grown, 0);
   });
 
-  it('does not give a worker back while work is still arriving', async () => {
-    // The idle clock has to be reset by *submitting*, not only by finishing: a shrink between a
-    // check queueing and a worker picking it up would take the worker that was about to run it.
-    // The interval here is far shorter than the work, so a policy that did not wait would fire.
-    // The interval is five times the submit cadence, so the two cannot be confused: a pool that
-    // reset its idle clock only on *completion* would still be inside the window, while one that
-    // never reset it would shrink at every tick.
+  /**
+   * **This replaced a test that asserted the opposite, and the replacement is the point of
+   * `P-26`.** The old one said a pool must not give a worker back "while work is still arriving",
+   * because a shrink between a check queueing and a worker picking it up would take the worker
+   * that was about to run it. The hazard is real; the measure was not. Timing "has anything been
+   * submitted" makes a probe watching five thousand sensors — eighty-three checks a second —
+   * permanently ineligible to shrink, so the pool that had grown large was the one that could
+   * never give anything back. Measured: 48 workers held for twenty-four hours at 0–3% use.
+   *
+   * The hazard is answered by looking at the worker instead. A slot that is ready, holding no
+   * job, and untouched for the whole interval is one that checks have been flowing *past*, and
+   * `#pump` dispatches to a free worker before a check can queue behind it.
+   */
+  it('gives back the workers a lighter load stopped needing', async () => {
+    // Six at once grows the pool; then one every 40 ms with 60 ms of work is 1.5 workers' worth,
+    // so most of what the burst bought is spare from then on.
     const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 200 });
     for (let i = 0; i < 6; i += 1) pool.submit(request(700 + i, 'test.slow', { delayMs: 60 }));
     await until(() => pool.size > 1, 'the pool to grow');
 
-    for (let round = 0; round < 12; round += 1) {
+    // **The peak is the highest size actually seen, not a single early sample.** Growth is
+    // asynchronous — workers are still spawning when `pool.size > 1` first becomes true — so
+    // reading it once races the thing being measured.
+    let peak = pool.size;
+    const rounds = 30;
+    for (let round = 0; round < rounds; round += 1) {
       await new Promise((resolve) => setTimeout(resolve, 40));
       pool.submit(request(800 + round, 'test.slow', { delayMs: 60 }));
+      peak = Math.max(peak, pool.size);
     }
-    assert.equal(pool.stats().shrunk, 0, 'a busy pool gave a worker back');
 
-    await until(() => seen.length === 18, 'every check to finish', 15_000);
+    // Asserted while the load is *still arriving*, which is the whole correction: the old policy
+    // treated any submission as proof every worker was needed.
+    assert.ok(
+      pool.stats().shrunk > 0,
+      `the pool gave nothing back in ${String(rounds * 40)} ms of a load needing ~2 workers`,
+    );
+    assert.ok(pool.size < peak, `the pool held ${String(pool.size)} of its peak ${String(peak)}`);
+
+    // And it took only genuinely spare workers: every check still ran to completion.
+    await until(() => seen.length === 6 + rounds, 'every check to finish', 15_000);
+  });
+
+  it('never takes a worker that is in the middle of a check', async () => {
+    // The hazard the old test was written against, asserted directly rather than by proxy. The
+    // interval is far shorter than the work, so a shrink policy that could not tell busy from
+    // spare would have every opportunity to take one.
+    const { pool, seen } = await poolOf({ size: 6, minSize: 1, idleShrinkMs: 30 });
+    for (let i = 0; i < 5; i += 1) pool.submit(request(900 + i, 'test.slow', { delayMs: 400 }));
+    await until(() => pool.size > 1, 'the pool to grow');
+
+    await until(() => seen.length === 5, 'every check to finish', 15_000);
+    assert.equal(
+      seen.filter((one) => one.result.outcome === 'ok').length,
+      5,
+      'a check was lost, which means a working worker was retired underneath it',
+    );
   });
 
   it('never shrinks below the minimum, however long it is quiet', async () => {

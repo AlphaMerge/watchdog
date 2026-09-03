@@ -66,11 +66,23 @@ The 35 MB is what a worker costs in a real probe, where each one loads the senso
 measured over 24 hours at 48 workers and 1,790 MB resident. A synthetic pool with no catalogue
 costs about 12 MB a worker, so do not size from a benchmark.
 
-**Size from `workerPoolSize`, not from your sensor count**, because a probe today reaches its
-ceiling and stays there: the pool overshoots while growing and its shrink policy cannot fire on a
-probe that is doing anything (`P-26`). A probe watching fifty sensors reaches the same 48 workers
-as one watching five thousand. Until that is fixed, **the ceiling you configure is the memory you
-buy** — which also means lowering `workerPoolSize` is the lever for a small installation.
+**The pool settles near the burst, so the burst is what you are buying memory for** — the same
+number that decides latency above. Measured, at a ceiling of 48:
+
+| Sensors | Burst | Workers held | Benchmark RSS |
+| --- | --- | --- | --- |
+| 100 | 1.7/s | 4 | 117 MB |
+| 500 | 8.3/s | 14 | 216 MB |
+| 1,000 | 16.7/s | 24 | 312 MB |
+| 2,500 | 41.7/s | 48 (ceiling) | 547 MB |
+| 5,000 | 83.3/s | 48 (ceiling) | 571 MB |
+
+Above about 2,500 sensors the burst exceeds the shipped ceiling, so the pool pins there and the
+extra latency is the second round the model predicts. Below it, the pool tracks the load.
+
+**`workerPoolSize` is a ceiling, not a headcount.** Lowering it caps memory at the cost of an
+extra round of jitter once the burst outgrows it; raising it is what a probe watching slow checks
+needs. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would allow.
 
 ---
 

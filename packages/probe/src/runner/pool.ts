@@ -111,6 +111,16 @@ interface Slot {
    * worker over its bound every time a check ignored an abort.
    */
   retired: boolean;
+  /**
+   * Monotonic instant this worker last had nothing to do, or `0n` while it has a job.
+   *
+   * **Per worker rather than per pool**, and that distinction is the whole of `P-26`. The pool
+   * used to time "nothing has been submitted at all", which on a probe watching five thousand
+   * sensors — eighty-three checks a second — is never true for a minute, so the shrink could not
+   * fire on the one probe that had grown a large pool. What matters is whether *this worker* has
+   * been spare, which is what the pool is being asked to give back.
+   */
+  idleSince: bigint;
 }
 
 /**
@@ -189,7 +199,6 @@ export class CheckPool {
   #grown = 0;
   #shrunk = 0;
   /** When every slot was last seen busy, or the queue non-empty. Monotonic (`CLAUDE.md`). */
-  #busySince = 0n;
   #shrinkTimer: NodeJS.Timeout | undefined;
   #startFailures = 0;
   #stopped = false;
@@ -233,7 +242,6 @@ export class CheckPool {
   async start(): Promise<void> {
     if (this.#slots.length > 0) return;
     await Promise.all(Array.from({ length: this.#minSize }, () => this.#spawn()));
-    this.#busySince = process.hrtime.bigint();
     // Zero means never give a worker back, which is what a probe on a machine with memory to
     // spare and spiky work should choose: the pool then only ever climbs.
     if (this.#minSize < this.#maxSize && this.#idleShrinkMs > 0) {
@@ -305,10 +313,6 @@ export class CheckPool {
       settled: false,
     });
     this.#active.add(request.sensorId);
-    // The pool is not idle from this moment, whatever happens next: a check that queues and a
-    // check that dispatches immediately are both work, and a shrink between the two would take
-    // the worker that was about to run it.
-    this.#busySince = process.hrtime.bigint();
     this.#pump();
     return 'accepted';
   }
@@ -373,7 +377,19 @@ export class CheckPool {
     if (held >= this.#maxSize) return;
     if (this.#queue.length === 0) return;
 
-    const want = Math.min(this.#maxSize, held * 2, held + this.#queue.length);
+    // **The queue that pending spawns will absorb must not also justify more spawns.** `held`
+    // already counts the workers on their way, so counting the whole queue as unmet demand
+    // counts the same pending workers on both sides of the comparison. A worker takes a few
+    // hundred milliseconds to import its registry, and every tick that lands inside that window
+    // saw the queue it had already paid for and bought against it again: measured at 500 sensors
+    // — a steady-state need of 1.7 workers — the pool reached **74**.
+    //
+    // Discounting the queue also removes the need to double. One step to meet the demand that is
+    // actually unmet answers a whole tranche at once, which is what the doubling was for: 83
+    // checks arriving against 4 workers now goes straight to the ceiling in a single step rather
+    // than in a handful of rounds.
+    const unmet = Math.max(0, this.#queue.length - this.#growing);
+    const want = Math.min(this.#maxSize, held + unmet);
     const add = want - held;
     if (add <= 0) return;
 
@@ -401,12 +417,19 @@ export class CheckPool {
    */
   #considerShrink(): void {
     if (this.#stopped || this.#slots.length <= this.#minSize) return;
-    const idleFor = Number(process.hrtime.bigint() - this.#busySince) / 1e6;
-    if (idleFor < this.#idleShrinkMs) return;
 
-    const spare = this.#slots.find((slot) => slot.ready && slot.job === undefined);
+    // The oldest genuinely spare worker: ready, holding no job, and untouched for the whole
+    // interval. Asking "has anything been submitted lately" instead — which is what this did
+    // before `P-26` — answers a different question, and answers it "yes" on every probe that is
+    // doing any work at all.
+    const now = process.hrtime.bigint();
+    const spare = this.#slots
+      .filter((slot) => slot.ready && slot.job === undefined && slot.idleSince !== 0n)
+      .filter((slot) => Number(now - slot.idleSince) / 1e6 >= this.#idleShrinkMs)
+      .sort((a, b) => (a.idleSince < b.idleSince ? -1 : 1))[0];
     if (spare === undefined) return;
 
+    const idleFor = Number(now - spare.idleSince) / 1e6;
     this.#shrunk += 1;
     this.#logger.info(
       { from: this.#slots.length, idleForMs: Math.round(idleFor) },
@@ -420,6 +443,8 @@ export class CheckPool {
 
   #dispatch(slot: Slot, job: Job): void {
     slot.job = job;
+    // Zero while working, so a busy worker can never look like the oldest spare one.
+    slot.idleSince = 0n;
     job.startedAt = process.hrtime.bigint();
     job.waitMs = Number(job.startedAt - job.queuedAt) / 1e6;
     record(this.#wait, job.waitMs);
@@ -483,6 +508,7 @@ export class CheckPool {
     if (job === undefined || job.id !== parsed.jobId) return;
     clear(job);
     slot.job = undefined;
+    slot.idleSince = process.hrtime.bigint();
 
     if (!job.settled) {
       const result = message as {
@@ -532,6 +558,7 @@ export class CheckPool {
       // Exactly one result is lost, and it is reported rather than dropped.
       this.#settle(job, 'worker-crash', `the worker running this check ${reason}`);
       slot.job = undefined;
+      slot.idleSince = process.hrtime.bigint();
     }
 
     if (!slot.ready) {
@@ -558,6 +585,7 @@ export class CheckPool {
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
     slot.job = undefined;
+    slot.idleSince = process.hrtime.bigint();
     await slot.worker.terminate();
     if (this.#stopped) return;
     await this.#spawn();
@@ -574,6 +602,7 @@ export class CheckPool {
       id: this.#nextWorkerId,
       worker,
       ready: false,
+      idleSince: process.hrtime.bigint(),
       job: undefined,
       retired: false,
     };

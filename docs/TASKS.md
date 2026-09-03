@@ -4135,7 +4135,7 @@ because each is a decision rather than a defect:
       refusal `isProtocolCompatible` already knows how to give. An older probe omits the field and
       the channel gaps, which is `R-06` again.
 
-- [ ] **P-26 — The pool's shrink policy cannot fire on a probe that is doing anything** · M ·
+- [x] **P-26 — The pool's shrink policy cannot fire on a probe that is doing anything** · M ·
       P-18 · `#considerShrink` gives a worker back only when the pool has been idle for
       `idleShrinkMs`, and `#busySince` is reset by **every `submit`** — so "idle" means "no check
       has been handed to the pool at all for a minute". A probe watching 5,000 sensors on a
@@ -4175,6 +4175,43 @@ because each is a decision rather than a defect:
       and that is what makes the memory column of any sizing table meaningless until this is
       fixed. Damping growth by what is already spawning, and measuring idleness per worker rather
       than per submission, are the same fix seen from two ends.
+
+      **Both ends fixed, and the two-ended reading was right.** Idleness is now per slot:
+      `Slot.idleSince` is stamped when a worker finishes and zeroed when it is dispatched, and
+      `#considerShrink` retires the *oldest* slot that is ready, jobless and has been so for the
+      whole window — which is the hazard the old test was guarding against, expressed as a
+      condition on the slot rather than as a ban on shrinking. Growth no longer doubles: `want`
+      is `held + (queue.length − growing)`, so a tick inside a spawn window does not buy a second
+      time against a queue it has already paid for. `#busySince` is gone.
+
+      **Measured on eight cores at the shipped ceiling of 48**
+      (`docs/findings/2026-09-03-sizing-sweep-after-p26.jsonl`), before → after:
+
+      | Sensors | Burst | Pool | RSS |
+      | --- | --- | --- | --- |
+      | 100 | 1.7/s | 4 → 4 | 120 → 117 MB |
+      | 500 | 8.3/s | **27 → 14** | **343 → 216 MB** |
+      | 1,000 | 16.7/s | **35 → 24** | **431 → 312 MB** |
+      | 2,500 | 41.7/s | 48 → 48 | 565 → 547 MB |
+      | 5,000 | 83.3/s | 48 → 48 | 578 → 571 MB |
+
+      −37% resident at 500 sensors and −28% at 1,000. Above 2,500 the burst genuinely exceeds the
+      ceiling, so pinning there is the pool doing its job rather than the defect. Dispatch latency
+      is unchanged — the 2,500-sensor point read 70 ms against 18 on the first run and looked like
+      a regression until it was run three more times: 10.5, 67.2, 8.9. That point sits exactly
+      where a burst needs one round or two, and one sample of it means nothing.
+
+      **The old test's premise was the defect**, so it was replaced rather than adjusted: "does
+      not give a worker back while work is still arriving" asserted the very behaviour that made
+      a busy probe unable to shrink. In its place, `gives back the workers a lighter load stopped
+      needing` and `never takes a worker that is in the middle of a check` — the second is the
+      hazard the old test was really about, and it fails if the ready/jobless condition is
+      dropped.
+
+      **On the dev stack this correctly changes nothing**: 5,047 sensors is a burst of 84 against
+      48 workers, so no worker is idle for a 60-second window and the pool stays at its ceiling.
+      The shrink path is covered by unit test rather than by the 60-second bench, because a run
+      that short cannot exercise a 60-second idle window.
 
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
@@ -6825,10 +6862,12 @@ because each is a decision rather than a defect:
       multiplier, not the sensor count**, so 5,000 HTTP sensors at 2 s need 83 workers where
       5,000 pings need 14.
 
-      **Memory is the pool ceiling rather than the workload**, which is `P-26` showing up in the
-      guidance: 500 sensors need 1.7 workers and reached 27; anything above 2,500 pins at the
-      shipped ceiling of 48 on every tier. So `sizing.md` sizes memory from `workerPoolSize` and
-      says plainly that the ceiling you configure is the memory you buy until `P-26` lands.
+      **Memory was the pool ceiling rather than the workload** — 500 sensors need 1.7 workers and
+      reached 27 — which is what the sweep turned `P-26` into a measured ticket for. Since it
+      landed, the pool tracks the burst below the ceiling (14 workers and 216 MB at 500 sensors,
+      24 and 312 MB at 1,000) and pins at 48 only above 2,500, where the burst genuinely exceeds
+      it. `sizing.md` now sizes memory from the burst and treats `workerPoolSize` as the cap it
+      is.
 
       **The benchmark's RSS is not a probe's.** It loads a fixture registry; a real probe loads
       the sensor catalogue into every worker — 12 MB a worker here against 35 MB in `H-01`'s
