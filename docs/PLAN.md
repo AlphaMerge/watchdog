@@ -290,10 +290,18 @@ flat 48, chosen from a measured sweep and recorded in
 **P-07 supplies what that benchmark could not: the cost of a real check.** `P-15` sized the pool
 against synthetic work, so it measured the scheduler and not the sensor. Ping — the most-used type
 there is — costs 1.3 ms of CPU and about 0.6 s of wall clock per check once `-i 0.2` is set,
-which is 99 checks a second on 64 workers. The shipped default of 48 carries roughly 75 a second,
+which is 99 checks a second on 64 workers. The shipped default of 48 carried roughly 75 a second,
 so an installation that is *entirely* ping at the v1 count of 5,000 on a one-minute interval wants
-about 55 rather than 48. That is a tuning note, not a defect: the two numbers now come from the
-same place, and before `P-07` the same installation was unreachable at any pool size.
+about 55 rather than 48.
+
+> **This paragraph called that "a tuning note, not a defect". It was a defect** (`P-32`), and this
+> sentence is where it was seen and waved through — the arithmetic was right, written down, and
+> then not carried to the place that owned the number. Measured five weeks later: 5,000 ping
+> sensors on a pool of 48 give a p95 of **5,082 ms** against a 1,000 ms budget, with **nothing
+> refused**, because a pool under its Little's-law floor accumulates rather than sheds. The
+> default is **64** now, chosen from a sweep
+> (`docs/findings/2026-09-03-pool-default.md`), and the probe derives its own ceiling from the
+> checks it was assigned (`P-34`). `P-35` is the ticket for the habit rather than the instance.
 
 P-05 landed the plugin contract, which is what the rest of the phase is built from, and P-08 put
 the first type in it. Sensors can now be created and the check runs correctly against a real

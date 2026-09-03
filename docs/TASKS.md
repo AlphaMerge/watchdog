@@ -4302,7 +4302,7 @@ because each is a decision rather than a defect:
       | | The number | Invalidated by | Found |
       | --- | --- | --- | --- |
       | `P-31` | the benchmark's `checkMs: 3_000` for `icmp.ping` | `P-07` measuring 600 ms, three days later | a week later, by reading a comment |
-      | `P-32` | `defaultPoolSize()` = 48, chosen against a 200 ms model | the same `P-07` — whose own finding said 83/s "needs about 55" | by `P-31`'s corrected run |
+      | `P-32` | `defaultPoolSize()` = 48, chosen against a 200 ms model | the same `P-07` — whose own `PLAN.md` entry said the ping case "wants about 55 rather than 48" and called it "a tuning note, not a defect" | by `P-31`'s corrected run, five weeks later |
       | `P-33` | `sizing.md`'s worker rule, missing Little's floor | nothing; it was incomplete from the start and every example was under its own floor | by `P-32`'s arithmetic |
       | — | `PLAN.md`'s Phase 1 exit criterion, "measured at **21.0 seconds**" | Phase 3's `M-02` and `M-08`, which took it to 28.8 | while checking something else |
 

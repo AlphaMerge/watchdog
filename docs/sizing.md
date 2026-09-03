@@ -53,9 +53,10 @@ as long as the probe runs:
 
 **Below this line no tolerance saves you.** The lag does not settle at some large value; it
 climbs. And it climbs *quietly* — the queue absorbs it, so nothing is refused and no counter
-says anything is wrong until the queue's own bound is reached. Measured: 5,000 ping sensors on
-the shipped pool of 48 sit 4% under this line and reach a **median** check 3.0 s late and a p95
-of 5.4 s inside ninety seconds, with **nothing refused**.
+says anything is wrong until the queue's own bound is reached. Measured: 5,000 ping sensors on a
+pool of 48 sat 4% under this line and reached a **median** check 3.0 s late and a p95 of 5.4 s
+inside ninety seconds, with **nothing refused**. That was the shipped default until `P-32`
+raised it to 64.
 
 ### 2. Then keep the jitter inside your tolerance
 
