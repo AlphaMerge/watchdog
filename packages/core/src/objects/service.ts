@@ -1386,19 +1386,24 @@ export class ObjectService {
       if (parent === null) throw parentNotFound(normalised.parentId);
       if (!parent.accepts) throw parentKindInvalid(normalised.kind, parent.kind);
 
-      let created = await this.#repo.create(q, normalised);
+      const id = await this.#repo.insert(q, normalised);
 
       if (normalised.kind === 'sensor') {
-        const { ownerVersion } = await this.#repo.createChannels(
+        await this.#repo.createChannels(
           q,
-          created.id,
+          id,
           this.#sensorTypes.channelsFor(normalised.sensorType, normalised.params ?? {}),
         );
-        // Declaring channels bumps the sensor's version by trigger, so the detail the insert
-        // returned is already a version behind. Handing that back would give the caller an ETag
-        // that 412s on its own first write.
-        if (ownerVersion !== null) created = { ...created, version: ownerVersion };
       }
+
+      // **Read once, after the object is finished** (`P-29`). Declaring channels bumps the
+      // sensor's version by trigger, so a read taken before them is a version behind — and
+      // handing that back would give the caller an ETag that 412s on its own first write. This
+      // used to be a read before the channels plus a second read of just the version to patch
+      // it; one read here is the same answer for one round trip fewer, on a path that is
+      // round-trip bound and gets walked five thousand times by a provisioning run.
+      const created = await this.#repo.get(q, id);
+      if (created === null) throw notFound(id);
 
       // A sensor created under a paused device is paused from its first moment (M-08). Without
       // this it would scan, alarm and record readings inside a maintenance window nobody

@@ -178,7 +178,17 @@ too: 5.9 → 7.9–11.1 s. So the extra sits in what a *request* costs — socke
 serialisation — not in what a create costs, which is what `2026-08-29-bulk-tree-create.md` already
 identified as the serial path's whole expense.
 
-**Read that with its caveat, which is large.** Only two commits have touched the create path since
+**Resolved, and it was not a regression** — see `P-29`. A `--cpu-prof` run measured **28.7 s,
+the fastest of the lot with the profiler attached**, against the 28.8 s recorded on 2026-08-29:
+nothing had got slower. The profile showed the process **63.6% idle**, and counting the
+statements gave **11 database round trips per sensor create**, two of which existed only to work
+around ordering — the object was read before its channels existed, then the version re-read and
+patched in. Reading once, after the writes, took it to **10 round trips and 4.15 → 3.71 ms a
+create (−10.6%)**. Three runs after the fix: **26.1, 28.3, 28.8 s** — all inside the budget,
+where before it was one run in four. Margin is now 4–13% against a machine that varies ~20%, so
+it is better rather than settled.
+
+**Read the original numbers with their caveat, which is large.** Only two commits have touched the create path since
 the 28.8 s measurement (`H-07`, `S-18`), neither plausibly per-request; and the host carried other
 projects' containers throughout at a load average of about **9 on 8 cores**. Stopping `ms-server`
 is not the same as a quiet machine. A per-request cost is the most contention-sensitive thing in
