@@ -707,6 +707,59 @@ describe(
       });
     });
 
+    /**
+     * The v1 target, in one message, is a message the probe refuses.
+     *
+     * `config-set` caps `sensors` at 5,000 and the frame decoder refuses anything over 4 MB,
+     * while `CAPABILITIES.MD` §13 puts the v1 target at 5,000 sensors — so an installation at its
+     * own documented size produced a configuration its probe rejected as a protocol violation and
+     * closed the link on. It reconnected, got the same message, and closed again: 426 times in
+     * three minutes on the dev stack, with no way out. Only a probe *restart* shows it, which is
+     * why a 24-hour soak carrying the same 5,047 sensors never did — they had arrived as deltas
+     * while the tree was being built.
+     */
+    it('splits a set too large for one message rather than sending one the probe refuses', async () => {
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 5_047 }, (_, at) => sensor(at + 1));
+
+      await withProbe(source, async (probe) => {
+        const set = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(set.type === 'config-set');
+        assert.ok(
+          set.sensors.length <= 5_000,
+          `config-set carried ${String(set.sensors.length)} sensors, which the schema refuses`,
+        );
+
+        // The deltas that carry the rest, all under the same version so the probe's fingerprint
+        // matches what the core believes it sent.
+        await probe.waitFor(
+          (m) =>
+            m.type === 'config-delta' &&
+            [
+              ...set.sensors,
+              ...probe.received.flatMap((r) => (r.type === 'config-delta' ? r.upserted : [])),
+            ].length === 5_047,
+        );
+
+        const delivered = [
+          ...set.sensors,
+          ...probe.received.flatMap((m) => (m.type === 'config-delta' ? m.upserted : [])),
+        ];
+        assert.equal(delivered.length, 5_047, 'every sensor arrived, across the chunks');
+        assert.equal(
+          new Set(delivered.map((one) => one.sensorId)).size,
+          5_047,
+          'and none of them twice',
+        );
+        for (const message of probe.received) {
+          if (message.type === 'config-delta') {
+            assert.equal(message.version, set.version, 'the chunks share one version');
+            assert.deepEqual(message.removed, [], 'a chunk of a full set removes nothing');
+          }
+        }
+      });
+    });
+
     it('sends nothing but a confirmation when the probe is already current', async () => {
       // The reconnect-after-a-blip case, and the whole reason the handshake carries a
       // fingerprint: re-sending five thousand unchanged assignments is pure waste.

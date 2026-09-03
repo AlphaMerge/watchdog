@@ -4068,6 +4068,33 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [x] **P-28 — A probe at the v1 target could never reconnect** · M · P-27 · `config-set` caps
+      `sensors` at 5,000 and the frame decoder refuses a message over 4 MB, while
+      `CAPABILITIES.MD` §13 puts the v1 target at **5,000 sensors** — so an installation at its
+      own documented size built a configuration its probe rejected outright.
+
+      **The failure mode was a wedge, not a bad message.** The probe reconnects, the core sends
+      the same oversized `config-set`, the probe closes the link on a protocol violation, and it
+      reconnects again: **426 closures in three minutes** on the dev stack, `connected: 0`, and no
+      way out short of deleting sensors. The core's own log said only "link to core closed".
+
+      **A probe restart is what shows it**, which is why `H-01` ran 24 hours with these same 5,047
+      sensors and never hit it — they had arrived as `config-delta` messages while the tree was
+      being provisioned, and each delta was small. It surfaced the moment the probe was restarted
+      to pick up `P-27`.
+
+      **Fixed without touching the protocol.** The probe already applies a `config-set` as a
+      replacement and a `config-delta` as an upsert, so a full push is now the first chunk as a
+      set and the rest as deltas carrying the same version: 5,047 sensors in 6 messages, and the
+      end state is identical to the one oversized message. A thousand assignments per chunk
+      measured about 120 KB, so a chunk has roughly thirty times the headroom it needs — the
+      margin matters because an assignment is as large as its parameters, and a `rest.custom` with
+      many mappings is worth many times an `icmp.ping`.
+
+      Left deliberately: the 5,000-item and 4 MB bounds stay where they are. They are absurdity
+      guards, and now that no message approaches either, they are doing the job they were written
+      for rather than standing between the product and its own target.
+
 - [x] **P-27 — The spool stall belongs on Probe Health, not only in the log** · S · H-01 ·
       `92ec56a` gave `SpoolDrain` a stall detector — `DrainStats.stalledForMs`, how long the spool
       has held results with the link up and nothing moving — and then only logged it. An operator

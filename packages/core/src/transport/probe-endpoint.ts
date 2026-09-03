@@ -279,6 +279,26 @@ function keyMatches(presented: string, accepted: readonly string[]): boolean {
  * can reach is bounded: the TLS client certificate, then a frame-size cap, then a handshake
  * deadline.
  */
+/**
+ * Sensors per configuration message.
+ *
+ * Two bounds sit above this and a chunk has to clear both: `config-set` refuses more than 5,000
+ * sensors, and the frame decoder refuses a message over 4 MB. A thousand assignments measured
+ * about 120 KB on the tree this was found on, so a chunk has roughly thirty times the headroom it
+ * needs there — which is the margin that matters, because an assignment is as large as its
+ * parameters and a `rest.custom` with many mappings or an `exe.script.advanced` carrying a script
+ * is worth many times an `icmp.ping`.
+ */
+const CONFIG_CHUNK_SENSORS = 1_000;
+
+/** `items` in runs of `size`, the last one short. Never an empty chunk, even for no items. */
+function chunked<T>(items: readonly T[], size: number): (readonly T[])[] {
+  if (items.length === 0) return [[]];
+  const out: (readonly T[])[] = [];
+  for (let at = 0; at < items.length; at += size) out.push(items.slice(at, at + size));
+  return out;
+}
+
 export class ProbeEndpoint {
   readonly #options: ProbeEndpointOptions;
   readonly #logger: Logger;
@@ -922,13 +942,39 @@ export class ProbeEndpoint {
           return;
         }
 
+        // **A full push is chunked, and at the v1 target it has to be.** `config-set` caps
+        // `sensors` at 5,000 and the frame decoder refuses anything over 4 MB — and
+        // `CAPABILITIES.MD` §13 puts the v1 target at 5,000 sensors, so an installation *at its
+        // own documented size* produced a message its probe refused. The failure was not a bad
+        // message but a wedge: reconnect, receive the same oversized set, close on a protocol
+        // violation, reconnect — 426 closures in three minutes, and a probe that could never come
+        // back. It needed a probe restart to show, which is why 24 hours of soak with the same
+        // 5,047 sensors never hit it.
+        //
+        // No protocol change: the probe already applies a `config-set` as a replacement and a
+        // `config-delta` as an upsert, so the first chunk is the set and the rest are deltas
+        // carrying the same version. The end state is identical to one oversized message.
+        const chunks = chunked(assignments.sensors, CONFIG_CHUNK_SENSORS);
+        const [first = [], ...rest] = chunks;
         session.connection.send({
           type: 'config-set',
           version: assignments.version,
-          sensors: [...assignments.sensors],
+          sensors: [...first],
         });
+        for (const chunk of rest) {
+          session.connection.send({
+            type: 'config-delta',
+            version: assignments.version,
+            upserted: [...chunk],
+            removed: [],
+          });
+        }
         logger.info(
-          { version: assignments.version, sensors: assignments.sensors.length },
+          {
+            version: assignments.version,
+            sensors: assignments.sensors.length,
+            ...(rest.length === 0 ? {} : { messages: chunks.length }),
+          },
           'sent probe configuration',
         );
       } catch (error: unknown) {
