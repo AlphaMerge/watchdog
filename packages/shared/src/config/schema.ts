@@ -408,7 +408,10 @@ export interface ProbeConfig {
      * **At 0 the probe sizes itself from Little's law** (`P-34`): it sums
      * `check duration / interval` over the sensors it was actually assigned, using the durations
      * it has measured for each type rather than a guess, and takes 30% headroom. Recomputed on
-     * every configuration push and every thirty seconds, bounded by `autoPoolCeilingMax()`. This
+     * every thirty seconds and shortly after a configuration push — after rather than during,
+     * because a chunked push is transiently incomplete (`P-41`) — bounded by
+     * `autoPoolCeilingMax()`. It raises at once and lowers only past a deadband and only when
+     * the lower answer persists (`P-40`), so the ceiling climbs quickly and steps down. This
      * is the case one constant could not serve: `P-32` measured 48 to be *under* the floor for a
      * probe watching `icmp.ping` at the v1 target, while 64 is more than a probe watching fast
      * checks needs at the same sensor count.

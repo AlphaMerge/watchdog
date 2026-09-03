@@ -153,8 +153,16 @@ allow.
 **Left at its default of 0, the probe applies rule 1 to itself** (`P-34`). It sums
 `check duration ÷ interval` over the sensors it was actually assigned — using the duration it has
 *measured* for each sensor type, not a guess — adds 30% headroom, and moves its own ceiling. It
-recomputes on every configuration push and every thirty seconds, so a probe whose checks get
-slower raises its ceiling before the backlog appears rather than after.
+recomputes every thirty seconds, and again shortly after a configuration push, so a probe whose
+checks get slower raises its ceiling before the backlog appears rather than after.
+
+**It raises at once and lowers slowly, and the asymmetry is deliberate** (`P-40`). A pool that is
+too small is a probe falling behind, and every second it waits is checks queueing — so an
+increase takes effect immediately. A decrease has to be more than a twitch (10% of the ceiling,
+or four workers, whichever is larger) and has to persist for about a minute, because a ceiling
+that follows every wobble in a network's round-trip time destroys and rebuilds workers for a
+workload that has not changed. **What you will see in the logs is a ceiling that climbs quickly
+and comes down in steps a minute apart**, and that is working as intended rather than lagging.
 
 The rules above are still worth knowing, for three reasons: to size the *box*, since the ceiling
 the probe derives is memory you have to have; to read `workerPoolSize` when somebody has set it;
