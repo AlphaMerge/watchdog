@@ -119,6 +119,13 @@ const measured = {
   'rollup lag (s)': trend(series('core', 'rollupLag')),
   'pool in use (%)': trend(series('probe', 'poolUsage')),
   'checks waiting': trend(series('probe', 'queued')),
+  // Session pools (`P-36`). `sessionsOpen` is a gauge that should settle, not climb — a probe
+  // steadily opening more sessions than it closes is the shape that ends in `EMFILE`, and it is
+  // exactly what a long run is for. `sessionOverflows` is cumulative and must simply stay flat:
+  // the pools open past their bound rather than fail a check, and doing that on a *simulated*
+  // workload with nothing else moving would be a defect rather than a busy afternoon.
+  'device sessions held': trend(series('probe', 'sessionsOpen')),
+  'session overflows': trend(series('probe', 'sessionOverflows')),
 };
 
 const elapsedHours = hours(samples[samples.length - 1]);
@@ -149,6 +156,9 @@ const DECLARED_WARNING = {
   'ingestion queue (readings)': 40_000,
   'rollup lag (s)': 3600,
   'pool in use (%)': 80,
+  // `sessionOverflows` errors above 0.5 (`S-18`), which makes the headroom tiny on purpose:
+  // this is a counter that should not move at all on a soak, and the budget should say so.
+  'session overflows': 0.5,
 };
 
 const verdicts = [];
