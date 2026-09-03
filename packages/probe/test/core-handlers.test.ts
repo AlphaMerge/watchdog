@@ -1,0 +1,203 @@
+import { strict as assert } from 'node:assert';
+import { describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { pino } from 'pino';
+import type { SensorAssignment } from '@ms/shared';
+import { AssignmentStore, type ConfigUpdate } from '../src/scheduler/assignments.js';
+import { TimingWheel } from '../src/scheduler/wheel.js';
+import { coreHandlers, type CoreHandlerDeps, type CursorSweeper } from '../src/core-handlers.js';
+
+const silent = pino({ level: 'silent' });
+const SETTLE_MS = 5;
+/** Comfortably past the settle without making the suite wait on it. */
+const settled = (): Promise<void> => delay(SETTLE_MS * 8);
+
+const assignment = (id: number): SensorAssignment => ({
+  sensorId: id,
+  sensorType: 'icmp.ping',
+  params: { count: 4 },
+  target: { host: `192.0.2.${String(id)}`, ipVersion: 'auto' },
+  intervalSeconds: 60,
+  timeoutMs: 30_000,
+});
+
+const set = (sensors: SensorAssignment[]): ConfigUpdate => ({ kind: 'set', version: 'v', sensors });
+const delta = (sensors: SensorAssignment[]): ConfigUpdate => ({
+  kind: 'delta',
+  version: 'v',
+  upserted: sensors,
+  removed: [],
+});
+
+/** Records what it was told to keep, so a test can assert on *when* as well as on what. */
+function sweeper(): CursorSweeper & { sweeps: number[][] } {
+  const sweeps: number[][] = [];
+  return {
+    sweeps,
+    retain: (ids) => {
+      sweeps.push([...ids]);
+    },
+  };
+}
+
+function harness(over: Partial<CoreHandlerDeps> = {}) {
+  const wheel = new TimingWheel({
+    logger: silent,
+    onDue: () => {},
+    now: () => 0n,
+    wallNow: () => 1_700_000_000_000,
+  });
+  const store = new AssignmentStore(wheel);
+  const traps = sweeper();
+  const syslog = sweeper();
+  const calls: string[] = [];
+  const runner = (name: string) => ({
+    start: (job: { runId: number }) => calls.push(`${name}.start:${String(job.runId)}`),
+    cancel: (runId: number) => calls.push(`${name}.cancel:${String(runId)}`),
+  });
+
+  let sized = 0;
+  let woken = 0;
+  const handlers = coreHandlers({
+    logger: silent,
+    assignments: store,
+    listeners: [traps, syslog],
+    sizePool: () => {
+      sized += 1;
+    },
+    wakeDrain: () => {
+      woken += 1;
+    },
+    // The runners take their own job shapes; only `runId` is read here.
+    sweeps: runner('sweep'),
+    identifications: runner('identify'),
+    queries: {
+      run: (queryId, _query, timeoutMs) => calls.push(`query.run:${queryId}:${String(timeoutMs)}`),
+      cancel: (queryId) => calls.push(`query.cancel:${queryId}`),
+    },
+    settleMs: SETTLE_MS,
+    ...over,
+  });
+
+  return {
+    handlers,
+    store,
+    traps,
+    syslog,
+    calls,
+    sized: () => sized,
+    woken: () => woken,
+  };
+}
+
+/**
+ * The regression suite for `P-41` and `P-42`, and the reason `P-43` moved this out of `main()`.
+ *
+ * Both bugs were decisions derived from `AssignmentStore` on every config message instead of once
+ * the push had settled, they were four lines apart, and neither was pinnable while the policy was
+ * written inline in a five-hundred-line bootstrap that nothing imports. These are the assertions
+ * that were not previously possible to write.
+ */
+describe('config push handling (P-41, P-42, P-43)', () => {
+  it('sweeps no cursors and sizes nothing while a chunked push is still arriving', async () => {
+    const h = harness();
+    const all = Array.from({ length: 300 }, (_, i) => assignment(i + 1));
+
+    // `P-28` chunking: an authoritative set, then deltas carrying the rest.
+    assert.equal(h.handlers.onConfig(set(all.slice(0, 100))), 100);
+    assert.equal(h.traps.sweeps.length, 0, 'nothing swept on the authoritative fraction');
+    assert.equal(h.sized(), 0);
+
+    h.handlers.onConfig(delta(all.slice(100, 200)));
+    h.handlers.onConfig(delta(all.slice(200)));
+    assert.equal(h.traps.sweeps.length, 0, 'still nothing, mid-push');
+
+    await settled();
+    assert.equal(h.traps.sweeps.length, 1, 'one sweep, after the push');
+    assert.equal(h.traps.sweeps[0]?.length, 300, 'and it saw all three hundred');
+  });
+
+  it('sweeps every listener, not just the first', async () => {
+    // `P-42`'s other half: `T-20` gave the trap and syslog listeners the same `retain` and wired
+    // one of them. Nothing in the code said so, and nothing could have.
+    const h = harness();
+    h.handlers.onConfig(set([assignment(1), assignment(2)]));
+    await settled();
+
+    assert.deepEqual(h.traps.sweeps, [[1, 2]]);
+    assert.deepEqual(h.syslog.sweeps, [[1, 2]], 'the syslog listener too');
+  });
+
+  it('coalesces a burst of messages into one settle', async () => {
+    const h = harness();
+    for (let i = 0; i < 20; i += 1) h.handlers.onConfig(delta([assignment(i + 1)]));
+    await settled();
+
+    assert.equal(h.traps.sweeps.length, 1, 'twenty messages, one sweep');
+    assert.equal(h.sized(), 1, 'and one sizing');
+  });
+
+  it('still drops the cursor of a sensor the settled push removed', async () => {
+    // The sweep exists to stop a deleted sensor costing a cursor for ever. Deferring it must not
+    // quietly turn it off.
+    const h = harness();
+    h.handlers.onConfig(set([assignment(1), assignment(2), assignment(3)]));
+    await settled();
+    h.handlers.onConfig(set([assignment(1), assignment(3)]));
+    await settled();
+
+    assert.deepEqual(h.traps.sweeps[1], [1, 3], 'sensor 2 is gone from the settled set');
+  });
+
+  it('does not sweep after stop', async () => {
+    const h = harness();
+    h.handlers.onConfig(set([assignment(1)]));
+    h.handlers.stop();
+    await settled();
+
+    assert.equal(h.traps.sweeps.length, 0);
+    assert.equal(h.sized(), 0);
+  });
+
+  it('reports the size the core acknowledges against, per message', () => {
+    // The return value is per-message and must stay that way: it is what the core acks against,
+    // not a statement about the settled workload.
+    const h = harness();
+    assert.equal(h.handlers.onConfig(set([assignment(1), assignment(2)])), 2);
+    assert.equal(h.handlers.onConfig(delta([assignment(3)])), 3);
+  });
+});
+
+describe('the other core handlers (P-43)', () => {
+  it('wakes the drain when the link comes back, and only then', () => {
+    const h = harness();
+    h.handlers.onStateChange('connecting');
+    h.handlers.onStateChange('handshaking');
+    assert.equal(h.woken(), 0);
+
+    h.handlers.onStateChange('connected');
+    assert.equal(h.woken(), 1);
+
+    h.handlers.onStateChange('disconnected');
+    assert.equal(h.woken(), 1);
+  });
+
+  it('routes every sweep and query command to its runner', () => {
+    const h = harness();
+    h.handlers.onSweep({ kind: 'start', job: { runId: 1 } as never });
+    h.handlers.onSweep({ kind: 'cancel', runId: 2 });
+    h.handlers.onSweep({ kind: 'identify', job: { runId: 3 } as never });
+    h.handlers.onSweep({ kind: 'identify-cancel', runId: 4 });
+    h.handlers.onQuery({ kind: 'run', queryId: 'q1', query: {} as never, timeoutMs: 500 });
+    h.handlers.onQuery({ kind: 'cancel', queryId: 'q2' });
+
+    assert.deepEqual(h.calls, [
+      'sweep.start:1',
+      'sweep.cancel:2',
+      'identify.start:3',
+      'identify.cancel:4',
+      'query.run:q1:500',
+      'query.cancel:q2',
+    ]);
+  });
+});

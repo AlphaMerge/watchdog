@@ -21,6 +21,7 @@ import { LISTENER_ID as SYSLOG_LISTENER_ID, SyslogListener } from './listeners/s
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
+import { coreHandlers } from './core-handlers.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
 import { TimingWheel } from './scheduler/wheel.js';
@@ -336,55 +337,6 @@ async function main(): Promise<void> {
     pool.setMaxSize(decision.ceiling);
   };
 
-  /**
-   * Everything that must read the assignment store *after* a configuration push has finished
-   * arriving rather than during it (`P-41`, `P-42`).
-   *
-   * **A full push is not one message.** `P-28` sends it as a `config-set` followed by deltas, and
-   * `AssignmentStore` treats a set as authoritative — so between the first chunk and the last the
-   * store legitimately holds a *fraction* of this probe's sensors. Two consumers read it, and
-   * both are wrong per message:
-   *
-   * - **The pool sizer** reads a workload that does not exist: a probe holding a ceiling of 128
-   *   sees the first chunks derive 64, and since `P-40` two such readings are a drop while since
-   *   `P-39` a drop sheds at once. The workers are destroyed and then asked for again three
-   *   chunks later.
-   * - **The listener cursor sweep** loses data rather than time, which is worse. `retain` deletes
-   *   the ring cursor of every sensor absent from the set it is handed, and a sensor whose cursor
-   *   is gone is indistinguishable from one that has never drained — `drain` registers it afresh
-   *   at the current sequence and returns an empty batch with `dropped: 0`. Mid-push that is
-   *   every trap and syslog sensor outside chunk one, so an ordinary configuration push would
-   *   discard their buffered notifications *and report none missing*, which is the one thing the
-   *   ring exists to prevent (`P-42`).
-   *
-   * Coalescing is the whole fix. A push arrives in a burst, so one call a couple of seconds after
-   * the last message is both a complete picture and still far faster than waiting for the timer.
-   *
-   * This is armed whether or not the pool is auto-sized. `sizePool` opts itself out; the cursor
-   * sweep is owed to every probe, and hanging it off the sizer's own guard would have quietly
-   * disabled it for anyone who set `workerPoolSize`.
-   */
-  let afterPush: NodeJS.Timeout | undefined;
-  const onConfigSettled = (): void => {
-    if (afterPush !== undefined) clearTimeout(afterPush);
-    afterPush = setTimeout(() => {
-      afterPush = undefined;
-      // One sorted copy of up to five thousand ids, not two.
-      const held = assignments.ids();
-      trapListener?.retain(held);
-      syslogListener?.retain(held);
-      sizePool();
-    }, 2_000);
-    afterPush.unref();
-  };
-  lifecycle.onShutdown({
-    name: 'config-settle',
-    timeoutMs: 1_000,
-    run: () => {
-      if (afterPush !== undefined) clearTimeout(afterPush);
-    },
-  });
-
   // Durations drift as networks do, so the ceiling is recomputed on a timer as well as after
   // every config push. Thirty seconds is far below the interval of anything it sizes for and far
   // above the cost of summing five thousand assignments.
@@ -487,52 +439,44 @@ async function main(): Promise<void> {
     drain: () => drain.stats(),
   });
 
+  /**
+   * What this probe does when the core says something (`P-43`).
+   *
+   * Kept out of here on purpose. `main()` builds collaborators and owns their lifecycles; the
+   * policy — what runs per message, what waits for a push to settle, which listeners are swept —
+   * lives in a module a test can construct. `P-41` and `P-42` were both defects in that policy,
+   * four lines apart, and neither could be pinned by a test while it was written inline here.
+   */
+  const handlers = coreHandlers({
+    logger,
+    assignments,
+    // Both of them, together, so forgetting one is visible (`P-42`).
+    listeners: [trapListener, syslogListener].filter((one) => one !== undefined),
+    sizePool,
+    wakeDrain: () => {
+      drain.wake();
+    },
+    sweeps,
+    identifications,
+    queries,
+  });
+  lifecycle.onShutdown({
+    name: 'config-settle',
+    timeoutMs: 1_000,
+    run: () => {
+      handlers.stop();
+    },
+  });
+
   const coreClient = new CoreClient({
     config,
     logger,
     agentVersion: VERSION,
     health: () => health.report(),
-    onStateChange: (state) => {
-      logger.info({ linkState: state }, 'link state changed');
-      // The backlog is the first thing to move once the link is back.
-      if (state === 'connected') drain.wake();
-    },
-    onConfig: (update) => {
-      const size = assignments.apply(update);
-      // The workload just changed, so both the ceiling derived from it (`P-34`) and the set of
-      // listener cursors worth keeping are stale. Recomputed after a push rather than only on the
-      // timer, because a config push is exactly when a probe goes from fifty sensors to five
-      // thousand and discovering that a tick later is a tick of backlog — but *after* the push,
-      // not during, since a chunked one is transiently incomplete (`P-41`, `P-42`).
-      onConfigSettled();
-      return size;
-    },
-    onSweep: (message) => {
-      switch (message.kind) {
-        case 'start':
-          sweeps.start(message.job);
-          return;
-        case 'cancel':
-          sweeps.cancel(message.runId);
-          return;
-        case 'identify':
-          identifications.start(message.job);
-          return;
-        case 'identify-cancel':
-          identifications.cancel(message.runId);
-          return;
-      }
-    },
-    onQuery: (message) => {
-      switch (message.kind) {
-        case 'run':
-          queries.run(message.queryId, message.query, message.timeoutMs);
-          return;
-        case 'cancel':
-          queries.cancel(message.queryId);
-          return;
-      }
-    },
+    onStateChange: handlers.onStateChange,
+    onConfig: handlers.onConfig,
+    onSweep: handlers.onSweep,
+    onQuery: handlers.onQuery,
   });
   coreClient.start();
   lifecycle.onShutdown({

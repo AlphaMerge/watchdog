@@ -4379,7 +4379,9 @@ because each is a decision rather than a defect:
       reports zero dropped; sweeping once the push has settled keeps all three; and a sensor
       genuinely absent from the *settled* set still loses its cursor, so the fix did not simply
       neuter the sweep. That is the policy pinned from both sides. What it cannot pin is the call
-      site, because `main()` is a 500-line unexported bootstrap that nothing imports — `P-43`.
+      site, because `main()` is a 500-line unexported bootstrap that nothing imports — `P-43`,
+      **which has since been done**: the sweep moved to `core-handlers.ts`, and the mutant that
+      reintroduces this exact bug now fails five of the eight tests there.
 
 - [x] **P-41 — The pool sizer read a configuration that was still arriving** · S · P-34 ·
       `sizePool()` ran on every `config` message. `P-28` sends a full configuration as a
@@ -4413,7 +4415,9 @@ because each is a decision rather than a defect:
       trap is real rather than theorised — that a chunked push holds only its first chunk until
       the deltas land, and that `poolDemand` over the store mid-push derives less than half what
       it derives once complete. The debounce itself is composition-root wiring; what is worth
-      pinning is the fact that makes it necessary.
+      pinning is the fact that makes it necessary. **`P-43` has since closed that gap**: the
+      handler now lives in `core-handlers.ts`, where a test asserts directly that a chunked push
+      sizes nothing until it settles.
 
       Third in a chain from one change, and each was correct alone: `P-34` made the ceiling
       derived, `P-39` made it obeyed promptly, `P-40` damped the resulting thrash, and this is the
@@ -5225,7 +5229,7 @@ because each is a decision rather than a defect:
       The shrink path is covered by unit test rather than by the 60-second bench, because a run
       that short cannot exercise a 60-second idle window.
 
-- [ ] **P-43 — `main()` is where the bugs are and the only place with no test seam** · M · — ·
+- [x] **P-43 — `main()` is where the bugs are and the only place with no test seam** · M · — ·
       Filed from evidence rather than from taste. `P-41` and `P-42` are the same defect — a
       decision derived from `AssignmentStore` on every message instead of once the push has
       settled — they are **four lines apart in the same function**, and neither fix is pinned by a
@@ -5247,9 +5251,31 @@ because each is a decision rather than a defect:
       the precedent and it worked — those decisions have real tests because they are no longer
       inside the bootstrap.
 
-      **Not urgent, and deliberately sized `M`.** Nothing is broken today; the cost is that this
-      class of bug is found by reading rather than by running, which is how two of them shipped.
-      Worth doing before the next change to the config path, not as an interruption of one.
+      **Done, and the seam is `packages/probe/src/core-handlers.ts`.** `coreHandlers(deps)`
+      returns the four functions the client calls plus a `stop()`; `main()` builds the
+      collaborators, passes them in, and owns the lifecycles as before. Every dependency is
+      declared *structurally* — `Assignments` is `apply` and `ids`, `CursorSweeper` is `retain` —
+      so a test asserts that both listeners were swept without constructing a `TrapListener`. The
+      settle delay is injectable, so the suite does not spend two seconds a case watching a
+      debounce. `main()` lost about fifty lines and gained nothing.
+
+      **One shape change worth naming**: the listeners are now a *list* rather than two named
+      fields. `P-42` was one of two identical listeners being wired and the other not, and nothing
+      in the code said so. A caller that forgets one now forgets it visibly, in the composition
+      root, on the line beside the other.
+
+      **Eight tests, mutation-checked rather than trusted.** Three mutants, each a bug that
+      actually shipped or nearly did — sweeping per message (`P-41`/`P-42`), sweeping only the
+      first listener (`P-42`'s syslog half), and a `stop()` that forgets to cancel. All three were
+      caught, each by the case meant to catch it: 5 of 8 fail on the first, 1 of 8 on each of the
+      others, and the restored source passes 8/8 byte-for-byte identical. That mattered more than
+      usual here — three tests earlier in this same run of work passed for the wrong reason
+      (`P-36`, `P-39`, and the first cut of `P-34`), so a green suite over new tests is not
+      evidence until something has been broken on purpose.
+
+      **What is still not covered**: `main()` itself. Construction, ordering and the shutdown
+      hooks remain unpinned — this moved the *policy* out, not the wiring. A much smaller gap than
+      the one it closed, and both defects that prompted the ticket were policy.
 
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
