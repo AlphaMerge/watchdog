@@ -5259,7 +5259,39 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
-- [ ] **P-45 — A pool that grew does not come back down, and holds the memory** · S · P-44 ·
+- [ ] **P-46 — The smaller the pool, the slower it notices it must grow** · M · P-44 · Positive
+      feedback in the sizing loop, found by fixing `P-45` and re-measuring — which is the only
+      reason it was found, since the shrink defect was masking it.
+
+      `CheckPool.typicalDurationMs` is the median of the last **1,024 completed checks of that
+      type**, a window counted in samples rather than in seconds. The median only moves once more
+      than half of them are new, so the time to notice a change is `512 ÷ completion rate` — and
+      the completion rate is set by the pool size:
+
+          66 workers at 1,500 ms -> 44/s -> ~12 s
+          31 workers             -> 21/s -> ~25 s   (measured: crossed at 29 s)
+           9 workers             ->  6/s -> ~85 s   (measured: never crossed in 70 s)
+
+      **A pool that is too small completes fewer checks, so it measures more slowly, so it stays
+      too small.** Measured at nine workers: the ceiling never rose, the queue reached 1,891, and
+      lateness reached **57 seconds** with nothing deferred and nothing refused.
+
+      **This is in the shipped code now**, not something `P-45` introduces. A probe whose workload
+      is genuinely fast has a genuinely small pool and the same slow detection; `P-45`'s defect was
+      accidentally holding extra workers, which sped the measurement up. The floor does not save it
+      either — `defaultPoolSize()` bounds the derived *ceiling*, but the pool only grows to what is
+      submitted, so a fast workload sits at a handful of workers whatever the ceiling says.
+
+      **The direction of the fix**: the loop's only input is a lagging duration estimate, and it is
+      surrounded by direct evidence it does not read. A queue that is growing, a `waitMs` p95 above
+      the dispatch budget, and checks completing later than their interval are all unambiguous
+      statements that the pool is too small, and none of them needs a duration at all. Adding a
+      backlog term to `poolDemand` is likely better than tuning the window, because a shorter
+      window trades lag for noise and still says nothing when no checks are completing. Whichever
+      way, it wants its own measurement — `scripts/sizing/autosize.mjs` already reproduces it, and
+      the phase-3 numbers are the regression to beat.
+
+- [ ] **P-45 — A pool that grew does not come back down, and holds the memory** · S · P-44, **blocked by P-46** ·
       Measured in `docs/findings/2026-09-04-autosize-loop.md`. A pool asked to go from a ceiling of
       66 to a ceiling of 9 went to 35 workers, then 31, and **stayed at 31 for the remaining two
       minutes of the run** — 3.4× its own ceiling. The instrumented run rules out every innocent
@@ -5282,10 +5314,19 @@ because each is a decision rather than a defect:
       the question from "has anything been submitted lately" to "has this worker been idle" —
       right, but still answered against a single opportunistic sample.
 
-      **The fix is small**: while the pool is over its ceiling, retry the prompt pass on a short
-      timer instead of waiting for the idle window, and stop when it reaches the ceiling. That
-      converges in seconds rather than minutes and needs no change to the safety rule. Re-run
-      `scripts/sizing/autosize.mjs` to prove it — the phase-2 plateau is the regression.
+      **The fix is small and it has been written and measured — and it must not land yet.**
+      Retrying the prompt pass on a 250 ms timer while the pool is over its ceiling converges it in
+      about five seconds instead of minutes, needs no change to the safety rule, halved resident
+      memory in the benchmark (507 MB to 255 MB) and cut worker-seconds above the ceiling from
+      1,594 to 26. A regression test on `CheckPool` passes with it and times out without it.
+
+      **Then the re-measurement showed it makes a realistic case far worse**, which is `P-46`: a
+      correctly-shrunk pool of 9 workers took so long to notice its checks had slowed that the
+      ceiling never rose, the queue reached 1,891 and lateness went from 11.6 s to **57 s**. The
+      shrink defect had been accidentally holding extra workers, and extra workers measure faster.
+      So the fix is correct and unsafe alone; it lands with `P-46` or after it. The measured
+      before-and-after is in `docs/findings/2026-09-04-autosize-loop.md` (Finding 3) with raw data
+      in `2026-09-04-autosize-shrink-trap.json`.
 
       Not urgent for correctness: nothing is dropped, no check is late because of it, and a probe
       restart reclaims it. It is a memory-footprint defect, and `docs/sizing.md` now warns to size

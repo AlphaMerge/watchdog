@@ -165,15 +165,21 @@ recomputes every thirty seconds, and again shortly after a configuration push. M
 ceiling it derives is Little's floor times the margin to the worker
 (`findings/2026-09-04-autosize-loop.md`).
 
-**It reacts about thirty seconds after your checks slow down, not before** — an earlier version of
-this page claimed the opposite. The measured lag from a step change in check duration to a moved
-ceiling is 31 s, and it is the *measurement* that lags rather than the loop: the duration it sizes
-from is a median over recent runs, so the window has to refill before the change is visible.
-Recomputing more often does not help, because it re-derives the same stale number. In that window
-a probe runs under-provisioned — measured at 10 to 12 seconds of check lateness, with **nothing
-deferred and nothing refused** — so the signal to watch is scheduler lag on Probe Health, not the
-pool counters. If your workload's duration changes in steps rather than drifting, set
-`workerPoolSize` for the slow case rather than paying that half minute each time.
+**It reacts after your checks slow down, not before** — an earlier version of this page claimed the
+opposite. It is the *measurement* that lags rather than the loop: the duration it sizes from is the
+median of the last 1,024 completed checks of that type, so the window has to refill before a change
+is visible. Recomputing more often does not help; it re-derives the same stale number. In that
+window a probe runs under-provisioned with **nothing deferred and nothing refused**, so the signal
+to watch is scheduler lag on Probe Health, not the pool counters.
+
+**How long it lags depends on how big the pool already is, and that is a trap** (`P-46`). The window
+is counted in checks, not in seconds, so the delay is roughly `512 ÷ completions per second` — a
+pool of 66 workers on 1,500 ms checks notices in about 12 seconds, a pool of 9 takes about 85. A
+pool that is too small completes fewer checks, so it measures more slowly, so it stays too small.
+Measured at nine workers: the ceiling never rose at all, the queue reached 1,891 and checks ran
+**57 seconds** late. **If your check durations change in steps rather than drifting — and a network
+or a device that degrades is exactly that — set `workerPoolSize` for the slow case** rather than
+relying on the probe to find it.
 
 **It raises at once and lowers slowly, and the asymmetry is deliberate** (`P-40`). A pool that is
 too small is a probe falling behind, and every second it waits is checks queueing — so an
