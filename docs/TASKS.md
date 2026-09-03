@@ -4295,6 +4295,41 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [ ] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
+      `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,
+      `acquired`, `reused`, `opened`, `closed`, `evicted` and `overflowed` — and **`stats()` is
+      called by nothing outside their own tests**. Both are re-exported from their `index.ts` and
+      no consumer exists.
+
+      **The code says otherwise, in as many words.** `snmp/pool.ts` on `maxSessions`:
+
+      > Passing the bound closes the least-recently-used idle session to make room, and if every
+      > session is in use it opens one anyway and counts it — refusing would fail a check to
+      > protect a file-descriptor budget, which is the wrong trade. **`overflowed` in the stats
+      > is what makes that visible rather than silent (CLAUDE.md).**
+
+      It is not visible. It is computed and discarded. The trade described there is the right
+      one — opening past the bound beats failing a check — but it is only defensible *because*
+      somebody can see it happen, and nobody can.
+
+      Two `CLAUDE.md` rules say this should exist: **"Backpressure is visible, never silent"**,
+      and **"The system monitors itself. Any new subsystem with a queue, a pool or a connection
+      adds a metric to one of them."** A pool with a bound, an eviction policy and an overflow
+      counter is exactly that subsystem, twice over.
+
+      What an operator loses today: no way to see that an SNMP session is being opened and
+      closed for every check because `idleMs` is too short for their interval; no way to see a
+      device holding sessions open; and no signal at all when the file-descriptor bound is being
+      passed, which is the one that ends in `EMFILE` on a busy probe.
+
+      Scope: the counters cross a process boundary — the pools live in `@ms/sensors`, inside the
+      probe's **worker threads**, and Probe Health is assembled in the probe's main thread from
+      `health/report.ts`. So this is not a channel declaration, it is a way for workers to report
+      pool counters back with their results, then an aggregation. `P-27` is the pattern for the
+      channel end (declared limits per `S-18`, protocol bump because the health schema is
+      `additionalProperties: false`); the worker→main path is the new part and is why this is
+      `M` rather than `S`.
+
 - [x] **P-35 — A measured number is copied into four files and nothing notices when it
       changes** · M · P-31 · **Four defects in one day, all the same shape.** Each came from a
       correct measurement that a later, equally correct measurement silently invalidated:
@@ -4820,6 +4855,31 @@ because each is a decision rather than a defect:
       that basis: either two instances are enough to see the shape, or this waits for `D-05`'s
       VMware transport. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
       deliberately, not incidentally.
+
+      **Decided 2026-09-03: wait for `D-05`, and here is the evidence so nobody re-derives it.**
+      The shape *is* now visible without a third instance — the two pools differ on exactly one
+      axis, `open`: SNMP's is synchronous, SSH's is `async` with in-flight sharing (`#opening`),
+      a liveness check and an `#attach` step. Everything else is shared, and it is not
+      approximately shared:
+
+      | Method | Difference |
+      | --- | --- |
+      | `sweep()` | **byte-identical** but for `sessions` / `connections` |
+      | `#makeRoom()` | byte-identical but for the same rename and one word of prose |
+      | `#lease`, `#startSweeping`, `#stopSweeping`, `stats()`, `closeAll()` | same |
+
+      **And that is the argument for waiting rather than against it.** Byte-identical after
+      months means the duplication has cost nothing — no fix has landed in one and missed the
+      other, which is the failure extraction prevents. Against that: the shared code is
+      credential-keyed session handling, the stat names `sessions` and `connections` are not
+      interchangeable prose, and `D-05`'s VMware transport is the instance that would say whether
+      the varying half is "async open" or something wider. Refactoring working, tested,
+      undrifted code in that area for tidiness alone is a bad trade; refactoring it when a third
+      caller forces the shape is a good one.
+
+      Re-check the diff above when `D-05` lands. If the two have drifted by then, that changes
+      the answer on its own.
+
 - [x] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
 
