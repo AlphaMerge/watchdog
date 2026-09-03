@@ -215,6 +215,20 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
 - [ ] **S-11 — Resolve TimescaleDB on Windows** · M · S-06 · Spike: install and benchmark on
       Windows Server. Decide TimescaleDB vs plain-Postgres fallback and record the outcome in
       ADR-001. _Blocks the Windows release story._
+
+      **The decision half is answered and does not need a Windows host** —
+      `docs/findings/2026-09-03-timescaledb-on-windows.md`. TimescaleDB publishes current Windows
+      builds (2.29.2 ships `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, and the eight
+      most recent releases all do), and the PostgreSQL 17 package contains
+      **`timescaledb-tsl-2.29.2.dll`** — the licensed module where compression lives — plus every
+      function this project uses: `create_hypertable`, `time_bucket`, `drop_chunks`,
+      `compress_chunk`, `add_compression_policy`. **So no `PlainPostgresEngine` fallback is
+      required on availability grounds**, and the cost `S-12` priced does not have to be paid.
+
+      What is left is what actually needs the host: the benchmark, and whether `setup.exe`
+      composes with how an operator installs PostgreSQL on Windows — there is no Windows
+      counterpart to `scripts/smoke/provision-postgres.sh`. Re-check the availability finding
+      before a Windows release; an upstream that stopped publishing Windows builds would flip it.
       **Added by S-12:** if the answer is a fallback, the work is bounded and half-measured
       already. A `PlainPostgresEngine` needs four methods — `date_bin` for bucketing (verified
       identical to `time_bucket`), partition introspection, a no-op compaction reporting
@@ -6713,6 +6727,35 @@ because each is a decision rather than a defect:
       all three installers now run the same `ms-setup`, proving it there proves it everywhere.
 - [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and
       an upgrade path.
+
+      **Built, structurally verified, and not installed.** `scripts/package-msi.sh` produces
+      `ms-<version>-x64.msi` and `ms-probe-<version>-x64.msi` with `wixl` — msitools' WiX
+      compiler, which runs on Linux, so the MSI comes off the same staged tree as the tarball,
+      the `.deb` and the `.rpm`. `deploy/windows/ms-setup.ps1` is the Windows counterpart of
+      `setup.sh` and does what H-06 asks for: registers the WinSW services, **opens the firewall
+      for the two ports the core actually listens on, read from the configuration rather than
+      hardcoded**, keeps an existing configuration with a timestamped backup, and runs
+      `config check` before restarting anything. `ms-teardown.ps1` is the uninstall half and
+      leaves ProgramData alone, for the reason the Linux packages leave `/etc/ms` alone.
+
+      **What is not done is the half that needs Windows**: nothing here has installed the MSI.
+      Service registration, the firewall rules, the upgrade path and the uninstall all execute on
+      Windows and are unproven. The build prints that in place of a success message, and this
+      ticket stays open for it.
+
+      Three things the build taught, all recorded in the script:
+
+      - **wixl segfaults above about ten thousand components** (a hundred compile instantly), so
+        the application ships as one `app.zip` that `ms-setup.ps1` expands. The cost is named:
+        Windows Installer no longer tracks the application file by file, so its repair cannot
+        restore one file and the teardown script removes the tree instead.
+      - **wixl drops a custom action it cannot compile and still writes an MSI, with exit status
+        zero.** A `Directory`-form action produced a GLib assertion on stderr and a package that
+        installs files and registers nothing — the exact shape of a defect that ships. The build
+        now asserts both actions exist and are sequenced, and fails if either is missing;
+        `Property` is the form wixl implements, `Directory` and `BinaryKey` are not.
+      - **Backticks in an interpolating heredoc are command substitution**, which is how a
+        prose comment mentioning `Directory` became "command not found" mid-build.
 - [x] **H-07 — Documentation set** · L · — · Installation, administration, sensor reference,
       API reference generated from OpenAPI, troubleshooting runbook.
 

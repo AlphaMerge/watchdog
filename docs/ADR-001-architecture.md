@@ -179,7 +179,19 @@ run from the core's own housekeeping loop; there is no real-time aggregation, so
 must union the not-yet-rolled-up tail from raw; and `time_bucket_gapfill` is TSL, so "gaps are
 not zeros" is honoured in the repository and the wire format. The licence forbids offering the
 product as a database-as-a-service, and attaches to any installer that bundles TimescaleDB
-binaries — a question for `H-05`/`H-06`.
+binaries — a question for `H-05`/`H-06`. Both installers answer it the same way: the packages
+tell an operator to install the database, and ship none of it.
+
+**Amended 2026-09-03 (`S-11`) — Windows needs no fallback engine.** The open question was whether
+a Windows release would have to fall back to plain PostgreSQL, which `S-12` costed at four engine
+methods plus a second migration list. It does not: TimescaleDB publishes current Windows builds
+for PostgreSQL 16, 17 and 18, and the 17 package contains `timescaledb-tsl-2.29.2.dll` — the
+licensed module compression lives in — along with every function this project uses. So the one
+TSL feature Decision 4 accepts is available on Windows, and `StorageEngine` stays a hedge rather
+than a thing Windows forces us to implement. What remains unmeasured is *performance* on Windows,
+which needs a host and is the rest of `S-11`; a slow result there would be a performance note, not
+a reason for a second engine. Evidence:
+`docs/findings/2026-09-03-timescaledb-on-windows.md`.
 
 **Consequences.** TimescaleDB must be installable on the target OSes — verify the Windows
 story early, since it is weaker than Linux. If Windows-native TimescaleDB proves impractical,
