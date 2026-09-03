@@ -37,6 +37,51 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       smoke test on a clean Linux VM asserting both services reach "running".
 - [x] **F-09 — Core↔probe transport skeleton** · L · F-03 · mTLS framed message channel with
       heartbeat, reconnect with backoff, and a versioned handshake. No business payloads yet.
+- [ ] **F-10 — The dev core is a `compose run` one-off, so Compose does not know it exists** · S ·
+      F-02 · Give `ms-server` its own service in `docker-compose.dev.yml`, so `docker compose ps`
+      lists it, `up` and `down` own it, and its ports and environment live beside every other
+      service's rather than as flags in a shell script.
+
+      **This ticket was filed with a wrong diagnosis, and the correction is the useful part.** It
+      claimed that Compose removes a service's other one-off containers whenever a new one
+      starts, and therefore that every `scripts/dev.sh` on the machine destroyed the running
+      core. **It does not.** Two experiments, both in throwaway projects against this compose
+      file:
+
+      - `compose run -d --name X toolchain 'sleep 600'`, then `compose run --rm -T toolchain
+        'node --version'` — the exact shapes `dev-services.sh` and `dev.sh` use. `X` survives.
+        Repeated with the profile flags and an override file: `X` survives.
+      - A `compose run -d` container whose command exits leaves an `Exited` container behind, so
+        a core that had crashed would still be there with its logs.
+
+      What was actually observed was `kill` → `die` → `destroy` on `ms-server` one second before
+      a new `toolchain-run` container was created. **`kill` means a signal was sent**: somebody
+      ran `docker rm -f ms-server`, or `dev-services.sh stop`, or `restart`. The `toolchain-run`
+      creation beside it was the next iteration of a loop running
+      `tree-build-performance.test.js` — adjacent, not causal. The likeliest explanation is
+      correct behaviour by somebody else sharing this machine: CLAUDE.md says to stop `ms-server`
+      before `npm run test:perf`, because a budget measured while the core is running is not a
+      measurement.
+
+      **The lesson is about the evidence, not about Compose.** A timestamp ordering is not a
+      mechanism. The claim was reproducible in principle and nobody tried to reproduce it before
+      it was written down as a finding; when it was finally tried, it failed on the first
+      attempt. Anything filed here as a cause should have been made to happen on purpose at
+      least once.
+
+      What is left is ergonomics, and it is worth doing anyway:
+
+      - A one-off does not appear in `docker compose ps`, is not brought up by `up` or taken down
+        by `down`, and does not carry its own configuration. The ports, the environment and the
+        two-process command line live in `dev-services.sh` as `run` flags.
+      - On a machine several worktrees share, one person stopping the core takes it from
+        everybody, and there is nothing on screen to say so. A service at least shows up in
+        `compose ps` as something absent on purpose.
+
+      Not urgent, and not a bug. If it is done, the perf suites should also refuse to measure
+      while the core is answering — `pretest:perf` can check the port and say why the numbers
+      would be worthless, which is the honest version of "stop it first" for a suite that runs in
+      a container with no Docker socket.
 
 ## Phase 1 — Object model and storage
 
