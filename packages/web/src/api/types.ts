@@ -67,6 +67,26 @@ export interface TreePage {
   truncated: boolean;
 }
 
+/**
+ * Exact totals for a subtree, from `GET /objects/{id}/counts`.
+ *
+ * Not derivable from a `TreePage`: that one is capped, and counting a capped read is how the
+ * overview came to report 930 sensors on a system running five thousand. Anything that renders
+ * a number rather than rows asks for this instead.
+ */
+export interface SubtreeCounts {
+  objects: {
+    probe: number;
+    group: number;
+    device: number;
+    sensor: number;
+    /** Every object in the subtree, the one asked about included — so the root counts itself. */
+    total: number;
+  };
+  /** Every state, zeros included; the values sum to `objects.sensor`. */
+  sensorStates: Record<SensorState, number>;
+}
+
 export interface ObjectPage {
   items: ObjectSummary[];
   nextCursor: string | null;

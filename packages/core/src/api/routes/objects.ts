@@ -24,6 +24,7 @@ import {
   pauseRequestSchema,
   PAUSE_PRESETS,
 } from '../schemas/pause.js';
+import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
@@ -152,6 +153,41 @@ const treeQuery = {
     effective: { type: ['string', 'array'], items: { type: 'string' } },
   },
 } as const;
+
+/**
+ * Every state is `required`, so the histogram is a full one whether or not a state occurs.
+ * `fast-json-stringify` would otherwise drop the zeros and leave each caller writing `?? 0`.
+ */
+const countsResponse = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['objects', 'sensorStates'],
+  properties: {
+    objects: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['probe', 'group', 'device', 'sensor', 'total'],
+      properties: {
+        probe: { type: 'integer' },
+        group: { type: 'integer' },
+        device: { type: 'integer' },
+        sensor: { type: 'integer' },
+        total: {
+          type: 'integer',
+          description:
+            'Every object in the subtree, the one asked about included — so for the root it ' +
+            'is one more than the four kinds sum to.',
+        },
+      },
+    },
+    sensorStates: {
+      type: 'object',
+      additionalProperties: false,
+      required: [...SENSOR_STATES],
+      properties: Object.fromEntries(SENSOR_STATES.map((state) => [state, { type: 'integer' }])),
+    },
+  },
+};
 
 const INCLUDE_TOKENS = ['settings', 'channels', 'credentials', 'ancestors'] as const;
 type IncludeToken = (typeof INCLUDE_TOKENS)[number];
@@ -748,6 +784,29 @@ export async function objectRoutes(
         effective,
       );
       await reply.send(result);
+    },
+  );
+
+  // ── 9b. subtree counts ───────────────────────────────────────────────────────────────────
+  app.get<{ Params: { id: number } }>(
+    '/objects/:id/counts',
+    {
+      schema: {
+        tags: ['objects'],
+        params: idParams,
+        summary: 'Exact totals for a subtree',
+        description:
+          'How many objects of each kind are under this one, and what state its sensors are ' +
+          'in. Unlike `/tree` there is no depth and no limit: the counting happens in the ' +
+          'database and only the totals cross the wire.\n\n' +
+          'Use this wherever a page shows a **number** rather than rows. Counting a page of ' +
+          '`/tree` gives the right answer for a small installation and a quietly wrong one for ' +
+          'a large installation, which is the worst way for a number to be wrong.',
+        response: { 200: countsResponse },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(await service.counts(request.params.id));
     },
   );
 

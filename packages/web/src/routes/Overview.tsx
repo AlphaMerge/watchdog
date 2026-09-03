@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
-import type { ObjectDetail, SensorState, SensorTypeSummary, TreePage } from '../api/types';
+import type { ObjectDetail, SensorState, SensorTypeSummary, SubtreeCounts } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { PageTitle } from '../components/PageTitle';
@@ -30,8 +30,18 @@ export function Overview(): React.JSX.Element {
   const root = useApi<ObjectDetail>('/objects/root');
   const rootId = root.status === 'ready' ? root.data.id : null;
 
-  const tree = useApi<TreePage>(
-    rootId === null ? null : `/objects/${String(rootId)}/tree?maxDepth=12&limit=1000`,
+  /**
+   * Totals, not rows.
+   *
+   * This page used to read a page of the tree — `?maxDepth=12&limit=1000` — and count what came
+   * back, which made every number on it a lower bound the moment an installation outgrew the
+   * limit: 930 sensors reported for a system running 5,051, with the only hint a truncation
+   * note in a card further down. `/counts` aggregates in the database, so the numbers are exact
+   * at any size and the page costs one small response rather than a megabyte of summaries it
+   * throws away.
+   */
+  const counts = useApi<SubtreeCounts>(
+    rootId === null ? null : `/objects/${String(rootId)}/counts`,
   );
   const types = useApi<{ items: SensorTypeSummary[] }>('/sensor-types');
   const api = useApi<OpenApi>('/openapi.json');
@@ -45,21 +55,9 @@ export function Overview(): React.JSX.Element {
     );
   }
 
-  const counts = new Map<string, number>();
-  if (tree.status === 'ready') {
-    for (const item of tree.data.items) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
-  }
-  const sensorCount = counts.get('sensor') ?? 0;
-
-  const states = new Map<SensorState, number>();
-  if (tree.status === 'ready') {
-    for (const item of tree.data.items) {
-      if (item.kind !== 'sensor') continue;
-      // A sensor that has never reported has no state at all, which is exactly Unknown.
-      const state = item.state ?? 'unknown';
-      states.set(state, (states.get(state) ?? 0) + 1);
-    }
-  }
+  const objects = counts.status === 'ready' ? counts.data.objects : null;
+  const states = counts.status === 'ready' ? counts.data.sensorStates : null;
+  const sensorCount = objects?.sensor ?? 0;
   const typeCount = types.status === 'ready' ? types.data.items.length : 0;
 
   return (
@@ -80,7 +78,7 @@ export function Overview(): React.JSX.Element {
         {KINDS.map((kind) => (
           <Stat
             key={kind}
-            value={tree.status === 'ready' ? (counts.get(kind) ?? 0) : '—'}
+            value={objects === null ? '—' : objects[kind].toLocaleString()}
             label={`${kind[0]?.toUpperCase() ?? ''}${kind.slice(1)}s`}
           />
         ))}
@@ -92,9 +90,9 @@ export function Overview(): React.JSX.Element {
       </div>
 
       <Card title="Sensor health">
-        {tree.status === 'loading' && <Loading what="the tree" />}
-        {tree.status === 'error' && <ErrorPanel error={tree.error} retry={tree.reload} />}
-        {tree.status === 'ready' &&
+        {counts.status === 'loading' && <Loading what="the totals" />}
+        {counts.status === 'error' && <ErrorPanel error={counts.error} retry={counts.reload} />}
+        {states !== null &&
           (sensorCount === 0 ? (
             <Empty because="Add a device and a sensor, or see the Tree.">
               No sensors exist yet.
@@ -102,15 +100,17 @@ export function Overview(): React.JSX.Element {
           ) : (
             <div className="space-y-3">
               <ul className="flex flex-wrap gap-x-6 gap-y-2">
-                {STATE_ORDER.filter((state) => (states.get(state) ?? 0) > 0).map((state) => (
+                {STATE_ORDER.filter((state) => states[state] > 0).map((state) => (
                   <li key={state} className="flex items-center gap-2">
                     <StatusBadge state={state} size="sm" />
-                    <span className="text-sm tabular-nums text-text">{states.get(state) ?? 0}</span>
+                    <span className="text-sm tabular-nums text-text">
+                      {states[state].toLocaleString()}
+                    </span>
                   </li>
                 ))}
               </ul>
               <p className="text-sm text-text-muted">
-                {sensorCount} sensor{sensorCount === 1 ? '' : 's'}, from{' '}
+                {sensorCount.toLocaleString()} sensor{sensorCount === 1 ? '' : 's'}, from{' '}
                 <code className="font-mono">sensor_state</code>. A sensor reads{' '}
                 <strong className="font-medium text-text">Unknown</strong> until its first result —
                 and again after a resume, because a state measured before a pause is not something
@@ -156,20 +156,14 @@ export function Overview(): React.JSX.Element {
             </Link>
           }
         >
-          {tree.status === 'ready' && (
-            <>
-              <p className="text-sm text-text-muted">
-                {tree.data.items.length} object{tree.data.items.length === 1 ? '' : 's'} within 12
-                levels of the root.
-              </p>
-              {tree.data.truncated && (
-                <p className="mt-2 text-sm text-warning-fg">
-                  Truncated — the tree is larger than this page asked for.
-                </p>
-              )}
-            </>
+          {objects !== null && (
+            <p className="text-sm text-text-muted">
+              {objects.total.toLocaleString()} object{objects.total === 1 ? '' : 's'} in the tree,
+              at any depth. The tree itself loads a level at a time, so how big this number is does
+              not change how fast it opens.
+            </p>
           )}
-          {tree.status === 'loading' && <Loading what="the tree" />}
+          {counts.status === 'loading' && <Loading what="the totals" />}
         </Card>
       </div>
     </div>

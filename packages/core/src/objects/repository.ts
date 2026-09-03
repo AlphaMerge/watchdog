@@ -1,6 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
-import type { SensorState } from '../state/tables.js';
+import { SENSOR_STATES, type SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
 import type {
@@ -21,6 +21,7 @@ import type {
   PageRequest,
   Precondition,
   Priority,
+  SubtreeCounts,
   SubtreeOptions,
   SubtreeResult,
   UpdateObjectInput,
@@ -832,6 +833,56 @@ export class ObjectRepository {
     }
 
     return { refs, counts };
+  }
+
+  /**
+   * Kind and state totals for a whole subtree, aggregated in the database (`U-14`).
+   *
+   * **`count(*)` has no limit to exceed**, which is the whole reason this exists beside
+   * `subtree`. Counting the rows of a bounded depth-first read gives an answer that is exact
+   * for a small installation and quietly wrong for a large one — the failure mode a number on
+   * an overview page can least afford, because a number is read as a fact.
+   *
+   * **One query, not two.** The state histogram is a second grouping column that is null for
+   * everything which is not a sensor, so the walk — the expensive half — happens once. That
+   * leaves at most a dozen rows: four kinds, and eight states under one of them.
+   */
+  async subtreeCounts(q: Queryable, id: ObjectId): Promise<SubtreeCounts> {
+    const rows = await q.query<{ kind: ObjectKind; state: SensorState | null; n: number }>(
+      `
+      WITH RECURSIVE subtree AS (
+        SELECT id, kind, 0 AS depth FROM object WHERE id = $1
+        UNION ALL
+        SELECT c.id, c.kind, subtree.depth + 1
+        FROM object c JOIN subtree ON c.parent_id = subtree.id
+        WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT s.kind,
+             -- Null for every other kind, so the two groupings share one walk. A sensor with no
+             -- runtime row has never reported, which is exactly Unknown.
+             CASE WHEN s.kind = 'sensor' THEN coalesce(sr.state, 'unknown') END AS state,
+             count(*)::int AS n
+      FROM subtree s
+      LEFT JOIN sensor_runtime sr ON sr.object_id = s.id AND s.kind = 'sensor'
+      GROUP BY 1, 2
+      `,
+      [id],
+    );
+
+    const objects = { probe: 0, group: 0, device: 0, sensor: 0, total: 0 };
+    const sensorStates = Object.fromEntries(SENSOR_STATES.map((state) => [state, 0])) as Record<
+      SensorState,
+      number
+    >;
+
+    // `count(*)::int` and not the default bigint, which `pg` hands over as a string.
+    for (const row of rows) {
+      objects.total += row.n;
+      if (row.kind !== 'root') objects[row.kind] += row.n;
+      if (row.state !== null) sensorStates[row.state] += row.n;
+    }
+
+    return { objects, sensorStates };
   }
 
   async countSubtree(q: Queryable, id: ObjectId): Promise<number> {

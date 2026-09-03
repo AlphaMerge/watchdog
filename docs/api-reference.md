@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-120 routes.
+121 routes.
 
 ## Conventions
 
@@ -981,6 +981,18 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 | `id` | path | integer | **required** |
 
 **200** { items, truncated }
+
+### `GET /api/v1/objects/{id}/counts`
+
+Exact totals for a subtree
+
+How many objects of each kind are under this one, and what state its sensors are in. Unlike `/tree` there is no depth and no limit: the counting happens in the database and only the totals cross the wire. Use this wherever a page shows a **number** rather than rows. Counting a page of `/tree` gives the right answer for a small installation and a quietly wrong one for a large installation, which is the worst way for a number to be wrong.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | integer | **required** |
+
+**200** { objects, sensorStates }
 
 ### `GET /api/v1/objects/{id}/ancestors`
 

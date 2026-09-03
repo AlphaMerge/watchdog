@@ -449,6 +449,36 @@ export interface SubtreeResult {
   readonly truncated: boolean;
 }
 
+/**
+ * Exact totals for a whole subtree, counted in the database rather than in the caller.
+ *
+ * A page that wants four numbers and a histogram used to get them by reading `subtree` and
+ * counting the rows, which stops being true the moment the tree is bigger than the limit that
+ * read asked for: a depth-first slice capped at a thousand answers "930 sensors" for an
+ * installation with five thousand, and nothing in the number says which it is. An aggregate has
+ * no limit to exceed, and it costs one small response instead of a megabyte of summaries.
+ *
+ * Every object in the walk is counted **including the one it started from**, by its own kind —
+ * the same reading `enumerateSubtree` gives the delete confirmation. The root has no kind of its
+ * own among the four, so for the whole tree `total` is one more than their sum.
+ */
+export interface SubtreeCounts {
+  readonly objects: {
+    readonly probe: number;
+    readonly group: number;
+    readonly device: number;
+    readonly sensor: number;
+    readonly total: number;
+  };
+  /**
+   * Every state, zeros included.
+   *
+   * An absent key and a zero are the same fact and must not render differently, and a caller
+   * that has to guard each lookup will eventually forget one.
+   */
+  readonly sensorStates: Readonly<Record<SensorState, number>>;
+}
+
 // ── reports ────────────────────────────────────────────────────────────────────────────────
 
 export interface CountsByKind {
