@@ -340,6 +340,10 @@ export class CheckPool {
     this.#maxSize = clamped;
     this.#logger.info({ from: previous, to: clamped, held: this.#slots.length }, 'pool ceiling');
     if (clamped > previous) this.#pump();
+    // Lowering it acts now rather than at the next window, for the same reason the pass above
+    // does not wait for one: the pool is over a bound, and an hour of holding memory it may not
+    // have is not a policy anybody chose.
+    else this.#considerShrink();
   }
 
   /**
@@ -594,28 +598,52 @@ export class CheckPool {
   #considerShrink(): void {
     if (this.#stopped || this.#slots.length <= this.#minSize) return;
 
-    // The oldest genuinely spare worker: ready, holding no job, and untouched for the whole
-    // interval. Asking "has anything been submitted lately" instead — which is what this did
-    // before `P-26` — answers a different question, and answers it "yes" on every probe that is
-    // doing any work at all.
+    // **Over the ceiling comes down now, not one worker a minute** (`P-34` made this reachable).
+    // `P-26` set the decay at one worker per idle window, which was right while the ceiling never
+    // moved: it decays a burst-sized pool gently and cannot thrash. A *derived* ceiling moves, and
+    // a pool above one is holding memory it has been told it may not have — 256 down to 64 is 192
+    // workers, which at one a minute is over three hours and about 6.6 GB in a real probe.
+    //
+    // The idle window is a thrash guard and a bound is not a hint, so this pass does not wait for
+    // one. What it does keep is the only condition that was ever about safety: a worker must be
+    // ready and holding no job. A ceiling change must never take a worker out of the middle of a
+    // check, which is `P-26`'s rule and the one that would corrupt a result if it were wrong.
+    while (this.#slots.length > this.#maxSize && this.#slots.length > this.#minSize) {
+      const spare = this.#spareSlots()[0];
+      if (spare === undefined) break;
+      this.#retire(spare, { over: this.#slots.length - this.#maxSize });
+    }
+
+    if (this.#slots.length <= this.#minSize) return;
+
+    // The ordinary decay, one worker per window: the oldest genuinely spare worker, ready,
+    // holding no job, and untouched for the whole interval. Asking "has anything been submitted
+    // lately" instead — which is what this did before `P-26` — answers a different question, and
+    // answers it "yes" on every probe that is doing any work at all.
     const now = process.hrtime.bigint();
-    const spare = this.#slots
-      .filter((slot) => slot.ready && slot.job === undefined && slot.idleSince !== 0n)
-      .filter((slot) => Number(now - slot.idleSince) / 1e6 >= this.#idleShrinkMs)
-      .sort((a, b) => (a.idleSince < b.idleSince ? -1 : 1))[0];
+    const spare = this.#spareSlots().filter(
+      (slot) => Number(now - slot.idleSince) / 1e6 >= this.#idleShrinkMs,
+    )[0];
     if (spare === undefined) return;
 
-    const idleFor = Number(now - spare.idleSince) / 1e6;
+    this.#retire(spare, { idleForMs: Math.round(Number(now - spare.idleSince) / 1e6) });
+  }
+
+  /** Workers that can be retired safely, oldest idle first. Never one in the middle of a check. */
+  #spareSlots(): Slot[] {
+    return this.#slots
+      .filter((slot) => slot.ready && slot.job === undefined && slot.idleSince !== 0n)
+      .sort((a, b) => (a.idleSince < b.idleSince ? -1 : 1));
+  }
+
+  #retire(slot: Slot, why: Record<string, number>): void {
     this.#shrunk += 1;
-    this.#logger.info(
-      { from: this.#slots.length, idleForMs: Math.round(idleFor) },
-      'shrinking the check pool',
-    );
-    spare.retired = true;
-    this.#bankSessions(spare);
-    const index = this.#slots.indexOf(spare);
+    this.#logger.info({ from: this.#slots.length, ...why }, 'shrinking the check pool');
+    slot.retired = true;
+    this.#bankSessions(slot);
+    const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
-    void spare.worker.terminate();
+    void slot.worker.terminate();
   }
 
   #dispatch(slot: Slot, job: Job): void {

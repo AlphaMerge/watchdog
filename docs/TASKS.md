@@ -4309,6 +4309,43 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [x] **P-39 — A pool over its ceiling took three hours to obey it** · S · P-34 · An
+      interaction between two changes, neither wrong alone. `P-26` set the shrink decay at **one
+      worker per idle window**, which is right while the ceiling never moves: it decays a
+      burst-sized pool gently and cannot thrash. `P-34` made the ceiling *derived*, so it moves —
+      and `#considerShrink` never consulted `#maxSize` at all, only `minSize`.
+
+      A pool above its ceiling is not merely larger than its current load; it is holding memory
+      it has been **told it may not have**. At 35 MB a worker in a real probe:
+
+      | Ceiling drop | Workers to shed | At one a minute | Held meanwhile |
+      | --- | --- | --- | --- |
+      | 256 → 64 | 192 | **3.2 h** | ~6.6 GB |
+      | 128 → 64 | 64 | 1.1 h | ~2.2 GB |
+      | 96 → 64 | 32 | 0.5 h | ~1.1 GB |
+
+      Reachable rather than theoretical: `main.ts` derives within `[defaultPoolSize(), 256]`, so
+      a probe whose slow checks recover — a device that came back, a network that stopped
+      dropping packets — drops from a high ceiling to the floor and then sits on the memory for
+      hours.
+
+      **Fixed with a second pass that does not wait for the window.** Over the ceiling, every
+      spare worker is retired until the pool is inside it; below the ceiling, the ordinary
+      one-per-window decay is unchanged. The idle window is a thrash guard and a bound is not a
+      hint. What the pass keeps is the only condition that was ever about safety — a worker must
+      be **ready and holding no job** — because a ceiling change must never take a worker out of
+      the middle of a check, which is `P-26`'s rule and the one that would corrupt a result.
+      `setMaxSize` also runs it directly when lowering, so the effect is immediate rather than up
+      to a window away.
+
+      Three tests, and the first one's *setup* was the interesting part: with quick checks the
+      burst drains before `#grow` catches up, the pool never reaches its ceiling, and the test
+      passes without exercising anything. It uses 400 ms checks and asserts the pool reached 8
+      first. A 60-second idle window means the ordinary decay cannot account for any of the
+      shedding, so what is measured is the ceiling pass alone — it completes in 576 ms and fails
+      at the 5 s timeout when the pass is removed. The other two hold the floor and the
+      mid-check rule.
+
 - [x] **P-38 — A probe holding a key the core has forgotten never tries the enrolment key** ·
       S · P-37 · The mirror image of `P-37`, and found while verifying its fix. There the core
       remembered a key the probe did not have; here the probe holds one the core has discarded,

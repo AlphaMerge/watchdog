@@ -493,6 +493,42 @@ describe('sizing the ceiling from the work (P-34)', () => {
     assert.ok(pool.size <= 6, 'and never past the new ceiling');
   });
 
+  it('comes down to a lowered ceiling now, not one worker a minute', async () => {
+    // **An interaction between two changes, neither wrong alone.** `P-26` set the decay at one
+    // worker per idle window, which is right while the ceiling never moves. `P-34` made it move,
+    // and a pool above its ceiling is holding memory it has been told it may not have — 256 down
+    // to 64 is 192 workers, over three hours at one a minute, about 6.6 GB in a real probe.
+    //
+    // A long idle window is what makes this test meaningful: at 60 s, the ordinary decay cannot
+    // account for any of the shedding below, so what it measures is the ceiling pass alone.
+    const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 60_000 });
+
+    // Slow enough that the queue outlives the spawning. With quick checks the burst drains
+    // before `#grow` catches up and the pool never reaches its ceiling, so there is nothing
+    // above it to shed and the test would pass without exercising anything.
+    for (let i = 0; i < 8; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
+    await until(() => pool.size === 8, 'a full pool');
+    await until(() => seen.length === 8, 'every worker idle again');
+
+    pool.setMaxSize(2);
+    // No waiting: lowering the ceiling acts immediately, so this is the state right after.
+    await until(() => pool.size <= 2, 'the pool to obey its new ceiling');
+    assert.ok(pool.size <= 2, `held ${String(pool.size)} against a ceiling of 2`);
+  });
+
+  it('still refuses to go under the configured floor, however low the ceiling goes', async () => {
+    // The floor is somebody's deliberate setting and the ceiling pass must not step through it.
+    // `setMaxSize` clamps, but the shedding loop is a second place that could get it wrong.
+    const { pool, seen } = await poolOf({ size: 6, minSize: 4, idleShrinkMs: 60_000 });
+    for (let i = 0; i < 6; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 40 }));
+    await until(() => seen.length === 6, 'the checks');
+
+    pool.setMaxSize(1);
+    assert.equal(pool.maxSize, 4, 'clamped to the floor');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(pool.size >= 4, `held ${String(pool.size)}, which is under the floor of 4`);
+  });
+
   it('never takes a worker out of a check when the ceiling drops', async () => {
     // Lowering the ceiling is a policy change, not a kill signal. The slots above the new line
     // are left to the shrink policy, which since `P-26` only retires a worker that is ready,
