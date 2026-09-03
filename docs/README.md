@@ -142,6 +142,7 @@ measurement is not a claim.
 - [24-hour soak at 5,000 sensors](findings/2026-08-30-soak-24h.md) (`H-01`)
 - [Failure modes, row by row](findings/2026-08-29-failure-modes.md) (`WORKFLOW.MD §13`)
 - [Sizing across machine tiers](findings/2026-09-03-sizing.md) (`H-08`)
+- [The `test:perf` budgets, and two that failed](findings/2026-09-03-perf-budgets.md) (`P-29`, `P-30`)
 
 ---
 
