@@ -103,6 +103,14 @@ export class StateStream {
   #states: ReadonlyMap<number, LiveState> = new Map();
   #status: StreamStatus = 'connecting';
   #socket: SocketLike | undefined;
+  /**
+   * Whether `#socket` has finished its handshake.
+   *
+   * The browser throws `InvalidStateError` on `send` before that rather than queueing, so this
+   * is what a subscription made while connecting waits on. Nothing else needs queueing: the
+   * subscription *is* `#objectId`, and `onopen` sends whatever it says by the time it fires.
+   */
+  #opened = false;
   #timer: number | undefined;
   #attempt = 0;
   #objectId: number | null = null;
@@ -135,7 +143,8 @@ export class StateStream {
   }
 
   /**
-   * Scopes the stream to a subtree, or to everything. Safe to call before the socket opens.
+   * Scopes the stream to a subtree, or to everything. Safe to call before the socket opens —
+   * the subscription is held in `#objectId` and goes out from `onopen`.
    *
    * **Reopens a closed stream**, which is what makes `close()` mean "I am not watching" rather
    * than "this object is spent". React's StrictMode mounts, unmounts and remounts every effect
@@ -165,6 +174,7 @@ export class StateStream {
     this.#timer = undefined;
     this.#socket?.close();
     this.#socket = undefined;
+    this.#opened = false;
   }
 
   #connect(): void {
@@ -172,26 +182,41 @@ export class StateStream {
     this.#setStatus('connecting');
     const socket = this.#open(this.#url);
     this.#socket = socket;
+    this.#opened = false;
 
+    // Every handler below first checks that its own socket is still the one in use. A socket
+    // told to close while it was connecting reports that close *afterwards*, by which time the
+    // stream has opened another — and a stream that cannot tell the two apart throws away the
+    // new socket's registration on the strength of the old one's death. Not hypothetical:
+    // StrictMode's second mount does exactly this on every page load in development.
     socket.onopen = () => {
+      if (socket !== this.#socket) {
+        // Told to close while connecting, and it opened anyway. Nothing reads it now, and an
+        // open socket the stream has forgotten holds a subscription for the life of the tab.
+        socket.close();
+        return;
+      }
+      this.#opened = true;
       this.#attempt = 0;
       this.#setStatus('live');
       this.#send();
     };
     socket.onmessage = (event) => {
+      if (socket !== this.#socket) return;
       this.#apply(event.data);
     };
     socket.onclose = () => {
-      this.#dropped();
+      this.#dropped(socket);
     };
     socket.onerror = () => {
-      this.#dropped();
+      this.#dropped(socket);
     };
   }
 
-  #dropped(): void {
-    if (this.#closed || this.#socket === undefined) return;
+  #dropped(socket: SocketLike): void {
+    if (this.#closed || socket !== this.#socket) return;
     this.#socket = undefined;
+    this.#opened = false;
     this.#setStatus('offline');
     // The states are what the stream last said; a disconnected client keeps showing them rather
     // than blanking the tree. `status` is how the UI says they may be stale.
@@ -205,6 +230,10 @@ export class StateStream {
   }
 
   #send(): void {
+    // `send` before the handshake finishes throws `InvalidStateError` — the browser does not
+    // queue on our behalf. So a subscription made while connecting waits here and goes out from
+    // `onopen`, which is the same path that replays it after every reconnect.
+    if (!this.#opened) return;
     this.#socket?.send(
       JSON.stringify({
         subscribe: this.#objectId === null ? {} : { objectId: this.#objectId },
