@@ -205,7 +205,24 @@ for (const [name, result] of Object.entries(measured)) {
 
 const windowHours = elapsedHours - WARMUP_MINUTES / 60;
 const tooShort = windowHours < MIN_WINDOW_HOURS;
-const passed = !tooShort && verdicts.every((one) => one.ok);
+
+/**
+ * How much of the run the probe was actually connected for.
+ *
+ * **A soak across a dropped link measures nothing, and used to say so eight times instead of
+ * once.** A run on 2026-09-03 lost its probe eight minutes in — the dev core was restarted
+ * underneath it — and every probe series then read "no data", which the report printed as eight
+ * separate FAIL lines. "FAIL probe RSS (MB): no data" reads as a memory finding. It was one
+ * fact about the run, not eight about the software, and the run had earned no verdict at all.
+ *
+ * Same shape as the defect `P-32` turned on: an absence reported as a property of the thing
+ * measured rather than of the measurement.
+ */
+const connectedSamples = samples.filter((one) => one.probe?.connected === 1).length;
+const connectedFraction = samples.length === 0 ? 0 : connectedSamples / samples.length;
+const linkDropped = connectedFraction < 0.99;
+
+const passed = !tooShort && !linkDropped && verdicts.every((one) => one.ok);
 
 if (asMarkdown) {
   stdout.write(`| Series | n | mean | min | max | slope/h | first ¼ → last ¼ |\n`);
@@ -226,6 +243,13 @@ if (asMarkdown) {
   for (const verdict of verdicts) {
     stdout.write(
       `- ${verdict.ok ? '**pass**' : '**FAIL**'} — ${verdict.name}: ${verdict.detail}\n`,
+    );
+  }
+  if (linkDropped) {
+    stdout.write(
+      `\n**No verdict**: the probe was connected for ${(connectedFraction * 100).toFixed(0)}% ` +
+        `of the run (${String(connectedSamples)} of ${String(samples.length)} samples). Every ` +
+        `probe series above is a gap in the sampling, not a measurement of the probe.\n`,
     );
   }
   if (tooShort) {
@@ -251,6 +275,14 @@ if (asMarkdown) {
   stdout.write('\n');
   for (const verdict of verdicts) {
     stdout.write(`${verdict.ok ? 'pass' : 'FAIL'}  ${verdict.name}: ${verdict.detail}\n`);
+  }
+  if (linkDropped) {
+    stdout.write(
+      `\nNO VERDICT: the probe was connected for ${(connectedFraction * 100).toFixed(0)}% of the ` +
+        `run (${String(connectedSamples)} of ${String(samples.length)} samples). The probe series ` +
+        `above are gaps in the sampling, not measurements of the probe — read them as "the run ` +
+        `lost its link", not as findings.\n`,
+    );
   }
   if (tooShort) {
     stdout.write(
