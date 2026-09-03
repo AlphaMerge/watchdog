@@ -174,7 +174,7 @@ export function Combobox({
           setOpen(true);
         }}
         onKeyDown={onKeyDown}
-        className="w-full min-w-0 rounded border border-control bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+        className="w-full min-w-0 border border-control bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
       />
       <ul
         ref={list}
@@ -185,7 +185,10 @@ export function Combobox({
         // that exists; `hidden` is what tells everybody, assistive technology included, that it
         // is shut.
         hidden={!open || count === 0}
-        className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded border border-border bg-surface py-1 shadow-lg"
+        /* Floats over content, so it gets the same restrained shadow as the chart tooltip —
+           and the control border rather than the divider grey, because its edge is what tells
+           you where the list ends. */
+        className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto border border-control bg-surface py-1 shadow-[0_2px_10px_rgb(27_26_23_/_0.14)]"
       >
         {options.map((option, index) => (
           <li
@@ -214,8 +217,8 @@ export function Combobox({
           >
             {option.badge !== undefined && (
               <span
-                className={`shrink-0 rounded px-1 py-0.5 text-xs ${
-                  index === active ? 'opacity-90' : 'bg-surface-muted text-text-muted'
+                className={`shrink-0 px-1 py-0.5 text-xs ${
+                  index === active ? '' : 'bg-surface-muted text-text-muted'
                 }`}
               >
                 {option.badge}
@@ -224,9 +227,7 @@ export function Combobox({
             <span className="truncate font-mono">{option.label ?? option.value}</span>
             {option.detail !== undefined && (
               <span
-                className={`ml-auto shrink-0 text-xs ${
-                  index === active ? 'opacity-90' : 'text-text-muted'
-                }`}
+                className={`ml-auto shrink-0 text-xs ${index === active ? '' : 'text-text-muted'}`}
               >
                 {option.detail}
               </span>

@@ -234,7 +234,7 @@ export function MoreButton({
         type="button"
         disabled={loading}
         onClick={more}
-        className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+        className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
       >
         {loading ? 'Loading…' : 'Load more'}
       </button>
@@ -296,8 +296,16 @@ function StatusChanges({
                     for (const entry of next) search.append('state', entry);
                   });
                 }}
-                className={`rounded border px-1 py-0.5 ${
-                  on ? 'border-accent' : 'border-transparent opacity-60 hover:opacity-100'
+                /*
+                  The same on/off treatment as the severity chips on Alarms — a border and a
+                  fill, and no opacity.
+                  `opacity-60` on the off state dimmed the badge inside it along with the chip,
+                  which took every state below 4.5:1 against its own fill (Unknown worst, at
+                  2.97:1) for a control that is not disabled and therefore has no 1.4.3
+                  exemption. Contrast was measured on the composited colour, not the token.
+                */
+                className={`border px-1 py-0.5 ${
+                  on ? 'border-accent bg-surface-muted' : 'border-control'
                 }`}
               >
                 <StatusBadge state={state} size="sm" />
@@ -478,7 +486,7 @@ function ObjectHistory({
                     for (const entry of next) search.append('category', entry);
                   });
                 }}
-                className={`rounded border px-2 py-1 text-xs ${
+                className={`border px-2 py-1 text-xs ${
                   on
                     ? 'border-accent bg-surface-muted text-text'
                     : 'border-control text-text-muted hover:text-text'
@@ -605,7 +613,7 @@ function ActorChip({
           search.delete('actorKind');
         });
       }}
-      className="rounded border border-accent bg-surface-muted px-2 py-1 text-xs text-text"
+      className="border border-accent bg-surface-muted px-2 py-1 text-xs text-text"
     >
       Only {kind} {ref} — show every actor
     </button>
@@ -663,7 +671,7 @@ function SystemEvents({
                   for (const entry of next) search.append('status', entry);
                 });
               }}
-              className={`rounded border px-2 py-1 text-xs ${
+              className={`border px-2 py-1 text-xs ${
                 on
                   ? 'border-accent bg-surface-muted text-text'
                   : 'border-control text-text-muted hover:text-text'
@@ -718,7 +726,7 @@ function NotificationRow({ entry }: { entry: NotificationRequestView }): React.J
           {new Date(entry.at).toLocaleString()}
         </time>
         <span
-          className={`rounded border px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[entry.status] ?? 'border-border text-text-muted'}`}
+          className={`border px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[entry.status] ?? 'border-border text-text-muted'}`}
         >
           {entry.status}
         </span>
@@ -766,7 +774,7 @@ function ScopeChip({
           search.delete('objectId');
         });
       }}
-      className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+      className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
     >
       Scoped to #{objectId} — show everything
     </button>

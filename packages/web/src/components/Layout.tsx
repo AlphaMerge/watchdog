@@ -21,31 +21,38 @@ export function Layout(): React.JSX.Element {
       {/* WCAG 2.4.1: a keyboard user must be able to skip the navigation. */}
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded focus:bg-accent focus:px-3 focus:py-2 focus:text-accent-contrast"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:bg-accent focus:px-3 focus:py-2 focus:text-accent-contrast"
       >
         Skip to content
       </a>
 
       <header className="border-b border-border bg-surface">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
-          <span className="text-sm font-semibold tracking-tight text-text">MonitoringSystem</span>
+          <span className="ms-label text-text">MonitoringSystem</span>
 
           {/*
             Wraps rather than overflows. Six links do not fit 375px, and a header that pushed the
             document 60px wider made *every* page scroll sideways — WCAG 1.4.10 asks for reflow
             at 320px, and the thing that broke it was the same on all of them.
           */}
-          <nav aria-label="Sections" className="flex flex-wrap items-center gap-1">
+          <nav aria-label="Sections" className="flex flex-wrap items-center gap-x-4 gap-y-1">
             {NAV.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                /*
+                  The current section is marked with a rule under it in the accent, not a filled
+                  pill: a fill is a second surface colour competing with the panels below, and at
+                  seven items the row of pills was reading as a toolbar of buttons rather than as
+                  a set of places. `aria-current` is what actually announces it — the rule and the
+                  ink are the sighted half of the same statement.
+                */
                 className={({ isActive }) =>
-                  `rounded px-2.5 py-1.5 text-sm ${
+                  `border-b-2 py-1 text-sm ${
                     isActive
-                      ? 'bg-surface-muted font-medium text-text'
-                      : 'text-text-muted hover:text-text'
+                      ? 'border-accent text-text'
+                      : 'border-transparent text-text-muted hover:text-text'
                   }`
                 }
               >
@@ -65,7 +72,7 @@ export function Layout(): React.JSX.Element {
             type="button"
             onClick={toggle}
             aria-pressed={theme === 'dark'}
-            className="ml-auto rounded border border-control px-2.5 py-1.5 text-sm text-text-muted hover:text-text"
+            className="ms-label ml-auto border border-control px-2.5 py-1 hover:text-text aria-pressed:border-accent aria-pressed:text-accent"
           >
             Dark theme
           </button>

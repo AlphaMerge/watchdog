@@ -117,7 +117,7 @@ export function SensorTypesView(): React.JSX.Element {
                     setAll(true);
                   }}
                   disabled={allOpen}
-                  className="rounded border border-control px-2 py-1 text-xs text-text hover:bg-surface disabled:opacity-50"
+                  className="border border-control px-2 py-1 text-xs text-text hover:bg-surface disabled:opacity-50"
                 >
                   Expand all
                 </button>
@@ -127,7 +127,7 @@ export function SensorTypesView(): React.JSX.Element {
                     setAll(false);
                   }}
                   disabled={!anyOpen}
-                  className="rounded border border-control px-2 py-1 text-xs text-text hover:bg-surface disabled:opacity-50"
+                  className="border border-control px-2 py-1 text-xs text-text hover:bg-surface disabled:opacity-50"
                 >
                   Collapse all
                 </button>
@@ -178,7 +178,7 @@ function TypeCard({
   const matched = new Set(matchedParameters);
 
   return (
-    <section className="rounded-lg border border-border bg-surface">
+    <section className="border border-border bg-surface">
       <h2>
         <button
           type="button"
@@ -200,7 +200,7 @@ function TypeCard({
           <span aria-hidden="true" className="w-3 shrink-0 text-text-muted">
             {open ? '▾' : '▸'}
           </span>
-          <span className="min-w-0 break-all font-mono text-sm font-semibold text-text">
+          <span className="min-w-0 break-all font-mono text-sm text-text">
             <Marked text={type.id} query={query} />
           </span>
           <span className="ml-auto text-xs text-text-muted">
@@ -271,7 +271,7 @@ function ParameterTable({
               {parameter.writeOnly && (
                 // The one annotation with teeth: it is why this value never comes back
                 // from any read path (P-05).
-                <span className="ml-2 rounded border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg">
+                <span className="ml-2 border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg">
                   write-only
                 </span>
               )}
@@ -293,7 +293,15 @@ export function Marked({ text, query }: { text: string; query: string }): React.
   return (
     <>
       {text.slice(0, from)}
-      <mark className="rounded bg-warning-bg px-0.5 text-warning-fg">{text.slice(from, to)}</mark>
+      {/*
+        The accent wash, not the warning fill it used to use. `bg-warning-bg text-warning-fg` is
+        the colour this application spends on a sensor that is *in the warning state*, and
+        wearing it to mean "your search matched here" says something about the type that is not
+        true — worse now that the state palette is warm, because the difference between the
+        ochre and the terracotta is no longer a difference in temperature. The accent already
+        means "this is the thing you are after" everywhere else. 4.94:1 light, 5.53:1 dark.
+      */}
+      <mark className="bg-accent-wash px-0.5 text-accent">{text.slice(from, to)}</mark>
       {text.slice(to)}
     </>
   );

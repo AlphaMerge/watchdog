@@ -133,7 +133,7 @@ export function ParamsForm({
         <button
           type="submit"
           disabled={saving || !dirty || problems.length > 0}
-          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Save parameters'}
         </button>
@@ -146,7 +146,7 @@ export function ParamsForm({
             setServerProblems([]);
             setFailed(null);
           }}
-          className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+          className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
         >
           Discard changes
         </button>
@@ -169,7 +169,7 @@ export function ParamsForm({
             ' — somebody else changed this sensor since this form was opened. Reload to see' +
               ' their change before saving over it.'}
           {failed.correlationId !== undefined && (
-            <span className="ml-2 font-mono opacity-75"> {failed.correlationId}</span>
+            <span className="ml-2 font-mono"> {failed.correlationId}</span>
           )}
         </p>
       )}

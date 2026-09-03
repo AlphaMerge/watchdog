@@ -75,7 +75,7 @@ export function TreeView(): React.JSX.Element {
               setQuery(event.target.value);
             }}
             placeholder="Search names and hosts"
-            className="min-w-0 flex-1 rounded border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            className="min-w-0 flex-1 border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
           />
           <label className="sr-only" htmlFor="tree-tag">
             Filter by tag
@@ -88,7 +88,7 @@ export function TreeView(): React.JSX.Element {
               setTag(event.target.value);
             }}
             placeholder="tag"
-            className="w-24 min-w-0 rounded border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            className="w-24 min-w-0 border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
           />
         </div>
       </div>
@@ -322,7 +322,7 @@ function TreeRow({
           // it. Left in the DOM as a button because it is still the mouse target, and because
           // `aria-label` on a `span` would be a control that announces itself and does nothing.
           tabIndex={-1}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-muted hover:text-text"
+          className="flex h-6 w-6 shrink-0 items-center justify-center text-text-muted hover:text-text"
         >
           {row.loading ? '⋯' : row.expanded ? '▾' : '▸'}
         </button>
@@ -351,7 +351,7 @@ function TreeRow({
       )}
 
       {object.paused === true && object.kind !== 'sensor' && (
-        <span className="shrink-0 rounded border border-paused-border bg-paused-bg px-1.5 py-0.5 text-xs text-paused-fg">
+        <span className="shrink-0 border border-paused-border bg-paused-bg px-1.5 py-0.5 text-xs text-paused-fg">
           paused
         </span>
       )}

@@ -279,7 +279,7 @@ function SinceAndCause({ live }: { live: LiveState }): React.JSX.Element {
           </time>
         </span>
       )}
-      {live.message !== '' && <span className="opacity-90">— {live.message}</span>}
+      {live.message !== '' && <span className="text-text-muted">— {live.message}</span>}
     </span>
   );
 }
@@ -478,7 +478,7 @@ function Configuration({ detail }: { detail: ObjectDetail }): React.JSX.Element 
 function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
   const until = view.pausedUntil === null ? null : new Date(view.pausedUntil);
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-paused-border bg-paused-bg px-3 py-2 text-sm text-paused-fg">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border border-paused-border bg-paused-bg px-3 py-2 text-sm text-paused-fg">
       <span className="font-medium">Paused{until === null ? ' indefinitely' : ''}</span>
       {until !== null && (
         <span>
@@ -488,7 +488,7 @@ function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
           </time>
         </span>
       )}
-      {view.message !== '' && <span className="opacity-90">— {view.message}</span>}
+      {view.message !== '' && <span className="text-text-muted">— {view.message}</span>}
       {view.inheritedFrom !== null && (
         <span>
           by{' '}
@@ -502,7 +502,7 @@ function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
         </span>
       )}
       {view.actor?.label !== null && view.actor !== null && (
-        <span className="opacity-75">({view.actor.label})</span>
+        <span className="text-text-muted">({view.actor.label})</span>
       )}
     </div>
   );

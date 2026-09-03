@@ -111,7 +111,7 @@ export function ChannelTable({
                   <span className="font-mono text-xs text-text-muted">{channel.key}</span>
                   {channel.isPrimary && (
                     <span
-                      className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted"
+                      className="border border-border px-1.5 py-0.5 text-xs text-text-muted"
                       title="The channel whose state is the sensor's state"
                     >
                       primary
@@ -192,7 +192,7 @@ function Judgement({
       <span className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
         <span className="font-mono">{channel.lookupId}</span>
         {!known && (
-          <span className="rounded border border-warning-border bg-warning-bg px-1.5 py-0.5 text-warning-fg">
+          <span className="border border-warning-border bg-warning-bg px-1.5 py-0.5 text-warning-fg">
             not loaded
           </span>
         )}
@@ -225,9 +225,7 @@ function LimitBand({ channel }: { channel: ChannelRecord }): React.JSX.Element {
     <span className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
       <span className="font-mono">{parts.join(' · ')}</span>
       {/* Configured but not acting. Saying so beats showing thresholds that do nothing. */}
-      {!limits.enabled && (
-        <span className="rounded border border-border px-1.5 py-0.5">not enforced</span>
-      )}
+      {!limits.enabled && <span className="border border-border px-1.5 py-0.5">not enforced</span>}
     </span>
   );
 }
@@ -251,7 +249,7 @@ function Processing({ channel }: { channel: ChannelRecord }): React.JSX.Element 
 
   return (
     <span
-      className="rounded border border-border px-1.5 py-0.5 font-mono text-xs text-text-muted"
+      className="border border-border px-1.5 py-0.5 font-mono text-xs text-text-muted"
       title="Applied before the reading is stored or judged"
     >
       {parts.join(' ')}

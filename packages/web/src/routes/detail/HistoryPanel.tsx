@@ -70,7 +70,7 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
                 onClick={() => {
                   setRange(entry.id);
                 }}
-                className={`rounded border px-2 py-1 text-sm ${
+                className={`border px-2 py-1 text-sm ${
                   entry.id === range
                     ? 'border-accent bg-surface-muted font-medium text-text'
                     : 'border-control text-text-muted hover:text-text'
@@ -88,7 +88,7 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
           onClick={() => {
             setAsTable((held) => !held);
           }}
-          className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
+          className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
         >
           {asTable ? 'Show charts' : 'Show table'}
         </button>
@@ -199,7 +199,7 @@ function Panel({
   return (
     <div>
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h3 className="text-sm font-medium text-text">
+        <h3 className="text-sm text-text">
           {heading}
           {group.series.length === 1 && group.unit !== '' && (
             <span className="ml-1 text-text-muted">({group.unit})</span>
@@ -209,7 +209,7 @@ function Panel({
       </div>
 
       {drawable.length === 0 ? (
-        <p className="mt-2 rounded border border-dashed border-border px-3 py-8 text-center text-xs text-text-muted">
+        <p className="mt-2 border border-dashed border-border px-3 py-8 text-center text-xs text-text-muted">
           Nothing was recorded in this range.
         </p>
       ) : (

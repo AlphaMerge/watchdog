@@ -35,7 +35,7 @@ export function SeriesLegend({
         <li key={entry.label} className="flex items-center gap-1.5 text-xs">
           <span
             aria-hidden="true"
-            className="h-0.5 w-3 shrink-0 rounded-[1px]"
+            className="h-0.5 w-3 shrink-0"
             style={{ background: seriesVar(entry.slot) }}
           />
           <span className="text-text-muted">{entry.label}</span>

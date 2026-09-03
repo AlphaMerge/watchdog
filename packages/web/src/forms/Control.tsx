@@ -27,7 +27,7 @@ function optionOf(value: unknown): string {
   return String(value);
 }
 
-const INPUT_CLASS = 'rounded border bg-surface px-2 py-1 text-sm text-text';
+const INPUT_CLASS = 'border bg-surface px-2 py-1 text-sm text-text';
 
 export function SchemaControl({
   id,

@@ -41,7 +41,7 @@ export function SeriesTable({
             {channels.map((channel) => (
               <th key={channel.id} scope="col" className="py-1.5 pr-3 text-right font-medium">
                 {channel.name}
-                {channel.unit !== '' && <span className="ml-1 opacity-70">({channel.unit})</span>}
+                {channel.unit !== '' && <span className="ml-1">({channel.unit})</span>}
               </th>
             ))}
           </tr>

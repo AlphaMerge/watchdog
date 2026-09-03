@@ -207,7 +207,7 @@ function Filters({
               onClick={() => {
                 toggle(severity.state);
               }}
-              className={`flex items-center gap-1.5 rounded border px-2 py-1 text-sm ${
+              className={`flex items-center gap-1.5 border px-2 py-1 text-sm ${
                 on ? 'border-accent bg-surface-muted text-text' : 'border-control text-text-muted'
               }`}
             >
@@ -242,7 +242,7 @@ function Filters({
               query.set('sort', event.target.value);
             });
           }}
-          className="rounded border border-control bg-surface px-1.5 py-1 text-sm text-text"
+          className="border border-control bg-surface px-1.5 py-1 text-sm text-text"
         >
           <option value="priority">priority, then duration</option>
           <option value="duration">duration</option>
@@ -257,7 +257,7 @@ function Filters({
               query.delete('objectId');
             });
           }}
-          className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
+          className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text"
         >
           Scoped to #{scope} — show everything
         </button>
@@ -351,7 +351,7 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
         <p className="pl-1 text-xs text-down-fg">
           {failed.message}
           {failed.correlationId !== undefined && (
-            <span className="ml-2 font-mono opacity-75">{failed.correlationId}</span>
+            <span className="ml-2 font-mono">{failed.correlationId}</span>
           )}
         </p>
       )}
@@ -428,7 +428,7 @@ function Actions({
           onClick={() => {
             act(() => send('DELETE', `/objects/${id}/acknowledge`));
           }}
-          className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
+          className="border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         >
           Un-acknowledge
         </button>
@@ -444,7 +444,7 @@ function Actions({
             send('POST', `/objects/${id}/pause`, { message: 'paused from the alarms list' }),
           );
         }}
-        className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
+        className="border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         title="Stops scanning it entirely — the alarm leaves this list because nothing is watching"
       >
         Pause
@@ -470,7 +470,7 @@ function AcknowledgeMenu({
         onClick={() => {
           act(() => send('POST', `/objects/${id}/acknowledge`, { message: 'acknowledged' }));
         }}
-        className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
+        className="border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-50"
         title="Silences notifications until it recovers. It stays on this list."
       >
         Acknowledge
@@ -490,7 +490,7 @@ function AcknowledgeMenu({
             send('POST', `/objects/${id}/acknowledge`, { minutes, message: 'acknowledged' }),
           );
         }}
-        className="rounded border border-control bg-surface px-1 py-0.5 text-xs text-text-muted disabled:opacity-50"
+        className="border border-control bg-surface px-1 py-0.5 text-xs text-text-muted disabled:opacity-50"
       >
         <option value="">for…</option>
         {PRESETS.map((preset) => (

@@ -12,18 +12,71 @@
  * (U-05). A canvas cannot read a utility class, but `getComputedStyle` reads these, so the
  * charts and the DOM share one palette instead of two that drift.
  *
- * Contrast: every `-fg` token meets WCAG 2.1 AA (4.5:1) against its own surface, in both themes,
- * and `--ms-control-border` meets 1.4.11's 3:1 for the edge of anything pressable — the two are
- * different criteria and `--ms-border` only ever satisfied the first, which is why there are now
- * two greys. Colour is never the only signal: `StatusBadge` pairs each state with a distinct
- * glyph and its name (WCAG 1.4.1), and a `-border` tint on one of those badges is decoration
- * that the label already carries, not the state indicator itself.
+ * ── The look ────────────────────────────────────────────────────────────────────────────────
+ *
+ * Monospace, warm paper, hairline rules, square corners, one accent. Three rules hold it
+ * together, and breaking any of them is what makes a screen stop matching the rest:
+ *
+ * 1. **Hierarchy comes from case, tracking and colour — not from weight or size.** A heading is
+ *    the same size as its body and reads as a heading because it is uppercase, tracked out and
+ *    muted (`.ms-label`). This is why the file defines exactly two type sizes worth naming and
+ *    why `font-semibold` appears nowhere: a system monospace stack has one usable bold, and a
+ *    design that leans on it has no second step left for the thing that is *actually* emphatic.
+ * 2. **A rule beats a box.** Regions separate with a 1px border on one edge, not with a card
+ *    floating on a shadow. There are no shadows outside the chart tooltip, which floats over
+ *    content and has to.
+ *
+ * 3. **One accent, and it means "act on this".** Terracotta is links, focus and the current
+ *    section. It is not decoration, and it is never the colour of a *state* — states have their
+ *    own six, because an accent that also means "down" stops meaning either.
+ *
+ * ── Typography ──────────────────────────────────────────────────────────────────────────────
+ *
+ * The whole UI is monospace, from a system stack — no webfont. `ms-core` serves these assets to
+ * an operator's browser on a network that may have no route to the internet at all (`ADR-001`
+ * Decision 8), so a `fonts.googleapis.com` link is not a style choice, it is a dependency that
+ * fails closed on exactly the install that most needs the console to open. The stack resolves to
+ * SF Mono on macOS, Consolas on Windows and DejaVu on most Linux desktops.
+ *
+ * It suits the content: this is a console for reading identifiers, addresses, durations and
+ * columns of numbers, and every one of those is easier to scan when the glyphs align. Monospace
+ * digits also make `tabular-nums` redundant rather than wrong — the declarations are left where
+ * they are, so that a future column set in a proportional face does not silently lose alignment.
+ *
+ * ── Contrast ────────────────────────────────────────────────────────────────────────────────
+ *
+ * Every `-fg` token meets WCAG 2.1 AA (4.5:1) against its own surface, in both themes, and
+ * `--ms-control-border` meets 1.4.11's 3:1 for the edge of anything pressable — the two are
+ * different criteria and `--ms-border` only ever satisfied the first, which is why there are two
+ * greys. Colour is never the only signal: `StatusBadge` pairs each state with a distinct glyph
+ * and its name (WCAG 1.4.1), and a `-border` tint on one of those badges is decoration that the
+ * label already carries, not the state indicator itself.
  *
  * Measured, not asserted (`U-11`): a script over every rendered node on every route computed the
- * ratio of each text colour against the surface actually behind it, and of each control's border
- * against the surface it sits on, in both themes. It found `--ms-border` at 1.23:1 under every
- * input and select in the light theme, and a `border-down-border` on three destructive buttons
- * at 1.9:1. Text passed everywhere and still does.
+ * ratio of each text colour against the surface actually *composited* behind it, and of each
+ * control's border against the surface it sits on, in both themes. The worst case for each token
+ * is recorded beside it below; the sweep over the running app found:
+ *
+ *   12 routes · 1,508 text nodes · 73 control borders · per theme
+ *   light  worst text 5.19  ·  worst control border 3.56  ·  0 failures
+ *   dark   worst text 5.67  ·  worst control border 4.37  ·  0 failures
+ *
+ * Disabled controls are excluded, which 1.4.3 allows for an inactive component — not as a
+ * convenience, but because counting them would bury the live ones. That is exactly what had
+ * happened: the run that flagged nine dimmed *disabled* buttons was also, in the same list,
+ * flagging the severity chips on Logs, which are not disabled and were at 2.97:1.
+ *
+ * **Quiet is a colour here, never an `opacity`.** Seven nodes failed the first light-theme sweep
+ * and every one of them was `opacity-80`/`-90` applied to text that already carried
+ * `--ms-text-muted` — a second quieting pass on a token whose whole job is to be the quiet one.
+ * Dark passed the same markup only because its muted grey has more headroom, which is the kind
+ * of difference that makes a defect look like a light-theme quirk. The opacity is gone; the
+ * token is the tone.
+ *
+ * The reference this palette was drawn from used a grey around 2.6:1 for its secondary text;
+ * `--ms-text-muted` is the same colour walked down until it passed, which costs nothing visible
+ * at body size and is the whole reason the muted grey here is warmer and darker than it looks
+ * like it should be.
  */
 
 @theme inline {
@@ -36,6 +89,7 @@
   --color-text-muted: var(--ms-text-muted);
   --color-accent: var(--ms-accent);
   --color-accent-contrast: var(--ms-accent-contrast);
+  --color-accent-wash: var(--ms-accent-wash);
 
   --color-up-fg: var(--ms-up-fg);
   --color-up-bg: var(--ms-up-bg);
@@ -59,76 +113,129 @@
   --color-grid: var(--ms-grid);
   --color-axis: var(--ms-axis);
 
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  /*
+   * One family. `--font-sans` is deliberately the same stack rather than a second face: it is
+   * still referenced by anything that asks for the default, and pointing it somewhere else would
+   * reintroduce the mixed setting this design exists to avoid.
+   */
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono',
+    monospace;
+  --font-sans: var(--font-mono);
+
+  /*
+   * Square corners, enforced rather than agreed.
+   *
+   * The rule is "nothing is rounded", and a rule that lives only in a review comment lasts until
+   * the next component. Zeroing the scale means `rounded`, `rounded-md`, `rounded-lg` and the
+   * rest all resolve to 0 — so a pasted snippet carrying a radius comes out square, and the
+   * design does not slowly regrow corners one component at a time.
+   */
+  --radius: 0px;
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
 }
 
 :root {
-  --ms-bg: #f8fafc;
-  --ms-surface: #ffffff;
-  --ms-surface-muted: #f1f5f9;
-  --ms-border: #e2e8f0;
+  /*
+   * Warm paper, three steps. `bg` is the page, `surface` is anything laid on it, and
+   * `surface-muted` is the step *down* used for table headers, the current nav item and other
+   * "this row is chrome, not content" fills. Note that surface is lighter than bg: panels lift
+   * off the page rather than being cut into it.
+   */
+  --ms-bg: #f4f2ee;
+  --ms-surface: #fbfaf7;
+  --ms-surface-muted: #eae7e0;
+
+  /* A hairline between things. Decoration — see `--ms-control-border` for the other grey. */
+  --ms-border: #dcd8d0;
+
   /*
    * The edge of anything you can type in or press — and *not* the same grey as a divider.
    *
    * WCAG 1.4.11 wants 3:1 for the boundary of a user interface component, and `--ms-border` is
-   * 1.23:1 on white: fine for a rule between table rows, which is decoration, and not fine for
-   * the thing that tells you where an input begins. Measured against every surface a control
-   * sits on, in both themes, worst case first:
+   * 1.30:1 on the light surface: fine for a rule between table rows, which is decoration, and
+   * not fine for the thing that tells you where an input begins. Measured against every surface
+   * a control sits on, in both themes, worst case first:
    *
-   *   light  #f1f5f9 3.57  ·  #f8fafc 3.73  ·  #ffffff 3.91
-   *   dark   #1e293b 3.74  ·  #111827 4.54  ·  #0b1220 4.79
+   *   light  #eae7e0 3.22  ·  #f4f2ee 3.56  ·  #fbfaf7 3.81
+   *   dark   #27241d 3.90  ·  #1c1a15 4.36  ·  #14130f 4.76
    *
-   * One value serves both themes, which is why there is no override below: it is a mid slate,
-   * dark enough to read on the light surfaces and light enough to read on the dark ones. Re-run
-   * the numbers before changing it — the worst case is always the *muted* surface.
+   * One value serves both themes, which is why there is no override below: it is a mid warm
+   * grey, dark enough to read on the paper and light enough to read on the charcoal. Re-run the
+   * numbers before changing it — the worst case is always the *muted* surface.
    */
-  --ms-control-border: #748296;
-  --ms-text: #0f172a;
-  --ms-text-muted: #475569;
-  --ms-accent: #2563eb;
-  --ms-accent-contrast: #ffffff;
+  --ms-control-border: #857f72;
 
-  /* The six v1 states of WORKFLOW.MD §4. Unusual and Down (Partial) are [V2]; the token set
-     accommodates them by reusing `unknown` until they exist, rather than inventing a colour
-     nothing can currently produce. */
-  --ms-up-fg: #15803d;
-  --ms-up-bg: #dcfce7;
-  --ms-up-border: #86efac;
-  --ms-warning-fg: #a16207;
-  --ms-warning-bg: #fef9c3;
-  --ms-warning-border: #fde047;
-  --ms-down-fg: #b91c1c;
-  --ms-down-bg: #fee2e2;
-  --ms-down-border: #fca5a5;
-  --ms-ack-fg: #7e22ce;
-  --ms-ack-bg: #f3e8ff;
-  --ms-ack-border: #d8b4fe;
-  --ms-paused-fg: #0369a1;
-  --ms-paused-bg: #e0f2fe;
-  --ms-paused-border: #7dd3fc;
-  --ms-unknown-fg: #475569;
-  --ms-unknown-bg: #f1f5f9;
-  --ms-unknown-border: #cbd5e1;
+  --ms-text: #1b1a17; /* 14.09:1 worst case */
+  --ms-text-muted: #69655c; /* 4.70:1 worst case, on #eae7e0 */
+
+  /*
+   * Terracotta. 4.75:1 worst case as text, and 5.62:1 the other way round for
+   * `--ms-accent-contrast` on top of it — both directions matter, because the accent is a link
+   * colour on one surface and a button fill on another.
+   */
+  --ms-accent: #b03f24;
+  --ms-accent-contrast: #fbfaf7;
+  /* The accent at fill strength, for the one panel per page that is being pointed at. */
+  --ms-accent-wash: #f6e9e3;
+
+  /*
+   * The six v1 states of WORKFLOW.MD §4, in the same warm register as everything else. Unusual
+   * and Down (Partial) are [V2]; the token set accommodates them by reusing `unknown` until they
+   * exist, rather than inventing a colour nothing can currently produce.
+   *
+   * Each `-fg` is measured against its own `-bg` (the badge fill), worst case 5.45:1, and each
+   * also clears 4.5:1 against the plain surface for the places a state colours text directly.
+   * They are desaturated to sit beside the accent without competing with it — but not so far
+   * that the hues stop being separable, which is the property that matters when six of them
+   * appear in one legend.
+   */
+  --ms-up-fg: #40631f;
+  --ms-up-bg: #e9eedd;
+  --ms-up-border: #bccfa2;
+  --ms-warning-fg: #87550a;
+  --ms-warning-bg: #f7eed7;
+  --ms-warning-border: #e0c893;
+  --ms-down-fg: #a8321c;
+  --ms-down-bg: #f7e6e1;
+  --ms-down-border: #e0b3a6;
+  --ms-ack-fg: #68437f;
+  --ms-ack-bg: #eee6f3;
+  --ms-ack-border: #cdb9db;
+  --ms-paused-fg: #2f5b6e;
+  --ms-paused-bg: #e2edf1;
+  --ms-paused-border: #a9c6d4;
+  --ms-unknown-fg: #5f5a51;
+  --ms-unknown-bg: #ebe8e2;
+  --ms-unknown-border: #cbc6ba;
 
   /*
    * Chart series palette (U-05). Eight slots, assigned in this fixed order and never cycled;
    * a ninth series folds into small multiples rather than inventing a hue.
    *
-   * Separate from the state tokens above on purpose: those are status colours, and a status
-   * colour that also means "channel 4" stops meaning "down". These are the `dataviz` skill's
-   * validated categorical palette, re-validated against *our* surfaces rather than the skill's
-   * defaults, because a contrast or lightness result is only meaningful against the surface the
-   * chart actually draws on:
+   * **Deliberately not restyled with the rest of the UI.** These are the `dataviz` skill's
+   * validated categorical palette, and their job is separation under colour-vision deficiency —
+   * a property measured *between the hues*, which no change to the surface behind them affects.
+   * Muting them into the warm register would have traded a measured accessibility property for a
+   * match nobody asked the chart to make. The chrome around them (grid, axis) did move, so a
+   * chart still sits on the new paper rather than on a cut-out of the old one.
    *
-   *   light on #ffffff — worst adjacent CVD ΔE 9.1 (protan), worst normal-vision ΔE 19.6
-   *   dark  on #111827 — worst adjacent CVD ΔE 8.4 (protan), worst normal-vision ΔE 19.3
+   *   light on #fbfaf7 — worst adjacent CVD ΔE 9.1 (protan), worst normal-vision ΔE 19.6
+   *   dark  on #1c1a15 — worst adjacent CVD ΔE 8.4 (protan), worst normal-vision ΔE 19.3
    *
-   * Three light slots (aqua, yellow, magenta) sit below 3:1 against white. That is a WARN, not a
-   * pass: the relief is mandatory and it is the table view and the value-bearing legend, both of
-   * which every chart here ships. Re-run before changing any of these:
-   *   node scripts/validate_palette.js "<the eight>" --mode light --surface "#ffffff"
+   * Three light slots still sit below 3:1 against the surface — aqua 2.70, yellow 2.07, magenta
+   * 2.58, each about 0.1 lower than on the white they used to sit on, so the same three and for
+   * the same reason. That is a WARN, not a pass: the relief is mandatory and it is the table view
+   * and the value-bearing legend, both of which every chart here ships. Re-run before changing
+   * any of these:
+   *   node scripts/validate_palette.js "<the eight>" --mode light --surface "#fbfaf7"
    */
   --ms-series-1: #2a78d6;
   --ms-series-2: #eb6834;
@@ -140,43 +247,52 @@
   --ms-series-8: #e34948;
 
   /* Chart chrome: one step off the surface, recessive, and solid — never dashed. */
-  --ms-grid: #e8edf3;
-  --ms-axis: #cbd5e1;
+  --ms-grid: #e6e2da;
+  --ms-axis: #c7c1b5;
 
   color-scheme: light;
 }
 
+/*
+ * The dark theme is warm charcoal, not the same greys inverted.
+ *
+ * The reference this design came from has no dark mode, so this is a reading of it rather than a
+ * copy: the paper goes to near-black with the same warmth left in, and the accent lifts to keep
+ * 4.5:1 — a terracotta dark enough to read on paper is far too dark to read on charcoal, so the
+ * two themes genuinely need two values.
+ */
 [data-theme='dark'] {
-  --ms-bg: #0b1220;
-  --ms-surface: #111827;
-  --ms-surface-muted: #1e293b;
-  --ms-border: #334155;
-  --ms-text: #f1f5f9;
-  --ms-text-muted: #94a3b8;
-  --ms-accent: #60a5fa;
-  --ms-accent-contrast: #0b1220;
+  --ms-bg: #14130f;
+  --ms-surface: #1c1a15;
+  --ms-surface-muted: #27241d;
+  --ms-border: #3a362d;
+  --ms-text: #f0ede5; /* 13.23:1 worst case */
+  --ms-text-muted: #a39c8d; /* 5.67:1 worst case */
+  --ms-accent: #e07a52; /* 5.22:1 worst case */
+  --ms-accent-contrast: #14130f; /* 6.26:1 on the accent */
+  --ms-accent-wash: #2b1c14;
 
-  --ms-up-fg: #4ade80;
-  --ms-up-bg: #052e16;
-  --ms-up-border: #166534;
-  --ms-warning-fg: #fbbf24;
-  --ms-warning-bg: #422006;
-  --ms-warning-border: #854d0e;
-  --ms-down-fg: #f87171;
-  --ms-down-bg: #450a0a;
-  --ms-down-border: #991b1b;
-  --ms-ack-fg: #c084fc;
-  --ms-ack-bg: #3b0764;
-  --ms-ack-border: #6b21a8;
-  --ms-paused-fg: #38bdf8;
-  --ms-paused-bg: #082f49;
-  --ms-paused-border: #075985;
-  --ms-unknown-fg: #94a3b8;
-  --ms-unknown-bg: #1e293b;
-  --ms-unknown-border: #475569;
+  --ms-up-fg: #9fc46a;
+  --ms-up-bg: #1e2914;
+  --ms-up-border: #3f5527;
+  --ms-warning-fg: #dcae55;
+  --ms-warning-bg: #2c2110;
+  --ms-warning-border: #5c451c;
+  --ms-down-fg: #ef8666;
+  --ms-down-bg: #2f1710;
+  --ms-down-border: #6b3423;
+  --ms-ack-fg: #c19bd8;
+  --ms-ack-bg: #251a2e;
+  --ms-ack-border: #4b3559;
+  --ms-paused-fg: #7db6cd;
+  --ms-paused-bg: #132630;
+  --ms-paused-border: #2a4a5b;
+  --ms-unknown-fg: #a39c8d;
+  --ms-unknown-bg: #27241d;
+  --ms-unknown-border: #4c473c;
 
   /* The same eight hues, stepped for the dark surface — a selected dark palette, not an
-     automatic flip of the light one. Validated as a set against #111827. */
+     automatic flip of the light one. Validated as a set against the charcoal surface. */
   --ms-series-1: #3987e5;
   --ms-series-2: #d95926;
   --ms-series-3: #199e70;
@@ -186,10 +302,26 @@
   --ms-series-7: #9085e9;
   --ms-series-8: #e66767;
 
-  --ms-grid: #1f2a3d;
-  --ms-axis: #334155;
+  --ms-grid: #2a2721;
+  --ms-axis: #443f35;
 
   color-scheme: dark;
+}
+
+/*
+ * A section label: uppercase, tracked out, muted, and the same size as the text under it.
+ *
+ * This carries the hierarchy that weight would carry in a proportional face. It is a class
+ * rather than a repeated trio of utilities because it appears on every card header, every stat
+ * and every field group — three utilities copied forty times is three utilities that will
+ * disagree by the fiftieth.
+ */
+.ms-label {
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ms-text-muted);
 }
 
 /*
@@ -207,22 +339,27 @@
   border-right: 1px solid var(--ms-axis);
 }
 
+/*
+ * The one shadow in the design, and it earns it: the tooltip floats over the plot, and a border
+ * alone does not separate it from a dense line chart underneath.
+ */
 .ms-chart-tooltip {
   position: absolute;
   top: 0;
   z-index: 10;
   pointer-events: none;
   min-width: 10rem;
-  border: 1px solid var(--ms-border);
-  border-radius: 0.375rem;
+  border: 1px solid var(--ms-control-border);
   background-color: var(--ms-surface);
   padding: 0.5rem 0.625rem;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+  box-shadow: 0 2px 10px rgb(27 26 23 / 0.14);
 }
 
 .ms-chart-tooltip-when {
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.375rem;
   font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--ms-text-muted);
 }
 
@@ -240,7 +377,6 @@
   flex: none;
   width: 0.75rem;
   height: 2px;
-  border-radius: 1px;
   align-self: center;
 }
 
@@ -248,7 +384,6 @@
    because here the reader already has the series and wants the number. */
 .ms-chart-tooltip-value {
   font-variant-numeric: tabular-nums;
-  font-weight: 500;
   color: var(--ms-text);
 }
 
@@ -265,7 +400,13 @@
   body {
     background-color: var(--ms-bg);
     color: var(--ms-text);
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
+    /*
+     * Monospace sets wider than the proportional face it replaced, and this UI is columns. A
+     * hair of negative tracking buys back roughly a character every eight without touching the
+     * size — which matters at 320px, where the header used to be the thing that broke reflow.
+     */
+    letter-spacing: -0.011em;
     -webkit-font-smoothing: antialiased;
   }
 
@@ -281,12 +422,12 @@
    * focusing. An outline is drawn in forced-colors, and `Highlight` is the system's own colour
    * for it.
    *
-   * 5.17:1 against the light surface and 6.98:1 against the dark one, both past 1.4.11's 3:1.
+   * 4.75:1 against the light surface and 5.22:1 against the dark one, both past 1.4.11's 3:1.
+   * Square, like everything else — the outline follows the box it is around.
    */
   :focus-visible {
     outline: 2px solid var(--ms-accent);
     outline-offset: 2px;
-    border-radius: 2px;
   }
 
   @media (forced-colors: active) {
@@ -300,8 +441,8 @@
    *
    * The default 2px offset puts the ring outside the row, and a row is the full width of the
    * viewport it scrolls in, so the left and right edges land under `overflow-y: auto` and are
-   * clipped away — leaving a single blue line along one edge that reads as a divider rather
-   * than as focus. Inset by the same amount and the whole ring is visible.
+   * clipped away — leaving a single line along one edge that reads as a divider rather than as
+   * focus. Inset by the same amount and the whole ring is visible.
    */
   .ms-roving-row:focus-visible {
     outline-offset: -2px;
