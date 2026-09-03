@@ -4082,6 +4082,63 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [ ] **P-30 — `test:perf`'s last scheduler case is OOM-killed, so the whole file fails** · S ·
+      P-15 · `scheduler-benchmark.test.ts`'s final case — "shows what the sensor type we actually
+      ship would need" — asks for **256 workers at 3-second checks for 90 seconds**, and on a
+      machine with less than about 3 GB free the process is **SIGKILLed** part-way through.
+      `node:test` then reports the *file* as failed with the bare message `'test failed'` and no
+      diagnostic, because the child died rather than asserting. Every test inside it passed.
+
+      **Measured 2026-09-03**: peak RSS **2,636,592 kB (2.57 GB)**, killed at **84 s of the 90 s
+      run** with **2,643 MB available** in the Docker VM. Run inside the whole file it dies
+      sooner, because three 90-second soaks have already run in the same process. `NODE_EXIT=137`
+      is the whole diagnosis — 128 + SIGKILL.
+
+      **Not caused by `P-26`**, checked rather than assumed: the pre-`P-26` `pool.ts` was compiled
+      back in (`busySince=4, idleSince=0` in the emitted JS, so the right code really was running)
+      and it is killed identically. This is how the case has always been on a machine this size.
+
+      Two things are wrong and they are worth separating. **The case costs 2.6 GB to assert
+      `completed > 0`** — it models a probe watching 5,000 `icmp.ping` sensors, which
+      `2026-08-26-scheduler-benchmark.md` says plainly nobody runs, and whose diagnostic value is
+      already written down in that finding. **And a SIGKILL is indistinguishable from a real
+      failure** in the output, which is exactly the "four false failures teach everyone to stop
+      reading the output" problem `CLAUDE.md` separates `test:perf` from `npm test` to avoid.
+
+      Whoever picks it up decides which: skip the case unless a memory floor is present (the
+      pattern `MS_BENCH_SWEEP` already uses in the same file), shorten it, or declare the
+      requirement and fail with a sentence rather than a signal. Do not just raise Docker's memory
+      — that fixes one laptop and leaves the next one with a silent kill.
+
+- [ ] **P-29 — The serial tree build is over Phase 1's 30-second budget** · M · S-16 · Phase 1's
+      exit criterion is **5,000 objects through the API in under 30 seconds**, and
+      `tree-build-performance.test.ts` now fails it. Three runs on 2026-09-03 with `ms-server`
+      stopped: **31.5 s, 33.0 s, 35.4 s** — −5%, −10% and −18% against the budget.
+
+      **The dev database's size is not the cause**, which was the first suspect and was checked:
+      the `monitoring` database has grown to 4,958 MB since the soak, so the run was repeated
+      against a **fresh empty TimescaleDB container** and came out **worst of the three at
+      35.4 s**. Whatever this is, it is not the working set.
+
+      **The cost is per request, not per object**, which narrows it: the same 5,000 objects in
+      *one* request (`P-19`'s bulk path) took 2.6–3.0 s against a 2.8 s baseline — unchanged —
+      while the serial path went 21.0 → 23.7 → 28.8 → 31.5–35.4 s across the recorded history
+      (`2026-08-25-tree-build-measurement.md`, `2026-08-29-bulk-tree-create.md`). Eight in flight
+      moved too, 5.9 → 7.9–11.1 s. So the extra is in what a *request* costs — socket, routing,
+      validation, serialisation — not in what a create costs.
+
+      **Read the number with its caveat.** Only two commits have touched the create path since
+      the 28.8 s measurement (`H-07`, `S-18`), neither plausibly per-request, and the host these
+      three runs were taken on carried other projects' containers throughout at a load average of
+      about 9 on 8 cores. A per-request cost is the most CPU-contention-sensitive thing in the
+      test. **So the first step is to re-measure on a genuinely idle host**, and only then to go
+      looking — a 12% spread across three runs is not a machine that can adjudicate a 5% miss.
+
+      If it is real, `2026-08-29-bulk-tree-create.md` already says where to look: the serial path
+      pays per-request costs 5,000 times, and the bulk route exists because that is the wrong
+      shape for a client to use. If it is not real, the ticket is still worth its keep for saying
+      so with numbers.
+
 - [x] **P-28 — A probe at the v1 target could never reconnect** · M · P-27 · `config-set` caps
       `sensors` at 5,000 and the frame decoder refuses a message over 4 MB, while
       `CAPABILITIES.MD` §13 puts the v1 target at **5,000 sensors** — so an installation at its
