@@ -99,3 +99,62 @@ export function poolDemand(
 
   return { required, ceiling, clamped: ceiling !== wanted, measured, assumed };
 }
+
+/**
+ * Deadband below the current ceiling, inside which a lower answer is not acted on.
+ *
+ * Ten per cent or four workers, whichever is larger — the constant floor matters because 10% of
+ * a small ceiling is less than one worker and would make the band vanish exactly where a single
+ * worker is a large fraction of the pool.
+ */
+const CEILING_DEADBAND = 0.1;
+const CEILING_DEADBAND_MIN = 4;
+
+/** Consecutive computations a lower answer must persist for. Two, so ~60 s at a 30 s cadence. */
+const LOWER_AFTER = 2;
+
+export interface CeilingDecision {
+  /** What the ceiling should be now. Equal to `current` when the answer is to hold. */
+  readonly ceiling: number;
+  /** Consecutive samples the derived value has been meaningfully lower. Feed back in. */
+  readonly belowStreak: number;
+}
+
+/**
+ * Whether to move the pool ceiling, given what demand now says (`P-40`).
+ *
+ * **Asymmetric on purpose, and the asymmetry is the whole design.** Raising is immediate: a pool
+ * that is too small is a probe falling behind, and every second it waits is checks queueing.
+ * Lowering waits, because a ceiling that follows every twitch is worse than one that is briefly
+ * too high — since `P-39` a drop sheds workers *at once*, and a worker costs about 35 MB and a
+ * registry import to replace.
+ *
+ * **The thrash this prevents is measured, not imagined.** At the v1 target a ping duration
+ * wobbling 600 ± 40 ms moves the derived ceiling between 64 and 73, every thirty seconds. Without
+ * a band that is nine workers destroyed and rebuilt a minute, for a workload that has not
+ * changed at all.
+ *
+ * Pure, so the policy can be tested without a pool, a clock or a network.
+ */
+export function nextCeiling(options: {
+  readonly current: number;
+  readonly derived: number;
+  readonly belowStreak: number;
+}): CeilingDecision {
+  // Up, or nowhere: act now and forget any downward streak, because the workload just told us
+  // the earlier lower readings were not the trend.
+  if (options.derived >= options.current) {
+    return { ceiling: options.derived, belowStreak: 0 };
+  }
+
+  const band = Math.max(CEILING_DEADBAND_MIN, options.current * CEILING_DEADBAND);
+  if (options.current - options.derived < band) {
+    // Inside the band: not a change, a twitch. The streak resets, so a wobble that never leaves
+    // the band never accumulates its way into a drop.
+    return { ceiling: options.current, belowStreak: 0 };
+  }
+
+  const streak = options.belowStreak + 1;
+  if (streak < LOWER_AFTER) return { ceiling: options.current, belowStreak: streak };
+  return { ceiling: options.derived, belowStreak: 0 };
+}

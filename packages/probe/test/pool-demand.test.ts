@@ -1,6 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { poolDemand, type DemandInput, type DemandOptions } from '../src/runner/demand.js';
+import {
+  nextCeiling,
+  poolDemand,
+  type DemandInput,
+  type DemandOptions,
+} from '../src/runner/demand.js';
 
 const OPTIONS: DemandOptions = { fallbackMs: 600, min: 4, max: 1_024, margin: 1.3 };
 
@@ -110,5 +115,77 @@ describe('poolDemand (P-34)', () => {
     const demand = poolDemand([], () => 600, OPTIONS);
     assert.equal(demand.required, 0);
     assert.equal(demand.ceiling, 4, 'the minimum, so a probe with no work still starts');
+  });
+});
+
+/**
+ * When the pool ceiling should actually move (`P-40`).
+ *
+ * **A consequence of `P-39` rather than a new idea.** While a lowered ceiling decayed one worker
+ * a minute, following every twitch cost little. Now it sheds at once, so a derived ceiling that
+ * wobbles destroys and rebuilds workers for a workload that has not changed — at the v1 target a
+ * ping duration of 600 ± 40 ms moves the answer between 64 and 73 every thirty seconds.
+ */
+describe('nextCeiling (P-40)', () => {
+  it('raises immediately, because a pool that is too small is checks queueing', () => {
+    const decision = nextCeiling({ current: 64, derived: 96, belowStreak: 0 });
+    assert.equal(decision.ceiling, 96);
+    assert.equal(decision.belowStreak, 0);
+  });
+
+  it('holds inside the deadband, so a twitch is not a change', () => {
+    // 64 → 60 is under both 10% and the four-worker floor.
+    const decision = nextCeiling({ current: 64, derived: 60, belowStreak: 0 });
+    assert.equal(decision.ceiling, 64, 'held');
+  });
+
+  it('does not let a wobble inside the band accumulate into a drop', () => {
+    // **The property that matters, and the reason the streak resets rather than decays.** A
+    // network sitting just below the band for an hour must not eventually trip a drop it never
+    // earned; only a reading that leaves the band counts towards one.
+    let streak = 0;
+    for (let i = 0; i < 20; i += 1) {
+      const decision = nextCeiling({ current: 64, derived: 61, belowStreak: streak });
+      streak = decision.belowStreak;
+      assert.equal(decision.ceiling, 64, `held at sample ${String(i)}`);
+    }
+    assert.equal(streak, 0, 'and nothing accumulated');
+  });
+
+  it('waits for a lower answer to persist before acting on it', () => {
+    const first = nextCeiling({ current: 128, derived: 64, belowStreak: 0 });
+    assert.equal(first.ceiling, 128, 'not on the first reading');
+    assert.equal(first.belowStreak, 1);
+
+    const second = nextCeiling({ current: 128, derived: 64, belowStreak: first.belowStreak });
+    assert.equal(second.ceiling, 64, 'on the second');
+    assert.equal(second.belowStreak, 0, 'and the streak is spent');
+  });
+
+  it('forgets a downward streak the moment demand goes back up', () => {
+    // The workload just said the earlier low readings were not the trend. Carrying the streak
+    // would mean one late sample could drop a ceiling the current demand needs.
+    const falling = nextCeiling({ current: 128, derived: 64, belowStreak: 0 });
+    assert.equal(falling.belowStreak, 1);
+
+    const recovered = nextCeiling({ current: 128, derived: 130, belowStreak: falling.belowStreak });
+    assert.equal(recovered.ceiling, 130);
+    assert.equal(recovered.belowStreak, 0);
+  });
+
+  it('does not thrash on the wobble that motivated it', () => {
+    // The measured case: 600 ± 40 ms at the v1 target derives 64..73. Replayed as a sawtooth,
+    // the ceiling must not chase it. Without the band this sets a new ceiling on most samples.
+    const wobble = [64, 68, 73, 66, 64, 70, 73, 64, 66, 68, 64, 73];
+    let current = 73;
+    let streak = 0;
+    let changes = 0;
+    for (const derived of wobble) {
+      const decision = nextCeiling({ current, derived, belowStreak: streak });
+      if (decision.ceiling !== current) changes += 1;
+      current = decision.ceiling;
+      streak = decision.belowStreak;
+    }
+    assert.ok(changes <= 2, `the ceiling moved ${String(changes)} times across a 12-sample wobble`);
   });
 });

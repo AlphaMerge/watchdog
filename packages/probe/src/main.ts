@@ -11,7 +11,7 @@ import { standardCatalogue } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { autoPoolCeilingMax, CheckPool, defaultPoolSize } from './runner/pool.js';
-import { poolDemand } from './runner/demand.js';
+import { nextCeiling, poolDemand } from './runner/demand.js';
 import { ICMP_PING_CHECK_MS, POOL_DEMAND_MARGIN } from './measured.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import { QueryRunner } from './queries/runner.js';
@@ -303,6 +303,10 @@ async function main(): Promise<void> {
   // constant cannot serve: 48 was under the floor for `icmp.ping` at the v1 target and 64 is
   // more than a probe watching fast checks needs at the same sensor count.
   const autoSize = config.probe.workerPoolSize <= 0;
+  // Consecutive computations the derived ceiling has been meaningfully below the current one
+  // (`P-40`). Held here rather than in the pool, because it is a property of the sizing loop's
+  // cadence — a pool told to change its ceiling should simply do it.
+  let belowStreak = 0;
   const sizePool = (): void => {
     if (!autoSize) return;
     const demand = poolDemand(assignments.values(), (type) => pool.typicalDurationMs(type), {
@@ -320,7 +324,16 @@ async function main(): Promise<void> {
         'workload needs more workers than a probe may derive for itself; set workerPoolSize',
       );
     }
-    pool.setMaxSize(demand.ceiling);
+    // **Raise now, lower slowly** (`P-40`). Since `P-39` a lowered ceiling sheds workers at once,
+    // so following every twitch in a network's round-trip time would destroy and rebuild workers
+    // for a workload that has not changed.
+    const decision = nextCeiling({
+      current: pool.maxSize,
+      derived: demand.ceiling,
+      belowStreak,
+    });
+    belowStreak = decision.belowStreak;
+    pool.setMaxSize(decision.ceiling);
   };
 
   // Durations drift as networks do, so the ceiling is recomputed on a timer as well as on every

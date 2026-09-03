@@ -4309,6 +4309,39 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [x] **P-40 — Shedding promptly made the ceiling worth thrashing** · S · P-39 · The other
+      side of `P-39`, and it needed answering in the same breath. While a lowered ceiling decayed
+      one worker a minute, a derived ceiling that wobbled cost almost nothing — the decay damped
+      it. Shedding at once removes the damping, so the sizing loop's every twitch becomes workers
+      destroyed and rebuilt.
+
+      **Measured rather than imagined.** At the v1 target a ping duration of 600 ± 40 ms derives:
+
+          560 ms -> 47.1 required -> ceiling 64
+          600 ms -> 50.5 required -> ceiling 66
+          640 ms -> 53.8 required -> ceiling 70
+          660 ms -> 55.5 required -> ceiling 73
+
+      Nine workers of movement, every thirty seconds, for a workload that has not changed at all.
+      A worker costs about 35 MB and a registry import to replace.
+
+      **Raise now, lower slowly**, and the asymmetry is the design. A pool that is too small is a
+      probe falling behind and every second it waits is checks queueing, so upward moves are
+      immediate. Downward ones must clear a deadband — 10% or four workers, whichever is larger,
+      the constant floor mattering because 10% of a small ceiling is less than one worker — and
+      then persist for two computations, about a minute at the loop's cadence.
+
+      **The streak resets rather than decays**, which is the part worth stating: a network sitting
+      just inside the band for an hour must not eventually trip a drop it never earned. Only a
+      reading that leaves the band counts toward one, and any upward reading clears the count,
+      because the workload has just said the low readings were not the trend.
+
+      Pure, like `poolDemand` and `staleKeyAction`, so the policy is tested without a pool, a
+      clock or a network. Six cases including the measured sawtooth replayed as data: the ceiling
+      moves at most twice across twelve samples, where without the band it moves on most of them.
+      Flattening the constants fails five of the six, so they are load-bearing rather than
+      decorative.
+
 - [x] **P-39 — A pool over its ceiling took three hours to obey it** · S · P-34 · An
       interaction between two changes, neither wrong alone. `P-26` set the shrink decay at **one
       worker per idle window**, which is right while the ceiling never moves: it decays a
