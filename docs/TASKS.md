@@ -6743,6 +6743,25 @@ because each is a decision rather than a defect:
       Windows and are unproven. The build prints that in place of a success message, and this
       ticket stays open for it.
 
+      **But "needs hardware nobody has" was wrong, and that mattered.** `windows-latest` on GitHub
+      Actions *is* Windows Server 2022 — the missing thing was a job, not a machine. CI now has a
+      `windows-install` job that downloads the MSI the Linux job built, installs it with
+      `msiexec /qn`, and asserts what H-06 actually asks for: the files land and `app.zip` was
+      expanded (which is the proof the custom action ran at all), both services registered, both
+      firewall rules exist, an upgrade over it keeps an edited configuration and leaves a backup,
+      and an uninstall removes the services while leaving ProgramData. The three `msiexec` logs
+      are uploaded whatever happens, because the first failure on a machine nobody has tested is
+      exactly when the log *is* the finding.
+
+      It also parse-checks every `.ps1`, which nothing else here can: PowerShell publishes no
+      arm64 container, the amd64 one dies under QEMU on an Apple Silicon machine, and the
+      `dotnet tool` package is broken — three routes tried, all dead. A parse error in
+      `ms-setup.ps1` would break every Windows install, and until this job existed nothing
+      anywhere would have caught it.
+
+      **The job has never run**, because CI is disabled at the operator's request. Tick H-06 when
+      it goes green, not before.
+
       Three things the build taught, all recorded in the script:
 
       - **wixl segfaults above about ten thousand components** (a hundred compile instantly), so

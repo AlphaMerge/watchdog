@@ -134,6 +134,17 @@ jobs:
       - name: package smoke test
         run: scripts/smoke-packages.sh
 
+      # Built here rather than on the Windows runner because wixl is msitools and runs on Linux —
+      # the MSI comes off the same staged tree as every other artefact. The Windows job installs
+      # what this produces.
+      - name: build the Windows installers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wixl msitools
+          scripts/package-msi.sh
+          scripts/package.sh --probe-only
+          scripts/package-msi.sh --probe-only
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -142,6 +153,128 @@ jobs:
             release/*.tar.gz
             release/*.deb
             release/*.rpm
+            release/*.msi
+          retention-days: 7
+
+  # **The Windows half of Phase 10's exit criterion**, on the Windows Server the hosted runner
+  # already is. Until this existed, H-06 shipped an MSI that had never been installed and the
+  # blocker was recorded as "needs hardware nobody has" — which was wrong: `windows-latest` is
+  # Windows Server 2022, and the missing thing was a job, not a machine.
+  #
+  # It does not cover H-09's field test — a hundred real devices for a week is still hardware and
+  # wall-clock this cannot reach. What it does cover is the installer: that the MSI installs, that
+  # the services register, that the firewall rules appear, that an upgrade over it keeps the
+  # configuration, and that removing it takes the services away and leaves the data.
+  windows-install:
+    name: MSI installs on Windows Server
+    needs: install-smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release
+
+      # The scripts the MSI runs are PowerShell, and a parse error in one of them breaks every
+      # Windows install. Nothing else in this repository can check that: PowerShell publishes no
+      # arm64 container, and the amd64 one dies under emulation on an Apple Silicon developer
+      # machine, so this is the first place the question can even be asked.
+      - name: parse-check the installer scripts
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Path deploy -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $bad++
+              Write-Host "FAIL $($_.FullName)"
+              $errors | ForEach-Object { Write-Host "     line $($_.Extent.StartLineNumber): $($_.Message)" }
+            } else { Write-Host "ok   $($_.Name)" }
+          }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: install the MSI
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem release/ms-*-x64.msi | Where-Object { $_.Name -notlike '*probe*' } | Select-Object -First 1).FullName
+          Write-Host "installing $msi"
+          # /qn so it cannot wait on a dialog, and a verbose log because the first failure on a
+          # machine nobody has tested is exactly when the log is the finding.
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v install.log" -Wait -PassThru
+          Write-Host "msiexec exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 80; exit 1 }
+
+      - name: assert the install did its work
+        shell: pwsh
+        run: |
+          $prefix = "$env:ProgramFiles\MonitoringSystem"
+          foreach ($f in @('ms-setup.ps1', 'ms-teardown.ps1', 'VERSION', 'app.zip')) {
+            if (-not (Test-Path (Join-Path $prefix $f))) { throw "missing from the install: $f" }
+          }
+          # ms-setup expands app.zip, so the application tree is the proof the action ran at all.
+          if (-not (Test-Path (Join-Path $prefix 'app'))) { throw 'app.zip was never expanded — the custom action did not run' }
+          Write-Host 'files and expansion: ok'
+
+          # Services and firewall are what H-06 asks for beyond laying down files.
+          foreach ($svc in @('ms-core', 'ms-probe')) {
+            $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+            if (-not $s) { throw "service $svc was not registered" }
+            Write-Host "service ${svc}: $($s.Status)"
+          }
+          foreach ($rule in @('MonitoringSystem API', 'MonitoringSystem probe channel')) {
+            if (-not (Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue)) {
+              throw "firewall rule missing: $rule"
+            }
+            Write-Host "firewall rule: $rule"
+          }
+
+      - name: upgrade over it, and keep the configuration
+        shell: pwsh
+        run: |
+          $data = "$env:ProgramData\MonitoringSystem"
+          $cfg = Join-Path $data 'core.json'
+          $json = Get-Content $cfg -Raw | ConvertFrom-Json
+          $json.database.password = 'set-by-the-operator'
+          $json | ConvertTo-Json -Depth 20 | Set-Content $cfg
+          $msi = (Get-ChildItem release/ms-*-x64.msi | Where-Object { $_.Name -notlike '*probe*' } | Select-Object -First 1).FullName
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v upgrade.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content upgrade.log -Tail 80; exit 1 }
+          if ((Get-Content $cfg -Raw) -notmatch 'set-by-the-operator') {
+            throw 'the upgrade overwrote the configuration'
+          }
+          if (-not (Get-ChildItem $data -Filter 'core.json.*.bak')) {
+            throw 'the upgrade took no backup'
+          }
+          Write-Host 'configuration preserved, backup taken'
+
+      - name: uninstall, and keep the data
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem release/ms-*-x64.msi | Where-Object { $_.Name -notlike '*probe*' } | Select-Object -First 1).FullName
+          $p = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /l*v uninstall.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 80; exit 1 }
+          foreach ($svc in @('ms-core', 'ms-probe')) {
+            if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { throw "service $svc survived removal" }
+          }
+          # ProgramData is left on purpose: it holds the vault key, and without it no stored
+          # credential can ever be decrypted again.
+          if (-not (Test-Path "$env:ProgramData\MonitoringSystem\core.json")) {
+            throw 'removal deleted the configuration, which it must not'
+          }
+          Write-Host 'services gone, data left in place'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-install-logs
+          path: |
+            install.log
+            upgrade.log
+            uninstall.log
           retention-days: 7
 
   enrol-smoke:
