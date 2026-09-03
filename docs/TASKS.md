@@ -4433,6 +4433,30 @@ because each is a decision rather than a defect:
       that would corrupt results if it were wrong), and that it will not go under a configured
       floor.
 
+      **Amended later the same day: those fourteen tested the parts and not the loop.** This
+      ticket asked for a scenario test — "a probe whose checks get slower must raise its ceiling
+      before the backlog grows, not after" — and it was ticked without one. Every component was
+      covered and nothing proved they compose, which is the only claim an operator experiences.
+
+      Two now do, on the same sensor type throughout, because that is the real case: an
+      `http.get` against an endpoint that degrades is not a new type, it is the same one costing
+      more.
+
+      - **`raises its ceiling from what it measured, before the backlog grows`** — 3,000 sensors
+        a minute apart is 50 checks a second; at 20 ms the floor is under the minimum and the
+        ceiling stays at 4, and when the same checks start taking 400 ms the derived ceiling goes
+        to 26. **The "before" clause is asserted rather than asserted-about**: `deferred` and
+        `refused` are 0 and the queue is empty at the moment it moves, because the estimate comes
+        from checks that have already finished, so a dozen of them is enough. Nothing had to
+        queue up for the probe to find out.
+      - **`gives the room back when the network recovers`** — the other direction, and the reason
+        the ceiling is derived rather than latched: a probe that grew for one bad afternoon must
+        not hold the memory for ever.
+
+      Proved to bite by making `typicalDurationMs` always return `undefined` — a probe that can
+      never learn. **Four tests fail**, including both of these; the fourteen that tested the
+      parts did not all notice.
+
       Also fixed in passing: the schema's own comment for `workerPoolSize` still described the
       four-per-core default that `P-15` disproved.
 

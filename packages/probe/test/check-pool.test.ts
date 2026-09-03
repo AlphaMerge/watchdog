@@ -6,6 +6,7 @@ import { availableParallelism } from 'node:os';
 import type { CheckResult } from '@ms/shared';
 import { CheckPool, defaultPoolSize, type ResultMeta } from '../src/runner/index.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
+import { poolDemand } from '../src/runner/demand.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -526,6 +527,104 @@ describe('sizing the ceiling from the work (P-34)', () => {
 
     pool.setMaxSize(1);
     assert.equal(pool.maxSize, 4, 'clamped up to the configured minimum');
+  });
+});
+
+describe('a probe whose checks get slower (P-34)', () => {
+  it('raises its ceiling from what it measured, before the backlog grows', async () => {
+    // **The loop, rather than its parts.** The tests above prove that the pool learns a
+    // duration, that the arithmetic is Little's law and that a ceiling can move. None of them
+    // proves the three compose — that a probe whose network got slower notices and grows *in
+    // time*, which is the whole promise and the only part an operator experiences.
+    //
+    // The same sensor type throughout, because that is the real case: `http.get` against an
+    // endpoint that degrades is not a new type, it is the same one costing more.
+    const { pool, seen } = await poolOf({ size: 4, minSize: 4, idleShrinkMs: 0 });
+
+    const SENSORS = 3_000;
+    const assignments = Array.from({ length: SENSORS }, () => ({
+      sensorType: 'test.slow',
+      intervalSeconds: 60,
+    }));
+
+    // What `main.ts` does on a config push and every thirty seconds, in miniature.
+    const sizePool = (): number => {
+      const demand = poolDemand(assignments, (type) => pool.typicalDurationMs(type), {
+        fallbackMs: 20,
+        min: 4,
+        max: 64,
+        margin: 1.3,
+      });
+      pool.setMaxSize(demand.ceiling);
+      return demand.ceiling;
+    };
+
+    // A quiet network: 3,000 sensors a minute apart is 50 checks a second, and at 20 ms each
+    // that is one worker's worth of work. The floor is under the minimum, so the minimum wins.
+    for (let i = 0; i < 12; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 20 }));
+    await until(() => seen.length === 12, 'the fast checks');
+    const quiet = sizePool();
+    assert.equal(quiet, 4, `a light workload derives the floor, got ${String(quiet)}`);
+
+    // The same sensors, now answering ten times slower. 50 a second at 400 ms is 20 in flight.
+    for (let i = 100; i < 112; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
+    await until(() => seen.length === 24, 'the slow checks');
+
+    const busy = sizePool();
+    assert.ok(
+      busy > quiet,
+      `the ceiling did not move when the work got slower: ${String(quiet)} -> ${String(busy)}`,
+    );
+    assert.ok(
+      busy >= 20,
+      `50 checks a second at 400 ms needs 20 in flight; derived ${String(busy)}`,
+    );
+    assert.equal(pool.maxSize, busy, 'and the pool took it');
+
+    // **"Before the backlog grows" is the clause that matters**, and this is what makes it true:
+    // the estimate comes from checks that have already *finished*, so a dozen of them is enough
+    // to move the ceiling. Nothing had to queue up for the probe to find out.
+    const stats = pool.stats();
+    assert.equal(stats.deferred, 0, 'nothing was deferred while it learned');
+    assert.equal(stats.refused, 0, 'and nothing refused');
+    assert.ok(stats.queued <= 1, `the queue was still empty, held ${String(stats.queued)}`);
+  });
+
+  it('gives the room back when the network recovers', async () => {
+    // The other direction, and the reason the ceiling is derived rather than latched: a probe
+    // that grew for one bad afternoon should not hold the memory for ever. Lowering the ceiling
+    // is safe by the test above — the shrink policy retires only idle, jobless workers.
+    const { pool, seen } = await poolOf({ size: 4, minSize: 4, idleShrinkMs: 0 });
+    const assignments = Array.from({ length: 3_000 }, () => ({
+      sensorType: 'test.slow',
+      intervalSeconds: 60,
+    }));
+    const sizePool = (): number => {
+      const demand = poolDemand(assignments, (type) => pool.typicalDurationMs(type), {
+        fallbackMs: 20,
+        min: 4,
+        max: 64,
+        margin: 1.3,
+      });
+      pool.setMaxSize(demand.ceiling);
+      return demand.ceiling;
+    };
+
+    for (let i = 0; i < 12; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
+    await until(() => seen.length === 12, 'the slow spell');
+    const degraded = sizePool();
+    assert.ok(degraded >= 20, `expected a raised ceiling, got ${String(degraded)}`);
+
+    // Enough fast checks to carry the median back down — the window is bounded, so recovery is
+    // a matter of running checks rather than of waiting.
+    for (let i = 100; i < 130; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 20 }));
+    await until(() => seen.length === 42, 'the recovery');
+
+    const recovered = sizePool();
+    assert.ok(
+      recovered < degraded,
+      `the ceiling stayed high after the work got cheap: ${String(degraded)} -> ${String(recovered)}`,
+    );
   });
 });
 
