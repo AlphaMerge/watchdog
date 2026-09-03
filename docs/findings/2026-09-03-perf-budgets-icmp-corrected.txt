@@ -1,0 +1,43 @@
+ Container monitoring-system-dev-toolchain-run-382fa8ba7d67 Creating 
+ Container monitoring-system-dev-toolchain-run-382fa8ba7d67 Created 
+available: 4231 MB
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (0.7425ms)
+
+    shipped default (48): 90s, pool 48, 7630 checks completed of 7630 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (92017.967542ms)
+
+    old default (7): 90s, pool 7, 4052 checks completed of 7536 dispatched, 3484 refused
+  ✔ shows what the old core-count default did with the same load (91405.960542ms)
+
+    demand-driven (4 -> 48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (91462.198501ms)
+
+    small, fixed 48: 15s, pool 48, 13 checks completed of 13 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+  ✔ costs a small installation a fraction of what a fixed pool reserves (32937.996557ms)
+  ﹣ sweeps pool sizes, which is how the default was chosen (0.823334ms) # set MS_BENCH_SWEEP=1 to run the pool-size sweep
+
+    icmp.ping as it ships (48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+
+    measured: 5000 sensors at 60s, 200 ms checks, 8 cores, 1.5 minutes per run
+    dispatch jitter is due -> check started; the budget is p95 under 1000 ms
+      shipped default (48)        200 ms check  pool  48       jitter p50     8 ms  p95    217 ms  p99    351 ms  (wheel p95 9 ms, wait p95 210 ms)  rss + 556 MB at 48 workers  refused 0
+      old default (7)             200 ms check  pool   7       jitter p50 18718 ms  p95  29102 ms  p99  29227 ms  (wheel p95 7 ms, wait p95 29099 ms)  rss +  36 MB at  7 workers  refused 3484
+      demand-driven (4 -> 48)     200 ms check  pool  48       jitter p50     7 ms  p95    217 ms  p99    410 ms  (wheel p95 9 ms, wait p95 211 ms)  rss +  15 MB at  4 workers  refused 0
+      small, fixed 48             200 ms check  pool  48       jitter p50     6 ms  p95      6 ms  p99      6 ms  (wheel p95 6 ms, wait p95 0 ms)  rss + 257 MB at 48 workers  refused 0
+      small, demand-driven        200 ms check  pool  48->  4  jitter p50     5 ms  p95     37 ms  p99     37 ms  (wheel p95 37 ms, wait p95 0 ms)  rss +  10 MB at  4 workers  refused 0
+      icmp.ping as it ships (48)  600 ms check  pool  48       jitter p50  3027 ms  p95   5371 ms  p99   5932 ms  (wheel p95 7 ms, wait p95 5366 ms)  rss + 466 MB at 48 workers  refused 0
+  ✔ shows what the sensor type we actually ship costs the pool (93278.451627ms)
+  ﹣ shows what it cost before P-07 made the check cheaper (1.019625ms) # needs about 4000 MB free to hold 256 workers (measured peak 2801 MB) and this machine has 3839 MB — stop what is using it, or read the committed measurement in docs/findings/2026-08-26-scheduler-benchmark.md
+✔ scheduler benchmark (P-15) (401107.757268ms)
+ℹ tests 8
+ℹ suites 1
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 401412.031143
+NODE_EXIT=0

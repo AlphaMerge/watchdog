@@ -73,6 +73,18 @@ const durationMs = minutes * 60_000;
  * wait for the last page. Erring high costs a skip that prints why; erring low costs every other
  * result in the file.
  */
+/**
+ * What one `icmp.ping` check costs a worker, measured after `P-07`.
+ *
+ * `-i 0.2` turns the three-second check this file was originally written against into a
+ * six-hundred-millisecond one, with identical reply counts
+ * (`docs/findings/2026-08-29-icmp-throughput.md`). 83 a second at 0.6 s is 50 in flight, which
+ * the shipped ceiling of 48 very nearly absorbs in one round — so this is the number that
+ * decides whether the type we ship fits the pool we ship, and the old 3,000 answered a question
+ * about a version of `ping` we stopped invoking.
+ */
+const ICMP_CHECK_MS = 600;
+
 const ICMP_POOL_SIZE = 256;
 const ICMP_PEAK_MB = 2_801;
 const ICMP_NEEDS_MB = 4_000;
@@ -446,15 +458,42 @@ describe('scheduler benchmark (P-15)', () => {
     }
   });
 
-  it('shows what the sensor type we actually ship would need', async (t) => {
-    // `icmp.ping` sends four packets a second apart, so a real one takes about three seconds.
-    // 83 a second at 3 s each is 250 in flight — an order of magnitude more than the 200 ms
-    // model above, and the number that decides whether a worker-thread pool is the right shape
-    // for I/O-bound checks at all. Short, and diagnostic.
+  it('shows what the sensor type we actually ship costs the pool', async () => {
+    // **What `icmp.ping` costs today, which is not what this case used to model** (`P-31`).
+    //
+    // It was written against a three-second check, because `ping` idles a second between
+    // packets and four packets is three seconds. `P-07` then passed `-i 0.2` and turned that
+    // into **600 ms** (`docs/findings/2026-08-29-icmp-throughput.md`) — so the case kept the old
+    // number while calling itself the type we ship, and the pool it asked for, 256 workers,
+    // stopped describing anything anyone runs.
+    //
+    // At 600 ms the arithmetic changes completely: 83 a second at 0.6 s is **50 in flight**
+    // against 250, which is the difference between needing a pool nobody would configure and
+    // fitting inside the shipped ceiling. So this runs the shipped default against the real
+    // check duration, which is the question an operator with 5,000 ping sensors actually has.
+    const run = await soak({
+      label: `icmp.ping as it ships (${String(defaultPoolSize())})`,
+      poolSize: 0,
+      queueMaxLength: 50_000,
+      checkMs: ICMP_CHECK_MS,
+      forMs: Math.min(durationMs, 90_000),
+    });
+    runs.push(run);
+
+    assert.ok(run.completed > 0, 'checks ran');
+    assert.equal(run.refused, 0, 'nothing was refused, so the queue is not hiding a delay');
+  });
+
+  it('shows what it cost before P-07 made the check cheaper', async (t) => {
+    // The same load at the **pre-`P-07`** three seconds a check: 250 in flight, which needs a
+    // pool an order of magnitude past what the sweep says is affordable. Kept rather than
+    // deleted because it is the counter-example that makes the row above mean something — and
+    // because it is the shape any *genuinely* slow sensor type walks into, whatever the
+    // protocol. Diagnostic, and asserts only that it ran.
     //
     // **Checked before it is run** (`P-30`): holding 256 workers costs more than a developer
     // laptop running the dev stack has spare, and finding that out by being killed loses this
-    // file's other five results along with it.
+    // file's other results along with it.
     const availableMb = availableMemoryMb();
     if (availableMb < ICMP_NEEDS_MB) {
       t.skip(
@@ -467,7 +506,7 @@ describe('scheduler benchmark (P-15)', () => {
     }
 
     const run = await soak({
-      label: 'icmp.ping-shaped',
+      label: 'before P-07, 3 s checks',
       poolSize: ICMP_POOL_SIZE,
       queueMaxLength: 50_000,
       checkMs: 3_000,

@@ -4162,6 +4162,90 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [ ] **P-33 — `sizing.md`'s worker formula has no stability floor, and understates every
+      example it gives** · M · H-08 · The published rule is
+      `workers ≥ burst ÷ (1 + tolerance ÷ check duration)`, derived from the rounds model:
+      `rounds = ceil(burst ÷ workers)`, `jitter ≈ (rounds − 1) × check`. It bounds the jitter of
+      **one** burst and never asks whether that burst clears before the next one arrives a
+      second later. When it does not, the backlog grows every second and the jitter the formula
+      predicts is not the jitter you get — it is the jitter of the first burst only.
+
+      The missing constraint is Little's law: **`workers ≥ burst × check duration`**, equivalently
+      `rounds × check ≤ 1 s`. Below it the pool's service rate is under the arrival rate and the
+      queue is unbounded, whatever tolerance was asked for.
+
+      **Every worked example on the page is under its own floor**, at the v1 target's burst of
+      83.3/s:
+
+      | Check | Page says | Little's floor | Service rate at the page's number |
+      | --- | --- | --- | --- |
+      | 200 ms | 14 workers | **16.7** | 70/s against 83.3 arriving |
+      | 600 ms (`icmp.ping` as it ships) | 31 | **50.0** | 52/s |
+      | 2 s HTTP | 83 | **166.7** | 41/s |
+
+      The 2-second row is the page's own "worked example that does not fit", and it still
+      understates the answer by half. An operator who sized down to any of these numbers would
+      watch the lag climb without ever hitting a refusal, because the queue absorbs it silently
+      until it does not.
+
+      **Measured, not derived**: `P-31`'s run put the shipped pool of 48 against 600 ms checks
+      and got p50 **3,027 ms**, p95 **5,371 ms**, nothing refused — a median check three seconds
+      late is a queue growing, not a percentile.
+
+      The fix is the constraint, the worked examples redone from it, and a sentence saying which
+      of the two bounds is binding — they swap over as the check gets slower. Check `docs/sizing.md`'s
+      memory table against the corrected numbers too, since it is indexed by worker count.
+
+- [ ] **P-32 — The shipped pool default cannot sustain the v1 target in the sensor type we
+      ship** · M · P-07 · `defaultPoolSize()` is 48. 5,000 `icmp.ping` sensors on a 60-second
+      interval is a burst of **83.3 a second**, and `P-07` measured a check at **600 ms**, so
+      Little's law needs **50 workers** and 48 gives a service rate of 80/s against 83.3
+      arriving. **The pool is 4% short of stable at the documented v1 target with the flagship
+      sensor type.**
+
+      **Measured** (`P-31`, 2026-09-03): p50 3,027 ms, p95 **5,371 ms**, p99 5,932 ms against
+      `P-15`'s 1,000 ms budget, with **wait 5,366 ms of the 5,371** and **nothing refused**. The
+      queue is not shedding, it is growing — which is why no counter says anything is wrong.
+
+      **Both halves were already measured and never compared.** `P-07`'s own row says the v1
+      requirement of 83/s "needs about 55 now"; `P-15` set the default at 48 against a 200 ms
+      model, where the floor is 16.7 and 48 is three times what is needed. Each ticket was right
+      about its own number. Nothing put 55 next to 48.
+
+      Deliberately not fixed on the spot, because the answer is a judgement rather than an
+      arithmetic correction. Raising the default costs every small installation memory it does
+      not need — the reason `P-18` exists — and `P-26` has since made the pool track its load, so
+      a higher *ceiling* may now be nearly free where it was not before. Candidates: raise the
+      ceiling, derive it from the configured sensors and their types rather than fixing it, or
+      leave it and document that 5,000 ping sensors want a bigger pool. Whichever it is, it needs
+      the measurement, and `P-33` needs to land first because the guidance is what an operator
+      would use to decide.
+
+- [x] **P-31 — The scheduler benchmark's `icmp.ping` case models a check we stopped
+      shipping** · S · P-07 · The case is named "shows what the sensor type we actually ship
+      would need" and ran `checkMs: 3_000`, because `ping` idles a second between packets and
+      four packets is three seconds. That was true on **2026-08-26**, when it was written. On
+      **2026-08-29** `P-07` passed `-i 0.2` and turned a three-second check into a
+      six-hundred-millisecond one with identical reply counts
+      (`docs/findings/2026-08-29-icmp-throughput.md`). The case kept the old number and the old
+      claim for a week.
+
+      **The arithmetic inverts, which is why it matters**: 83.3 a second at 3 s is 250 in flight
+      and needs a pool nobody would configure; at 600 ms it is **50**, which is a pool an
+      operator very nearly has. A case asking for 256 workers reads as a curiosity about a
+      workload no one runs. The same case at 600 ms reads as a question about the default —
+      and `P-32` is the answer it gives.
+
+      **Split rather than retuned.** "As it ships" runs the real 600 ms check against
+      `defaultPoolSize()`, which is the question an operator with 5,000 ping sensors has;
+      "before `P-07`" keeps the 3-second, 256-worker run as the counter-example that makes the
+      first row mean something, and as the shape any genuinely slow sensor type still walks into.
+      `P-30`'s memory guard stays on the second one, where it belongs.
+
+      It also means the `icmp.ping-shaped` row this morning's finding reported as *"the sensor
+      type we actually ship, missing the budget by 2.3×"* was the pre-`P-07` check mislabelled.
+      Corrected in `docs/findings/2026-09-03-perf-budgets.md` rather than quietly dropped.
+
 - [x] **P-30 — `test:perf`'s last scheduler case is OOM-killed, so the whole file fails** · S ·
       P-15 · `scheduler-benchmark.test.ts`'s final case — "shows what the sensor type we actually
       ship would need" — asks for **256 workers at 3-second checks for 90 seconds**, and on a

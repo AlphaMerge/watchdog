@@ -5,7 +5,8 @@
   `npm test` on purpose. Run with `ms-server` stopped.
 - **Raw data**: `2026-09-03-perf-budgets-run.txt`, the whole run;
   `2026-09-03-perf-budgets-scheduler.txt`, the separately recovered `P-15` table;
-  `2026-09-03-perf-budgets-clean-run.txt`, the re-run after both fixes
+  `2026-09-03-perf-budgets-clean-run.txt`, the re-run after both fixes;
+  `2026-09-03-perf-budgets-icmp-corrected.txt`, the `icmp.ping` case against the check that ships
 - **Reproduce**: `./scripts/dev.sh "npm run test:perf"`, or one file with
   `./scripts/dev.sh "cd packages/core && node --test dist/test/perf/<name>.test.js"`
 - **Measured on**: 8-core arm64, `node:24-bookworm-slim` in Docker Desktop's 7.75 GB LinuxKit VM,
@@ -254,8 +255,7 @@ opt-in sweeps (`MS_PING_SWEEP`, `MS_BENCH_SWEEP`), not the new memory guard — 
 actually gets matches it at 215 ms.
 
 **The `icmp.ping` row reproduces**: 2,427 ms here against 2,333 ms standalone, both essentially
-all wait. Two independent runs agreeing put that 2.4× budget miss on firm ground rather than on
-one observation.
+all wait — but see the correction below, because it is not the check that ships.
 
 ### Two numbers that moved, and neither is a signal
 
@@ -271,6 +271,45 @@ one observation.
 
 What did *not* move is worth as much: compression 10.1× in both runs, ICMP 99 targets/s in both,
 storage 103.1 B/row in both.
+
+---
+
+## Correction: that `icmp.ping` row was the wrong check (`P-31`)
+
+**The case measured above models a three-second `icmp.ping`, and `icmp.ping` has not cost three
+seconds since 2026-08-29.** The benchmark was written on 2026-08-26, when `ping` idled a second
+between packets; `P-07` then passed `-i 0.2` and made the same check **600 ms** with identical
+reply counts (`2026-08-29-icmp-throughput.md`). The case kept the old duration while calling
+itself the type we ship, and this page repeated that claim.
+
+The arithmetic inverts at the v1 target's burst of 83.3 checks a second:
+
+| Check duration | In flight (Little's law) | Reads as |
+| --- | --- | --- |
+| 3,000 ms (pre-`P-07`, what was measured) | 250 | a pool nobody would configure |
+| **600 ms (what ships)** | **50** | a pool an operator very nearly has |
+
+Re-measured against the shipped default of 48 workers at the real 600 ms:
+
+    icmp.ping as it ships (48)  600 ms check  pool 48
+      jitter p50 3027 ms  p95 5371 ms  p99 5932 ms
+      (wheel p95 7 ms, wait p95 5366 ms)   rss +466 MB   refused 0
+
+**Worse than the case it replaced, and for a different reason.** 48 workers at 600 ms serve
+80 checks a second against 83.3 arriving, so the pool is **4% short of stable** and the queue
+grows for as long as the run lasts. A median check three seconds late is a backlog, not a tail —
+and nothing is refused, so no counter reports it. That is `P-32`.
+
+It also exposed `P-33`: `docs/sizing.md`'s rule
+`workers ≥ burst ÷ (1 + tolerance ÷ check duration)` bounds the jitter of one burst and never
+asks whether that burst clears before the next arrives. It is missing Little's floor,
+`workers ≥ burst × check duration`, and understates **every worked example on the page** — 14
+against 16.7 for the 200 ms model, 31 against 50 for `icmp.ping`, and 83 against 166.7 for the
+2-second HTTP example the page offers as the one that *does not* fit.
+
+Both halves of `P-32` were already measured and never put side by side: `P-07` recorded that
+83/s "needs about 55 now", and `P-15` set the default to 48 against a 200 ms model where the
+floor is 16.7. Each was right about its own number.
 
 ---
 

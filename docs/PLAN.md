@@ -161,15 +161,21 @@ list — and verified that `date_bin` reproduces `time_bucket` exactly
 | S-13 conditional GET | done | ETags that cover the inheritance chain, so the common UI read is conditional again |
 | S-15 state-history retention | done | `sensor_state` was excluded from retention because a sensor Up for three years has one row, three years old, and dropping it would leave the sensor with **no known state at all** — which breaks uptime and SLA. Snapshot, drop, then anchor only the sensors the drop actually emptied. **Anchoring after the drop rather than before it is what makes it affordable**: the obvious order writes a row per quiet sensor per pass, 288 a day. Mutation 10/10 |
 | S-09 gap semantics | done | Mostly delivered by S-05 through S-08 and finished on the UI side by U-04/U-05; what this ticket added is the **composed** test. `no-data is not zero` is not a property of storage, or the rollup, or the query, or the chart — it is a property of the five together, and a zero could appear at any seam without failing a test written for one stage. Sixty scans of a constant 100 ms with ten failures, walked from the failed check to the JSON: a one-hour bucket averages 100 and not 83.3, a failed check carrying a zero is discarded and counted, and the gap is ten minutes while the outage is nine — which is why uptime comes from `sensor_state` and not from where the samples stop. Mutation 6/6 |
-| S-11 | not started | |
+| S-11 | partial | **The decision half is answered and needed no Windows host.** TimescaleDB publishes current Windows builds — 2.29.2 ships `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, as do the eight releases before it — and the PostgreSQL 17 package contains `timescaledb-tsl-2.29.2.dll`, the licensed module where compression lives, plus every function this project uses. **So no `PlainPostgresEngine` fallback is required on availability grounds** and the cost `S-12` priced does not have to be paid. What is left genuinely needs the host: the benchmark, and whether `setup.exe` composes with how an operator installs PostgreSQL on Windows — there is no Windows counterpart to `scripts/smoke/provision-postgres.sh`. Re-check availability before a Windows release; an upstream that stopped publishing would flip it (`docs/findings/2026-09-03-timescaledb-on-windows.md`) |
 
 All four exit criteria are met and measured:
 
-- **Create a 5,000-object tree via the API in under 30 seconds** — measured at **21.0 seconds**
-  over real HTTP with a serial client, and **5.9 seconds** with eight requests in flight. `S-16`
-  took the serial path from 24.0 s by narrowing what a create reads about its parent. The
-  statement-level breakdown showed the request layer costs more than all the SQL, so the lever
-  that remains is fewer requests rather than fewer statements.
+- **Create a 5,000-object tree via the API in under 30 seconds** — **currently 27.6 seconds**
+  over real HTTP with a serial client, 9.0 s with eight in flight, and **2.6 s in one request**
+  via `P-19`'s bulk route. The serial number is the one to watch and it has moved: 24.0 s, then
+  21.0 after `S-16` narrowed what a create reads about its parent, then **28.8 once Phase 3 made
+  every create write a `sensor_runtime` row (`M-02`) and check for a paused ancestor (`M-08`)**.
+  That left about 4% margin, which a loaded machine spends, and is how `P-29` came to be filed
+  and fixed — a create read the object back before its channels existed and then re-read the
+  version to patch it, so reading once after the writes took it from 11 database round trips to
+  10. **The criterion is met with the margin it has, not comfortably**: this path is round-trip
+  bound (63.6% idle under a profiler), so the remaining lever is fewer round trips, or fewer
+  requests, rather than faster SQL (`docs/findings/2026-09-03-perf-budgets.md`).
 - **Ingest 100,000 samples/minute, p99 write under 100 ms** — measured at **3,621,280
   samples/minute with a p99 write of 22.1 ms**, and 2.5M/minute through the full wire path
   including channel resolution.
