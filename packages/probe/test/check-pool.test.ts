@@ -5,6 +5,7 @@ import { pino } from 'pino';
 import { availableParallelism } from 'node:os';
 import type { CheckResult } from '@ms/shared';
 import { CheckPool, defaultPoolSize, type ResultMeta } from '../src/runner/index.js';
+import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -549,7 +550,7 @@ describe('the default pool size', () => {
     // wait a sensor sees is (tranches - 1) x check duration. Two tranches keeps a one-second
     // budget intact up to a check of about a second; three breaches it at about 500 ms, which
     // an ordinary HTTP check exceeds.
-    const batch = Math.ceil(5_000 / 60);
+    const batch = Math.ceil(V1_TARGET_BURST);
     const tranches = Math.ceil(batch / defaultPoolSize());
     assert.ok(
       tranches <= 2,
@@ -568,15 +569,13 @@ describe('the default pool size', () => {
     // `icmp.ping` is the case that bites, because it is the type this project ships and it is
     // not fast: four packets at `-i 0.2` is 600 ms (`P-07`). The old default of 48 was one
     // worker under this line and measured a p95 of 5,082 ms against a 1,000 ms budget.
-    const burst = 5_000 / 60;
-    const PING_CHECK_SECONDS = 0.6;
-    const floor = burst * PING_CHECK_SECONDS;
+    const floor = littleFloor(V1_TARGET_BURST, ICMP_PING_CHECK_MS);
+    const served = defaultPoolSize() / (ICMP_PING_CHECK_MS / 1_000);
 
     assert.ok(
       defaultPoolSize() > floor,
-      `${String(defaultPoolSize())} slots complete ` +
-        `${(defaultPoolSize() / PING_CHECK_SECONDS).toFixed(1)} checks a second against ` +
-        `${burst.toFixed(1)} arriving — the backlog would grow without bound`,
+      `${String(defaultPoolSize())} slots complete ${served.toFixed(1)} checks a second ` +
+        `against ${V1_TARGET_BURST.toFixed(1)} arriving — the backlog would grow without bound`,
     );
 
     // And clear it by enough that the tranche model above actually holds. Measured at 600 ms:

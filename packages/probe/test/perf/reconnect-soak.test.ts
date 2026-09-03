@@ -8,6 +8,7 @@ import type { CheckResult } from '@ms/shared';
 import { SpoolDrain, type ResultSender } from '../../src/spool/drain.js';
 import { ResultSpool } from '../../src/spool/spool.js';
 import type { ResultsOutcome } from '../../src/transport/core-client.js';
+import { V1_TARGET_INTERVAL_SECONDS, V1_TARGET_SENSORS } from '../../src/measured.js';
 
 /**
  * A one-hour disconnect, replayed (`R-08`).
@@ -49,8 +50,8 @@ after(async () => {
 });
 
 /** `PLAN.md`'s v1 target, which is what makes "an hour" a number rather than a feeling. */
-const SENSORS = 5_000;
-const INTERVAL_SECONDS = 60;
+const SENSORS = V1_TARGET_SENSORS;
+const INTERVAL_SECONDS = V1_TARGET_INTERVAL_SECONDS;
 const SOAK_MINUTES = Number(process.env['MS_SOAK_MINUTES'] ?? '1');
 const OUTAGE_RESULTS = Math.round((SENSORS / INTERVAL_SECONDS) * 60 * SOAK_MINUTES);
 

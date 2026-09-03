@@ -12,6 +12,7 @@ import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { autoPoolCeilingMax, CheckPool, defaultPoolSize } from './runner/pool.js';
 import { poolDemand } from './runner/demand.js';
+import { ICMP_PING_CHECK_MS, POOL_DEMAND_MARGIN } from './measured.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import { QueryRunner } from './queries/runner.js';
 import type { ResultMeta } from './runner/types.js';
@@ -49,23 +50,16 @@ function configCheckRequested(argv: readonly string[]): 'check' | 'usage' | 'non
 }
 
 /**
- * Headroom over the raw Little's-law requirement when the probe sizes its own pool (`P-34`).
- *
- * Measured, not chosen (`docs/findings/2026-09-03-pool-default.md`): at 1.12x the requirement a
- * ping-shaped workload measured a p95 of 822 ms where the tranche model predicted 600, because
- * the queueing the model omits is still on top; by 1.28x it measured 614 and the model held.
- */
-const POOL_DEMAND_MARGIN = 1.3;
-
-/**
  * What a check is assumed to cost before this probe has run one of that type.
  *
- * 600 ms is `icmp.ping` after `P-07` — the type we ship, and a fair stand-in for anything that
- * waits for a packet. Deliberately not the smallest plausible number: a low guess here derives a
- * ceiling under the floor and reproduces `P-32`, and the estimate is replaced by measurement
- * within one interval anyway.
+ * `icmp.ping` after `P-07` — the type we ship, and a fair stand-in for anything that waits for a
+ * packet. Deliberately not the smallest plausible number: a low guess derives a ceiling under
+ * the floor and reproduces `P-32`, and measurement replaces it within one interval anyway.
+ *
+ * Imported rather than retyped (`P-35`): this constant existing in three files under three names
+ * is what let `P-31` and `P-32` happen.
  */
-const ASSUMED_CHECK_MS = 600;
+const ASSUMED_CHECK_MS = ICMP_PING_CHECK_MS;
 
 async function main(): Promise<void> {
   const requested = configCheckRequested(process.argv.slice(2));

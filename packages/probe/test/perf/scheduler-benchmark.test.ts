@@ -6,6 +6,13 @@ import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { CheckPool, defaultPoolSize } from '../../src/runner/pool.js';
 import { phaseFor, TimingWheel } from '../../src/scheduler/wheel.js';
+import {
+  DISPATCH_BUDGET_MS,
+  ICMP_PING_CHECK_MS,
+  MODEL_CHECK_MS,
+  V1_TARGET_INTERVAL_SECONDS,
+  V1_TARGET_SENSORS,
+} from '../../src/measured.js';
 
 /**
  * The architecture go/no-go gate (`P-15`).
@@ -38,10 +45,16 @@ import { phaseFor, TimingWheel } from '../../src/scheduler/wheel.js';
 const silent = pino({ level: 'silent' });
 const FIXTURES = fileURLToPath(new URL('../support/check-fixtures.js', import.meta.url));
 
-/** The criterion, verbatim. */
-const SENSORS = 5_000;
-const INTERVAL_SECONDS = 60;
-const P95_BUDGET_MS = 1_000;
+/**
+ * The criterion, verbatim — and taken from `measured.ts` rather than retyped (`P-35`).
+ *
+ * This file is why that module exists. It held its own copy of what an `icmp.ping` costs, `P-07`
+ * changed the measurement, and the copy went on describing a check nobody ran for a week
+ * (`P-31`).
+ */
+const SENSORS = V1_TARGET_SENSORS;
+const INTERVAL_SECONDS = V1_TARGET_INTERVAL_SECONDS;
+const P95_BUDGET_MS = DISPATCH_BUDGET_MS;
 const REQUIRED_CORES = 8;
 
 /**
@@ -51,8 +64,11 @@ const REQUIRED_CORES = 8;
  * that decides everything else: 5,000 sensors on a 60-second interval is 83 checks a second, so
  * 83 × 0.2 = **17 checks in flight at any moment**. A pool smaller than that cannot keep up, no
  * matter how precise the wheel is.
+ *
+ * **The model, deliberately not the shipped type.** `ICMP_PING_CHECK_MS` is what `icmp.ping`
+ * actually costs; conflating the two is what `P-31` was.
  */
-const CHECK_MS = 200;
+const CHECK_MS = MODEL_CHECK_MS;
 
 const minutes = Number(process.env['MS_BENCH_MINUTES'] ?? '1.5');
 const durationMs = minutes * 60_000;
@@ -83,7 +99,7 @@ const durationMs = minutes * 60_000;
  * decides whether the type we ship fits the pool we ship, and the old 3,000 answered a question
  * about a version of `ping` we stopped invoking.
  */
-const ICMP_CHECK_MS = 600;
+const ICMP_CHECK_MS = ICMP_PING_CHECK_MS;
 
 const ICMP_POOL_SIZE = 256;
 const ICMP_PEAK_MB = 2_801;

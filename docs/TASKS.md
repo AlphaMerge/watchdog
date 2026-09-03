@@ -4295,7 +4295,7 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
-- [ ] **P-35 — A measured number is copied into four files and nothing notices when it
+- [x] **P-35 — A measured number is copied into four files and nothing notices when it
       changes** · M · P-31 · **Four defects in one day, all the same shape.** Each came from a
       correct measurement that a later, equally correct measurement silently invalidated:
 
@@ -4331,6 +4331,36 @@ because each is a decision rather than a defect:
       Scope it to the numbers that have already bitten rather than every figure in `docs/` — the
       goal is that the next `P-07` cannot land without the four places that depend on it moving
       or breaking.
+
+      **`packages/probe/src/measured.ts`, and the goal is met literally.** Raising
+      `ICMP_PING_CHECK_MS` from 600 to 900 in that one file fails
+      `keeps up with the v1 target in the sensor type we ship` immediately — at 900 ms the floor
+      is `84.1 × 0.9 = 75.7` and the default of 64 is under it. That is the exact scenario that
+      played out silently over a week the first time.
+
+      Six literals across five files became imports:
+
+      | Was | Where |
+      | --- | --- |
+      | `600` / `0.6` under three names | `main.ts`, `scheduler-benchmark.test.ts`, `check-pool.test.ts` |
+      | `5_000` / `60` / `5_000 / 60` | those two tests plus `timing-wheel.test.ts` and `reconnect-soak.test.ts` |
+      | `1_000` dispatch budget, `200` model check, `1.3` margin | the benchmark and `main.ts` |
+
+      **What is deliberately *not* collapsed**: `MODEL_CHECK_MS` (200) stays a separate constant
+      from `ICMP_PING_CHECK_MS` (600). They are numerically unrelated and conceptually adjacent,
+      which is precisely the confusion `P-31` was — a benchmark that thought its model was the
+      shipped type. Two names, two doc comments, each naming its own finding.
+
+      **`littleFloor(burst, checkMs)` is a function, not a constant**, and that is the second
+      half of the idea. The bound `sizing.md` was missing is a *relationship* between two
+      measurements, and a relationship survives both of them changing — the same reason `P-32`'s
+      test asserts the default clears the floor rather than that it equals 64.
+
+      Left for whoever wants it: the prose. `sizing.md`'s worked examples are still arithmetic
+      typed by hand, and `H-07` already shows the shape of the fix — `sensor-reference.md` and
+      `api-reference.md` are generated and fail the build when they drift. That is a bigger job
+      than this ticket and it is not what bit us; the numbers the *code* depends on are now in
+      one place, which is where all four defects came from.
 
 - [x] **P-34 — The pool ceiling should come from the checks assigned, not from one constant** ·
       L · P-32 · `defaultPoolSize()` is one number for every workload, and `P-32` showed what

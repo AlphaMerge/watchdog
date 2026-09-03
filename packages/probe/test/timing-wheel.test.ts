@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
 import { phaseFor, TimingWheel, type ScheduledTask } from '../src/scheduler/wheel.js';
+import { V1_TARGET_BURST } from '../src/measured.js';
 
 const silent = pino({ level: 'silent' });
 const SECOND = 1_000_000_000n;
@@ -73,7 +74,7 @@ describe('phase spreading', () => {
       buckets[phase] = (buckets[phase] ?? 0) + 1;
     }
 
-    const ideal = 5_000 / 60;
+    const ideal = V1_TARGET_BURST;
     const worst = Math.max(...buckets);
     assert.ok(
       buckets.every((count) => count > 0),
