@@ -4140,7 +4140,7 @@ because each is a decision rather than a defect:
       requirement and fail with a sentence rather than a signal. Do not just raise Docker's memory
       — that fixes one laptop and leaves the next one with a silent kill.
 
-- [ ] **P-29 — The serial tree build is over Phase 1's 30-second budget** · M · S-16 · Phase 1's
+- [x] **P-29 — The serial tree build is over Phase 1's 30-second budget** · M · S-16 · Phase 1's
       exit criterion is **5,000 objects through the API in under 30 seconds**, and
       `tree-build-performance.test.ts` now fails it. Three runs on 2026-09-03 with `ms-server`
       stopped: **31.5 s, 33.0 s, 35.4 s** — −5%, −10% and −18% against the budget
@@ -4169,6 +4169,59 @@ because each is a decision rather than a defect:
       pays per-request costs 5,000 times, and the bulk route exists because that is the wrong
       shape for a client to use. If it is not real, the ticket is still worth its keep for saying
       so with numbers.
+
+      **It was not a regression, and the profile said what it was instead.** A `--cpu-prof` run
+      came out at **28.7 s — the fastest of the lot, with the profiler attached** — against the
+      **28.8 s** recorded on 2026-08-29. Nothing had got slower since. What the profile showed is
+      that the process is **63.6% idle**: the serial path waits on the database and barely
+      computes. So the ticket's premise ("something regressed") was wrong and its subject was
+      real — the budget has had ~4% margin since Phase 3, and a host with ~20% run-to-run
+      variance turns that into a coin flip.
+
+      **Counted rather than guessed**: one sensor create made **11 database round trips**.
+
+          BEGIN · advisory lock · parent check · INSERT object · INSERT sensor_config
+          · read the object · INSERT channel · read the version again · pause guard
+          · INSERT audit · COMMIT
+
+      Two of those exist only because of ordering. Declaring a sensor's channels bumps the
+      owner's version by trigger, so `create` read the object, `createChannels` re-read the
+      version, and the service patched one into the other — the code said so in a comment about
+      an ETag that would 412 on its own first write.
+
+      **Fixed by reading once, after the object is finished.** `ObjectRepository.insert` writes
+      and returns the id; the service reads the assembled detail after the channels exist, where
+      the version is right by construction rather than patched. **11 → 10 round trips, and
+      4.15 → 3.71 ms a create measured in-process (−10.6%)**, which is the controlled number —
+      no HTTP, no machine noise.
+
+      End to end, `ms-server` stopped, before → after:
+
+      | | Runs | Best |
+      | --- | --- | --- |
+      | before | 28.7 (profiled), 31.5, 33.0, 35.4 s | 28.7 s |
+      | after | **26.1, 28.3, 28.8 s** | **26.1 s** |
+
+      **Three for three inside the budget**, where before it was one for four and that one had a
+      profiler attached. The −9% end to end matches the −10.6% measured on the database portion,
+      which is about three quarters of the time.
+
+      **Two bigger fusions were tried and rejected, which is worth writing down.** Folding
+      `INSERT sensor_config` into the object INSERT as a data-modifying CTE looks like a free
+      round trip and is not: `sensor_config_kind_check` is a BEFORE INSERT trigger that does
+      `SELECT kind FROM object WHERE id = NEW.object_id`, and a sibling CTE's insert is not in
+      its snapshot. It would need a migration to change the trigger, which is a different ticket.
+      Fusing the pause guard into the object read would work but puts the pause concern inside a
+      generic read, and the round trip is not worth that.
+
+      **The residual, stated plainly:** margin is now 4–13% against a machine that varies ~20%,
+      so this is better rather than settled. The honest next lever is the remaining ten round
+      trips, not the budget — and `P-19`'s bulk path already does the same 5,000 objects in
+      2.5 s with 92% spare, which is what a client provisioning a tree should be using.
+
+      The new test does not assert the round-trip count; it asserts the property the reordering
+      could break — a created sensor's version works as the precondition for its own first write
+      — and it was proved to fail against a planted stale-read mutant before being kept.
 
 - [x] **P-28 — A probe at the v1 target could never reconnect** · M · P-27 · `config-set` caps
       `sensors` at 5,000 and the frame decoder refuses a message over 4 MB, while

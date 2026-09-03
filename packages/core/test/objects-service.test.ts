@@ -134,6 +134,40 @@ describe(
         assert.equal(h.audit.recorded.length, 1);
         assert.equal(h.audit.recorded[0]?.action, 'object.created');
       });
+
+      it('hands back a sensor version its own first write can use (P-29)', async () => {
+        // **The trap this guards.** Declaring a sensor's channels bumps the owner's version by
+        // trigger, so a version read before the channels exist is stale the moment it is
+        // returned — and a caller doing the obvious thing, creating a sensor and immediately
+        // updating it with the version it was just given, would get a 412 it could not explain.
+        //
+        // `create` used to read the object early and patch the version in from a second read.
+        // It now reads once, after the writes. This test does not care which: it asserts the
+        // property both were for, so the next person to reorder that path finds out here.
+        const d = await device(probeId, 'switch-02');
+        const created = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: d,
+          name: 'Ping',
+          sensorType: 'icmp.ping',
+          params: { count: 4 },
+        });
+
+        const [row] = await scratch.db.query<{ version: number }>(
+          'SELECT version FROM object WHERE id = $1',
+          [created.id],
+        );
+        assert.equal(created.version, row?.version, 'the version returned is the version stored');
+
+        // And the property that actually matters to a caller: it works as a precondition.
+        const updated = await h.service.update(
+          testActor,
+          created.id,
+          { kind: 'sensor', name: 'Ping, renamed' },
+          { kind: 'version', expected: created.version },
+        );
+        assert.equal(updated.name, 'Ping, renamed');
+      });
     });
 
     // ── version / ETag ────────────────────────────────────────────────────────────────────

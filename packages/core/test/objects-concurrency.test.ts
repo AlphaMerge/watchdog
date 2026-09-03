@@ -148,7 +148,7 @@ describe(
       // Client 1 creates a sensor inside the target subtree and holds it open, under the
       // shared lock that `create` takes.
       const client1 = h.service.batch('shared', async (q, repo) => {
-        await repo.create(q, {
+        await repo.insert(q, {
           kind: 'sensor',
           parentId: d,
           name: 'Late arrival',

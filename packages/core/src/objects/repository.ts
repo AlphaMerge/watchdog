@@ -513,8 +513,8 @@ export class ObjectRepository {
     q: Queryable,
     sensorId: ObjectId,
     drafts: readonly ChannelDraft[],
-  ): Promise<{ created: number; ownerVersion: number | null }> {
-    if (drafts.length === 0) return { created: 0, ownerVersion: null };
+  ): Promise<number> {
+    if (drafts.length === 0) return 0;
     const rows = await q.query<{ id: number }>(
       `INSERT INTO channel (sensor_id, key, name, unit, is_primary, lookup_id, counter_bits,
                             limits, limits_source)
@@ -536,11 +536,7 @@ export class ObjectRepository {
         drafts.map((draft) => declaredLimitsJson(draft)),
       ],
     );
-    // A primary-key lookup, and only on sensor creation.
-    const [owner] = await q.query<{ version: number }>('SELECT version FROM object WHERE id = $1', [
-      sensorId,
-    ]);
-    return { created: rows.length, ownerVersion: owner === undefined ? null : owner.version };
+    return rows.length;
   }
 
   /**
@@ -903,7 +899,16 @@ export class ObjectRepository {
 
   // ── writes ───────────────────────────────────────────────────────────────────────────────
 
-  async create(q: Queryable, input: CreateObjectInput): Promise<ObjectDetail> {
+  /**
+   * Writes the object row and its kind's configuration row, and returns the id.
+   *
+   * **Deliberately does not read the object back.** It used to, and the detail it returned was
+   * wrong by the time the caller had it: declaring a sensor's channels bumps the owner's version
+   * by trigger, so `create` read the row, `createChannels` re-read the version, and the service
+   * patched one into the other. Two reads to answer what one read after the writes answers
+   * exactly. The caller does the read when the object is finished (`P-29`).
+   */
+  async insert(q: Queryable, input: CreateObjectInput): Promise<ObjectId> {
     const rows = await q.query<{ id: string }>(
       `INSERT INTO object (parent_id, kind, name, tags, priority, comments)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
@@ -938,9 +943,7 @@ export class ObjectRepository {
       ]);
     }
 
-    const created = await this.get(q, id);
-    if (created === null) throw notFound(id);
-    return created;
+    return id;
   }
 
   /**
