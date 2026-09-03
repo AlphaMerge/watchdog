@@ -124,7 +124,7 @@ export function MappingPreview({
   }, [open, document, contentType, paramsKey, typeId]);
 
   return (
-    <section className="rounded border border-border bg-surface-muted">
+    <section className="border border-border bg-surface-muted">
       <button
         type="button"
         aria-expanded={open}
@@ -160,7 +160,7 @@ export function MappingPreview({
                 setDocument(event.target.value);
               }}
               placeholder={'{\n  "queue": { "depth": 12 }\n}'}
-              className="mt-1 w-full rounded border border-control bg-surface p-2 font-mono text-xs"
+              className="mt-1 w-full border border-control bg-surface p-2 font-mono text-xs"
             />
           </div>
 
@@ -176,7 +176,7 @@ export function MappingPreview({
                 setContentType(event.target.value);
               }}
               placeholder="application/json"
-              className="mt-1 w-full rounded border border-control bg-surface px-2 py-1 font-mono text-xs"
+              className="mt-1 w-full border border-control bg-surface px-2 py-1 font-mono text-xs"
             />
             <p className="mt-1 text-xs text-text-muted">
               Only matters where the format is set to <code className="font-mono">auto</code> and
@@ -254,7 +254,7 @@ function Result({ result }: { result: PreviewResult }): React.JSX.Element {
       )}
 
       {result.problems.length > 0 && (
-        <div className="rounded border border-down-border bg-down-bg p-2">
+        <div className="border border-down-border bg-down-bg p-2">
           <p className="text-xs font-medium text-down-fg">As it stands, this check would fail:</p>
           <ul className="mt-1 list-inside list-disc text-xs text-down-fg">
             {result.problems.map((problem, at) => (
@@ -293,7 +293,7 @@ function Row({ row }: { row: PreviewRow }): React.JSX.Element {
               {row.selected.map((one, at) => (
                 <code
                   key={`${one.text}-${String(at)}`}
-                  className={`rounded border px-1 font-mono ${
+                  className={`border px-1 font-mono ${
                     one.numeric
                       ? 'border-border bg-surface'
                       : 'border-warning-border bg-warning-bg text-warning-fg'

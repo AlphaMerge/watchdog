@@ -78,6 +78,34 @@ Every `-fg` token meets WCAG 2.1 AA against its own surface in both themes. Colo
 only signal: `StatusBadge` pairs each of the six `WORKFLOW.MD` §4 states with a distinct glyph
 and its name, which is what makes it readable to a screen reader and to a colour-blind operator.
 
+### The visual language
+
+Monospace, warm paper, hairline rules, square corners, one accent. Four rules, each of which is
+load-bearing — the reasoning for all of them is in the header comment of `src/index.css`:
+
+1. **Hierarchy comes from case, tracking and colour, not from weight or size.** A section label
+   is `.ms-label` — uppercase, tracked out, muted, and the same size as the text under it. There
+   is no `font-semibold` in the app: a system monospace stack has one usable bold, and spending
+   it on a card header leaves nothing for anything urgent.
+2. **A rule beats a box.** Regions separate with a 1px border on one edge. The only two shadows
+   are the chart tooltip and the combobox list, both of which float over content.
+3. **Nothing is rounded**, and this is enforced rather than agreed: the Tailwind radius scale is
+   zeroed in `@theme`, so a pasted `rounded-lg` comes out square instead of quietly reintroducing
+   a corner.
+4. **The accent means "act on this"** — links, focus, the current section, a search match. It is
+   never the colour of a _state_; the six state tokens are for that.
+
+Uppercase is for fixed chrome only. A heading that can hold an object's name — `PageTitle`, the
+chart group headings — stays in sentence case, because uppercasing a device called `db-01.ber`
+states something about it that is not true.
+
+No webfont. `ms-core` serves this UI to a browser on a network that may have no route to the
+internet, so the font stack is the platform's own monospace and `fonts.googleapis.com` is a
+dependency that would fail closed on exactly the install that most needs the console to open.
+
+Quiet is a colour, never an `opacity`. Dimming text that already carries `text-text-muted` is
+what put seven nodes under 4.5:1 in the light theme; the muted token _is_ the quiet tone.
+
 ## Where the tricky parts live
 
 Each of these carries its reasoning in a header comment; read that before changing it.

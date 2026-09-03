@@ -131,7 +131,7 @@ export function AddSensor(): React.JSX.Element {
               onChange={(event) => {
                 setName(event.target.value);
               }}
-              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
             />
           </div>
 
@@ -146,7 +146,7 @@ export function AddSensor(): React.JSX.Element {
               onChange={(event) => {
                 pickType(event.target.value);
               }}
-              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
             >
               <option value="">Choose a type…</option>
               {catalogue.map((type) => (
@@ -187,7 +187,7 @@ export function AddSensor(): React.JSX.Element {
             <button
               type="submit"
               disabled={saving || !ready}
-              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
             >
               {saving ? 'Creating…' : 'Create sensor'}
             </button>
@@ -197,7 +197,7 @@ export function AddSensor(): React.JSX.Element {
               onClick={() => {
                 void navigate(`/objects/${String(parent.data.id)}`);
               }}
-              className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+              className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
             >
               Cancel
             </button>
@@ -212,7 +212,7 @@ export function AddSensor(): React.JSX.Element {
             <p className="text-xs text-down-fg">
               {failed.message}
               {failed.correlationId !== undefined && (
-                <span className="ml-2 font-mono opacity-75"> {failed.correlationId}</span>
+                <span className="ml-2 font-mono"> {failed.correlationId}</span>
               )}
             </p>
           )}

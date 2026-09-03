@@ -131,7 +131,7 @@ function Setting({
   };
 
   return (
-    <div className="space-y-1.5 rounded border border-border px-3 py-2">
+    <div className="space-y-1.5 border border-border px-3 py-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <label htmlFor={id} className="text-sm font-medium text-text">
           {labelFor(setting.key.slice(prefix.length + 1))}
@@ -177,7 +177,7 @@ function Setting({
                   }),
                 );
               }}
-              className="rounded border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40"
+              className="border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40"
             >
               {busy ? 'Saving…' : 'Save'}
             </button>

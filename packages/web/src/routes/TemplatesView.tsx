@@ -73,7 +73,7 @@ export function TemplatesView(): React.JSX.Element {
           onClick={() => {
             open(null);
           }}
-          className="ml-auto rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast"
+          className="ml-auto border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast"
         >
           New template
         </button>
@@ -114,7 +114,7 @@ export function TemplatesView(): React.JSX.Element {
                 <span className="text-xs text-text-muted">{template.summary}</span>
                 {!template.enabled && (
                   <span
-                    className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted"
+                    className="border border-border px-1.5 py-0.5 text-xs text-text-muted"
                     title="Configured, but it will never send"
                   >
                     disabled
@@ -231,7 +231,7 @@ function Editor({
                 });
                 setReplacing(new Set());
               }}
-              className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+              className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
             >
               {methods.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -244,7 +244,7 @@ function Editor({
             )}
           </div>
 
-          <fieldset className="space-y-4 rounded border border-border px-3 pb-3 pt-1">
+          <fieldset className="space-y-4 border border-border px-3 pb-3 pt-1">
             <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
               {method?.name ?? 'Method'} settings
             </legend>
@@ -320,7 +320,7 @@ function Editor({
                 onChange={(event) => {
                   setDraft({ ...draft, summarisation: event.target.value });
                 }}
-                className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+                className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
               >
                 {modes.data.items.map((mode) => (
                   <option key={mode.id} value={mode.id}>
@@ -354,7 +354,7 @@ function Editor({
                     scheduleId: event.target.value === '' ? null : Number(event.target.value),
                   });
                 }}
-                className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+                className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
               >
                 <option value="">always</option>
                 {schedules.data.items.map((schedule) => (
@@ -372,7 +372,7 @@ function Editor({
                     onChange={(event) => {
                       setDraft({ ...draft, whenInactive: event.target.value });
                     }}
-                    className="ml-2 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+                    className="ml-2 border border-control bg-surface px-2 py-1 text-sm text-text"
                   >
                     <option value="queue">queued until the window opens</option>
                     <option value="discard">discarded</option>
@@ -386,7 +386,7 @@ function Editor({
             <button
               type="submit"
               disabled={saving || draft.name.trim() === ''}
-              className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
             >
               {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
             </button>
@@ -394,7 +394,7 @@ function Editor({
               type="button"
               disabled={saving}
               onClick={onCancel}
-              className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+              className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
             >
               Cancel
             </button>
@@ -506,7 +506,7 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
   }, [draft, chosen, incomplete]);
 
   return (
-    <div className="space-y-2 rounded border border-border p-3">
+    <div className="space-y-2 border border-border p-3">
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-medium text-text">Preview</h3>
         {sensors.status === 'ready' && sensors.data.items.length > 0 && (
@@ -520,7 +520,7 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
               onChange={(event) => {
                 setSensorId(Number(event.target.value));
               }}
-              className="rounded border border-control bg-surface px-1.5 py-0.5 text-xs text-text"
+              className="border border-control bg-surface px-1.5 py-0.5 text-xs text-text"
             >
               {sensors.data.items.map((sensor) => (
                 <option key={sensor.id} value={sensor.id}>
@@ -548,7 +548,7 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
       ) : (
         <div className="space-y-2">
           <p className="text-sm font-medium text-text">{preview.subject}</p>
-          <pre className="whitespace-pre-wrap break-words rounded bg-surface-muted p-2 text-xs text-text">
+          <pre className="whitespace-pre-wrap break-words bg-surface-muted p-2 text-xs text-text">
             {preview.body}
           </pre>
         </div>
@@ -567,7 +567,7 @@ function TestSend({ template }: { template: TemplateView }): React.JSX.Element {
   const [sending, setSending] = useState(false);
 
   return (
-    <div className="space-y-2 rounded border border-border p-3">
+    <div className="space-y-2 border border-border p-3">
       <h3 className="text-sm font-medium text-text">Test send</h3>
       <p className="text-xs text-warning-fg">
         This really sends, to the real recipients, through the real transport. Testing an on-call
@@ -592,7 +592,7 @@ function TestSend({ template }: { template: TemplateView }): React.JSX.Element {
               setSending(false);
             });
         }}
-        className="rounded border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+        className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
       >
         {sending ? 'Sending…' : 'Send a test'}
       </button>
@@ -635,7 +635,7 @@ function Delete({
         onClick={() => {
           setConfirming(true);
         }}
-        className="ml-auto rounded border border-down-fg px-3 py-1 text-sm text-down-fg"
+        className="ml-auto border border-down-fg px-3 py-1 text-sm text-down-fg"
       >
         Delete
       </button>
@@ -671,7 +671,7 @@ function Delete({
             setConfirming(false);
             setFailed(null);
           }}
-          className="rounded border border-control px-2 py-1 text-text-muted"
+          className="border border-control px-2 py-1 text-text-muted"
         >
           Close
         </button>
@@ -695,7 +695,7 @@ function Delete({
               );
             });
         }}
-        className="rounded border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
+        className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
       >
         Yes, delete
       </button>
@@ -705,7 +705,7 @@ function Delete({
           setConfirming(false);
           setFailed(null);
         }}
-        className="rounded border border-control px-2 py-1 text-xs text-text-muted"
+        className="border border-control px-2 py-1 text-xs text-text-muted"
       >
         Keep it
       </button>
@@ -715,7 +715,7 @@ function Delete({
 
 function Placeholders({ items }: { items: readonly PlaceholderInfo[] }): React.JSX.Element {
   return (
-    <details className="rounded border border-border px-3 py-2">
+    <details className="border border-border px-3 py-2">
       <summary className="cursor-pointer text-xs text-text-muted">
         {items.length} placeholders
       </summary>
@@ -739,7 +739,7 @@ function Recipients({
   onChange: (next: TemplateRecipient[]) => void;
 }): React.JSX.Element {
   return (
-    <fieldset className="space-y-2 rounded border border-border px-3 pb-3 pt-1">
+    <fieldset className="space-y-2 border border-border px-3 pb-3 pt-1">
       <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
         Recipients
       </legend>
@@ -761,14 +761,14 @@ function Recipients({
               next[index] = { ...recipient, value: event.target.value };
               onChange(next);
             }}
-            className="w-64 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+            className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
           />
           <button
             type="button"
             onClick={() => {
               onChange(items.filter((_, at) => at !== index));
             }}
-            className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
+            className="border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
           >
             Remove
           </button>
@@ -779,7 +779,7 @@ function Recipients({
         onClick={() => {
           onChange([...items, { kind: 'address', value: '' }]);
         }}
-        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+        className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
       >
         Add a recipient
       </button>
@@ -826,7 +826,7 @@ function TextField({
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        className="w-full rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+        className="w-full border border-control bg-surface px-2 py-1 text-sm text-text"
       />
     </div>
   );
@@ -854,7 +854,7 @@ function TextArea({
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        className="w-full rounded border border-control bg-surface px-2 py-1 font-mono text-sm text-text"
+        className="w-full border border-control bg-surface px-2 py-1 font-mono text-sm text-text"
       />
     </div>
   );
@@ -888,7 +888,7 @@ function NumberField({
         onChange={(event) => {
           onChange(Number(event.target.value));
         }}
-        className="w-24 rounded border border-control bg-surface px-2 py-1 text-sm tabular-nums text-text"
+        className="w-24 border border-control bg-surface px-2 py-1 text-sm tabular-nums text-text"
       />
     </div>
   );

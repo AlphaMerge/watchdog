@@ -102,7 +102,7 @@ function Field(props: FieldProps): React.JSX.Element {
   }
   if (field.kind === 'object') {
     return (
-      <fieldset className="rounded border border-border px-3 pb-3 pt-1">
+      <fieldset className="border border-border px-3 pb-3 pt-1">
         <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
           {field.label}
         </legend>
@@ -275,7 +275,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
   const atLimit = field.schema.maxItems !== undefined && entries.length >= field.schema.maxItems;
 
   return (
-    <fieldset className="rounded border border-border px-3 pb-3 pt-1">
+    <fieldset className="border border-border px-3 pb-3 pt-1">
       <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
         {field.label}
       </legend>
@@ -293,7 +293,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
               // derived from their contents would remount a control on every keystroke — which
               // takes the caret with it.
               key={index}
-              className="rounded border border-border-subtle p-2"
+              className="border border-border-subtle p-2"
             >
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-text-muted">
@@ -338,7 +338,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
         onClick={() => {
           replace([...entries, newEntryFor(items)]);
         }}
-        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text disabled:opacity-50"
+        className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text disabled:opacity-50"
       >
         Add {entryLabel.toLowerCase()}
       </button>
@@ -416,7 +416,7 @@ function EntryButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="rounded border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+      className="border border-control px-1.5 py-0.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
     >
       {text}
     </button>
@@ -468,7 +468,7 @@ function WriteOnly({
           onChange={(event) => {
             onValue(event.target.value === '' ? undefined : event.target.value);
           }}
-          className="w-64 rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+          className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
         />
         {isSet && (
           <button
@@ -478,7 +478,7 @@ function WriteOnly({
               onValue(undefined);
               onReplace(field.path, false);
             }}
-            className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+            className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
           >
             Keep the current one
           </button>
@@ -490,7 +490,7 @@ function WriteOnly({
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span
-        className="rounded border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg"
+        className="border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg"
         id={id}
       >
         set, write-only
@@ -501,7 +501,7 @@ function WriteOnly({
         onClick={() => {
           onReplace(field.path, true);
         }}
-        className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+        className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
       >
         Replace
       </button>
@@ -510,7 +510,7 @@ function WriteOnly({
           type="button"
           disabled={disabled}
           onClick={onClear}
-          className="rounded border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+          className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
         >
           Clear
         </button>

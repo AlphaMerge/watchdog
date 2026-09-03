@@ -274,7 +274,7 @@ function StartPanel({
             {orderedLevels(preview.levels).map((level) => (
               <label
                 key={level.id}
-                className="flex cursor-pointer gap-3 rounded border border-border p-3 hover:bg-surface"
+                className="flex cursor-pointer gap-3 border border-border p-3 hover:bg-surface"
               >
                 <input
                   type="radio"
@@ -292,7 +292,7 @@ function StartPanel({
                       {estimateText(level.minSeconds, level.maxSeconds)}
                     </span>
                     {isLong(level) && (
-                      <span className="rounded bg-warning-bg px-1.5 py-0.5 text-xs text-warning-fg">
+                      <span className="bg-warning-bg px-1.5 py-0.5 text-xs text-warning-fg">
                         long enough to walk away from
                       </span>
                     )}
@@ -349,7 +349,7 @@ function StartPanel({
           type="button"
           disabled={blocked !== null || starting}
           onClick={start}
-          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Start discovery'}
         </button>
@@ -381,7 +381,7 @@ function TemplatePicker({
         None ticked means all of them, which is what you want unless you are deliberately narrowing.
         A run filtered to templates that match nothing creates the device and no sensors.
       </p>
-      <div className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded border border-border p-2">
+      <div className="mt-2 max-h-40 space-y-1 overflow-y-auto border border-border p-2">
         {templates.length === 0 && <p className="text-sm text-text-muted">No templates loaded.</p>}
         {templates.map((template) => (
           <label key={template.id} className="flex items-center gap-2 text-sm text-text">
@@ -501,7 +501,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
             type="button"
             onClick={cancel}
             disabled={cancelling}
-            className="rounded border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+            className="border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
           >
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
@@ -525,7 +525,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
       )}
 
       <div
-        className="mt-3 h-2 w-full overflow-hidden rounded bg-border"
+        className="mt-3 h-2 w-full overflow-hidden bg-border"
         role="progressbar"
         aria-valuenow={percent}
         aria-valuemin={0}
@@ -548,7 +548,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
       {elapsed !== null && <p className="mt-2 text-xs text-text-muted">{elapsed} elapsed</p>}
 
       {summary !== null && summary.errors.length > 0 && (
-        <div className="mt-3 rounded border border-border p-3">
+        <div className="mt-3 border border-border p-3">
           <h3 className="text-sm font-medium text-text">
             {summary.errors.length} address{summary.errors.length === 1 ? '' : 'es'} had problems
           </h3>
@@ -603,9 +603,7 @@ function RecentRuns({
               {run.found.toLocaleString()} answered, {run.devicesCreated.toLocaleString()} created
             </span>
             {run.scheduleId !== null && (
-              <span className="rounded bg-surface px-1.5 py-0.5 text-xs text-text-muted">
-                scheduled
-              </span>
+              <span className="bg-surface px-1.5 py-0.5 text-xs text-text-muted">scheduled</span>
             )}
             <span className="ml-auto text-xs text-text-muted">
               {new Date(run.createdAt).toLocaleString()}
@@ -619,8 +617,17 @@ function RecentRuns({
 
 // ── bits ────────────────────────────────────────────────────────────────────────────────────
 
-const INPUT =
-  'w-full rounded border border-border bg-surface px-2 py-1 text-sm text-text focus:border-accent focus:outline-none';
+/*
+ * `border-control`, and no `focus:outline-none` — this was the one U-11 missed.
+ *
+ * It carried `border-border focus:border-accent focus:outline-none`, which is both halves of the
+ * defect that pass fixed everywhere else: the divider grey on the edge of an input is 1.30:1
+ * against the surface, under 1.4.11's 3:1 for a control boundary, and removing the outline in
+ * favour of a border colour leaves nothing at all in forced-colors mode, where the border is
+ * repainted by the system. The one `:focus-visible` rule in `index.css` is the indicator; a
+ * control's job is to not take it away.
+ */
+const INPUT = 'w-full border border-control bg-surface px-2 py-1 text-sm text-text';
 const SELECT = INPUT;
 
 /**

@@ -60,7 +60,7 @@ export function TriggersPanel({
   return (
     <div className="space-y-4">
       {!inheritsTriggers && (
-        <p className="rounded border border-warning-border bg-warning-bg px-3 py-2 text-sm text-warning-fg">
+        <p className="border border-warning-border bg-warning-bg px-3 py-2 text-sm text-warning-fg">
           This object does not inherit triggers. Nothing defined above it applies here, or to
           anything beneath it.
         </p>
@@ -78,7 +78,7 @@ export function TriggersPanel({
                 setAdding(true);
                 setEditing(null);
               }}
-              className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
+              className="border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
             >
               + Add a trigger
             </button>
@@ -172,7 +172,7 @@ function OwnRow({
         <span className="text-sm text-text-muted">{trigger.summary}</span>
         {!trigger.enabled && (
           <span
-            className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted"
+            className="border border-border px-1.5 py-0.5 text-xs text-text-muted"
             title="Configured, but it will not fire"
           >
             disabled
@@ -183,7 +183,7 @@ function OwnRow({
           <button
             type="button"
             onClick={onEdit}
-            className="rounded border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
+            className="border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
           >
             Edit
           </button>
@@ -202,7 +202,7 @@ function OwnRow({
                       );
                     });
                 }}
-                className="rounded border border-down-border bg-down-bg px-2 py-0.5 text-xs text-down-fg"
+                className="border border-down-border bg-down-bg px-2 py-0.5 text-xs text-down-fg"
               >
                 Yes, delete
               </button>
@@ -211,7 +211,7 @@ function OwnRow({
                 onClick={() => {
                   setConfirming(false);
                 }}
-                className="rounded border border-control px-2 py-0.5 text-xs text-text-muted"
+                className="border border-control px-2 py-0.5 text-xs text-text-muted"
               >
                 Keep
               </button>
@@ -222,7 +222,7 @@ function OwnRow({
               onClick={() => {
                 setConfirming(true);
               }}
-              className="rounded border border-control px-2 py-0.5 text-xs text-down-fg"
+              className="border border-control px-2 py-0.5 text-xs text-down-fg"
             >
               Delete
             </button>
@@ -332,7 +332,7 @@ function TriggerForm({
 
   return (
     <form
-      className="space-y-3 rounded border border-accent px-3 py-3"
+      className="space-y-3 border border-accent px-3 py-3"
       onSubmit={(event) => {
         event.preventDefault();
         save();
@@ -351,7 +351,7 @@ function TriggerForm({
             setKindId(event.target.value);
             setSettings(seedFrom(picked));
           }}
-          className="w-full max-w-md rounded border border-control bg-surface px-2 py-1 text-sm text-text"
+          className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
         >
           {kinds.map((entry) => (
             <option key={entry.id} value={entry.id}>
@@ -408,7 +408,7 @@ function TriggerForm({
         <button
           type="submit"
           disabled={saving}
-          className="rounded border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           {saving ? 'Saving…' : trigger === undefined ? 'Add trigger' : 'Save trigger'}
         </button>
@@ -416,7 +416,7 @@ function TriggerForm({
           type="button"
           disabled={saving}
           onClick={onCancel}
-          className="rounded border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+          className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
         >
           Cancel
         </button>
@@ -470,7 +470,7 @@ function Group({
               <span className="text-sm text-text-muted">{trigger.summary}</span>
               {!trigger.enabled && (
                 <span
-                  className="rounded border border-border px-1.5 py-0.5 text-xs text-text-muted"
+                  className="border border-border px-1.5 py-0.5 text-xs text-text-muted"
                   title="Configured, but it will not fire"
                 >
                   disabled

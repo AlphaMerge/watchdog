@@ -55,10 +55,20 @@ export interface PageTitleProps {
  * on arrival: the announcement is the page's name. `tabIndex={-1}` makes it focusable
  * programmatically without adding a stop to the tab order.
  */
+/*
+ * Sentence case, and deliberately not the uppercase label the rest of the chrome uses.
+ *
+ * Two of the ten headings are data — `ObjectDetailView` renders the object's own name and
+ * `AddSensor` renders its parent's — and uppercasing a device called `db-01.ber` states
+ * something about it that is not true. Uppercase is for fixed chrome; a heading that can hold a
+ * hostname is not fixed chrome. Size carries it instead, which is also why there is no bold:
+ * at `text-xl` against a page set in `text-sm`, weight would be the third signal for a
+ * distinction two have already made.
+ */
 export function PageTitle({
   title,
   children,
-  className = 'text-xl font-semibold text-text',
+  className = 'text-xl tracking-[-0.02em] text-text',
 }: PageTitleProps): React.JSX.Element {
   const { pathname } = useLocation();
   const heading = useRef<HTMLHeadingElement>(null);
