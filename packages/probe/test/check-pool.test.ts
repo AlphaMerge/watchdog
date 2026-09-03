@@ -530,6 +530,97 @@ describe('sizing the ceiling from the work (P-34)', () => {
   });
 });
 
+describe('session-pool counters (P-36)', () => {
+  const SESSION_FIXTURES = join(import.meta.dirname, 'support', 'session-fixtures.js');
+
+  async function sessionPool(size: number, minSize = size, idleShrinkMs = 0) {
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: silent,
+      size,
+      minSize,
+      idleShrinkMs,
+      registryModule: SESSION_FIXTURES,
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    await pool.start();
+    return { pool, seen };
+  }
+
+  it('reports nothing at all when the registry keeps no pools', async () => {
+    // The case that must not become zeros. A build with no session pools has nothing to say
+    // about them, and a channel reading 0 open sessions is a claim, not an absence.
+    const { pool, seen } = await poolOf({ size: 2, minSize: 2 });
+    pool.submit(request(1, 'test.ok'));
+    await until(() => seen.length === 1, 'a check');
+
+    assert.equal(pool.sessionCounters(), undefined);
+    assert.equal(pool.stats().sessions, undefined, 'and it is absent from the stats too');
+  });
+
+  it('sums what every worker reports, because each thread holds its own pools', async () => {
+    const { pool, seen } = await sessionPool(3);
+    for (let i = 0; i < 3; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 60 }));
+    await until(() => seen.length === 3, 'one check on each worker');
+
+    const counters = pool.sessionCounters();
+    assert.ok(counters !== undefined, 'the registry reported');
+    // Every worker says `open: 2`, and three workers ran a check, so a sum is 6 and any single
+    // worker's answer is 2. This is the assertion that would fail if the pool published one
+    // worker's numbers as though they were the probe's.
+    assert.equal(counters.open, 6, `summed across workers, got ${String(counters.open)}`);
+    assert.ok(counters.opened > 0, 'and the cumulative counters came through');
+  });
+
+  it('never lets a cumulative counter fall when a worker goes away', async () => {
+    // **The reason the retired baseline exists.** The published figure is a sum over live
+    // workers, so shrinking the pool would otherwise lower a counter — and a counter that falls
+    // is one an operator cannot put a trigger on.
+    // A pool that *can* shrink: a floor of 1 and a short idle window, since `idleShrinkMs: 0`
+    // means "never give a worker back" and would make this test assert nothing.
+    const { pool, seen } = await sessionPool(3, 1, 50);
+
+    // **Every worker must have reported before one is retired, or this proves nothing.** The
+    // pool starts at its floor and grows, so a burst can finish on two workers while the third
+    // is still spawning — retiring a worker that never ran a check loses no counters, and the
+    // test would pass with the banking removed. An earlier version of it did exactly that.
+    let submitted = 0;
+    await until(() => {
+      if (seen.length === submitted && submitted < 24) {
+        for (let i = 0; i < 3; i += 1)
+          pool.submit(request(submitted + i, 'test.slow', { delayMs: 40 }));
+        submitted += 3;
+      }
+      return pool.sessionCounters()?.open === 6;
+    }, 'all three workers to report');
+
+    const before = pool.sessionCounters();
+    assert.ok(before !== undefined);
+    assert.equal(before.open, 6, 'three workers, two sessions each');
+
+    // Take the ceiling down and let the shrink policy retire the spare workers.
+    pool.setMaxSize(1);
+    await until(() => pool.size < 3, 'the pool to give workers back');
+
+    const after = pool.sessionCounters();
+    assert.ok(after !== undefined, 'still reporting after the shrink');
+    assert.ok(after.open < before.open, 'the gauge fell, so a reporting worker really did go');
+    assert.ok(
+      after.overflowed >= before.overflowed,
+      `overflowed fell from ${String(before.overflowed)} to ${String(after.overflowed)}`,
+    );
+    assert.ok(
+      after.opened >= before.opened,
+      `opened fell from ${String(before.opened)} to ${String(after.opened)}`,
+    );
+    assert.ok(
+      after.evicted >= before.evicted,
+      `evicted fell from ${String(before.evicted)} to ${String(after.evicted)}`,
+    );
+  });
+});
+
 describe('a probe whose checks get slower (P-34)', () => {
   it('raises its ceiling from what it measured, before the backlog grows', async () => {
     // **The loop, rather than its parts.** The tests above prove that the pool learns a

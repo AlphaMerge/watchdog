@@ -59,8 +59,41 @@ export interface ResultMeta {
  * than as a failing check: a missing type fails identically for ever, and counting it with
  * genuine check failures buries a configuration error in a rate that looks like flapping.
  */
+/**
+ * Session-pool counters a registry keeps, summed across every pool it owns (`P-36`).
+ *
+ * **Why this is on the registry and not an import.** The pools live in `@ms/sensors`, and the
+ * worker loads its registry *by path* precisely so it never depends on that package — which is
+ * what lets a test drive the pool with checks that hang and crash on purpose. Reaching for
+ * `snmpPool` from the worker would pull the real catalogue into every fixture run and undo that.
+ * So the registry that owns the pools reports on them, and one that has none says nothing.
+ *
+ * **Cumulative, except `open`.** A worker is retired when the pool shrinks, and its counters go
+ * with it; the pool therefore keeps a retired baseline so the totals it publishes never go
+ * backwards. `open` is a gauge and is meant to fall.
+ */
+export interface SessionCounters {
+  /** Sessions the registry's pools are holding right now, live and idle. */
+  open: number;
+  /** Sessions opened past the configured bound because every existing one was in use. */
+  overflowed: number;
+  /** Sessions closed for being idle longer than the pool's `idleMs`. */
+  evicted: number;
+  /** Sessions opened, ever. With `evicted`, this is how much churn an interval is causing. */
+  opened: number;
+}
+
 export interface CheckRegistry {
   execute(sensorType: string, context: CheckContext): Promise<CheckExecution>;
+  /**
+   * Optional (`P-36`): what this registry's session pools are doing.
+   *
+   * Optional because a fixture registry has no pools and should not have to pretend. The worker
+   * asks after every check and sends whatever comes back, so a registry that does not implement
+   * it costs nothing and reports nothing — and the channel gaps rather than reading zero, which
+   * is `R-06` and the rule that no-data is not zero.
+   */
+  sessionCounters?(): SessionCounters;
 }
 
 /** The shape the worker sniffs for. Kept structural so a test registry need not import one. */

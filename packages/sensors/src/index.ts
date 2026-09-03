@@ -47,6 +47,14 @@ export {
   type TrapVersion,
 } from './support/snmp/trap.js';
 
+// The session pools, exported so the probe can report what they are doing (`P-36`). The pools
+// themselves stay where the transports are; what crosses this boundary is their counters, and
+// only because nothing else in the system could see a bound being passed.
+export { snmpPool } from './support/snmp/pool.js';
+export type { SnmpPoolStats } from './support/snmp/pool.js';
+export { sshPool } from './support/ssh/pool.js';
+export type { SshPoolStats } from './support/ssh/pool.js';
+
 // The same split for syslog (`T-20`): the parser and the renderer are pure functions over plain
 // data, and the sockets live behind the `@ms/sensors/syslog` subpath.
 export {

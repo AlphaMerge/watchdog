@@ -41,15 +41,15 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
- * Version 9 added `spoolStalledMs` to that health report (`H-01`). **The bump is required by
- * `additionalProperties: false` on the health schema**, not by the field itself: a version-9
- * probe sending it to a version-8 core would have every heartbeat rejected by validation, with
- * nothing to say why. `isProtocolCompatible` refuses a peer above this build's version at the
+ * Version 10 adds the session-pool counters to that health report (`P-36`), and version 9 added
+ * `spoolStalledMs` to it (`H-01`). **The bump is required by `additionalProperties: false` on
+ * the health schema**, not by the fields themselves: a newer probe sending them to an older core
+ * would have every heartbeat rejected by validation, with nothing to say why. `isProtocolCompatible` refuses a peer above this build's version at the
  * handshake instead, which is the same trade version 2 made — a clean rejection where an
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 /**
  * The oldest peer version this build still understands.
@@ -306,6 +306,18 @@ export interface ProbeHealthReport {
   refused?: number;
   timedOut?: number;
   workerCrashes?: number;
+  /**
+   * Session-pool counters, summed across the probe's check workers (`P-36`).
+   *
+   * **Absent together or present together**, and absent on a probe whose registry keeps no
+   * session pools at all. `sessionOverflows` is the one with a threshold: the pools open past
+   * their bound rather than fail a check, which is the right trade and is only defensible while
+   * somebody can see it happening.
+   */
+  sessionsOpen?: number;
+  sessionOverflows?: number;
+  sessionsEvicted?: number;
+  sessionsOpened?: number;
   /** Results written to disk and not yet acknowledged by the core. */
   spoolPending?: number;
   spoolBytes?: number;
@@ -595,6 +607,10 @@ const PROBE_HEALTH_SCHEMA = {
     refused: { type: 'integer', minimum: 0 },
     timedOut: { type: 'integer', minimum: 0 },
     workerCrashes: { type: 'integer', minimum: 0 },
+    sessionsOpen: { type: 'integer', minimum: 0 },
+    sessionOverflows: { type: 'integer', minimum: 0 },
+    sessionsEvicted: { type: 'integer', minimum: 0 },
+    sessionsOpened: { type: 'integer', minimum: 0 },
     spoolPending: { type: 'integer', minimum: 0 },
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },

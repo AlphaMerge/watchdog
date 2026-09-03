@@ -80,6 +80,43 @@ const CHANNELS: readonly ChannelDef[] = [
       errorMessage: 'the worker pool is full; checks are about to be deferred',
     },
   },
+  {
+    key: 'sessionsOpen',
+    name: 'Device sessions held',
+    unit: 'sessions',
+    // No threshold: how many SNMP and SSH sessions a probe should hold is a property of the
+    // catalogue it was given, not of health. A hundred is ordinary for a probe watching a
+    // hundred devices and alarming would be noise. What is never healthy is the *bound* being
+    // passed, and that is `sessionOverflows`.
+  },
+  {
+    key: 'sessionOverflows',
+    name: 'Sessions opened past the bound',
+    unit: 'sessions',
+    counter: { bits: 64 },
+    // **Any value above zero is worth a look, so the error sits just above it** — the style
+    // `spoolDropped` uses, and for the same reason: this is not a matter of degree.
+    //
+    // The pools open past `maxSessions` rather than fail a check, which is the right trade —
+    // refusing would fail a check to protect a file-descriptor budget. It is only defensible
+    // while somebody can see it happening, which until `P-36` nobody could: the counter existed
+    // and `stats()` was read by nothing outside its own tests. Sustained overflow is a probe
+    // heading for `EMFILE`, and the remedy is a longer `idleMs`, fewer devices per probe, or a
+    // higher bound.
+    limits: {
+      upperError: 0.5,
+      errorMessage: 'device sessions are being opened past the pool bound',
+    },
+  },
+  {
+    key: 'sessionsEvicted',
+    name: 'Sessions closed when idle',
+    unit: 'sessions',
+    counter: { bits: 64 },
+    // No threshold, and it is the diagnostic half of the pair above. Eviction climbing in step
+    // with `sessionsOpened` is a pool whose `idleMs` is shorter than the scan interval, so every
+    // check pays a handshake it need not — expensive on SSH, and invisible without this.
+  },
   { key: 'queued', name: 'Checks waiting for a worker', unit: 'checks' },
   { key: 'checkWait', name: 'Wait for a worker (p95)', unit: 'ms' },
   // Skip-if-still-running: the previous scan of that sensor had not finished. Counted, never

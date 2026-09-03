@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { describeError, type CheckResult, type Logger } from '@ms/shared';
-import type { CheckPhase, CheckRequest, ResultMeta } from './types.js';
+import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
 
 /** Latencies kept for the percentiles Probe Health reports (P-13). */
 const LATENCY_WINDOW = 1_024;
@@ -34,6 +34,10 @@ export interface PoolStats {
   timedOut: number;
   /** Checks skipped because the previous scan of that sensor had not finished. */
   deferred: number;
+  /**
+   * Session-pool counters summed across workers, absent when no registry keeps pools (`P-36`).
+   */
+  sessions?: SessionCounters;
   /** Checks refused because the queue was full. */
   refused: number;
   workerCrashes: number;
@@ -103,6 +107,15 @@ interface Slot {
   worker: Worker;
   ready: boolean;
   job: Job | undefined;
+  /**
+   * This worker's session-pool counters as of its last result (`P-36`).
+   *
+   * Per slot because each worker thread holds its own pools — the module singletons in
+   * `@ms/sensors` are per-thread — so the probe's real total is the sum over workers, not any
+   * one of them. `undefined` until the worker has finished a check, and for ever on a build
+   * whose registry keeps no pools.
+   */
+  sessions: SessionCounters | undefined;
   /**
    * Set when the pool itself is taking this worker out of service.
    *
@@ -248,6 +261,16 @@ export class CheckPool {
    * list for it.
    */
   readonly #runByType = new Map<string, number[]>();
+  /**
+   * Session-pool counters from workers the pool has already retired (`P-36`).
+   *
+   * **Without this the totals would go backwards.** Each worker keeps its own pools, so the
+   * published figure is a sum over live workers; shrinking the pool would then *lower* a
+   * cumulative counter, and a counter that falls is one a trigger cannot be set on. A retired
+   * worker's last snapshot is added here instead, and `open` is left out because it is a gauge
+   * — a retired worker holds no sessions, and saying it does would be worse than saying nothing.
+   */
+  #retiredSessions = { overflowed: 0, evicted: 0, opened: 0 };
 
   #nextJobId = 0;
   #nextWorkerId = 0;
@@ -331,6 +354,51 @@ export class CheckPool {
     if (window === undefined || window.length === 0) return undefined;
     const sorted = [...window].sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))];
+  }
+
+  /**
+   * Adds a departing worker's counters to the retired baseline (`P-36`).
+   *
+   * Called wherever a slot leaves `#slots` — shrink, crash, failed start — because the published
+   * totals are a sum over live workers and a worker leaving must not make a cumulative counter
+   * fall. Idempotent by clearing the slot's snapshot: a crash path that also runs the shrink
+   * path would otherwise bank the same numbers twice.
+   */
+  #bankSessions(slot: Slot): void {
+    const counters = slot.sessions;
+    if (counters === undefined) return;
+    this.#retiredSessions.overflowed += counters.overflowed;
+    this.#retiredSessions.evicted += counters.evicted;
+    this.#retiredSessions.opened += counters.opened;
+    slot.sessions = undefined;
+  }
+
+  /**
+   * What every worker's session pools add up to, or `undefined` if none has reported (`P-36`).
+   *
+   * `undefined` rather than zeros, so a build whose registry keeps no pools gaps the channel
+   * instead of publishing a confident nothing — no-data is not zero.
+   */
+  sessionCounters(): SessionCounters | undefined {
+    let reported = false;
+    const total: SessionCounters = { open: 0, overflowed: 0, evicted: 0, opened: 0 };
+    for (const slot of this.#slots) {
+      const counters = slot.sessions;
+      if (counters === undefined) continue;
+      reported = true;
+      total.open += counters.open;
+      total.overflowed += counters.overflowed;
+      total.evicted += counters.evicted;
+      total.opened += counters.opened;
+    }
+    const retired = this.#retiredSessions;
+    if (!reported && retired.opened === 0 && retired.overflowed === 0 && retired.evicted === 0) {
+      return undefined;
+    }
+    total.overflowed += retired.overflowed;
+    total.evicted += retired.evicted;
+    total.opened += retired.opened;
+    return total;
   }
 
   #recordTypeDuration(sensorType: string, durationMs: number): void {
@@ -434,6 +502,10 @@ export class CheckPool {
       failed: this.#failed,
       timedOut: this.#timedOut,
       deferred: this.#deferred,
+      ...(() => {
+        const sessions = this.sessionCounters();
+        return sessions === undefined ? {} : { sessions };
+      })(),
       refused: this.#refused,
       workerCrashes: this.#crashes,
       waitMs: percentiles(this.#wait),
@@ -540,6 +612,7 @@ export class CheckPool {
       'shrinking the check pool',
     );
     spare.retired = true;
+    this.#bankSessions(spare);
     const index = this.#slots.indexOf(spare);
     if (index >= 0) this.#slots.splice(index, 1);
     void spare.worker.terminate();
@@ -622,9 +695,11 @@ export class CheckPool {
         unknownType?: boolean;
         message: string;
         channels?: { key: string; value: number; name?: string; unit?: string }[];
+        sessions?: SessionCounters;
       };
       record(this.#run, result.durationMs);
       this.#recordTypeDuration(job.request.sensorType, result.durationMs);
+      if (result.sessions !== undefined) slot.sessions = result.sessions;
       if (result.ok) {
         this.#completed += 1;
         this.#emit(job, slot, 'execute', {
@@ -678,6 +753,7 @@ export class CheckPool {
       }
     }
 
+    this.#bankSessions(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
     void this.#spawn().then(() => {
@@ -687,6 +763,7 @@ export class CheckPool {
 
   async #recycle(slot: Slot): Promise<void> {
     slot.retired = true;
+    this.#bankSessions(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
     slot.job = undefined;
@@ -708,6 +785,7 @@ export class CheckPool {
       worker,
       ready: false,
       idleSince: process.hrtime.bigint(),
+      sessions: undefined,
       job: undefined,
       retired: false,
     };

@@ -4295,7 +4295,7 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
-- [ ] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
+- [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,
       `acquired`, `reused`, `opened`, `closed`, `evicted` and `overflowed` — and **`stats()` is
       called by nothing outside their own tests**. Both are re-exported from their `index.ts` and
@@ -4329,6 +4329,45 @@ because each is a decision rather than a defect:
       channel end (declared limits per `S-18`, protocol bump because the health schema is
       `additionalProperties: false`); the worker→main path is the new part and is why this is
       `M` rather than `S`.
+
+      **Three channels on `ms.probe.health`, and the path they came down is the interesting
+      part.** `sessionOverflows` carries the threshold — `upperError: 0.5`, the `spoolDropped`
+      style, because this is not a matter of degree; `sessionsOpen` and `sessionsEvicted` carry
+      none, since how many sessions a probe should hold is a property of its catalogue and
+      alarming on it would be noise. Eviction is the diagnostic half: climbing in step with
+      sessions opened is an `idleMs` shorter than the scan interval, so every check pays a
+      handshake it need not.
+
+      **The counters ride back on the result message.** The pools are module singletons *inside
+      each worker thread*, so there is no one pool to ask — the probe's real figure is a sum over
+      workers. A worker attaches its four integers to a result it was already sending, which
+      needs no second channel between the thread and the pool and costs nothing on an idle
+      worker, whose counters cannot have changed.
+
+      **Through the registry rather than by importing the pools**, which is the design point.
+      `check-worker.ts` loads its registry *by path* precisely so it never depends on
+      `@ms/sensors` — that is what lets a test drive the pool with checks that hang and crash on
+      purpose. So `CheckRegistry` gained an optional `sessionCounters()`, the catalogue registry
+      implements it, and a fixture registry does not: **a build with no pools reports nothing and
+      the channels gap**, rather than publishing a confident zero.
+
+      **A retired worker's counters are banked, or the totals would go backwards.** The published
+      figure sums live workers, so shrinking the pool would lower a cumulative counter — and a
+      counter that falls is one nobody can put a trigger on. `open` is deliberately excluded from
+      the baseline: it is a gauge and is meant to fall.
+
+      **Protocol 9 → 10**, required by `additionalProperties: false` on the health schema exactly
+      as `P-27`'s bump was; an older probe omits the fields and the channels gap.
+
+      **The test that nearly did not earn its keep.** "Never lets a cumulative counter fall"
+      passed with the banking removed, and the reason was worth finding: the pool starts at its
+      floor and grows, so a burst of three checks finished on two workers while the third was
+      still spawning, and the worker being retired had never reported. Retiring a worker with no
+      counters loses nothing. It now drives checks until all three workers have reported —
+      asserted, `open === 6` — before shrinking, and fails as it should when the banking goes.
+
+      Live on the dev stack: **`sessionsOpen: 5`**, overflows and evictions zero, on a probe
+      where that number was computed and discarded before today.
 
 - [x] **P-35 — A measured number is copied into four files and nothing notices when it
       changes** · M · P-31 · **Four defects in one day, all the same shape.** Each came from a

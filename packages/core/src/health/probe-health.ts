@@ -118,6 +118,12 @@ export class ProbeHealthService {
       refused: health?.refused ?? null,
       timedOut: health?.timedOut ?? null,
       workerCrashes: health?.workerCrashes ?? null,
+      // `?? null` throughout, so a probe whose registry keeps no session pools gaps these rather
+      // than reading zero — a probe with nothing to report is not a probe with nothing open
+      // (`P-36`, and `R-06` again).
+      sessionsOpen: health?.sessionsOpen ?? null,
+      sessionOverflows: health?.sessionOverflows ?? null,
+      sessionsEvicted: health?.sessionsEvicted ?? null,
       scheduled: health?.scheduled ?? null,
       spoolDepth: health?.spoolPending ?? null,
       spoolBytes: health?.spoolBytes === undefined ? null : round(health.spoolBytes / MB, 1),

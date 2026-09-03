@@ -1002,6 +1002,9 @@ cost: **light** · evaluated by the core, never by a probe
 | `protocol` | Protocol version skew | — | lookup `ms.probe.protocol` |
 | `schedulerLag` | Scheduler lag (p95) | ms | default limits: warn above 1000, error above 5000 |
 | `poolUsage` | Worker pool in use | % | default limits: warn above 80, error above 95 |
+| `sessionsOpen` | Device sessions held | sessions | — |
+| `sessionOverflows` | Sessions opened past the bound | sessions | 64-bit counter → rate; default limits: error above 0.5 |
+| `sessionsEvicted` | Sessions closed when idle | sessions | 64-bit counter → rate |
 | `queued` | Checks waiting for a worker | checks | — |
 | `checkWait` | Wait for a worker (p95) | ms | — |
 | `deferred` | Checks deferred | checks | 64-bit counter → rate |

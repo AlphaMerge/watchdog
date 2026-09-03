@@ -74,6 +74,16 @@ export class ProbeHealthReporter {
       refused: pool.refused,
       timedOut: pool.timedOut,
       workerCrashes: pool.workerCrashes,
+      // Absent when no registry keeps session pools (`P-36`), so the channels gap rather than
+      // reading a confident zero on a build that has nothing to report.
+      ...(pool.sessions === undefined
+        ? {}
+        : {
+            sessionsOpen: pool.sessions.open,
+            sessionOverflows: pool.sessions.overflowed,
+            sessionsEvicted: pool.sessions.evicted,
+            sessionsOpened: pool.sessions.opened,
+          }),
       ...(spool === undefined
         ? {}
         : {

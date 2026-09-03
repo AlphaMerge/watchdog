@@ -4,6 +4,7 @@ import {
   type CheckRegistry,
   type CheckTarget,
   type ReceivedBatch,
+  type SessionCounters,
 } from './types.js';
 
 /**
@@ -73,6 +74,7 @@ async function run(message: RunMessage): Promise<void> {
       ok: true,
       channels: execution.channels,
       message: execution.message ?? '',
+      ...sessions(),
     });
   } catch (error: unknown) {
     port.postMessage({
@@ -83,6 +85,7 @@ async function run(message: RunMessage): Promise<void> {
       aborted: controller.signal.aborted,
       unknownType: (error as { code?: unknown } | null)?.code === UNKNOWN_SENSOR_TYPE,
       message: error instanceof Error ? error.message : String(error),
+      ...sessions(),
     });
   } finally {
     running.delete(message.jobId);
@@ -91,6 +94,23 @@ async function run(message: RunMessage): Promise<void> {
 
 function elapsed(startedAt: bigint): number {
   return Number(process.hrtime.bigint() - startedAt) / 1e6;
+}
+
+/**
+ * This worker's session-pool counters, to ride back with the result (`P-36`).
+ *
+ * **On the result rather than on a timer of its own**, because a worker that is running checks
+ * is a worker that is reporting, and one that is idle has counters that cannot have changed. It
+ * costs four integers on a message that already exists, and it needs no second channel between
+ * the thread and the pool.
+ *
+ * Absent when the registry keeps no pools — a fixture registry, mostly — and absent means
+ * absent: the pool leaves the field off rather than sending zeros, so a build with no session
+ * pools gaps the channel instead of claiming a healthy nothing (`R-06`).
+ */
+function sessions(): { sessions?: SessionCounters } {
+  const counters = registry.sessionCounters?.();
+  return counters === undefined ? {} : { sessions: counters };
 }
 
 port.postMessage({ type: 'ready' });
