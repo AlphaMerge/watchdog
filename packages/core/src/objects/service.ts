@@ -55,6 +55,7 @@ import type {
   SettingChange,
   SettingView,
   SiblingMove,
+  SubtreeCounts,
   SubtreeOptions,
   SubtreeResult,
   UpdateObjectInput,
@@ -251,6 +252,17 @@ export class ObjectService {
     const result = await this.#repo.subtree(this.#db, id, options);
     if (effectiveKeys.length === 0 || result.items.length === 0) return result;
     return { ...result, items: await this.#attachEffective(result.items, effectiveKeys) };
+  }
+
+  /**
+   * What `subtree` would have counted, without the rows and without the cap (`U-14`).
+   *
+   * A caller that wants totals asks for totals. Reading a page of the tree and counting it is
+   * how an overview came to claim 930 sensors on a system running five thousand.
+   */
+  async counts(id: ObjectId): Promise<SubtreeCounts> {
+    await this.get(id);
+    return this.#repo.subtreeCounts(this.#db, id);
   }
 
   async ancestors(id: ObjectId): Promise<ObjectRef[]> {

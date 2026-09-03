@@ -3509,6 +3509,35 @@ because each is a decision rather than a defect:
       `Content-Type`, and it survived because every fixture either looked like XML or looked like
       JSON — the header only decides for a document the shape cannot, which is the HTML fragment
       starting with `<`. Two tests now turn on exactly that, one at the type and one over HTTP.
+- [x] **U-14 — Exact totals for the overview** · S · U-01, U-03 · The overview counted the rows
+      of one page of the tree. Replace that with an aggregate the database computes, so the
+      numbers on the landing page are totals rather than whatever fitted in the response.
+
+      **U-14 outcome, and the bug is worth stating plainly.** `Overview.tsx` read
+      `/objects/{root}/tree?maxDepth=12&limit=1000` and counted what came back. On the dev
+      installation — 5,329 objects, 5,051 sensors — that page showed **1 probe, 5 groups, 63
+      devices, 930 sensors** and a sensor-health histogram over the same 930, all of it presented
+      as fact. The only hint was a truncation note in the Tree card further down the page, which
+      says the *response* was cut off and nothing about the four numbers taken from it.
+
+      A number is read as a total. The fix is therefore not louder wording but a different
+      question: `GET /objects/{id}/counts` walks the subtree and aggregates in SQL — kinds and
+      the sensor-state histogram in one pass, the states as a second grouping column that is null
+      for everything which is not a sensor. There is no depth and no limit to exceed, and every
+      state comes back including the zeros, so no caller has to guess at an absent key.
+
+      Measured against the dev database (5,329 objects): **23.7 ms and 195 bytes**, against
+      **50.9 ms and 160,906 bytes** for the 1,000-row page it replaces — and that page was the
+      one giving wrong answers. The overview no longer fetches the tree at all.
+
+      Scoped to any object rather than the root, because a group page wants the same thing and
+      would otherwise reach for the same wrong tool. `total` counts the object asked about, the
+      way `enumerateSubtree` does for the delete confirmation.
+
+      Tests: 6 in `subtree-counts.test.ts` over HTTP — including the same subtree read both ways,
+      so the difference cannot quietly come back — and 3 in `overview-counts.test.tsx`, one of
+      which asserts the page no longer requests `/tree`.
+
 - [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
 
