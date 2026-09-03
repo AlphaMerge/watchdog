@@ -1,0 +1,36 @@
+ Container monitoring-system-dev-toolchain-run-c3d2e461ba46 Creating 
+ Container monitoring-system-dev-toolchain-run-c3d2e461ba46 Created 
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (9.33625ms)
+
+    shipped default (48): 90s, pool 48, 7798 checks completed of 7798 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (94298.26921ms)
+
+    old default (7): 90s, pool 7, 4080 checks completed of 7536 dispatched, 3456 refused
+  ✔ shows what the old core-count default did with the same load (91630.235249ms)
+
+    demand-driven (4 -> 48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (91591.319792ms)
+
+    small, fixed 48: 15s, pool 48, 15 checks completed of 15 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+
+    measured: 5000 sensors at 60s, 200 ms checks, 8 cores, 1.5 minutes per run
+    dispatch jitter is due -> check started; the budget is p95 under 1000 ms
+      shipped default (48)        200 ms check  pool  48       jitter p50     7 ms  p95    296 ms  p99   1114 ms  (wheel p95 53 ms, wait p95 257 ms)  rss + 555 MB at 48 workers  refused 0
+      old default (7)             200 ms check  pool   7       jitter p50 18707 ms  p95  28848 ms  p99  29001 ms  (wheel p95 7 ms, wait p95 28838 ms)  rss +  34 MB at  7 workers  refused 3456
+      demand-driven (4 -> 48)     200 ms check  pool  48       jitter p50     8 ms  p95    214 ms  p99    411 ms  (wheel p95 9 ms, wait p95 208 ms)  rss +  16 MB at  4 workers  refused 0
+      small, fixed 48             200 ms check  pool  48       jitter p50     4 ms  p95    141 ms  p99    141 ms  (wheel p95 141 ms, wait p95 0 ms)  rss + 262 MB at 48 workers  refused 0
+      small, demand-driven        200 ms check  pool  48->  4  jitter p50     6 ms  p95     62 ms  p99     62 ms  (wheel p95 62 ms, wait p95 1 ms)  rss +  18 MB at  4 workers  refused 0
+  ✔ costs a small installation a fraction of what a fixed pool reserves (33496.015515ms)
+  ﹣ sweeps pool sizes, which is how the default was chosen (6.432834ms) # set MS_BENCH_SWEEP=1 to run the pool-size sweep
+✔ scheduler benchmark (P-15) (311052.383975ms)
+ℹ tests 6
+ℹ suites 1
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 313059.4856

@@ -1,0 +1,238 @@
+ Container monitoring-system-dev-toolchain-run-74a89ad53163 Creating 
+ Container monitoring-system-dev-toolchain-run-74a89ad53163 Created 
+
+> monitoring-system@0.1.0 test:perf
+> npm run test:perf --workspaces --if-present
+
+
+> @ms/core@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/core@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+
+    measured: cloned 221 objects in 37.2 ms using 15 statements
+▶ clone performance
+  ✔ issues a number of statements proportional to depth, not to object count (667.330333ms)
+✔ clone performance (1154.918667ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, a seven-level chain with a setting and a credential at each level:
+      full render     6.12 ms   2863 bytes
+      304             1.55 ms      0 bytes  (4.0x cheaper)
+▶ conditional GET performance
+  ✔ answers a repeat read for a fraction of the cost of rendering it (420.734083ms)
+✔ conditional GET performance (1224.239875ms)
+
+    measured, 40 days of one-minute readings on 3 channels (172,800 raw rows):
+      hourly buckets, 40 days, same answer either way:
+        from sample_1h    24 ms
+        from sample       61 ms   (2.5x, reading 60x the rows)
+      end to end:
+      1 hour  from sample_1h   23 ms   960 buckets from    960 rows/channel
+      1 day   from sample_1d    4 ms    40 buckets from     40 rows/channel
+      45 min  from sample_5m   31 ms  1248 buckets from 11,520 rows/channel
+      44 min  from sample      77 ms  1277 buckets from 57,600 rows/channel   <- no tier divides 44 minutes
+▶ historic query performance
+  ✔ answers a long range from a rollup tier rather than from raw (240.070625ms)
+      stitched 2 sources           18 ms   960 buckets   <- a day of tail read from raw
+  ✔ costs no more to stitch an answer from several sources (24.848667ms)
+✔ historic query performance (2433.965627ms)
+
+    measured, 100000 readings per run, target 100,000 samples/min and p99 under 100 ms:
+       1000 rows/write    3,201,544 samples/min  p99   42.1 ms  100 writes   <- shipped default
+       2000 rows/write    3,557,107 samples/min  p99   65.4 ms   50 writes
+       5000 rows/write    3,540,273 samples/min  p99   98.7 ms   20 writes
+▶ ingestion performance
+  ✔ sustains 100,000 samples a minute with a p99 write inside 100 ms (5380.492794ms)
+
+    measured, 30000 readings through the full path:
+      throughput 2,547,652 samples/minute
+      channels   100 created once, then 300 resolved from cache with no query at all
+  ✔ costs almost nothing extra to go through the wire format and channel resolution (998.744209ms)
+
+    measured, 100 sensors x 100 scans, 30000 readings:
+      no states    2,497,851 samples/min  p99   30.9 ms      0 transitions written
+      steady       2,502,112 samples/min  p99   32.9 ms    100 transitions written
+      state machine costs -0.2% of throughput
+      flapping   every sensor changing state on every scan: p99 write 26.1 ms, 1900 transitions in 20 writes
+                 (271 ms per batch end to end, of which 250 ms is the flush timer — one probe offering one batch at a time never fills a write)
+  ✔ carries the state machine for a bounded, measured cost (7448.989795ms)
+✔ ingestion performance (14423.17384ms)
+
+  2000 sensors, one inherited state trigger
+    first failure (nothing armed): 100 ms
+    arming 2000 chains:      139 ms
+    holding them (worst of 3):    66 ms
+    cancelling all of them:       78 ms
+    timers: 2 idle, 2 with 2000 pending, 2 after
+
+▶ notification timer cost
+  ✔ arms, holds and cancels 2000 chains with one timer (601.180667ms)
+    firing 4000 due steps:         235 ms
+
+  ✔ fires 2000 due chains in one sweep (599.689876ms)
+✔ notification timer cost (7466.733879ms)
+
+    measured, two probes each replaying 15,000 readings (5% of an hour at the v1 target, set MS_SOAK_FRACTION=1 for all of it) while another reports live:
+      live, quiet     p50  265.3 ms   p99  276.8 ms   40 batches
+      live, replaying p50  265.6 ms   p99  270.9 ms   15 batches   -> 0.98x, budget 3x
+      replay          p50   23.0 ms   p99   40.3 ms   30 batches, cleared in 4.8 s
+      pacing          the replaying probe was asked to wait up to 50 ms; the live one 0 ms
+▶ replay under load
+  ✔ keeps storing live readings promptly while a probe empties an hour of backlog (15449.245257ms)
+  ✔ lets one probe catch up at full speed, because one is not a fairness problem (0.797833ms)
+  ✔ lets a probe that has caught up rejoin the fast path on its very next batch (519.679084ms)
+✔ replay under load (17079.708383ms)
+
+    measured, 15000 channels at 60s (the v1 target):
+      generated  300000 raw readings in 1061 ms
+      raw -> 5m  604 ms for 4 buckets (151 ms per 5-minute bucket, budget 300,000 ms)
+      5m  -> 1h  133 ms for 15000 buckets
+      1h  -> 1d  129 ms for 15000 buckets
+      on disk    raw 103.1 B/row, 5m 117.4 B/row
+▶ rollup performance at the v1 target
+  ✔ rolls up a full five-minute bucket for 15,000 channels well inside its period (1971.191334ms)
+
+    measured, 300 channels x 1440 readings (one day per channel, the production chunk shape):
+      compressed 40.0 MB -> 4.0 MB (10.1x) in 198 ms
+      graph read against compressed chunks 1.1 ms
+  ✔ compresses a day of readings per channel by an order of magnitude (2169.310001ms)
+✔ rollup performance at the v1 target (4524.155002ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19):
+      bulk              2.6 s     1,899 objects/s   91% spare
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (2748.604376ms)
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s:
+      serial           31.5 s       159 objects/s   -5% spare
+      8 in flight       7.9 s       633 objects/s   74% spare
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+  ✖ creates a 5,000-object tree through the API inside its budget (39451.566643ms)
+✖ tree build performance (43747.443811ms)
+ℹ tests 16
+ℹ suites 8
+ℹ pass 15
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 96132.614252
+
+✖ failing tests:
+
+test at dist/test/perf/tree-build-performance.test.js:201:5
+✖ creates a 5,000-object tree through the API inside its budget (39451.566643ms)
+  AssertionError [ERR_ASSERTION]: a serial build took 31.5 s against a 30 s budget
+      at TestContext.<anonymous> (file:///workspace/packages/core/dist/test/perf/tree-build-performance.test.js:226:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+npm error Lifecycle script `test:perf` failed with error:
+npm error code 1
+npm error path /workspace/packages/core
+npm error workspace @ms/core@0.1.0
+npm error location /workspace/packages/core
+npm error command failed
+npm error command sh -c node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+
+> @ms/probe@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/probe@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+    before P-07 (count 4, -w 5)         49672 ms     20 targets/s   1.56 ms CPU each  4000/4000 replies
+▶ ICMP throughput (P-07)
+  ✔ measures what shipped before, which is the number the ADR was worried about (49675.90844ms)
+    shipped now (count 4, -i 0.2, -W)   10147 ms     99 targets/s   1.13 ms CPU each  4000/4000 replies
+  ✔ measures what ships now, which needs no privileges and no dependency (10148.226129ms)
+    blackholed, before P-07             20058 ms     10 targets/s   1.35 ms CPU each  0/1000 replies
+    blackholed, ships now               10542 ms     19 targets/s   1.27 ms CPU each  0/800 replies
+    measured on 8 cores, 1000 targets, 64 in flight
+  ✔ measures a target that answers nothing, both ways (30602.112805ms)
+  ﹣ sweeps concurrency, which is the other lever and the one P-15 reached for (0.92375ms) # set MS_PING_SWEEP=1
+  ✔ reports the cores it measured on, because the number is meaningless without them (0.754375ms)
+✔ ICMP throughput (P-07) (90430.715583ms)
+
+    measured, 20 checks in a process each (serial):
+      start-up overhead  p50 23.1 ms  p95 50.3 ms  max 50.3 ms
+▶ process runner start-up cost
+  ✔ costs a bounded and measured overhead per check (637.8715ms)
+    with the real catalogue (icmp.ping, 10 checks): start-up overhead p50 26.5 ms
+  ✔ costs more with the real catalogue than with a one-file registry, and says how much (2567.063751ms)
+    8 checks at a concurrency of 4: 84 ms total, 10 ms each
+  ✔ overlaps start-ups at the default concurrency (84.238376ms)
+✔ process runner start-up cost (3290.216252ms)
+
+    measured, 5000 sensors at 60 s disconnected for 1 min (set MS_SOAK_MINUTES=60 for the criterion's full hour):
+      spooled         5,000 readings, 1.0 MB in 1 segments, 22 ms to write
+      an hour     62 MB projected at 216 bytes a reading, against a 2 GiB shipped default (3.0% of it)
+      replayed    37 ms in 3 batches, 135,735 readings/s
+      lost 0, duplicated 0, corrupt 0; caught up 1629x faster than the outage
+▶ a disconnect long enough to matter
+  ✔ spools an hour of readings, survives a restart, and replays every one exactly once (96.379167ms)
+(node:2842) Warning: Closing file descriptor 18 on garbage collection
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2842) [DEP0137] DeprecationWarning: Closing a FileHandle object on garbage collection is deprecated. Please close FileHandle objects explicitly using FileHandle.prototype.close(). In the future, an error will be thrown if a file descriptor is closed during garbage collection.
+  ✔ keeps its place when the connection drops again mid-replay (61.085125ms)
+✔ a disconnect long enough to matter (158.387042ms)
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (0.996709ms)
+
+    shipped default (48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (91803.865918ms)
+
+    old default (7): 90s, pool 7, 4079 checks completed of 7536 dispatched, 3457 refused
+  ✔ shows what the old core-count default did with the same load (91454.507959ms)
+
+    demand-driven (4 -> 48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (91459.688499ms)
+
+    small, fixed 48: 15s, pool 48, 15 checks completed of 15 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+  ✔ costs a small installation a fraction of what a fixed pool reserves (33458.810807ms)
+  ﹣ sweeps pool sizes, which is how the default was chosen (4.827459ms) # set MS_BENCH_SWEEP=1 to run the pool-size sweep
+✖ dist/test/perf/scheduler-benchmark.test.js (390913.464345ms)
+ℹ tests 17
+ℹ suites 3
+ℹ pass 14
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 485305.291346
+
+✖ failing tests:
+
+test at dist/test/perf/scheduler-benchmark.test.js:1:1
+✖ dist/test/perf/scheduler-benchmark.test.js (390913.464345ms)
+  'test failed'
+npm error Lifecycle script `test:perf` failed with error:
+npm error code 1
+npm error path /workspace/packages/probe
+npm error workspace @ms/probe@0.1.0
+npm error location /workspace/packages/probe
+npm error command failed
+npm error command sh -c node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+

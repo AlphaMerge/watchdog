@@ -4089,8 +4089,9 @@ because each is a decision rather than a defect:
       `node:test` then reports the *file* as failed with the bare message `'test failed'` and no
       diagnostic, because the child died rather than asserting. Every test inside it passed.
 
-      **Measured 2026-09-03**: peak RSS **2,636,592 kB (2.57 GB)**, killed at **84 s of the 90 s
-      run** with **2,643 MB available** in the Docker VM. Run inside the whole file it dies
+      **Measured 2026-09-03** (`docs/findings/2026-09-03-perf-budgets.md`): peak RSS
+      **2,636,592 kB (2.57 GB)**, killed at **84 s of the 90 s run** with **2,643 MB
+      available** in the Docker VM. Run inside the whole file it dies
       sooner, because three 90-second soaks have already run in the same process. `NODE_EXIT=137`
       is the whole diagnosis — 128 + SIGKILL.
 
@@ -4113,7 +4114,8 @@ because each is a decision rather than a defect:
 - [ ] **P-29 — The serial tree build is over Phase 1's 30-second budget** · M · S-16 · Phase 1's
       exit criterion is **5,000 objects through the API in under 30 seconds**, and
       `tree-build-performance.test.ts` now fails it. Three runs on 2026-09-03 with `ms-server`
-      stopped: **31.5 s, 33.0 s, 35.4 s** — −5%, −10% and −18% against the budget.
+      stopped: **31.5 s, 33.0 s, 35.4 s** — −5%, −10% and −18% against the budget
+      (`docs/findings/2026-09-03-perf-budgets.md`).
 
       **The dev database's size is not the cause**, which was the first suspect and was checked:
       the `monitoring` database has grown to 4,958 MB since the soak, so the run was repeated
