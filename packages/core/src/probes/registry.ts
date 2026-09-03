@@ -358,9 +358,15 @@ export class ProbeRegistry {
     // `access_key_hash` is cleared rather than set: a re-approved probe is issued a fresh key at
     // its next handshake, so a key that leaked before it was revoked does not survive the
     // decision to let the machine back in.
+    //
+    // **`access_key_confirmed_at` goes with it** (`P-37`). A row with no hash but a confirmation
+    // is a state that cannot be true — nothing was confirmed, because there is nothing to
+    // confirm — and leaving it set would mean the next reader has to know that the hash is
+    // checked first. It is harmless today for exactly that reason and would not stay harmless.
     const rows = await this.#db.query<Record<string, unknown>>(
       `UPDATE probe_registration
-       SET status = 'approved', object_id = $2, access_key_hash = NULL, decided_at = now(),
+       SET status = 'approved', object_id = $2, access_key_hash = NULL,
+           access_key_confirmed_at = NULL, decided_at = now(),
            decided_by = $3, note = ''
        WHERE gid = $1
        RETURNING *`,
@@ -393,7 +399,8 @@ export class ProbeRegistry {
   async revoke(gid: string, note: string, actorId?: number): Promise<ProbeRegistration> {
     const rows = await this.#db.query<Record<string, unknown>>(
       `UPDATE probe_registration
-       SET status = 'revoked', access_key_hash = NULL, note = $2, decided_at = now(),
+       SET status = 'revoked', access_key_hash = NULL, access_key_confirmed_at = NULL,
+           note = $2, decided_at = now(),
            decided_by = $3
        WHERE gid = $1
        RETURNING *`,

@@ -4399,6 +4399,27 @@ because each is a decision rather than a defect:
       works until a probe has used one of its own. `identity.ts` now names that dependency, so
       whoever changes the fallback next finds out that this catch rests on it.
 
+      **`approve` and `revoke` clear the confirmation too**, found by tracing the recovery path
+      rather than by a test failing. Both already cleared `access_key_hash`; leaving
+      `access_key_confirmed_at` set left a row saying "no key, but confirmed", which cannot be
+      true. It is harmless today only because `stored === null` is checked first, and that is
+      exactly the kind of harmless that stops being harmless when somebody reorders the checks.
+
+      **Verified as far as a shared machine allowed.** Migration 039 applied on the dev stack and
+      the backfill did what it was designed to: the existing probe came back `confirmed`, so the
+      enrolment fallback stayed shut and it remained locked out — correct, and the reason the
+      backfill is not a security regression. Resetting it to pending and re-approving cleared
+      hash and confirmation together, as intended. The last step — the handshake that issues a
+      key and the one after it that confirms — was not observed, because another session began
+      approving probes through the UI in the same stack while it was in flight, and interfering
+      with that would have been worse than leaving the check to the unit tests, which cover it.
+
+      A second lockout path noticed while doing this, and *not* fixed here: a probe holding a key
+      the core has since forgotten presents that stale key rather than the enrolment key, so
+      re-approval alone does not recover it — someone has to clear `identity.json` on the probe's
+      own disk, which for a remote probe means logging into that machine. It is the mirror image
+      of this ticket, it is not what this ticket was about, and it deserves its own.
+
 - [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,
       `acquired`, `reused`, `opened`, `closed`, `evicted` and `overflowed` — and **`stats()` is
