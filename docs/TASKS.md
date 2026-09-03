@@ -4162,7 +4162,7 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
-- [ ] **P-30 — `test:perf`'s last scheduler case is OOM-killed, so the whole file fails** · S ·
+- [x] **P-30 — `test:perf`'s last scheduler case is OOM-killed, so the whole file fails** · S ·
       P-15 · `scheduler-benchmark.test.ts`'s final case — "shows what the sensor type we actually
       ship would need" — asks for **256 workers at 3-second checks for 90 seconds**, and on a
       machine with less than about 3 GB free the process is **SIGKILLed** part-way through.
@@ -4190,6 +4190,47 @@ because each is a decision rather than a defect:
       pattern `MS_BENCH_SWEEP` already uses in the same file), shorten it, or declare the
       requirement and fail with a sentence rather than a signal. Do not just raise Docker's memory
       — that fixes one laptop and leaves the next one with a silent kill.
+
+      **Declared and checked, which is the first of those.** The case now reads `MemAvailable`
+      before it runs and skips with a sentence naming what it needs and what the machine has.
+      `os.freemem()` was not good enough to decide it — that is `MemFree` on Linux, which
+      excludes reclaimable page cache and understates the answer by gigabytes on a machine that
+      has been working; `/proc/meminfo`'s `MemAvailable` is the kernel's own estimate of what an
+      allocation would actually get, with `freemem()` kept as the fallback where there is no
+      Linux `/proc`.
+
+      **Both branches verified, on the same command that used to be killed:**
+
+      | Available | Result |
+      | --- | --- |
+      | 3,005 MB (dev stack up) | skipped, **exit 0**, reason printed — this command gave `NODE_EXIT=137` before |
+      | 4,262 MB (stack stopped) | ran to completion, exit 0 |
+
+      **The threshold is bracketed by measurement rather than picked.** Killed with 2,643 MB
+      available; ran with 4,262 MB at a peak RSS of **2,801 MB**. The floor sits at 4,000 MB,
+      between the two and on the safe side, because the asymmetry is not close: erring high costs
+      a skip that says why, erring low costs every other result in the file.
+
+      Worth correcting from the ticket above: the 2,575 MB it quotes was a **truncated** peak,
+      read from a run that was killed at 84 s. A run that finishes peaks at 2,801 MB.
+
+      **And the case has now actually run, for the first time.** It had never completed on this
+      hardware, so its own subject was unmeasured — `2026-08-26-scheduler-benchmark.md` predicted
+      it from arithmetic and nothing had checked:
+
+          icmp.ping-shaped  3000 ms check  pool 256
+            jitter p50 603 ms  p95 2333 ms  p99 2371 ms
+            (wheel p95 18 ms, wait p95 2325 ms)   7,876/7,876 checks, 0 refused
+
+      **The `icmp.ping`-shaped load misses `P-15`'s 1,000 ms budget by 2.3×** — 3.8× when run
+      alone on a cold process — and essentially all of it is *wait*, 2,325 ms of 2,333. The pool
+      is the constraint and the wheel is not, at 256 workers. That is the arithmetic in
+      `2026-08-26`'s "What this says about `icmp.ping`" confirmed rather than assumed, and it is
+      why `P-07` made the check itself cheaper instead of making the pool bigger.
+
+      **Whole file, end to end:** 7 tests, 6 pass, 0 fail, 1 skipped (the opt-in sweep),
+      `NODE_EXIT=0` — and the `after` hook's table printed, which is the thing the kill used to
+      destroy along with the four `P-15` results that had already passed.
 
 - [x] **P-29 — The serial tree build is over Phase 1's 30-second budget** · M · S-16 · Phase 1's
       exit criterion is **5,000 objects through the API in under 30 seconds**, and

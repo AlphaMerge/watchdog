@@ -155,6 +155,25 @@ that `CLAUDE.md` separates `test:perf` from `npm test` to avoid.
 It also destroys the report: the jitter table is printed from the file's `after` hook, so the run
 that met `P-15`'s gate could not show its own numbers. The table above was recovered separately.
 
+**Fixed, and the case has now run for the first time.** It reads `MemAvailable` before starting
+and skips with a sentence when the machine cannot hold 256 workers — verified both ways on the
+command that used to be killed: **skipped at 3,005 MB available (exit 0)** where it previously
+gave `NODE_EXIT=137`, and **ran to completion at 4,262 MB**, peak RSS **2,801 MB**. The 2,575 MB
+above was a truncated peak, read from a run killed at 84 s.
+
+Because it had never completed, its own subject had never been measured — only predicted from
+arithmetic in `2026-08-26-scheduler-benchmark.md`:
+
+    icmp.ping-shaped  3000 ms check  pool 256
+      jitter p50 603 ms  p95 2333 ms  p99 2371 ms
+      (wheel p95 18 ms, wait p95 2325 ms)   7,876/7,876 checks, 0 refused
+
+**The `icmp.ping`-shaped load misses the 1,000 ms budget by 2.3×** — 3.8× alone on a cold
+process — and 2,325 of those 2,333 ms are *wait*. At 256 workers the pool is the constraint and
+the wheel is not, which is the prediction confirmed and the reason `P-07` made the check cheaper
+rather than the pool bigger. The whole file now runs 6 pass, 0 fail, 1 skipped, exit 0, with its
+report intact.
+
 ## Failure 2 — the serial tree build is over its 30-second budget (`P-29`)
 
 Phase 1's exit criterion is **5,000 objects through the API in under 30 seconds**. Three runs,

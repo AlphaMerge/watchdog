@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
-import { availableParallelism } from 'node:os';
+import { readFileSync } from 'node:fs';
+import { availableParallelism, freemem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
@@ -55,6 +56,45 @@ const CHECK_MS = 200;
 
 const minutes = Number(process.env['MS_BENCH_MINUTES'] ?? '1.5');
 const durationMs = minutes * 60_000;
+
+/**
+ * The pool the `icmp.ping`-shaped case asks for, and what it costs to hold (`P-30`).
+ *
+ * **Declared because the alternative is a signal instead of a test result.** On 2026-09-03 the
+ * kernel killed this process at 84 s of a 90 s run on a machine with 2,643 MB available:
+ * `NODE_EXIT=137`, no assertion, no stack, and `node:test` reporting the whole *file* as failed
+ * with a bare `'test failed'` while every test inside it had passed. It took the `after` hook
+ * with it too, so the runs that had already met `P-15`'s gate could not print their numbers.
+ *
+ * **Two measured points bracket the requirement**, and the threshold sits between them on the
+ * safe side: killed with **2,643 MB** available, and ran to completion with **4,262 MB**, at a
+ * peak RSS of **2,801 MB**. The headroom over that peak is not decoration — RSS climbs across
+ * the run, and the kill came while 2.6 GB was still nominally free, because the killer does not
+ * wait for the last page. Erring high costs a skip that prints why; erring low costs every other
+ * result in the file.
+ */
+const ICMP_POOL_SIZE = 256;
+const ICMP_PEAK_MB = 2_801;
+const ICMP_NEEDS_MB = 4_000;
+
+/**
+ * What this machine could still hand out, in MB.
+ *
+ * `os.freemem()` is `MemFree` on Linux, which excludes reclaimable page cache and so understates
+ * the answer by gigabytes on any machine that has been doing work. `MemAvailable` is the
+ * kernel's own estimate of what a new allocation would actually get, which is the question being
+ * asked. Falls back to `freemem()` where there is no Linux `/proc` to read.
+ */
+function availableMemoryMb(): number {
+  try {
+    const match = /^MemAvailable:\s+(\d+) kB$/m.exec(readFileSync('/proc/meminfo', 'utf8'));
+    const kb = match?.[1];
+    if (kb !== undefined) return Number(kb) / 1024;
+  } catch {
+    // No /proc, or not a Linux one. `freemem()` is the portable answer.
+  }
+  return freemem() / (1024 * 1024);
+}
 
 interface Sample {
   /** Due → check started, in milliseconds. The criterion's number. */
@@ -406,14 +446,29 @@ describe('scheduler benchmark (P-15)', () => {
     }
   });
 
-  it('shows what the sensor type we actually ship would need', async () => {
+  it('shows what the sensor type we actually ship would need', async (t) => {
     // `icmp.ping` sends four packets a second apart, so a real one takes about three seconds.
     // 83 a second at 3 s each is 250 in flight — an order of magnitude more than the 200 ms
     // model above, and the number that decides whether a worker-thread pool is the right shape
     // for I/O-bound checks at all. Short, and diagnostic.
+    //
+    // **Checked before it is run** (`P-30`): holding 256 workers costs more than a developer
+    // laptop running the dev stack has spare, and finding that out by being killed loses this
+    // file's other five results along with it.
+    const availableMb = availableMemoryMb();
+    if (availableMb < ICMP_NEEDS_MB) {
+      t.skip(
+        `needs about ${String(ICMP_NEEDS_MB)} MB free to hold ${String(ICMP_POOL_SIZE)} workers ` +
+          `(measured peak ${String(ICMP_PEAK_MB)} MB) and this machine has ` +
+          `${availableMb.toFixed(0)} MB — stop what is using it, or read the committed ` +
+          `measurement in docs/findings/2026-08-26-scheduler-benchmark.md`,
+      );
+      return;
+    }
+
     const run = await soak({
       label: 'icmp.ping-shaped',
-      poolSize: 256,
+      poolSize: ICMP_POOL_SIZE,
       queueMaxLength: 50_000,
       checkMs: 3_000,
       forMs: Math.min(durationMs, 90_000),
