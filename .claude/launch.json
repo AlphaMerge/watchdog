@@ -3,6 +3,8 @@
   "configurations": [
     {
       "name": "web",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "-f", "docker-compose.dev.yml", "--profile", "ui", "up", "web"],
       "port": 5173,
       "url": "http://127.0.0.1:5173",
       "autoPort": false
