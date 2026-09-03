@@ -80,7 +80,15 @@ jobs:
 
       # install.sh runs as root on an operator's box; a shell bug there is an outage.
       - name: shellcheck
-        run: shellcheck -S warning scripts/*.sh deploy/*.sh
+        run: shellcheck -S warning scripts/*.sh scripts/sizing/*.sh deploy/*.sh
+
+      # **The workflow is the one file nothing else checks**, and it is now five jobs across two
+      # operating systems. A bad expression or an unknown runner costs a whole CI cycle to find
+      # out about, and the Windows job in particular is expensive to discover a typo in.
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest \
+            -ignore 'SC2012' .github/workflows/*.yml
 
       # **Production dependencies only, and that is the point** (A-09). A dev-only advisory is
       # worth knowing about and is not shipped to anybody; failing the build on one would train
