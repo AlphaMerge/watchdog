@@ -1,18 +1,21 @@
-# Measurements: the `test:perf` budgets, and two that failed
+# Measurements: the `test:perf` budgets, two that failed, and the re-run that closed them
 
 - **Date**: 2026-09-03
 - **Method**: `npm run test:perf` — the measured budgets, which `CLAUDE.md` keeps out of
   `npm test` on purpose. Run with `ms-server` stopped.
 - **Raw data**: `2026-09-03-perf-budgets-run.txt`, the whole run;
-  `2026-09-03-perf-budgets-scheduler.txt`, the separately recovered `P-15` table
+  `2026-09-03-perf-budgets-scheduler.txt`, the separately recovered `P-15` table;
+  `2026-09-03-perf-budgets-clean-run.txt`, the re-run after both fixes
 - **Reproduce**: `./scripts/dev.sh "npm run test:perf"`, or one file with
   `./scripts/dev.sh "cd packages/core && node --test dist/test/perf/<name>.test.js"`
 - **Measured on**: 8-core arm64, `node:24-bookworm-slim` in Docker Desktop's 7.75 GB LinuxKit VM,
   PostgreSQL 17 + TimescaleDB from `docker-compose.dev.yml`
 
-**Result: 29 of 31 passed. Two failed, and neither is what its output first appears to say** —
-one is a SIGKILL wearing an assertion's clothes, and the other is a budget miss on a host that
-was not entitled to adjudicate it. Both are filed: `P-30` and `P-29`.
+**First run: 29 of 31 passed. Two failed, and neither was what its output first appeared to
+say** — one a SIGKILL wearing an assertion's clothes, the other a budget miss on a host that was
+not entitled to adjudicate it. Both were filed and fixed the same day (`P-30`, `P-29`), and the
+re-run at the end of this page is clean: **31 of 31, nothing cancelled**. The failures are kept
+here in full rather than overwritten, because what each one turned out to be is the finding.
 
 ---
 
@@ -213,6 +216,61 @@ projects' containers throughout at a load average of about **9 on 8 cores**. Sto
 is not the same as a quiet machine. A per-request cost is the most contention-sensitive thing in
 the test, and a **12% spread across three runs cannot adjudicate a 5% miss**. So `P-29`'s first
 step is to re-measure on a genuinely idle host, and only then to go looking.
+
+---
+
+## The re-run, after `P-29` and `P-30`
+
+Same command, same machine, `ms-server` stopped, with both fixes in
+(`2026-09-03-perf-budgets-clean-run.txt`):
+
+| | `@ms/core` | `@ms/probe` |
+| --- | --- | --- |
+| tests | 16 | 17 |
+| pass | **16** | **15** |
+| fail | 0 | 0 |
+| cancelled | 0 | 0 |
+| skipped | 0 | 2 |
+
+**Both failures are closed by measurement rather than by adjustment.** The two skips are the
+opt-in sweeps (`MS_PING_SWEEP`, `MS_BENCH_SWEEP`), not the new memory guard — headroom measured
+4,279 MB against its 4,000 MB floor, so the 256-worker case ran.
+
+- **The serial tree build passed inside a full run**, which is the test that matters rather than
+  in isolation: **27.6 s, 8% spare**, with bulk at 2.6 s (91% spare) and eight in flight at 9.0 s
+  (70%).
+- **The scheduler file completed and printed its report**, which is what `P-30` was for:
+
+| Pool | jitter p50 | **p95** | p99 | wheel p95 | wait p95 | RSS delta | refused |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| shipped default (48) | 7 ms | **214 ms** | 221 ms | 7 ms | 210 ms | +558 MB at 48 | 0 |
+| old default (7) | 18,810 ms | **29,082 ms** | 29,235 ms | 9 ms | 29,079 ms | +36 MB at 7 | **3,485** |
+| demand-driven (4 → 48) | 7 ms | **215 ms** | 377 ms | 9 ms | 210 ms | +16 MB at 4 | 0 |
+| small, fixed 48 | 4 ms | 7 ms | 7 ms | 7 ms | 1 ms | +254 MB at 48 | 0 |
+| small, demand-driven | 5 ms | 43 ms | 43 ms | 43 ms | 0 ms | +18 MB at 4 | 0 |
+| `icmp.ping`-shaped (256) | 604 ms | **2,427 ms** | 2,460 ms | 12 ms | 2,422 ms | +2,585 MB at 256 | 0 |
+
+`P-15`'s gate is met at **214 ms against 1,000 ms**, and the demand-driven pool an operator
+actually gets matches it at 215 ms.
+
+**The `icmp.ping` row reproduces**: 2,427 ms here against 2,333 ms standalone, both essentially
+all wait. Two independent runs agreeing put that 2.4× budget miss on firm ground rather than on
+one observation.
+
+### Two numbers that moved, and neither is a signal
+
+- **`small, fixed 48` measured p95 7 ms here against 259 ms in the run before, and 141 ms in the
+  one before that.** It is a 15-second run containing 15 checks, so one scheduling hiccup moves
+  the percentile by two orders of magnitude. Read the *pair* — fixed 254 MB against
+  demand-driven 18 MB — which is what that case exists to show, and ignore its latency column.
+- **The state machine "costs 8.3% of throughput" here and −0.2% in the first run.** Same code,
+  and both inside budget. It is the difference of two independently noisy throughput
+  measurements, which is the least stable quantity in the suite; the claim it supports is "the
+  state machine is not what limits ingestion", and 2.47M samples/min against 2.70M supports that
+  as well as 2.50 against 2.50 did.
+
+What did *not* move is worth as much: compression 10.1× in both runs, ICMP 99 targets/s in both,
+storage 103.1 B/row in both.
 
 ---
 

@@ -1,0 +1,211 @@
+ Container monitoring-system-dev-toolchain-run-bfdb702827d3 Creating 
+ Container monitoring-system-dev-toolchain-run-bfdb702827d3 Created 
+available: 4279 MB
+
+> monitoring-system@0.1.0 test:perf
+> npm run test:perf --workspaces --if-present
+
+
+> @ms/core@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/core@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+
+    measured: cloned 221 objects in 35.9 ms using 15 statements
+▶ clone performance
+  ✔ issues a number of statements proportional to depth, not to object count (766.347959ms)
+✔ clone performance (1545.840584ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, a seven-level chain with a setting and a credential at each level:
+      full render     6.56 ms   2863 bytes
+      304             1.92 ms      0 bytes  (3.4x cheaper)
+▶ conditional GET performance
+  ✔ answers a repeat read for a fraction of the cost of rendering it (463.576209ms)
+✔ conditional GET performance (1474.632417ms)
+
+    measured, 40 days of one-minute readings on 3 channels (172,800 raw rows):
+      hourly buckets, 40 days, same answer either way:
+        from sample_1h    34 ms
+        from sample       70 ms   (2.1x, reading 60x the rows)
+      end to end:
+      1 hour  from sample_1h   23 ms   960 buckets from    960 rows/channel
+      1 day   from sample_1d    4 ms    40 buckets from     40 rows/channel
+      45 min  from sample_5m   42 ms  1248 buckets from 11,520 rows/channel
+      44 min  from sample      75 ms  1277 buckets from 57,600 rows/channel   <- no tier divides 44 minutes
+▶ historic query performance
+  ✔ answers a long range from a rollup tier rather than from raw (268.340042ms)
+      stitched 2 sources           19 ms   960 buckets   <- a day of tail read from raw
+  ✔ costs no more to stitch an answer from several sources (24.544541ms)
+✔ historic query performance (2724.586459ms)
+
+    measured, 100000 readings per run, target 100,000 samples/min and p99 under 100 ms:
+       1000 rows/write    3,433,331 samples/min  p99   28.2 ms  100 writes   <- shipped default
+       2000 rows/write    3,551,642 samples/min  p99   60.6 ms   50 writes
+       5000 rows/write    3,711,976 samples/min  p99   92.5 ms   20 writes
+▶ ingestion performance
+  ✔ sustains 100,000 samples a minute with a p99 write inside 100 ms (5146.193877ms)
+
+    measured, 30000 readings through the full path:
+      throughput 2,509,698 samples/minute
+      channels   100 created once, then 300 resolved from cache with no query at all
+  ✔ costs almost nothing extra to go through the wire format and channel resolution (1016.908126ms)
+
+    measured, 100 sensors x 100 scans, 30000 readings:
+      no states    2,697,822 samples/min  p99   23.7 ms      0 transitions written
+      steady       2,474,215 samples/min  p99   37.0 ms    100 transitions written
+      state machine costs 8.3% of throughput
+      flapping   every sensor changing state on every scan: p99 write 28.6 ms, 1900 transitions in 20 writes
+                 (274 ms per batch end to end, of which 250 ms is the flush timer — one probe offering one batch at a time never fills a write)
+  ✔ carries the state machine for a bounded, measured cost (7483.209086ms)
+✔ ingestion performance (14219.058965ms)
+
+  2000 sensors, one inherited state trigger
+    first failure (nothing armed): 91 ms
+    arming 2000 chains:      141 ms
+    holding them (worst of 3):    63 ms
+    cancelling all of them:       77 ms
+    timers: 2 idle, 2 with 2000 pending, 1 after
+
+▶ notification timer cost
+  ✔ arms, holds and cancels 2000 chains with one timer (564.497084ms)
+    firing 4000 due steps:         199 ms
+
+  ✔ fires 2000 due chains in one sweep (407.913584ms)
+✔ notification timer cost (6443.298919ms)
+
+    measured, two probes each replaying 15,000 readings (5% of an hour at the v1 target, set MS_SOAK_FRACTION=1 for all of it) while another reports live:
+      live, quiet     p50  262.5 ms   p99  279.9 ms   40 batches
+      live, replaying p50  263.0 ms   p99  270.6 ms   15 batches   -> 0.97x, budget 3x
+      replay          p50   23.2 ms   p99   35.9 ms   30 batches, cleared in 4.7 s
+      pacing          the replaying probe was asked to wait up to 50 ms; the live one 0 ms
+▶ replay under load
+  ✔ keeps storing live readings promptly while a probe empties an hour of backlog (15258.413257ms)
+  ✔ lets one probe catch up at full speed, because one is not a fairness problem (0.906041ms)
+  ✔ lets a probe that has caught up rejoin the fast path on its very next batch (523.683251ms)
+✔ replay under load (16854.624924ms)
+
+    measured, 15000 channels at 60s (the v1 target):
+      generated  300000 raw readings in 1443 ms
+      raw -> 5m  692 ms for 4 buckets (173 ms per 5-minute bucket, budget 300,000 ms)
+      5m  -> 1h  158 ms for 15000 buckets
+      1h  -> 1d  157 ms for 15000 buckets
+      on disk    raw 103.1 B/row, 5m 117.4 B/row
+▶ rollup performance at the v1 target
+  ✔ rolls up a full five-minute bucket for 15,000 channels well inside its period (2495.186918ms)
+
+    measured, 300 channels x 1440 readings (one day per channel, the production chunk shape):
+      compressed 40.0 MB -> 4.0 MB (10.1x) in 263 ms
+      graph read against compressed chunks 1.6 ms
+  ✔ compresses a day of readings per channel by an order of magnitude (3089.879501ms)
+✔ rollup performance at the v1 target (6261.883503ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19):
+      bulk              2.6 s     1,950 objects/s   91% spare
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (2679.156167ms)
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s:
+      serial           27.6 s       181 objects/s    8% spare
+      8 in flight       9.0 s       553 objects/s   70% spare
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+  ✔ creates a 5,000-object tree through the API inside its budget (36701.299475ms)
+✔ tree build performance (40327.073434ms)
+ℹ tests 16
+ℹ suites 8
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 94010.576376
+
+> @ms/probe@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/probe@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+    before P-07 (count 4, -w 5)         49545 ms     20 targets/s   1.60 ms CPU each  4000/4000 replies
+▶ ICMP throughput (P-07)
+  ✔ measures what shipped before, which is the number the ADR was worried about (49551.018732ms)
+    shipped now (count 4, -i 0.2, -W)   10138 ms     99 targets/s   1.07 ms CPU each  4000/4000 replies
+  ✔ measures what ships now, which needs no privileges and no dependency (10139.812088ms)
+    blackholed, before P-07             20064 ms     10 targets/s   1.12 ms CPU each  0/1000 replies
+    blackholed, ships now               10555 ms     19 targets/s   1.16 ms CPU each  0/800 replies
+    measured on 8 cores, 1000 targets, 64 in flight
+  ✔ measures a target that answers nothing, both ways (30622.04693ms)
+  ﹣ sweeps concurrency, which is the other lever and the one P-15 reached for (0.861792ms) # set MS_PING_SWEEP=1
+  ✔ reports the cores it measured on, because the number is meaningless without them (0.803167ms)
+✔ ICMP throughput (P-07) (90317.245041ms)
+
+    measured, 20 checks in a process each (serial):
+      start-up overhead  p50 21.2 ms  p95 27.1 ms  max 27.1 ms
+▶ process runner start-up cost
+  ✔ costs a bounded and measured overhead per check (508.239209ms)
+    with the real catalogue (icmp.ping, 10 checks): start-up overhead p50 24.3 ms
+  ✔ costs more with the real catalogue than with a one-file registry, and says how much (2058.63871ms)
+    8 checks at a concurrency of 4: 68 ms total, 9 ms each
+  ✔ overlaps start-ups at the default concurrency (68.5685ms)
+✔ process runner start-up cost (2636.433252ms)
+
+    measured, 5000 sensors at 60 s disconnected for 1 min (set MS_SOAK_MINUTES=60 for the criterion's full hour):
+      spooled         5,000 readings, 1.0 MB in 1 segments, 13 ms to write
+      an hour     62 MB projected at 216 bytes a reading, against a 2 GiB shipped default (3.0% of it)
+      replayed    24 ms in 3 batches, 208,301 readings/s
+      lost 0, duplicated 0, corrupt 0; caught up 2500x faster than the outage
+▶ a disconnect long enough to matter
+  ✔ spools an hour of readings, survives a restart, and replays every one exactly once (59.289125ms)
+(node:2844) Warning: Closing file descriptor 18 on garbage collection
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2844) [DEP0137] DeprecationWarning: Closing a FileHandle object on garbage collection is deprecated. Please close FileHandle objects explicitly using FileHandle.prototype.close(). In the future, an error will be thrown if a file descriptor is closed during garbage collection.
+  ✔ keeps its place when the connection drops again mid-replay (62.6795ms)
+✔ a disconnect long enough to matter (123.075083ms)
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (0.543083ms)
+
+    shipped default (48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (91857.413376ms)
+
+    old default (7): 90s, pool 7, 4051 checks completed of 7536 dispatched, 3485 refused
+  ✔ shows what the old core-count default did with the same load (91458.839084ms)
+
+    demand-driven (4 -> 48): 90s, pool 48, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (91488.917624ms)
+
+    small, fixed 48: 15s, pool 48, 13 checks completed of 13 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+  ✔ costs a small installation a fraction of what a fixed pool reserves (33149.109682ms)
+  ﹣ sweeps pool sizes, which is how the default was chosen (1.125791ms) # set MS_BENCH_SWEEP=1 to run the pool-size sweep
+
+    icmp.ping-shaped: 90s, pool 256, 7798 checks completed of 7798 dispatched, 0 refused
+
+    measured: 5000 sensors at 60s, 200 ms checks, 8 cores, 1.5 minutes per run
+    dispatch jitter is due -> check started; the budget is p95 under 1000 ms
+      shipped default (48)        200 ms check  pool  48       jitter p50     7 ms  p95    214 ms  p99    221 ms  (wheel p95 7 ms, wait p95 210 ms)  rss + 558 MB at 48 workers  refused 0
+      old default (7)             200 ms check  pool   7       jitter p50 18810 ms  p95  29082 ms  p99  29235 ms  (wheel p95 9 ms, wait p95 29079 ms)  rss +  36 MB at  7 workers  refused 3485
+      demand-driven (4 -> 48)     200 ms check  pool  48       jitter p50     7 ms  p95    215 ms  p99    377 ms  (wheel p95 9 ms, wait p95 210 ms)  rss +  16 MB at  4 workers  refused 0
+      small, fixed 48             200 ms check  pool  48       jitter p50     4 ms  p95      7 ms  p99      7 ms  (wheel p95 7 ms, wait p95 1 ms)  rss + 254 MB at 48 workers  refused 0
+      small, demand-driven        200 ms check  pool  48->  4  jitter p50     5 ms  p95     43 ms  p99     43 ms  (wheel p95 43 ms, wait p95 0 ms)  rss +  18 MB at  4 workers  refused 0
+      icmp.ping-shaped           3000 ms check  pool 256       jitter p50   604 ms  p95   2427 ms  p99   2460 ms  (wheel p95 12 ms, wait p95 2422 ms)  rss +2585 MB at 256 workers  refused 0
+  ✔ shows what the sensor type we actually ship would need (105825.22784ms)
+✔ scheduler benchmark (P-15) (413792.923107ms)
+ℹ tests 17
+ℹ suites 4
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 507567.465274
