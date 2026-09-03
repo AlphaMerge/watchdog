@@ -148,13 +148,32 @@ floor rule 1 sets — under that line the probe stops keeping up rather than mer
 slower. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would
 allow.
 
+**A pool that has grown does not shrink back promptly, and that is a known defect** (`P-45`,
+measured in `findings/2026-09-04-autosize-loop.md`). Lowering the ceiling — by hand or by the
+derived loop — sheds only the workers that happen to be idle at that instant, and tries again just
+once a minute. Measured: a pool asked to go from 66 workers to 9 sat at 31 for two minutes while
+completely idle, holding memory it had been told to release. **Size the box for the largest pool
+the probe will reach, not the one it should settle at.** Restarting the probe is the reliable way
+to reclaim it until `P-45` lands.
+
 ### You usually do not have to do this arithmetic
 
 **Left at its default of 0, the probe applies rule 1 to itself** (`P-34`). It sums
 `check duration ÷ interval` over the sensors it was actually assigned — using the duration it has
 *measured* for each sensor type, not a guess — adds 30% headroom, and moves its own ceiling. It
-recomputes every thirty seconds, and again shortly after a configuration push, so a probe whose
-checks get slower raises its ceiling before the backlog appears rather than after.
+recomputes every thirty seconds, and again shortly after a configuration push. Measured, the
+ceiling it derives is Little's floor times the margin to the worker
+(`findings/2026-09-04-autosize-loop.md`).
+
+**It reacts about thirty seconds after your checks slow down, not before** — an earlier version of
+this page claimed the opposite. The measured lag from a step change in check duration to a moved
+ceiling is 31 s, and it is the *measurement* that lags rather than the loop: the duration it sizes
+from is a median over recent runs, so the window has to refill before the change is visible.
+Recomputing more often does not help, because it re-derives the same stale number. In that window
+a probe runs under-provisioned — measured at 10 to 12 seconds of check lateness, with **nothing
+deferred and nothing refused** — so the signal to watch is scheduler lag on Probe Health, not the
+pool counters. If your workload's duration changes in steps rather than drifting, set
+`workerPoolSize` for the slow case rather than paying that half minute each time.
 
 **It raises at once and lowers slowly, and the asymmetry is deliberate** (`P-40`). A pool that is
 too small is a probe falling behind, and every second it waits is checks queueing — so an

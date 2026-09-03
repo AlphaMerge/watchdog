@@ -10,9 +10,7 @@ import {
 import { standardCatalogue } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
-import { autoPoolCeilingMax, CheckPool, defaultPoolSize } from './runner/pool.js';
-import { nextCeiling, poolDemand } from './runner/demand.js';
-import { ICMP_PING_CHECK_MS, POOL_DEMAND_MARGIN } from './measured.js';
+import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import { QueryRunner } from './queries/runner.js';
 import type { ResultMeta } from './runner/types.js';
@@ -22,6 +20,7 @@ import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
 import { coreHandlers } from './core-handlers.js';
+import { poolSizer } from './pool-sizer.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
 import { TimingWheel } from './scheduler/wheel.js';
@@ -49,18 +48,6 @@ function configCheckRequested(argv: readonly string[]): 'check' | 'usage' | 'non
   if (positional[0] !== 'config') return 'none';
   return argv[argv.indexOf('config') + 1] === 'check' ? 'check' : 'usage';
 }
-
-/**
- * What a check is assumed to cost before this probe has run one of that type.
- *
- * `icmp.ping` after `P-07` — the type we ship, and a fair stand-in for anything that waits for a
- * packet. Deliberately not the smallest plausible number: a low guess derives a ceiling under
- * the floor and reproduces `P-32`, and measurement replaces it within one interval anyway.
- *
- * Imported rather than retyped (`P-35`): this constant existing in three files under three names
- * is what let `P-31` and `P-32` happen.
- */
-const ASSUMED_CHECK_MS = ICMP_PING_CHECK_MS;
 
 async function main(): Promise<void> {
   const requested = configCheckRequested(process.argv.slice(2));
@@ -297,60 +284,22 @@ async function main(): Promise<void> {
 
   // ── the pool ceiling, derived from the work this probe was actually given (`P-34`) ──────────
   //
-  // **Only when the operator has not said otherwise.** A non-zero `workerPoolSize` is somebody's
-  // statement about how much memory this probe may use, and a derived number must not overrule
-  // it — `size > 0` therefore means a fixed ceiling exactly as before, and this loop does
-  // nothing. At the default of 0 the probe sizes itself, which is the case `P-32` showed a
-  // constant cannot serve: 48 was under the floor for `icmp.ping` at the v1 target and 64 is
-  // more than a probe watching fast checks needs at the same sensor count.
-  const autoSize = config.probe.workerPoolSize <= 0;
-  // Consecutive computations the derived ceiling has been meaningfully below the current one
-  // (`P-40`). Held here rather than in the pool, because it is a property of the sizing loop's
-  // cadence — a pool told to change its ceiling should simply do it.
-  let belowStreak = 0;
-  const sizePool = (): void => {
-    if (!autoSize) return;
-    const demand = poolDemand(assignments.values(), (type) => pool.typicalDurationMs(type), {
-      fallbackMs: ASSUMED_CHECK_MS,
-      min: defaultPoolSize(),
-      max: autoPoolCeilingMax(),
-      margin: POOL_DEMAND_MARGIN,
-    });
-    if (demand.clamped && demand.required * POOL_DEMAND_MARGIN > autoPoolCeilingMax()) {
-      // Visible rather than silent (`WORKFLOW.MD` §5). The pool will also saturate and raise
-      // `poolUsage` on Probe Health, which is the alarm an operator already has a trigger on;
-      // this names the number that was refused so the log says what to do about it.
-      logger.warn(
-        { required: Math.ceil(demand.required), cap: autoPoolCeilingMax() },
-        'workload needs more workers than a probe may derive for itself; set workerPoolSize',
-      );
-    }
-    // **Raise now, lower slowly** (`P-40`). Since `P-39` a lowered ceiling sheds workers at once,
-    // so following every twitch in a network's round-trip time would destroy and rebuild workers
-    // for a workload that has not changed.
-    const decision = nextCeiling({
-      current: pool.maxSize,
-      derived: demand.ceiling,
-      belowStreak,
-    });
-    belowStreak = decision.belowStreak;
-    pool.setMaxSize(decision.ceiling);
-  };
-
-  // Durations drift as networks do, so the ceiling is recomputed on a timer as well as after
-  // every config push. Thirty seconds is far below the interval of anything it sizes for and far
-  // above the cost of summing five thousand assignments.
-  if (autoSize) {
-    const sizeTimer = setInterval(sizePool, 30_000);
-    sizeTimer.unref();
-    lifecycle.onShutdown({
-      name: 'pool-sizer',
-      timeoutMs: 1_000,
-      run: () => {
-        clearInterval(sizeTimer);
-      },
-    });
-  }
+  // The policy lives in `pool-sizer.ts` so that `scripts/sizing/autosize.mjs` runs the same loop
+  // this does rather than a model of it (`P-43`, `P-44`).
+  const sizer = poolSizer({
+    logger,
+    pool,
+    assignments: () => assignments.values(),
+    configuredSize: config.probe.workerPoolSize,
+  });
+  sizer.start();
+  lifecycle.onShutdown({
+    name: 'pool-sizer',
+    timeoutMs: 1_000,
+    run: () => {
+      sizer.stop();
+    },
+  });
 
   wheel.start();
   lifecycle.onShutdown({
@@ -452,7 +401,7 @@ async function main(): Promise<void> {
     assignments,
     // Both of them, together, so forgetting one is visible (`P-42`).
     listeners: [trapListener, syslogListener].filter((one) => one !== undefined),
-    sizePool,
+    sizePool: sizer.size,
     wakeDrain: () => {
       drain.wake();
     },

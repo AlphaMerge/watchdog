@@ -5229,6 +5229,68 @@ because each is a decision rather than a defect:
       The shrink path is covered by unit test rather than by the 60-second bench, because a run
       that short cannot exercise a 60-second idle window.
 
+- [x] **P-44 — The auto-sizing loop had never been run** · M · P-34 · `bench.mjs` pins the
+      ceiling and measures the pool underneath it, so the *loop* — measure durations, derive a
+      demand, apply hysteresis, move the ceiling, watch the pool respond, measure again — had
+      never run under load in any committed measurement. `demand.ts` has unit tests for the
+      arithmetic and `P-43` added them for the settle, but between the two sat the part that only
+      exists at runtime. Every claim in `docs/sizing.md` about how the ceiling behaves was read
+      off the code.
+
+      **The loop was extracted before it was measured** (`pool-sizer.ts`), for the reason `P-31`
+      makes expensive: a benchmark that re-implements the policy is right until the policy changes
+      and silent on the day it stops being. `scripts/sizing/autosize.mjs` imports the shipped
+      `poolSizer` and changes the check duration underneath a running probe — 1,500 ms, then
+      200 ms, then 1,500 ms again — which is the thing the loop exists to react to. Seven unit
+      tests came with the extraction, mutation-checked against four mutants (ignore
+      `workerPoolSize`, drop the hysteresis, ignore measured durations, warn silently); all four
+      were caught by the case meant to catch them.
+
+      **What is right**: the derived ceiling is Little's floor times the margin to the worker
+      (66 against a predicted 65, the extra one being float accumulation in the sum); a raise is a
+      single step with no ramp; a drop waits for two consecutive readings. **Nothing was deferred
+      or refused at any point**, including while checks ran 25 seconds late — `P-33`'s argument,
+      now measured.
+
+      **Two things were wrong, and both were documentation rather than arithmetic.** The pool does
+      not follow its ceiling down (`P-45`), and the ceiling moves about thirty seconds *after* a
+      slowdown rather than before it — the sizing page claimed the opposite. The lag is the
+      measurement rather than the cadence: `typicalDurationMs` is a median over a window, so
+      recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
+      numbers in `docs/findings/2026-09-04-autosize-loop.md`.
+
+- [ ] **P-45 — A pool that grew does not come back down, and holds the memory** · S · P-44 ·
+      Measured in `docs/findings/2026-09-04-autosize-loop.md`. A pool asked to go from a ceiling of
+      66 to a ceiling of 9 went to 35 workers, then 31, and **stayed at 31 for the remaining two
+      minutes of the run** — 3.4× its own ceiling. The instrumented run rules out every innocent
+      explanation: at two separate samples it was holding 35 workers with **`busy` 0 and `queued`
+      0**, completely idle, twenty-six above a bound it had already been given, shedding nothing.
+
+      **The mechanism is that the prompt pass is opportunistic and almost never invoked.**
+      `CheckPool.#considerShrink` retires whatever is spare at the instant it runs and breaks the
+      moment it meets a slot mid-check — which is correct, since a ceiling change must never take
+      a worker out of a check. But it is called from exactly two places: a `setMaxSize` that
+      lowers the ceiling, and the 60-second idle timer. A wheel firing every second produces
+      bursts in which most slots are briefly busy, so a pass landing inside one sheds almost
+      nothing and then waits a full minute for its next chance.
+
+      **This contradicts the comment sitting directly above that loop** — "over the ceiling comes
+      down now, not one worker a minute" — and the `P-39` claim that a lowered ceiling sheds at
+      once. Both are true of the ceiling. Neither is true of the workers, and the workers are what
+      cost memory: at the measured 35 MB a worker in a real probe, the excess here is about
+      **770 MB held after a workload got cheaper**. It is the same shape as `P-26`, which changed
+      the question from "has anything been submitted lately" to "has this worker been idle" —
+      right, but still answered against a single opportunistic sample.
+
+      **The fix is small**: while the pool is over its ceiling, retry the prompt pass on a short
+      timer instead of waiting for the idle window, and stop when it reaches the ceiling. That
+      converges in seconds rather than minutes and needs no change to the safety rule. Re-run
+      `scripts/sizing/autosize.mjs` to prove it — the phase-2 plateau is the regression.
+
+      Not urgent for correctness: nothing is dropped, no check is late because of it, and a probe
+      restart reclaims it. It is a memory-footprint defect, and `docs/sizing.md` now warns to size
+      the box for the largest pool the probe reaches rather than the one it should settle at.
+
 - [x] **P-43 — `main()` is where the bugs are and the only place with no test seam** · M · — ·
       Filed from evidence rather than from taste. `P-41` and `P-42` are the same defect — a
       decision derived from `AssignmentStore` on every message instead of once the push has
