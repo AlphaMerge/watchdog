@@ -3538,6 +3538,57 @@ because each is a decision rather than a defect:
       so the difference cannot quietly come back — and 3 in `overview-counts.test.tsx`, one of
       which asserts the page no longer requests `/tree`.
 
+- [x] **U-15 — A catalogue you can find a type in** · S · U-08 · The sensor types page collapsed
+      to one line per type, with a search that completes type ids, categories and parameter
+      names.
+
+      **U-15 outcome.** Forty-three types with every `paramsSchema` on screen is three hundred
+      and twenty-two parameter rows and about twenty screens of scrolling — a page on which you
+      cannot see what types exist, which is the one thing a catalogue is for. Each card is a
+      disclosure now, shut by default, with the category, the cost hint and the parameter count
+      on the row so it can be skipped without opening.
+
+      **The search covers all three things the page holds**, because "which types take a
+      `verifyTls`?" cannot be answered by scrolling and is the question an operator actually
+      arrives with. Ids, categories and parameter names and titles, all substrings — nothing
+      fuzzy, on a page whose entire content is identifiers, where a match the reader cannot
+      explain is worse than no match. Ranking is in `sensor-types-model.ts` and tested there: an
+      id that starts with the query beats one that contains it, which beats a category, which
+      beats a parameter, and alphabetical within a rank so the list does not reshuffle itself as
+      a search is narrowed one keystroke at a time.
+
+      **A parameter hit opens its card; an id or category hit does not.** Somebody who typed
+      `verifyTls` wants the row, not the card that happens to contain it. The mirror of that rule
+      is why `matchedParameters` is empty whenever the id or the category matched: half the SNMP
+      types have a parameter titled "SNMP version", and reporting it would open all nine cards on
+      a search for `snmp` and tell each of them it "matches version".
+
+      **What the search opens belongs to the search.** The state is the set of cards somebody has
+      *decided* about, not the set of open ones, so clearing the box shuts what the box opened,
+      and a card shut by hand stays shut. The first attempt held open ids in a `Set` an effect
+      edited on every keystroke; thirteen cards opened by a search for `veri` were still open,
+      with nothing on screen saying why, long after the search was gone.
+
+      `Combobox` is the ARIA 1.2 "combobox with list autocomplete", and the keyboard is the half
+      that is either right or a trap: focus never leaves the input, the active option is named by
+      `aria-activedescendant`, arrowing does not choose anything, Escape shuts the list and shuts
+      the field. An empty box lists every category with its count — eleven of them, never
+      truncated, because that is the only complete short answer to "what is in here?" and cutting
+      it hides exactly the category somebody could not name.
+
+      **Marked matches fragment an accessible name**: `<mark>` inside the label computes to
+      "snmp .traf fic", and it would change with every keystroke. The toggle and each option
+      carry an explicit `aria-label` built from the plain strings, so what a control is called
+      does not depend on the search.
+
+      Found at 320px, the width WCAG 1.4.10 asks about: a header row that let the meta hold its
+      width rendered `db.postgresql` as "d…". It wraps now, and the parameter table scrolls
+      inside its card rather than pushing the page sideways.
+
+      Tests: 21 in `sensor-types-search.test.ts` (ranking, the parameter rule, the browse menu),
+      13 in `combobox.test.tsx` (the keyboard, and the stale `aria-activedescendant` a narrowed
+      list leaves behind), 13 in `sensor-types-view.test.tsx`. Verified live at 320px and desktop
+      in both themes; the mark measures 4.58:1 light and 8.73:1 dark.
 - [x] **T-01 — SNMP session layer** · L · P-05 · v1/v2c/v3 (auth + priv), connection pooling per
       device, timeout and retry, bulk-walk support, vendored `net-snmp`.
 
