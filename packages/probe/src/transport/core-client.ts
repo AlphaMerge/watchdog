@@ -25,6 +25,7 @@ import {
   EMPTY_IDENTITY,
   identityPath,
   readIdentity,
+  staleKeyAction,
   writeIdentity,
   type ProbeIdentity,
 } from './identity.js';
@@ -133,6 +134,15 @@ export class CoreClient {
   #stopped = false;
   /** Set when the core rejects us for a reason retrying cannot fix. */
   #fatalRejection: string | undefined;
+  /**
+   * Whether the stored key has already been given up on after a refusal (`P-38`).
+   *
+   * Once per stale key, not once per reconnect: retrying the enrolment key against a core that
+   * has genuinely revoked this probe would be a machine hammering a door it has been told to
+   * stop knocking on. Cleared when a handshake succeeds, so a probe that is refused again later
+   * — a second re-approval, a second restored backup — may try again.
+   */
+  #abandonedStoredKey = false;
 
   constructor(options: CoreClientOptions) {
     this.#options = options;
@@ -202,6 +212,62 @@ export class CoreClient {
       this.#logger,
     );
     this.#logger.info({ gid, issuedKey: issuedKey !== undefined }, 'stored this probe’s identity');
+  }
+
+  /**
+   * Falls back to the configured enrolment key after a refusal (`P-38`).
+   *
+   * **The core forgets keys in ordinary circumstances**, and re-approving a probe is one of
+   * them: the hash is cleared on purpose, so a key that leaked before a revocation cannot
+   * survive the decision to let the machine back in. But the probe went on presenting the key it
+   * still had, which the core no longer knows — so the remedy an operator reaches for first left
+   * the probe *less* recoverable, and the only exit was deleting `identity.json` on its own
+   * disk. On a remote probe that means logging into the machine, which is the thing enrolment
+   * exists to avoid.
+   *
+   * **Why the probe and not the core.** Accepting an unknown key for an approved GID because the
+   * core has no hash would let anyone who can reach the port claim an approved probe's identity
+   * by presenting anything at all. Proving possession of the enrolment key is the point, and only
+   * the probe can do that.
+   *
+   * Nothing is written to disk here. The stored identity is dropped from memory and the next
+   * handshake presents the configured key; the core issues a fresh one and `writeIdentity`
+   * persists *that*, which is the same path a first enrolment takes. If it fails, `P-37`'s
+   * fallback means the probe can still come back.
+   */
+  #giveUpOnStoredKey(): void {
+    const action = staleKeyAction({
+      stored: this.#identity.accessKey,
+      configured: this.#options.config.core.accessKey,
+      alreadyTried: this.#abandonedStoredKey,
+    });
+
+    switch (action) {
+      case 'already-tried':
+      case 'nothing-to-retry':
+        return;
+
+      case 'no-enrolment-key':
+        // **The case a probe cannot fix by itself**, and the one worth a sentence rather than a
+        // loop: no enrolment key to fall back on, so somebody has to either re-issue at the core
+        // or clear this probe's stored identity.
+        this.#abandonedStoredKey = true;
+        this.#logger.error(
+          { gid: this.#gid },
+          'the core does not know this probe’s key and no enrolment key is configured; ' +
+            'set core.accessKey or clear the probe’s stored identity',
+        );
+        return;
+
+      case 'retry-with-enrolment':
+        this.#abandonedStoredKey = true;
+        this.#identity = { gid: this.#identity.gid, accessKey: '' };
+        this.#logger.warn(
+          { gid: this.#gid },
+          'the core does not know the key this probe holds; falling back to the enrolment key',
+        );
+        return;
+    }
   }
 
   async stop(): Promise<void> {
@@ -331,6 +397,10 @@ export class CoreClient {
         // presented the key. Reading that as approved is what keeps an older core working.
         this.#approved = message.approved ?? true;
         this.#backoff.reset();
+        // A handshake got through, so whatever key this probe is holding is one the core knows.
+        // Arming the fallback again matters because the core can forget a key more than once —
+        // a second re-approval, a second restored backup (`P-38`).
+        this.#abandonedStoredKey = false;
         this.#setState('connected');
         this.#logger.info(
           { gid: message.gid, coreVersion: message.coreVersion, approved: this.#approved },
@@ -461,6 +531,7 @@ export class CoreClient {
           { code: message.code, detail: message.message },
           'core rejected this probe',
         );
+        if (message.code === 'bad-access-key') this.#giveUpOnStoredKey();
         return;
       }
 

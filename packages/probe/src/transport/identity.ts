@@ -107,3 +107,41 @@ export async function writeIdentity(
     );
   }
 }
+
+/**
+ * What a probe should do when the core refuses the key it is holding (`P-38`).
+ *
+ * **A decision, separated from the doing, because the doing needs a live core and the decision
+ * needs none.** Four outcomes and each is a different situation an operator would want named
+ * differently; getting them confused is how a probe ends up looping in silence.
+ */
+export type StaleKeyAction =
+  /** Drop the stored key and present the configured enrolment key on the next handshake. */
+  | 'retry-with-enrolment'
+  /** Already presenting the configured key, so the refusal is not about which key is held. */
+  | 'nothing-to-retry'
+  /** A stored key the core rejects and no enrolment key to fall back on: a human is needed. */
+  | 'no-enrolment-key'
+  /** The fallback was already used against this refusal; do not hammer the door. */
+  | 'already-tried';
+
+export function staleKeyAction(options: {
+  /** The key this probe currently presents, or `''` when it has none of its own. */
+  readonly stored: string;
+  /** `core.accessKey` from the configuration file, or `''` when none is set. */
+  readonly configured: string;
+  /** Whether the fallback has already been taken since the last successful handshake. */
+  readonly alreadyTried: boolean;
+}): StaleKeyAction {
+  if (options.alreadyTried) return 'already-tried';
+
+  // Nothing to abandon: this probe is already presenting the configured key, so a refusal means
+  // the core has revoked it or the configured key is simply wrong. Retrying the same key would
+  // change nothing, and reporting it as a stale-key problem would send somebody looking in the
+  // wrong place.
+  if (options.stored === '' || options.stored === options.configured) return 'nothing-to-retry';
+
+  if (options.configured === '') return 'no-enrolment-key';
+
+  return 'retry-with-enrolment';
+}

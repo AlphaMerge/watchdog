@@ -4309,7 +4309,7 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
-- [ ] **P-38 — A probe holding a key the core has forgotten never tries the enrolment key** ·
+- [x] **P-38 — A probe holding a key the core has forgotten never tries the enrolment key** ·
       S · P-37 · The mirror image of `P-37`, and found while verifying its fix. There the core
       remembered a key the probe did not have; here the probe holds one the core has discarded,
       and the recovery an operator would reach for makes it worse.
@@ -4352,6 +4352,30 @@ because each is a decision rather than a defect:
       the probe recovers without anyone touching its disk. A probe with no enrolment key
       configured genuinely cannot recover by itself — that case should say so once, clearly,
       instead of looping in silence.
+
+      **Fixed on the probe.** A `bad-access-key` refusal now drops a stored key the core does not
+      know and presents the configured enrolment key on the next handshake; `P-37`'s change then
+      has the core issue a fresh one and close the fallback only once the probe has used it. So
+      the two tickets compose: one made the core forgiving about a key it had written down, the
+      other makes the probe stop insisting on a key nobody remembers.
+
+      **Once per stale key, not once per reconnect**, and reset by a successful handshake rather
+      than by a timer. A core that has genuinely revoked a probe refuses the enrolment key too,
+      and retrying it every few seconds would be a machine arguing with a decision somebody made
+      on purpose. Resetting on success matters because the core can forget a key more than once —
+      a second re-approval, a second restored backup.
+
+      **The decision is a pure function**, `staleKeyAction`, because the doing needs a live core
+      and the deciding needs none — the same split as `P-34`'s `poolDemand`. The probe endpoint's
+      tests drive a stub rather than a real `CoreClient`, so wiring the branch into the client and
+      calling it tested would have tested nothing. Six cases, one per outcome, and the outcomes
+      are separate names on purpose: "already presenting the configured key" and "no enrolment key
+      configured" are different situations an operator would look for in different places, and a
+      probe that loops in silence is the failure being replaced.
+
+      **The case a probe cannot fix by itself now says so once** — a stored key the core rejects
+      with no enrolment key to fall back on needs a human, and it logs what to do rather than
+      repeating `bad-access-key` for ever.
 
 - [x] **P-37 — A probe can be locked out for ever by one dropped welcome** · M · R-01 ·
       `ProbeRegistry` issues an approved probe a key of its own, and **stores the hash before the
