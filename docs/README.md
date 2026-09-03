@@ -129,6 +129,7 @@ measurement is not a claim.
 - [Handing a script to PowerShell](findings/2026-08-27-powershell-transport.md)
 - [ICMP at 1,000 targets](findings/2026-08-29-icmp-throughput.md)
 - [Demand-driven pool sizing](findings/2026-08-29-pool-sizing.md)
+- [The pool default against the sensor type we ship](findings/2026-09-03-pool-default.md) (`P-32`)
 
 **Tree, API and notifications**
 

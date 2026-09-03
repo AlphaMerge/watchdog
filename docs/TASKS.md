@@ -4228,7 +4228,7 @@ because each is a decision rather than a defect:
       rather than a rewrite; and the `H-08` summaries in `PLAN.md` and `TASKS.md`, which both
       repeated "83 workers where 5,000 pings need 14".
 
-- [ ] **P-32 — The shipped pool default cannot sustain the v1 target in the sensor type we
+- [x] **P-32 — The shipped pool default cannot sustain the v1 target in the sensor type we
       ship** · M · P-07 · `defaultPoolSize()` is 48. 5,000 `icmp.ping` sensors on a 60-second
       interval is a burst of **83.3 a second**, and `P-07` measured a check at **600 ms**, so
       Little's law needs **50 workers** and 48 gives a service rate of 80/s against 83.3
@@ -4252,6 +4252,74 @@ because each is a decision rather than a defect:
       leave it and document that 5,000 ping sensors want a bigger pool. Whichever it is, it needs
       the measurement, and `P-33` needs to land first because the guidance is what an operator
       would use to decide.
+
+      **Raised to 64, from a sweep rather than from arithmetic**
+      (`docs/findings/2026-09-03-pool-default.md`). Six ceilings at the real 600 ms check, 5,000
+      sensors, 90 s a point:
+
+      | Ceiling | Ratio to the floor of 50 | Tranches | Predicted | p50 | **p95** | RSS |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | 48 | **0.96×** | — | **unstable** | 3,081 ms | **5,082 ms** | 656 MB |
+      | 56 | 1.12× | 2 | 600 ms | 220 ms | 822 ms | 753 MB |
+      | **64** | **1.28×** | 2 | 600 ms | 8 ms | **614 ms** | 851 MB |
+      | 80 | 1.60× | 2 | 600 ms | 4 ms | 608 ms | 1,037 MB |
+      | 96 | 1.92× | 1 | 0 ms | 4 ms | 7 ms | 1,215 MB |
+      | 128 | 2.54× | 1 | 0 ms | 3 ms | 9 ms | 1,514 MB |
+
+      **The floor is a cliff.** 48 → 56 is one eighth more workers and takes the p95 from 5,082 ms
+      to 822. **Nothing was refused at any ceiling, 48 included** — the pool that cannot keep up
+      does not shed and alarm, it accumulates, which is why a p50 of 3.0 s is the honest signal
+      and no counter is.
+
+      **64 because the margin is doing visible work.** 56 and 64 are both two tranches and
+      `P-33`'s model predicts 600 ms for each; they measure 822 and 614, because at 1.12× the
+      floor the queueing the model omits is still on top and by 1.28× it is gone. 64 sits 39%
+      inside the budget. 96 buys the last 600 ms for 32 more workers — about 1.1 GB in a real
+      probe — to improve a budget already met.
+
+      **What it costs the workload it does not help**, because it is not a rounding error: a v1
+      target probe with fast checks now holds 64 where it held 48, about **+560 MB** in a real
+      probe, for no latency gain — 83 is two tranches against either. Demand-driven sizing
+      (`P-18`) and load tracking (`P-26`) mean nothing below the v1 target pays it at all, but a
+      large fast-check probe does.
+
+      **The test that was missing is the deliverable, not the constant.** `check-pool.test.ts`
+      had two tests on the default and neither could see this: one rejects deriving it from the
+      core count, the other checks the tranche count — the bound `P-33` showed is necessary and
+      not sufficient. The new one asserts Little's floor for `icmp.ping` at the v1 target, and
+      the margin above it the sweep measured. Verified by putting 48 back: the new test fails and
+      **both old ones still pass**, which is exactly how this shipped.
+
+      **Not done here, and deliberately.** The honest ceiling is derived from the measured
+      duration of the checks a probe is actually assigned. The system does not have that number —
+      `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
+      a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
+
+- [ ] **P-34 — The pool ceiling should come from the checks assigned, not from one constant** ·
+      L · P-32 · `defaultPoolSize()` is one number for every workload, and `P-32` showed what
+      that costs at both ends: 48 was below the floor for a probe watching `icmp.ping`, and 64 is
+      about 560 MB more than a probe watching fast checks needs at the same sensor count. One
+      constant cannot be right for both, because the floor is `burst × check duration` and the
+      probe's own catalogue decides the second term.
+
+      **The probe already knows the first term and not the second.** It knows every assignment
+      and its interval, so `burst` is exact. What it lacks is a duration: `costHint` is
+      `light | medium | heavy`, and turning that into milliseconds is a guess of exactly the kind
+      `P-33` was filed about.
+
+      Two ways to get a real number, and the second is probably right: declare a measured typical
+      duration on the `SensorType` contract beside `costHint`, which puts the burden on whoever
+      adds a type and is a lie the moment a network is slow; or **measure it** — the probe
+      already times every check, so a rolling per-type p50 over recent results is a number the
+      system owns rather than one it was told. That also handles the case neither constant can:
+      an `http.get` against a slow endpoint is genuinely heavier than the same type against a
+      fast one.
+
+      Whichever, the ceiling stays a ceiling — a bound on memory, not an allocation — and the
+      floor becomes something the probe recomputes as assignments change. Needs a scenario test
+      for the case that would hurt: a probe whose checks get slower must raise its ceiling before
+      the backlog grows, not after, and `WORKFLOW.MD`'s backpressure rule says the change must be
+      visible on Probe Health rather than silent.
 
 - [x] **P-31 — The scheduler benchmark's `icmp.ping` case models a check we stopped
       shipping** · S · P-07 · The case is named "shows what the sensor type we actually ship

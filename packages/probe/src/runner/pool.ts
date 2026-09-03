@@ -156,23 +156,52 @@ interface Slot {
  * `(tranches - 1) x checkDuration`. The measured curve is exactly that shape: 32 slots is three
  * tranches and a p95 of 405 ms; 48 is two and 213 ms; 128 takes the whole batch at once and 7 ms.
  *
- * 48 is where that stops being worth paying for. 64 measured no better and cost 38 MB more; 128
- * bought 200 ms for another 550 MB and its p99 was unstable at 510 ms; 256 was worse everywhere,
- * with the wheel's own lag rising to 676 ms as the threads contended with its timer. The old
- * default of 7 refused 21% of checks and delayed the rest by a p95 of **16 seconds**, against an
- * exit criterion of one.
+ * **That tranche model is necessary and not sufficient, which is how this was wrong for a week**
+ * (`P-32`, `P-33`). It bounds the wait for *one* batch and never asks whether the batch clears
+ * before the next arrives a second later. The constraint it was missing is Little's law: a pool
+ * completes `slots / checkDuration` checks a second, and below the arrival rate the backlog
+ * grows for as long as the probe runs — quietly, because the queue absorbs it and nothing is
+ * refused until the queue's own bound is reached.
  *
- * The tie-break against 32 is how slow a check mix survives it: three tranches breaches the
- * one-second budget at about a 500 ms check, two at about a second. Real HTTP checks routinely
- * exceed 500 ms.
+ *     slots >= burst x checkDuration
  *
- * It costs about 6.5 MB a worker — roughly 290 MB at this size, whether the probe is watching
- * five thousand sensors or fifty. That is the price of a fixed default, and `P-18` is the task
- * for making it demand-driven so a small probe stops paying for slots it never uses. Until then,
- * `probe.workerPoolSize` is the setting.
+ * **`icmp.ping` is what made that bite.** `P-15` chose 48 against a 200 ms model, where the
+ * floor is 16.7 and 48 is nearly three times it. `P-07` then measured a real ping check at
+ * **600 ms** — four packets at `-i 0.2` — and at the v1 target that floor is `83.3 x 0.6 = 50`.
+ * **48 was one worker under the line for the sensor type this project actually ships**, and
+ * `P-07`'s own finding had already said 83/s "needs about 55 now" without anyone putting 55 next
+ * to 48.
+ *
+ * Swept at 600 ms checks, 5,000 sensors, 90 s a point
+ * (`docs/findings/2026-09-03-pool-default.md`):
+ *
+ *     ceiling   ratio to floor   p50        p95        benchmark RSS
+ *          48            0.96x   3,081 ms   5,082 ms   656 MB   <- backlog, not a tail
+ *          56            1.12x     220 ms     822 ms   753 MB
+ *          64            1.28x       8 ms     614 ms   851 MB   <- this
+ *          80            1.60x       4 ms     608 ms   1,037 MB
+ *          96            1.92x       4 ms       7 ms   1,215 MB
+ *         128            2.54x       3 ms       9 ms   1,514 MB
+ *
+ * **64, because the margin above the floor is doing visible work.** 56 and 64 are both two
+ * tranches and the tranche model predicts 600 ms for each; 56 measures 822 and 64 measures 614,
+ * because at 1.12x the floor the queueing noise the model ignores is still on top. 64 sits 39%
+ * inside the one-second budget. 96 buys the last 600 ms by taking the batch in one tranche, and
+ * costs another 32 workers — about 1.1 GB in a real probe, where a worker carries the sensor
+ * catalogue at ~35 MB — to improve a budget that is already met.
+ *
+ * **What this costs the workload it does not help**, stated plainly: a probe at the v1 target
+ * whose checks are fast now holds 64 workers where it held 48, about **+560 MB** in a real
+ * probe, and gains nothing — 83 in two tranches either way. The pool is demand-driven since
+ * `P-18` and tracks its load since `P-26`, so nothing below the v1 target pays this at all, but
+ * a large fast-check probe does. The honest fix is a ceiling derived from the measured duration
+ * of the checks actually assigned rather than one constant for every workload; `costHint` is a
+ * three-value enum and not that number, so it needs its own ticket rather than a guess here.
+ *
+ * `probe.workerPoolSize` overrides it, and `docs/sizing.md` is written in terms of the floor.
  */
 export function defaultPoolSize(): number {
-  return 48;
+  return 64;
 }
 
 export class CheckPool {

@@ -1,0 +1,6 @@
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":3081,"p95":5082.1,"p99":5839.5,"max":6231.2,"poolFinal":48,"poolGrown":44,"deferred":0,"refused":0,"rssMb":656,"poolRssMb":578.5}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":220.2,"p95":822.4,"p99":865.9,"max":1070.6,"poolFinal":56,"poolGrown":52,"deferred":0,"refused":0,"rssMb":753.1,"poolRssMb":675.5}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":8.5,"p95":614,"p99":719,"max":919.6,"poolFinal":64,"poolGrown":60,"deferred":0,"refused":0,"rssMb":850.7,"poolRssMb":772.3}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":4,"p95":607.5,"p99":614.2,"max":813.6,"poolFinal":80,"poolGrown":76,"deferred":0,"refused":0,"rssMb":1037.4,"poolRssMb":959.4}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":4,"p95":7.3,"p99":592,"max":831.4,"poolFinal":96,"poolGrown":92,"deferred":0,"refused":0,"rssMb":1215,"poolRssMb":1137.5}
+{"cores":8,"sensors":5000,"intervalSeconds":60,"checkMs":600,"seconds":90,"completed":7536,"p50":3.1,"p95":8.7,"p99":436.6,"max":653.7,"poolFinal":127,"poolGrown":123,"deferred":0,"refused":0,"rssMb":1513.6,"poolRssMb":1436}

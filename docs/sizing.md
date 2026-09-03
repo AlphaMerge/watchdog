@@ -91,13 +91,16 @@ the number to clear comfortably, not to meet.
 ### Worked examples
 
 **5,000 sensors, 60-second interval, 200 ms checks.** Burst 83.3. Rule 1 needs
-`83.3 × 0.2 = 17` workers; the shipped ceiling of 48 is 2.9× that. Rule 2: 2 rounds, so about
-200 ms of jitter, measured at 208–217. Comfortable, and why 5,000 sensors fit on two cores.
+`83.3 × 0.2 = 17` workers; the shipped ceiling of 64 is 3.8× that. Rule 2: 2 rounds, so about
+200 ms of jitter, measured at 208–217 when the ceiling was 48 and unchanged by raising it — 83
+is two rounds against either. Comfortable, and why 5,000 sensors fit on two cores.
 
-**5,000 `icmp.ping` sensors — the one to watch.** A ping check costs **600 ms** since `P-07`
-(`findings/2026-08-29-icmp-throughput.md`), so rule 1 needs `83.3 × 0.6 = 50` workers. **The
-shipped ceiling of 48 is below the floor.** Raise `workerPoolSize`, lengthen the interval, or
-split across probes — this is `P-32` and the default has not moved yet.
+**5,000 `icmp.ping` sensors — the case that moved the default.** A ping check costs **600 ms**
+since `P-07` (`findings/2026-08-29-icmp-throughput.md`), so rule 1 needs `83.3 × 0.6 = 50`
+workers. The ceiling used to be 48 — one under the floor — and measured a p95 of **5,082 ms**
+with nothing refused. **It is 64 now** (`P-32`), which is 1.28× the floor and measures 614 ms.
+If your ping sensors are on a shorter interval than 60 s, redo rule 1: the floor scales with the
+burst, and `workerPoolSize` is the setting.
 
 **5,000 HTTP sensors averaging 2 seconds.** Rule 1 needs `83.3 × 2 = 167` workers, well past the
 shipped ceiling. An earlier version of this page said 83, from rule 2 alone; that was half the
@@ -119,18 +122,20 @@ measured over 24 hours at 48 workers and 1,790 MB resident. A synthetic pool wit
 costs about 12 MB a worker, so do not size from a benchmark.
 
 **The pool settles near the burst, so the burst is what you are buying memory for.** Measured at
-a ceiling of 48, **with 200 ms checks**:
+a ceiling of 48, **with 200 ms checks** — the ceiling has since risen to 64, so the two pinned
+rows would now pin at 64 and cost proportionally more:
 
 | Sensors | Burst | Workers held | Benchmark RSS |
 | --- | --- | --- | --- |
 | 100 | 1.7/s | 4 | 117 MB |
 | 500 | 8.3/s | 14 | 216 MB |
 | 1,000 | 16.7/s | 24 | 312 MB |
-| 2,500 | 41.7/s | 48 (ceiling) | 547 MB |
-| 5,000 | 83.3/s | 48 (ceiling) | 571 MB |
+| 2,500 | 41.7/s | 48 (was the ceiling) | 547 MB |
+| 5,000 | 83.3/s | 48 (was the ceiling) | 571 MB |
 
-Above about 2,500 sensors the burst exceeds the shipped ceiling, so the pool pins there and the
-extra latency is the second round the model predicts. Below it, the pool tracks the load.
+Above about 2,500 sensors the burst exceeds the ceiling, so the pool pins there and the extra
+latency is the second round the model predicts. Below it, the pool tracks the load and the
+ceiling costs nothing — which is why raising it to 64 changed nothing for the first three rows.
 
 **Read that table with the check duration it was measured at.** A slower check raises the floor
 in direct proportion — three times the check duration is three times the workers, and three

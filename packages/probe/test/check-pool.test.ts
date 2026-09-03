@@ -462,10 +462,42 @@ describe('the default pool size', () => {
     );
   });
 
+  it('keeps up with the v1 target in the sensor type we ship', () => {
+    // **The check that was missing, and its absence is `P-32`.** The tranche test above bounds
+    // the wait for one batch and never asks whether that batch clears before the next arrives a
+    // second later. A pool completes `slots / checkDuration` checks a second; below the arrival
+    // rate the backlog grows for as long as the probe runs, and nothing is refused while the
+    // queue still has room, so no counter says anything is wrong.
+    //
+    // `icmp.ping` is the case that bites, because it is the type this project ships and it is
+    // not fast: four packets at `-i 0.2` is 600 ms (`P-07`). The old default of 48 was one
+    // worker under this line and measured a p95 of 5,082 ms against a 1,000 ms budget.
+    const burst = 5_000 / 60;
+    const PING_CHECK_SECONDS = 0.6;
+    const floor = burst * PING_CHECK_SECONDS;
+
+    assert.ok(
+      defaultPoolSize() > floor,
+      `${String(defaultPoolSize())} slots complete ` +
+        `${(defaultPoolSize() / PING_CHECK_SECONDS).toFixed(1)} checks a second against ` +
+        `${burst.toFixed(1)} arriving — the backlog would grow without bound`,
+    );
+
+    // And clear it by enough that the tranche model above actually holds. Measured at 600 ms:
+    // 1.12x the floor predicted 600 ms and delivered 822; 1.28x delivered 614. The margin is
+    // not decoration, it is the queueing the tranche model leaves out.
+    assert.ok(
+      defaultPoolSize() >= floor * 1.25,
+      `${String(defaultPoolSize())} is only ${(defaultPoolSize() / floor).toFixed(2)}x the floor`,
+    );
+  });
+
   it('does not pay for slots the measurement showed were not worth it', () => {
-    // 64 measured no better than 48 and cost 38 MB more; 128 bought 200 ms for another 550 MB
-    // with an unstable p99; 256 was worse everywhere. A default that drifts upward without a
-    // measurement behind it is how a probe quietly starts needing a gigabyte.
+    // At 600 ms checks, 96 slots take the v1 batch in one tranche and measure a p95 of 7 ms
+    // against 64's 614 — but both are inside the 1,000 ms budget, and the 32 extra workers cost
+    // about 1.1 GB in a real probe, where each carries the sensor catalogue. A default that
+    // drifts upward without a measurement behind it is how a probe quietly starts needing a
+    // gigabyte, so this is deliberately tight: raising it again means measuring again.
     assert.ok(defaultPoolSize() <= 64);
   });
 });
