@@ -137,7 +137,7 @@ alarm.
 | --- | --- |
 | `connected` | The link to the core |
 | `schedulerLag` | Checks starting later than scheduled. Warns at 1 s, errors at 5 s — this is the first sign of an overloaded probe |
-| `poolUsage` | Worker pool saturation. Warns at 80% |
+| `poolUsage` | Worker pool saturation. Warns at 80%. Since `P-34` the probe raises its own ceiling from the checks it was assigned, so sustained saturation means either `workerPoolSize` is pinned or the workload outgrew what a probe derives for itself — see the troubleshooting runbook, and note that a pool below its floor accumulates rather than refusing |
 | `deferred` | Checks the pool could not start. **Backpressure is counted, never silent** |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |

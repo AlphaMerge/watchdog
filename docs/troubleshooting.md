@@ -135,9 +135,38 @@ which is the honest answer rather than a reading of zero.
 - **`queued`** and **`checkWait`** — how deep the queue is and how long a check waits for a
   worker.
 
-The remedies are fewer sensors per probe, longer intervals, or another probe. Nothing blocks the
-scheduler itself — every check runs in a worker or a child process with a timeout and an abort
-signal — so lag is saturation, not a stuck check.
+The remedies are a bigger pool, fewer sensors per probe, longer intervals, or another probe.
+Nothing blocks the scheduler itself — every check runs in a worker or a child process with a
+timeout and an abort signal — so lag is saturation, not a stuck check.
+
+### Check the pool against the arithmetic before you move sensors
+
+**Lag with `deferred` and `refused` both at zero is the case that misleads.** It reads as "the
+pool is coping, so the problem is elsewhere", and it is the opposite: a pool that cannot keep up
+does not shed work and raise a counter, it accumulates. Nothing is refused while the queue still
+has room, so the only symptom is that checks start later and later.
+
+The arithmetic that decides it, from `docs/sizing.md`:
+
+    burst         = sensors ÷ interval in seconds
+    workers needed = burst × check duration in seconds
+
+If the pool is under that, no amount of tolerance helps and the lag climbs for as long as the
+probe runs. **The tell is `checkWait`**: a p95 in seconds, growing between readings, on a probe
+that is refusing nothing.
+
+Since `P-34` the probe works this out for itself — it measures what each sensor type costs and
+moves its own ceiling — so the two cases where you have to intervene are:
+
+- **`workerPoolSize` is set to a non-zero value.** That fixes the ceiling and turns self-sizing
+  off, deliberately, because the setting is a statement about memory. Raise it or set it to 0.
+- **The workload needs more than a probe will derive on its own** (256 workers). The probe logs
+  `workload needs more workers than a probe may derive for itself` with the number it wanted.
+  Set `workerPoolSize` explicitly, and check the box has the memory: about 35 MB a worker.
+
+A worked case: 5,000 `icmp.ping` sensors on a 60-second interval is a burst of 83 a second, and
+a ping check costs 600 ms, so the pool needs 50 workers. On 48 that measured a **median** check
+3.0 s late and a p95 of 5.4 s — **with nothing refused** (`P-32`).
 
 **`workerCrashes` above zero** points at a specific check type. Types that run somebody else's
 code run in a child process for exactly this reason: a segfault in a native module would
