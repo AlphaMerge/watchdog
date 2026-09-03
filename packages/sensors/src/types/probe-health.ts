@@ -60,8 +60,19 @@ const CHANNELS: readonly ChannelDef[] = [
     key: 'poolUsage',
     name: 'Worker pool in use',
     unit: '%',
-    // The pool grows to its maximum before this stays high (`P-18`), so a sustained 80% is a
+    // The pool grows to its ceiling before this stays high (`P-18`), so a sustained 80% is a
     // pool that has already grown as far as it may. At 95% the next burst is deferred checks.
+    //
+    // **"As far as it may" moved** (`P-34`): the ceiling is derived from the checks the probe
+    // was actually assigned, so a sustained reading now means the probe has already tried to
+    // help itself and either `workerPoolSize` is pinned or the workload outgrew what a probe
+    // derives on its own. `docs/troubleshooting.md` has the two remedies.
+    //
+    // **This is `busy / held`, not `busy / ceiling`**, which is what makes it survive a moving
+    // ceiling at all: a pool that cannot keep up has every worker it holds busy, whatever the
+    // ceiling says. The failure `P-34` could introduce — a derived ceiling too low — therefore
+    // shows up here rather than needing a signal of its own. It is also why the *transient* 100%
+    // of a pool that is about to grow is not an alarm, and only a sustained reading is.
     limits: {
       upperWarning: 80,
       upperError: 95,
