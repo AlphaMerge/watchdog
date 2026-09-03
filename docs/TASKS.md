@@ -4309,6 +4309,51 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [x] **P-42 — The same mid-push read, one line up, and this one lost traps** · S · P-41 ·
+      Found by asking what *else* read the assignment store per message, immediately after fixing
+      `P-41`. The answer was directly above it: `onConfig` swept the trap listener's ring cursors
+      with `assignments.ids()` on every message.
+
+      **`retain` is hygiene given the settled set and data loss given a fraction of it.** It
+      deletes the ring cursor of every sensor absent from the list it is handed, so mid-push that
+      is every trap sensor outside chunk one. And the loss is *silent*, which is what makes this
+      worse than `P-41`: a sensor whose cursor has been deleted is indistinguishable from one that
+      has never drained, so `drain` registers it afresh at the current sequence and returns
+      `items: []` with **`dropped: 0`**. The ring's own doc comment promises the opposite — "a
+      cursor the ring has overtaken yields a drop count rather than a quietly shorter list" — and
+      CLAUDE.md's rule is that backpressure is visible, never silent. An ordinary configuration
+      push threw away buffered traps and told the sensor nothing had been missed. `P-41` cost
+      workers destroyed and rebuilt; this cost the notifications a trap sensor exists to report.
+
+      **And the syslog listener was never swept at all.** `T-20` extracted `NotificationRing`
+      from the trap and syslog listeners on the grounds that the cursor arithmetic and the retain
+      sweep are "byte-for-byte the same thing for traps and for syslog", gave both a `retain`,
+      tested both, and wired one. `git log -S` finds no commit in the repository's history that
+      ever called `syslogListener.retain` — so syslog cursors accumulated for the life of the
+      process, one per sensor ever assigned. Fixing the trap sweep and leaving that would have
+      repeated the original mistake in the same file.
+
+      **Both now run on `P-41`'s settle**, renamed from `sizePoolWhenSettled` to `onConfigSettled`
+      since it is no longer only about the pool. One subtlety worth naming: the old helper began
+      `if (!autoSize) return`, so hanging the sweep off it unchanged would have quietly disabled
+      cursor cleanup for every operator who set `workerPoolSize`. The guard now sits inside
+      `sizePool`, which is whose business it is.
+
+      **One limitation the debounce introduces, since it should not have to be re-derived**: a
+      core pushing configuration more often than every two seconds, indefinitely, starves the
+      settle. The sizer has a backstop — its own thirty-second timer calls `sizePool` directly —
+      and the sweep does not. Left as is because the consequence is stale cursors rather than lost
+      ones, the eager direction being the dangerous one; and because a config path that never
+      quiets for two seconds is a larger problem than cursor hygiene.
+
+      **Tested where it can be**, with the same limitation `P-41` recorded and for the same
+      reason. Three cases drive a real `NotificationRing` off a real `AssignmentStore` through a
+      chunked push: sweeping at the chunk boundary loses three traps buffered for sensor 150 and
+      reports zero dropped; sweeping once the push has settled keeps all three; and a sensor
+      genuinely absent from the *settled* set still loses its cursor, so the fix did not simply
+      neuter the sweep. That is the policy pinned from both sides. What it cannot pin is the call
+      site, because `main()` is a 500-line unexported bootstrap that nothing imports — `P-43`.
+
 - [x] **P-41 — The pool sizer read a configuration that was still arriving** · S · P-34 ·
       `sizePool()` ran on every `config` message. `P-28` sends a full configuration as a
       `config-set` followed by deltas carrying the same version — because one message for five
@@ -5152,6 +5197,32 @@ because each is a decision rather than a defect:
       48 workers, so no worker is idle for a 60-second window and the pool stays at its ceiling.
       The shrink path is covered by unit test rather than by the 60-second bench, because a run
       that short cannot exercise a 60-second idle window.
+
+- [ ] **P-43 — `main()` is where the bugs are and the only place with no test seam** · M · — ·
+      Filed from evidence rather than from taste. `P-41` and `P-42` are the same defect — a
+      decision derived from `AssignmentStore` on every message instead of once the push has
+      settled — they are **four lines apart in the same function**, and neither fix is pinned by a
+      test. Both tickets had to write "tested where it can be, which is not `main.ts`".
+
+      **The reason is structural.** `packages/probe/src/main.ts` is 571 lines of which `main()` is
+      about 500: it reads config, builds the pool, the wheel, both listeners, the core client and
+      the lifecycle, and closes over all of them in the message handlers. Nothing exports it and
+      no test imports it, so every policy expressed *in the wiring* — what runs per message versus
+      per settle, what is guarded by `autoSize`, which listeners get swept — is unverifiable by
+      construction. That is also why `P-42`'s syslog half survived from `T-20` to now: no test
+      could observe that one of two identical listeners was never wired.
+
+      **What would fix it**, roughly: separate composition from policy. Have `main()` build the
+      collaborators and hand them to a `ProbeRuntime` (or just an exported `wireProbe(deps)`)
+      that owns the handlers, so a test can construct it with fakes, feed it a chunked
+      `config-set` plus deltas, and assert that no cursor was swept until the push settled and
+      that both listeners were swept when it did. The `demand.ts` extraction for `P-34`/`P-40` is
+      the precedent and it worked — those decisions have real tests because they are no longer
+      inside the bootstrap.
+
+      **Not urgent, and deliberately sized `M`.** Nothing is broken today; the cost is that this
+      class of bug is found by reading rather than by running, which is how two of them shipped.
+      Worth doing before the next change to the config path, not as an interruption of one.
 
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent

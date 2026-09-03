@@ -4,6 +4,7 @@ import { pino } from 'pino';
 import type { SensorAssignment } from '@ms/shared';
 import { AssignmentStore, type ConfigUpdate } from '../src/scheduler/assignments.js';
 import { poolDemand } from '../src/runner/demand.js';
+import { NotificationRing } from '../src/listeners/ring.js';
 import { TimingWheel } from '../src/scheduler/wheel.js';
 
 const silent = pino({ level: 'silent' });
@@ -192,5 +193,94 @@ describe('a chunked configuration push (P-41)', () => {
       complete > partial * 2,
       `mid-push derived ${String(partial)} against ${String(complete)} once complete`,
     );
+  });
+
+  /**
+   * The same trap, and the expensive one: sweeping listener cursors mid-push *loses traps*
+   * (`P-42`).
+   *
+   * `retain` is memory hygiene — a sensor this probe no longer holds should stop costing a cursor.
+   * Handed a fraction of the assignment set it becomes data loss instead, and silent data loss at
+   * that, because a deleted cursor is indistinguishable from a sensor that has never drained.
+   */
+  it('makes the listener cursor sweep discard buffered notifications, mid-push', () => {
+    const { store } = harness();
+    const ring = new NotificationRing(1_000);
+    const all = Array.from({ length: 200 }, (_, i) => assignment(i + 1));
+
+    // Every sensor has drained once, so every one of them holds a cursor.
+    store.apply(set(all));
+    for (const id of store.ids()) ring.drain(id, 'snmp-trap');
+    assert.equal(ring.cursors, 200);
+
+    // Three traps arrive for sensor 150 while the core happens to be pushing a new config.
+    for (let i = 0; i < 3; i++) {
+      ring.push({
+        at: new Date().toISOString(),
+        source: '192.0.2.150',
+        text: 'link down',
+        detail: {},
+      });
+    }
+
+    // Chunk one of that push, as a set — authoritative over a fraction.
+    store.apply(set(all.slice(0, 100)));
+    ring.retain(store.ids());
+    assert.equal(ring.cursors, 100, 'sensor 150 has lost its cursor to a chunk boundary');
+
+    // The rest of the push arrives and sensor 150 is assigned again, as it always was.
+    store.apply({ kind: 'delta', version: 'v', upserted: all.slice(100), removed: [] });
+    assert.equal(store.size, 200);
+
+    const batch = ring.drain(150, 'snmp-trap');
+    assert.deepEqual(batch.items, [], 'the three traps are gone');
+    assert.equal(
+      batch.dropped,
+      0,
+      'and reported as none dropped — the sensor cannot tell this from a quiet network',
+    );
+  });
+
+  /** The other side of it: the same sweep, given the set the push settled on, keeps them. */
+  it('keeps them when the sweep waits for the push to settle', () => {
+    const { store } = harness();
+    const ring = new NotificationRing(1_000);
+    const all = Array.from({ length: 200 }, (_, i) => assignment(i + 1));
+
+    store.apply(set(all));
+    for (const id of store.ids()) ring.drain(id, 'snmp-trap');
+
+    for (let i = 0; i < 3; i++) {
+      ring.push({
+        at: new Date().toISOString(),
+        source: '192.0.2.150',
+        text: 'link down',
+        detail: {},
+      });
+    }
+
+    // The whole push, with no sweep in the middle of it.
+    store.apply(set(all.slice(0, 100)));
+    store.apply({ kind: 'delta', version: 'v', upserted: all.slice(100), removed: [] });
+    ring.retain(store.ids());
+
+    assert.equal(ring.cursors, 200);
+    assert.equal(ring.drain(150, 'snmp-trap').items.length, 3, 'the three traps survive');
+  });
+
+  /** And it still does the job it exists for: a sensor genuinely gone stops costing a cursor. */
+  it('still drops the cursor of a sensor the settled push removed', () => {
+    const { store } = harness();
+    const ring = new NotificationRing(1_000);
+    const all = Array.from({ length: 200 }, (_, i) => assignment(i + 1));
+
+    store.apply(set(all));
+    for (const id of store.ids()) ring.drain(id, 'snmp-trap');
+
+    // A device moved to another probe: sensor 150 is absent from the settled set, not from a chunk.
+    store.apply(set(all.filter((a) => a.sensorId !== 150)));
+    ring.retain(store.ids());
+
+    assert.equal(ring.cursors, 199);
   });
 });

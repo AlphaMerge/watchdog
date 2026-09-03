@@ -337,28 +337,53 @@ async function main(): Promise<void> {
   };
 
   /**
-   * Sizing after a configuration push, once the push has finished arriving (`P-41`).
+   * Everything that must read the assignment store *after* a configuration push has finished
+   * arriving rather than during it (`P-41`, `P-42`).
    *
    * **A full push is not one message.** `P-28` sends it as a `config-set` followed by deltas, and
    * `AssignmentStore` treats a set as authoritative — so between the first chunk and the last the
-   * store holds a *fraction* of this probe's sensors. Sizing on that reads a workload that does
-   * not exist: a probe holding a ceiling of 128 sees the first chunks derive 64, and since
-   * `P-40` two such readings are a drop and since `P-39` a drop sheds at once. The workers are
-   * destroyed and then asked for again three chunks later.
+   * store legitimately holds a *fraction* of this probe's sensors. Two consumers read it, and
+   * both are wrong per message:
+   *
+   * - **The pool sizer** reads a workload that does not exist: a probe holding a ceiling of 128
+   *   sees the first chunks derive 64, and since `P-40` two such readings are a drop while since
+   *   `P-39` a drop sheds at once. The workers are destroyed and then asked for again three
+   *   chunks later.
+   * - **The listener cursor sweep** loses data rather than time, which is worse. `retain` deletes
+   *   the ring cursor of every sensor absent from the set it is handed, and a sensor whose cursor
+   *   is gone is indistinguishable from one that has never drained — `drain` registers it afresh
+   *   at the current sequence and returns an empty batch with `dropped: 0`. Mid-push that is
+   *   every trap and syslog sensor outside chunk one, so an ordinary configuration push would
+   *   discard their buffered notifications *and report none missing*, which is the one thing the
+   *   ring exists to prevent (`P-42`).
    *
    * Coalescing is the whole fix. A push arrives in a burst, so one call a couple of seconds after
    * the last message is both a complete picture and still far faster than waiting for the timer.
+   *
+   * This is armed whether or not the pool is auto-sized. `sizePool` opts itself out; the cursor
+   * sweep is owed to every probe, and hanging it off the sizer's own guard would have quietly
+   * disabled it for anyone who set `workerPoolSize`.
    */
-  let sizeAfterPush: NodeJS.Timeout | undefined;
-  const sizePoolWhenSettled = (): void => {
-    if (!autoSize) return;
-    if (sizeAfterPush !== undefined) clearTimeout(sizeAfterPush);
-    sizeAfterPush = setTimeout(() => {
-      sizeAfterPush = undefined;
+  let afterPush: NodeJS.Timeout | undefined;
+  const onConfigSettled = (): void => {
+    if (afterPush !== undefined) clearTimeout(afterPush);
+    afterPush = setTimeout(() => {
+      afterPush = undefined;
+      // One sorted copy of up to five thousand ids, not two.
+      const held = assignments.ids();
+      trapListener?.retain(held);
+      syslogListener?.retain(held);
       sizePool();
     }, 2_000);
-    sizeAfterPush.unref();
+    afterPush.unref();
   };
+  lifecycle.onShutdown({
+    name: 'config-settle',
+    timeoutMs: 1_000,
+    run: () => {
+      if (afterPush !== undefined) clearTimeout(afterPush);
+    },
+  });
 
   // Durations drift as networks do, so the ceiling is recomputed on a timer as well as after
   // every config push. Thirty seconds is far below the interval of anything it sizes for and far
@@ -371,7 +396,6 @@ async function main(): Promise<void> {
       timeoutMs: 1_000,
       run: () => {
         clearInterval(sizeTimer);
-        if (sizeAfterPush !== undefined) clearTimeout(sizeAfterPush);
       },
     });
   }
@@ -475,14 +499,12 @@ async function main(): Promise<void> {
     },
     onConfig: (update) => {
       const size = assignments.apply(update);
-      // A deleted sensor should stop costing a cursor. Cheap, and it runs only on a config push.
-      trapListener?.retain(assignments.ids());
-      // The workload just changed, so the ceiling derived from it is stale (`P-34`). Sized after
-      // a push rather than only on the timer, because a config push is exactly when a probe goes
-      // from fifty sensors to five thousand and discovering that a tick later is a tick of
-      // backlog — but *after* it, not during, since a chunked push is transiently incomplete
-      // (`P-41`).
-      sizePoolWhenSettled();
+      // The workload just changed, so both the ceiling derived from it (`P-34`) and the set of
+      // listener cursors worth keeping are stale. Recomputed after a push rather than only on the
+      // timer, because a config push is exactly when a probe goes from fifty sensors to five
+      // thousand and discovering that a tick later is a tick of backlog — but *after* the push,
+      // not during, since a chunked one is transiently incomplete (`P-41`, `P-42`).
+      onConfigSettled();
       return size;
     },
     onSweep: (message) => {
