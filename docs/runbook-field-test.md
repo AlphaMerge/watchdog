@@ -99,9 +99,16 @@ something was watching. Set notification triggers on:
 | `alarmOverdue` | Core Health | the alarm sweep stopped; everything downstream is stale |
 | `notifyOldest` | Core Health | notifications queued and undelivered |
 | `probesDown` | Core Health | a probe is not connected |
+| `sessionOverflows` | Probe Health | SNMP or SSH sessions opened past the pool bound (`P-36`) — sustained, this is a probe heading for `EMFILE`, and a week is long enough to get there |
 
 These all ship with declared limits (`S-18`), so the thresholds are already right; what you are
 adding is delivery.
+
+**`sessionOverflows` matters more here than anywhere else**, and it is why it was worth adding
+before the field test rather than after. A hundred real devices with SNMP and SSH credentials is
+the first workload this project has ever run that opens sessions in earnest, and the pools open
+past their bound rather than fail a check — the right trade, and one nothing could see until
+`P-36`. A simulator does not hold a session open for a week.
 
 ## 4. Run for a week, and record
 
@@ -122,6 +129,10 @@ The numbers that decide the criterion:
   nobody can explain is the finding.
 - **`workerCrashes`** — above zero names a check type that fell over on a real device, which is
   precisely what a simulator would not have shown you.
+- **`sessionsOpen` against `sessionsEvicted`** — the pair, not either alone. A steady `open` with
+  `evicted` climbing is a probe reopening sessions it just closed, because `idleMs` is shorter
+  than your scan interval; on SSH that is a full handshake per check and it will show in
+  `checkWait` before it shows anywhere else.
 
 ## 5. What counts as a failure
 
