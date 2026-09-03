@@ -129,7 +129,11 @@ which is the honest answer rather than a reading of zero.
 
 `schedulerLag` on Probe Health, which warns at 1 s and errors at 5 s. Then:
 
-- **`poolUsage`** — the worker pool. Warns at 80%.
+- **`poolUsage`** — the worker pool. Warns at 80%. **It is an instantaneous gauge, not a duty
+  cycle**, so on a bursty workload it reads far lower than the pool's real use: measured on a probe
+  whose 84-checks-a-second burst saturates all 64 workers for about 20 ms in every second, it
+  reported **4.7%** (`findings/2026-09-04-live-probe-check.md`). A low reading is not evidence of a
+  pool that can be shrunk. `checkWait` is the number that does not lie about a burst.
 - **`deferred`** — checks the pool could not start. Backpressure is counted and surfaced, never
   silently dropped, and this is where it surfaces.
 - **`queued`** and **`checkWait`** — how deep the queue is and how long a check waits for a

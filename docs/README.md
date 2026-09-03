@@ -144,6 +144,8 @@ measurement is not a claim.
 - [Failure modes, row by row](findings/2026-08-29-failure-modes.md) (`WORKFLOW.MD §13`)
 - [Sizing across machine tiers](findings/2026-09-03-sizing.md) (`H-08`)
 - [The `test:perf` budgets, two that failed, and the re-run that closed them](findings/2026-09-03-perf-budgets.md) (`P-29`, `P-30`)
+- [The auto-sizing loop under load, and the feedback trap in it](findings/2026-09-04-autosize-loop.md) (`P-44`, `P-45`, `P-46`)
+- [Today's probe changes on a live stack, and a defect that was not one](findings/2026-09-04-live-probe-check.md) (`P-42`–`P-46`)
 
 ---
 
