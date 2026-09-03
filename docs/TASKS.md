@@ -4295,6 +4295,56 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [ ] **P-37 — A probe can be locked out for ever by one dropped welcome** · M · R-01 ·
+      `ProbeRegistry` issues an approved probe a key of its own, and **stores the hash before the
+      probe can possibly have it**:
+
+      ```
+      const issuedKey = randomBytes(32).toString('base64url');
+      await UPDATE probe_registration SET access_key_hash = $2 WHERE gid = $1   // rotated here
+      return { kind: 'approved', ..., issuedKey };                              // delivered after
+      ```
+
+      There is no acknowledgement. The probe writes the key to `identity.json` on receiving the
+      welcome, and if anything comes between the database write and that disk write — the link
+      dropping, the probe being killed, a read-only spool directory, the process losing power —
+      the core has rotated the key and the probe has not. **The next handshake then takes the
+      `hasOwnKey === true` path and is refused for ever.** The comment above it says "it happens
+      exactly once", which is the assumption: it happens exactly once whether or not it worked.
+
+      **The recovery is re-approval**, which needs a human in the UI. A probe in this state
+      reconnects, is refused, backs off and reconnects again — indefinitely, and the only signal
+      is `bad-access-key` in the log. **This is `P-28`'s shape exactly**: a probe that can never
+      reconnect, looping, where nothing downstream says why.
+
+      **Observed on the dev stack, 2026-09-03** — and observation and mechanism are separate here,
+      so both are written down:
+
+      - The stored hash is **not** the hash of the key the probe holds. `hashKey` is an unsalted
+        `sha256`, so this is decisive: they genuinely diverged.
+      - `decided_at` is unchanged since 2026-08-27, so neither `approve` nor `revoke` did it —
+        those are the only other writers and both set it.
+      - The probe's `identity.json` has not been written since the day it was approved.
+      - 384 reconnect attempts, refused every time, with the core's `requireAccessKey: true`.
+
+      **What is not proven is that the lockout arose this way.** The evidence fits and nothing
+      else in the code can rotate that column without touching `decided_at`, but the moment
+      itself was not captured — the dev stack was restarted several times by concurrent work on
+      this machine. The mechanism above stands on reading the code, and it is a defect whether or
+      not it is what happened here.
+
+      Shapes a fix could take, cheapest first: **accept the previous key for a grace period**
+      after issuing a new one, so a lost welcome costs a reconnect rather than the probe;
+      **do not rotate until the probe presents the new key**, keeping the old hash until the
+      first successful handshake with the new one; or **acknowledge** — the probe confirms it has
+      persisted before the core commits. The first is the smallest and handles the case that
+      actually happens. Whichever, it needs a test that kills the link between the database write
+      and the probe's disk write, because that is the window and it is currently untested.
+
+      Worth checking at the same time: what the probe does when `writeIdentity` fails. It logs,
+      but a probe that could not persist a key it was issued is in the same trap and should
+      probably refuse to continue rather than carry on with a key the core has already discarded.
+
 - [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,
       `acquired`, `reused`, `opened`, `closed`, `evicted` and `overflowed` — and **`stats()` is
