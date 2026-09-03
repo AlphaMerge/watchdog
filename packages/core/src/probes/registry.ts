@@ -58,7 +58,14 @@ export interface ProbeRegistration {
   protocolVersion: number;
   lastAddress: string;
   allowFrom: string[];
-  /** Whether a key has been issued to this probe. Never the key itself. */
+  /**
+   * Whether this probe has **used** a key of its own. Never the key itself.
+   *
+   * Deliberately not "a key has been issued" (`P-37`). The core writes the hash and returns the
+   * key in the welcome that follows, and nothing acknowledges it — so a hash on its own says the
+   * core issued a key, not that the probe ever received one. Reading it as the latter is what
+   * let a single dropped welcome lock a probe out for ever.
+   */
   hasOwnKey: boolean;
   objectId: number | null;
   note: string;
@@ -208,21 +215,33 @@ export class ProbeRegistry {
       return { kind: 'pending', gid: existing.gid };
     }
 
-    if (!(await this.#keyAccepted(existing.gid, hello.accessKey))) {
+    // **Which key it presented, not merely whether one was accepted** (`P-37`). `existing` was
+    // read before this ran, so its `hasOwnKey` is a snapshot from before a first use could be
+    // recorded — deciding whether to issue from that snapshot hands a second key to the probe
+    // that just proved it had the first.
+    const accepted = await this.#keyAccepted(existing.gid, hello.accessKey);
+    if (accepted === 'no') {
       this.#logger.warn({ gid: existing.gid }, 'an approved probe presented the wrong key');
       return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
     }
 
-    // **An approved probe with no key of its own is given one now**, in the welcome it is about
-    // to receive. This is the only moment a key can be delivered to a machine that may have been
-    // switched off when somebody approved it — see `approve`. It happens exactly once: the hash
-    // is stored in the same breath, so the next handshake takes the issued-key path above.
-    if (!existing.hasOwnKey) {
+    // **An approved probe that has never used a key of its own is given one now**, in the welcome
+    // it is about to receive. This is the only moment a key can be delivered to a machine that
+    // may have been switched off when somebody approved it — see `approve`.
+    //
+    // **It used to say "it happens exactly once", and that was the bug** (`P-37`). The hash was
+    // stored in the same breath, so the next handshake took the issued-key path whether or not
+    // the welcome ever arrived — and a probe that never got its key came back on the enrolment
+    // key it still had, was refused, and stayed refused. Issuing now repeats until the probe
+    // proves it has one, which costs a reconnect where it used to cost the probe.
+    if (accepted === 'enrolment') {
       const issuedKey = randomBytes(32).toString('base64url');
-      await this.#db.query(`UPDATE probe_registration SET access_key_hash = $2 WHERE gid = $1`, [
-        existing.gid,
-        hashKey(issuedKey),
-      ]);
+      await this.#db.query(
+        `UPDATE probe_registration
+         SET access_key_hash = $2, access_key_confirmed_at = NULL
+         WHERE gid = $1`,
+        [existing.gid, hashKey(issuedKey)],
+      );
       this.#logger.info({ gid: existing.gid }, 'issued this probe a key of its own');
       return { kind: 'approved', gid: existing.gid, objectId: existing.objectId, issuedKey };
     }
@@ -424,17 +443,55 @@ export class ProbeRegistry {
     return matchesAny(presented, this.#enrolmentKeys);
   }
 
-  async #keyAccepted(gid: string, presented: string): Promise<boolean> {
-    const rows = await this.#db.query<{ access_key_hash: string | null }>(
-      `SELECT access_key_hash FROM probe_registration WHERE gid = $1`,
-      [gid],
-    );
+  /**
+   * Which key this probe authenticated with (`P-37`).
+   *
+   * `'own'` is the key it was issued, and using it is what closes the enrolment fallback.
+   * `'enrolment'` is the shared key, accepted only while the probe has never used one of its
+   * own — the caller reads that as "this probe still has no key" and issues one.
+   */
+  async #keyAccepted(gid: string, presented: string): Promise<'own' | 'enrolment' | 'no'> {
+    const rows = await this.#db.query<{
+      access_key_hash: string | null;
+      access_key_confirmed_at: Date | null;
+    }>(`SELECT access_key_hash, access_key_confirmed_at FROM probe_registration WHERE gid = $1`, [
+      gid,
+    ]);
     const stored = rows[0]?.access_key_hash ?? null;
+    const confirmed = rows[0]?.access_key_confirmed_at != null;
     // An approved probe with no key of its own was approved by the upgrade in migration 030,
     // which had no key to issue. It keeps working on the enrolment key until it is re-approved,
     // because breaking every existing probe on upgrade is not a security improvement.
-    if (stored === null) return this.#enrolmentKeyMatches(presented);
-    return timingSafeMatch(hashKey(presented), stored);
+    if (stored === null) return this.#enrolmentKeyMatches(presented) ? 'enrolment' : 'no';
+
+    if (timingSafeMatch(hashKey(presented), stored)) {
+      // **First use is what closes the enrolment fallback** (`P-37`). Written here rather than
+      // where the key is issued, because that is the whole distinction: the core knowing a key
+      // and the probe having it are different facts, and only the probe can supply the second.
+      if (!confirmed) {
+        await this.#db.query(
+          `UPDATE probe_registration SET access_key_confirmed_at = now() WHERE gid = $1`,
+          [gid],
+        );
+        this.#logger.info({ gid }, 'this probe used the key it was issued');
+      }
+      return 'own';
+    }
+
+    // **The welcome carrying its key never landed.** The probe has nothing but the enrolment key
+    // it started with, so accepting that is the difference between one wasted reconnect and a
+    // probe nobody can recover without a human in the UI. The window is narrow on purpose: it is
+    // open only between issuing a key and its first use, and `hasOwnKey` being false here means
+    // the caller issues a fresh one in the welcome this handshake is about to receive.
+    if (!confirmed && this.#enrolmentKeyMatches(presented)) {
+      this.#logger.warn(
+        { gid },
+        'this probe came back on the enrolment key, so the key it was issued never arrived',
+      );
+      return 'enrolment';
+    }
+
+    return 'no';
   }
 
   async #touch(gid: string, hello: ProbeHello): Promise<void> {
@@ -492,7 +549,7 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     skew: skewFor(Number(row['protocol_version'] ?? 0)),
     lastAddress: text(row['last_address']),
     allowFrom: Array.isArray(row['allow_from']) ? (row['allow_from'] as string[]) : [],
-    hasOwnKey: row['access_key_hash'] != null,
+    hasOwnKey: row['access_key_hash'] != null && row['access_key_confirmed_at'] != null,
     objectId: row['object_id'] == null ? null : Number(row['object_id']),
     note: text(row['note']),
     firstSeenAt: iso(row['first_seen_at']),

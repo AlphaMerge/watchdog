@@ -150,16 +150,23 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
 
       const stored = await registry.get(first.gid);
       assert.ok(stored !== null);
-      assert.equal(stored.hasOwnKey, true);
+      // **Issued is not the same as held** (`P-37`). `hasOwnKey` used to read "a hash exists",
+      // and flipping it here meant the enrolment fallback closed on a probe that might never
+      // have received the welcome. It now means the probe has *used* the key, so it is still
+      // false at this point and the change is deliberate rather than incidental.
+      assert.equal(stored.hasOwnKey, false, 'issued, not yet proven to have arrived');
       assert.ok(
         !JSON.stringify(stored).includes(accessKey),
         'and the key itself is nowhere in what a route can read',
       );
 
-      // Exactly once: the next handshake takes the issued-key path.
+      // The next handshake with that key takes the issued-key path, and confirms it.
       const third = await registry.admit(hello({ gid: first.gid, accessKey }));
       assert.ok(third.kind === 'approved');
       assert.equal(third.issuedKey, undefined);
+
+      const confirmed = await registry.get(first.gid);
+      assert.equal(confirmed?.hasOwnKey, true, 'used, so now it is the probe’s own key');
 
       // The tree's own side of the binding, so `R-04`'s config push finds the subtree.
       const rows = await db.query<{ gid: string }>(
@@ -167,6 +174,59 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         [probeId],
       );
       assert.equal(rows[0]?.gid, first.gid);
+    });
+
+    /**
+     * The window between the core writing a key down and the probe having it (`P-37`).
+     *
+     * The core stores the hash and returns the key in the welcome that follows, and nothing
+     * acknowledges it. A link that drops in between — or a probe killed, or a spool directory
+     * that cannot be written — used to leave the core rotated and the probe not, and the probe
+     * came back on the only key it had and was refused for ever.
+     */
+    it('takes a probe back on the enrolment key when the welcome never arrived', async () => {
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+
+      // The handshake that issues a key. Pretend the welcome is lost: the probe never sees
+      // `issuedKey`, so it still holds nothing but the enrolment key.
+      const issuing = await registry.admit(hello({ gid: first.gid }));
+      assert.ok(issuing.kind === 'approved');
+      assert.ok(issuing.issuedKey !== undefined, 'a key was minted and written down');
+
+      // What the probe can actually do next: reconnect with the enrolment key it started with.
+      const retry = await registry.admit(hello({ gid: first.gid }));
+      assert.ok(
+        retry.kind === 'approved',
+        `a probe that never got its key must not be locked out, got ${retry.kind}`,
+      );
+      assert.ok(retry.issuedKey !== undefined, 'and it is issued another one, since it has none');
+      assert.notEqual(retry.issuedKey, issuing.issuedKey, 'a fresh key, not the lost one');
+
+      // This time the welcome lands, and using the key closes the fallback.
+      const settled = await registry.admit(hello({ gid: first.gid, accessKey: retry.issuedKey }));
+      assert.ok(settled.kind === 'approved');
+      assert.equal(settled.issuedKey, undefined, 'it has one of its own now');
+      assert.equal((await registry.get(first.gid))?.hasOwnKey, true);
+    });
+
+    it('stops accepting the enrolment key once the probe has used its own', async () => {
+      // **The security half, and the reason the fallback is bounded by use rather than by a
+      // clock.** An enrolment key is shared and long-lived; once a probe has a key of its own,
+      // presenting the shared one must not impersonate it. The window above is open only while
+      // the probe demonstrably has nothing else.
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+
+      const issuing = await registry.admit(hello({ gid: first.gid }));
+      assert.ok(issuing.kind === 'approved' && issuing.issuedKey !== undefined);
+      const used = await registry.admit(hello({ gid: first.gid, accessKey: issuing.issuedKey }));
+      assert.ok(used.kind === 'approved');
+
+      const onEnrolmentKey = await registry.admit(hello({ gid: first.gid }));
+      assert.equal(onEnrolmentKey.kind, 'refused', 'the shared key is no longer enough');
     });
 
     it('lets an approved probe in with its own key, and nothing else', async () => {

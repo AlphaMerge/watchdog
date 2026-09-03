@@ -4309,7 +4309,7 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
-- [ ] **P-37 — A probe can be locked out for ever by one dropped welcome** · M · R-01 ·
+- [x] **P-37 — A probe can be locked out for ever by one dropped welcome** · M · R-01 ·
       `ProbeRegistry` issues an approved probe a key of its own, and **stores the hash before the
       probe can possibly have it**:
 
@@ -4358,6 +4358,40 @@ because each is a decision rather than a defect:
       Worth checking at the same time: what the probe does when `writeIdentity` fails. It logs,
       but a probe that could not persist a key it was issued is in the same trap and should
       probably refuse to continue rather than carry on with a key the core has already discarded.
+
+      **Fixed by closing the fallback on first *use* rather than on the write.** Migration 039
+      adds `access_key_confirmed_at`, and `hasOwnKey` now means "this probe has used a key of its
+      own" instead of "a hash exists". Unconfirmed, the enrolment key is still accepted and a
+      fresh key is issued, so a lost welcome costs one reconnect. Confirmed, only the issued key
+      works — which is the property the shared enrolment key must not weaken, and it is why the
+      window is bounded by use rather than by a clock: a probe switched off for a month is not
+      less entitled to its key than one switched off for a minute.
+
+      **Existing rows are backfilled as confirmed**, deliberately. A probe already carrying a
+      hash has been authenticating with it — there has been no other way to stay connected — so
+      marking the estate unconfirmed on upgrade would reopen the enrolment fallback everywhere to
+      fix a liveness bug, which is a bad trade. A probe genuinely stuck is stuck already, and
+      re-approval clears the hash and takes the new path.
+
+      **A real ordering bug in the first version of the fix, caught by the new test.** `existing`
+      is read *before* the key is checked, so deciding whether to issue from `existing.hasOwnKey`
+      handed a second key to the probe that had just proved it held the first — the confirmation
+      had happened, the snapshot predated it. `#keyAccepted` now returns which key was accepted,
+      `'own' | 'enrolment' | 'no'`, and issuance keys off that. The stale snapshot was the same
+      class of mistake as the bug being fixed: a fact read at one moment and trusted at another.
+
+      **One existing test asserted the old meaning** — `hasOwnKey` true the instant a key was
+      issued — and was changed deliberately with the reason written beside it, not incidentally.
+
+      Two new tests: a probe that never received its welcome comes back on the enrolment key, is
+      admitted, and is issued a *fresh* key; and once it has used one, the enrolment key is
+      refused. The first fails when the fallback is removed, which is the check that it is doing
+      the work. Migration rollback is exercised by the migrator's own "rolls back the most recent
+      migration", 039 now being the most recent.
+
+      Still open, and noted above rather than done here: what the probe should do when
+      `writeIdentity` fails. It logs and carries on with a key the core has discarded — which
+      this fix now recovers from, but refusing to continue would be more honest.
 
 - [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,

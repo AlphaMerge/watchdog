@@ -37,6 +37,7 @@ import { migration035 } from './035-api-tokens.js';
 import { migration036 } from './036-totp.js';
 import { migration037 } from './037-state-retention.js';
 import { migration038 } from './038-channel-limit-source.js';
+import { migration039 } from './039-probe-key-confirmed.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -83,6 +84,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration036,
   migration037,
   migration038,
+  migration039,
 ];
 
 export type { Migration } from './types.js';
