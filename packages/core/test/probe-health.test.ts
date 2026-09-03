@@ -41,6 +41,10 @@ const FULL: ProbeHealthReport = {
   spoolDropped: 4,
   spoolCorrupt: 0,
   spoolStalledMs: 420_000,
+  sessionsOpen: 12,
+  sessionOverflows: 3,
+  sessionsEvicted: 40,
+  sessionsOpened: 55,
   cpuPercent: 18.5,
   memoryMb: 210.4,
   uptimeSeconds: 3_600,
@@ -171,6 +175,48 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { spoolStalledMs: _omitted, ...withoutStall } = FULL;
       const { reading } = build(() => connected({ health: withoutStall })).read(probeId);
       assert.equal(reading['spoolStalled'], null);
+    });
+
+    /**
+     * The session pools, as channels an operator can alarm on (`P-36`).
+     *
+     * Both pools counted `overflowed` — sessions opened past their bound because every existing
+     * one was in use — and `stats()` was read by nothing outside their own tests, while the
+     * SNMP pool's own comment claimed the counter was what made the overflow visible. These
+     * assert the trip from a heartbeat field to a channel, and the absence that must stay an
+     * absence.
+     */
+    it('carries the session counters through to their channels', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['sessionsOpen'], 12);
+      assert.equal(reading['sessionOverflows'], 3);
+      assert.equal(reading['sessionsEvicted'], 40);
+    });
+
+    it('gaps the session channels when the probe keeps no pools', () => {
+      // **The claim `P-36` made and did not test at first.** A probe older than protocol 10
+      // omits these, and so does a current one whose registry keeps no session pools at all —
+      // and zero open sessions is a claim about a probe that never made one, not an absence.
+      const {
+        sessionsOpen: _open,
+        sessionOverflows: _over,
+        sessionsEvicted: _evicted,
+        sessionsOpened: _opened,
+        ...withoutSessions
+      } = FULL;
+      const { reading } = build(() => connected({ health: withoutSessions })).read(probeId);
+      assert.equal(reading['sessionsOpen'], null);
+      assert.equal(reading['sessionOverflows'], null);
+      assert.equal(reading['sessionsEvicted'], null);
+    });
+
+    it('reads zero overflows as zero, because a pool inside its bound is a measurement', () => {
+      // The other half of the pair, and the reason the gap above is not simply "falsy is null":
+      // a probe reporting no overflows has said something, and it is the healthy answer.
+      const { reading } = build(() => connected({ health: { ...FULL, sessionOverflows: 0 } })).read(
+        probeId,
+      );
+      assert.equal(reading['sessionOverflows'], 0);
     });
 
     it('reads zero as zero, because a drain that is moving is a measurement', () => {

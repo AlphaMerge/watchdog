@@ -4369,6 +4369,15 @@ because each is a decision rather than a defect:
       Live on the dev stack: **`sessionsOpen: 5`**, overflows and evictions zero, on a probe
       where that number was computed and discarded before today.
 
+      **Amended: the gap claim was asserted in a commit message before it was asserted in a
+      test.** "An older probe omits the fields and the channels gap" is the `R-06` rule and the
+      reason the protocol bump is a bump; `P-27` proved exactly that for `spoolStalled` and this
+      shipped without the equivalent. Three tests now cover the trip — the counters reaching
+      their channels, the **absence staying an absence**, and zero overflows reading as zero,
+      because a probe inside its bound has said something and it is the healthy answer. Proved
+      to bite by changing one `?? null` to `?? 0`, which is the mistake that would actually be
+      made.
+
 - [x] **P-35 — A measured number is copied into four files and nothing notices when it
       changes** · M · P-31 · **Four defects in one day, all the same shape.** Each came from a
       correct measurement that a later, equally correct measurement silently invalidated:
