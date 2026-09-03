@@ -112,6 +112,15 @@ jobs:
       - name: install smoke test
         run: scripts/smoke-install.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
 
+      # **Ubuntu as well as Debian**, because Phase 10's exit criterion names it: "a clean install
+      # on Ubuntu and on Windows Server". They differ in the things an installer trips over — a
+      # different PostgreSQL packaging, a different TimescaleDB repository — so proving one and
+      # assuming the other would be assuming the half that differs.
+      - name: install smoke test on Ubuntu
+        env:
+          MS_SMOKE_DISTRO: ubuntu
+        run: scripts/smoke-install.sh "$(ls -t release/ms-[0-9]*.tar.gz | head -1)"
+
       # Backs one host up and restores onto a second, clean one (H-04). Two containers, because
       # restoring over the installation the backup came from proves almost nothing — the data is
       # already there, and a restore that quietly did nothing would pass.

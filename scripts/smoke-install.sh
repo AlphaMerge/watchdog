@@ -19,8 +19,20 @@ matches() {
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-container=ms-smoke-install
-image=ms-smoke:bookworm
+
+# **Ubuntu is named in the exit criterion, so it is a target here** (`PLAN.md` Phase 10: "a clean
+# install on Ubuntu and on Windows Server"). Proving Debian and *assuming* Ubuntu would be
+# assuming the half of the sentence that has a different PostgreSQL packaging, a different
+# TimescaleDB repository and a different init layout.
+#
+#     MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh
+distro="${MS_SMOKE_DISTRO:-debian}"
+case "${distro}" in
+  debian) dockerfile=Dockerfile;        image=ms-smoke:bookworm ;;
+  ubuntu) dockerfile=Dockerfile.ubuntu; image=ms-smoke:ubuntu ;;
+  *) echo "unknown MS_SMOKE_DISTRO: ${distro} (debian|ubuntu)" >&2; exit 2 ;;
+esac
+container="ms-smoke-install-${distro}"
 
 # Build unless handed a specific tarball. Reusing whichever one happened to be lying around is
 # how this test silently validated a package built before the change under test — which is worse
@@ -57,7 +69,8 @@ cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 echo "==> building smoke image"
-docker build -q -t "${image}" "${repo_root}/scripts/smoke" >/dev/null
+docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/${dockerfile}" \
+  "${repo_root}/scripts/smoke" >/dev/null
 
 echo "==> booting a clean systemd box"
 cleanup

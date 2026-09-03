@@ -28,6 +28,7 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 | [`docs/sensor-reference.md`](docs/sensor-reference.md)             | Every sensor type — **generated from the catalogue**                     |
 | [`docs/api-reference.md`](docs/api-reference.md)                   | Every route — **generated from the OpenAPI document**                    |
 | [`docs/runbook-backup-restore.md`](docs/runbook-backup-restore.md) | Backing up, and restoring onto a host that is not the one it came from   |
+| [`docs/runbook-field-test.md`](docs/runbook-field-test.md)         | The release-candidate field test, and what counts as passing it          |
 
 ## Layout
 

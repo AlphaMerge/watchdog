@@ -6822,6 +6822,27 @@ because each is a decision rather than a defect:
 - [ ] **H-09 — Release candidate field test** · L · H-01…H-07 · Clean installs on Ubuntu and
       Windows Server monitoring 100 real devices for a week without intervention.
 
+      **The Ubuntu half of the first clause is done and in CI.** `smoke-install.sh` now takes
+      `MS_SMOKE_DISTRO=ubuntu` and runs against an Ubuntu 24.04 box with PostgreSQL 17 from PGDG
+      and TimescaleDB from packagecloud's `ubuntu` repository — services reach active, an upgrade
+      keeps the configuration, both refusal gates hold and both services stop with exit 0.
+      Proving Debian and assuming Ubuntu would have been assuming the half that differs: different
+      PostgreSQL packaging, different TimescaleDB repository.
+
+      **The rest needs hardware and a week**, and the procedure for it is
+      `docs/runbook-field-test.md` — written now rather than at the time, because a test that has
+      to be designed before it can be run is a test that gets run badly. It says what is already
+      proved so it is not re-proved, what to install and keep the log of, which channels to put
+      triggers on (all of which have declared limits from `S-18`, so only delivery needs adding),
+      what to record at start / 24 h / end, and what counts as a failure.
+
+      **Step 2 of that runbook is "restart everything, once, before you start counting", and it
+      is there because of `P-28`.** A probe at the v1 target could never reconnect — the core sent
+      a configuration too large for one message and the probe looped, 426 closures in three
+      minutes, with the core logging only "link to core closed". Twenty-four hours of soak with
+      the same 5,047 sensors never saw it, because the probe never restarted. Anything that only
+      breaks on restart is invisible to every other test here.
+
 ---
 
 ## Backlog — v2 candidates

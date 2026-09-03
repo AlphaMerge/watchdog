@@ -1,0 +1,71 @@
+# Clean-box install target on Ubuntu (TASKS.md H-09).
+#
+# Development/CI only — this image exists to prove install.sh works against a real systemd on
+# Ubuntu, which `PLAN.md` Phase 10's exit criterion names explicitly ("a clean install on Ubuntu
+# and on Windows Server"). It is not a way to run MonitoringSystem in a container.
+#
+# **The Debian counterpart is `Dockerfile`, and the two are deliberately the same shape** — same
+# PostgreSQL major, same TimescaleDB, same Node from the same tarball — so that a difference the
+# smoke test finds is a difference between the *distributions* and not between two unlike boxes.
+# What actually differs is the packaging: Ubuntu takes TimescaleDB from packagecloud's `ubuntu`
+# repository keyed by its own codename, and its PostgreSQL comes from PGDG rather than from the
+# archive, because noble ships 16 and everything here is measured on 17.
+FROM ubuntu:24.04
+
+ARG NODE_VERSION=24.19.0
+ARG PG_MAJOR=17
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus ca-certificates curl gnupg lsb-release xz-utils procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# PostgreSQL from PGDG, so this box and the Debian one are on the same major.
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "deb https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor > /etc/apt/trusted.gpg.d/pgdg.gpg; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      "postgresql-${PG_MAJOR}" "postgresql-contrib-${PG_MAJOR}"; \
+    rm -rf /var/lib/apt/lists/*
+
+# TimescaleDB from Timescale's own repository, the way an operator installs it.
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "deb https://packagecloud.io/timescale/timescaledb/ubuntu/ ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/timescaledb.list; \
+    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
+      | gpg --dearmor > /etc/apt/trusted.gpg.d/timescaledb.gpg; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "timescaledb-2-postgresql-${PG_MAJOR}"; \
+    rm -rf /var/lib/apt/lists/*
+
+# Node from the official tarball: the same way an operator installs it, and the reason the
+# packages express Node as a recommendation rather than a hard dependency.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+      -o /tmp/node.tar.xz; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version
+
+ENV PATH="/usr/lib/postgresql/17/bin:${PATH}"
+
+# Trim units that are pointless in a container and slow the boot.
+RUN systemctl mask systemd-udevd systemd-udev-trigger systemd-firstboot \
+      systemd-journald-audit.socket getty.target
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
