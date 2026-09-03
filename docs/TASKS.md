@@ -5267,6 +5267,37 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-49 — "Clean" covered a third of the core and said nothing** · S · P-25 · Noticed by
+      accident: a full run reported **3,244 tests** where every earlier run today reported about
+      1,945. Nothing had been added — PostgreSQL happened to be up, because the dev stack had been
+      started for a browser preview, so `@ms/core` ran **2,005** tests instead of **709**.
+
+      **1,296 tests silently did not exist, and the summary looked identical.** The integration
+      suites gate themselves with `describe(..., { skip: 'no PostgreSQL …' })`, which `node:test`
+      reports as *one* skipped item however many tests are inside — so the counters read
+      `skipped 15` and the script printed `clean`, exactly as it does for a run that covered
+      everything. Counted properly, that run skipped **88 suites**: 77 of them for want of
+      PostgreSQL, under four different wordings, plus MySQL, SQL Server and `pwsh`.
+
+      This is the defect `test-all.sh` already exists to prevent, one category over. Its header
+      says a summary reporting only pass/fail "reads twenty-five tests that never ran as a suite
+      that was fine"; a skipped suite is the same sentence with a different verb. The difference is
+      that skipping is *deliberate* — `npm test` is meant to work with the stack down — so unlike
+      `cancelled` it must not fail the run. It only has to be impossible to miss.
+
+      **The script now counts skipped suites, groups them by reason, and refuses to call such a run
+      simply "clean"** — it prints `clean, but N suite(s) never ran`. Verified both ways: silent on
+      a run with no skips, and reproducing all 88 against this morning's log.
+
+      **It also invalidates how today's earlier work was gated.** `P-42` through `P-46` were each
+      committed on a "full suite, 0 failed" that was missing two thirds of the core's tests. They
+      all pass under the fuller run that gated `P-48`, so nothing was actually broken — but the
+      claim was weaker than it sounded, and that is worth having written down rather than
+      discovered again.
+
+      Left alone: the four wordings for "PostgreSQL is not running". Consolidating them is tidying,
+      and the grouped report reads fine without it.
+
 - [x] **P-48 — A sizing pass blocked the probe for 427 ms, re-deriving what it already had** · S ·
       P-44 · Found by auditing my own `P-46` change for cost, having changed `typicalDurationMs`
       without measuring it. The cost turned out to be almost entirely older than `P-46`, and much

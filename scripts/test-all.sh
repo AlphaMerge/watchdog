@@ -47,6 +47,25 @@ skipped="$(sum skipped)"
 printf '    tests %s · pass %s · fail %s · cancelled %s · skipped %s\n' \
   "${tests}" "${passed}" "${failed}" "${cancelled}" "${skipped}"
 
+# **A skipped suite counts as one, however many tests are inside it** (`P-49`). `node:test` reports
+# `describe(..., { skip: reason })` as a single skipped item, so a run with PostgreSQL down reported
+# `skipped 15` while 1,296 of the core's 2,005 tests never ran — and printed `clean`, identically to
+# a run that covered all of them. That is the same defect this script was written for: a counter
+# that reads work-that-never-happened as work that was fine.
+#
+# Unlike `cancelled` this must not fail the run. Skipping when a dependency is absent is deliberate,
+# and `npm test` is meant to work with the stack down. It just has to be impossible to miss.
+skipped_suites="$(grep -cE '^ *﹣ .+ # ' "${log}" 2>/dev/null || true)"
+skipped_suites="${skipped_suites:-0}"
+if [ "${skipped_suites}" -gt 0 ]; then
+  echo
+  echo "==> ${skipped_suites} suite(s) skipped for a missing dependency — those tests did not run,"
+  echo "    and are not in the counts above:"
+  grep -oE '# [^#]+$' "${log}" 2>/dev/null | sed 's/^# //' | sort | uniq -c | sort -rn |
+    awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "      %4d x %s\n", n, $0 }' | head -8
+  echo "    Bring the stack up (npm run dev) to cover them."
+fi
+
 if [ "${failed}" -gt 0 ]; then
   echo
   echo "==> failures"
@@ -73,4 +92,8 @@ if [ "${status}" -ne 0 ] || [ "${failed}" -gt 0 ] || [ "${cancelled}" -gt 0 ]; t
   exit 1
 fi
 
-echo "==> clean. Full log: ${log}"
+if [ "${skipped_suites}" -gt 0 ]; then
+  echo "==> clean, but ${skipped_suites} suite(s) never ran. Full log: ${log}"
+else
+  echo "==> clean. Full log: ${log}"
+fi
