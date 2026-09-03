@@ -82,12 +82,37 @@ export function poolDemand(
   let measured = 0;
   let assumed = 0;
 
+  /**
+   * One answer per sensor type per pass (`P-48`).
+   *
+   * **This is a correctness point before it is a speed one.** A pass that asked twice and got two
+   * numbers would be summing a workload that never existed at any instant; within one computation
+   * a type has one typical duration.
+   *
+   * It is also where the pass's time went. `typicalDurationMs` slices, maps and sorts a window of
+   * up to 1,024 samples on every call, and this loop called it once per *assignment* — five
+   * thousand times at the v1 target, for perhaps twenty distinct types. Measured before the cache:
+   * **427 ms** for one pass, against **0.146 ms** for the same pass with a constant duration, so
+   * 99.97% of it was re-deriving medians it already had. The sizing loop runs on the probe's own
+   * thread every thirty seconds, and CLAUDE.md's rule is that nothing blocks the scheduler.
+   *
+   * `has` rather than `??`, because `undefined` — no measurement for this type yet — is an answer
+   * worth caching too, and it is the answer for every type on a probe that has just started.
+   */
+  const seen = new Map<string, number | undefined>();
+  const typical = (sensorType: string): number | undefined => {
+    if (seen.has(sensorType)) return seen.get(sensorType);
+    const observed = durationMs(sensorType);
+    seen.set(sensorType, observed);
+    return observed;
+  };
+
   for (const assignment of assignments) {
     // A non-positive interval is not a sensor that runs infinitely often, it is a corrupt
     // assignment; counting it would make the ceiling infinite and take the pool with it.
     if (!Number.isFinite(assignment.intervalSeconds) || assignment.intervalSeconds <= 0) continue;
 
-    const observed = durationMs(assignment.sensorType);
+    const observed = typical(assignment.sensorType);
     if (observed === undefined) assumed += 1;
     else measured += 1;
 

@@ -185,3 +185,33 @@ slow case, which `docs/sizing.md` now says.
 queue, and in the window above the queue reached 814 while every other signal said the workload was
 cheap. A backlog term would have caught it in one sizing interval rather than three; it is not
 needed to close `P-46` and it is the obvious next improvement.
+
+## What a sizing pass costs (`P-48`)
+
+Measured after the fact, because nothing had asked. `poolDemand` over 5,000 assignments, on the
+probe's own thread, with the per-type duration windows about 40% full:
+
+| | median | min | max |
+| --- | --- | --- | --- |
+| as written | **426.8 ms** | 273.1 | 465.2 |
+| the same pass with a constant duration | **0.146 ms** | — | — |
+| after caching one lookup per type | **1.13 ms** | 0.21 | 2.89 |
+
+**99.97% of the pass was re-deriving medians it already had.** `typicalDurationMs` slices, maps and
+sorts a window of up to 1,024 samples on every call, and the loop called it once per *assignment* —
+five thousand times for perhaps twenty distinct types. The control run isolates it: the same
+arithmetic with a constant duration is a seventh of a millisecond.
+
+This matters because of where it runs. The sizing loop is synchronous, on the probe's own thread,
+every thirty seconds and again a couple of seconds after every configuration push — and the wheel
+fires once a second, so a 427 ms pass swallows a whole tick's dispatch. CLAUDE.md's rule is that
+nothing blocks the scheduler. The window was only 40% full here; at the 1,024 cap the sort work is
+about 2.9× larger.
+
+**It is invisible to the metric that would be expected to catch it.** `schedulerLag` is reported as
+a p95, and a stall once every thirty ticks is about 3% of them — it lands in the p99 and the max,
+neither of which is on Probe Health. The live probe read 5.7 ms of lag while doing this.
+
+Caching one answer per type per pass is also the more correct thing to do independently of speed: a
+pass that asked twice and got two numbers would be summing a workload that never existed at any
+instant.

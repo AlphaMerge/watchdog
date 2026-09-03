@@ -5267,6 +5267,37 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-48 — A sizing pass blocked the probe for 427 ms, re-deriving what it already had** · S ·
+      P-44 · Found by auditing my own `P-46` change for cost, having changed `typicalDurationMs`
+      without measuring it. The cost turned out to be almost entirely older than `P-46`, and much
+      larger than expected.
+
+      `poolDemand` called `durationMs(assignment.sensorType)` once per **assignment**. At the v1
+      target that is five thousand calls for perhaps twenty distinct types, and each one slices,
+      maps and sorts a window of up to 1,024 samples. Measured over 5,000 assignments with the
+      windows about 40% full: **426.8 ms** a pass, against **0.146 ms** for the same pass with a
+      constant duration. **99.97% of it was re-deriving medians it already had.**
+
+      **Where it runs is what makes it a defect.** The sizing loop is synchronous, on the probe's
+      own thread, every thirty seconds and again after every configuration push. The wheel fires
+      once a second, so a 427 ms pass swallows a tick's dispatch — against CLAUDE.md's rule that
+      nothing blocks the scheduler. At the 1,024-sample cap the sort work is about 2.9× larger
+      again.
+
+      **And it hides from the metric that should catch it.** `schedulerLag` is a p95; a stall on
+      one tick in thirty is 3% of them, which lands in the p99 and the max, and neither is on Probe
+      Health. The live probe read 5.7 ms of lag while doing exactly this.
+
+      **Fixed by caching one answer per type per pass**, which is the more correct thing anyway: a
+      pass that asked twice and got two numbers would be summing a workload that never existed at
+      any instant. `has` rather than a truthiness check, because `undefined` is an answer and it is
+      the answer for every type on a probe that has just started — the case where the loop runs
+      most. **426.8 ms → 1.13 ms**, a 378× reduction, within about 15× of the arithmetic's own
+      floor. Numbers in `docs/findings/2026-09-04-autosize-loop.md`.
+
+      Mutation-checked: removing the cache fails the per-type test, and caching only defined values
+      fails the fresh-probe test.
+
 - [x] **P-46 — The smaller the pool, the slower it notices it must grow** · M · P-44 · Positive
       feedback in the sizing loop, found by fixing `P-45` and re-measuring — which is the only
       reason it was found, since the shrink defect was masking it.

@@ -189,3 +189,67 @@ describe('nextCeiling (P-40)', () => {
     assert.ok(changes <= 2, `the ceiling moved ${String(changes)} times across a 12-sample wobble`);
   });
 });
+
+/**
+ * The pass asks each sensor type for its duration once, not once per assignment (`P-48`).
+ *
+ * `typicalDurationMs` slices, maps and sorts a window of up to 1,024 samples on every call, and
+ * this loop used to call it once per assignment: 5,000 times at the v1 target for perhaps twenty
+ * types. One pass measured **427 ms**, against 0.146 ms for the same pass with a constant, so
+ * essentially all of it was re-deriving medians already in hand — on the probe's own thread, every
+ * thirty seconds, against a rule that nothing blocks the scheduler.
+ */
+describe('one duration lookup per type (P-48)', () => {
+  const spread = (count: number, types: readonly string[]): DemandInput[] =>
+    Array.from({ length: count }, (_, i) => ({
+      sensorType: types[i % types.length] ?? 'a',
+      intervalSeconds: 60,
+    }));
+
+  it('asks once per distinct type however many assignments carry it', () => {
+    const asked: string[] = [];
+    const types = ['icmp.ping', 'port.tcp', 'http.request'];
+    poolDemand(
+      spread(5_000, types),
+      (type) => {
+        asked.push(type);
+        return 200;
+      },
+      { fallbackMs: 600, min: 4, max: 256, margin: 1.3 },
+    );
+
+    assert.equal(asked.length, types.length, `asked ${String(asked.length)} times`);
+    assert.deepEqual([...asked].sort(), [...types].sort());
+  });
+
+  it('caches "nothing measured yet" too, which is every type on a fresh probe', () => {
+    // `undefined` is an answer, and the one a probe gives for every type until its first check
+    // finishes. Caching only defined values would leave the fresh-probe case — the one where the
+    // sizing loop runs most often — paying the full cost.
+    let asked = 0;
+    const demand = poolDemand(
+      spread(1_000, ['never.run']),
+      () => {
+        asked += 1;
+        return undefined;
+      },
+      { fallbackMs: 600, min: 4, max: 256, margin: 1.3 },
+    );
+
+    assert.equal(asked, 1);
+    assert.equal(demand.assumed, 1_000, 'and every assignment still counts as assumed');
+    assert.equal(demand.measured, 0);
+  });
+
+  it('gives the same answer it gave before the cache', () => {
+    // 1,000 sensors of one type at 600 ms on a 60 s interval: 1000/60 x 0.6 = 10 workers, x1.3 =13.
+    const demand = poolDemand(spread(1_000, ['icmp.ping']), () => 600, {
+      fallbackMs: 600,
+      min: 4,
+      max: 256,
+      margin: 1.3,
+    });
+    assert.equal(demand.ceiling, 13);
+    assert.equal(demand.measured, 1_000);
+  });
+});
