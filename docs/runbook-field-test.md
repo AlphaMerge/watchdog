@@ -11,13 +11,20 @@ that gets run badly or not at all.
 
 **What is already proved, so you do not re-prove it:**
 
-| | |
-| --- | --- |
-| Clean install on Ubuntu | **passing**, `scripts/smoke-install.sh` with `MS_SMOKE_DISTRO=ubuntu`, in CI |
-| Clean install on Debian | passing, same script, in CI |
-| `.deb` and `.rpm` install, upgrade, remove | passing, `scripts/smoke-packages.sh`, in CI |
-| Backup and restore onto a different host | passing, `scripts/smoke-restore.sh`, in CI |
-| 5,000 sensors for 24 h | passing, `docs/findings/2026-08-30-soak-24h.md` |
+| | Last verified | How |
+| --- | --- | --- |
+| Clean install on Ubuntu | **2026-09-03, locally** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
+| Clean install on Debian | 2026-09-03, locally | `scripts/smoke-install.sh` |
+| `.deb` and `.rpm` install, upgrade, remove | 2026-09-03, locally | `scripts/smoke-packages.sh` |
+| Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
+| 5,000 sensors for 24 h | 2026-08-30 | `docs/findings/2026-08-30-soak-24h.md` |
+
+> **"Last verified" is a date, not a guarantee, and that is deliberate.** These four used to read
+> "in CI", which stopped being true the moment the workflow was disabled — a table telling you
+> not to re-prove something, on the strength of a job that is not running, is worse than no table.
+> They are one command each and they take minutes. **Re-run all four against the build you are
+> about to field-test**, rather than trusting this row, and update the date. If CI is running
+> again by then, say so here and the rule can go back to trusting it.
 
 **What this runbook adds is what those cannot reach**: Windows Server, real devices that answer
 in ways a simulator does not, and a week of unattended running.

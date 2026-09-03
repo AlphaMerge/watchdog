@@ -7246,7 +7246,8 @@ because each is a decision rather than a defect:
 
       Also asserted: the archive is 0600, and a restore **refuses while ms-core is active** —
       restoring under a live core would have it writing into a database being replaced beneath
-      it. Both smoke tests run in CI.
+      it. Both smoke tests are wired into CI, which is **disabled at the moment** — they were
+      last run by hand on 2026-09-03 and passed.
 
       One of `S-17`'s own tests turned out to be flaky and was fixed here: it compared the
       watcher's `statfs` with its own, taken a moment later on a live filesystem, and the free
@@ -7416,7 +7417,8 @@ because each is a decision rather than a defect:
 - [ ] **H-09 — Release candidate field test** · L · H-01…H-07 · Clean installs on Ubuntu and
       Windows Server monitoring 100 real devices for a week without intervention.
 
-      **The Ubuntu half of the first clause is done and in CI.** `smoke-install.sh` now takes
+      **The Ubuntu half of the first clause is done.** It is wired into CI, which is disabled;
+      last run by hand on 2026-09-03 and passing. `smoke-install.sh` now takes
       `MS_SMOKE_DISTRO=ubuntu` and runs against an Ubuntu 24.04 box with PostgreSQL 17 from PGDG
       and TimescaleDB from packagecloud's `ubuntu` repository — services reach active, an upgrade
       keeps the configuration, both refusal gates hold and both services stop with exit 0.
