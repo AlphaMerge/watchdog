@@ -4309,6 +4309,50 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [ ] **P-38 — A probe holding a key the core has forgotten never tries the enrolment key** ·
+      S · P-37 · The mirror image of `P-37`, and found while verifying its fix. There the core
+      remembered a key the probe did not have; here the probe holds one the core has discarded,
+      and the recovery an operator would reach for makes it worse.
+
+      `core-client.ts` decides what to present in one line:
+
+      ```
+      accessKey: this.#identity.accessKey === '' ? config.core.accessKey : this.#identity.accessKey
+      ```
+
+      **The configured enrolment key is used only when the stored one is empty.** A probe with a
+      stale key therefore presents it for ever. On the core side `#keyAccepted` sees
+      `access_key_hash IS NULL` and accepts only the enrolment key — so the handshake is refused,
+      no key is issued, and the loop is permanent.
+
+      **The core forgets a key in ordinary circumstances**: re-approving a probe clears the hash
+      (deliberately — a key that leaked before a revocation must not survive), revoking clears
+      it, and a restored backup or a rebuilt core predates the issuance. So the trap is easy to
+      walk into: an operator whose probe will not connect **re-approves it**, which is the
+      documented remedy and the obvious thing to try, and that clears the core's hash while the
+      probe keeps presenting its old key. The probe is now less recoverable than before they
+      helped.
+
+      Recovery today is deleting `identity.json` on the probe's own disk — which for a remote
+      probe means logging into that machine, the exact thing enrolment exists to avoid.
+
+      **The fix belongs on the probe.** On a `bad-access-key` refusal, a probe holding a stored
+      key that differs from its configured enrolment key should discard the stored one and retry
+      once with the configured key. That is safe: the enrolment key is a credential an operator
+      put in the config, and `P-37`'s change means the core will then issue a fresh key and only
+      close the fallback once the probe has used it.
+
+      **Not on the core, and it is worth saying why.** Accepting an unknown key for an approved
+      GID because the core has no hash would let anyone who can reach the port claim an approved
+      probe's identity by presenting anything at all. The probe proving it holds the enrolment
+      key is the whole point.
+
+      Needs: the retry, a log line that names the situation rather than repeating
+      `bad-access-key` forever, and a test that stores a key the core does not know and asserts
+      the probe recovers without anyone touching its disk. A probe with no enrolment key
+      configured genuinely cannot recover by itself — that case should say so once, clearly,
+      instead of looping in silence.
+
 - [x] **P-37 — A probe can be locked out for ever by one dropped welcome** · M · R-01 ·
       `ProbeRegistry` issues an approved probe a key of its own, and **stores the hash before the
       probe can possibly have it**:
