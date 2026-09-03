@@ -2899,6 +2899,20 @@ because each is a decision rather than a defect:
       OpenAPI document; rather than pretend otherwise, the document's own description says where
       the stream is and how to talk to it.
 
+      **The client threw its first connection away, and reconnection covered for it.** Found
+      later, from an `InvalidStateError` on every page load in development. StrictMode's second
+      mount closes a socket that has not finished connecting, and that socket's close event
+      arrives *after* its replacement exists — so handlers that read `this.#socket` rather than
+      the socket the event belonged to cancelled the new socket's registration on the strength
+      of the old one's death. Measured in the browser: the subscribe frame for the working
+      socket was never sent at all, that socket then stayed open and unsubscribed for the life
+      of the tab, and the tree filled in ~900 ms later when the reconnect backoff expired. The
+      live view worked, in development, only because reconnection did. Handlers now check that
+      their own socket is still the one in use, and a subscription made while connecting waits
+      for `onopen` rather than throwing. The test fake now throws on `send` before `open`, the
+      way a browser does — accepting it silently is how a client that sent too early passed
+      fifteen tests here while filling the dev console with the error.
+
       Verified live against the dev stack: a socket subscribed to a device's subtree received the
       snapshot of its three sensors and then `state` frames, numbered in sequence, as a simulated
       error went on and came off.
