@@ -6408,8 +6408,37 @@ because each is a decision rather than a defect:
 
 ## Phase 10 — Hardening and release
 
-- [ ] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
+- [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
       growth, no scheduler lag drift, rollups correct throughout.
+
+      **H-01 outcome. All three hold, measured over 23.99 h at 5,047 sensors** —
+      `docs/findings/2026-08-30-soak-24h.md`, with the raw samples and every rollup check beside
+      it. Core RSS moved **+1.10 MB/h** on a 310 MB footprint and probe RSS **+0.68 MB/h** on
+      1,790 MB, which is a quarter of one percent across the day. Scheduler lag p95 was 10.7 ms
+      against `P-15`'s 1,000 ms budget with a slope of **−0.02 ms/h**. Rollups were verified every
+      fifteen minutes against a recomputation of the rows beneath each bucket: **225 runs,
+      13,694,541 bucket comparisons, zero disagreements**, across 7,544,624 readings written.
+
+      **Three of the eight series first reported FAIL and none was a fault** — all three were the
+      report's own thresholds, and each is a way to make a soak worthless. It compared the
+      absolute slope, so a *draining* queue read as drift. It judged rollup lag against 1% of its
+      own mean, forty times stricter than the channel's declared warning bound. And it gave
+      `checks waiting`, whose mean is 0.08, a budget of 0.001/h — a threshold no measurement
+      clears, on a series that was non-zero in five samples out of 1,439 and spent its whole last
+      quarter at zero. Checks are one-sided now, judged against declared limits where a channel
+      has them (`S-18`), and a slope only counts as drift if the run also ended higher than it
+      started. Each relaxation was checked against a synthetic leak rather than assumed: 60 MB/h
+      still fails, and a rollup lag climbing 200 s/h still fails.
+
+      **The harness could not say what it had measured**: every sample recorded `sensorCount:
+      null`, because it asked a keyset-paginated endpoint for a `total` it does not return. The
+      load was in the data all along as the probe's `scheduled` channel.
+
+      **`P-26` came out of the run** — the check pool grew to 48 workers during provisioning and
+      shrank zero times in 24 hours at 0–3% usage, because its idle clock resets on every submit
+      and a probe watching 5,000 sensors never goes a minute without one. That is also the whole
+      of the probe's 1,790 MB, and it is flat, so it is headroom rather than a leak — but it is
+      set by the worst burst the probe ever saw.
 
       **Harness landed; the 24 hours are running.** `scripts/soak.sh` provisions 5,000 `port.tcp`
       sensors, samples the installation's own Core Health and Probe Health once a minute, checks

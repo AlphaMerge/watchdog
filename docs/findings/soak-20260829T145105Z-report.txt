@@ -1,0 +1,20 @@
+soak of 23.99 h · 1424 samples past warm-up (of 1439) · 0 errors
+started 2026-08-29T14:51:05.862Z · 5047 sensors
+
+core RSS (MB)                mean    310.0  slope +1.102/h  ¼→¼ +6.6%
+core heap (MB)               mean     82.1  slope +0.078/h  ¼→¼ +2.0%
+probe RSS (MB)               mean   1790.4  slope +0.680/h  ¼→¼ +0.6%
+scheduler lag p95 (ms)       mean     10.7  slope -0.023/h  ¼→¼ -3.4%
+ingestion queue (readings)   mean     24.8  slope +0.070/h  ¼→¼ +54.7%
+rollup lag (s)               mean     78.0  slope +0.246/h  ¼→¼ +12.7%
+pool in use (%)              mean      1.3  slope -0.036/h  ¼→¼ -25.9%
+checks waiting               mean      0.1  slope +0.003/h  ¼→¼ -100.0%
+
+pass  core RSS (MB): +1.102/h against +3.100 (1%/h of the mean)
+pass  core heap (MB): +0.078/h against +0.821 (1%/h of the mean)
+pass  probe RSS (MB): +0.680/h against +17.904 (1%/h of the mean)
+pass  scheduler lag p95 (ms): -0.023/h against +41.221 (reaches 1000 in 24 h) — falling
+pass  ingestion queue (readings): +0.070/h against +1665.632 (reaches 40000 in 24 h)
+pass  rollup lag (s): +0.246/h against +146.751 (reaches 3600 in 24 h)
+pass  pool in use (%): -0.036/h against +3.280 (reaches 80 in 24 h) — falling
+pass  checks waiting: +0.003/h against +0.001 (1%/h of the mean) — but ended no higher than it started

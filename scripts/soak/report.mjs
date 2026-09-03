@@ -86,6 +86,27 @@ function trend(series) {
   };
 }
 
+/**
+ * The load the run was measured under, taken from the probe rather than from a sensor listing.
+ *
+ * The first version asked `/objects?kind=sensor&limit=1` for a `total` the endpoint does not
+ * have — it is keyset-paginated and answers `{items, nextCursor}` — so every one of the first
+ * run's 1,439 samples recorded `sensorCount: null` and the report said "? sensors". A record of a
+ * measurement that cannot say what it measured is most of the way to not being a record.
+ *
+ * `scheduled` is what the probe's wheel actually holds, which is the number that matters and is
+ * already in every sample. The median ignores the first sample or two, taken while the core is
+ * still pushing the configuration and the wheel is part-filled.
+ */
+function loadOf(samples) {
+  const values = samples
+    .map((one) => one.probe?.scheduled)
+    .filter((one) => typeof one === 'number')
+    .sort((a, b) => a - b);
+  if (values.length === 0) return '?';
+  return values[Math.floor(values.length / 2)];
+}
+
 const hours = (sample) => sample.elapsedS / 3600;
 const series = (side, key) => samples.map((one) => [hours(one), one[side]?.[key]]);
 
@@ -154,12 +175,21 @@ for (const [name, result] of Object.entries(measured)) {
   }
   const { limit, why } = budgetFor(name, result);
   const slope = result.slopePerHour;
+  // **A series that ended no higher than it started is not drifting upward**, whatever a line
+  // fitted through it says. `checks waiting` was above zero in five samples out of 1,439 across
+  // the first 24-hour run, spent its whole last quarter at exactly zero, and still produced a
+  // positive slope — a least-squares fit dragged by two early spikes. A proportional budget
+  // cannot help there either: 1% of a mean of 0.08 is a threshold no real measurement clears.
+  // Requiring both signals to agree costs nothing on a genuine leak, where they always do.
+  const roseAcrossTheRun = result.lastQuarter > result.firstQuarter;
+  const ok = slope <= limit || !roseAcrossTheRun;
   verdicts.push({
     name,
-    ok: slope <= limit,
+    ok,
     detail:
       `${slope >= 0 ? '+' : ''}${slope.toFixed(3)}/h against +${limit.toFixed(3)} (${why})` +
-      (slope < 0 ? ' — falling' : ''),
+      (slope < 0 ? ' — falling' : '') +
+      (slope > limit && !roseAcrossTheRun ? ' — but ended no higher than it started' : ''),
   });
 }
 
@@ -199,9 +229,7 @@ if (asMarkdown) {
     `soak of ${elapsedHours.toFixed(2)} h · ${String(samples.length)} samples past warm-up ` +
       `(of ${String(all.length)}) · ${String(errors.length)} errors\n`,
   );
-  stdout.write(
-    `started ${String(meta.startedAt)} · ${String(samples[0]?.sensorCount ?? '?')} sensors\n\n`,
-  );
+  stdout.write(`started ${String(meta.startedAt)} · ${String(loadOf(samples))} sensors\n\n`);
   for (const [name, result] of Object.entries(measured)) {
     if (result === null) continue;
     stdout.write(

@@ -101,18 +101,13 @@ let taken = 0;
 while (Date.now() < until) {
   const at = new Date().toISOString();
   try {
-    const [core, probe, sensors] = await Promise.all([
-      healthOf(health.core),
-      healthOf(health.probe),
-      get('/objects?kind=sensor&limit=1'),
-    ]);
+    const [core, probe] = await Promise.all([healthOf(health.core), healthOf(health.probe)]);
     appendFileSync(
       OUT,
       `${JSON.stringify({
         kind: 'sample',
         at,
         elapsedS: Math.round((Date.now() - started) / 1000),
-        sensorCount: sensors.total ?? null,
         core,
         probe,
       })}\n`,
