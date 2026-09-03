@@ -3413,6 +3413,33 @@ because each is a decision rather than a defect:
       Measured after: no horizontal document scroll on any route at 320px, no text or control
       boundary under its threshold in either theme, and nothing pressable under 24px.
 
+- [x] **U-16 — Clear the Fast Refresh allowlist** · S · U-01 · Thirteen web modules exported a
+      pure helper beside their components, so `@vitejs/plugin-react` could not Fast Refresh them:
+      every edit reloaded the page and dropped whatever UI state was open.
+
+      **U-16 outcome.** `react-refresh/only-export-components` is an error across
+      `packages/web/src` with no exemptions, and the allowlist that carried the thirteen is gone.
+      31 violations, all the shape `whereSteps` had. The helpers moved into sibling modules —
+      `time-series-model`, `page-title-model`, `tabs-model`, `virtual-list-model`, `logs-model`,
+      `templates-model`, one `routes/detail/model.ts` for the five detail panels, and
+      `descendantsOf` into the `discovery-model` that already existed.
+
+      **One `model.ts` for `detail/`, not five.** It mirrors `src/tree/model.ts`, and
+      `test/detail-model.test.ts` already treated those panels' helpers as one thing.
+
+      Two were not simple moves. `PageTitle` kept its "which page was I on" in a module-level
+      `let` that `resetNavigationFocus` cleared, so the state had to travel with the export; the
+      read-then-write is now one `takeFocusOn` call, which is also the honest contract — the
+      answer is only right on a route's first render, and it is the recording that makes it so.
+      `SchemaForm` needed no new module at all: its three flagged names were a re-export of
+      `forms/schema` and `forms/validate` that nothing imported, so the line was deleted. Four
+      imports elsewhere died with the moves and lint caught each one.
+
+      Verified with `isLikelyComponentType` — vite-plugin-react's own predicate, the one that
+      emits the invalidate message — over all fourteen modules: every runtime export is a
+      component. Types moved where they were a moved function's argument (`ChartSeries`,
+      `TabDefinition`, `RangeId`), since a type-only import back would have been a cycle.
+
 ## Phase 6 — Sensor breadth
 
 - [x] **U-12 — Repeating fields in the generated form** · M · U-08 · An array of objects in a

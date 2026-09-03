@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ObjectSummary } from '../src/api/types';
 import type { TreeRowModel } from '../src/tree/model';
 import { keepActive, parentOf, treeCommand } from '../src/tree/keyboard';
-import { shouldTakeFocus } from '../src/components/PageTitle';
+import { shouldTakeFocus } from '../src/components/page-title-model';
 
 function object(id: number): ObjectSummary {
   return {

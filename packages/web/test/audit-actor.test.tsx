@@ -2,7 +2,8 @@ import { render, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { actorLabel, actorRef } from '../src/api/actors';
-import { ActorLink, auditQueryFor } from '../src/routes/LogsView';
+import { ActorLink } from '../src/routes/LogsView';
+import { auditQueryFor } from '../src/routes/logs-model';
 import type { AuditActor } from '../src/api/types';
 
 /**

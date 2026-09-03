@@ -1,5 +1,5 @@
 import { seriesVar } from './palette';
-import type { ChartSeries } from './TimeSeriesChart';
+import type { ChartSeries } from './time-series-model';
 
 /**
  * The legend — always present for two or more series, absent for one.

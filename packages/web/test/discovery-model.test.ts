@@ -9,10 +9,10 @@ import {
   orderedLevels,
   phaseOf,
   pollIntervalMs,
+  descendantsOf,
   progressOf,
   whyNotStartable,
 } from '../src/routes/discovery-model';
-import { descendantsOf } from '../src/routes/DiscoveryView';
 import type { DiscoveryLevelEstimate, DiscoveryRun, ObjectSummary } from '../src/api/types';
 
 /**

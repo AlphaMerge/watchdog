@@ -3,6 +3,7 @@ import type {
   DiscoveryLevelEstimate,
   DiscoveryRun,
   DiscoveryStatus,
+  ObjectPage,
 } from '../api/types';
 
 /**
@@ -178,4 +179,26 @@ export const LONG_RUN_SECONDS = 600;
 
 export function isLong(estimate: DiscoveryLevelEstimate): boolean {
   return estimate.maxSeconds >= LONG_RUN_SECONDS;
+}
+
+/**
+ * The groups that sit under one probe.
+ *
+ * Walked from the flat list rather than asked for, because the page already has every group for
+ * the picker and a second request per probe selection would be three round trips to answer a
+ * question the browser can answer from what it holds. A group's parent chain always ends at a
+ * probe or at the root, so this terminates.
+ */
+export function descendantsOf(
+  objects: readonly ObjectPage['items'][number][],
+  probeId: number,
+): ObjectPage['items'] {
+  const byId = new Map(objects.map((one) => [one.id, one]));
+  const under = (id: number | null, depth = 0): boolean => {
+    if (id === null || depth > 64) return false;
+    if (id === probeId) return true;
+    const parent = byId.get(id);
+    return parent === undefined ? false : under(parent.parentId, depth + 1);
+  };
+  return objects.filter((one) => under(one.parentId));
 }

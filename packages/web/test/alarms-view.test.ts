@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { whereSteps } from '../src/routes/AlarmsView';
+import { whereSteps } from '../src/routes/alarms-model';
 import type { Alarm } from '../src/api/types';
 
 function alarm(path: number[], pathNames: string[]): Alarm {

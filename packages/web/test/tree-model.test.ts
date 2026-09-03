@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { LiveState } from '../src/api/stream';
 import type { ObjectSummary, SensorState } from '../src/api/types';
 import { EMPTY_TREE, flatten, rollup, stateFor, worstOf, type TreeState } from '../src/tree/model';
-import { visibleRange } from '../src/components/VirtualList';
+import { visibleRange } from '../src/components/virtual-list-model';
 
 function node(id: number, parentId: number, over: Partial<ObjectSummary> = {}): ObjectSummary {
   return {

@@ -7,7 +7,7 @@ import {
   seriesWash,
   SERIES_SLOTS,
 } from '../src/charts/palette';
-import { dataFor, rowsFor } from '../src/charts/TimeSeriesChart';
+import { dataFor, rowsFor } from '../src/charts/time-series-model';
 import type { HistoryChannel } from '../src/api/types';
 
 function channel(

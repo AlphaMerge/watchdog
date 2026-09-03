@@ -3,19 +3,9 @@ import { useApi } from '../../api/client';
 import type { StateLogEntry, StateLogPage } from '../../api/types';
 import { Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { StatusBadge } from '../../components/StatusBadge';
+import { formatDuration } from './model';
 
 const LIMIT = 50;
-
-/** A duration in the largest unit that still says something useful. */
-export function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1_000);
-  if (seconds < 90) return `${String(seconds)}s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) return `${String(minutes)}m`;
-  const hours = minutes / 60;
-  if (hours < 48) return `${hours.toFixed(hours < 10 ? 1 : 0)}h`;
-  return `${(hours / 24).toFixed(1)}d`;
-}
 
 /**
  * Every state this object has been in, newest first (`M-15`).

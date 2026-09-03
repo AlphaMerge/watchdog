@@ -16,13 +16,15 @@ import type {
 } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
-import { TabPanel, Tabs, type TabDefinition } from '../components/Tabs';
+import { TabPanel, Tabs } from '../components/Tabs';
+import type { TabDefinition } from '../components/tabs-model';
 import { rollup, stateFor } from '../tree/model';
 import { ChannelTable } from './detail/ChannelTable';
 import { HistoryPanel } from './detail/HistoryPanel';
 import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
-import { ActorLink, MoreButton, usePaged } from './LogsView';
+import { ActorLink, MoreButton } from './LogsView';
+import { usePaged } from './logs-model';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';

@@ -15,8 +15,9 @@ import type {
 } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { SchemaForm } from '../forms/SchemaForm';
-import { seedDefaults, type JsonSchema } from '../forms/schema';
+import type { JsonSchema } from '../forms/schema';
 import { PageTitle } from '../components/PageTitle';
+import { initial, seed } from './templates-model';
 
 /** How long to wait after a keystroke before asking the core what the draft renders as. */
 const PREVIEW_DEBOUNCE_MS = 500;
@@ -411,50 +412,6 @@ function Editor({
       </div>
     </Card>
   );
-}
-
-export function initial(
-  template: TemplateView | undefined,
-  methods: readonly NotificationMethod[],
-): TemplateInput {
-  if (template === undefined) {
-    const first = methods[0];
-    return {
-      name: '',
-      method: first?.id ?? 'email',
-      // Seeded from the method's own defaults, which the core applies and stores anyway — the
-      // same rule the sensor-parameter form follows when adding rather than editing (`U-08`).
-      settings: seed(first?.settingsSchema),
-      subject: '%sitename: %sensor on %device is %status',
-      body: '%lastmessage\n\n%linksensor',
-      recipients: [],
-      priority: 3,
-      enabled: true,
-    };
-  }
-  // Rebuilt from the read, which carries no secrets — and must not. A PUT that omits one keeps
-  // the stored value; `N-05` merges rather than clearing, which is what makes editing a subject
-  // line safe on a template with a webhook URL in it.
-  return {
-    name: template.name,
-    description: template.description,
-    method: template.method,
-    settings: template.settings,
-    subject: template.subject,
-    body: template.body,
-    recipients: template.recipients,
-    priority: template.priority,
-    enabled: template.enabled,
-    summarisation: template.summarisation,
-    summaryWindowSeconds: template.summaryWindowSeconds,
-    scheduleId: template.scheduleId,
-    whenInactive: template.whenInactive,
-  };
-}
-
-/** A method's settings pre-filled from the defaults its schema declares. */
-export function seed(schema: Record<string, unknown> | undefined): Record<string, unknown> {
-  return seedDefaults(schema ?? {});
 }
 
 /**

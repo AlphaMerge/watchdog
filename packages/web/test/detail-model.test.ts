@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { formatValue, howLongAgo } from '../src/routes/detail/ChannelTable';
-import { formatDuration } from '../src/routes/detail/StateLogPanel';
-import { formatSeconds, lastReading, summarise } from '../src/routes/detail/HistoryPanel';
-import { nextTab } from '../src/components/Tabs';
+import {
+  formatDuration,
+  formatSeconds,
+  formatValue,
+  howLongAgo,
+  lastReading,
+  summarise,
+} from '../src/routes/detail/model';
+import { nextTab } from '../src/components/tabs-model';
 import type { HistoryChannel } from '../src/api/types';
 
 export function channel(

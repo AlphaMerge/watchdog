@@ -4,8 +4,9 @@ import { ApiError, send } from '../../api/client';
 import type { SettingSource, SettingView } from '../../api/types';
 import { Empty } from '../../components/Panels';
 import { SchemaControl } from '../../forms/Control';
-import { labelFor, type FieldModel, type JsonSchema } from '../../forms/schema';
+import { labelFor } from '../../forms/schema';
 import { problemsFor } from '../../forms/validate';
+import { fieldFor } from './model';
 
 /**
  * Every inheritable setting in effect, with an override toggle (`U-09`).
@@ -217,49 +218,6 @@ function Setting({
       {failed !== null && <p className="text-xs text-down-fg">{failed.message}</p>}
     </div>
   );
-}
-
-/**
- * A `FieldModel` for one setting.
- *
- * Built by hand rather than through `fieldsOf`, because a setting's key is dotted —
- * `scan.intervalSeconds` — and the path machinery would read that as nesting. The setting is one
- * value at one key; the dots are a namespace, not a structure.
- */
-export function fieldFor(setting: SettingView, prefix: string): FieldModel {
-  const schema = setting.schema as JsonSchema;
-  const type = Array.isArray(schema.type)
-    ? schema.type.find((entry) => entry !== 'null')
-    : schema.type;
-  const nullable = Array.isArray(schema.type) && schema.type.includes('null');
-
-  return {
-    path: setting.key,
-    name: setting.key,
-    label: labelFor(setting.key.slice(prefix.length + 1)),
-    description: setting.description,
-    kind:
-      schema.enum !== undefined && schema.enum.length > 0
-        ? 'enum'
-        : type === 'integer'
-          ? 'integer'
-          : type === 'number'
-            ? 'number'
-            : type === 'boolean'
-              ? 'boolean'
-              : type === 'string'
-                ? 'string'
-                : 'json',
-    schema,
-    // A nullable setting is one whose "not set" is a value — `schedule.id: null` means "always".
-    // Calling it required would make that unreachable through the control.
-    required: !nullable,
-    writeOnly: false,
-    children: [],
-    // Never an array: a setting is one value at one key, and `U-12`'s repeating control is for a
-    // sensor type's parameters. An array-typed setting falls to the JSON box above.
-    items: undefined,
-  };
 }
 
 function show(value: unknown): string {

@@ -1,55 +1,6 @@
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
-
-/**
- * How many decimal places an automatic-precision value gets.
- *
- * **Three significant digits, not six decimal places.** A stored reading of `0.223 ms` and a
- * 45-minute average of `0.20335648…` are the same channel, and printing the second one in full
- * claims a precision the average does not have — six digits of it manufactured by division. The
- * places move with the magnitude so a small value keeps its digits: `0.000412` stays
- * `0.000412` rather than rounding to `0.000`, which would read as a zero.
- */
-export function automaticDecimals(value: number): number {
-  const size = Math.abs(value);
-  if (size === 0) return 0;
-  if (size >= 100) return 0;
-  if (size >= 10) return 1;
-  if (size >= 1) return 2;
-  // Below one: enough places for three significant digits, capped so a denormal cannot ask for
-  // forty of them.
-  return Math.min(8, 2 - Math.floor(Math.log10(size)));
-}
-
-/**
- * Formats a reading the way its channel is configured to show it (`M-07`).
- *
- * `decimals: null` means automatic — see `automaticDecimals`. A configured precision is honoured
- * exactly, padding included, because a channel set to two places wants `0.20` and not `0.2`.
- */
-export function formatValue(value: number, unit: string, decimals: number | null): string {
-  const shown =
-    decimals === null
-      ? new Intl.NumberFormat(undefined, {
-          maximumFractionDigits: automaticDecimals(value),
-        }).format(value)
-      : new Intl.NumberFormat(undefined, {
-          minimumFractionDigits: decimals,
-          maximumFractionDigits: decimals,
-        }).format(value);
-  return unit === '' ? shown : `${shown} ${unit}`;
-}
-
-/** How long ago, in words, for a reading whose exact instant is a tooltip away. */
-export function howLongAgo(at: string, now: number): string {
-  const seconds = Math.max(0, Math.round((now - new Date(at).getTime()) / 1_000));
-  if (seconds < 90) return `${String(seconds)}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) return `${String(minutes)}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${String(hours)}h ago`;
-  return `${String(Math.round(hours / 24))}d ago`;
-}
+import { formatValue, howLongAgo } from './model';
 
 /**
  * The channel table (`U-04`) — what each channel reads, and what judges it.

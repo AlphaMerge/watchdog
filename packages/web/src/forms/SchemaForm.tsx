@@ -1,6 +1,5 @@
 import { useCallback, useId, useMemo, useState } from 'react';
 import {
-  defaultFor,
   fieldsOf,
   newEntryFor,
   readAt,
@@ -10,7 +9,7 @@ import {
   type JsonSchema,
 } from './schema';
 import { SchemaControl } from './Control';
-import { allProblems, problemsFor, type FieldProblem } from './validate';
+import { problemsFor, type FieldProblem } from './validate';
 
 export interface SchemaFormProps {
   readonly schema: JsonSchema;
@@ -518,6 +517,3 @@ function WriteOnly({
     </div>
   );
 }
-
-export { allProblems, defaultFor, fieldsOf };
-export type { FieldModel, FieldProblem, JsonSchema };

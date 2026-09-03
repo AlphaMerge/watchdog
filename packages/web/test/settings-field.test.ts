@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldFor } from '../src/routes/detail/SettingsPanel';
+import { fieldFor } from '../src/routes/detail/model';
 import { problemsFor } from '../src/forms/validate';
 import type { SettingView } from '../src/api/types';
 
