@@ -4,6 +4,7 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
+import reactRefresh from 'eslint-plugin-react-refresh';
 
 export default tseslint.config(
   {
@@ -84,6 +85,23 @@ export default tseslint.config(
     rules: {
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'error',
+    },
+  },
+  {
+    // A module that exports a component and anything else cannot Fast Refresh. Editing it drops
+    // the hot update and reloads the page instead, which fails silently: it costs a couple of
+    // seconds and whatever UI state was open, and nothing reports it but a line in the dev
+    // console. `whereSteps` sat in `AlarmsView.tsx` like that until somebody read one.
+    //
+    // `src` only. The rule describes what Vite's refresh boundaries need, and `test/` is not in
+    // that module graph — a helper exported beside a rendered fixture there costs nothing.
+    files: ['packages/web/src/**/*.ts', 'packages/web/src/**/*.tsx'],
+    plugins: { 'react-refresh': reactRefresh },
+    rules: {
+      // `allowConstantExport` matches what the runtime already tolerates: it permits literals,
+      // template and arithmetic expressions — the values that stay identical across a module
+      // re-evaluation — and still rejects the arrays, objects and functions that do not.
+      'react-refresh/only-export-components': ['error', { allowConstantExport: true }],
     },
   },
   {

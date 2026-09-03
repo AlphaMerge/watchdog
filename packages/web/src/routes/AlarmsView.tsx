@@ -5,7 +5,8 @@ import { useStateStream } from '../api/stream';
 import type { Alarm, AlarmPage, SensorState } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
-import { formatDuration } from './detail/StateLogPanel';
+import { formatDuration } from './detail/model';
+import { whereSteps } from './alarms-model';
 import { PageTitle } from '../components/PageTitle';
 
 /**
@@ -357,21 +358,6 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
       )}
     </li>
   );
-}
-
-/**
- * The two steps above a sensor: its device and that device's parent.
- *
- * Not the whole chain. Root and probe are the same for almost every row on a single-probe
- * installation, and repeating them on forty rows turns the part that distinguishes them into
- * noise. The full path is one click away on the detail page.
- *
- * The sensor itself is dropped — its name is already the row's heading.
- */
-export function whereSteps(alarm: Alarm): { id: number; name: string }[] {
-  return alarm.path
-    .map((id, index) => ({ id, name: alarm.pathNames[index] ?? String(id) }))
-    .slice(Math.max(0, alarm.path.length - 3), Math.max(0, alarm.path.length - 1));
 }
 
 /**

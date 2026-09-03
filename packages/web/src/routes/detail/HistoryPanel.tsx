@@ -1,27 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
-import type { HistoryChannel, HistorySeries } from '../../api/types';
+import type { HistorySeries } from '../../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '../../charts/groups';
 import { SeriesLegend } from '../../charts/SeriesLegend';
 import { SeriesTable } from '../../charts/SeriesTable';
-import { TimeSeriesChart, type ChartSeries } from '../../charts/TimeSeriesChart';
-import { formatValue } from './ChannelTable';
-
-/**
- * The three ranges PRTG's sensor page offers, and this one does too (`CAPABILITIES.MD §8`).
- *
- * They are not arbitrary: two days is "what happened on my shift", thirty is "is this getting
- * worse", a year is "what do I tell the auditor". The resolution is left to the server, which
- * has rules about it (`S-08`) and reports what it changed.
- */
-export const RANGES = [
-  { id: '2d', label: '2 days', days: 2 },
-  { id: '30d', label: '30 days', days: 30 },
-  { id: '365d', label: '365 days', days: 365 },
-] as const;
-
-export type RangeId = (typeof RANGES)[number]['id'];
+import { TimeSeriesChart } from '../../charts/TimeSeriesChart';
+import type { ChartSeries } from '../../charts/time-series-model';
+import {
+  RANGES,
+  describe,
+  formatSeconds,
+  formatValue,
+  lastReading,
+  summarise,
+  type RangeId,
+} from './model';
 
 /**
  * Historic data, as charts (`U-05`).
@@ -233,51 +227,6 @@ function Panel({
   );
 }
 
-/** The newest reading a channel has in this range, or null when it ends in a gap. */
-export function lastReading(channel: HistoryChannel): number | null {
-  for (let index = channel.avg.length - 1; index >= 0; index -= 1) {
-    const value = channel.avg[index];
-    if (value !== null && value !== undefined) return value;
-  }
-  return null;
-}
-
-/** The one-line range summary beside a panel heading. */
-export function summarise(group: ChartGroup, extent: { low: number; high: number } | null): string {
-  const buckets = group.series[0]?.channel.avg.length ?? 0;
-  const gaps = group.series.reduce(
-    (worst, { channel }) => Math.max(worst, channel.avg.filter((value) => value === null).length),
-    0,
-  );
-  const unit = group.unit;
-  const range =
-    extent === null
-      ? 'no readings in this range'
-      : extent.low === extent.high
-        ? // "0 % to 0 %" is a worse sentence than the one fact it contains — and quoting a
-          // padded drawing scale here would invent a reading nobody took.
-          `steady at ${formatValue(extent.low, unit, null)}`
-        : `${formatValue(extent.low, unit, null)} to ${formatValue(extent.high, unit, null)}`;
-  if (gaps === 0 || buckets === 0) return range;
-  return `${range} · ${gaps.toLocaleString()} of ${buckets.toLocaleString()} buckets are gaps`;
-}
-
-/** What a screen reader is told instead of the canvas. */
-export function describe(
-  group: ChartGroup,
-  buckets: readonly string[],
-  extent: { low: number; high: number } | null,
-): string {
-  const first = buckets[0];
-  const last = buckets[buckets.length - 1];
-  const period =
-    first === undefined || last === undefined
-      ? ''
-      : ` from ${new Date(first).toLocaleString()} to ${new Date(last).toLocaleString()}`;
-  const names = group.series.map(({ channel }) => channel.name).join(', ');
-  return `Line chart of ${names}${period}. ${summarise(group, extent)}. The same readings are in the table view.`;
-}
-
 /**
  * Where the numbers came from, and what the query rules changed about the request.
  *
@@ -300,11 +249,4 @@ function Provenance({ series }: { series: HistorySeries }): React.JSX.Element {
       ))}
     </div>
   );
-}
-
-export function formatSeconds(seconds: number): string {
-  if (seconds % 86_400 === 0) return `${String(seconds / 86_400)}d`;
-  if (seconds % 3_600 === 0) return `${String(seconds / 3_600)}h`;
-  if (seconds % 60 === 0) return `${String(seconds / 60)}m`;
-  return `${String(seconds)}s`;
 }

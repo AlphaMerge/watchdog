@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { usePaged } from '../src/routes/LogsView';
+import { usePaged } from '../src/routes/logs-model';
 
 interface Row {
   id: string;

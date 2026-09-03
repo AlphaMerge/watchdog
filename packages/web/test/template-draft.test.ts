@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { initial, seed } from '../src/routes/TemplatesView';
-import { seedFrom } from '../src/routes/detail/TriggersPanel';
+import { initial, seed } from '../src/routes/templates-model';
+import { seedFrom } from '../src/routes/detail/model';
 import type { NotificationMethod, TemplateView } from '../src/api/types';
 
 function method(id: string, settingsSchema: Record<string, unknown>): NotificationMethod {

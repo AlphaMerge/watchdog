@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { SeriesLegend } from '../src/charts/SeriesLegend';
-import type { ChartSeries } from '../src/charts/TimeSeriesChart';
+import type { ChartSeries } from '../src/charts/time-series-model';
 
 function series(...labels: string[]): ChartSeries[] {
   return labels.map((label, slot) => ({ label, slot, avg: [1], min: [1], max: [1] }));

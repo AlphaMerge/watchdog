@@ -4,7 +4,8 @@ import { ApiError, send, useApi } from '../../api/client';
 import type { TemplateView, TriggerKind, TriggerView } from '../../api/types';
 import { Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
-import { seedDefaults, type JsonSchema } from '../../forms/schema';
+import type { JsonSchema } from '../../forms/schema';
+import { seedFrom } from './model';
 
 interface TriggersResponse {
   objectId: number;
@@ -437,11 +438,6 @@ function TriggerForm({
 }
 
 const EMPTY: ReadonlySet<string> = new Set();
-
-/** A kind's settings pre-filled from the defaults its schema declares. */
-export function seedFrom(kind: TriggerKind | undefined): Record<string, unknown> {
-  return seedDefaults(kind?.settingsSchema ?? {});
-}
 
 function Group({
   title,

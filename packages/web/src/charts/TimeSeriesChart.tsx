@@ -2,16 +2,7 @@ import { useEffect, useRef } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { readChartTheme, seriesColour, seriesWash, type ChartTheme } from './palette';
-
-export interface ChartSeries {
-  readonly label: string;
-  /** Fixed slot in the categorical palette. Follows the channel, never its rank on screen. */
-  readonly slot: number;
-  /** Aligned to `times`. `null` is a gap and must stay one. */
-  readonly avg: readonly (number | null)[];
-  readonly min: readonly (number | null)[];
-  readonly max: readonly (number | null)[];
-}
+import { dataFor, rowsFor, type ChartSeries } from './time-series-model';
 
 export interface TimeSeriesChartProps {
   /** Bucket starts, epoch seconds — what uPlot's time scale expects. */
@@ -101,29 +92,6 @@ export function TimeSeriesChart({
   }, [times, series, height, format, label]);
 
   return <div ref={host} className="w-full" style={{ minHeight: `${String(height)}px` }} />;
-}
-
-/**
- * `[times, ...values]` in uPlot's aligned layout.
- *
- * Each series contributes three rows — min, max and avg, in that order — because the band is
- * drawn *between* two series and uPlot needs both as real data. The nulls go in as nulls.
- */
-export function dataFor(
-  times: readonly number[],
-  series: readonly ChartSeries[],
-): uPlot.AlignedData {
-  const rows: (number | null)[][] = [[...times]];
-  for (const entry of series) {
-    rows.push([...entry.min], [...entry.max], [...entry.avg]);
-  }
-  return rows as unknown as uPlot.AlignedData;
-}
-
-/** Where each series' three rows land in the aligned data. */
-export function rowsFor(index: number): { min: number; max: number; avg: number } {
-  const base = index * 3 + 1;
-  return { min: base, max: base + 1, avg: base + 2 };
 }
 
 function optionsFor(options: {
