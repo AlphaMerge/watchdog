@@ -3,6 +3,9 @@
 The web UI. Served by `ms-core` as static assets — there is no second web server to install
 (`ADR-001` Decision 8).
 
+**This file is how to develop it.** What each view is _for_, from an operator's side, is
+[`docs/web-ui.md`](../../docs/web-ui.md).
+
 **Scaffolded in `U-01`.** React 19 + TypeScript + Vite 8, Tailwind CSS 4, React Router 7.
 The stack additions Decision 8 left open — styling and routing — are recorded in the amendment
 at the end of that decision.
@@ -33,25 +36,36 @@ For production, `scripts/package.sh` runs `vite build` and stages `dist` into th
 
 ## What is here
 
-| Route           | Shows                                                                     |
-| --------------- | ------------------------------------------------------------------------- |
-| `/`             | Core reachability, object counts, sensor states, the registered catalogue |
-| `/tree`         | The object tree in the operator's own arrangement                         |
-| `/objects/:id`  | Configuration, parameters, channels, history, recent changes              |
-| `/sensor-types` | The catalogue and each type's parameter schema                            |
+Phase 5 is complete — `U-01` through `U-13`. The routes are registered in `src/App.tsx`:
+
+| Route                     | Shows                                                                     |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `/`                       | Core reachability, object counts, sensor states, the registered catalogue |
+| `/alarms`                 | What is in alarm, worst first, with acknowledge and pause on the row      |
+| `/tree`                   | The object tree in the operator's own arrangement                         |
+| `/logs`                   | Status changes, object history and system events, as three tabs           |
+| `/discovery`              | Range sweeps, with the cost of each level shown before the choice         |
+| `/templates`              | Notification templates, with live preview and test send                   |
+| `/objects/:id`            | Overview, history, log, settings, triggers, changes                       |
+| `/objects/:id/add-sensor` | The add form, generated from the chosen type's `paramsSchema`             |
+| `/sensor-types`           | The catalogue and each type's parameter schema                            |
 
 **States are real since `M-02`.** The overview counts sensors by state, worst first; the tree
 colours each row; the detail page shows the state with its cause and since when, read from
 `GET /sensors/:id/state` rather than from the object, because that read is conditional and a
 live state behind an ETag would be served stale. A sensor still reads Unknown until its first
-result, and again after a resume — that is the state, not a placeholder. Panels that are empty
-say which task fills them.
+result, and again after a resume — that is the state, not a placeholder.
 
 The channel table shows each channel's configured thresholds (`M-04`), ordered the way the
-number line is, so the band a reading should stay inside reads as one thing. Read-only here —
-`U-08` generates the form.
+number line is, so the band a reading should stay inside reads as one thing.
 
-Nothing polls yet: every panel loads once. The live stream is `U-02`.
+**State is streamed; readings are polled, and the split is deliberate.** `U-02`'s WebSocket
+(`src/api/stream.ts`) carries state changes, which is what the badges and the tree rollup need
+and what has to be immediate. Channel _values_ change on every scan whether the state does or
+not, and a frame per reading per sensor would be a stream nobody could keep up with — so the
+channel table re-reads on a 15-second interval. Discovery progress polls too, for the same
+reason inverted: a run lives for minutes and one operator is watching it, so pushing it would
+mean a new message kind and a fan-out to every client for something one of them cares about.
 
 ## Design system
 
@@ -64,9 +78,24 @@ Every `-fg` token meets WCAG 2.1 AA against its own surface in both themes. Colo
 only signal: `StatusBadge` pairs each of the six `WORKFLOW.MD` §4 states with a distinct glyph
 and its name, which is what makes it readable to a screen reader and to a colour-blind operator.
 
-## Next
+## Where the tricky parts live
 
-`U-02` replaces the fetch-on-mount in `src/api/client.ts` with a WebSocket state stream — there
-is deliberately no cache layer here to unpick when it does. `U-03` makes the tree virtualised and
-searchable, `U-05` brings uPlot, and `U-08` generates settings forms from the `paramsSchema` this
-app already displays on `/sensor-types`.
+Each of these carries its reasoning in a header comment; read that before changing it.
+
+| Concern                                   | File                   |
+| ----------------------------------------- | ---------------------- |
+| Fetching, errors, conditional reads       | `src/api/client.ts`    |
+| The live state stream (`U-02`)            | `src/api/stream.ts`    |
+| Tree flattening and rollup                | `src/tree/model.ts`    |
+| Tree keyboard commands (`U-11`)           | `src/tree/keyboard.ts` |
+| Forms generated from JSON Schema (`U-08`) | `src/forms/`           |
+| uPlot panels (`U-05`)                     | `src/charts/`          |
+
+`src/tree/keyboard.ts` decides what a key press means without touching the DOM, because that is
+the part that is easy to get wrong and easy to test: `ArrowLeft` collapses an expanded branch and
+moves to the parent on a leaf, and getting those the wrong way round makes a tree that traps you
+at the bottom of a branch. Table-driven tests are cheap there and would be an ordeal against a
+rendered list.
+
+The v2 work this app does not do — the drag-and-drop map and dashboard designer, and reports —
+is scoped in `CAPABILITIES.MD §6`.
