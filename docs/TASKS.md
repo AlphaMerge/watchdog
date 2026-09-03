@@ -4662,15 +4662,23 @@ because each is a decision rather than a defect:
       enrolment fallback stayed shut and it remained locked out — correct, and the reason the
       backfill is not a security regression. Resetting it to pending and re-approving cleared
       hash and confirmation together, as intended. The last step — the handshake that issues a
-      key and the one after it that confirms — was not observed, because another session began
-      approving probes through the UI in the same stack while it was in flight, and interfering
-      with that would have been worse than leaving the check to the unit tests, which cover it.
+      key and the one after it that confirms — was not observed at the time, because another
+      session began approving probes through the UI in the same stack while it was in flight, and
+      interfering with that would have been worse than leaving the check to the unit tests.
 
-      A second lockout path noticed while doing this, and *not* fixed here: a probe holding a key
-      the core has since forgotten presents that stale key rather than the enrolment key, so
-      re-approval alone does not recover it — someone has to clear `identity.json` on the probe's
-      own disk, which for a remote probe means logging into that machine. It is the mirror image
-      of this ticket, it is not what this ticket was about, and it deserves its own.
+      **Observed live on 2026-09-04** (`findings/2026-09-04-live-probe-check.md`), both halves, and
+      the stack happened to be in the state that exercises the recovery path too. The core issued a
+      key (`issued this probe a key of its own`), the probe stored it, and the database then held
+      `access_key_hash` set with `access_key_confirmed_at` **null** — the exact state this ticket
+      added the column to represent. On the next connection the core logged `this probe used the
+      key it was issued` and stamped the confirmation. No re-issue, no enrolment fallback.
+
+      A second lockout path was noticed while doing this and was not fixed here: a probe holding a
+      key the core has since forgotten presents that stale key rather than the enrolment key, so
+      re-approval alone does not recover it. **`P-38` fixed it**, and the same live run shows the
+      two composing exactly as `P-38` said they would — the probe logged `the core does not know
+      the key this probe holds; falling back to the enrolment key`, and this ticket's change then
+      issued a fresh one.
 
 - [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,
