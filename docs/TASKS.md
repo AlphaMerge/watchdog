@@ -4295,7 +4295,7 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
-- [ ] **P-34 — The pool ceiling should come from the checks assigned, not from one constant** ·
+- [x] **P-34 — The pool ceiling should come from the checks assigned, not from one constant** ·
       L · P-32 · `defaultPoolSize()` is one number for every workload, and `P-32` showed what
       that costs at both ends: 48 was below the floor for a probe watching `icmp.ping`, and 64 is
       about 560 MB more than a probe watching fast checks needs at the same sensor count. One
@@ -4320,6 +4320,54 @@ because each is a decision rather than a defect:
       for the case that would hurt: a probe whose checks get slower must raise its ceiling before
       the backlog grows, not after, and `WORKFLOW.MD`'s backpressure rule says the change must be
       visible on Probe Health rather than silent.
+
+      **Measured, which was the choice between the two routes.** The probe times every check it
+      runs, so `CheckPool` now keeps a bounded window of recent durations **per sensor type** and
+      reports their median. Per type because that is the whole point — an `icmp.ping` at 600 ms
+      and an `snmp.traffic` at 40 ms make a pooled median describing neither. The median rather
+      than the mean because a check that ran to its timeout is in the window too, and one
+      30-second timeout would size the pool for a workload that does not exist.
+
+      **The arithmetic is a pure function**, `poolDemand` in `runner/demand.ts`:
+      `Σ (duration ÷ interval)` over the assignments, times a 1.3 margin, clamped. Pure so it is
+      table-tested without a pool, a wheel or a clock — nine cases including a mixed catalogue
+      (which must *add*, not take the worst type), an unmeasured type, and an assignment whose
+      interval is zero, which would otherwise make the ceiling `Infinity`.
+
+      **`workerPoolSize: 0` now means "derive it", and any non-zero value is untouched.** That
+      distinction already existed in the schema — 0 meant "use the default" — so no setting
+      changed meaning for anyone who had configured one. Setting it is a statement about how much
+      memory the probe may use, and a derived number must not overrule it.
+
+      **Live, on the dev stack's 5,047 sensors, it does exactly what it should:**
+
+          config push, nothing measured yet   64 -> 65 -> 66
+          thirty seconds later, port.tcp timed   66 -> 64
+
+      84.1 a second against the 600 ms assumption is 50.5 required, ×1.3 = 66. Once real
+      `port.tcp` durations replaced the assumption the demand collapsed and the floor took over.
+      **Assume, measure, correct** — and the assumption is deliberately the shipped check
+      duration rather than the smallest plausible one, because guessing low here reproduces
+      `P-32`.
+
+      **On the backpressure clause, a judgement worth recording rather than burying.** The
+      heartbeat carries held workers, not the ceiling, so publishing the derived number would
+      cost a protocol bump. It is not needed for the signal the rule is about: the failure this
+      change can introduce is the 256-worker cap binding, and a bound pool saturates, which
+      raises `poolUsage` — already on Probe Health with declared limits at 80% and 95% from
+      `S-18`, already the channel an operator has a trigger on. What the cap adds is a `warn` log
+      naming the number that was refused, so the log says what to do. **The derived ceiling itself
+      is informational and is not published**; if it turns out an operator wants to graph it,
+      that is a channel and a protocol bump on its own terms.
+
+      Fourteen tests: nine on the arithmetic, five on the pool — that it learns per type, that a
+      median resists one outlier, that raising the ceiling allocates nothing by itself, that
+      **lowering it never takes a worker out of a running check** (`P-26`'s rule, and the one
+      that would corrupt results if it were wrong), and that it will not go under a configured
+      floor.
+
+      Also fixed in passing: the schema's own comment for `workerPoolSize` still described the
+      four-per-core default that `P-15` disproved.
 
 - [x] **P-31 — The scheduler benchmark's `icmp.ping` case models a check we stopped
       shipping** · S · P-07 · The case is named "shows what the sensor type we actually ship

@@ -204,9 +204,28 @@ export function defaultPoolSize(): number {
   return 64;
 }
 
+/**
+ * The most the probe will derive for itself when `workerPoolSize` is left at 0 (`P-34`).
+ *
+ * **A bound on what auto-sizing may ask for, not on what an operator may configure.** Setting
+ * `workerPoolSize` explicitly still takes any value the schema allows; this is only the ceiling
+ * on a number the probe worked out on its own, because a derived value that can climb without
+ * limit is one OOM away from being worse than the constant it replaced. At the ~35 MB a worker
+ * costs in a real probe, 256 is about 9 GB — past any probe size `docs/sizing.md` describes, so
+ * a workload that derives past it is one an operator needs to hear about rather than have
+ * quietly served.
+ *
+ * Reaching it is visible without a new signal: the pool saturates, and `poolUsage` on Probe
+ * Health already alarms at 80% sustained and 95% (`S-18`). What the cap adds is a log line
+ * naming the number that was refused.
+ */
+export function autoPoolCeilingMax(): number {
+  return 256;
+}
+
 export class CheckPool {
   readonly #logger: Logger;
-  readonly #maxSize: number;
+  #maxSize: number;
   readonly #minSize: number;
   readonly #idleShrinkMs: number;
   readonly #queueMax: number;
@@ -220,6 +239,15 @@ export class CheckPool {
   readonly #active = new Set<number>();
   readonly #wait: number[] = [];
   readonly #run: number[] = [];
+  /**
+   * Recent run durations per sensor type, for `P-34`'s demand calculation.
+   *
+   * Per type rather than pooled, because the whole point is that types differ: an `icmp.ping` at
+   * 600 ms and an `snmp.traffic` at 40 ms make a pooled median that describes neither. Bounded
+   * the same way as the latency windows — a probe watching one type for a month must not grow a
+   * list for it.
+   */
+  readonly #runByType = new Map<string, number[]>();
 
   #nextJobId = 0;
   #nextWorkerId = 0;
@@ -265,6 +293,53 @@ export class CheckPool {
   /** The ceiling. What `stats().size` used to report, and what a capacity alarm compares to. */
   get maxSize(): number {
     return this.#maxSize;
+  }
+
+  /**
+   * Moves the ceiling (`P-34`).
+   *
+   * **Raising it takes effect on the next pump rather than immediately**, which is the whole
+   * point: `#grow` is what decides to spawn, and it now has more room. Nothing is allocated
+   * here, so a probe that never needs the headroom never pays for it.
+   *
+   * **Lowering it below what is already held is allowed and does not kill anybody.** The slots
+   * over the new line are left to `#considerShrink`, which only ever retires a worker that is
+   * ready, jobless and has been idle for the whole window — a ceiling change must not take a
+   * worker out of the middle of a check, and this is the same rule `P-26` established.
+   *
+   * Clamped to at least `minSize`, because a ceiling under the floor is two settings that
+   * contradict each other, and the floor is the one an operator set deliberately.
+   */
+  setMaxSize(next: number): void {
+    const clamped = Math.max(this.#minSize, Math.trunc(next));
+    if (clamped === this.#maxSize || !Number.isFinite(clamped) || clamped < 1) return;
+    const previous = this.#maxSize;
+    this.#maxSize = clamped;
+    this.#logger.info({ from: previous, to: clamped, held: this.#slots.length }, 'pool ceiling');
+    if (clamped > previous) this.#pump();
+  }
+
+  /**
+   * What a check of this type has recently cost, in milliseconds, or `undefined` if none has run.
+   *
+   * The median rather than the mean, because a check that timed out is in this window too and
+   * one 30-second timeout would drag a mean far enough to size the pool for a workload that does
+   * not exist.
+   */
+  typicalDurationMs(sensorType: string): number | undefined {
+    const window = this.#runByType.get(sensorType);
+    if (window === undefined || window.length === 0) return undefined;
+    const sorted = [...window].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))];
+  }
+
+  #recordTypeDuration(sensorType: string, durationMs: number): void {
+    const window = this.#runByType.get(sensorType);
+    if (window === undefined) {
+      this.#runByType.set(sensorType, [durationMs]);
+      return;
+    }
+    record(window, durationMs);
   }
 
   /** Resolves once every worker has loaded its registry and is ready for work. */
@@ -549,6 +624,7 @@ export class CheckPool {
         channels?: { key: string; value: number; name?: string; unit?: string }[];
       };
       record(this.#run, result.durationMs);
+      this.#recordTypeDuration(job.request.sensorType, result.durationMs);
       if (result.ok) {
         this.#completed += 1;
         this.#emit(job, slot, 'execute', {

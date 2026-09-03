@@ -432,6 +432,102 @@ describe('growing and shrinking with the load', () => {
  * *reasoning* — that the pool is sized by checks in flight rather than by cores, which is the
  * thing the benchmark disproved and the thing a later refactor could quietly undo.
  */
+describe('sizing the ceiling from the work (P-34)', () => {
+  it('learns what a type costs, separately per type', async () => {
+    const { pool, seen } = await poolOf({ size: 4, minSize: 4 });
+
+    assert.equal(pool.typicalDurationMs('test.slow'), undefined, 'nothing measured yet');
+
+    for (let i = 0; i < 5; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 120 }));
+    for (let i = 10; i < 15; i += 1) pool.submit(request(i, 'test.ok'));
+    await until(() => seen.length === 10, 'both types to finish');
+
+    const slow = pool.typicalDurationMs('test.slow');
+    const fast = pool.typicalDurationMs('test.ok');
+    assert.ok(slow !== undefined && fast !== undefined, 'both types measured');
+
+    // The numbers that matter are the *separation*, not the absolutes — a worker's own overhead
+    // is in both. A pooled median would describe neither type, which is why this is per type.
+    assert.ok(slow >= 100, `a 120 ms check measured ${String(slow)} ms`);
+    assert.ok(fast < 100, `an immediate check measured ${String(fast)} ms`);
+    assert.ok(slow > fast * 2, 'and the two are not confusable');
+  });
+
+  it('takes the median, so one timeout does not resize the pool', async () => {
+    // The reason this is a median and not a mean. A single check that ran to its timeout is in
+    // the window too, and a mean would let it claim the workload is thirty times heavier than
+    // it is — sizing the pool for a workload that does not exist.
+    const { pool, seen } = await poolOf({ size: 4, minSize: 4 });
+
+    for (let i = 0; i < 9; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 20 }));
+    await until(() => seen.length === 9, 'the ordinary checks');
+    const ordinary = pool.typicalDurationMs('test.slow');
+    assert.ok(ordinary !== undefined);
+
+    pool.submit(request(99, 'test.slow', { delayMs: 400 }));
+    await until(() => seen.length === 10, 'the outlier');
+
+    const after = pool.typicalDurationMs('test.slow');
+    assert.ok(after !== undefined);
+    assert.ok(
+      after < ordinary + 60,
+      `one 400 ms outlier moved the estimate from ${String(ordinary)} to ${String(after)}`,
+    );
+  });
+
+  it('raises the ceiling without allocating, and lets the pump use it', async () => {
+    // Raising a ceiling must not spawn anything by itself — a probe that never needs the
+    // headroom never pays for it. What it does is stop `#grow` being the constraint.
+    const { pool, seen } = await poolOf({ size: 2, minSize: 1, idleShrinkMs: 0 });
+    assert.equal(pool.maxSize, 2);
+
+    pool.setMaxSize(6);
+    assert.equal(pool.maxSize, 6, 'the ceiling moved');
+    assert.ok(pool.size <= 2, `nothing was spawned by the raise alone, held ${String(pool.size)}`);
+
+    for (let i = 0; i < 6; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 80 }));
+    await until(() => pool.size > 2, 'the pool to use the new room');
+    await until(() => seen.length === 6, 'the checks');
+    assert.ok(pool.size <= 6, 'and never past the new ceiling');
+  });
+
+  it('never takes a worker out of a check when the ceiling drops', async () => {
+    // Lowering the ceiling is a policy change, not a kill signal. The slots above the new line
+    // are left to the shrink policy, which since `P-26` only retires a worker that is ready,
+    // jobless and idle for the whole window.
+    const { pool, seen } = await poolOf({ size: 4, minSize: 1, idleShrinkMs: 60_000 });
+    for (let i = 0; i < 4; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 150 }));
+    await until(() => pool.size === 4, 'a full pool');
+
+    pool.setMaxSize(1);
+    assert.equal(pool.maxSize, 1);
+
+    await until(() => seen.length === 4, 'every check in flight to finish');
+    assert.equal(
+      seen.filter((entry) => entry.result.outcome === 'ok').length,
+      4,
+      'all four completed rather than being cut off',
+    );
+  });
+
+  it('will not set a ceiling under the floor the operator configured', () => {
+    // Two settings that contradict each other, and the floor is the one somebody chose
+    // deliberately. Starting more workers than the ceiling allows would make every later
+    // decision arithmetic on a number already known to be wrong.
+    const pool = new CheckPool({
+      logger: silent,
+      size: 8,
+      minSize: 4,
+      registryModule: FIXTURES,
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+
+    pool.setMaxSize(1);
+    assert.equal(pool.maxSize, 4, 'clamped up to the configured minimum');
+  });
+});
+
 describe('the default pool size', () => {
   it('is not derived from the core count', () => {
     // The thing `P-15` disproved. The old default was `cores - 1`, which is what a CPU-bound

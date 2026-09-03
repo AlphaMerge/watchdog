@@ -399,12 +399,23 @@ export interface ProbeConfig {
      */
     spoolCatchUpMaxRows: number;
     /**
-     * Checks that may run at once. 0 derives it from the machine.
+     * Checks that may run at once. **0 lets the probe derive it from its own workload.**
      *
      * Slots, not cores: a check spends nearly all of its time awaiting a packet, so this bounds
-     * *concurrency* rather than CPU. The derived default is four per core with a floor of 16,
-     * measured by `P-15` — see `docs/findings/2026-08-26-scheduler-benchmark.md` for what the
-     * old core-count default cost, and for the point where more workers start to hurt.
+     * *concurrency* rather than CPU. `P-15` disproved deriving it from the core count — the
+     * machine's width has nothing to do with how many packets are in the air.
+     *
+     * **At 0 the probe sizes itself from Little's law** (`P-34`): it sums
+     * `check duration / interval` over the sensors it was actually assigned, using the durations
+     * it has measured for each type rather than a guess, and takes 30% headroom. Recomputed on
+     * every configuration push and every thirty seconds, bounded by `autoPoolCeilingMax()`. This
+     * is the case one constant could not serve: `P-32` measured 48 to be *under* the floor for a
+     * probe watching `icmp.ping` at the v1 target, while 64 is more than a probe watching fast
+     * checks needs at the same sensor count.
+     *
+     * **Any non-zero value is a fixed ceiling and is never overruled**, because setting it is a
+     * statement about how much memory this probe may use. Set it when you know your workload, or
+     * when a derived ceiling would exceed what the box has.
      */
     workerPoolSize: number;
     /**

@@ -144,8 +144,26 @@ lookup for any workload.
 
 **`workerPoolSize` is a ceiling, not a headcount.** Lowering it caps memory, but never below the
 floor rule 1 sets — under that line the probe stops keeping up rather than merely getting
-slower. Raising it is what a probe watching slow checks needs. A probe watching fifty sensors
-costs about 120 MB, not the 555 MB its ceiling would allow.
+slower. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would
+allow.
+
+### You usually do not have to do this arithmetic
+
+**Left at its default of 0, the probe applies rule 1 to itself** (`P-34`). It sums
+`check duration ÷ interval` over the sensors it was actually assigned — using the duration it has
+*measured* for each sensor type, not a guess — adds 30% headroom, and moves its own ceiling. It
+recomputes on every configuration push and every thirty seconds, so a probe whose checks get
+slower raises its ceiling before the backlog appears rather than after.
+
+The rules above are still worth knowing, for three reasons: to size the *box*, since the ceiling
+the probe derives is memory you have to have; to read `workerPoolSize` when somebody has set it;
+and because auto-sizing is bounded at 256 workers, past which the probe logs what it needed and
+waits for you.
+
+**Setting `workerPoolSize` to anything non-zero turns this off** and fixes the ceiling there,
+because the setting is a statement about how much memory the probe may use and a derived number
+must not overrule it. Set it when you know your workload, or when the box is smaller than the
+arithmetic wants.
 
 ---
 

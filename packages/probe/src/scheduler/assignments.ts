@@ -40,6 +40,16 @@ export class AssignmentStore {
     return [...this.#assignments.keys()].sort((a, b) => a - b);
   }
 
+  /**
+   * Every assignment, for the pool's demand calculation (`P-34`).
+   *
+   * The map's own iterator rather than a copy: this is read on a timer over a list that reaches
+   * five thousand entries at the v1 target, and the caller only sums over it.
+   */
+  values(): IterableIterator<SensorAssignment> {
+    return this.#assignments.values();
+  }
+
   /** Applies an update and returns how many assignments are now scheduled. */
   apply(update: ConfigUpdate): number {
     if (update.kind === 'set') {
