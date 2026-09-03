@@ -4295,6 +4295,43 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [ ] **P-35 — A measured number is copied into four files and nothing notices when it
+      changes** · M · P-31 · **Four defects in one day, all the same shape.** Each came from a
+      correct measurement that a later, equally correct measurement silently invalidated:
+
+      | | The number | Invalidated by | Found |
+      | --- | --- | --- | --- |
+      | `P-31` | the benchmark's `checkMs: 3_000` for `icmp.ping` | `P-07` measuring 600 ms, three days later | a week later, by reading a comment |
+      | `P-32` | `defaultPoolSize()` = 48, chosen against a 200 ms model | the same `P-07` — whose own finding said 83/s "needs about 55" | by `P-31`'s corrected run |
+      | `P-33` | `sizing.md`'s worker rule, missing Little's floor | nothing; it was incomplete from the start and every example was under its own floor | by `P-32`'s arithmetic |
+      | — | `PLAN.md`'s Phase 1 exit criterion, "measured at **21.0 seconds**" | Phase 3's `M-02` and `M-08`, which took it to 28.8 | while checking something else |
+
+      **Nobody was careless.** `P-07` measured a ping and wrote its number down; `P-15` sized a
+      pool against the model it had; `H-08` published a rule that fitted all fifteen of its own
+      points. Every one was right in its own file. The defect is that a measurement is *copied*
+      into the places that depend on it — a benchmark constant, a default, a worked example, a
+      plan's exit criterion — and nothing relates the copies back to the source.
+
+      **What it cost**: a shipped pool default that could not sustain the documented v1 target in
+      the flagship sensor type, and would not have refused a single check while failing to.
+
+      The fix is not review discipline, it is a source of truth. Candidates, cheapest first:
+
+      - **One module of measured constants** — `ICMP_CHECK_MS`, the v1 target's sensor count and
+        interval, the dispatch budget — imported by the benchmarks, the pool default's own test
+        and the sizing scripts, each naming the finding it came from. A number then changes in
+        one place, and everything that derives from it moves or fails to compile.
+      - **Assert the derived relationships, not just the values.** `P-32`'s new test is the
+        pattern: it does not check that the default is 64, it checks that the default clears
+        Little's floor for the type we ship. That kind of test survives both numbers changing.
+      - **A check that the prose agrees with the code.** `docs/sensor-reference.md` and
+        `api-reference.md` are already generated and fail the build when they drift (`H-07`);
+        `sizing.md`'s worked examples are arithmetic over constants and could be too.
+
+      Scope it to the numbers that have already bitten rather than every figure in `docs/` — the
+      goal is that the next `P-07` cannot land without the four places that depend on it moving
+      or breaking.
+
 - [x] **P-34 — The pool ceiling should come from the checks assigned, not from one constant** ·
       L · P-32 · `defaultPoolSize()` is one number for every workload, and `P-32` showed what
       that costs at both ends: 48 was below the floor for a probe watching `icmp.ping`, and 64 is
