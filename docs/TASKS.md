@@ -4389,9 +4389,15 @@ because each is a decision rather than a defect:
       the work. Migration rollback is exercised by the migrator's own "rolls back the most recent
       migration", 039 now being the most recent.
 
-      Still open, and noted above rather than done here: what the probe should do when
-      `writeIdentity` fails. It logs and carries on with a key the core has discarded — which
-      this fix now recovers from, but refusing to continue would be more honest.
+      **The `writeIdentity` question closed itself, and reading it was worth the trip.** That
+      catch has always said "Not fatal: the probe works for as long as it stays up, and re-enrols
+      if it restarts" — a promise this defect had quietly falsified, since a restart presented the
+      enrolment key and was refused for ever. The trade the comment describes, losing the identity
+      rather than losing the link over a read-only directory, silently stopped being the trade
+      being made. Closing the fallback on first use restores exactly the property it claimed, so
+      there is nothing further to change: carrying on is right *because* the enrolment key still
+      works until a probe has used one of its own. `identity.ts` now names that dependency, so
+      whoever changes the fallback next finds out that this catch rests on it.
 
 - [x] **P-36 — The session pools count backpressure and nobody ever reads it** · M · P-24 ·
       `SnmpSessionPool` and `SshSessionPool` maintain `sessions`/`connections`, `inUse`,

@@ -94,6 +94,13 @@ export async function writeIdentity(
     // Not fatal: the probe works for as long as it stays up, and re-enrols if it restarts.
     // Losing the link over a read-only directory would be a worse trade than losing the
     // identity, and this line is what tells an operator which one happened.
+    //
+    // **That "re-enrols if it restarts" depends on the core, and for a while it was not true**
+    // (`P-37`). The core used to close its enrolment fallback the moment it *wrote down* a key's
+    // hash, so a probe that reached this branch restarted, presented the enrolment key it still
+    // had, and was refused for ever — the trade described above silently stopped being the trade
+    // being made. The fallback now closes when the probe first *uses* a key, which is what makes
+    // carrying on here safe. If that ever changes, this catch has to change with it.
     logger.error(
       { path, err: describeError(error) },
       'the probe identity could not be stored; a restart will enrol again',
