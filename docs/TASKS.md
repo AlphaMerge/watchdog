@@ -4162,7 +4162,7 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
-- [ ] **P-33 — `sizing.md`'s worker formula has no stability floor, and understates every
+- [x] **P-33 — `sizing.md`'s worker formula has no stability floor, and understates every
       example it gives** · M · H-08 · The published rule is
       `workers ≥ burst ÷ (1 + tolerance ÷ check duration)`, derived from the rounds model:
       `rounds = ceil(burst ÷ workers)`, `jitter ≈ (rounds − 1) × check`. It bounds the jitter of
@@ -4195,6 +4195,38 @@ because each is a decision rather than a defect:
       The fix is the constraint, the worked examples redone from it, and a sentence saying which
       of the two bounds is binding — they swap over as the check gets slower. Check `docs/sizing.md`'s
       memory table against the corrected numbers too, since it is indexed by worker count.
+
+      **Done, and the "which binds" question has a cleaner answer than the ticket assumed.** They
+      do not swap over as the check gets slower — the latency bound overtakes the floor only when
+      `check duration + tolerance` is under one second, which is the wheel's tick. At the
+      system's own 1,000 ms budget that needs a check faster than zero, so **rule 1 always
+      binds** for any sensor with a real network round trip. `sizing.md` now leads with the floor
+      and keeps the rounds model for predicting the jitter you get once clear of it, rather than
+      presenting them as two candidate sizing rules.
+
+      **The floor is necessary and not sufficient, which the measurements say plainly:**
+
+      | | Floor | Pool | Ratio | Predicted | Measured p95 |
+      | --- | --- | --- | --- | --- | --- |
+      | 200 ms checks, shipped pool | 16.7 | 48 | **2.9×** | 200 ms | 208–217 ms, five runs |
+      | 3 s checks, 256 workers | 250 | 256 | **1.02×** | 0 ms | **2,427 ms** |
+
+      At 2.9× the model is right to within 17 ms across five independent runs; at 1.02× it is
+      wrong by 2.4 seconds, because worker start-up and ordinary variance are bigger than a 2%
+      margin. **Where between those it becomes safe is not measured**, and the page says so
+      rather than inventing a coefficient — the instruction is to clear the floor comfortably,
+      not to meet it.
+
+      **The corrected model predicts every point we have**, which the old one did not: five
+      200 ms runs at 48 workers (predicts 200 ms, measured 208–217), the 600 ms case at 48
+      (predicts unstable, measured a growing backlog), and the old 7-worker default (predicts
+      unstable; measured 29.1 s rather than the 124 s of pure arithmetic, because the queue hit
+      its bound and refused 3,484 checks — the cap is the queue, and that is worth knowing).
+
+      Corrected in four places, not one: `sizing.md`'s rules, worked examples, memory table and
+      the "start here" table's assumption; the `H-08` finding, in place with a dated correction
+      rather than a rewrite; and the `H-08` summaries in `PLAN.md` and `TASKS.md`, which both
+      repeated "83 workers where 5,000 pings need 14".
 
 - [ ] **P-32 — The shipped pool default cannot sustain the v1 target in the sensor type we
       ship** · M · P-07 · `defaultPoolSize()` is 48. 5,000 `icmp.ping` sensors on a 60-second
@@ -7176,8 +7208,12 @@ because each is a decision rather than a defect:
       `rounds = ceil(burst / workers)`, and `jitter ≈ (rounds − 1) × checkMs`. That predicted all
       fifteen points — within 12 ms where it predicts 200 ms, and 6–18 ms of wheel overhead where
       it predicts zero. It also says the thing a table cannot: **the check duration is the
-      multiplier, not the sensor count**, so 5,000 HTTP sensors at 2 s need 83 workers where
-      5,000 pings need 14.
+      multiplier, not the sensor count**. **Corrected by `P-33`:** that rule bounds the jitter of
+      one burst and omits Little's floor, `workers ≥ burst × check duration`, below which the
+      backlog grows for as long as the probe runs and nothing is refused. Every number it gave on
+      its own was low — 5,000 HTTP sensors at 2 s need **167** workers rather than 83, and 5,000
+      pings at their real 600 ms need **50** rather than 14, which is above the shipped ceiling
+      of 48 (`P-32`).
 
       **Memory was the pool ceiling rather than the workload** — 500 sensors need 1.7 workers and
       reached 27 — which is what the sweep turned `P-26` into a measured ticket for. Since it

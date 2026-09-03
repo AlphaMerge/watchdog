@@ -26,35 +26,87 @@ measured result and the one most likely to save money: at 5,000 sensors the disp
 208 ms on two cores, 212 on four and 209 on eight — indistinguishable, and all a fifth of the
 1,000 ms budget. A check waits for a packet, not for a core.
 
+**The table assumes 200 ms checks.** If yours are slower — and `icmp.ping` is 600 ms — the pool
+is what changes, not the cores. Read the next section before taking the 5,000-sensor row at face
+value: at that size the shipped pool default is below what ping sensors need.
+
 ---
 
 ## Sizing a probe properly
 
 The table above assumes 200 ms checks on a 60-second interval. If yours are slower, or the
-interval is shorter, size from the rule instead — it predicted all fifteen measured points to
-within 12 ms.
+interval is shorter, size from the rules below.
 
 The wheel fires once a second, so work arrives in bursts rather than smoothly:
 
-    burst   = sensors ÷ interval in seconds
+    burst = sensors ÷ interval in seconds
+
+**There are two rules and the first one is not optional.**
+
+### 1. Keep up at all
+
+A worker is held for the whole check, so a pool of `workers` completes `workers ÷ check duration`
+checks a second. That has to be at least the arrival rate, or the backlog grows every second for
+as long as the probe runs:
+
+    workers ≥ burst × check duration
+
+**Below this line no tolerance saves you.** The lag does not settle at some large value; it
+climbs. And it climbs *quietly* — the queue absorbs it, so nothing is refused and no counter
+says anything is wrong until the queue's own bound is reached. Measured: 5,000 ping sensors on
+the shipped pool of 48 sit 4% under this line and reach a **median** check 3.0 s late and a p95
+of 5.4 s inside ninety seconds, with **nothing refused**.
+
+### 2. Then keep the jitter inside your tolerance
+
+Once you are keeping up, the burst is served in rounds and the last check in a round waits for
+the one before it:
+
     rounds  = ceil(burst ÷ workers)
     jitter ≈ (rounds − 1) × check duration
 
-Keep `jitter` inside your tolerance — the system's own budget is 1,000 ms — by giving the pool
-enough workers to clear the burst in few enough rounds:
+which is inside a tolerance when
 
     workers ≥ burst ÷ (1 + tolerance ÷ check duration)
 
-**Worked example.** 5,000 sensors, 60-second interval, 200 ms checks, 1,000 ms tolerance:
-burst is 83, tolerance buys 6 rounds, so 14 workers suffice. The shipped ceiling of 48 is
-comfortable — which is why 5,000 sensors fit on two cores.
+**At the system's own 1,000 ms budget, rule 1 is always the binding one.** Rule 2 only overtakes
+it when `check duration + tolerance` is under a second, which no sensor with a real network
+round trip and this budget reaches. Size from rule 1 and use rule 2 to predict the jitter you
+will then get.
 
-**Worked example that does not fit.** 5,000 HTTP sensors averaging 2 seconds: burst is still 83,
-but tolerance buys only 1 round, so you need 83 workers — above the shipped ceiling of 48. Raise
-`workerPoolSize`, lengthen the interval, or split across probes.
+### Leave headroom above the floor — it is a floor, not a target
 
-**The check duration is the multiplier, not the sensor count.** Ten thousand pings are cheaper
-than two thousand slow HTTP checks.
+Being *above* the line is not the same as being safely above it. Two measured points:
+
+| | Floor | Pool | Ratio | Predicted jitter | Measured p95 |
+| --- | --- | --- | --- | --- | --- |
+| 200 ms checks, shipped pool | 16.7 | 48 | **2.9×** | 200 ms | 208–217 ms |
+| 3 s checks, 256 workers | 250 | 256 | **1.02×** | 0 ms | **2,427 ms** |
+
+At 2.9× the floor the model is right to within 17 ms across five independent runs. At 1.02× it
+is wrong by 2.4 seconds, because worker start-up and ordinary variance are larger than a 2%
+margin. Where between 1.02× and 2.9× it becomes safe **is not measured** — so treat the floor as
+the number to clear comfortably, not to meet.
+
+### Worked examples
+
+**5,000 sensors, 60-second interval, 200 ms checks.** Burst 83.3. Rule 1 needs
+`83.3 × 0.2 = 17` workers; the shipped ceiling of 48 is 2.9× that. Rule 2: 2 rounds, so about
+200 ms of jitter, measured at 208–217. Comfortable, and why 5,000 sensors fit on two cores.
+
+**5,000 `icmp.ping` sensors — the one to watch.** A ping check costs **600 ms** since `P-07`
+(`findings/2026-08-29-icmp-throughput.md`), so rule 1 needs `83.3 × 0.6 = 50` workers. **The
+shipped ceiling of 48 is below the floor.** Raise `workerPoolSize`, lengthen the interval, or
+split across probes — this is `P-32` and the default has not moved yet.
+
+**5,000 HTTP sensors averaging 2 seconds.** Rule 1 needs `83.3 × 2 = 167` workers, well past the
+shipped ceiling. An earlier version of this page said 83, from rule 2 alone; that was half the
+true answer.
+
+**The check duration is the multiplier, not the sensor count.** Ten thousand pings on a
+300-second interval need `33.3 × 0.6 = 20` workers; two thousand 2-second HTTP checks on a
+60-second interval need `33.3 × 2 = 67`. The second is a third of the sensors and three times
+the pool.
 
 ### What a probe costs in memory
 
@@ -66,8 +118,8 @@ The 35 MB is what a worker costs in a real probe, where each one loads the senso
 measured over 24 hours at 48 workers and 1,790 MB resident. A synthetic pool with no catalogue
 costs about 12 MB a worker, so do not size from a benchmark.
 
-**The pool settles near the burst, so the burst is what you are buying memory for** — the same
-number that decides latency above. Measured, at a ceiling of 48:
+**The pool settles near the burst, so the burst is what you are buying memory for.** Measured at
+a ceiling of 48, **with 200 ms checks**:
 
 | Sensors | Burst | Workers held | Benchmark RSS |
 | --- | --- | --- | --- |
@@ -80,9 +132,15 @@ number that decides latency above. Measured, at a ceiling of 48:
 Above about 2,500 sensors the burst exceeds the shipped ceiling, so the pool pins there and the
 extra latency is the second round the model predicts. Below it, the pool tracks the load.
 
-**`workerPoolSize` is a ceiling, not a headcount.** Lowering it caps memory at the cost of an
-extra round of jitter once the burst outgrows it; raising it is what a probe watching slow checks
-needs. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would allow.
+**Read that table with the check duration it was measured at.** A slower check raises the floor
+in direct proportion — three times the check duration is three times the workers, and three
+times the memory at the same sensor count. The table is the shape for 200 ms checks, not a
+lookup for any workload.
+
+**`workerPoolSize` is a ceiling, not a headcount.** Lowering it caps memory, but never below the
+floor rule 1 sets — under that line the probe stops keeping up rather than merely getting
+slower. Raising it is what a probe watching slow checks needs. A probe watching fifty sensors
+costs about 120 MB, not the 555 MB its ceiling would allow.
 
 ---
 
