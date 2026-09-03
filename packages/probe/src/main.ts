@@ -336,9 +336,33 @@ async function main(): Promise<void> {
     pool.setMaxSize(decision.ceiling);
   };
 
-  // Durations drift as networks do, so the ceiling is recomputed on a timer as well as on every
-  // config push. Thirty seconds is far below the interval of anything it sizes for and far above
-  // the cost of summing five thousand assignments.
+  /**
+   * Sizing after a configuration push, once the push has finished arriving (`P-41`).
+   *
+   * **A full push is not one message.** `P-28` sends it as a `config-set` followed by deltas, and
+   * `AssignmentStore` treats a set as authoritative — so between the first chunk and the last the
+   * store holds a *fraction* of this probe's sensors. Sizing on that reads a workload that does
+   * not exist: a probe holding a ceiling of 128 sees the first chunks derive 64, and since
+   * `P-40` two such readings are a drop and since `P-39` a drop sheds at once. The workers are
+   * destroyed and then asked for again three chunks later.
+   *
+   * Coalescing is the whole fix. A push arrives in a burst, so one call a couple of seconds after
+   * the last message is both a complete picture and still far faster than waiting for the timer.
+   */
+  let sizeAfterPush: NodeJS.Timeout | undefined;
+  const sizePoolWhenSettled = (): void => {
+    if (!autoSize) return;
+    if (sizeAfterPush !== undefined) clearTimeout(sizeAfterPush);
+    sizeAfterPush = setTimeout(() => {
+      sizeAfterPush = undefined;
+      sizePool();
+    }, 2_000);
+    sizeAfterPush.unref();
+  };
+
+  // Durations drift as networks do, so the ceiling is recomputed on a timer as well as after
+  // every config push. Thirty seconds is far below the interval of anything it sizes for and far
+  // above the cost of summing five thousand assignments.
   if (autoSize) {
     const sizeTimer = setInterval(sizePool, 30_000);
     sizeTimer.unref();
@@ -347,6 +371,7 @@ async function main(): Promise<void> {
       timeoutMs: 1_000,
       run: () => {
         clearInterval(sizeTimer);
+        if (sizeAfterPush !== undefined) clearTimeout(sizeAfterPush);
       },
     });
   }
@@ -452,10 +477,12 @@ async function main(): Promise<void> {
       const size = assignments.apply(update);
       // A deleted sensor should stop costing a cursor. Cheap, and it runs only on a config push.
       trapListener?.retain(assignments.ids());
-      // The workload just changed, so the ceiling derived from it is stale (`P-34`). Sized here
-      // rather than only on the timer because a config push is exactly when a probe goes from
-      // fifty sensors to five thousand, and discovering that a tick later is a tick of backlog.
-      sizePool();
+      // The workload just changed, so the ceiling derived from it is stale (`P-34`). Sized after
+      // a push rather than only on the timer, because a config push is exactly when a probe goes
+      // from fifty sensors to five thousand and discovering that a tick later is a tick of
+      // backlog — but *after* it, not during, since a chunked push is transiently incomplete
+      // (`P-41`).
+      sizePoolWhenSettled();
       return size;
     },
     onSweep: (message) => {

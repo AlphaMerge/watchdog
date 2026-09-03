@@ -4309,6 +4309,44 @@ because each is a decision rather than a defect:
       `costHint` is a three-value enum, not a duration, and mapping it to milliseconds would put
       a guess underneath Little's law, which is the mistake `P-33` was about. Filed as `P-34`.
 
+- [x] **P-41 — The pool sizer read a configuration that was still arriving** · S · P-34 ·
+      `sizePool()` ran on every `config` message. `P-28` sends a full configuration as a
+      `config-set` followed by deltas carrying the same version — because one message for five
+      thousand sensors exceeded the frame bound and left the probe unable to reconnect at all —
+      and `AssignmentStore` treats a set as **authoritative**. So between the first chunk and the
+      last, the store legitimately holds a fraction of this probe's sensors, and the sizer read
+      that fraction as the workload.
+
+      **It bites where the ceiling is above the floor**, which is precisely the case `P-39`
+      exists for. A probe whose checks take two seconds, holding a ceiling of 128, sees a chunked
+      push of 5,047 sensors derive:
+
+          after 1,000 applied ->  64
+          after 2,000 applied ->  87
+          after 3,000 applied -> 130
+          after 5,047 applied -> 219
+
+      Two readings of 64 clear `P-40`'s band and persist, so the ceiling drops to 64; `P-39` then
+      sheds about sixty workers at once; and three chunks later the completed push asks for them
+      back. At the v1 target with ping-shaped checks the floor of 64 masks it entirely, which is
+      why it would not have shown up on the dev stack.
+
+      **Coalesced rather than guarded.** Sizing after a push now waits two seconds from the last
+      message, so it sees a complete picture — still far faster than the thirty-second timer,
+      which is the whole reason the config hook exists. Guarding instead (say, ignoring a set
+      smaller than the current set) would have been a rule about message shapes rather than about
+      when an answer is ready, and would have got in the way of a genuine shrink.
+
+      **Tested where it can be**, which is not `main.ts`: two cases on `AssignmentStore` prove the
+      trap is real rather than theorised — that a chunked push holds only its first chunk until
+      the deltas land, and that `poolDemand` over the store mid-push derives less than half what
+      it derives once complete. The debounce itself is composition-root wiring; what is worth
+      pinning is the fact that makes it necessary.
+
+      Third in a chain from one change, and each was correct alone: `P-34` made the ceiling
+      derived, `P-39` made it obeyed promptly, `P-40` damped the resulting thrash, and this is the
+      input that fed it.
+
 - [x] **P-40 — Shedding promptly made the ceiling worth thrashing** · S · P-39 · The other
       side of `P-39`, and it needed answering in the same breath. While a lowered ceiling decayed
       one worker a minute, a derived ceiling that wobbled cost almost nothing — the decay damped

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { SensorAssignment } from '@ms/shared';
 import { AssignmentStore, type ConfigUpdate } from '../src/scheduler/assignments.js';
+import { poolDemand } from '../src/runner/demand.js';
 import { TimingWheel } from '../src/scheduler/wheel.js';
 
 const silent = pino({ level: 'silent' });
@@ -129,5 +130,67 @@ describe('assignment store', () => {
     const { store } = harness();
     store.apply(set([assignment(1)]));
     assert.equal(store.apply({ kind: 'delta', version: 'v2', upserted: [], removed: [99] }), 1);
+  });
+});
+
+/**
+ * What the store holds *during* a chunked push, and why anything reading it must wait (`P-41`).
+ *
+ * `P-28` sends a full configuration as a `config-set` followed by deltas carrying the same
+ * version, because one message for five thousand sensors exceeded the frame bound and left the
+ * probe unable to reconnect at all. The consequence is that a set is authoritative over a
+ * *fraction*: between the first chunk and the last, this store legitimately holds far fewer
+ * sensors than the probe has been assigned.
+ *
+ * That is correct, and it is a trap for anything that derives a decision from the store on every
+ * message rather than once the push has settled — which the pool sizer did.
+ */
+describe('a chunked configuration push (P-41)', () => {
+  it('holds only the first chunk until the deltas arrive', () => {
+    const { store } = harness();
+    const all = Array.from({ length: 500 }, (_, i) => assignment(i + 1));
+
+    // Chunk one, as a set: authoritative, and therefore a claim that these are all of them.
+    assert.equal(store.apply(set(all.slice(0, 100))), 100);
+
+    // The rest, as deltas.
+    for (let offset = 100; offset < all.length; offset += 100) {
+      store.apply({
+        kind: 'delta',
+        version: 'v',
+        upserted: all.slice(offset, offset + 100),
+        removed: [],
+      });
+    }
+    assert.equal(store.size, 500, 'complete once the push has finished');
+  });
+
+  it('makes the pool sizer read a workload that does not exist, mid-push', () => {
+    // **The measured shape of the trap.** A probe whose checks take two seconds needs a large
+    // pool; after the first chunk the same arithmetic asks for the floor. Two such readings are
+    // a drop under `P-40`, and a drop sheds at once under `P-39` — workers destroyed and then
+    // asked for again three chunks later.
+    const { store } = harness();
+    const all = Array.from({ length: 3_000 }, (_, i) => assignment(i + 1));
+    const options = { fallbackMs: 2_000, min: 64, max: 256, margin: 1.3 };
+    const ceilingNow = (): number => poolDemand(store.values(), () => 2_000, options).ceiling;
+
+    store.apply(set(all.slice(0, 500)));
+    const partial = ceilingNow();
+
+    for (let offset = 500; offset < all.length; offset += 500) {
+      store.apply({
+        kind: 'delta',
+        version: 'v',
+        upserted: all.slice(offset, offset + 500),
+        removed: [],
+      });
+    }
+    const complete = ceilingNow();
+
+    assert.ok(
+      complete > partial * 2,
+      `mid-push derived ${String(partial)} against ${String(complete)} once complete`,
+    );
   });
 });
