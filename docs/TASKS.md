@@ -4147,6 +4147,21 @@ because each is a decision rather than a defect:
       Not fixed on the spot because doing so restarts the probe, and that would have thrown away
       the 24-hour soak that found it.
 
+      **And it does not only fail to shrink — it overshoots on the way up, which is the other
+      half.** Growth doubles: `want = min(maxSize, held * 2, held + queue.length)`. A worker is
+      not `ready` until it has spawned and imported its registry, and `#pump` only dispatches to
+      ready slots — so the queue that triggered the growth is still there on the next tick, and
+      the pool doubles again. Measured while sizing for `H-08`, on eight cores with a ceiling of
+      256: **500 sensors grew the pool to 74 workers and 718 MB**, against a steady-state need of
+      `500 / 60 × 0.2 = 1.7` workers. That is forty times the concurrency the workload has.
+
+      With the release's own ceiling of 48 it simply pins there instead: 500 sensors on two cores
+      settled at 27 workers and 340 MB, and the `H-01` soak's 5,047 sensors sat at 48 — the same
+      48 a fifty-sensor probe reaches. **The ceiling, not the workload, is what a probe costs**,
+      and that is what makes the memory column of any sizing table meaningless until this is
+      fixed. Damping growth by what is already spawning, and measuring idleness per worker rather
+      than per submission, are the same fix seen from two ends.
+
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
       full runs of that package on the same machine reported 781/781. **The arithmetic says which
@@ -6725,8 +6740,42 @@ because each is a decision rather than a defect:
       types, every parameter, and every `writeOnly` marker match the live catalogue. The sizing
       section cites the measured figures rather than inventing any — CPU and RAM guidance stays
       absent until `H-08`, which is honest rather than helpful-sounding.
-- [ ] **H-08 — Published sizing guidance** · M · H-01 · Measured numbers per hardware tier, not
+- [x] **H-08 — Published sizing guidance** · M · H-01 · Measured numbers per hardware tier, not
       estimates.
+
+      **H-08 outcome.** `docs/sizing.md` is the guidance and
+      `docs/findings/2026-09-03-sizing.md` is the measurement behind it — a 15-point sweep,
+      {2, 4, 8} cores × {100, 500, 1000, 2500, 5000} sensors, run in containers given real
+      `--cpus` limits at the pool settings the release ships. Raw data committed as
+      `2026-09-03-sizing-sweep.jsonl`.
+
+      **Cores are not the constraint, and that is the headline.** At 5,000 sensors the p95
+      dispatch jitter was **208.5 ms on two cores, 212.3 on four and 208.6 on eight** — the tiers
+      are indistinguishable and every one is a fifth of `P-15`'s 1,000 ms budget, with nothing
+      deferred or refused anywhere in the sweep. A check waits for a packet, not for a core, so
+      sizing a probe by core count sizes it by the wrong number.
+
+      **What does constrain it is the per-tick burst**, and the sweep produced a rule rather than
+      a table: the wheel fires per-second buckets, so `burst = sensors / interval`,
+      `rounds = ceil(burst / workers)`, and `jitter ≈ (rounds − 1) × checkMs`. That predicted all
+      fifteen points — within 12 ms where it predicts 200 ms, and 6–18 ms of wheel overhead where
+      it predicts zero. It also says the thing a table cannot: **the check duration is the
+      multiplier, not the sensor count**, so 5,000 HTTP sensors at 2 s need 83 workers where
+      5,000 pings need 14.
+
+      **Memory is the pool ceiling rather than the workload**, which is `P-26` showing up in the
+      guidance: 500 sensors need 1.7 workers and reached 27; anything above 2,500 pins at the
+      shipped ceiling of 48 on every tier. So `sizing.md` sizes memory from `workerPoolSize` and
+      says plainly that the ceiling you configure is the memory you buy until `P-26` lands.
+
+      **The benchmark's RSS is not a probe's.** It loads a fixture registry; a real probe loads
+      the sensor catalogue into every worker — 12 MB a worker here against 35 MB in `H-01`'s
+      soak, 578 MB against 1,790 MB at the same 48 workers. The guidance uses the soak's figure
+      and says why.
+
+      Not measured, and said so on the page rather than estimated: x86, more than one probe
+      against a core, remote probes over a real network, `exe.script` sensors that genuinely
+      compute, and Windows.
 - [ ] **H-09 — Release candidate field test** · L · H-01…H-07 · Clean installs on Ubuntu and
       Windows Server monitoring 100 real devices for a week without intervention.
 

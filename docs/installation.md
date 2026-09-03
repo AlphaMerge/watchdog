@@ -30,8 +30,13 @@ the TimescaleDB project's own repository.
 
 ### Sizing
 
-Proper sizing guidance is `H-08` and is not written yet, because it depends on a soak that has
-not been run. What *has* been measured is the storage, in
+Full guidance, with the measurement behind every number, is
+[`docs/sizing.md`](sizing.md). The short version: **two cores is enough for a probe at every size
+up to the v1 target** — at 5,000 sensors the dispatch jitter measured 208 ms on two cores against
+212 on eight, because a check waits for a packet rather than for a core. Give the core 4 cores
+and 8 GB at that size and the headroom to PostgreSQL.
+
+The storage half is in
 [`docs/findings/2026-08-25-timeseries-sizing.md`](findings/2026-08-25-timeseries-sizing.md):
 
 - **99.3 bytes per reading** on disk uncompressed, indexes included.
@@ -40,9 +45,8 @@ not been run. What *has* been measured is the storage, in
 - With TimescaleDB's native compression, the same 40 days measured **12.5× smaller: ~6.4 GB**
   ([the rollup spike](findings/2026-08-25-rollup-storage-spike.md)).
 
-Take anything about CPU and RAM from your own trial until `H-08` lands. The one number worth
-planning around is TimescaleDB's: the recent working set should fit in roughly a quarter of RAM,
-which is what the one-day chunk interval was chosen against.
+The one number worth planning around beyond that is TimescaleDB's: the recent working set should
+fit in roughly a quarter of RAM, which is what the one-day chunk interval was chosen against.
 
 ---
 

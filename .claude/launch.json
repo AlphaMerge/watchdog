@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "port": 5173,
+      "url": "http://127.0.0.1:5173",
+      "autoPort": false
+    },
+    {
+      "name": "core-api",
+      "port": 8080,
+      "url": "http://127.0.0.1:8080",
+      "autoPort": false
+    }
+  ]
+}

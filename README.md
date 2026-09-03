@@ -24,6 +24,7 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 | [`docs/installation.md`](docs/installation.md)                     | Installing, upgrading, and adding a remote probe                         |
 | [`docs/administration.md`](docs/administration.md)                 | Roles and rights, credentials, pausing, what to watch                    |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md)               | Symptoms, and the number that diagnoses each one                         |
+| [`docs/sizing.md`](docs/sizing.md)                                 | How much hardware, from measurements rather than estimates               |
 | [`docs/sensor-reference.md`](docs/sensor-reference.md)             | Every sensor type — **generated from the catalogue**                     |
 | [`docs/api-reference.md`](docs/api-reference.md)                   | Every route — **generated from the OpenAPI document**                    |
 | [`docs/runbook-backup-restore.md`](docs/runbook-backup-restore.md) | Backing up, and restoring onto a host that is not the one it came from   |
