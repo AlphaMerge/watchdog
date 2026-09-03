@@ -6,11 +6,15 @@ Probes run checks against your devices, the core stores the results, evaluates s
 notifications. Production is a **standalone native service** — systemd on Linux, WinSW on
 Windows — with PostgreSQL as its only always-on dependency.
 
-**Status: Phase 0 (foundations) complete.** Both services start, talk to each other over mutual
-TLS and install from a tarball. There is no monitoring yet — the object model is Phase 1 and the
-scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
+**Status: Phases 0–9 complete; Phase 10 (hardening and release) in progress.** The object model,
+the scheduler, the state machine, notifications, the web UI, ~43 sensor types, discovery, remote
+probes and RBAC are in. What is left is the release work: the Ubuntu half of the field test is
+proved and in CI, and the rest of `H-09` needs hardware. See [`docs/PLAN.md`](docs/PLAN.md).
 
 ## The documents
+
+Start at [`docs/README.md`](docs/README.md) — it indexes everything below and says which document
+answers which question.
 
 | Document                                                           | What it is                                                               |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------ |
@@ -21,6 +25,8 @@ scheduler is Phase 2. See [`docs/PLAN.md`](docs/PLAN.md).
 | [`docs/TASKS.md`](docs/TASKS.md)                                   | Ticket-sized backlog — **pick work from here**                           |
 | [`docs/findings/`](docs/findings/)                                 | Measured results that change a documented assumption                     |
 | [`docs/adding-a-sensor-type.md`](docs/adding-a-sensor-type.md)     | How to write a sensor type. One file, six members.                       |
+| [`docs/state-machine.md`](docs/state-machine.md)                   | Sensor state and pause precedence — transitions, invariants, precedence  |
+| [`docs/web-ui.md`](docs/web-ui.md)                                 | Every view in the browser, and what each one is for                      |
 | [`docs/installation.md`](docs/installation.md)                     | Installing, upgrading, and adding a remote probe                         |
 | [`docs/administration.md`](docs/administration.md)                 | Roles and rights, credentials, pausing, what to watch                    |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md)               | Symptoms, and the number that diagnoses each one                         |

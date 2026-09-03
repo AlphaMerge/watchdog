@@ -6,8 +6,10 @@ A PRTG-class infrastructure monitoring system in Node.js/TypeScript.
 
 | Document                       | What it is                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------- |
+| `docs/README.md`               | Index of every document, by the question it answers. **Start here if unsure.**        |
 | `docs/CAPABILITIES.MD`         | What PRTG does, with `[V1]` / `[V2]` / `[OUT]` scope markers. **The scope contract.** |
 | `docs/WORKFLOW.MD`             | How the system must behave over time — loops, lifecycles, state machines              |
+| `docs/state-machine.md`        | Sensor state and pause precedence in full — read before touching either               |
 | `docs/ADR-001-architecture.md` | Stack and architecture decisions with rationale                                       |
 | `docs/PLAN.md`                 | Phased roadmap with exit criteria per phase                                           |
 | `docs/TASKS.md`                | Ticket-sized backlog — **pick work from here**                                        |
