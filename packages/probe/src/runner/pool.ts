@@ -16,6 +16,41 @@ const LATENCY_WINDOW = 1_024;
  */
 const MAX_CONSECUTIVE_START_FAILURES = 3;
 
+/**
+ * How much recent history the *sizing* estimate is allowed to see (`P-46`).
+ *
+ * **Counted in seconds, and that is the whole point.** This window used to be the same 1,024
+ * samples as every other latency window, and a median over N samples only moves once more than
+ * half of them are new — so the time to notice a change was `512 ÷ completions per second`, and
+ * the completion rate is set by the pool size. `P-44` measured the consequence: 12 s to notice at
+ * 66 workers, 25 s at 31, and about 85 s at 9. A pool that is too small completes fewer checks, so
+ * it measured more slowly, so it stayed too small. That is positive feedback, and it is removed by
+ * counting the window in time: half the window, at any pool size.
+ *
+ * Thirty seconds because the sizing loop runs at thirty (`SIZE_INTERVAL_MS`), so the median has
+ * crossed by the tick after the one that saw the change.
+ */
+const DURATION_WINDOW_MS = 30_000;
+
+/**
+ * Never estimate from fewer than this, however old they are.
+ *
+ * A probe with three sensors on a five-minute interval produces nothing inside thirty seconds, and
+ * an empty window means `typicalDurationMs` returns undefined and the sizer falls back to an
+ * assumption it already has a measurement for. Stale but real beats fresh and absent.
+ */
+const MIN_DURATION_SAMPLES = 8;
+
+/**
+ * How soon to look again when the pool is over its ceiling but nothing was spare (`P-45`).
+ *
+ * Short enough that a probe gives memory back within a few seconds of a check finishing, rather
+ * than at the next 60-second idle window; long enough that it is a handful of cheap sweeps and not
+ * a spin. A check that keeps every slot busy for longer than this is a workload that still needs
+ * them, and the next sweep finds that out too.
+ */
+const OVER_CEILING_RETRY_MS = 250;
+
 export type SubmitOutcome = 'accepted' | 'already-running' | 'queue-full' | 'stopped';
 
 export interface PoolStats {
@@ -76,6 +111,13 @@ export interface CheckPoolOptions {
    * about to re-spawn.
    */
   idleShrinkMs?: number;
+  /**
+   * How much recent history the sizing estimate sees, in milliseconds (`P-46`).
+   *
+   * Defaults to `DURATION_WINDOW_MS`. Injectable so a test can bury a stale reading without
+   * spending thirty seconds doing it, and so the sizing benchmark can vary it.
+   */
+  durationWindowMs?: number;
   queueMaxLength?: number;
   /**
    * How long a check has to honour its abort before the worker is terminated.
@@ -241,6 +283,7 @@ export class CheckPool {
   #maxSize: number;
   readonly #minSize: number;
   readonly #idleShrinkMs: number;
+  readonly #durationWindowMs: number;
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
   readonly #registryModule: string;
@@ -260,7 +303,7 @@ export class CheckPool {
    * the same way as the latency windows — a probe watching one type for a month must not grow a
    * list for it.
    */
-  readonly #runByType = new Map<string, number[]>();
+  readonly #runByType = new Map<string, DurationSample[]>();
   /**
    * Session-pool counters from workers the pool has already retired (`P-36`).
    *
@@ -280,6 +323,8 @@ export class CheckPool {
   #shrunk = 0;
   /** When every slot was last seen busy, or the queue non-empty. Monotonic (`CLAUDE.md`). */
   #shrinkTimer: NodeJS.Timeout | undefined;
+  /** Set only while the pool is above its ceiling and still has workers to give back (`P-45`). */
+  #overCeilingTimer: NodeJS.Timeout | undefined;
   #startFailures = 0;
   #stopped = false;
   #disabled = false;
@@ -301,6 +346,7 @@ export class CheckPool {
     // every later decision arithmetic on a number that was already wrong.
     this.#minSize = Math.max(1, Math.min(options.minSize ?? this.#maxSize, this.#maxSize));
     this.#idleShrinkMs = options.idleShrinkMs ?? 60_000;
+    this.#durationWindowMs = options.durationWindowMs ?? DURATION_WINDOW_MS;
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#registryModule =
@@ -356,7 +402,20 @@ export class CheckPool {
   typicalDurationMs(sensorType: string): number | undefined {
     const window = this.#runByType.get(sensorType);
     if (window === undefined || window.length === 0) return undefined;
-    const sorted = [...window].sort((a, b) => a - b);
+
+    // Samples are appended in order, so the first fresh one bounds every later one.
+    const cutoff = process.hrtime.bigint() - BigInt(this.#durationWindowMs) * 1_000_000n;
+    let fresh = 0;
+    for (const sample of window) {
+      if (sample.at >= cutoff) break;
+      fresh += 1;
+    }
+    const from = Math.min(fresh, Math.max(0, window.length - MIN_DURATION_SAMPLES));
+
+    const sorted = window
+      .slice(from)
+      .map((sample) => sample.ms)
+      .sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))];
   }
 
@@ -406,12 +465,16 @@ export class CheckPool {
   }
 
   #recordTypeDuration(sensorType: string, durationMs: number): void {
+    const sample: DurationSample = { at: process.hrtime.bigint(), ms: durationMs };
     const window = this.#runByType.get(sensorType);
     if (window === undefined) {
-      this.#runByType.set(sensorType, [durationMs]);
+      this.#runByType.set(sensorType, [sample]);
       return;
     }
-    record(window, durationMs);
+    window.push(sample);
+    // Still bounded by count, so a busy type cannot grow without limit; the count is a memory
+    // bound now rather than the estimate's window.
+    if (window.length > LATENCY_WINDOW) window.shift();
   }
 
   /** Resolves once every worker has loaded its registry and is ready for work. */
@@ -444,6 +507,8 @@ export class CheckPool {
     this.#stopped = true;
     if (this.#shrinkTimer !== undefined) clearInterval(this.#shrinkTimer);
     this.#shrinkTimer = undefined;
+    if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
+    this.#overCeilingTimer = undefined;
     for (const job of this.#queue.splice(0)) this.#settle(job, 'pool-stopped', 'probe is stopping');
     await Promise.all(
       this.#slots.map(async (slot) => {
@@ -614,6 +679,19 @@ export class CheckPool {
       this.#retire(spare, { over: this.#slots.length - this.#maxSize });
     }
 
+    // **Come back for the rest in a moment, not in a minute** (`P-45`).
+    //
+    // The pass above takes whatever is spare *at this instant* and stops at the first slot holding
+    // a job, which is the one rule here that is about safety. What it is not is a schedule: a
+    // wheel firing every second means most slots are briefly busy inside a burst, so a pass landing
+    // in one sheds almost nothing. Before this the next chance was the 60-second idle timer, and
+    // `P-44` measured the result — a pool asked to go from 66 workers to 9 sat at 31 for two
+    // minutes, twice observed completely idle while it did, holding about 770 MB in a real probe
+    // that it had already been told to release.
+    //
+    // It stops on its own, because the condition is being over a bound: reaching the bound ends it.
+    this.#scheduleOverCeilingSweep();
+
     if (this.#slots.length <= this.#minSize) return;
 
     // The ordinary decay, one worker per window: the oldest genuinely spare worker, ready,
@@ -630,6 +708,18 @@ export class CheckPool {
   }
 
   /** Workers that can be retired safely, oldest idle first. Never one in the middle of a check. */
+  #scheduleOverCeilingSweep(): void {
+    if (this.#overCeilingTimer !== undefined || this.#stopped) return;
+    if (this.#slots.length <= this.#maxSize || this.#slots.length <= this.#minSize) return;
+
+    this.#overCeilingTimer = setTimeout(() => {
+      this.#overCeilingTimer = undefined;
+      this.#considerShrink();
+    }, OVER_CEILING_RETRY_MS);
+    // Giving memory back must never be the reason the process stays alive.
+    this.#overCeilingTimer.unref();
+  }
+
   #spareSlots(): Slot[] {
     return this.#slots
       .filter((slot) => slot.ready && slot.job === undefined && slot.idleSince !== 0n)
@@ -885,6 +975,12 @@ function clear(job: Job): void {
   if (job.grace !== undefined) clearTimeout(job.grace);
   job.timeout = undefined;
   job.grace = undefined;
+}
+
+/** One measured check duration and when it was measured, for the sizing window (`P-46`). */
+interface DurationSample {
+  readonly at: bigint;
+  readonly ms: number;
 }
 
 function record(window: number[], value: number): void {

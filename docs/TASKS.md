@@ -5259,7 +5259,7 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
-- [ ] **P-46 — The smaller the pool, the slower it notices it must grow** · M · P-44 · Positive
+- [x] **P-46 — The smaller the pool, the slower it notices it must grow** · M · P-44 · Positive
       feedback in the sizing loop, found by fixing `P-45` and re-measuring — which is the only
       reason it was found, since the shrink defect was masking it.
 
@@ -5291,7 +5291,31 @@ because each is a decision rather than a defect:
       way, it wants its own measurement — `scripts/sizing/autosize.mjs` already reproduces it, and
       the phase-3 numbers are the regression to beat.
 
-- [ ] **P-45 — A pool that grew does not come back down, and holds the memory** · S · P-44, **blocked by P-46** ·
+      **Fixed by counting the window in seconds rather than in samples** — `durationWindowMs`, 30 s
+      to match the sizing cadence, injectable so a test can bury a stale reading in a hundred
+      milliseconds instead of half a minute, with a floor of eight samples so a probe that measures
+      nothing inside the window still answers from something real rather than sending the sizer
+      back to its assumption.
+
+      **Not the backlog term this ticket argued for, and the reason is arithmetic.** `busy + queued`
+      overshoots enormously — 1,900 against a true need of 50 — because a backlog is accumulated
+      debt and not a rate. The throughput ratio `size × submitted ÷ completed` gives exactly the
+      right answer (9 × 33.3/6 = 50) but needs a clean "work finished" denominator, and the pool
+      has none: `submitted` counts deferred and refused checks too, and `completed`, `failed` and
+      `timedOut` partition awkwardly across three release sites. The window is the smaller change
+      and it addresses this ticket's actual title, which is the *rate dependence*.
+
+      **Measured** (`docs/findings/2026-09-04-autosize-loop.md`): the median now crosses in
+      `W × R_old ÷ (R_old + R_new)`, so at worst the window — 13 s at 66 workers, 18 s at 31, 25 s
+      at 9, against 85 s and unbounded before. It is not pool-*independent* and the finding says so
+      rather than claiming it. That was enough to unblock `P-45`, and with both in place the pool
+      holds nine workers where nine are wanted, spends **zero** worker-seconds above its ceiling
+      over a whole run, and still recovers its ceiling to 66 when the checks slow down.
+
+      A backlog term remains the obvious next improvement: in the measured window the queue reached
+      814 while every duration-based signal still said the workload was cheap.
+
+- [x] **P-45 — A pool that grew does not come back down, and holds the memory** · S · P-44, P-46 ·
       Measured in `docs/findings/2026-09-04-autosize-loop.md`. A pool asked to go from a ceiling of
       66 to a ceiling of 9 went to 35 workers, then 31, and **stayed at 31 for the remaining two
       minutes of the run** — 3.4× its own ceiling. The instrumented run rules out every innocent
@@ -5327,6 +5351,14 @@ because each is a decision rather than a defect:
       So the fix is correct and unsafe alone; it lands with `P-46` or after it. The measured
       before-and-after is in `docs/findings/2026-09-04-autosize-loop.md` (Finding 3) with raw data
       in `2026-09-04-autosize-shrink-trap.json`.
+
+      **`P-46` landed, so this did too.** With both, the pool spends **zero** worker-seconds above
+      its ceiling across the whole benchmark — down from 1,594 — and resident memory in the fast
+      phase halves, 507.9 MB to 255.8 MB. Worst lateness when the checks slow again is 24.8 s
+      against the baseline's 11.6 s, and that gap is this fix's honest price rather than a
+      regression: the baseline was only quicker because it was still carrying 22 workers it had
+      been told to release. The trade is about 250 MB in the benchmark and about 770 MB in a real
+      probe, and an operator who cannot accept the transient sets `workerPoolSize`.
 
       Not urgent for correctness: nothing is dropped, no check is late because of it, and a probe
       restart reclaims it. It is a memory-footprint defect, and `docs/sizing.md` now warns to size

@@ -148,13 +148,18 @@ floor rule 1 sets — under that line the probe stops keeping up rather than mer
 slower. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would
 allow.
 
-**A pool that has grown does not shrink back promptly, and that is a known defect** (`P-45`,
-measured in `findings/2026-09-04-autosize-loop.md`). Lowering the ceiling — by hand or by the
-derived loop — sheds only the workers that happen to be idle at that instant, and tries again just
-once a minute. Measured: a pool asked to go from 66 workers to 9 sat at 31 for two minutes while
-completely idle, holding memory it had been told to release. **Size the box for the largest pool
-the probe will reach, not the one it should settle at.** Restarting the probe is the reliable way
-to reclaim it until `P-45` lands.
+**A pool that has grown does come back down** (`P-45`), within a few seconds of the workers
+finishing their checks rather than at the next idle window. It used to shed only what happened to
+be idle at the instant the ceiling moved and then wait a minute for another chance: a pool asked to
+go from 66 workers to 9 sat at 31 for two minutes while completely idle. Measured after the fix, it
+spends **no time at all** above its ceiling over a whole run and halves resident memory in the
+cheap phase.
+
+The corollary is worth stating, because it is the price: **a correctly-sized small pool is more
+exposed to a sudden slowdown than an oversized one.** Measured, the transient after checks slow
+from 200 ms to 1,500 ms is about 25 seconds of lateness rather than about 12 — the probe is no
+longer carrying spare workers that used to absorb it. That is the trade for roughly 770 MB, and
+`workerPoolSize` is how you buy back the other side of it.
 
 ### You usually do not have to do this arithmetic
 
@@ -172,14 +177,13 @@ is visible. Recomputing more often does not help; it re-derives the same stale n
 window a probe runs under-provisioned with **nothing deferred and nothing refused**, so the signal
 to watch is scheduler lag on Probe Health, not the pool counters.
 
-**How long it lags depends on how big the pool already is, and that is a trap** (`P-46`). The window
-is counted in checks, not in seconds, so the delay is roughly `512 ÷ completions per second` — a
-pool of 66 workers on 1,500 ms checks notices in about 12 seconds, a pool of 9 takes about 85. A
-pool that is too small completes fewer checks, so it measures more slowly, so it stays too small.
-Measured at nine workers: the ceiling never rose at all, the queue reached 1,891 and checks ran
-**57 seconds** late. **If your check durations change in steps rather than drifting — and a network
-or a device that degrades is exactly that — set `workerPoolSize` for the slow case** rather than
-relying on the probe to find it.
+**The lag is bounded at about thirty seconds** (`P-46`). The window is counted in seconds, so the
+delay cannot exceed it however small the pool is: measured at 13 seconds with 66 workers, 18 with
+31 and 25 with 9. It used to be counted in *checks*, which made the delay `512 ÷ completions per
+second` — 85 seconds at nine workers and worse at fewer — so a pool that was too small measured too
+slowly and stayed too small. **If your check durations change in steps rather than drifting — and a
+network or a device that degrades is exactly that — set `workerPoolSize` for the slow case** rather
+than paying that half minute each time.
 
 **It raises at once and lowers slowly, and the asymmetry is deliberate** (`P-40`). A pool that is
 too small is a probe falling behind, and every second it waits is checks queueing — so an

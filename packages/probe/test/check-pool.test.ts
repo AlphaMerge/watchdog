@@ -25,6 +25,7 @@ async function poolOf(
     size?: number;
     minSize?: number;
     idleShrinkMs?: number;
+    durationWindowMs?: number;
     abortGraceMs?: number;
     queueMaxLength?: number;
   } = {},
@@ -38,6 +39,9 @@ async function poolOf(
     minSize: options.minSize ?? options.size ?? 2,
     registryModule: FIXTURES,
     ...(options.idleShrinkMs === undefined ? {} : { idleShrinkMs: options.idleShrinkMs }),
+    ...(options.durationWindowMs === undefined
+      ? {}
+      : { durationWindowMs: options.durationWindowMs }),
     ...(options.abortGraceMs === undefined ? {} : { abortGraceMs: options.abortGraceMs }),
     ...(options.queueMaxLength === undefined ? {} : { queueMaxLength: options.queueMaxLength }),
     onResult: (result, meta) => seen.push({ result, meta }),
@@ -516,6 +520,33 @@ describe('sizing the ceiling from the work (P-34)', () => {
     assert.ok(pool.size <= 2, `held ${String(pool.size)} against a ceiling of 2`);
   });
 
+  it('reaches its ceiling even when the drop lands mid-check (P-45)', async () => {
+    // The case above lowers the ceiling on an idle pool, which always worked. `P-44` measured the
+    // one that did not: a wheel firing every second means a ceiling change usually lands while
+    // slots hold jobs, the pass sheds whatever happens to be spare and stops, and before this the
+    // next chance was the 60-second idle window. Measured there: 31 workers against a ceiling of
+    // 9 for two full minutes, twice observed completely idle while it sat.
+    const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 60_000 });
+
+    for (let i = 0; i < 8; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
+    await until(() => pool.size === 8, 'a full pool');
+    await until(() => seen.length === 8, 'the first round to finish');
+
+    // A second round, so the drop below lands on workers that are holding jobs.
+    for (let i = 0; i < 8; i += 1) pool.submit(request(100 + i, 'test.slow', { delayMs: 400 }));
+    await until(() => pool.stats().busy >= 6, 'workers holding jobs');
+
+    pool.setMaxSize(2);
+    assert.ok(
+      pool.size > 2,
+      `the opportunistic pass alone cannot finish the job; held ${String(pool.size)}`,
+    );
+
+    // At a 60-second idle window the ordinary decay cannot account for any of this, so whatever
+    // converges the pool within five seconds is the retry and nothing else.
+    await until(() => pool.size <= 2, 'the pool to reach its ceiling anyway');
+  });
+
   it('still refuses to go under the configured floor, however low the ceiling goes', async () => {
     // The floor is somebody's deliberate setting and the ceiling pass must not step through it.
     // `setMaxSize` clamps, but the shedding loop is a second place that could get it wrong.
@@ -654,6 +685,79 @@ describe('session-pool counters (P-36)', () => {
       after.evicted >= before.evicted,
       `evicted fell from ${String(before.evicted)} to ${String(after.evicted)}`,
     );
+  });
+});
+
+/**
+ * The estimate the sizing loop reads, and why its window is counted in seconds (`P-46`).
+ *
+ * It used to be the last 1,024 samples. A median over N samples only moves once more than half of
+ * them are new, so the time to notice a change was `512 ÷ completions per second` — and the
+ * completion rate is set by the pool size. `P-44` measured it: about 12 s to notice at 66 workers,
+ * 25 s at 31, 85 s at 9. A pool that was too small measured too slowly and stayed too small.
+ *
+ * These drive the estimate directly rather than through a running pool, because the property under
+ * test is *how many old samples it takes to bury a change* — which a timing test would measure
+ * badly and slowly.
+ */
+describe('the duration the sizing loop reads (P-46)', () => {
+  /** Feeds durations straight into the pool's per-type window. */
+  async function measured(old: number, oldCount: number, fresh: number, freshCount: number) {
+    // A 150 ms window rather than the shipped 30 s, so the stale readings age out inside a test
+    // instead of half a minute later. What is under test is the shape, not the constant.
+    const { pool, seen } = await poolOf({
+      size: 4,
+      minSize: 4,
+      idleShrinkMs: 0,
+      durationWindowMs: 150,
+    });
+    for (let i = 0; i < oldCount; i += 1) pool.submit(request(i, 'test.slow', { delayMs: old }));
+    await until(() => seen.length === oldCount, `${String(oldCount)} slow checks`, 20_000);
+    // Long enough that every one of the old readings is outside the window.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    for (let i = 0; i < freshCount; i += 1) {
+      pool.submit(request(1_000 + i, 'test.slow', { delayMs: fresh }));
+    }
+    await until(() => seen.length === oldCount + freshCount, 'the fresh ones', 20_000);
+    return pool;
+  }
+
+  it('is not outvoted by a long history of a duration that no longer applies', async () => {
+    // Forty old samples against twelve new ones. On a count-counted window the old ones win and
+    // the probe keeps sizing for a workload it no longer has; on a time-counted one they have
+    // aged out and only the twelve are left.
+    const pool = await measured(5, 40, 120, 12);
+    const typical = pool.typicalDurationMs('test.slow');
+
+    assert.ok(typical !== undefined);
+    assert.ok(
+      typical >= 100,
+      `sized from the recent 120ms checks, not the stale 5ms ones; got ${String(typical)}`,
+    );
+  });
+
+  it('still answers when a quiet probe has nothing recent at all', async () => {
+    // A probe with three sensors on a five-minute interval measures nothing inside the window.
+    // Stale but real beats fresh and absent: an undefined answer sends the sizer to its
+    // assumption, which is the guess the measurement exists to replace.
+    const { pool, seen } = await poolOf({
+      size: 4,
+      minSize: 4,
+      idleShrinkMs: 0,
+      durationWindowMs: 150,
+    });
+    for (let i = 0; i < 3; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 80 }));
+    await until(() => seen.length === 3, 'three checks');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const typical = pool.typicalDurationMs('test.slow');
+    assert.ok(typical !== undefined, 'a stale answer rather than none');
+    assert.ok(typical >= 60, `and it is the one that was measured; got ${String(typical)}`);
+  });
+
+  it('says nothing about a type it has never run', async () => {
+    const { pool } = await poolOf({ size: 4, minSize: 4, idleShrinkMs: 0 });
+    assert.equal(pool.typicalDurationMs('never.seen'), undefined);
   });
 });
 

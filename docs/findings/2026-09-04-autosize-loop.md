@@ -148,3 +148,40 @@ a design, but it does mean the two must be fixed together: **`P-45` must not lan
 The floor does not save it either. `defaultPoolSize()` bounds the derived *ceiling* at 64, but the
 pool only grows to what is submitted, so a fast workload sits at a handful of workers whatever the
 ceiling says.
+
+## Resolution — both fixed, and what the fix costs
+
+`P-46` makes the sizing window **counted in seconds rather than in samples**
+(`durationWindowMs`, 30 s), so `P-45`'s shrink retry could land with it. Same benchmark, same
+machine, raw data in `2026-09-04-autosize-fixed.json`.
+
+| | baseline (both defects) | `P-45` alone | **both fixed** |
+| --- | --- | --- | --- |
+| workers at the end of the fast phase | 31 (ceiling 9) | 9 | **9** |
+| resident there | 507.9 MB | 257.4 MB | **255.8 MB** |
+| worker-seconds above the ceiling, whole run | 1,594 | 26 | **0** |
+| duration measured 30 s into the slowdown | 1,505 ms | **209 ms — never crossed** | **1,504 ms** |
+| ceiling reached in phase 3 | 66 | **10** | **66** |
+| queued at the end of phase 3 | 7, drained | **1,954, climbing** | 367, draining |
+| worst lateness in phase 3 | 11.6 s | 57.1 s | **24.8 s** |
+
+**Detection is now bounded rather than unbounded.** With a window counted in seconds, the median
+crosses after `W × R_old ÷ (R_old + R_new)` where the two `R`s are the sample rates before and
+after the change — so it is at worst `W`, whatever the pool size. Measured: the change landed at
+t=141 and the median crossed between t=165 and t=170, against a predicted t≈166. The old
+count-counted window had no such bound: 85 s at nine workers, and proportionally worse at fewer.
+
+It is **not** pool-independent, and saying so would be overclaiming: `13 s` at 66 workers, `18 s` at
+31, `25 s` at 9. The dependence is now a factor of two across that range instead of unbounded.
+
+**The remaining 24.8 s is the honest price of the memory fix, not a regression.** The baseline
+reached only 11.6 s because it was carrying 22 workers it had been told to release — being
+accidentally over-provisioned made it more robust to a sudden slowdown. That is not a design, and
+the trade it was making was about 250 MB in this benchmark and about 770 MB in a real probe at
+35 MB a worker. An operator who cannot accept the transient should set `workerPoolSize` for the
+slow case, which `docs/sizing.md` now says.
+
+**What is still open**: the loop's only input is still a duration estimate. Nothing in it reads the
+queue, and in the window above the queue reached 814 while every other signal said the workload was
+cheap. A backlog term would have caught it in one sizing interval rather than three; it is not
+needed to close `P-46` and it is the obvious next improvement.
