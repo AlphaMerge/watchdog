@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { ProbeHealthReporter } from '../src/health/report.js';
 import type { PoolStats } from '../src/runner/pool.js';
+import type { DrainStats } from '../src/spool/drain.js';
 import type { SpoolStats } from '../src/spool/spool.js';
 import type { WheelStats } from '../src/scheduler/wheel.js';
 
@@ -43,8 +44,19 @@ const POOL: PoolStats = {
 
 const SPOOL: SpoolStats = { pending: 500, bytes: 2_097_152, segments: 1, dropped: 4, corrupt: 0 };
 
+const DRAIN: DrainStats = {
+  sent: 40,
+  backlog: 500,
+  maxRetryAfterMs: 0,
+  rejected: 0,
+  retried: 1,
+  stalledForMs: 0,
+};
+
 function reporter(options: {
   spool?: boolean;
+  drain?: boolean;
+  stalledForMs?: number;
   cpuUs?: number[];
   elapsedNs?: number[];
   rss?: number;
@@ -58,6 +70,9 @@ function reporter(options: {
     scheduler: () => WHEEL,
     pool: () => POOL,
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
+    ...(options.drain === false
+      ? {}
+      : { drain: () => ({ ...DRAIN, stalledForMs: options.stalledForMs ?? 0 }) }),
     process: {
       cpuUsage: () => {
         cpu += options.cpuUs?.[cpuCall] ?? 0;
@@ -95,6 +110,39 @@ describe('the probe’s own health report', () => {
     assert.equal(report.spoolPending, 500);
     assert.equal(report.spoolDropped, 4);
     assert.equal(report.spoolBytes, 2_097_152);
+  });
+
+  /**
+   * The stall, on the wire (`H-01`).
+   *
+   * The detector itself is `spool-drain.test.ts`; what these pin is the half that was missing —
+   * that the number reaches the heartbeat at all. `615c9f3` was a spool that would not move with
+   * the link up, and the reason it ran for hours unnoticed is that nothing carried this: depth
+   * said "plenty waiting", which is also what a healthy catch-up says.
+   */
+  it('carries the spool stall, so a drain that is not draining is visible', () => {
+    assert.equal(reporter({ stalledForMs: 420_000 }).report().spoolStalledMs, 420_000);
+  });
+
+  it('reports a stall of zero rather than omitting it while the drain is healthy', () => {
+    // Zero here is a measurement, not an absence: the drain looked and found it *is* moving.
+    // Omitting it would gap the channel and lose the difference between "not stalled" and "this
+    // probe cannot tell you".
+    const report = reporter({ stalledForMs: 0 }).report();
+    assert.equal('spoolStalledMs' in report, true);
+    assert.equal(report.spoolStalledMs, 0);
+  });
+
+  it('omits the stall when this build runs no drain', () => {
+    assert.equal('spoolStalledMs' in reporter({ drain: false }).report(), false);
+  });
+
+  it('reports the stall independently of the spool', () => {
+    // Separate sources on purpose: how much is waiting is the spool's answer, whether any of it
+    // is moving is only the drain's. A build with one and not the other reports what it has.
+    const report = reporter({ spool: false, stalledForMs: 1_000 }).report();
+    assert.equal('spoolPending' in report, false);
+    assert.equal(report.spoolStalledMs, 1_000);
   });
 
   it('omits every spool field when this build runs no spool', () => {

@@ -139,6 +139,7 @@ alarm.
 | `schedulerLag` | Checks starting later than scheduled. Warns at 1 s, errors at 5 s — this is the first sign of an overloaded probe |
 | `poolUsage` | Worker pool saturation. Warns at 80% |
 | `deferred` | Checks the pool could not start. **Backpressure is counted, never silent** |
+| `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 

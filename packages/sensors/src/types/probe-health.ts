@@ -100,6 +100,31 @@ const CHANNELS: readonly ChannelDef[] = [
       errorMessage: 'the spool is full and readings are being discarded',
     },
   },
+  // **Depth cannot tell a stall from a catch-up, which is why this is a separate channel.** A
+  // spool with thousands of results in it is a probe replaying an outage, and a threshold on
+  // `spoolDepth` would alarm on exactly that — which is why it has none. What is never healthy is
+  // a spool holding results with the link *up* and nothing moving, and that is what this counts.
+  //
+  // It exists because of the defect `615c9f3` fixed: a cursor parked on a segment boundary made
+  // `peek` return empty for ever, so the drain read a full spool as "nothing to send". The link
+  // stayed up, nothing was logged, and 30,000 results accumulated before anything would have
+  // noticed — the only signal that would ever have fired was `spoolDropped`, hours later, once
+  // the cap began discarding the evidence.
+  {
+    key: 'spoolStalled',
+    name: 'Spool stalled for',
+    unit: 's',
+    // **Not a matter of degree**, like `spoolDropped`. The probe reports zero unless it has
+    // already waited out its own stall window — five minutes of a connected link and a spool
+    // that will not move — so any value here is a stall the probe has itself concluded is real,
+    // and a threshold above zero would only delay the alarm further. Below one second rather
+    // than at zero, for the same reason as `spoolDropped`: the value is a converted duration and
+    // a bound of exactly zero fires on residue.
+    limits: {
+      upperError: 0.5,
+      errorMessage: 'the spool is not draining although the core is reachable',
+    },
+  },
   { key: 'clockJumps', name: 'Clock jumps', unit: 'jumps', counter: { bits: 64 } },
   { key: 'cpu', name: 'CPU', unit: '%' },
   { key: 'memory', name: 'Memory (resident)', unit: 'MB' },

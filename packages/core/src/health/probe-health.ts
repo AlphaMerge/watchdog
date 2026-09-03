@@ -122,6 +122,11 @@ export class ProbeHealthService {
       spoolDepth: health?.spoolPending ?? null,
       spoolBytes: health?.spoolBytes === undefined ? null : round(health.spoolBytes / MB, 1),
       spoolDropped: health?.spoolDropped ?? null,
+      // Milliseconds on the wire, seconds on the channel: every other duration an operator reads
+      // here is in seconds, and a threshold written in milliseconds beside them would be read
+      // wrong exactly once.
+      spoolStalled:
+        health?.spoolStalledMs === undefined ? null : round(health.spoolStalledMs / 1000, 1),
       clockJumps: health?.clockJumps ?? null,
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,

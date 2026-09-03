@@ -96,7 +96,11 @@ async function main(): Promise<void> {
   // and a check finishing before this binding existed would be a temporal-dead-zone crash.
   // `client` reads `coreClient` through a getter, so the two can need each other without
   // either having to exist first; nothing runs until `drain.start()`.
-  const drain = new SpoolDrain({
+  // **Annotated rather than inferred.** Probe Health reads the drain, the core client is what
+  // the drain sends through, and the client is built with the health reporter — so the three
+  // now refer to each other in a cycle that inference cannot unwind. Naming this one type is
+  // enough to break it.
+  const drain: SpoolDrain = new SpoolDrain({
     spool,
     client: {
       get connected() {
@@ -357,6 +361,10 @@ async function main(): Promise<void> {
     scheduler: () => wheel.stats(),
     pool: () => pool.stats(),
     spool: () => spool.stats(),
+    // How much is waiting is the spool's; whether any of it is *moving* is only the drain's, and
+    // the difference is the whole of `615c9f3` — a full spool and a healthy link read identically
+    // without it.
+    drain: () => drain.stats(),
   });
 
   const coreClient = new CoreClient({

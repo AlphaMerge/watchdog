@@ -1,5 +1,6 @@
 import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
+import type { DrainStats } from '../spool/drain.js';
 import type { SpoolStats } from '../spool/spool.js';
 import type { WheelStats } from '../scheduler/wheel.js';
 
@@ -21,6 +22,12 @@ export interface ProbeHealthSources {
   pool: () => PoolStats;
   /** Absent when this build runs no spool. */
   spool?: () => SpoolStats;
+  /**
+   * Absent when this build runs no drain — which is the same builds that run no spool, but the
+   * two are separate sources because they answer different questions: the spool knows how much is
+   * waiting, and only the drain knows whether any of it is moving.
+   */
+  drain?: () => DrainStats;
   /** Injectable so a test does not measure the test runner. */
   process?: {
     cpuUsage: () => NodeJS.CpuUsage;
@@ -51,6 +58,7 @@ export class ProbeHealthReporter {
     const scheduler = this.#sources.scheduler();
     const pool = this.#sources.pool();
     const spool = this.#sources.spool?.();
+    const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
 
     return {
@@ -74,6 +82,9 @@ export class ProbeHealthReporter {
             spoolDropped: spool.dropped,
             spoolCorrupt: spool.corrupt,
           }),
+      // Separate from the spool block above, so a build with a drain and no spool — or the
+      // reverse — reports what it has rather than nothing. Absent is absent.
+      ...(drain === undefined ? {} : { spoolStalledMs: drain.stalledForMs }),
       // The first heartbeat after a start carries no CPU: a rate needs two samples, and 0% would
       // say the probe is idle rather than that nothing has been measured yet.
       ...(cpu === null ? {} : { cpuPercent: cpu }),

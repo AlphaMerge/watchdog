@@ -4068,6 +4068,32 @@ because each is a decision rather than a defect:
       has perf tests and no `test:perf` script, or if a `test` glob starts descending into
       `perf/` again. That last one is a single character, and it is how the budgets get back into
       the ordinary run without anybody deciding to put them there.
+- [x] **P-27 — The spool stall belongs on Probe Health, not only in the log** · S · H-01 ·
+      `92ec56a` gave `SpoolDrain` a stall detector — `DrainStats.stalledForMs`, how long the spool
+      has held results with the link up and nothing moving — and then only logged it. An operator
+      could not see it on a dashboard or put a trigger on it, which for a condition whose entire
+      problem was being invisible is most of the way back to where it started.
+
+      **`spoolStalled` on `ms.probe.health`**, in seconds, with an `upperError` of 0.5 in the
+      style of `spoolDropped`: not a matter of degree, because the probe already reports zero
+      unless it has waited out its own five-minute stall window, so any value here is a stall the
+      probe has itself concluded is real and a higher threshold would only delay the alarm.
+
+      **Depth could never have carried this signal, which is why it is a separate channel.** A
+      spool with thousands of results in it is what a probe replaying an outage looks like, so
+      `spoolDepth` has no declared limits and should not have any. What is never healthy is a
+      spool holding results with the link *up* and nothing moving — a duration, not a depth.
+
+      Wiring: `DrainStats` into `ProbeHealthReporter` as a source separate from the spool, because
+      how much is waiting and whether any of it is moving are different questions and a build with
+      one and not the other should report what it has; `spoolStalledMs` on the heartbeat;
+      milliseconds on the wire converted to seconds on the channel, since every other duration an
+      operator reads there is in seconds. **Protocol 8 → 9**: the health schema is
+      `additionalProperties: false`, so a version-9 probe would have had every heartbeat rejected
+      by a version-8 core with nothing to say why — the bump turns that into the handshake
+      refusal `isProtocolCompatible` already knows how to give. An older probe omits the field and
+      the channel gaps, which is `R-06` again.
+
 - [ ] **P-26 — The pool's shrink policy cannot fire on a probe that is doing anything** · M ·
       P-18 · `#considerShrink` gives a worker back only when the pool has been idle for
       `idleShrinkMs`, and `#busySince` is reset by **every `submit`** — so "idle" means "no check

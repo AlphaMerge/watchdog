@@ -113,7 +113,11 @@ Work through these in order — each is a number, not a guess.
 3. **`spoolDepth` and `spoolBytes` on Probe Health.** The probe cannot reach the core and is
    spooling to its own disk. It replays when the link comes back, rate-limited so the catch-up
    does not itself become the outage.
-4. **`spoolDropped` on Probe Health.** Above zero means the spool filled and results were lost.
+4. **`spoolStalled` on Probe Health.** Above zero means the core is reachable and the spool is
+   *not moving* — which depth alone cannot tell you, because a deep spool is also what a probe
+   replaying an outage looks like. This is the channel for the case where the link is healthy and
+   delivery has stopped anyway.
+5. **`spoolDropped` on Probe Health.** Above zero means the spool filled and results were lost.
    That is data gone, and the error threshold is there so it is never silent.
 
 **A database outage does not kill the core.** A write failure is reported and counted, and the

@@ -40,8 +40,16 @@ import { AppError } from '../errors/app-error.js';
  * connected or not, heartbeat age, protocol skew — and says in its message why the rest is
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
+ *
+ * Version 9 added `spoolStalledMs` to that health report (`H-01`). **The bump is required by
+ * `additionalProperties: false` on the health schema**, not by the field itself: a version-9
+ * probe sending it to a version-8 core would have every heartbeat rejected by validation, with
+ * nothing to say why. `isProtocolCompatible` refuses a peer above this build's version at the
+ * handshake instead, which is the same trade version 2 made — a clean rejection where an
+ * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
+ * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /**
  * The oldest peer version this build still understands.
@@ -305,6 +313,14 @@ export interface ProbeHealthReport {
   spoolDropped?: number;
   /** Spool lines that did not parse — a torn write at a crash boundary. */
   spoolCorrupt?: number;
+  /**
+   * How long the spool has held results with the link up and nothing moving (`H-01`).
+   *
+   * Zero while the drain is making progress or has nothing to make progress on. Non-zero means
+   * the one failure `615c9f3` was: a connected probe, a spool that will not move, and no other
+   * signal saying so — depth alone cannot tell a stall from a legitimate catch-up.
+   */
+  spoolStalledMs?: number;
   /** The probe process itself: percentage of one core, resident megabytes, seconds since start. */
   cpuPercent?: number;
   memoryMb?: number;
@@ -583,6 +599,7 @@ const PROBE_HEALTH_SCHEMA = {
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },
     spoolCorrupt: { type: 'integer', minimum: 0 },
+    spoolStalledMs: { type: 'integer', minimum: 0 },
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },
     uptimeSeconds: { type: 'number', minimum: 0 },

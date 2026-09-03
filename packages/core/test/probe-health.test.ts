@@ -40,6 +40,7 @@ const FULL: ProbeHealthReport = {
   spoolBytes: 2 * 1024 * 1024,
   spoolDropped: 4,
   spoolCorrupt: 0,
+  spoolStalledMs: 420_000,
   cpuPercent: 18.5,
   memoryMb: 210.4,
   uptimeSeconds: 3_600,
@@ -152,7 +153,31 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['spoolDepth'], 500);
       assert.equal(reading['spoolBytes'], 2, 'bytes in, megabytes out');
       assert.equal(reading['spoolDropped'], 4);
+      assert.equal(reading['spoolStalled'], 420, 'milliseconds in, seconds out');
       assert.equal(reading['cpu'], 18.5);
+    });
+
+    /**
+     * The stall the probe reports, as a channel an operator can alarm on (`H-01`).
+     *
+     * `615c9f3` was a spool that would not move with the link up. Depth alone could not have
+     * shown it — a spool with thousands of results in it is also what a probe replaying an
+     * outage looks like — so the signal has to be the *duration* of no progress, and it has to
+     * survive the trip from the probe to a channel.
+     */
+    it('gaps the stall rather than reading zero when the probe does not report one', () => {
+      // An older probe omits the field. Zero would say "not stalled", which is a claim about a
+      // probe that never made it — `CLAUDE.md`'s no-data rule, on the channel it matters most.
+      const { spoolStalledMs: _omitted, ...withoutStall } = FULL;
+      const { reading } = build(() => connected({ health: withoutStall })).read(probeId);
+      assert.equal(reading['spoolStalled'], null);
+    });
+
+    it('reads zero as zero, because a drain that is moving is a measurement', () => {
+      const { reading } = build(() => connected({ health: { ...FULL, spoolStalledMs: 0 } })).read(
+        probeId,
+      );
+      assert.equal(reading['spoolStalled'], 0);
     });
 
     it('says what it is doing, and stays quiet about what is fine', () => {
