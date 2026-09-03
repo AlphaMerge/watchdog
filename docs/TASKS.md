@@ -5295,6 +5295,12 @@ because each is a decision rather than a defect:
       claim was weaker than it sounded, and that is worth having written down rather than
       discovered again.
 
+      **Then the gap was actually closed**, which is the point of having found it. Every compose
+      dependency up — the default services plus `--profile db` for MySQL and SQL Server — gives
+      **3,246 tests, 3,246 passed, 0 failed, 0 cancelled, and one suite skipped**, that one being
+      `no pwsh on this machine`, which macOS cannot help. Against this morning's 1,945 tests and 88
+      skipped suites, both reported as `clean`.
+
       Left alone: the four wordings for "PostgreSQL is not running". Consolidating them is tidying,
       and the grouped report reads fine without it.
 

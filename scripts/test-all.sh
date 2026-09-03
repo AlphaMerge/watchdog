@@ -63,7 +63,11 @@ if [ "${skipped_suites}" -gt 0 ]; then
   echo "    and are not in the counts above:"
   grep -oE '# [^#]+$' "${log}" 2>/dev/null | sed 's/^# //' | sort | uniq -c | sort -rn |
     awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "      %4d x %s\n", n, $0 }' | head -8
-  echo "    Bring the stack up (npm run dev) to cover them."
+  # Naming the profile because it is not discoverable: `npm run dev` starts the default services
+  # and leaves MySQL and SQL Server behind a profile, which is most of what stays skipped after
+  # somebody thinks they have brought the stack up. Some skips are not services at all — `pwsh` is
+  # a binary this machine either has or does not — so this suggests rather than instructs.
+  echo "    Most are compose services: npm run dev, plus --profile db for MySQL and SQL Server."
 fi
 
 if [ "${failed}" -gt 0 ]; then
