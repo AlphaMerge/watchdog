@@ -113,6 +113,66 @@ describe('generated documentation', () => {
   }
 });
 
+/**
+ * Every `.ps1` in the tree parses (`P-53`).
+ *
+ * **A parse error in `ms-setup.ps1` breaks every Windows install**, and until now the only thing
+ * anywhere that would have caught one was `H-06`'s `windows-install` CI job — which has never run,
+ * because CI is disabled. So the scripts that register the services, open the firewall and gate an
+ * upgrade on `config check` were unchecked by anything at all.
+ *
+ * `H-06` recorded that a local check was impossible: "PowerShell publishes no arm64 container, the
+ * amd64 one dies under QEMU on an Apple Silicon machine, and the `dotnet tool` package is broken —
+ * three routes tried, all dead." That was true of those three routes and not of the fourth:
+ * `P-51` put the official `linux-arm64` tarball in the toolchain image for the Windows *sensor*
+ * transport, and a parser is a parser.
+ *
+ * Parsing is not running. This cannot tell whether `New-Service` was called with the right
+ * arguments — only Windows can, which is what `H-06` still waits for. It catches the class of
+ * mistake that costs a release, at the price of one process.
+ */
+describe('PowerShell installers', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+  const pwsh = ((): string => {
+    for (const candidate of [process.env['MS_TEST_PWSH'] ?? '', 'pwsh', 'powershell.exe']) {
+      if (candidate === '') continue;
+      const probe = spawnSync(candidate, ['-NoProfile', '-NonInteractive', '-Command', '$true'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      if (probe.status === 0) return candidate;
+    }
+    return '';
+  })();
+
+  it('parse without error', { skip: pwsh === '' ? 'no pwsh on this machine' : false }, () => {
+    // One process for every file: starting PowerShell costs far more than parsing does, and the
+    // report has to name which file failed rather than only that one did.
+    const script = [
+      '$bad = @()',
+      "Get-ChildItem -Recurse -Path 'deploy','scripts' -Filter *.ps1 | ForEach-Object {",
+      '  $errors = $null',
+      '  [System.Management.Automation.Language.Parser]::ParseFile(',
+      '    $_.FullName, [ref]$null, [ref]$errors) | Out-Null',
+      '  if ($errors -and $errors.Count -gt 0) {',
+      '    foreach ($e in $errors) {',
+      '      $bad += ($_.FullName + ":" + $e.Extent.StartLineNumber + " " + $e.Message)',
+      '    }',
+      '  }',
+      '}',
+      'if ($bad.Count -gt 0) { $bad -join "`n"; exit 1 }',
+      "Write-Output 'ok'",
+    ].join('\n');
+
+    const run = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  });
+});
+
 async function compare(
   compiledDir: string,
   sourceDir: string,

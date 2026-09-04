@@ -5282,6 +5282,32 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-53 — Nothing was checking the scripts that install on Windows** · S · P-51, H-06 ·
+      `H-06` says a parse error in `ms-setup.ps1` "would break every Windows install", and that the
+      only thing anywhere that would catch one is its `windows-install` CI job. **That job has
+      never run**, because CI is disabled at the operator's request — so the scripts that register
+      the services, open the firewall and gate an upgrade on `config check` were checked by nothing
+      at all.
+
+      `H-06` also recorded why a local check was impossible: "PowerShell publishes no arm64
+      container, the amd64 one dies under QEMU on an Apple Silicon machine, and the `dotnet tool`
+      package is broken — three routes tried, all dead." True of those three, and not of the
+      fourth: `P-51` had just put the official `linux-arm64` tarball in the toolchain image for the
+      Windows *sensor* transport, and a parser is a parser. The claim was correct when written and
+      stopped being so an hour later, in a ticket that had no reason to know.
+
+      All three scripts parse — `install-probe.ps1`, `ms-setup.ps1`, `ms-teardown.ps1` — and the
+      check now lives in the build-hygiene suite beside the generated-documentation checks, so it
+      runs on every `npm test` rather than in a job nobody can run. It skips with a named reason
+      where no `pwsh` exists, which `P-49`'s reporting now surfaces rather than swallowing.
+
+      **Mutation-checked**: an unclosed brace appended to `ms-setup.ps1` fails the test with the
+      file and the line — `ms-setup.ps1:184 Missing closing '}'` — and the restored file passes.
+
+      **Parsing is not running.** This cannot tell whether `New-Service` got the right arguments;
+      only Windows can, and `H-06` stays open for it. It catches the class of mistake that costs a
+      release, for the price of one process.
+
 - [x] **P-52 — The totals never included the web workspace** · S · P-49 · Found by checking
       whether `P-49`'s new skip report covered every runner. It did not, and neither did the
       counters it sits under.
@@ -8202,11 +8228,16 @@ because each is a decision rather than a defect:
       are uploaded whatever happens, because the first failure on a machine nobody has tested is
       exactly when the log *is* the finding.
 
-      It also parse-checks every `.ps1`, which nothing else here can: PowerShell publishes no
-      arm64 container, the amd64 one dies under QEMU on an Apple Silicon machine, and the
-      `dotnet tool` package is broken — three routes tried, all dead. A parse error in
-      `ms-setup.ps1` would break every Windows install, and until this job existed nothing
-      anywhere would have caught it.
+      It also parse-checks every `.ps1`. A parse error in `ms-setup.ps1` would break every Windows
+      install, and for a while nothing anywhere would have caught it: PowerShell publishes no arm64
+      container, the amd64 one dies under QEMU on an Apple Silicon machine, and the `dotnet tool`
+      package is broken — three routes tried, all dead.
+
+      **A fourth route works, and the check no longer depends on this job** (`P-53`). `P-51` put
+      the official `linux-arm64` PowerShell tarball in the toolchain image, so the parse check runs
+      in the ordinary test suite on every machine, disabled CI or not. All three scripts parse.
+      That is not this job's other assertions — installing, the services, the firewall, the upgrade
+      — which still need Windows and still keep this ticket open.
 
       **The job has never run**, because CI is disabled at the operator's request. Tick H-06 when
       it goes green, not before.
