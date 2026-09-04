@@ -688,6 +688,16 @@ export class ProbeEndpoint {
         return undefined;
       }
       const gid = hello.gid === '' ? randomUUID() : hello.gid;
+      // **One session per probe here too** (`P-65`). `#openSession` overwrites the map entry, so
+      // without this the old connection is merely orphaned: nothing points at it and nothing
+      // closes it, and it lives on until its idle timer fires three heartbeats later. The
+      // registry branch below has always done this; the asymmetry was invisible because the test
+      // that names the behaviour drives *this* branch, and passed on that idle timer instead.
+      const superseded = this.#sessions.get(gid);
+      if (superseded !== undefined) {
+        logger.info({ gid }, 'replacing an existing session for this probe');
+        superseded.connection.destroy('superseded by a newer connection');
+      }
       const session = this.#openSession(gid, hello, connection, context, true);
       this.#welcome(session, connection, context, true);
       logger.info(

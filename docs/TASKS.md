@@ -5575,6 +5575,42 @@ because each is a decision rather than a defect:
       like `spoolDropped`: any rate above zero is data that no longer exists anywhere, and it
       should carry a limit that says so. Another protocol bump, for the reason `P-61` documents.
 
+- [x] **P-65 — The session-replacement test was watching an idle timer** · S · P-61 · The full
+      suite went red on "replaces a stale session when the same probe reconnects" while `P-61` was
+      in the tree, and the version bump looked like the cause: it passed at protocol 10 and failed
+      at 11, three times each. It is not the cause. Six runs at protocol 10 failed once — the test
+      is a coin flip, and it was one before anything in `P-61` was written.
+
+      Measuring where the time went settled it. The second probe connects in 6 ms and is welcomed
+      in 1 ms; the first socket then takes **3,000 ms** to close, against a `waitForClose` timeout
+      of exactly 3,000 ms. That number is `heartbeatIntervalMs * 3`, the connection's idle timeout
+      — and a log spy confirms what closes it: `connection idle, closing`, never `replacing an
+      existing session for this probe`. **The test has never observed a replacement.** It watched
+      an unrelated timer expire at the same instant it gave up, and won that race about five times
+      in six.
+
+      The reason the replacement never ran is a real asymmetry. `ProbeEndpoint` has a no-registry
+      branch — pre-`R-01` behaviour, kept because, as its comment says, it is "what the
+      transport's own tests drive, and leaving it in means those tests are not secretly testing
+      the registry". That branch calls `#openSession`, which does `this.#sessions.set(gid, …)` and
+      **overwrites**: nothing points at the old connection afterwards and nothing closes it, so it
+      lives until its idle timer three heartbeats later. The registry branch has always destroyed
+      the superseded connection properly. So the one test that names the behaviour drove the one
+      branch that did not have it — and could not have failed for the right reason.
+
+      Both halves fixed. The no-registry branch supersedes the same way, and the test runs with a
+      30-second heartbeat so the idle timeout is 90 s and nothing but a replacement can close that
+      socket inside the second it now allows. It went from 3,010 ms and one failure in six to
+      13–29 ms and six for six, and it fails deterministically when the supersede is removed.
+
+      **A production shutdown hang was suspected here and does not exist.** Removing the supersede
+      made the test take 90 s rather than 1 s, which pointed at `stop()`: it closes only what is in
+      `#sessions`, and `server.close()` waits for every open connection. Two candidates were tried
+      — a peer that ignores its `bye`, and a probe left pending approval, which `#openSession`
+      deliberately does not store — and `stop()` returned in 0 ms for both. The 90 s was the
+      orphaned connection alone, which is the defect above. Recorded because the reasoning is
+      sound and the conclusion is still wrong, and the next person will re-derive it.
+
 - [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so
       every check submitted from then on vanishes without appearing in `deferred`, `refused`, or

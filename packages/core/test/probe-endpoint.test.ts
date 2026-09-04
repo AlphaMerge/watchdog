@@ -439,8 +439,17 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
   });
 
   it('replaces a stale session when the same probe reconnects', async () => {
+    // **The idle timer must not be able to pass this test** (`P-65`). It used to: the default
+    // config makes the idle timeout three heartbeats — exactly the 3,000 ms `waitForClose` waits
+    // — so the old socket died of idleness at the same instant the test gave up, and which of the
+    // two won was luck. It lost about one run in six. Worse, it was never observing a replacement
+    // at all: the log said `connection idle, closing`, never `replacing an existing session`,
+    // because this endpoint is built without a registry and that branch had no replacement in it.
+    //
+    // A heartbeat interval of 30 s puts the idle timeout at 90 s, so nothing but the replacement
+    // can close `first` inside the second below.
     const endpoint = new ProbeEndpoint({
-      config: endpointConfig(dir),
+      config: endpointConfig(dir, { heartbeatIntervalMs: 30_000 }),
       logger: silentLogger,
       coreVersion: '0.1.0',
     });
@@ -455,7 +464,14 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
       second.send(hello({ gid: 'probe-b' }));
       await second.waitFor((m) => m.type === 'welcome');
 
-      await first.waitForClose();
+      const startedAt = process.hrtime.bigint();
+      await first.waitForClose(1_000);
+      const closedAfterMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+      assert.ok(
+        closedAfterMs < 500,
+        `the supersede must close the old socket at once, took ${closedAfterMs.toFixed(0)} ms`,
+      );
       assert.equal(endpoint.connectedProbes.length, 1, 'a reconnect must not leave two sessions');
 
       second.close();
