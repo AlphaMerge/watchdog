@@ -5267,6 +5267,28 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-52 — The totals never included the web workspace** · S · P-49 · Found by checking
+      whether `P-49`'s new skip report covered every runner. It did not, and neither did the
+      counters it sits under.
+
+      `test-all.sh` sums `node:test`'s `ℹ tests` lines. `@ms/web` runs **vitest**, which prints a
+      different shape — `Tests  315 passed (315)` — so its tests were absent from every total this
+      script has ever reported. Verified rather than reasoned: run over the web workspace alone it
+      printed **`tests 0 · pass 0 · fail 0`** and **`clean`**, for a run of 315 tests.
+
+      **Failures were never actually missed** — a failing vitest run comes back in the exit status
+      and the script checks that — so this was a reporting defect rather than a green-when-red one.
+      What was genuinely invisible is skips: `P-49`'s report reads `node:test`'s
+      `﹣ name # reason` shape, so a vitest suite skipping itself would have been silent in exactly
+      the way `P-49` exists to prevent. The gap was in the fix, one workspace over.
+
+      Vitest's summary is now parsed for total, passed, failed and skipped and folded into the
+      counters, which also means a vitest failure trips the `failed > 0` branch on its own rather
+      than relying on the exit status alone. Both shapes it emits under failure and under skips
+      were checked against synthesised summaries, since neither occurs in a green log.
+
+      **The full suite now reads 3,565 rather than 3,250** — the same run, counted properly.
+
 - [x] **P-51 — The Windows transport was only ever tested against a fake** · S · P-49 · The last
       suite still skipping once every compose dependency was up: `no pwsh on this machine`. It
       gates `windows-transport.test.ts`'s real-PowerShell cases, and its own header says it "runs

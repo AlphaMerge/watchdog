@@ -44,6 +44,32 @@ failed="$(sum fail)"
 cancelled="$(sum cancelled)"
 skipped="$(sum skipped)"
 
+# **The web workspace runs `vitest`, which does not print `node:test`'s counters** (`P-52`). Summing
+# only the `ℹ` lines silently left its 315 tests out of every total this script has ever reported,
+# and — worse — a vitest run that skipped some would have been invisible, since the skip report
+# below reads `node:test`'s `﹣ name # reason` shape. Failures were always caught, because they
+# come back in the exit status, but "how much ran" was wrong by a workspace.
+#
+# Its summary, once the colour is stripped, is one line per run:
+#     Tests  315 passed (315)
+#     Tests  310 passed | 5 skipped (315)
+plain="$(sed 's/\x1b\[[0-9;]*m//g' "${log}" 2>/dev/null || cat "${log}")"
+vitest_of() {
+  printf '%s\n' "${plain}" | grep -E '^ *Tests +[0-9]+' | grep -oE "$1" |
+    awk '{ total += $1 } END { print total + 0 }'
+}
+# The parenthesised figure is the run's total; the rest are named.
+vitest_tests="$(printf '%s\n' "${plain}" | grep -E '^ *Tests +[0-9]+' | grep -oE '\([0-9]+\)$' |
+  tr -d '()' | awk '{ total += $1 } END { print total + 0 }')"
+vitest_passed="$(vitest_of '[0-9]+ passed')"
+vitest_failed="$(vitest_of '[0-9]+ failed')"
+vitest_skipped="$(vitest_of '[0-9]+ skipped')"
+
+tests=$((tests + vitest_tests))
+passed=$((passed + vitest_passed))
+failed=$((failed + vitest_failed))
+skipped=$((skipped + vitest_skipped))
+
 printf '    tests %s · pass %s · fail %s · cancelled %s · skipped %s\n' \
   "${tests}" "${passed}" "${failed}" "${cancelled}" "${skipped}"
 
