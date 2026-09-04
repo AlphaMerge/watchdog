@@ -1,0 +1,112 @@
+Raw output — the tail of each workspace's run. The summary tables are emitted at the end
+of each suite by design, so every measured number is here; the per-test progress lines
+above them are not. Captured 2026-09-04, load average 2.74 at start, 4.56 at finish.
+
+════════════════════════ packages/probe ════════════════════════
+=== load at start: load: 2.74 5.82 6.40 ===
+✔ process runner start-up cost (3347.846294ms)
+
+    measured, 5000 sensors at 60 s disconnected for 1 min (set MS_SOAK_MINUTES=60 for the criterion's full hour):
+      spooled         5,000 readings, 1.0 MB in 1 segments, 11 ms to write
+      an hour     62 MB projected at 216 bytes a reading, against a 2 GiB shipped default (3.0% of it)
+      replayed    17 ms in 3 batches, 286,854 readings/s
+      lost 0, duplicated 0, corrupt 0; caught up 3442x faster than the outage
+▶ a disconnect long enough to matter
+  ✔ spools an hour of readings, survives a restart, and replays every one exactly once (52.319792ms)
+(node:2859) Warning: Closing file descriptor 18 on garbage collection
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:2859) [DEP0137] DeprecationWarning: Closing a FileHandle object on garbage collection is deprecated. Please close FileHandle objects explicitly using FileHandle.prototype.close(). In the future, an error will be thrown if a file descriptor is closed during garbage collection.
+  ✔ keeps its place when the connection drops again mid-replay (60.748791ms)
+✔ a disconnect long enough to matter (113.973958ms)
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (0.601291ms)
+
+    shipped default (64): 90s, pool 64, 7630 checks completed of 7630 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (92000.776626ms)
+
+    old default (7): 90s, pool 7, 4065 checks completed of 7536 dispatched, 3471 refused
+  ✔ shows what the old core-count default did with the same load (91462.612208ms)
+
+    demand-driven (4 -> 64): 90s, pool 64, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (91533.082792ms)
+
+    small, fixed 48: 15s, pool 48, 15 checks completed of 15 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+  ✔ costs a small installation a fraction of what a fixed pool reserves (33462.269348ms)
+  ﹣ sweeps pool sizes, which is how the default was chosen (0.781375ms) # set MS_BENCH_SWEEP=1 to run the pool-size sweep
+
+    icmp.ping as it ships (64): 90s, pool 64, 7630 checks completed of 7630 dispatched, 0 refused
+  ✔ shows what the sensor type we actually ship costs the pool (93640.358209ms)
+
+    before P-07, 3 s checks: 90s, pool 256, 7798 checks completed of 7798 dispatched, 0 refused
+
+    measured: 5000 sensors at 60s, 200 ms checks, 8 cores, 1.5 minutes per run
+    dispatch jitter is due -> check started; the budget is p95 under 1000 ms
+      shipped default (64)        200 ms check  pool  64       jitter p50     4 ms  p95    209 ms  p99    214 ms  (wheel p95 8 ms, wait p95 206 ms)  rss + 622 MB at 64 workers  refused 0
+      old default (7)             200 ms check  pool   7       jitter p50 18755 ms  p95  28951 ms  p99  29073 ms  (wheel p95 7 ms, wait p95 28949 ms)  rss +  30 MB at  7 workers  refused 3471
+      demand-driven (4 -> 64)     200 ms check  pool  64       jitter p50     7 ms  p95    213 ms  p99    311 ms  (wheel p95 8 ms, wait p95 207 ms)  rss +  11 MB at  4 workers  refused 0
+      small, fixed 48             200 ms check  pool  48       jitter p50     7 ms  p95     95 ms  p99     95 ms  (wheel p95 95 ms, wait p95 0 ms)  rss + 162 MB at 48 workers  refused 0
+      small, demand-driven        200 ms check  pool  48->  4  jitter p50     3 ms  p95     30 ms  p99     30 ms  (wheel p95 30 ms, wait p95 0 ms)  rss +  10 MB at  4 workers  refused 0
+      icmp.ping as it ships (64)  600 ms check  pool  64       jitter p50    11 ms  p95    612 ms  p99    624 ms  (wheel p95 11 ms, wait p95 606 ms)  rss + 513 MB at 64 workers  refused 0
+      before P-07, 3 s checks    3000 ms check  pool 256       jitter p50  1364 ms  p95   3171 ms  p99   3228 ms  (wheel p95 226 ms, wait p95 3158 ms)  rss +2068 MB at 256 workers  refused 0
+  ✔ shows what it cost before P-07 made the check cheaper (106642.492467ms)
+✔ scheduler benchmark (P-15) (508749.313984ms)
+  sizing pass over 5000 assignments: median 0.42 ms, worst 1.21 ms (budget 50 ms)
+▶ one sizing pass at the v1 target (P-48)
+  ✔ sums 5000 assignments in well under a tick (342.306125ms)
+✔ one sizing pass at the v1 target (P-48) (343.174083ms)
+ℹ tests 19
+ℹ suites 5
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 603970.144069
+
+[exited with code 0]
+
+════════════════════════ packages/core ════════════════════════
+      pacing          the replaying probe was asked to wait up to 50 ms; the live one 0 ms
+▶ replay under load
+  ✔ keeps storing live readings promptly while a probe empties an hour of backlog (15319.604507ms)
+  ✔ lets one probe catch up at full speed, because one is not a fairness problem (0.625125ms)
+  ✔ lets a probe that has caught up rejoin the fast path on its very next batch (521.580334ms)
+✔ replay under load (16821.640092ms)
+
+    measured, 15000 channels at 60s (the v1 target):
+      generated  300000 raw readings in 1045 ms
+      raw -> 5m  571 ms for 4 buckets (143 ms per 5-minute bucket, budget 300,000 ms)
+      5m  -> 1h  141 ms for 15000 buckets
+      1h  -> 1d  131 ms for 15000 buckets
+      on disk    raw 103.1 B/row, 5m 116.3 B/row
+▶ rollup performance at the v1 target
+  ✔ rolls up a full five-minute bucket for 15,000 channels well inside its period (1917.730542ms)
+
+    measured, 300 channels x 1440 readings (one day per channel, the production chunk shape):
+      compressed 40.0 MB -> 4.0 MB (10.1x) in 138 ms
+      graph read against compressed chunks 1.3 ms
+  ✔ compresses a day of readings per channel by an order of magnitude (1610.144168ms)
+✔ rollup performance at the v1 target (3786.362918ms)
+
+    measured, the same 5,000 objects in **one** request (P-19):
+      bulk              2.2 s     2,267 objects/s   93% spare
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (2299.687251ms)
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s:
+      serial           22.8 s       219 objects/s   24% spare
+      8 in flight       6.6 s       756 objects/s   78% spare
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+  ✔ creates a 5,000-object tree through the API inside its budget (29453.389263ms)
+✔ tree build performance (32600.134681ms)
+ℹ tests 16
+ℹ suites 8
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 84515.869747
