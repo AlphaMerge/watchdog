@@ -80,7 +80,15 @@ function serve(
   handle: (socket: Duplexish, options: MailServerOptions) => void,
   options: MailServerOptions,
 ): Promise<RunningServer> {
+  // Tracked so `close()` can end them. `Server.close` waits for open connections, and a mail
+  // conversation left mid-dialogue by a test is one — the same teardown hang `P-63` fixed in the
+  // HTTP simulator, in the one helper every mail simulator here is built on.
+  const sockets = new Set<Socket>();
   const server: Server = createTcpServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => {
+      sockets.delete(socket);
+    });
     handle(wrap(socket, options), options);
   });
   return new Promise((resolve) => {
@@ -90,6 +98,8 @@ function serve(
         port: typeof address === 'object' && address !== null ? address.port : 0,
         close: () =>
           new Promise<void>((done) => {
+            for (const socket of sockets) socket.destroy();
+            sockets.clear();
             server.close(() => {
               done();
             });

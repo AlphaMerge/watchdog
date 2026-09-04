@@ -5548,6 +5548,38 @@ because each is a decision rather than a defect:
       Smallest of the four: a `discarded` counter incremented in the `stopped` branch, and a
       channel to carry it.
 
+- [x] **P-63 — A simulator's `stop()` waits for connections it never destroys** · S · — · Found by
+      the full suite going red in `packages/simulators` during `P-60`, in a test that had passed
+      every run before it: "shuts down while a request is still hanging". It looked like
+      contention — 302 s for a package that takes five — but CPU load alone would not reproduce
+      it. What reproduces it every time is calling `stop()` one turn of the event loop after the
+      request instead of fifty milliseconds after.
+
+      `HttpSimulator` tracked the sockets parked in a hang route, and only those. A connection that
+      has been accepted but whose request has not reached the handler yet is in no set at all and
+      is still open, and `Server.close()` waits for anything open — so a teardown racing a request
+      in flight waits on a client that was never going to finish. Which of those two states a
+      loaded machine produces is luck, which is why this showed up as an unrelated package failing
+      once in a while rather than as a bug. Every accepted connection is tracked now, and the hang
+      route is just the easiest way to arrange the case.
+
+      **The same helper, the same defect, in the mail simulators.** `serve()` in `mail-servers.ts`
+      backs SMTP, POP3 and IMAP and closed exactly the same way; it destroys its sockets now too.
+      `ssh-server.ts` already had a 500 ms escape hatch with a comment naming this precise problem,
+      so it gives up rather than hangs — left alone.
+
+      **The test could not report this, only suffer it.** The client is deliberately never aborted,
+      because an aborted client tidies the socket up and hides the defect. The cost was that when
+      the assertion failed, the socket kept the event loop alive and the run stopped with no output
+      at all — the pathology the test's own comment describes, arriving in the test itself. It
+      aborts *after* the race now: late enough that the client cannot tidy up before `stop()` is
+      measured, early enough that a failure is a failure. The budget went from 2 s to 5 s for the
+      same reason — the claim is that it does not hang, and a hang is unbounded, so a larger number
+      catches the defect just as surely and never fires on a busy machine.
+
+      Two rows, 0 ms and 50 ms. Only the first fails against the old tracking, and the pair is the
+      whole point: 50 ms was passing for a reason that had nothing to do with what it asserts.
+
 - [x] **P-54 — The documentation is a graph and nothing checked its edges** · S · H-07 · Adding a
       finding means adding a line to `docs/README.md`'s index by hand, and the two findings written
       on 2026-09-04 were missing from it until somebody happened to look. A typo in a path would

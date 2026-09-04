@@ -1,5 +1,6 @@
 import { createServer as createHttpServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
+import type { Socket } from 'node:net';
 import { close, listen } from './net.js';
 
 /**
@@ -90,8 +91,16 @@ export class HttpSimulator {
   readonly #options: HttpSimulatorOptions;
   readonly #requests: RecordedRequest[] = [];
   readonly #consumed = new Map<string, number>();
-  /** Sockets left hanging, so `stop()` can end them rather than waiting on a client that will not. */
-  readonly #hanging = new Set<{ destroy: () => void }>();
+  /**
+   * Every accepted connection, so `stop()` can end them rather than wait on a client that will
+   * not.
+   *
+   * Every one, not only the sockets parked in a hang route. `close()` waits for anything open,
+   * and a request that has been accepted but has not reached the handler yet is open — so a
+   * teardown racing a request in flight used to wait for a client that was never going to
+   * finish (`P-63`). The hang route is simply the case that makes it easy to arrange.
+   */
+  readonly #connections = new Set<Socket>();
   #server: Server | undefined;
   #port = 0;
 
@@ -127,16 +136,22 @@ export class HttpSimulator {
         : createHttpsServer(this.#options.tls, (request, response) => {
             void this.#handle(request, response);
           });
+    server.on('connection', (socket: Socket) => {
+      this.#connections.add(socket);
+      socket.on('close', () => {
+        this.#connections.delete(socket);
+      });
+    });
     this.#server = server;
     this.#port = await listen(this.#server);
     return this.#port;
   }
 
   async stop(): Promise<void> {
-    // Hanging sockets first: `close()` waits for open connections, and a hang is an open
-    // connection by definition, so a test that scripted one would otherwise hang its own teardown.
-    for (const socket of this.#hanging) socket.destroy();
-    this.#hanging.clear();
+    // Connections first: `close()` waits for open ones, and a hang is an open connection by
+    // definition, so a test that scripted one would otherwise hang its own teardown.
+    for (const socket of this.#connections) socket.destroy();
+    this.#connections.clear();
     await close(this.#server);
     this.#server = undefined;
   }
@@ -162,7 +177,6 @@ export class HttpSimulator {
 
     const script = this.#scriptFor(url);
     if (script.hang === true) {
-      this.#hanging.add(request.socket);
       return;
     }
     if (script.reset === true) {

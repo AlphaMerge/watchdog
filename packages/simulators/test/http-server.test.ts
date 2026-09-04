@@ -99,28 +99,50 @@ describe('the HTTP simulator', () => {
     await assert.rejects(() => pending);
   });
 
-  it('shuts down while a request is still hanging, rather than waiting for it', async () => {
-    // **A hang is an open connection, and `close()` waits for open connections** — so a simulator
-    // that did not destroy them would hang its own teardown. That failure is worse than it looks:
-    // it does not fail, it *stops*, and what a developer sees is a test run that never finishes
-    // with no indication of which fixture is holding it. The client here is deliberately not
-    // aborted, because an aborted client tidies the socket up and hides the bug.
-    const hanging = new HttpSimulator({ routes: { '/hang': { hang: true } } });
-    await hanging.start();
-    const pending = fetch(hanging.url('/hang')).catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  // **A hang is an open connection, and `close()` waits for open connections** — so a simulator
+  // that did not destroy them would hang its own teardown. That failure is worse than it looks:
+  // it does not fail, it *stops*, and what a developer sees is a test run that never finishes
+  // with no indication of which fixture is holding it. The client is deliberately never aborted,
+  // because an aborted client tidies the socket up and hides the bug.
+  //
+  // The wait before `stop()` is the whole point of the table (`P-63`). At 50 ms the request has
+  // reached the hang route and the socket is parked there; at 0 ms it has been accepted and has
+  // not been dispatched yet, which is a connection `close()` waits for and nothing was tracking.
+  // Only the second one fails against a simulator that destroys the hang route's sockets alone —
+  // and which of the two a loaded machine produces is luck, so this used to be a run that broke
+  // somewhere unrelated once in a while.
+  for (const waitMs of [0, 50]) {
+    it(`shuts down ${String(waitMs)} ms into a request that is still hanging`, async () => {
+      const hanging = new HttpSimulator({ routes: { '/hang': { hang: true } } });
+      await hanging.start();
+      // Abortable, but not aborted until the race is over: aborting first tidies the socket up
+      // and hides the defect, while never aborting at all means a simulator that *does* hang
+      // takes the whole test process down with it — no failure, just a run that stops. The
+      // ordering keeps both properties.
+      const controller = new AbortController();
+      const pending = fetch(hanging.url('/hang'), { signal: controller.signal }).catch(
+        () => undefined,
+      );
+      // Always a real turn of the event loop, even at 0: the connection has to be *established*
+      // for this to test anything, and calling `stop()` in the same microtask as `fetch()` just
+      // finds a server with nothing attached to it.
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
 
-    const stopped = await Promise.race([
-      hanging.stop().then(() => 'stopped'),
-      new Promise((resolve) => {
-        setTimeout(() => {
-          resolve('still waiting');
-        }, 2_000).unref();
-      }),
-    ]);
-    assert.equal(stopped, 'stopped');
-    await pending;
-  });
+      const stopped = await Promise.race([
+        hanging.stop().then(() => 'stopped'),
+        new Promise((resolve) => {
+          // Generous on purpose: the claim is that it does not hang, and a hang is unbounded, so
+          // a bigger number catches the defect just as surely and never fires on a busy machine.
+          setTimeout(() => {
+            resolve('still waiting');
+          }, 5_000).unref();
+        }),
+      ]);
+      controller.abort();
+      await pending;
+      assert.equal(stopped, 'stopped');
+    });
+  }
 
   it('resets the connection when told to, which is not a status code', async () => {
     await assert.rejects(() => get('/reset'));
