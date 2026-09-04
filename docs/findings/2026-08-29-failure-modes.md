@@ -92,6 +92,29 @@ answered by the state machine, and the question underneath it — "and the data 
 is a different test. `92ec56a` makes the drain say when it is making no progress, so the next one
 of these is loud rather than silent.
 
+**Amended 2026-09-04 (`P-74`), and the amendment is a new row rather than a correction.** This
+audit is of §13 as it stood, and §13 had no row for the case that actually followed from the two
+paragraphs above: a probe that is **connected** and has stopped sending results. `615c9f3` was
+exactly that fault and was found by `H-01`'s soak, and the table still described only the probe
+that goes *away* — so the specification named the failure it had already suffered nowhere.
+
+`WORKFLOW.MD §13` now carries **"Probe connected but sending no results"**, with the same answer
+as the row above, because the sensors are equally unasked. What proves it: `probe-delivery.test.ts`
+— fourteen table-driven rows over the pure rule, including forty consecutive spool-replay batches
+that must not trip it and the start-up grace that must hold — and `probe-delivery-watch.test.ts`,
+seven on the sweep, including that three sweeps over a stalled probe write **one** transition
+rather than three, and that a probe which disconnects while silent and reconnects still silent can
+be marked again.
+
+`P-76` adds the finer case the core cannot see, and it is deliberately *not* a §13 row: a probe
+that is delivering while some of what it carries is not being checked is a Warning on Probe Health
+(`checksCompleting`, `checksBehind`), not a failure of the system to survive anything. Proved by
+`check-flow.test.ts`.
+
+The lesson, again and pointing the other way: this audit read every row of the table and could not
+have found the row that was missing from it. Auditing a specification against the code says whether
+the code matches; it does not say whether the specification is complete.
+
 ### 4. Notification delivery fails
 
 > Logged, retried with backoff, surfaced on Core Health; the alarm itself is not lost
