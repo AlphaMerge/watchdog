@@ -6020,7 +6020,7 @@ because each is a decision rather than a defect:
       separates them is `connected` versus `delivering`, and the second is the one that can be Down
       while the first is Up.
 
-- [ ] **P-76 — A probe can be delivering and still have sensors that are not being checked** · M ·
+- [x] **P-76 — A probe can be delivering and still have sensors that are not being checked** · M ·
       P-74 · The honest boundary of `P-74`, which is probe-level by construction. One wedged sensor
       among five thousand healthy siblings changes nothing: the probe is delivering, so the
       predicate is false. Marking 4,999 working sensors Unknown to catch one would be a false claim
@@ -6037,6 +6037,34 @@ because each is a decision rather than a defect:
       Also found by that reading and worth folding in: `spoolResult`'s `.catch` in `main.ts` logs a
       line and the reading is gone, counted nowhere — a small `P-74` of its own, two counters to
       close.
+
+      **Landed, and narrower than the design that proposed it.** `CheckFlowWatchdog` answers one
+      question — are dispatched checks settling? — rather than the five-code precedence ladder the
+      design sketched. The other four codes it proposed are already channels: a latched pool is
+      `poolState` (`P-62`), a probe delivering nothing is `delivering` (`P-74`), and a wheel that
+      has stopped ticking shows in `schedulerLag`. Adding a second way to say each of those would
+      have been a second alarm for one outage.
+
+      **Two clauses, and the second is the whole of why this is not noisy.** Something outstanding
+      far past any timeout is necessary; *nothing at all having completed since it was dispatched*
+      is what separates a stopped runner from one slow check while the rest of the probe works.
+      A check accepted by a runner **must** settle — both runners emit a result on timeout, on a
+      worker or child dying, and on stop — so the first clause is a proved fault rather than a
+      guess, and the second stops it firing on the ordinary case of a check taking its time.
+
+      Warning rather than Down, deliberately. `ms.probe.delivery` is Down because a probe
+      delivering nothing is monitoring nothing. This fires while the probe *is* delivering, so the
+      sensors still completing are genuinely fine; `checksBehind` says how much of the probe is
+      affected, and the core decides what that means for any sensor's state. Marking the healthy
+      ones Unknown to catch the wedged ones is exactly the false claim `P-74` refused to make.
+
+      The structural test grew a third directory. It read `src/runner/` for `P-61`, gained
+      `listeners/` for `P-64`, and now `health/` — which is the pattern rather than the exception:
+      a rule that only looks where the last defect was found is a rule that finds the last defect,
+      so the list grows whenever a subsystem starts measuring itself.
+
+      Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
+      reading, counted nowhere.
 
 - [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
       running eslint over a directory rather than a file during `P-62`: a real

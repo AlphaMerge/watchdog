@@ -164,12 +164,14 @@ describe('the probe’s own health report', () => {
     );
     assert.ok(declaration.includes('scheduler'), 'found the ProbeHealthSources declaration');
 
-    // **Both directories, because reading one is how `P-64` stayed hidden.** This test was
-    // written for `P-61` and pointed at `src/runner/`, so the two listeners — which keep counters
-    // of exactly the same kind, and reached exactly as far — were outside its reach. A rule that
-    // only looks where the last defect was found is a rule that finds the last defect.
+    // **Every directory that keeps counters, because reading one is how `P-64` stayed hidden.**
+    // This test was written for `P-61` and pointed at `src/runner/` alone, so the two listeners —
+    // which keep counters of exactly the same kind, and reached exactly as far — were outside its
+    // reach. `P-64` added `listeners/`; `P-76` added `health/`, where the check-flow watchdog
+    // lives. A rule that only looks where the last defect was found is a rule that finds the last
+    // defect, so the list grows whenever a subsystem starts measuring itself.
     const checked: string[] = [];
-    for (const where of ['runner', 'listeners']) {
+    for (const where of ['runner', 'listeners', 'health']) {
       const dir = join(root, 'src', where);
       for (const file of await readdir(dir)) {
         if (!file.endsWith('.ts')) continue;
@@ -186,8 +188,8 @@ describe('the probe’s own health report', () => {
       }
     }
     assert.ok(
-      checked.length >= 4,
-      `expected both runners and both listeners to be checked, saw ${checked.join(', ')}`,
+      checked.length >= 5,
+      `expected both runners, both listeners and the check-flow watchdog, saw ${checked.join(', ')}`,
     );
   });
 
@@ -204,6 +206,32 @@ describe('the probe’s own health report', () => {
     }).report();
     assert.equal(dead.poolState, 1, 'a state an operator can alarm on');
     assert.equal(dead.discarded, 412, 'and the volume behind it');
+  });
+
+  it('says whether dispatched checks are coming back, and how many sensors are behind', () => {
+    // `P-76`. The probe is delivering — `P-74`'s predicate is false — and part of what it carries
+    // is not being checked. Only the probe can see that, and only as a Warning: the sensors that
+    // *are* completing are fine, and saying otherwise would wreck their SLA.
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      checkFlow: () => ({
+        completing: 0,
+        outstanding: 7,
+        oldestOutstandingMs: 420_000,
+        behind: 12,
+      }),
+    }).report();
+    assert.equal(report.checksCompleting, 0);
+    assert.equal(report.checksBehind, 12);
+    assert.equal(report.checksOutstanding, 7);
+    assert.equal(report.checkStalledMs, 420_000);
+  });
+
+  it('says nothing about check flow on a build that does not watch it', () => {
+    const report = reporter({}).report();
+    assert.equal(report.checksCompleting, undefined);
+    assert.equal(report.checksBehind, undefined);
   });
 
   it('carries what each listener heard, accepted and turned away', () => {

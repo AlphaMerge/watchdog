@@ -1,5 +1,6 @@
 import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
+import type { CheckFlowStats } from './check-flow.js';
 import type { ProcessRunnerStats } from '../runner/process-runner.js';
 import type { SyslogListenerStats } from '../listeners/syslog-listener.js';
 import type { TrapListenerStats } from '../listeners/trap-listener.js';
@@ -40,6 +41,8 @@ export interface ProbeHealthSources {
    * has to stay absent: a build with no syslog listener must gap its channels rather than report
    * a confident zero that cannot be told from a listener nothing is sending to.
    */
+  /** Whether dispatched checks are coming back, absent on a build without the watchdog. */
+  checkFlow?: () => CheckFlowStats;
   trapListener?: () => TrapListenerStats;
   syslogListener?: () => SyslogListenerStats;
   /** Absent when this build runs no spool. */
@@ -80,6 +83,7 @@ export class ProbeHealthReporter {
     const scheduler = this.#sources.scheduler();
     const pool = this.#sources.pool();
     const children = this.#sources.children?.();
+    const flow = this.#sources.checkFlow?.();
     const trap = this.#sources.trapListener?.();
     const syslog = this.#sources.syslogListener?.();
     const spool = this.#sources.spool?.();
@@ -123,6 +127,14 @@ export class ProbeHealthReporter {
             childRefused: children.refused,
             childTimedOut: children.timedOut,
             childCrashes: children.crashed,
+          }),
+      ...(flow === undefined
+        ? {}
+        : {
+            checksCompleting: flow.completing,
+            checksBehind: flow.behind,
+            checksOutstanding: flow.outstanding,
+            checkStalledMs: flow.oldestOutstandingMs,
           }),
       ...(trap === undefined
         ? {}

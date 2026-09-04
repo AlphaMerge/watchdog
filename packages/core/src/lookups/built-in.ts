@@ -152,6 +152,27 @@ const PROBE_DELIVERY: LookupDefinition = {
   ],
 };
 
+/**
+ * Whether a probe is getting back the checks it dispatches (`P-76`).
+ *
+ * **Warning rather than Down, and the distinction is the whole ticket.** `ms.probe.delivery` is
+ * Down because a probe delivering nothing is monitoring nothing. This one fires when the probe is
+ * delivering — other checks are completing — and some of what it dispatched is not coming back.
+ * The probe is working; part of what it carries is not being checked. Down would overstate it and
+ * would collide with the case that genuinely is one.
+ */
+const PROBE_CHECKS: LookupDefinition = {
+  id: 'ms.probe.checks',
+  name: 'Probe check flow',
+  description: 'Whether checks this probe dispatched are settling.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'warning', text: 'checks were dispatched and are not coming back' },
+    { value: 1, state: 'up', text: 'checks are settling' },
+  ],
+};
+
 export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
@@ -159,4 +180,5 @@ export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   PROBE_PROTOCOL,
   PROBE_POOL,
   PROBE_DELIVERY,
+  PROBE_CHECKS,
 ];

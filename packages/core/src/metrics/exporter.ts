@@ -235,6 +235,16 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'checksCompleting',
+    name: 'ms_probe_checks_settling',
+    help: '0 when this probe dispatched checks that are not coming back.',
+  },
+  {
+    key: 'checksBehind',
+    name: 'ms_probe_sensors_behind',
+    help: 'Sensors whose last completed check is older than four of their own intervals.',
+  },
+  {
     key: 'trapReceived',
     name: 'ms_probe_traps_received_total',
     help: 'SNMP traps this probe’s listener accepted.',

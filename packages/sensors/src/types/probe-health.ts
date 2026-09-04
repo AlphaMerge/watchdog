@@ -42,6 +42,15 @@ const CHANNELS: readonly ChannelDef[] = [
   // How long since anything arrived. No limit: the lookup above is the alarm, and a second one
   // for one outage is what `CLAUDE.md` forbids.
   { key: 'resultAge', name: 'Since last result', unit: 's' },
+  // **The half the core cannot see** (`P-76`). `delivering` above asks whether anything is coming
+  // back at all, which is a question about arrivals and so the core's to answer. This asks whether
+  // the checks the probe *dispatched* are settling — visible only on the probe, where dispatch and
+  // completion sit on one thread against a monotonic clock. Warning, not Down: the probe is
+  // working, and part of what it carries is not being checked.
+  { key: 'checksCompleting', name: 'Checks settling', lookup: 'ms.probe.checks' },
+  // How much of the probe is affected, which the state above cannot say. No limit: one outage,
+  // one alarm, and the lookup is already it.
+  { key: 'checksBehind', name: 'Sensors behind schedule', unit: 'sensors' },
   {
     key: 'protocol',
     name: 'Protocol version skew',

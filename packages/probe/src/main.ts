@@ -22,6 +22,7 @@ import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
 import { coreHandlers } from './core-handlers.js';
 import { dueDispatcher, type DueListener } from './due-dispatch.js';
+import { CheckFlowWatchdog } from './health/check-flow.js';
 import { poolSizer } from './pool-sizer.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
@@ -120,7 +121,20 @@ async function main(): Promise<void> {
   // One sink for both runners: a check that ran in a process of its own is spooled, drained and
   // acknowledged exactly like one that ran in a worker, because to everything downstream it is
   // the same reading.
+  // **The single sink both runners settle into** (`P-76`), which is what makes one watchdog able
+  // to see every completion however the check ended. Declared before `spoolResult` so it can be
+  // told; the assignments that give it intervals arrive further down, so it reads them lazily.
+  const checkFlow = new CheckFlowWatchdog({
+    // Through a closure for the reason the dispatcher's `assignments` is: the store is built
+    // after the wheel, so reading the binding here would be its temporal dead zone.
+    intervalFor: (sensorId: number): number | undefined =>
+      assignments.get(sensorId)?.intervalSeconds,
+  });
+
   const spoolResult = (result: CheckResult, meta: ResultMeta): void => {
+    // However it ended. An error is a completion — the runner came back, and a probe reporting
+    // nothing but failures is monitoring and telling the truth, not stalled.
+    checkFlow.completed(result.sensorId);
     logger.debug(
       { sensorId: result.sensorId, outcome: result.outcome, phase: meta.phase },
       'check finished',
@@ -271,6 +285,9 @@ async function main(): Promise<void> {
       isolated,
       pool,
       processRunner,
+      onDispatch: (sensorId) => {
+        checkFlow.dispatched(sensorId);
+      },
     }),
   });
   // Constructed before the wheel is started: `onDue` closes over this binding, and a tick that
@@ -380,6 +397,7 @@ async function main(): Promise<void> {
     // nothing about them — which is how `P-61` went unnoticed: ten numbers, computed and read by
     // nobody, while a probe saturated by shell-outs looked healthy.
     children: () => processRunner.stats(),
+    checkFlow: () => checkFlow.stats(),
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).

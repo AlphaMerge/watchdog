@@ -146,6 +146,10 @@ export class ProbeHealthService {
       // prevent. The lookup's `undefinedState` makes the gap a warning rather than an Up.
       poolState: health?.poolState ?? null,
       discarded: health?.discarded ?? null,
+      // Null for a probe too old to report it — absent is absent, and the lookup's
+      // `undefinedState` makes that a warning rather than a confident "settling".
+      checksCompleting: health?.checksCompleting ?? null,
+      checksBehind: health?.checksBehind ?? null,
       // Null rather than 0 for a probe running no such listener: a channel that gaps says "not
       // running one", and a zero says "running one and hearing nothing", which are different
       // answers to the question an operator is asking.

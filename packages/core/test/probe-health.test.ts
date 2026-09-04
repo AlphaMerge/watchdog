@@ -37,6 +37,8 @@ const FULL: ProbeHealthReport = {
   timedOut: 1,
   discarded: 0,
   poolState: 0,
+  checksCompleting: 1,
+  checksBehind: 0,
   trapReceived: 900,
   trapRejected: 412,
   trapMalformed: 3,
@@ -195,6 +197,17 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { reading } = build(() => connected({ health: noTrap })).read(probeId);
       assert.equal(reading['trapReceived'], null);
       assert.equal(reading['syslogReceived'], 40_000, 'the other one is unaffected');
+    });
+
+    it('warns when a working probe has sensors that are not being checked', () => {
+      // `P-76`, and the reason it is a Warning. The probe is delivering, so `P-74`'s question is
+      // answered yes; part of what it carries is not settling. Down would overstate it and would
+      // collide with the case that genuinely is one.
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, checksCompleting: 0, checksBehind: 12 } }),
+      ).read(probeId);
+      assert.equal(reading['checksCompleting'], 0);
+      assert.equal(reading['checksBehind'], 12, 'and how much of the probe is affected');
     });
 
     it('turns the probe Down when its worker pool has given up', () => {

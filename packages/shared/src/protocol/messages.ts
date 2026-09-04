@@ -41,7 +41,8 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
- * Version 13 adds the listeners' throughput counters (`P-64`), version 12 the worker pool's
+ * Version 14 adds `checksCompleting` and `checksBehind` (`P-76`), version 13 the listeners'
+ * throughput counters (`P-64`), version 12 the worker pool's
  * `discarded` count and `poolState` (`P-62`), version 11 the child-process runner's counters
  * (`P-61`), version 10 the session-pool counters (`P-36`), and version 9 `spoolStalledMs`
  * (`H-01`). **The bump is required by `additionalProperties: false` on
@@ -51,7 +52,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 
 /**
  * The oldest peer version this build still understands.
@@ -373,6 +374,26 @@ export interface ProbeHealthReport {
   syslogReceived?: number;
   syslogRejected?: number;
   syslogMalformed?: number;
+  /**
+   * Whether this probe is getting back the checks it dispatches (`P-76`): 1 yes, 0 no.
+   *
+   * **The half `P-74` cannot see.** The core can tell whether a probe is delivering *anything*,
+   * from arrival times. It cannot tell whether the probe is dispatching checks that never come
+   * back while others complete, because the probe looks perfectly healthy from outside. Only the
+   * probe sees dispatch and completion on one thread against a monotonic clock.
+   */
+  checksCompleting?: number;
+  /**
+   * Sensors whose last completed check is older than four of their own scan intervals.
+   *
+   * A count rather than a state, and a Warning rather than Down: the probe *is* working, and some
+   * of what it carries is not being checked. Marking those sensors Unknown is the core's decision
+   * and not the probe's, and marking the rest would be a false claim about sensors that are fine.
+   */
+  checksBehind?: number;
+  /** Checks accepted by a runner and not yet settled, and how long the oldest has waited. */
+  checksOutstanding?: number;
+  checkStalledMs?: number;
   /** Results written to disk and not yet acknowledged by the core. */
   spoolPending?: number;
   spoolBytes?: number;
@@ -681,6 +702,10 @@ const PROBE_HEALTH_SCHEMA = {
     syslogReceived: { type: 'integer', minimum: 0 },
     syslogRejected: { type: 'integer', minimum: 0 },
     syslogMalformed: { type: 'integer', minimum: 0 },
+    checksCompleting: { type: 'integer', minimum: 0, maximum: 1 },
+    checksBehind: { type: 'integer', minimum: 0 },
+    checksOutstanding: { type: 'integer', minimum: 0 },
+    checkStalledMs: { type: 'integer', minimum: 0 },
     spoolPending: { type: 'integer', minimum: 0 },
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },
