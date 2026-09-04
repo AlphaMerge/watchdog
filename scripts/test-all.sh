@@ -116,7 +116,26 @@ if [ "${cancelled}" -gt 0 ]; then
   echo "    (full detail in the log)"
 fi
 
-if [ "${status}" -ne 0 ] || [ "${failed}" -gt 0 ] || [ "${cancelled}" -gt 0 ]; then
+# **A check nobody runs is a check that does not exist** (`P-62`). `npm run lint` was in
+# `package.json` and in no script here, and CI is off, so nothing ran it: a live
+# `no-unnecessary-condition` error sat in `packages/probe/test/pool-sizer.test.ts` while every
+# suite reported clean. Same family as `P-49` and `P-52` — the run said what it measured, and did
+# not say what it was not measuring at all.
+#
+# Last, and separate from the counters, because a lint error is not a failing test and reading it
+# as one would bury the failures above it. Appended to the same log for the same reason
+# everything else is.
+echo "==> lint"
+"${repo_root}/scripts/dev.sh" "npm run lint" >> "${log}" 2>&1
+lint_status=$?
+if [ "${lint_status}" -ne 0 ]; then
+  echo "    lint failed:"
+  awk '/^\/workspace\//, 0' "${log}" | grep -E '^\s+[0-9]+:[0-9]+|^/workspace/' | head -20 |
+    sed 's/^/      /'
+fi
+
+if [ "${status}" -ne 0 ] || [ "${failed}" -gt 0 ] || [ "${cancelled}" -gt 0 ] ||
+  [ "${lint_status}" -ne 0 ]; then
   echo
   echo "==> not clean. Full log: ${log}"
   exit 1

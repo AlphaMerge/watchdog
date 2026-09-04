@@ -8,7 +8,10 @@ import { poolSizer, type PoolSizerDeps, type SizerPool } from '../src/pool-sizer
 const silent = pino({ level: 'silent' });
 
 /** Records every ceiling it was handed, so a test can assert on the path and not just the end. */
-function fakePool(start: number, durations: Record<string, number> = {}): SizerPool & {
+function fakePool(
+  start: number,
+  durations: Record<string, number> = {},
+): SizerPool & {
   readonly set: number[];
 } {
   let current = start;
@@ -120,7 +123,7 @@ describe('the derived pool ceiling (P-34, P-40, P-44)', () => {
     assert.equal(pool.maxSize, 256, 'clamped');
     assert.equal(h.warnings.length, 1, 'and not silently (WORKFLOW.MD §5)');
     assert.equal(h.warnings[0]?.['cap'], 256);
-    assert.ok(Number(h.warnings[0]?.['required']) > 256, 'the number that was refused is named');
+    assert.ok(Number(h.warnings[0]['required']) > 256, 'the number that was refused is named');
   });
 
   it('recomputes on its own timer, and stops when told', async () => {

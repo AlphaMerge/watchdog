@@ -5683,6 +5683,24 @@ because each is a decision rather than a defect:
       The test fails deterministically at eight seconds when the grace is removed, and passes at
       1,014 ms with it.
 
+- [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
+      running eslint over a directory rather than a file during `P-62`: a real
+      `no-unnecessary-condition` error had been sitting in
+      `packages/probe/test/pool-sizer.test.ts:123`, and every full run for weeks had reported
+      clean. Nothing runs lint. `scripts/test-all.sh` runs `npm test` per workspace, whose
+      `pretest` is `tsc -b` — types are checked, style is not — and CI is deliberately off
+      (`ci-deliberately-disabled`). So the check existed, was correct, and had no way to fire.
+
+      Same family as `P-49` and `P-52`, and the third instance of it: a run that reports what it
+      measured while saying nothing about what it never measured at all. `P-49` was 88 suites
+      skipped in silence, `P-52` was a whole workspace's tests missing from every total, and this
+      is a whole *kind* of check missing from every run.
+
+      The suite runs it last and fails on it, separately from the test counters — a lint error is
+      not a failing test, and folding it into that number would bury the failures above it. The one
+      error is fixed; the repo was otherwise clean, which is the only reason wiring it in was a
+      four-line change rather than a project.
+
 - [x] **P-70 — What the review found wrong with the fixes for what the review found** · S · P-66 ·
       An 81-agent adversarial review of `P-59`, `P-60` and `P-63` upheld nine findings out of
       twenty-five and then turned a completeness critic on the fixes themselves. Two of those hit
