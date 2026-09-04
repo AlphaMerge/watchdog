@@ -103,6 +103,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
               detach = undefined;
               send({ type: 'overflow', reason: 'too far behind; subscribe again' });
             },
+            // What `ws` has accepted and not yet written to the socket. The one number that
+            // actually grows when a client stops reading — a browser tab suspended in the
+            // background does exactly that, and nothing else here would notice (`P-60`).
+            backlog: () => socket.bufferedAmount,
           },
           objectId,
         );

@@ -5,7 +5,7 @@ import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
-import { StateBroadcaster, type StateEvent } from '../src/state/stream.js';
+import { StateBroadcaster, type StateEvent, type StateSubscriber } from '../src/state/stream.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -17,23 +17,32 @@ import { buildHarness, silent, testActor, type Harness } from './support/tree.js
 
 const available = await databaseAvailable();
 
-/** Collects what a subscriber was sent, and can be told to stop draining. */
-function recorder() {
+/**
+ * Collects what a subscriber was sent, and can be told how far behind it is.
+ *
+ * The backlog is a parameter because the broadcaster asks rather than infers (`P-60`): a real
+ * subscriber sits on a socket that buffers, and only the socket knows. Left out, this one is a
+ * subscriber that consumes as fast as it is given — which every recorder here was, silently, and
+ * which is why a guard that could never fire never showed up as a failure.
+ */
+function recorder(backlog?: () => number) {
   const events: StateEvent[] = [];
   let overflowed = false;
+  const subscriber: StateSubscriber = {
+    send: (event: StateEvent) => {
+      events.push(event);
+    },
+    overflow: () => {
+      overflowed = true;
+    },
+    ...(backlog === undefined ? {} : { backlog }),
+  };
   return {
     events,
     get overflowed() {
       return overflowed;
     },
-    subscriber: {
-      send: (event: StateEvent) => {
-        events.push(event);
-      },
-      overflow: () => {
-        overflowed = true;
-      },
-    },
+    subscriber,
   };
 }
 
@@ -308,7 +317,7 @@ describe(
     it('cuts off a subscriber that cannot keep up, and counts it', async () => {
       // Never a silent trim: a client missing a change from the middle of the stream shows a
       // state the system has moved on from and has no way to tell.
-      const stuck = new StateBroadcaster({ logger: silent, queueLimit: 0 });
+      const stuck = new StateBroadcaster({ logger: silent, backlogLimitBytes: 0 });
       const seen = recorder();
       stuck.subscribe(seen.subscriber, null);
 
@@ -328,6 +337,60 @@ describe(
       assert.equal(stuck.stats.subscribers, 0, 'and detached');
     });
 
+    it('cuts off a subscriber once its own backlog crosses the limit, and not before', async () => {
+      // `P-60`. The guard used to read a counter the broadcaster raised and lowered around a
+      // `send` that returns immediately — so it was zero at every check and this could never
+      // fire, however far behind the client actually was. The number comes from the subscriber
+      // now, because the transport that buffers is the only thing that can measure it.
+      let backlog = 0;
+      const seen = recorder(() => backlog);
+      const slow = new StateBroadcaster({ logger: silent, backlogLimitBytes: 4_096 });
+      slow.subscribe(seen.subscriber, null);
+
+      const change = {
+        sensorId,
+        state: 'down',
+        previousState: 'up',
+        cause: 'probe',
+        message: 'no ICMP reply',
+        at: new Date(),
+      } as const;
+
+      await slow.publish(db, [change]);
+      assert.equal(seen.events.length, 1, 'keeping up, so nothing happens to it');
+      assert.equal(slow.stats.overflowed, 0);
+
+      backlog = 4_096;
+      await slow.publish(db, [change]);
+      assert.equal(seen.overflowed, true, 'over the limit, so it is told to resubscribe');
+      assert.equal(seen.events.length, 1, 'and is not handed the event it could not take');
+      assert.equal(slow.stats.overflowed, 1);
+      assert.equal(slow.stats.subscribers, 0, 'and is detached');
+    });
+
+    it('leaves a subscriber that keeps up alone, whatever the volume', async () => {
+      // The other half. A limit expressed as “bytes it has not delivered” must not fire on a
+      // client that is delivering — the old shape counted events, and this is the reading of it
+      // that would have been wrong.
+      const seen = recorder(() => 0);
+      const fast = new StateBroadcaster({ logger: silent, backlogLimitBytes: 64 });
+      fast.subscribe(seen.subscriber, null);
+
+      const many = Array.from({ length: 200 }, () => ({
+        sensorId,
+        state: 'down' as const,
+        previousState: 'up' as const,
+        cause: 'probe' as const,
+        message: 'no ICMP reply',
+        at: new Date(),
+      }));
+      await fast.publish(db, many);
+
+      assert.equal(seen.events.length, 200);
+      assert.equal(seen.overflowed, false);
+      assert.equal(fast.stats.overflowed, 0);
+    });
+
     it('stops sending to a subscriber that has gone', async () => {
       const seen = recorder();
       const detach = stream.subscribe(seen.subscriber, null);
@@ -341,6 +404,15 @@ describe(
     // ---------------------------------------------------------------------------------------
 
     it('streams to a browser over a real WebSocket', async () => {
+      // Every subscriber the route attaches, so the backlog wiring below can be checked on the
+      // real one rather than on a stand-in. `stream` is rebuilt per test, so this is local.
+      const registered: StateSubscriber[] = [];
+      const attach = stream.subscribe.bind(stream);
+      stream.subscribe = (subscriber, objectId): (() => void) => {
+        registered.push(subscriber);
+        return attach(subscriber, objectId);
+      };
+
       const server = new ApiServer({
         config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
         logger: silent,
@@ -398,6 +470,19 @@ describe(
         socket.send(JSON.stringify({ subscribe: { objectId: deviceId } }));
         const snapshot = await arrived('snapshot');
         assert.equal(snapshot['objectId'], deviceId);
+
+        // `P-60`: the broadcaster asks the transport how far behind it is, so a route that does
+        // not answer reads as 0 for ever and can never be cut off — silently, which is exactly
+        // how the counter it replaced went unnoticed. This pins that the route answers, and with
+        // the socket's own number. It does not make that number large: filling a socket's buffer
+        // takes hundreds of kilobytes and would be a slow, flaky way to say the same thing.
+        // Absent, this reads `undefined` against a number, so the assertion is both halves at
+        // once: the route answers, and answers with the socket's own figure.
+        assert.equal(
+          registered[0]?.backlog?.(),
+          socket.bufferedAmount,
+          'the stream route must report its socket’s backlog, or it can never be cut off',
+        );
 
         // Twice, because the two-step rule takes a sensor through Warning before it is Down —
         // so both frames go out, which is itself the thing a tree needs.

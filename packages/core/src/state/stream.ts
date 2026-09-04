@@ -64,13 +64,25 @@ export interface StreamStats {
 
 export interface StateBroadcasterOptions {
   logger: Logger;
-  /** How many events one slow subscriber may fall behind before it is cut off. */
-  queueLimit?: number;
+  /**
+   * How many bytes one subscriber may have accepted but not yet put on the wire before it is
+   * cut off. Bytes rather than events because that is the quantity the transport can actually
+   * measure — see `StateSubscriber.backlog`.
+   */
+  backlogLimitBytes?: number;
   /** How many sensors a snapshot may carry. */
   snapshotLimit?: number;
 }
 
-const DEFAULT_QUEUE_LIMIT = 500;
+/**
+ * 1 MiB, which is thousands of state frames.
+ *
+ * Deliberately forgiving. Cutting a subscriber off costs it a fresh snapshot of up to 20,000
+ * sensors, so a limit tight enough to fire on an ordinary network stall would be worse than the
+ * backlog it prevents. What it has to stop is the unbounded case — a suspended browser tab that
+ * never reads again — and any finite number does that.
+ */
+const DEFAULT_BACKLOG_LIMIT_BYTES = 1024 * 1024;
 const DEFAULT_SNAPSHOT_LIMIT = 20_000;
 
 /** What a subscriber does with an event, and what it is told when it falls behind. */
@@ -78,12 +90,22 @@ export interface StateSubscriber {
   send(event: StateEvent): void;
   /** Its own queue overflowed; everything it holds is suspect and it must resubscribe. */
   overflow(): void;
+  /**
+   * Bytes this subscriber has accepted and not yet delivered, if it can say.
+   *
+   * The broadcaster cannot work this out for itself, and `P-60` is what happened when it tried:
+   * `send` returns `void` and returns *immediately* — a WebSocket's does, because it buffers
+   * internally — so a counter the broadcaster raised and lowered around the call was zero every
+   * time it was read, and the cut-off below it could never fire. The transport is the only thing
+   * that knows, so the transport is asked. A subscriber that consumes synchronously has no
+   * backlog and may leave this out.
+   */
+  backlog?(): number;
 }
 
 interface Attached {
   readonly subscriber: StateSubscriber;
   readonly objectId: ObjectId | null;
-  pending: number;
 }
 
 /**
@@ -106,7 +128,7 @@ interface Attached {
  */
 export class StateBroadcaster {
   readonly #logger: Logger;
-  readonly #queueLimit: number;
+  readonly #backlogLimit: number;
   readonly #snapshotLimit: number;
   readonly #attached = new Set<Attached>();
   #seq = 0;
@@ -117,7 +139,7 @@ export class StateBroadcaster {
 
   constructor(options: StateBroadcasterOptions) {
     this.#logger = options.logger.child({ component: 'stream' });
-    this.#queueLimit = options.queueLimit ?? DEFAULT_QUEUE_LIMIT;
+    this.#backlogLimit = options.backlogLimitBytes ?? DEFAULT_BACKLOG_LIMIT_BYTES;
     this.#snapshotLimit = options.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT;
   }
 
@@ -142,7 +164,7 @@ export class StateBroadcaster {
 
   /** Attaches a subscriber, scoped to a subtree or to everything. Returns how to detach it. */
   subscribe(subscriber: StateSubscriber, objectId: ObjectId | null): () => void {
-    const attached: Attached = { subscriber, objectId, pending: 0 };
+    const attached: Attached = { subscriber, objectId };
     this.#attached.add(attached);
     return () => this.#attached.delete(attached);
   }
@@ -277,22 +299,19 @@ export class StateBroadcaster {
     let sent = 0;
     for (const attached of this.#attached) {
       if (attached.objectId !== null && !event.path.includes(attached.objectId)) continue;
-      if (attached.pending >= this.#queueLimit) {
+      // Asked, not inferred. See `StateSubscriber.backlog`.
+      const backlog = attached.subscriber.backlog?.() ?? 0;
+      if (backlog >= this.#backlogLimit) {
         this.#attached.delete(attached);
         this.#overflowed += 1;
         this.#logger.warn(
-          { objectId: attached.objectId, limit: this.#queueLimit },
+          { objectId: attached.objectId, backlog, limit: this.#backlogLimit },
           'a subscriber fell too far behind and was cut off; it must resubscribe',
         );
         attached.subscriber.overflow();
         continue;
       }
-      attached.pending += 1;
-      try {
-        attached.subscriber.send(event);
-      } finally {
-        attached.pending -= 1;
-      }
+      attached.subscriber.send(event);
       sent += 1;
       this.#delivered += 1;
     }

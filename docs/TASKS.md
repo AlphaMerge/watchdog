@@ -5471,7 +5471,7 @@ because each is a decision rather than a defect:
       run with a neighbouring factory set to a day, because the collapse is only visible when
       there are two — and three of them die when the age check goes.
 
-- [ ] **P-60 — The stream's overflow cut-off cannot fire, and nothing else bounds the backlog** ·
+- [x] **P-60 — The stream's overflow cut-off cannot fire, and nothing else bounds the backlog** ·
       S · P-58 · `api-reference.md` tells the operator that a client which cannot keep up "is sent
       `overflow` and detached rather than being quietly trimmed". `StateBroadcaster.#deliver`
       guards that path on `attached.pending >= queueLimit` — but `pending` is incremented and
@@ -5487,6 +5487,36 @@ because each is a decision rather than a defect:
 
       The test needs a subscriber that does not drain. Every existing one accepts instantly, which
       is exactly why a guard that can never fire has always passed.
+
+      **Fixed by asking the transport instead of inferring.** `StateSubscriber` gains an optional
+      `backlog(): number` and the WebSocket route answers with `socket.bufferedAmount` — what `ws`
+      has accepted and not yet written. That is the one quantity that actually grows when a client
+      stops reading, and the broadcaster had no way to compute it, which is why its attempt read
+      zero. `pending` is gone; there is nothing left to keep it in step with.
+
+      The limit is bytes now, so `queueLimit` would have been a lie about its own unit and is
+      `backlogLimitBytes` instead. The default is 1 MiB — deliberately forgiving, because cutting
+      a subscriber off costs it a fresh snapshot of up to 20,000 sensors, so a limit tight enough
+      to fire on an ordinary network stall would be worse than the backlog it prevents. What it
+      has to stop is the unbounded case, and any finite number does that.
+
+      `backlog` is optional because a subscriber that consumes synchronously genuinely has none,
+      and every test recorder in the suite is one. That is also the trap: absent, it reads 0 for
+      ever, and a route added later without one would be uncuttable and silent about it — the same
+      failure in a new place. So the real-socket test asserts the route's own subscriber answers,
+      and answers with the socket's figure. `undefined` against a number fails, which makes the
+      one assertion cover both halves.
+
+      **What the existing test was really testing.** "cuts off a subscriber that cannot keep up"
+      passed throughout, on `queueLimit: 0` — `0 >= 0` fires on the first event whatever `pending`
+      holds. It proved the detach mechanism and never touched the measurement, which is the same
+      shape as `P-59`'s staleness test: a number chosen so the assertion holds for a reason other
+      than the one the name gives. It is kept, because the mechanism is worth pinning; the two
+      tests added beside it are the ones that read a backlog, and they fail if the guard goes back
+      to counting for itself.
+
+      One stale claim fixed in passing: the recorder helper's comment said it "can be told to stop
+      draining", and nothing in it ever could. Now it can, because that is what these tests need.
 
 - [ ] **P-61 — EXE and Script backpressure reaches no health sensor** · S · P-58 · `ProcessRunner`
       counts `#deferred`, `#refused`, `#timedOut`, `#crashed`, a live count and a queue depth, and
