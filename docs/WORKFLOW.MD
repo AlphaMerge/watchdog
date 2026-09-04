@@ -463,6 +463,7 @@ Core Health and probe reconnection → verify a sample of sensors resumed.
 | Core server restarts        | Paused states persist; sensors resume on their next due tick; probes reconnect and replay their spools        |
 | Database unavailable        | Checks continue, results spool locally, ingestion resumes on recovery; Core Health goes Down                  |
 | Probe unreachable           | Probe Health goes Down; its sensors go Unknown (not Down — we don't know); a single alarm, not one per sensor |
+| Probe connected but sending no results | Same answer, and it has to be: the sensors are equally unasked. Detected from *arrival* times, never the probe's own timestamps, so a spool replay cannot trip it (`P-74`) |
 | Notification delivery fails | Logged, retried with backoff, surfaced on Core Health; the alarm itself is not lost                           |
 | A check type hangs          | Killed at timeout; the worker is recycled; scheduler unaffected                                               |
 | Scheduler falls behind      | Lag metric rises, deferred-check counter increments, Probe Health warns before anything is silently dropped   |

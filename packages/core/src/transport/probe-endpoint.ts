@@ -212,6 +212,17 @@ export type ProbeLink =
       lastHeartbeatAt: Date | null;
       approved: boolean;
       agentVersion: string;
+      /**
+       * What this probe was told to scan, and when anything last arrived from it (`P-74`).
+       *
+       * Here rather than on `ConnectedProbe` because it is a fact about the *link*, and because
+       * the delivery watchdog is the only reader: a probe that is connected and silent is not
+       * carrying its sensors, and nothing else in the core can tell.
+       */
+      assignedSensors: number;
+      cadenceSeconds: number | null;
+      lastResultsAt: Date | null;
+      configSentAt: Date | null;
       /** Absent from a probe below protocol 7, which cannot report its own numbers. */
       health?: ProbeHealthReport;
     };
@@ -252,6 +263,18 @@ interface ProbeSession {
    */
   sentVersion: string | null;
   sentSensors: readonly SensorAssignment[];
+  /**
+   * When a results batch last **arrived**, on this core's wall clock (`P-74`).
+   *
+   * Deliberately not `result.at`: that is the probe's own timestamp for the check, and a probe
+   * replaying an hour of spool sends rows stamped an hour ago while the batches themselves land
+   * now. A watchdog over the probe's clock fires hardest on the probe that is recovering.
+   */
+  lastResultsAt: Date | null;
+  /** When this probe was last given its assignments — it cannot be late with work it lacks. */
+  configSentAt: Date | null;
+  /** The median assigned scan interval, so the window is the probe's own cadence (`P-74`). */
+  cadenceSeconds: number | null;
   /** The credential stamps that went with `sentSensors`; the delta needs them (`T-08`). */
   sentStamps: ReadonlyMap<number, string>;
 }
@@ -290,6 +313,20 @@ function keyMatches(presented: string, accepted: readonly string[]): boolean {
  * parameters and a `rest.custom` with many mappings or an `exe.script.advanced` carrying a script
  * is worth many times an `icmp.ping`.
  */
+/**
+ * The middle scan interval of what a probe was assigned (`P-74`).
+ *
+ * The median rather than the mean, because one daily sensor among five hundred ten-second ones
+ * must not drag the window out to where a real stall goes unnoticed for hours — and the reverse,
+ * one fast sensor pulling the window in under a slow probe's own period, would call a probe late
+ * for keeping exactly to the schedule it was given.
+ */
+function medianInterval(sensors: readonly SensorAssignment[]): number | null {
+  if (sensors.length === 0) return null;
+  const seconds = sensors.map((one) => one.intervalSeconds).sort((a, b) => a - b);
+  return seconds[Math.floor(seconds.length / 2)] ?? null;
+}
+
 const CONFIG_CHUNK_SENSORS = 1_000;
 
 /**
@@ -642,12 +679,27 @@ export class ProbeEndpoint {
    * probe's heartbeats from being answered, or the connection would be declared idle and torn
    * down by the very backlog we are working through.
    */
+  /**
+   * What this probe was told to scan, and the two clocks that go with it.
+   *
+   * One place, because `sentSensors` is set from two branches and a cadence that disagreed with
+   * the list it was derived from would give a window for work the probe is not doing (`P-74`).
+   */
+  #noteAssignments(session: ProbeSession, sensors: readonly SensorAssignment[]): void {
+    session.sentSensors = sensors;
+    session.configSentAt = new Date();
+    session.cadenceSeconds = medianInterval(sensors);
+  }
+
   #queueResults(
     message: Extract<ProbeToCoreMessage, { type: 'results' }>,
     connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>,
     logger: Logger,
     session: ProbeSession,
   ): void {
+    // **Stamped on arrival, before anything is written.** The clock is when the batch landed, not
+    // when it finished being ingested, so a slow write cannot make a delivering probe look silent.
+    if (message.results.length > 0) session.lastResultsAt = new Date();
     const receiver = this.#options.results;
     if (receiver === undefined) {
       logger.warn({ batchId: message.batchId }, 'results arrived before ingestion was wired up');
@@ -843,6 +895,9 @@ export class ProbeEndpoint {
       probeObjectId: null,
       sentVersion: null,
       sentSensors: [],
+      lastResultsAt: null,
+      configSentAt: null,
+      cadenceSeconds: null,
       sentStamps: new Map(),
     };
     if (approved && gid !== '') this.#sessions.set(gid, session);
@@ -948,7 +1003,7 @@ export class ProbeEndpoint {
         const held = presented ?? session.sentVersion;
         if (assignments.version === held) {
           session.sentVersion = assignments.version;
-          session.sentSensors = assignments.sensors;
+          this.#noteAssignments(session, assignments.sensors);
           session.sentStamps = assignments.stamps;
           if (presented !== undefined) {
             session.connection.send({ type: 'config-unchanged', version: assignments.version });
@@ -970,7 +1025,7 @@ export class ProbeEndpoint {
               );
 
         session.sentVersion = assignments.version;
-        session.sentSensors = assignments.sensors;
+        this.#noteAssignments(session, assignments.sensors);
         session.sentStamps = assignments.stamps;
 
         // Only the upserts are weighed against the snapshot: a removal is an integer, an upsert
@@ -1058,6 +1113,10 @@ export class ProbeEndpoint {
         lastHeartbeatAt: session.info.lastHeartbeatAt,
         approved: session.approved,
         agentVersion: session.info.agentVersion,
+        assignedSensors: session.sentSensors.length,
+        cadenceSeconds: session.cadenceSeconds,
+        lastResultsAt: session.lastResultsAt,
+        configSentAt: session.configSentAt,
         ...(session.health === undefined ? {} : { health: session.health }),
       };
     }

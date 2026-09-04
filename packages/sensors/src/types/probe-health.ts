@@ -34,6 +34,14 @@ const CHANNELS: readonly ChannelDef[] = [
   // Seconds since the last heartbeat. Rises before `connected` falls, which is the window in
   // which an operator can still do something.
   { key: 'heartbeatAge', name: 'Since last heartbeat', unit: 's' },
+  // **A probe can be connected, heartbeating and monitoring nothing** (`P-74`). Nothing ages a
+  // sensor out — the core re-evaluates when a result arrives — so a fault that stops results
+  // without dropping the link freezes every sensor under this probe in its last state for ever.
+  // `connected` above cannot see it, because the link is fine. This is the channel that can.
+  { key: 'delivering', name: 'Sending results', lookup: 'ms.probe.delivery' },
+  // How long since anything arrived. No limit: the lookup above is the alarm, and a second one
+  // for one outage is what `CLAUDE.md` forbids.
+  { key: 'resultAge', name: 'Since last result', unit: 's' },
   {
     key: 'protocol',
     name: 'Protocol version skew',

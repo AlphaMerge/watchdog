@@ -20,7 +20,7 @@ vocabulary; it says what the values mean and when each is used.
 
 | State                | Meaning                                                                  | v1  |
 | -------------------- | ------------------------------------------------------------------------ | --- |
-| `unknown`            | No current reading. Newly created, just resumed, or its probe is gone.   | yes |
+| `unknown`            | No current reading. Newly created, just resumed, or its probe is gone or silent. | yes |
 | `up`                 | Last scan succeeded and every channel is within its limits.              | yes |
 | `warning`            | A warning limit is breached, or the first consecutive scan failure.      | yes |
 | `down`               | An error limit is breached, or the failure policy has been exhausted.    | yes |
@@ -61,9 +61,20 @@ eye. Evaluated **in this order**, first match wins:
 | - | ------------------------------------- | ------------------- | -------------------------------- |
 | 1 | Any pause source active               | `paused`            | the first active source (§3)     |
 | 2 | Simulated error set (`M-14`)          | `down` → §2.4       | `simulated`                      |
-| 3 | Owning probe unreachable              | `unknown`           | `probe`                          |
+| 3 | Owning probe unreachable *or* connected and not delivering | `unknown` | `probe`               |
 | 4 | No reading since creation or resume   | `unknown`           | `scan`                           |
 | 5 | Otherwise                             | worst of §2.1, §2.2 | whichever produced the worst     |
+
+**Row 3 covers two faults with one answer** (`P-74`). A probe whose link has gone and a probe that
+is connected and has stopped sending results are indistinguishable from the sensor's point of
+view — nobody has asked it anything — so both produce `unknown`/`probe`, and both produce exactly
+one alarm, on that probe's own Probe Health. What separates them is the message and the channel:
+`connected` says whether the link is there, `delivering` says whether anything is coming back over
+it, and the second is the one that can be Down while the first is Up.
+
+The detector reads when a batch last *arrived*, never `result.at` — a probe replaying an hour of
+spooled results sends rows stamped an hour ago while the batches themselves land now, so a rule
+over the probe's own clock would fire hardest on the probe that is recovering correctly.
 
 **Pause beats everything**, including a simulated error and a lost probe: it is an explicit
 instruction to stop monitoring, and a paused sensor that reported Down because its probe went

@@ -41,6 +41,7 @@ import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
+import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
 import { CoreHealthService } from './health/core-health.js';
 import { ProbeHealthService } from './health/probe-health.js';
 import { MetricsExporter } from './metrics/exporter.js';
@@ -969,10 +970,23 @@ async function serve(): Promise<void> {
   // report its own absence**, which is the single most important thing this sensor says — R-05
   // made a lost probe one alarm rather than a thousand, and this is where that one alarm comes
   // from.
+  // **A probe that is connected and silent is monitoring nothing** (`P-74`). `R-05` covers the
+  // probe that goes away; nothing covered the one that stays and stops delivering, and a sensor
+  // is re-evaluated only when a result arrives — so its sensors would hold their last state for
+  // ever. Built before Probe Health because that reads its verdict.
+  const deliveryWatch = new ProbeDeliveryWatch({
+    db,
+    logger,
+    reachability,
+    linkFor: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
+    startedAt: new Date(),
+  });
+
   const probeHealth = new ProbeHealthService({
     db,
     logger,
     sources: { link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId) },
+    delivery: deliveryWatch,
     ingest: async (results) => {
       await ingestion.acceptResults('probe-health', {
         type: 'results',
@@ -995,6 +1009,26 @@ async function serve(): Promise<void> {
     timeoutMs: 2_000,
     run: () => {
       probeHealthSweep.stop();
+      return Promise.resolve();
+    },
+  });
+
+  // Beside the other three, on the same period. Its own sweep rather than a step inside Probe
+  // Health's, because it writes *state* through `ProbeReachability` while that one writes a
+  // reading — and a failure in either must not take the other down with it.
+  const deliverySweep = new PeriodicSweep({
+    logger,
+    component: 'probe-delivery-sweep',
+    what: 'a probe delivery sweep failed',
+    run: () => deliveryWatch.settle().then(() => undefined),
+    intervalMs: 30_000,
+  });
+  deliverySweep.start();
+  lifecycle.onShutdown({
+    name: 'probe-delivery-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      deliverySweep.stop();
       return Promise.resolve();
     },
   });

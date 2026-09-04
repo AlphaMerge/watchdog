@@ -59,6 +59,15 @@ export interface ProbeReachabilityOptions {
   now?: () => Date;
 }
 
+/**
+ * Why a probe's sensors are Unknown.
+ *
+ * `link` is `R-05`: the connection went away, so nobody is asking. `silence` is `P-74`: the
+ * connection is fine and nothing is coming back, which the sensors cannot tell apart and an
+ * operator very much can.
+ */
+export type OfflineReason = 'link' | 'silence';
+
 export class ProbeReachability {
   readonly #db: Db;
   readonly #logger: Logger;
@@ -77,7 +86,16 @@ export class ProbeReachability {
    */
   readonly #unreachable = new Set<number>();
   /** Which probe put each sensor in that set, so one probe's return frees only its own. */
-  readonly #byProbe = new Map<number, number[]>();
+  /**
+   * Why each probe's sensors are Unknown, alongside which they are.
+   *
+   * **The reason is here so that only its owner can clear it** (`P-74`). A probe that is
+   * connected and silent and a probe whose link has gone both put their sensors in the same set,
+   * because the sensors' answer is the same — but the delivery sweep must not decide a
+   * *disconnected* probe is fine again just because it has stopped expecting results from it.
+   * `found` is the link's, `resumed` is the sweep's, and neither undoes the other's work.
+   */
+  readonly #byProbe = new Map<number, { sensorIds: number[]; reason: OfflineReason }>();
   #outages = 0;
 
   constructor(options: ProbeReachabilityOptions) {
@@ -114,7 +132,9 @@ export class ProbeReachability {
    * A sensor created while the probe is away is not in the set, and does not need to be: it has
    * never been scanned, so it is already Unknown for want of a reading.
    */
-  async lost(probeObjectId: number): Promise<number> {
+  async lost(probeObjectId: number, reason: OfflineReason = 'link'): Promise<number> {
+    // Already offline for some reason. Whichever came first is the one an operator is reading,
+    // and re-marking would re-walk the tree and re-evaluate for no change.
     if (this.#byProbe.has(probeObjectId)) return 0;
 
     let sensorIds: number[];
@@ -131,7 +151,7 @@ export class ProbeReachability {
       return 0;
     }
 
-    this.#byProbe.set(probeObjectId, sensorIds);
+    this.#byProbe.set(probeObjectId, { sensorIds, reason });
     for (const id of sensorIds) this.#unreachable.add(id);
     this.#outages += 1;
     if (sensorIds.length === 0) return 0;
@@ -141,11 +161,14 @@ export class ProbeReachability {
     // the facts, the service overlays `probeReachable` from this set, and layer 3 does the rest.
     const moved = await this.#db.tx((q) =>
       this.#states.reevaluate(q, sensorIds, this.#now(), {
-        message: 'the probe carrying this sensor stopped answering',
+        message:
+          reason === 'link'
+            ? 'the probe carrying this sensor stopped answering'
+            : 'the probe carrying this sensor is connected but has stopped sending results',
       }),
     );
     this.#logger.warn(
-      { probeObjectId, sensors: sensorIds.length, moved },
+      { probeObjectId, reason, sensors: sensorIds.length, moved },
       'a probe went offline; its sensors are Unknown rather than Down',
     );
     return moved;
@@ -160,8 +183,26 @@ export class ProbeReachability {
    * add a second transition per sensor for no information, and turn one outage into two.
    */
   async found(probeObjectId: number): Promise<number> {
-    const sensorIds = this.#byProbe.get(probeObjectId);
-    if (sensorIds === undefined) return 0;
+    return this.#online(probeObjectId, undefined);
+  }
+
+  /**
+   * A probe that had gone quiet is delivering again (`P-74`).
+   *
+   * Only clears what the delivery sweep itself marked. A probe whose *link* is down is not made
+   * well by the sweep no longer expecting results from it, and letting this clear that entry
+   * would put every sensor under a disconnected probe back to its last reading — a confident
+   * answer about a probe nobody is talking to.
+   */
+  async resumed(probeObjectId: number): Promise<number> {
+    return this.#online(probeObjectId, 'silence');
+  }
+
+  async #online(probeObjectId: number, only: OfflineReason | undefined): Promise<number> {
+    const entry = this.#byProbe.get(probeObjectId);
+    if (entry === undefined) return 0;
+    if (only !== undefined && entry.reason !== only) return 0;
+    const sensorIds = entry.sensorIds;
     this.#byProbe.delete(probeObjectId);
     for (const id of sensorIds) this.#unreachable.delete(id);
     if (sensorIds.length === 0) return 0;

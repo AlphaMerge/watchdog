@@ -98,13 +98,19 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       ingest: () => Promise.resolve(),
     });
 
-  const connected: ProbeLink = {
+  // The connected arm rather than the union: spreading a union loses the discriminant, so every
+  // `{ ...connected, health: … }` below would stop type-checking against the other arm.
+  const connected: Extract<ProbeLink, { connected: true }> = {
     connected: true,
     protocolVersion: 7,
     connectedAt: new Date(),
     lastHeartbeatAt: new Date(),
     approved: true,
     agentVersion: '1.0.0',
+    assignedSensors: 120,
+    cadenceSeconds: 60,
+    lastResultsAt: new Date(),
+    configSentAt: new Date(),
     health: {
       scheduled: 120,
       schedulerLagMs: { p50: 2, p95: 11, p99: 30, max: 90 },

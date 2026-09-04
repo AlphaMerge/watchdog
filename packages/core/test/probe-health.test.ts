@@ -134,6 +134,10 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
     approved: true,
     agentVersion: '1.0.0',
+    assignedSensors: 100,
+    cadenceSeconds: 60,
+    lastResultsAt: new Date('2026-08-28T00:00:20Z'),
+    configSentAt: new Date('2026-08-28T00:00:00Z'),
     health: FULL,
     ...overrides,
   });
@@ -370,6 +374,10 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
         approved: true,
         agentVersion: '0.4.0',
+        assignedSensors: 12,
+        cadenceSeconds: 60,
+        lastResultsAt: new Date('2026-08-28T00:00:20Z'),
+        configSentAt: new Date('2026-08-28T00:00:00Z'),
         // No `health` at all: a probe below protocol 7 sends none.
       };
       const { reading, message } = build(() => old).read(probeId);

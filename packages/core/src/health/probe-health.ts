@@ -8,6 +8,7 @@ import {
   type Logger,
 } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
 
 /**
@@ -35,6 +36,13 @@ export interface ProbeHealthServiceOptions {
   readonly db: Database;
   readonly logger: Logger;
   readonly sources: ProbeHealthSources;
+  /**
+   * Whether each probe is still delivering (`P-74`), absent on a build without the sweep.
+   *
+   * Optional so the two channels gap rather than read a confident "delivering" on a core that is
+   * not watching — absent is absent, the same rule the probe-reported channels follow.
+   */
+  readonly delivery?: { verdictFor: (probeObjectId: number) => DeliveryVerdict | null };
   readonly ingest: (results: readonly CheckResult[]) => Promise<void>;
   readonly now?: () => Date;
 }
@@ -64,6 +72,7 @@ export class ProbeHealthService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #sources: ProbeHealthSources;
+  readonly #delivery: ProbeHealthServiceOptions['delivery'];
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
   readonly #now: () => Date;
 
@@ -75,6 +84,7 @@ export class ProbeHealthService {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'probe-health' });
     this.#sources = options.sources;
+    this.#delivery = options.delivery;
     this.#ingest = options.ingest;
     this.#now = options.now ?? ((): Date => new Date());
   }
@@ -103,10 +113,23 @@ export class ProbeHealthService {
         ? null
         : Math.max(0, Math.round((this.#now().getTime() - link.lastHeartbeatAt.getTime()) / 1_000));
 
+    // **Computed here, not reported by the probe** (`P-74`). A probe that has stopped delivering
+    // cannot be relied on to say so — the whole point is that it looks fine from its own side —
+    // and this is a fact about arrivals, which only the core can see. No protocol field, and it
+    // therefore works against a probe of any version.
+    const delivery = this.#delivery?.verdictFor(probeObjectId) ?? null;
+
     const reading: ProbeHealthReading = {
       ...blank(),
       connected: 1,
       heartbeatAge,
+      delivering: delivery === null ? null : delivery.stalled ? 0 : 1,
+      // How long since anything arrived. No limit: `delivering` is the alarm, and a second one
+      // for the same outage is what "one outage, one alarm" forbids.
+      resultAge:
+        delivery?.silentForMs === null || delivery?.silentForMs === undefined
+          ? null
+          : Math.round(delivery.silentForMs / 1_000),
       // A skew of `unknown` gaps rather than taking a code: a lookup maps a reading to a state
       // and has no Unknown to map to, so the honest answer is no reading.
       protocol: skewCode(skew.kind),

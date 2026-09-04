@@ -5912,7 +5912,7 @@ because each is a decision rather than a defect:
       throws from a `setTimeout` where nothing can catch it. The test pins one crash and one
       replacement, and fails on both counts when the flag is removed.
 
-- [ ] **P-74 — Nothing ages out a sensor whose probe stopped sending results** · M · P-62 · Found
+- [x] **P-74 — Nothing ages out a sensor whose probe stopped sending results** · M · P-62 · Found
       while verifying `P-62`, confirmed by reading. A sensor's state is re-evaluated only when a
       result arrives, or on a pause, an acknowledgement, or a change in probe reachability. The
       only routes to Unknown are `!probeReachable` and a sensor that has never been scanned. There
@@ -5992,6 +5992,51 @@ because each is a decision rather than a defect:
       false claim that wrecks their SLA. `P-76` carries the probe-side half — the probe is the only
       party that can see dispatch-without-completion, on its own monotonic clock — and it reports
       that as a Warning with a count rather than as a state change.
+
+      **Landed.** `delivery.ts` holds the rule as one pure `verdict()` with fourteen table-driven
+      tests, including the two that eliminated the rejected designs: forty batches of a spool
+      replay in a row must not trip it, and the start-up grace must hold. `delivery-watch.ts` is
+      the sweep — edge-triggered, so three sweeps over a stalled probe write **one** transition
+      rather than one each, which matters because every call re-evaluates every sensor under the
+      probe and writes into the table uptime is computed from.
+
+      `ProbeReachability` now records *why* a probe's sensors are Unknown, and only the owner of a
+      reason can clear it: `found` is the link's, `resumed` is the sweep's. Without that split the
+      sweep would decide a *disconnected* probe was fine again merely because it had stopped
+      expecting results from it, putting every sensor under a probe nobody is talking to back to
+      its last reading.
+
+      One case a naive edge-trigger gets wrong, and it has a test: a probe that disconnects while
+      silent and reconnects **still** silent. The reconnect clears the reachability entry — `R-05`'s
+      rule — so a watch still holding its claim reads the next stall as no change and never marks
+      it again. The sweep drops its claim the moment the link goes.
+
+      `delivering` and `resultAge` are computed by the *core* from arrival times, so there is no
+      protocol field and no version bump, and they work against a probe of any version — which is
+      the point: a probe that has stopped delivering cannot be relied on to say so.
+
+      `docs/state-machine.md` and `WORKFLOW.MD §13` say this now. Row 3 of the layer table covers
+      both faults with one answer, because the sensor cannot tell them apart and should not: what
+      separates them is `connected` versus `delivering`, and the second is the one that can be Down
+      while the first is Up.
+
+- [ ] **P-76 — A probe can be delivering and still have sensors that are not being checked** · M ·
+      P-74 · The honest boundary of `P-74`, which is probe-level by construction. One wedged sensor
+      among five thousand healthy siblings changes nothing: the probe is delivering, so the
+      predicate is false. Marking 4,999 working sensors Unknown to catch one would be a false claim
+      that wrecks their SLA, so the core cannot fix this from arrival times alone.
+
+      The probe can. It sees dispatch (`dueDispatcher`), completion (`spoolResult`) and shipping
+      (`SpoolDrain`) on its own monotonic clock, so it can answer "am I dispatching checks that
+      never come back?" — a provable fault rather than a statistical guess, because a check
+      accepted by a runner *must* settle inside its own timeout. The design that scored highest in
+      `P-74`'s judging proposed `checkFlow` as a state on the heartbeat, precedence-ordered
+      (wheel not ticking / dispatched and not completing / completing but not reaching disk / every
+      runner given up), with `sensorsBehind` as a count and a Warning rather than a state change.
+
+      Also found by that reading and worth folding in: `spoolResult`'s `.catch` in `main.ts` logs a
+      line and the reading is gone, counted nowhere — a small `P-74` of its own, two counters to
+      close.
 
 - [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
       running eslint over a directory rather than a file during `P-62`: a real

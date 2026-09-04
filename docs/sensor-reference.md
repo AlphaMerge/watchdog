@@ -999,6 +999,8 @@ cost: **light** · evaluated by the core, never by a probe
 | --- | --- | --- | --- |
 | `connected` | Link to the core | — | **primary**; lookup `ms.probe.link` |
 | `heartbeatAge` | Since last heartbeat | s | — |
+| `delivering` | Sending results | — | lookup `ms.probe.delivery` |
+| `resultAge` | Since last result | s | — |
 | `protocol` | Protocol version skew | — | lookup `ms.probe.protocol` |
 | `schedulerLag` | Scheduler lag (p95) | ms | default limits: warn above 1000, error above 5000 |
 | `poolUsage` | Worker pool in use | % | default limits: warn above 80, error above 95 |

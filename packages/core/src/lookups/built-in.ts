@@ -127,10 +127,36 @@ const PROBE_POOL: LookupDefinition = {
   ],
 };
 
+/**
+ * Whether a connected probe is still sending results (`P-74`).
+ *
+ * **The alarm for a probe that is up and answering and monitoring nothing.** A sensor's state is
+ * re-evaluated when a result arrives; nothing ages one out. So a fault that stops results without
+ * dropping the link leaves every sensor under that probe frozen in its last state, for ever, with
+ * no alarm — a monitoring system reporting that everything is fine because nobody asked.
+ *
+ * A lookup rather than a threshold, for `PROBE_LINK`'s reason: this is a state. And Down rather
+ * than Warning, because a probe that is not delivering is not monitoring, which is the same
+ * outcome as a probe that is gone — the difference is only that this one is still answering the
+ * phone, which is exactly what makes it harder to notice.
+ */
+const PROBE_DELIVERY: LookupDefinition = {
+  id: 'ms.probe.delivery',
+  name: 'Probe delivery',
+  description: 'Whether this probe is still sending results for the sensors it was assigned.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'down', text: 'connected but sending no results' },
+    { value: 1, state: 'up', text: 'delivering' },
+  ],
+};
+
 export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
   PROBE_LINK,
   PROBE_PROTOCOL,
   PROBE_POOL,
+  PROBE_DELIVERY,
 ];
