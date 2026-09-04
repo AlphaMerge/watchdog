@@ -5344,9 +5344,8 @@ because each is a decision rather than a defect:
       sensorsOfDevice, which feeds POST /objects/:id/as-template as text". The test also asserts
       the public settings still travel, so a fix that returned nothing would not pass.
 
-- [ ] **P-57 — Listener notifications are drained, then dropped when the check is not accepted** ·
-      S · P-42 · Found by the same audit and **verified by hand**, not fixed here because the fix
-      wants a design rather than a patch.
+- [x] **P-57 — Listener notifications are drained, then dropped when the check is not accepted** ·
+      S · P-42 · Found by the same audit and verified by hand before anything was changed.
 
       In the wheel's `onDue` (`packages/probe/src/main.ts:262`), `trapListener.drain(sensorId)` or
       `syslogListener.drain(sensorId)` runs *before* the check is handed to a runner, and
@@ -5361,11 +5360,33 @@ because each is a decision rather than a defect:
       `stopped` lose them too.
 
       **Same family as `P-42`** — a cursor advanced past data that was then thrown away, reported
-      as nothing missing — which is why it is worth fixing properly rather than quickly. The
-      obvious repairs each have a cost: draining lazily cannot cross the worker boundary, since the
-      request is serialised; checking acceptance first duplicates the runner's admission rule at
-      the call site; rewinding the cursor after a refusal has to define what "rewind" means against
-      a ring that may have overwritten in between. Whoever takes it should pick one deliberately.
+      as nothing missing.
+
+      **Fixed by asking before draining.** Of the three candidate repairs, draining lazily cannot
+      cross the worker boundary — the request is serialised to a worker, so a thunk cannot travel —
+      and rewinding after a refusal would have to define what a rewind means against a ring that
+      may have overwritten in the meantime, and restore `since` as well as `next`. Asking first is
+      sound at this call site for a specific reason: `onDue` is synchronous and single-threaded, so
+      nothing can change between the question and the `submit` that follows it.
+
+      The objection to asking first was that it restates the admission rule at the call site, so it
+      does not. Both runners now derive `submit` and a new `accepts` from one private `#admission`;
+      `accepts` is the decision without the counters, so asking never moves one. The submit still
+      happens when the answer is no, and the deferral still reaches Probe Health — what changes is
+      that the ring keeps its messages for the scan that does get through.
+
+      **This also closes the dispatch half of `P-43`'s residual gap, and not by choice.** `P-43`
+      moved the *config* handlers out of `main()` and said plainly that construction and dispatch
+      were still uncovered. `P-57` is a defect in dispatch, found by reading rather than by a test
+      because no test could reach it. `due-dispatch.ts` now holds that policy — skip an unassigned
+      sensor, route isolated types to the child-process runner, drain only for a check that will be
+      taken — with five tests, two of which fail if the drain moves back before the question.
+
+      One hazard met while extracting, recorded because the next person will meet it too:
+      `assignments` is constructed *after* the wheel, because it needs the wheel, so passing it as
+      a dependency value reads it in its temporal dead zone. The inline callback got that right by
+      being a closure; it is passed as one now, with its return type written down, since leaving
+      that to inference makes `wheel` circular through it.
 
 - [ ] **P-58 — Five audit candidates that nobody has verified by hand** · S · P-55 · An
       invariant-audit on 2026-09-04 produced fourteen candidates; eight were put to an adversary
@@ -5769,6 +5790,11 @@ because each is a decision rather than a defect:
       **What is still not covered**: `main()` itself. Construction, ordering and the shutdown
       hooks remain unpinned — this moved the *policy* out, not the wiring. A much smaller gap than
       the one it closed, and both defects that prompted the ticket were policy.
+
+      **The dispatch half of that gap closed on 2026-09-04**, and not by choice: `P-57` turned out
+      to be a defect in `onDue` — exactly the code named here as uncovered — found by reading
+      because nothing could test it. `due-dispatch.ts` is this same extraction applied there.
+      Construction and shutdown ordering remain.
 
 - [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
