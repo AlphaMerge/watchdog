@@ -5631,8 +5631,8 @@ because each is a decision rather than a defect:
       `T-09`'s WinRM transport is the third and the point at which the shape is known. **`T-09`
       landed and is not a third instance** — it is a shell-out with no session to keep, so the two
       pools are still two and this ticket's trigger never fired. Whoever picks it up decides on
-      that basis: either two instances are enough to see the shape, or this waits for `D-05`'s
-      VMware transport. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
+      that basis: either two instances are enough to see the shape, or this waits for a third
+      transport — which is `V2-08`, and therefore v2. See the re-check below. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
       deliberately, not incidentally.
 
       **Decided 2026-09-03: wait for `D-05`, and here is the evidence so nobody re-derives it.**
@@ -5651,13 +5651,29 @@ because each is a decision rather than a defect:
       months means the duplication has cost nothing — no fix has landed in one and missed the
       other, which is the failure extraction prevents. Against that: the shared code is
       credential-keyed session handling, the stat names `sessions` and `connections` are not
-      interchangeable prose, and `D-05`'s VMware transport is the instance that would say whether
-      the varying half is "async open" or something wider. Refactoring working, tested,
-      undrifted code in that area for tidiness alone is a bad trade; refactoring it when a third
-      caller forces the shape is a good one.
+      interchangeable prose, and a third transport is the instance that would say whether the
+      varying half is "async open" or something wider. Refactoring working, tested, undrifted code
+      in that area for tidiness alone is a bad trade; refactoring it when a third caller forces the
+      shape is a good one.
 
-      Re-check the diff above when `D-05` lands. If the two have drifted by then, that changes
-      the answer on its own.
+      **The re-check this ticket asked for has been done, and its trigger was pointing at the wrong
+      thing** (2026-09-04). It said "re-check the diff when `D-05` lands", and named "`D-05`'s
+      VMware transport" as the third instance. `D-05` is *Default master dependency*; it landed and
+      has no transport in it. Virtualisation sensors are **`V2-08`**, which is v2 — so the third
+      caller this ticket waits for **cannot arrive in v1**, and the instruction to re-check had
+      silently come due without anyone noticing, because it named a ticket that was never about
+      what it claimed.
+
+      **The re-check itself says: still no drift.** Neither `support/snmp/pool.ts` nor
+      `support/ssh/pool.ts` has been touched since 2026-08-27 — nine days, one commit each, the
+      ones that created them — and the only difference in their method sets remains SNMP's
+      `acquire` against SSH's `#attach`. So the "waiting has cost nothing" argument holds on its
+      own evidence; what has changed is that waiting now means waiting for v2.
+
+      **So the decision is between two honest options, and it is not this ticket's to take
+      quietly**: extract at two instances, accepting the guess `P-19` warns about, or move this to
+      the v2 backlog beside `V2-08` where its trigger actually lives. It should not sit in the v1
+      list appearing merely deferred, because nothing in v1 will ever unblock it.
 
 - [x] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
