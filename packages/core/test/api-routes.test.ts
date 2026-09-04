@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { AuditRepository } from '../src/audit/store.js';
-import { ApiServer } from '../src/api/server.js';
+import { ApiServer, sensorsOfDevice } from '../src/api/server.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { SHARED_SCHEMAS } from '../src/api/schemas/objects.js';
 import {
@@ -682,6 +682,43 @@ describe(
         assertNoLeak(moved.body, 'POST /move');
         const failed = await app.inject({ method: 'DELETE', url: `/api/v1/objects/${String(g)}` });
         assertNoLeak(failed.body, 'the 409 delete-refusal body');
+      });
+
+      /**
+       * A device template must not carry a secret out (`P-56`).
+       *
+       * `POST /objects/:id/as-template` is built from `sensorsOfDevice`, which reads
+       * `sensor_config.params` with raw SQL to get the *stored* settings a template has to carry
+       * forward — deliberately going around `ObjectService.#redact`. Its comment justified that by
+       * asserting credentials never appear in `params`. Two shipped types disprove it:
+       * `exe.script`'s `secret`, and every SNMP type's `community`, `authKey` and `privKey`, are
+       * `writeOnly` entries in their own `paramsSchema` and live in that column.
+       *
+       * The route's response schema is `additionalProperties: true`, so the serialiser filtered
+       * nothing either, and the sweep above never covered it because that sweep is a
+       * hand-maintained list of URLs.
+       */
+      it('builds a device template without the writeOnly parameters', async () => {
+        const g = await createGroup(probeId, 'Group');
+        const d = await createDevice(g, 'switch-01');
+        const sensor = await post('/api/v1/objects', {
+          kind: 'sensor',
+          parentId: d.id,
+          name: 'Traffic',
+          sensorType: 'snmp.traffic',
+          params: { community: CANARY, port: 161 },
+        });
+        assert.equal(sensor.statusCode, 201, sensor.body);
+
+        const sensors = await sensorsOfDevice(scratch.db, testCatalogue(), d.id);
+        assert.equal(sensors.length, 1, 'the sensor is in the template');
+
+        const body = JSON.stringify(sensors);
+        assertNoLeak(body, 'sensorsOfDevice, which feeds POST /objects/:id/as-template');
+
+        // ...and not by returning nothing: a template with no settings carries nothing forward,
+        // which would pass a leak check while making the feature useless.
+        assert.equal(sensors[0]?.params['port'], 161, 'the public settings still travel');
       });
 
       it('reports where a credential is inherited from, without its value', async () => {

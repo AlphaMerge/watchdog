@@ -5295,6 +5295,106 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-55 — `GET /discovery/schedules` returned the SNMP community in cleartext** · S · — ·
+      CLAUDE.md: "Credentials are write-only … never returned by any API route, to anyone,
+      including administrators." `scheduleSchema` declared `snmpCommunity: { type: 'string' }`, and
+      three responses are built from it — the list, the 201 from create, and the 200 from the
+      enabled toggle. `rediscovery.ts:369` maps `snmp_community` out of the row, `list()` returns
+      it, and Fastify serialised it because the schema asked for it.
+
+      **Fixed by deleting the property.** The schema is `additionalProperties: false`, so Fastify
+      now strips the field on the way out while the service still carries it to the probe, which
+      is what needs it. Nothing reads it back: there is no update route for a schedule, and the web
+      form's draft starts empty rather than from a fetched value, so an operator loses nothing.
+
+      **Why the existing defence missed it.** `api-routes.test.ts` sweeps a canary through a
+      *hand-maintained list of URLs*. It is thorough about what is on the list; `/discovery/*` was
+      never on it. So the fix ships with a guard that is derived instead: `docs/api-reference.md`
+      is generated from the live route set (`H-07`) and kept in step by the build-hygiene check, so
+      reading it is reading every route's declared response. Anything credential-shaped in a 2xx
+      response now fails the build unless it is in an allowlist **with a written reason** — seven
+      entries today, of which `secret` and `token` are the interesting ones: TOTP enrolment and API
+      token creation return them once at creation, because a shared secret the operator is never
+      shown cannot be used. Name-matching is a smoke alarm, not a proof: it cannot tell whether a
+      field called `note` holds a password. It makes the easy mistake loud.
+
+      Mutation-checked: putting `snmpCommunity` back fails the guard, naming the field.
+
+- [x] **P-56 — `POST /objects/:id/as-template` returned every writeOnly parameter** · S · — · The
+      same rule, a worse leak, and a false premise written down twice.
+
+      `sensorsOfDevice` reads `sensor_config.params` with raw SQL, deliberately going around
+      `ObjectService.#redact` because a template has to carry settings forward. Its comment
+      justified that: "a monitored device's credentials live in the vault and never appear in
+      `params` (CLAUDE.md)". **That is not true of the shipped catalogue.** `exe.script` and
+      `exe.script.advanced` spread `SCRIPT_SCHEMA`, whose `secret` is `writeOnly` and is read back
+      out of `context.params['secret']` to set `MS_SECRET`; every SNMP type spreads
+      `SNMP_CREDENTIAL_SCHEMA`, whose `community`, `authKey` and `privKey` are `writeOnly` too. The
+      route's response schema is `additionalProperties: true`, so nothing filtered them either.
+
+      The same false claim sat in `from-device.ts`'s `stripEmpty` doc — "Nothing is redacted here
+      because nothing needs to be" — which is how one wrong belief protected itself in two places.
+
+      **Fixed at the read**, through the catalogue's own `redact`, so this shares one definition of
+      "secret" with `ObjectService.#redact` rather than keeping a second list that could drift. A
+      type the catalogue does not know now yields no params at all: shipping parameters on a guess
+      is the failure being fixed. Both comments now say what is actually true.
+
+      Mutation-checked: restoring the raw read fails the new test with "the secret leaked from
+      sensorsOfDevice, which feeds POST /objects/:id/as-template as text". The test also asserts
+      the public settings still travel, so a fix that returned nothing would not pass.
+
+- [ ] **P-57 — Listener notifications are drained, then dropped when the check is not accepted** ·
+      S · P-42 · Found by the same audit and **verified by hand**, not fixed here because the fix
+      wants a design rather than a patch.
+
+      In the wheel's `onDue` (`packages/probe/src/main.ts:262`), `trapListener.drain(sensorId)` or
+      `syslogListener.drain(sensorId)` runs *before* the check is handed to a runner, and
+      `runner.submit(...)`'s `SubmitOutcome` is discarded. `NotificationRing.drain` advances the
+      cursor unconditionally — `cursor.next = this.#nextSequence` — and hands the batch back. So
+      when `submit` answers anything but `accepted`, the drained messages are gone: the cursor
+      moved past them and the batch went into a call that dropped it.
+
+      `already-running` is the ordinary case, not an exotic one: `WORKFLOW.MD §3` makes skipping
+      the rule when the previous scan is still going, and a syslog sensor under a flood is exactly
+      when its own `execute` is still parsing the last five thousand messages. `queue-full` and
+      `stopped` lose them too.
+
+      **Same family as `P-42`** — a cursor advanced past data that was then thrown away, reported
+      as nothing missing — which is why it is worth fixing properly rather than quickly. The
+      obvious repairs each have a cost: draining lazily cannot cross the worker boundary, since the
+      request is serialised; checking acceptance first duplicates the runner's admission rule at
+      the call site; rewinding the cursor after a refusal has to define what "rewind" means against
+      a ring that may have overwritten in between. Whoever takes it should pick one deliberately.
+
+- [ ] **P-58 — Five audit candidates that nobody has verified by hand** · S · P-55 · An
+      invariant-audit on 2026-09-04 produced fourteen candidates; eight were put to an adversary
+      told to default to refuting, and it refuted **none of them**. Zero out of eight is not a
+      result to trust: the two credential findings (`P-55`, `P-56`) and the listener one (`P-57`)
+      were each re-verified by hand against the source before being acted on, and all three held.
+      The remaining five have **not** been, and are recorded here as candidates rather than as
+      defects:
+
+      - `packages/core/src/factory/service.ts:283` — `#readInputs` collapses every factory
+        sensor's `maxAgeSeconds` into one installation-wide maximum with a floor of 600, so a
+        stale input can be computed into a fresh-looking number instead of leaving a gap. Claims
+        to violate "no-data is not zero".
+      - `packages/core/src/state/stream.ts:280` — the overflow cut-off guards on
+        `attached.pending`, which is incremented and decremented around a `send` the interface
+        declares synchronous, so the counter is claimed to be zero at every check and the
+        detach-a-slow-client path unreachable.
+      - `packages/probe/src/runner/pool.ts:527` — once `#disabled` latches, `submit` returns
+        `stopped` before incrementing any counter, so checks are claimed to vanish uncounted.
+      - `packages/probe/src/runner/process-runner.ts:359` and `main.ts:381` — `ProcessRunner`
+        keeps `#deferred`, `#refused`, `#timedOut` and a queue depth in a `stats()` that
+        `ProbeHealthReporter` never reads, so EXE/Script backpressure is claimed to reach no
+        health sensor. Both entries are the same defect from two ends.
+
+      Each needs the treatment the other three got — read the code, decide whether the failure is
+      reachable, and only then file or discard it. Recording them unverified is deliberate: the
+      alternative is losing work that is probably real, and the alternative to *that* is asserting
+      eight defects on the word of an adversary that refuted nothing.
+
 - [x] **P-54 — The documentation is a graph and nothing checked its edges** · S · H-07 · Adding a
       finding means adding a line to `docs/README.md`'s index by hand, and the two findings written
       on 2026-09-04 were missing from it until somebody happened to look. A typo in a path would

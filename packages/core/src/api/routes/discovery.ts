@@ -639,7 +639,17 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         range: { type: 'string' },
         level: { type: 'string' },
         templates: { type: 'array', items: { type: 'string' } },
-        snmpCommunity: { type: 'string' },
+        // **`snmpCommunity` is deliberately absent** (`P-55`). It is a credential, and CLAUDE.md
+        // says a credential is never returned by any API route, to anyone, including
+        // administrators. It was declared here, which meant all three responses built from this
+        // schema — the list, the 201 from create, and the 200 from the enabled toggle — echoed
+        // the stored community back in cleartext.
+        //
+        // Removing the property is the whole fix rather than the start of one: this schema is
+        // `additionalProperties: false`, so Fastify now strips the field on the way out even
+        // though the service still carries it, which is exactly what the probe needs it to do.
+        // Nothing reads it back — there is no update route for a schedule, and the web form's
+        // draft starts empty rather than from a fetched value.
         timeoutMs: { type: 'integer' },
         concurrency: { type: 'integer' },
         ratePerSecond: { type: 'number' },

@@ -494,7 +494,7 @@ export class ApiServer {
           await scope.register(deviceTemplateRoutes, {
             templates,
             ...(this.#discovery === undefined ? {} : { discovery: this.#discovery }),
-            sensorsOf: (deviceId) => sensorsOfDevice(this.#db, deviceId),
+            sensorsOf: (deviceId) => sensorsOfDevice(this.#db, this.#catalogue, deviceId),
             credentialKindsFor: (sensorType) =>
               this.#catalogue.has(sensorType)
                 ? (this.#catalogue.declaration(sensorType).credentialKinds ?? [])
@@ -675,14 +675,25 @@ export async function buildApiServer(options: ApiServerOptions): Promise<ApiServ
  * A device's sensors, for save-as-template (`D-03`).
  *
  * Read straight rather than through `ObjectService`, because what is wanted is the *stored*
- * parameters: the service redacts anything a type marked `writeOnly` and hands back
- * `redactedParams` instead, which is exactly right for an API response and exactly wrong for a
- * template that has to carry the settings forward. Nothing sensitive is lost by reading them
- * directly — a monitored device's credentials live in the vault and never appear in `params`
- * (CLAUDE.md) — and `templateFromDevice` writes that down where somebody will read it.
+ * parameters: a template has to carry the settings forward, and the service's `redactedParams`
+ * shape is right for an API response and wrong for a template.
+ *
+ * **It still redacts the credentials, and the comment that used to say it need not was wrong**
+ * (`P-56`). It claimed "a monitored device's credentials live in the vault and never appear in
+ * `params`". Two shipped types disprove it: `exe.script` and `exe.script.advanced` spread
+ * `SCRIPT_SCHEMA`, whose `secret` is `writeOnly` and is read straight back out of
+ * `context.params['secret']` to set `MS_SECRET`; and every SNMP type spreads
+ * `SNMP_CREDENTIAL_SCHEMA`, whose `community`, `authKey` and `privKey` are `writeOnly` too. Those
+ * live in `sensor_config.params`, and `POST /objects/:id/as-template` returned them in cleartext
+ * to anyone who could reach the route — the exact thing CLAUDE.md says never happens to anyone,
+ * administrators included.
+ *
+ * The catalogue does the stripping, so this shares one definition of "secret" with
+ * `ObjectService.#redact` rather than keeping a second list that could drift.
  */
-async function sensorsOfDevice(
+export async function sensorsOfDevice(
   db: Database,
+  catalogue: SensorCatalogue,
   deviceId: number,
 ): Promise<
   { name: string; sensorType: string; params: Record<string, unknown>; isMaster: boolean }[]
@@ -709,7 +720,9 @@ async function sensorsOfDevice(
   return rows.map((row) => ({
     name: row.name,
     sensorType: row.type,
-    params: row.params,
+    // A type the catalogue does not know cannot be redacted against its schema, and shipping its
+    // parameters on a guess is the failure this is fixing. Nothing is safer than nothing.
+    params: catalogue.has(row.type) ? catalogue.redact(row.type, row.params).params : {},
     isMaster: row.is_master,
   }));
 }

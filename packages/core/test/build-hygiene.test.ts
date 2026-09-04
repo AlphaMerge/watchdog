@@ -115,6 +115,80 @@ describe('generated documentation', () => {
 });
 
 /**
+ * No route grows a credential-shaped field in a response without someone saying why (`P-55`).
+ *
+ * **This is a default-deny list, and it exists because the hand-maintained one failed.**
+ * `api-routes.test.ts` sweeps a list of URLs with a canary and asserts no secret comes back. That
+ * catches everything on the list and nothing else, and `GET /discovery/schedules` — which
+ * returned the stored SNMP community in cleartext from three separate responses — was never on
+ * it. CLAUDE.md's rule is absolute: a credential is never returned by any API route, to anyone,
+ * including administrators.
+ *
+ * `docs/api-reference.md` is generated from the live route set (`H-07`) and kept in step by the
+ * check above, so reading it is reading every route's declared response — the same derived-not-
+ * enumerated property that made `H-07`'s completeness guard work. A new route cannot dodge this
+ * by not being added anywhere.
+ *
+ * It matches on *names*, so it is a smoke alarm and not a proof: it cannot tell whether a field
+ * called `note` holds a password. What it does is make the easy mistake loud.
+ */
+describe('credential-shaped response fields', () => {
+  /**
+   * Each of these is a deliberate exception with a reason, and the reason is the point: an entry
+   * added without one is how the rule erodes.
+   */
+  const ALLOWED = new Map([
+    [
+      'secret',
+      'TOTP enrolment and API-token creation return it once, at creation. A shared secret the operator is never shown cannot be enrolled or used.',
+    ],
+    [
+      'token',
+      'The API token, returned once by its creation route for the same reason. It is hashed at rest and never readable again.',
+    ],
+    [
+      'credentials',
+      "The object detail's credential block carries presence and inheritance source, never a value — which the canary sweep in api-routes.test.ts asserts directly.",
+    ],
+    ['credentialsChanged', 'A boolean on a clone response.'],
+    [
+      'droppedCredentialKinds',
+      'A list of credential *kind* names that were not copied, never their values.',
+    ],
+    ['mustChangePassword', 'A boolean on the session and user routes.'],
+    ['cappedByToken', "A boolean saying an API token's ceiling limited the right."],
+  ]);
+
+  const SHAPE =
+    /(community|password|secret|auth_?key|priv_?key|passphrase|token|api_?key|credential)/i;
+
+  it('are all accounted for', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const reference = await readFile(join(repoRoot, 'docs', 'api-reference.md'), 'utf8');
+
+    const unexplained: string[] = [];
+    for (const line of reference.split('\n')) {
+      // `**200** { a, b, c }` — the generator's rendering of a declared response shape.
+      const match = /^\*\*(2\d\d)\*\*\s*\{(.+)\}\s*$/.exec(line);
+      if (match === null) continue;
+      for (const raw of (match[2] ?? '').split(',')) {
+        const field = raw.trim();
+        if (field === '' || !SHAPE.test(field) || ALLOWED.has(field)) continue;
+        if (!unexplained.includes(field)) unexplained.push(field);
+      }
+    }
+
+    assert.deepEqual(
+      unexplained,
+      [],
+      'a response now carries a credential-shaped field that nothing justifies:\n  ' +
+        `${unexplained.join('\n  ')}\n` +
+        'Either stop returning it, or add it to ALLOWED with the reason it is safe.',
+    );
+  });
+});
+
+/**
  * Every link between documents points at a file that exists (`P-54`).
  *
  * **The documentation is a graph and nothing was checking its edges.** Adding a finding means

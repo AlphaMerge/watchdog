@@ -84,10 +84,13 @@ export function templateFromDevice(options: FromDeviceOptions): DeviceTemplate {
  * one would pin all of them — and a later release changing a default would then not reach any
  * device created from that template. What is worth keeping is what somebody actually set.
  *
- * **Nothing is redacted here because nothing needs to be**: a monitored device's credentials live
- * in the vault and never appear in `params` (CLAUDE.md), so a template built from a device
- * carries no secret. That is a property of the object model rather than of this function, which
- * is why it is worth writing down.
+ * **Redaction happens before this, and the note that used to sit here was wrong** (`P-56`). It
+ * said a monitored device's credentials live in the vault and never appear in `params`. They do
+ * appear: `exe.script`'s `secret` and every SNMP type's `community`/`authKey`/`privKey` are
+ * `writeOnly` entries in their own `paramsSchema`, stored in `sensor_config.params` and read back
+ * from there at check time. `sensorsOfDevice` now strips them through the catalogue, so what
+ * arrives here already carries no secret — which is a property of that caller, not of the object
+ * model, and the difference is what made the old note dangerous.
  */
 function stripEmpty(params: Readonly<Record<string, unknown>>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
