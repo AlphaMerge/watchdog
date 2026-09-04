@@ -844,6 +844,19 @@ export class ProbeEndpoint {
       session.info.gid = decision.gid;
       session.approved = decision.kind === 'approved';
 
+      // **The socket may have gone while `admit` was in flight** (`P-80`). `admit` is three
+      // database round trips, and `MessageConnection.destroy` runs `onClose` synchronously — so
+      // `#handleClose` has already fired, with `probeObjectId` still null and the session not yet
+      // in `#sessions`, which means it removed nothing and told reachability nothing. Installing
+      // the dead session here left it reported `connected: true` for ever, `found()` putting its
+      // sensors back to Up for a probe with no socket, and `#handleClose` never running again:
+      // `R-05`'s one promise — that the core reports a probe's absence because the probe cannot —
+      // broken permanently for that probe.
+      if (connection.closed) {
+        logger.info({ gid: decision.gid }, 'the probe disconnected while it was being admitted');
+        return;
+      }
+
       const existing = this.#sessions.get(decision.gid);
       if (existing !== undefined && existing !== session) {
         // A reconnect after a network partition: the old socket is stale by definition.
@@ -978,7 +991,22 @@ export class ProbeEndpoint {
         if (session.probeObjectId === null) {
           session.probeObjectId = await source.probeObjectFor(session.info.gid);
           if (session.probeObjectId !== null) {
-            await source.touch(session.probeObjectId);
+            // Best-effort, and its own catch (`P-80`). `touch` is one `UPDATE ... last_seen_at`
+            // documented as unable to fail a handshake, but a rejection landed in the outer catch
+            // — skipping `found()` below. Because the guard that re-runs this block is
+            // `probeObjectId === null` and the field is already set, `found()` would never be
+            // called again for the life of the session: the probe's sensors stayed Unknown with
+            // reason 'link' while it delivered normally, every arriving result re-decided against
+            // an overlay saying its probe was unreachable. The delivery sweep cannot rescue that
+            // either — it reads `marked === 'link'` and correctly leaves `R-05`'s probes alone.
+            try {
+              await source.touch(session.probeObjectId);
+            } catch (error: unknown) {
+              logger.warn(
+                { probeObjectId: session.probeObjectId, ...describeError(error) },
+                'could not record this probe’s last-seen time; continuing',
+              );
+            }
             logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
             // Its sensors go back to their last reading (`R-05`). Here rather than at the
             // handshake, because this is the moment the *branch* is known — a session without

@@ -388,8 +388,8 @@ async function compare(
  * and says nothing about what it never looked at (`P-49`, `P-52`, `P-75`). `CLAUDE.md` says the
  * system monitors itself; a counter nobody can read is not monitoring, it is bookkeeping.
  *
- * The check is against `probe-health.ts` alone, with comments stripped, because that is the one
- * place a health field becomes a channel reading. A broad grep across `packages/core` is what
+ * The check is against `probe-health.ts` alone, with comments stripped and matched on a word
+ * boundary, because that is the one place a health field becomes a channel reading. A broad grep across `packages/core` is what
  * missed `sessionsOpened` when this was first audited by hand: the name appeared in a *comment*
  * beside `sessionsEvicted`, describing a diagnosis the operator could not actually make.
  */
@@ -424,7 +424,11 @@ describe('the probe health protocol', () => {
     // audit, and a mention is not a reading.
     const code = source.replaceAll(/\/\*[\s\S]*?\*\//g, ' ').replaceAll(/\/\/[^\n]*/g, ' ');
 
-    const unread = fields.filter((field) => !code.includes(field));
+    // Word-boundary, not substring (`P-80`). `includes` let a field whose name is a *prefix* of
+    // another be satisfied by its longer sibling — `sessionsOpen` by `sessionsOpened` — so the
+    // guard could pass while the shorter one was read by nothing. The floor above catches a regex
+    // that matches nothing; only this catches a match that is accidentally satisfied.
+    const unread = fields.filter((field) => !new RegExp(`\\b${field}\\b`).test(code));
     assert.deepEqual(
       unread,
       [],

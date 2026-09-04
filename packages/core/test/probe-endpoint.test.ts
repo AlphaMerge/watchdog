@@ -492,6 +492,62 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('does not install a session whose socket died while it was being admitted', async () => {
+    // **`P-80`, and the whole registry path was uncovered — every other test here drives the
+    // registry-less branch.** `admit` is three database round trips, and
+    // `MessageConnection.destroy` runs `onClose` synchronously, so a socket that dies mid-admit
+    // fires `#handleClose` while `probeObjectId` is still null and the session is not yet in
+    // `#sessions`: it removes nothing and tells reachability nothing. Installing the dead session
+    // afterwards left it reported `connected: true` for ever, with `found()` putting its sensors
+    // back to Up for a probe with no socket, and `#handleClose` never running again for it —
+    // `R-05`'s one promise broken permanently for that probe.
+    let release: (() => void) | undefined;
+    const admitted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const found: number[] = [];
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+      registry: {
+        admit: async () => {
+          await admitted;
+          return { kind: 'approved' as const, gid: 'probe-gid', objectId: 7 };
+        },
+      },
+      reachability: {
+        found: (id: number) => {
+          found.push(id);
+          return Promise.resolve(1);
+        },
+        lost: () => Promise.resolve(0),
+      },
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello({ gid: 'probe-gid' }));
+      // The socket goes while `admit` is still in flight, then the decision lands.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      probe.close();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      release?.();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      assert.equal(endpoint.linkFor(7).connected, false, 'a dead socket is not a connected probe');
+      assert.deepEqual(found, [], 'and its sensors were not declared healthy on its behalf');
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
   it('shuts down while a probe is wedged, rather than waiting for a FIN that never comes', async () => {
     // **`Server.close()` waits for every open connection, and `stop()` only *asks* them to go.**
     // A session is `end()`ed, not destroyed, so a probe that has stopped reading keeps its half
@@ -759,9 +815,13 @@ describe(
           stamps: new Map(this.stamps),
         });
       }
+      /** `P-80`: a rejection here used to cost the probe its `found()` for the whole session. */
+      touchFails = false;
       touch(objectId: number): Promise<void> {
         this.touched.push(objectId);
-        return Promise.resolve();
+        return this.touchFails
+          ? Promise.reject(new Error('deadlock on probe_config'))
+          : Promise.resolve();
       }
     }
 
@@ -770,6 +830,7 @@ describe(
       body: (probe: TestProbe, endpoint: ProbeEndpoint) => Promise<void>,
       helloOverrides: Partial<Extract<ProbeToCoreMessage, { type: 'hello' }>> = {},
       queries?: ProbeQuerySink,
+      reachability?: { found: (id: number) => Promise<number>; lost: () => Promise<number> },
     ): Promise<void> {
       const endpoint = new ProbeEndpoint({
         config: endpointConfig(dir),
@@ -777,6 +838,7 @@ describe(
         coreVersion: '9.9.9',
         probeConfig: source,
         ...(queries === undefined ? {} : { queries }),
+        ...(reachability === undefined ? {} : { reachability }),
       });
       const address = await endpoint.start();
       try {
@@ -930,6 +992,38 @@ describe(
         assert.ok(after.connected);
         assert.equal(after.configSentAt?.getTime(), stamped, 'the clock was restarted by churn');
       });
+    });
+
+    it('brings a probe’s sensors back even when recording its last-seen time fails', async () => {
+      // **`P-80`.** `touch` is one `UPDATE ... last_seen_at`, documented as unable to fail a
+      // handshake — but its rejection landed in the outer catch, skipping `reachability.found()`.
+      // The guard that re-runs that block is `probeObjectId === null` and the field is already
+      // set by then, so `found()` was never called again for the life of the session: the probe's
+      // sensors stayed Unknown with reason 'link' while it delivered normally, every arriving
+      // result re-decided against an overlay saying its probe was unreachable. The delivery sweep
+      // cannot rescue it either — it reads 'link' and correctly leaves `R-05`'s probes alone.
+      const source = new StubSource();
+      source.sensors = [sensor(1)];
+      source.touchFails = true;
+      const found: number[] = [];
+
+      await withProbe(
+        source,
+        async (probe) => {
+          await probe.waitFor((m) => m.type === 'config-set');
+          assert.deepEqual(source.touched, [7], 'it was attempted');
+          assert.deepEqual(found, [7], 'and the sensors came back anyway');
+        },
+        {},
+        undefined,
+        {
+          found: (id: number) => {
+            found.push(id);
+            return Promise.resolve(1);
+          },
+          lost: () => Promise.resolve(0),
+        },
+      );
     });
 
     it('sends an empty configuration to a probe no branch has claimed', async () => {
