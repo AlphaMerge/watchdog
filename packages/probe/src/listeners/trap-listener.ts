@@ -103,7 +103,8 @@ export class TrapListener {
         this.#malformed += 1;
         // A malformed datagram is ordinary on a port anything can send to. Logged for the first
         // few and then every thousandth: one line per bad packet is how a disk fills up during
-        // an incident, and the count is on Probe Health either way.
+        // an incident, and the count is on Probe Health either way — which `P-64` made true. It
+        // was written here before anything carried it, and stayed wrong for three tickets.
         if (this.#malformed <= 5 || this.#malformed % 1_000 === 0) {
           this.#logger.warn({ reason, malformed: this.#malformed }, 'discarded a notification');
         }

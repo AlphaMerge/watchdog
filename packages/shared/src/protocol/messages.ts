@@ -41,15 +41,17 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
- * Version 11 adds the child-process runner's counters to that health report (`P-61`), version 10
- * added the session-pool counters (`P-36`), and version 9 added `spoolStalledMs` (`H-01`). **The bump is required by `additionalProperties: false` on
+ * Version 13 adds the listeners' throughput counters (`P-64`), version 12 the worker pool's
+ * `discarded` count and `poolState` (`P-62`), version 11 the child-process runner's counters
+ * (`P-61`), version 10 the session-pool counters (`P-36`), and version 9 `spoolStalledMs`
+ * (`H-01`). **The bump is required by `additionalProperties: false` on
  * the health schema**, not by the fields themselves: a newer probe sending them to an older core
  * would have every heartbeat rejected by validation, with nothing to say why. `isProtocolCompatible` refuses a peer above this build's version at the
  * handshake instead, which is the same trade version 2 made — a clean rejection where an
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 13;
 
 /**
  * The oldest peer version this build still understands.
@@ -305,6 +307,23 @@ export interface ProbeHealthReport {
   /** Checks refused because the queue was full. Monotonic, and never silent. */
   refused?: number;
   timedOut?: number;
+  /**
+   * Checks the worker pool threw away because it has given up (`P-62`).
+   *
+   * Not `refused`, which is a full queue on a pool that still works. This is a pool that will run
+   * nothing until the probe restarts, and each count is a scan that produced no reading anywhere.
+   */
+  discarded?: number;
+  /**
+   * Whether the worker pool is still running checks: 0 alive, 1 given up.
+   *
+   * **A state, not a measurement**, for the same reason `connected` is one. A pool that has
+   * latched off answers nothing and reports `poolBusy: 0`, which reads as an idle probe — while
+   * every sensor under it keeps its last state indefinitely, because the core re-evaluates on an
+   * arriving result and none arrive. Absent from an older probe, and absent must stay absent:
+   * "this build cannot tell you whether its pool is alive" is not "the pool is alive".
+   */
+  poolState?: number;
   workerCrashes?: number;
   /**
    * Session-pool counters, summed across the probe's check workers (`P-36`).
@@ -336,6 +355,24 @@ export interface ProbeHealthReport {
   childRefused?: number;
   childTimedOut?: number;
   childCrashes?: number;
+  /**
+   * The SNMP-trap and syslog listeners (`P-64`), each absent unless this probe runs that one.
+   *
+   * **`rejected` is the one worth having.** A message turned away by the community or sender
+   * allow-list never reaches the ring, so it produces no batch, no `dropped` and no `unmatched` —
+   * and it is deliberately not logged, because a misconfigured device retries for ever. Without
+   * this the sensor drains nothing, throws nothing, and renders "no traps since …": a green
+   * sensor reporting a quiet network at a receiver turning everything away. `received` is what
+   * separates a live listener from a dead socket when no sensor is draining, and `malformed` is
+   * ordinary on a public port. None of the three is an alarm; they are what turns "my trap sensor
+   * reads zero" into a diagnosis.
+   */
+  trapReceived?: number;
+  trapRejected?: number;
+  trapMalformed?: number;
+  syslogReceived?: number;
+  syslogRejected?: number;
+  syslogMalformed?: number;
   /** Results written to disk and not yet acknowledged by the core. */
   spoolPending?: number;
   spoolBytes?: number;
@@ -624,6 +661,8 @@ const PROBE_HEALTH_SCHEMA = {
     deferred: { type: 'integer', minimum: 0 },
     refused: { type: 'integer', minimum: 0 },
     timedOut: { type: 'integer', minimum: 0 },
+    discarded: { type: 'integer', minimum: 0 },
+    poolState: { type: 'integer', minimum: 0, maximum: 1 },
     workerCrashes: { type: 'integer', minimum: 0 },
     sessionsOpen: { type: 'integer', minimum: 0 },
     sessionOverflows: { type: 'integer', minimum: 0 },
@@ -636,6 +675,12 @@ const PROBE_HEALTH_SCHEMA = {
     childRefused: { type: 'integer', minimum: 0 },
     childTimedOut: { type: 'integer', minimum: 0 },
     childCrashes: { type: 'integer', minimum: 0 },
+    trapReceived: { type: 'integer', minimum: 0 },
+    trapRejected: { type: 'integer', minimum: 0 },
+    trapMalformed: { type: 'integer', minimum: 0 },
+    syslogReceived: { type: 'integer', minimum: 0 },
+    syslogRejected: { type: 'integer', minimum: 0 },
+    syslogMalformed: { type: 'integer', minimum: 0 },
     spoolPending: { type: 'integer', minimum: 0 },
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },

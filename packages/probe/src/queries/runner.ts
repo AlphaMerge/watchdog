@@ -160,8 +160,13 @@ const NOT_A_CHECK_FAILURE: Readonly<
   },
 };
 
-const REFUSALS: Readonly<Record<'already-running' | 'queue-full' | 'stopped', string>> = {
+const REFUSALS: Readonly<
+  Record<'already-running' | 'queue-full' | 'stopped' | 'disabled', string>
+> = {
   'already-running': 'this sensor is already being checked on demand',
   'queue-full': 'too many on-demand checks are already running on this probe',
   stopped: 'this probe is not running checks',
+  // Distinct from `stopped`, and the difference is what the requester needs: this probe is up and
+  // will keep answering, and it cannot run a check until somebody restarts it (`P-62`).
+  disabled: 'this probe’s worker pool has failed and it cannot run checks until it is restarted',
 };

@@ -94,7 +94,8 @@ export class SyslogListener {
       onMalformed: (reason) => {
         this.#malformed += 1;
         // Logged for the first few and then every thousandth: one line per bad packet is how a
-        // disk fills up during an incident, and the count is on Probe Health either way.
+        // disk fills up during an incident, and the count is on Probe Health either way — which
+        // `P-64` made true. It was written here before anything carried it.
         if (this.#malformed <= 5 || this.#malformed % 1_000 === 0) {
           this.#logger.warn({ reason, malformed: this.#malformed }, 'discarded a syslog message');
         }

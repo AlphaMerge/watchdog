@@ -35,6 +35,14 @@ const FULL: ProbeHealthReport = {
   deferred: 7,
   refused: 2,
   timedOut: 1,
+  discarded: 0,
+  poolState: 0,
+  trapReceived: 900,
+  trapRejected: 412,
+  trapMalformed: 3,
+  syslogReceived: 40_000,
+  syslogRejected: 0,
+  syslogMalformed: 17,
   workerCrashes: 0,
   childSlots: 4,
   childBusy: 3,
@@ -166,6 +174,43 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['spoolDropped'], 4);
       assert.equal(reading['spoolStalled'], 420, 'milliseconds in, seconds out');
       assert.equal(reading['cpu'], 18.5);
+    });
+
+    it('carries what the listeners heard and turned away, which nothing else knows', () => {
+      // `P-64`. `trapRejected` is the one worth the wire: without it a device sending the wrong
+      // community makes the trap sensor read a quiet network rather than a receiver refusing
+      // everything it is sent.
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['trapReceived'], 900);
+      assert.equal(reading['trapRejected'], 412);
+      assert.equal(reading['syslogMalformed'], 17);
+    });
+
+    it('gaps a listener a probe does not run, rather than reading it as silent', () => {
+      const { trapReceived: _a, trapRejected: _b, trapMalformed: _c, ...noTrap } = FULL;
+      const { reading } = build(() => connected({ health: noTrap })).read(probeId);
+      assert.equal(reading['trapReceived'], null);
+      assert.equal(reading['syslogReceived'], 40_000, 'the other one is unaffected');
+    });
+
+    it('turns the probe Down when its worker pool has given up', () => {
+      // **The alarm for a probe that is up and monitoring nothing** (`P-62`). Every other channel
+      // reads like a quiet night: the link is connected, `poolUsage` is 0%, nothing is deferred or
+      // refused. Meanwhile every sensor under that probe holds its last state for ever, because
+      // the core re-evaluates on an arriving result and none arrive.
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, poolState: 1, discarded: 412 } }),
+      ).read(probeId);
+      assert.equal(reading['poolState'], 1);
+      assert.equal(reading['discarded'], 412, 'and what it cost, for afterwards');
+    });
+
+    it('gaps the pool state for a probe too old to report it, rather than reading it as alive', () => {
+      // The one mistake this channel exists to prevent: silence from an older probe is not
+      // "the pool is running". The lookup's undefinedState makes the gap a warning.
+      const { poolState: _omitted, ...older } = FULL;
+      const { reading } = build(() => connected({ health: older })).read(probeId);
+      assert.equal(reading['poolState'], null);
     });
 
     it('carries the child-process runner’s counters, which no pool channel covers', () => {

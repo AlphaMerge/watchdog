@@ -224,6 +224,41 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'poolState',
+    name: 'ms_probe_pool_failed',
+    help: '1 when this probe’s worker pool has given up and it can run no checks.',
+  },
+  {
+    key: 'discarded',
+    name: 'ms_probe_checks_discarded_total',
+    help: 'Checks thrown away because the worker pool has given up.',
+    counter: true,
+  },
+  {
+    key: 'trapReceived',
+    name: 'ms_probe_traps_received_total',
+    help: 'SNMP traps this probe’s listener accepted.',
+    counter: true,
+  },
+  {
+    key: 'trapRejected',
+    name: 'ms_probe_traps_rejected_total',
+    help: 'SNMP traps turned away because their community is not in the accept list.',
+    counter: true,
+  },
+  {
+    key: 'syslogReceived',
+    name: 'ms_probe_syslog_received_total',
+    help: 'Syslog messages this probe’s listener accepted.',
+    counter: true,
+  },
+  {
+    key: 'syslogRejected',
+    name: 'ms_probe_syslog_rejected_total',
+    help: 'Syslog messages turned away because their sender is not in the accept list.',
+    counter: true,
+  },
+  {
     key: 'scheduled',
     name: 'ms_probe_sensors_scheduled',
     help: 'Sensors this probe currently has on its wheel.',

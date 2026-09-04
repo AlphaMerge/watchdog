@@ -5561,7 +5561,7 @@ because each is a decision rather than a defect:
       declares a `stats()` must have its stats type named in `ProbeHealthSources`. It reads the
       source rather than the build, so it fails on the regression whether or not it compiles.
 
-- [ ] **P-64 — The syslog and SNMP-trap listeners count what they lose, and tell nobody** · S ·
+- [x] **P-64 — The syslog and SNMP-trap listeners count what they lose, and tell nobody** · S ·
       P-61 · Found while wiring `P-61`, by asking the same question one subsystem further out.
       `TrapListener.stats()` and `SyslogListener.stats()` each keep `received`, `rejected`,
       `malformed`, `buffered`, `cursors` and — the one that matters — `overwritten`: notifications
@@ -5574,11 +5574,55 @@ because each is a decision rather than a defect:
       subsystem where the data being lost is the *point* — a trap that was overwritten is an event
       nobody will ever know arrived.
 
-      Not the same fix as `P-61`. These are per-listener and a probe may run neither, one or both,
-      and `buffered`/`cursors` are gauges of a ring rather than of a queue — the channel set wants
-      thinking about rather than copying. `overwritten` is the one that is not a matter of degree,
-      like `spoolDropped`: any rate above zero is data that no longer exists anywhere, and it
-      should carry a limit that says so. Another protocol bump, for the reason `P-61` documents.
+      Not the same fix as `P-61`: these are per-listener and a probe may run neither, one or both.
+
+      **What this ticket first proposed as the headline was written before anybody read the code,
+      and it was wrong.** It named `overwritten` — "not a matter of degree, like `spoolDropped`",
+      carrying a limit that alarms above zero. Verifying before implementing, which is the rule
+      `P-58` exists for, refuted that and turned up a different defect.
+
+      `overwritten` is not loss. `NotificationRing.push` increments it whenever the target slot is
+      occupied, and slots are never cleared: `drain` reads without clearing, `retain` touches only
+      cursors. So once `nextSequence >= size` every push increments whatever the cursors have done,
+      and the counter is identically `max(0, nextSequence - size)` — **ring turnover**. At the
+      default `bufferSize: 20_000`, a device sending 100 messages a second with a sensor scanning
+      every 60 s drains 6,000 per scan, loses nothing, and turns `overwritten` over by ~8.6M a day.
+      The limit this ticket asked for would have put every busy listener into permanent Error.
+
+      The loss it called silent is already the loudest thing in the subsystem: the per-cursor
+      figure is `ReceivedBatch.dropped`, and both `snmp.trap` and `syslog` already fail the check
+      on it, with a diagnosis.
+
+      **The reachable defect is `rejected`.** A message turned away by the community or sender
+      allow-list never enters the ring, so it produces no batch item, no `dropped` and no
+      `unmatched` — and it is deliberately not logged, because a misconfigured device retries for
+      ever. Enable the listener with `communities: ['public']` and let a device be reconfigured to
+      send `private`: every trap is rejected, the sensor drains an empty batch, `execute` returns
+      `count: 0` without throwing, and `describe` renders "no traps since …". A green sensor
+      reporting a quiet network, at a receiver that is turning all of it away — word for word the
+      failure `snmp-trap.ts` says it must never have, guarded for a missing batch and unguarded for
+      a filter that rejects everything.
+
+      So three channels per listener, not six — `received`, `rejected`, `malformed` — and none with
+      a limit: an allow-list exists in order to reject, and a public UDP port collects junk. Their
+      value is turning "my trap sensor reads zero" into "the probe rejected 400 last minute". Not
+      `overwritten`; not `buffered`, a latch that rises once and never falls; not `cursors`, a count
+      the core already has. Protocol bump for the reason `P-61` documents.
+
+      The structural test that caught `P-61` reads `src/runner/` only, so `src/listeners/` was
+      outside its reach — generalising it over both directories is part of this. Both listeners also
+      carry a comment claiming the malformed count "is on Probe Health either way", which is false
+      today, and is some of why nobody looked.
+
+      **Landed as the reading described, not as the ticket first did.** Two optional sources, three
+      channels each, none with a limit, and `overwritten` deliberately left where it is. The
+      comments in both listeners claiming the malformed count "is on Probe Health either way" are
+      true now — they were written before anything carried it and had been wrong since `T-20`.
+
+      The structural test from `P-61` read `src/runner/` only, which is how a subsystem keeping
+      counters of exactly the same kind stayed invisible to it for three tickets. It reads both
+      directories now, and fails when either listener's source is taken out of `ProbeHealthSources`.
+      A rule that only looks where the last defect was found is a rule that finds the last defect.
 
 - [x] **P-65 — The session-replacement test was watching an idle timer** · S · P-61 · The full
       suite went red on "replaces a stale session when the same probe reconnects" while `P-61` was
@@ -5683,24 +5727,6 @@ because each is a decision rather than a defect:
       The test fails deterministically at eight seconds when the grace is removed, and passes at
       1,014 ms with it.
 
-- [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
-      running eslint over a directory rather than a file during `P-62`: a real
-      `no-unnecessary-condition` error had been sitting in
-      `packages/probe/test/pool-sizer.test.ts:123`, and every full run for weeks had reported
-      clean. Nothing runs lint. `scripts/test-all.sh` runs `npm test` per workspace, whose
-      `pretest` is `tsc -b` — types are checked, style is not — and CI is deliberately off
-      (`ci-deliberately-disabled`). So the check existed, was correct, and had no way to fire.
-
-      Same family as `P-49` and `P-52`, and the third instance of it: a run that reports what it
-      measured while saying nothing about what it never measured at all. `P-49` was 88 suites
-      skipped in silence, `P-52` was a whole workspace's tests missing from every total, and this
-      is a whole *kind* of check missing from every run.
-
-      The suite runs it last and fails on it, separately from the test counters — a lint error is
-      not a failing test, and folding it into that number would bury the failures above it. The one
-      error is fixed; the repo was otherwise clean, which is the only reason wiring it in was a
-      four-line change rather than a project.
-
 - [x] **P-70 — What the review found wrong with the fixes for what the review found** · S · P-66 ·
       An 81-agent adversarial review of `P-59`, `P-60` and `P-63` upheld nine findings out of
       twenty-five and then turned a completeness critic on the fixes themselves. Two of those hit
@@ -5753,7 +5779,8 @@ because each is a decision rather than a defect:
       from `streamRoutes` so it read as `socketBacklog`'s, and the `readMaxAge` test still carried
       the `NaN`-widens-to-`Infinity` rationale that `P-66` corrected everywhere else.
 
-- [ ] **P-71 — The web client answers `overflow` with an instant resubscribe** · S · P-70 · Raised
+- [x] **P-71 — The web client answers `overflow` with an instant resubscribe** · **discarded** ·
+      S · P-70 · Raised
       by the review of `P-60` and not verified by hand. `packages/web/src/api/stream.ts` handles an
       `overflow` frame by calling `#send()` immediately on the same socket, with no backoff — the
       `retryMs` backoff beside it applies only to a dropped socket. Each resubscribe runs the full
@@ -5762,12 +5789,34 @@ because each is a decision rather than a defect:
       per turn. `P-70` makes a false cut-off much less likely; it does not make the response to one
       safe, and a client that is genuinely too slow will still be told to resubscribe for ever.
 
-- [ ] **P-68 — `MessageConnection` declares a backpressure signal that reaches nothing** · S · P-61
-      · `pendingInboundBytes` is documented on the connection as "a backpressure signal for Probe
-      Health" and is read by nothing. The same shape as `P-61` and `P-64`, in the transport: a
-      number computed, named for a consumer, and never wired to one. Raised by the review of
-      `P-59`/`P-60`/`P-63` and not yet verified by hand — the treatment `P-58` prescribes has not
-      been applied, and the entry says so rather than pretending otherwise.
+      **Read, and discarded.** The stated mechanism is dead: `overflow()` runs only after the
+      subscriber has been deleted from the attached set, so no further event can reach that socket
+      to re-trip the guard, and the socket being FIFO — the property `socketBacklog` is built on —
+      means a second snapshot is not counted against the client either. Neither reviewer upheld it,
+      and the proposed backoff was wrong on its own terms: it would have reset its ladder on every
+      landed snapshot, which in the loop it was written for is every turn.
+
+      One residual worry is real and is not this ticket: a client that is genuinely too slow is
+      told to resubscribe for ever, and resubscribing *is* the documented resync, so there is
+      nowhere for it to converge. That is a design question about what the stream owes a client it
+      cannot serve, and it wants an answer rather than a backoff constant.
+
+- [x] **P-68 — `MessageConnection` declares a backpressure signal that reaches nothing** ·
+      **discarded** · S · P-61 · `pendingInboundBytes` is documented on the connection as "a
+      backpressure signal for Probe Health" and is read by nothing — the same shape as `P-61` and
+      `P-64`: a number computed, named for a consumer, and never wired to one. Raised by the review
+      of `P-59`/`P-60`/`P-63`, then read before filing, and it does not hold.
+
+      The number is the length of a **partial frame** sitting in the decoder. It is bounded by one
+      message and falls to zero the moment that message completes — not a queue, unable to grow, no
+      backpressure for it to signal and nothing an operator could do with it. Two independent reads
+      agreed it should reach nothing.
+
+      What remains is a wrong comment rather than a missing channel: the getter, and the note in
+      `frame.ts` that calls it a backpressure metric, should say what the number is — bytes of an
+      incomplete frame — or the getter should go. Kept as a closed entry rather than deleted,
+      because "a number that reaches nothing" is a shape this codebase now looks for, and this is
+      the case where the answer is that it should.
 
 - [x] **P-69 — A gapped Sensor Factory leaves its stored sample where a factory above reads it** ·
       S · P-59 · Raised by the review of `P-59`, then verified by hand and by a test that fails
@@ -5793,7 +5842,7 @@ because each is a decision rather than a defect:
       defect, but it is enough to make a hand-written fixture miss. The reproducing test creates the
       channel the way ingestion would and then inserts into it.
 
-- [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
+- [x] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so
       every check submitted from then on vanishes without appearing in `deferred`, `refused`, or
       anywhere else on Probe Health.
@@ -5807,6 +5856,88 @@ because each is a decision rather than a defect:
 
       Smallest of the four: a `discarded` counter incremented in the `stopped` branch, and a
       channel to carry it.
+
+      **Verified before implementing, and the reading found the ticket understated it twice.**
+
+      First, the reachable consequence is not an uncounted drop. The core re-evaluates a sensor's
+      state when a result arrives, and the only two routes to Unknown are an unreachable probe
+      (`machine.ts:202`) and a sensor that has never been scanned (`machine.ts:206`) — there is no
+      periodic sweep that ages a sensor out. A latched pool leaves the probe *connected* and
+      heartbeating, so `probeReachable` stays true, results simply stop, and **every sensor under
+      that probe holds its last state for ever**. The installation reports that everything is Up
+      while nothing is being checked. That is the defect; the missing counter was a symptom.
+
+      Second, Probe Health does not merely fail to say so — it reads actively healthy. The latch
+      `return`ed one line before the `#slots.splice`, so the slot that killed the pool stayed in
+      `#slots` for the life of the process and was reported as `poolSize`; `poolUsage` therefore
+      read "0% of five workers" instead of gapping the way it does at size 0. The one guard that
+      would have produced no reading was defeated by the leak.
+
+      **So the alarm is a state, not a counter.** `poolState` rides the heartbeat and maps through
+      a new built-in lookup `ms.probe.pool` — 0 running, 1 failed — so a dead pool turns Probe
+      Health Down and says why in a sentence, the same treatment `ms.probe.link` gives a lost
+      probe. `discarded` is the diagnostic half and carries **no limit**: the lookup already
+      alarms for this cause, and a second alarm for one outage is what `CLAUDE.md` forbids.
+
+      `SubmitOutcome` gains `disabled` beside `stopped`, because collapsing them is what hid this —
+      stopping is something an operator did and the probe stops heartbeating for, while giving up
+      leaves it connected, answering, and running nothing. Only one of them needs an alarm, and
+      the on-demand query path now tells a requester which it hit. The counter increments on the
+      `disabled` branch alone, so an orderly shutdown is not counted, and never in `accepts`,
+      which `P-57` established must not move a counter.
+
+      Protocol 12, for the reason `P-61` documents: the health schema is `additionalProperties:
+      false`, so a field without a bump has every heartbeat rejected by an older core.
+
+- [ ] **P-73 — Each failed worker start is counted twice, so the pool gives up at two** · S · P-62
+      · Found while verifying `P-62`, confirmed by reading and not yet fixed. `#spawn` registers
+      both `worker.on('error')` and `worker.on('exit')`, each calling `#onWorkerGone`, whose only
+      re-entry guard is `this.#stopped || slot.retired` — neither is set on a start failure. A
+      worker whose top-level import throws emits both events, so one failed start increments
+      `#startFailures` twice and `MAX_CONSECUTIVE_START_FAILURES = 3` latches on the **second**
+      failing worker, not the third its own comment describes. `workerCrashes` is reported at
+      double the true value for the same reason, and a ready worker's crash calls `#spawn()` twice
+      for one death.
+
+      The guard wants to be per-slot rather than per-pool — a `gone` flag on the slot, set on first
+      entry — and the constant's comment wants to match whatever the count then means.
+
+- [ ] **P-74 — Nothing ages out a sensor whose probe stopped sending results** · M · P-62 · Found
+      while verifying `P-62`, confirmed by reading. A sensor's state is re-evaluated only when a
+      result arrives, or on a pause, an acknowledgement, or a change in probe reachability. The
+      only routes to Unknown are `!probeReachable` and a sensor that has never been scanned. There
+      is no watchdog for **a reachable probe that has stopped answering**, so any fault which stops
+      results without dropping the link leaves every sensor under it frozen in its last state,
+      indefinitely, with no alarm from the sensors themselves.
+
+      `P-62` closes the one cause it knows about by turning the probe's own Probe Health Down. This
+      is the general case: a wedged scheduler, a probe that stops draining its spool, an assignment
+      list that never arrived, a bug not yet found. `CLAUDE.md` says no-data is not zero, and a
+      sensor that is Up because nobody asked it anything is the largest possible version of that.
+
+      Wants care rather than a quick fix: the natural rule — Unknown after some multiple of the
+      scan interval — has to not fire on a probe legitimately replaying an outage from its spool,
+      and it must produce **one** alarm for a probe-wide stall rather than one per sensor, which is
+      what `ProbeReachability` already exists to arrange. Sizing and the alarm-shape question
+      belong in a scenario test (`M-17`).
+
+- [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
+      running eslint over a directory rather than a file during `P-62`: a real
+      `no-unnecessary-condition` error had been sitting in
+      `packages/probe/test/pool-sizer.test.ts:123`, and every full run for weeks had reported
+      clean. Nothing runs lint. `scripts/test-all.sh` runs `npm test` per workspace, whose
+      `pretest` is `tsc -b` — types are checked, style is not — and CI is deliberately off
+      (`ci-deliberately-disabled`). So the check existed, was correct, and had no way to fire.
+
+      Same family as `P-49` and `P-52`, and the third instance of it: a run that reports what it
+      measured while saying nothing about what it never measured at all. `P-49` was 88 suites
+      skipped in silence, `P-52` was a whole workspace's tests missing from every total, and this
+      is a whole *kind* of check missing from every run.
+
+      The suite runs it last and fails on it, separately from the test counters — a lint error is
+      not a failing test, and folding it into that number would bury the failures above it. The one
+      error is fixed; the repo was otherwise clean, which is the only reason wiring it in was a
+      four-line change rather than a project.
 
 - [x] **P-63 — A simulator's `stop()` waits for connections it never destroys** · S · — · Found by
       the full suite going red in `packages/simulators` during `P-60`, in a test that had passed

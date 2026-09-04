@@ -51,7 +51,14 @@ const MIN_DURATION_SAMPLES = 8;
  */
 const OVER_CEILING_RETRY_MS = 250;
 
-export type SubmitOutcome = 'accepted' | 'already-running' | 'queue-full' | 'stopped';
+/**
+ * `disabled` is separate from `stopped` on purpose (`P-62`).
+ *
+ * Stopping is something an operator did and the probe stops heartbeating for; the pool giving up
+ * is a fault that leaves the probe connected, answering, and running nothing. Collapsing them
+ * meant the one that needs an alarm was reported as the one that needs none.
+ */
+export type SubmitOutcome = 'accepted' | 'already-running' | 'queue-full' | 'stopped' | 'disabled';
 
 export interface PoolStats {
   /** Workers held right now. Since `P-18` this moves with the load. */
@@ -75,6 +82,23 @@ export interface PoolStats {
   sessions?: SessionCounters;
   /** Checks refused because the queue was full. */
   refused: number;
+  /**
+   * Checks thrown away because the pool has given up (`P-62`).
+   *
+   * Not `refused`, which is a full queue on a pool that is still working — a matter of degree,
+   * and recoverable within one interval. Every one of these is a scan that produced no reading
+   * anywhere, from a pool that will run nothing until the probe restarts.
+   */
+  discarded: number;
+  /**
+   * The pool has latched itself off after repeated worker start failures.
+   *
+   * **The signal that matters, and it is a state rather than a number.** A latched pool answers
+   * nothing and reports `busy: 0`, which reads as an idle probe on a quiet night; meanwhile every
+   * sensor under it keeps its last state for ever, because the core re-evaluates on an arriving
+   * result and none arrive. The counter above says how much was lost; this says the pool is dead.
+   */
+  disabled: boolean;
   workerCrashes: number;
   waitMs: { p50: number; p95: number; p99: number; max: number };
   runMs: { p50: number; p95: number; p99: number; max: number };
@@ -335,6 +359,7 @@ export class CheckPool {
   #timedOut = 0;
   #deferred = 0;
   #refused = 0;
+  #discarded = 0;
   #crashes = 0;
 
   constructor(options: CheckPoolOptions) {
@@ -544,7 +569,8 @@ export class CheckPool {
 
   /** The decision alone. Counting is `submit`'s, so asking twice never moves a counter. */
   #admission(sensorId: number): SubmitOutcome {
-    if (this.#stopped || this.#disabled) return 'stopped';
+    if (this.#stopped) return 'stopped';
+    if (this.#disabled) return 'disabled';
     // The previous scan of this sensor is still going. Skipping is the rule (WORKFLOW.MD §3)
     // and it is free: the wheel has already scheduled the next one.
     if (this.#active.has(sensorId)) return 'already-running';
@@ -555,6 +581,14 @@ export class CheckPool {
   submit(request: CheckRequest): SubmitOutcome {
     const verdict = this.#admission(request.sensorId);
     if (verdict === 'stopped') return 'stopped';
+    if (verdict === 'disabled') {
+      // **Counted, because the alternative is a probe that looks idle** (`P-62`). Once the latch
+      // is on, every check submitted from here on vanishes; nothing else moves, and Probe Health
+      // reads a pool with slots and nothing to do. `#stopped` deliberately does not come through
+      // here: a probe on its way down stops heartbeating, and the link channel already says so.
+      this.#discarded += 1;
+      return 'disabled';
+    }
     this.#submitted += 1;
 
     if (verdict === 'already-running') {
@@ -604,6 +638,8 @@ export class CheckPool {
         return sessions === undefined ? {} : { sessions };
       })(),
       refused: this.#refused,
+      discarded: this.#discarded,
+      disabled: this.#disabled,
       workerCrashes: this.#crashes,
       waitMs: percentiles(this.#wait),
       runMs: percentiles(this.#run),
@@ -887,6 +923,14 @@ export class CheckPool {
       slot.idleSince = process.hrtime.bigint();
     }
 
+    // Out of the pool before anything else, including before the latch below returns. It used to
+    // return first, so the slot that killed the pool stayed in `#slots` for the life of the
+    // process — counted as `poolSize`, and enough to stop `poolUsage` gapping the way it does at
+    // size 0, so the reading was "0% of five workers" rather than no reading at all (`P-62`).
+    this.#bankSessions(slot);
+    const index = this.#slots.indexOf(slot);
+    if (index >= 0) this.#slots.splice(index, 1);
+
     if (!slot.ready) {
       this.#startFailures += 1;
       if (this.#startFailures >= MAX_CONSECUTIVE_START_FAILURES) {
@@ -898,10 +942,6 @@ export class CheckPool {
         return;
       }
     }
-
-    this.#bankSessions(slot);
-    const index = this.#slots.indexOf(slot);
-    if (index >= 0) this.#slots.splice(index, 1);
     void this.#spawn().then(() => {
       this.#pump();
     });

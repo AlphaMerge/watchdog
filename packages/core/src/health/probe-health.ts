@@ -118,6 +118,20 @@ export class ProbeHealthService {
       refused: health?.refused ?? null,
       timedOut: health?.timedOut ?? null,
       workerCrashes: health?.workerCrashes ?? null,
+      // Null, not 0, when the probe does not send it: an older probe cannot say whether its pool
+      // is alive, and reading that silence as "running" is the one mistake this channel exists to
+      // prevent. The lookup's `undefinedState` makes the gap a warning rather than an Up.
+      poolState: health?.poolState ?? null,
+      discarded: health?.discarded ?? null,
+      // Null rather than 0 for a probe running no such listener: a channel that gaps says "not
+      // running one", and a zero says "running one and hearing nothing", which are different
+      // answers to the question an operator is asking.
+      trapReceived: health?.trapReceived ?? null,
+      trapRejected: health?.trapRejected ?? null,
+      trapMalformed: health?.trapMalformed ?? null,
+      syslogReceived: health?.syslogReceived ?? null,
+      syslogRejected: health?.syslogRejected ?? null,
+      syslogMalformed: health?.syslogMalformed ?? null,
       // Null, not 0, when the probe sends nothing: a build with no child-process runner has
       // nothing to say here, and a confident zero cannot be told from one that is idle.
       childSlots: health?.childSlots ?? null,

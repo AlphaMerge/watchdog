@@ -101,9 +101,36 @@ const PROBE_PROTOCOL: LookupDefinition = {
   ],
 };
 
+/**
+ * Whether a probe's worker pool is still running checks (`P-62`).
+ *
+ * **The alarm for a probe that is up and monitoring nothing.** The pool latches itself off after
+ * repeated worker start failures and runs nothing until the probe restarts — while the link stays
+ * connected, heartbeats keep arriving, and `poolBusy` reads 0, which is indistinguishable from a
+ * quiet night. Meanwhile every sensor under that probe holds its last state for ever: the core
+ * re-evaluates on an arriving result, and the only routes to Unknown are an unreachable probe and
+ * a sensor that has never been scanned. So without this, the failure mode is an installation
+ * reporting that everything is Up while nothing is being checked.
+ *
+ * A lookup rather than a threshold, for the reason `PROBE_LINK` gives: this is a state, and "1 is
+ * above 0.5" is not a sentence anybody can act on.
+ */
+const PROBE_POOL: LookupDefinition = {
+  id: 'ms.probe.pool',
+  name: 'Probe worker pool',
+  description: 'Whether this probe’s worker pool is still able to run checks.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'up', text: 'running' },
+    { value: 1, state: 'down', text: 'failed; this probe cannot run checks until it is restarted' },
+  ],
+};
+
 export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
   PROBE_LINK,
   PROBE_PROTOCOL,
+  PROBE_POOL,
 ];

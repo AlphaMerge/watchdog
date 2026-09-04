@@ -126,6 +126,27 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'refused', name: 'Checks refused', unit: 'checks', counter: { bits: 64 } },
   { key: 'timedOut', name: 'Checks timed out', unit: 'checks', counter: { bits: 64 } },
   { key: 'workerCrashes', name: 'Worker crashes', unit: 'workers', counter: { bits: 64 } },
+  // **The alarm for a probe that is up and monitoring nothing** (`P-62`). The pool latches itself
+  // off after repeated worker start failures and runs nothing until the probe restarts, while the
+  // link stays connected and `poolUsage` reads 0% — a quiet night, as far as every other channel
+  // here is concerned. Every sensor under that probe then holds its last state indefinitely,
+  // because the core re-evaluates on an arriving result and none arrive.
+  { key: 'poolState', name: 'Worker pool', lookup: 'ms.probe.pool' },
+  // What the failure cost, which the state above cannot say. **No limit, deliberately**: the
+  // lookup already turns this sensor Down for exactly this cause, and a second alarm for one
+  // outage is the thing `CLAUDE.md` forbids. This is the number an operator reads afterwards.
+  { key: 'discarded', name: 'Checks discarded', unit: 'checks', counter: { bits: 64 } },
+  // **The listeners (`P-64`), and none of these carries a limit.** An allow-list exists in order
+  // to reject and a public UDP port collects junk, so a threshold above zero would alarm on
+  // correct configuration. Their value is diagnostic: they turn "my trap sensor reads zero" into
+  // "the probe rejected four hundred in the last minute", which is the difference between a quiet
+  // network and a receiver refusing everything a device sends it.
+  { key: 'trapReceived', name: 'Traps received', unit: 'traps', counter: { bits: 64 } },
+  { key: 'trapRejected', name: 'Traps rejected', unit: 'traps', counter: { bits: 64 } },
+  { key: 'trapMalformed', name: 'Traps malformed', unit: 'traps', counter: { bits: 64 } },
+  { key: 'syslogReceived', name: 'Syslog received', unit: 'messages', counter: { bits: 64 } },
+  { key: 'syslogRejected', name: 'Syslog rejected', unit: 'messages', counter: { bits: 64 } },
+  { key: 'syslogMalformed', name: 'Syslog malformed', unit: 'messages', counter: { bits: 64 } },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
   // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
   // worker, with their own much smaller ceiling — so the pool channels above say nothing at all

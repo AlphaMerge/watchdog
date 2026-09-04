@@ -1011,6 +1011,14 @@ cost: **light** · evaluated by the core, never by a probe
 | `refused` | Checks refused | checks | 64-bit counter → rate |
 | `timedOut` | Checks timed out | checks | 64-bit counter → rate |
 | `workerCrashes` | Worker crashes | workers | 64-bit counter → rate |
+| `poolState` | Worker pool | — | lookup `ms.probe.pool` |
+| `discarded` | Checks discarded | checks | 64-bit counter → rate |
+| `trapReceived` | Traps received | traps | 64-bit counter → rate |
+| `trapRejected` | Traps rejected | traps | 64-bit counter → rate |
+| `trapMalformed` | Traps malformed | traps | 64-bit counter → rate |
+| `syslogReceived` | Syslog received | messages | 64-bit counter → rate |
+| `syslogRejected` | Syslog rejected | messages | 64-bit counter → rate |
+| `syslogMalformed` | Syslog malformed | messages | 64-bit counter → rate |
 | `scheduled` | Sensors scheduled | sensors | — |
 | `childSlots` | Child process slots | processes | — |
 | `childBusy` | Child processes running | processes | — |

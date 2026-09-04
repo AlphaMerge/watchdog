@@ -1,6 +1,8 @@
 import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
 import type { ProcessRunnerStats } from '../runner/process-runner.js';
+import type { SyslogListenerStats } from '../listeners/syslog-listener.js';
+import type { TrapListenerStats } from '../listeners/trap-listener.js';
 import type { DrainStats } from '../spool/drain.js';
 import type { SpoolStats } from '../spool/spool.js';
 import type { WheelStats } from '../scheduler/wheel.js';
@@ -31,6 +33,15 @@ export interface ProbeHealthSources {
    * healthy pool while it turned checks away.
    */
   children?: () => ProcessRunnerStats;
+  /**
+   * The listeners, each absent unless this probe runs that one (`P-64`).
+   *
+   * Separate keys rather than one, because a probe may run neither, either or both, and absent
+   * has to stay absent: a build with no syslog listener must gap its channels rather than report
+   * a confident zero that cannot be told from a listener nothing is sending to.
+   */
+  trapListener?: () => TrapListenerStats;
+  syslogListener?: () => SyslogListenerStats;
   /** Absent when this build runs no spool. */
   spool?: () => SpoolStats;
   /**
@@ -69,6 +80,8 @@ export class ProbeHealthReporter {
     const scheduler = this.#sources.scheduler();
     const pool = this.#sources.pool();
     const children = this.#sources.children?.();
+    const trap = this.#sources.trapListener?.();
+    const syslog = this.#sources.syslogListener?.();
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
@@ -84,6 +97,8 @@ export class ProbeHealthReporter {
       queueWaitMs: pool.waitMs,
       deferred: pool.deferred,
       refused: pool.refused,
+      discarded: pool.discarded,
+      poolState: pool.disabled ? 1 : 0,
       timedOut: pool.timedOut,
       workerCrashes: pool.workerCrashes,
       // Absent when no registry keeps session pools (`P-36`), so the channels gap rather than
@@ -108,6 +123,20 @@ export class ProbeHealthReporter {
             childRefused: children.refused,
             childTimedOut: children.timedOut,
             childCrashes: children.crashed,
+          }),
+      ...(trap === undefined
+        ? {}
+        : {
+            trapReceived: trap.received,
+            trapRejected: trap.rejected,
+            trapMalformed: trap.malformed,
+          }),
+      ...(syslog === undefined
+        ? {}
+        : {
+            syslogReceived: syslog.received,
+            syslogRejected: syslog.rejected,
+            syslogMalformed: syslog.malformed,
           }),
       ...(spool === undefined
         ? {}

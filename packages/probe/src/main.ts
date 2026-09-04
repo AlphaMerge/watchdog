@@ -380,6 +380,11 @@ async function main(): Promise<void> {
     // nothing about them — which is how `P-61` went unnoticed: ten numbers, computed and read by
     // nobody, while a probe saturated by shell-outs looked healthy.
     children: () => processRunner.stats(),
+    // Only when this probe runs that listener. What the channels are for is `rejected`: a device
+    // sending the wrong community has every message dropped before the ring, so the sensor reads
+    // a quiet network rather than a receiver turning everything away (`P-64`).
+    ...(trapListener === undefined ? {} : { trapListener: () => trapListener.stats() }),
+    ...(syslogListener === undefined ? {} : { syslogListener: () => syslogListener.stats() }),
     spool: () => spool.stats(),
     // How much is waiting is the spool's; whether any of it is *moving* is only the drain's, and
     // the difference is the whole of `615c9f3` — a full spool and a healthy link read identically

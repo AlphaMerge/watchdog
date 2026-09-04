@@ -260,10 +260,58 @@ describe('check pool', () => {
     // A registry that cannot be imported kills every worker the moment it starts. Retrying at
     // the speed of the event loop would fill the log and bury the one line that mattered.
     await until(
-      () => pool.submit(request(100, 'test.ok')) === 'stopped',
+      () => pool.submit(request(100, 'test.ok')) === 'disabled',
       'the pool to disable itself',
     );
     assert.ok(pool.stats().workerCrashes >= 1);
+  });
+
+  it('says it has given up, rather than looking like an idle probe', async () => {
+    // **The signal `P-62` added, and the reason it had to be a state.** A latched pool answers
+    // nothing and reports `busy: 0`; every other channel on Probe Health reads exactly like a
+    // quiet night. Meanwhile every sensor under that probe holds its last state indefinitely,
+    // because the core re-evaluates on an arriving result and none arrive — an installation
+    // reporting that everything is Up while nothing is being checked.
+    const pool = new CheckPool({
+      logger: silent,
+      size: 1,
+      registryModule: join(import.meta.dirname, 'support', 'no-such-registry.js'),
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await pool.start();
+
+    assert.equal(pool.stats().disabled, false, 'not before it has given up');
+    await until(
+      () => pool.submit(request(110, 'test.ok')) === 'disabled',
+      'the pool to disable itself',
+    );
+
+    const stats = pool.stats();
+    assert.equal(stats.disabled, true, 'the pool says it is dead');
+    assert.ok(stats.discarded >= 1, `discards are counted, saw ${String(stats.discarded)}`);
+
+    // Waited for rather than read once. The latch stops new spawns, but one already in flight has
+    // pushed its slot and has not failed yet, so `size` is briefly 1 — which is a transient and
+    // not the thing under test. What the leak fix guarantees is that a dead slot *leaves*: before
+    // it, the latching slot stayed in `#slots` for the life of the process and this never reached
+    // zero. Asserting the instant instead of the settled state is how the first version of this
+    // passed alone and failed in the full run.
+    await until(() => pool.stats().size === 0, 'the dead slots to leave the pool');
+  });
+
+  it('separates a pool that gave up from a probe that was stopped', async () => {
+    // Collapsing the two is what hid this: stopping is something an operator did and the probe
+    // stops heartbeating for, while giving up leaves it connected, answering, and running
+    // nothing. Only one of them needs an alarm.
+    const pool = new CheckPool({ logger: silent, size: 1, onResult: () => undefined });
+    pools.push(pool);
+    await pool.start();
+    await pool.stop();
+
+    assert.equal(pool.submit(request(111, 'test.ok')), 'stopped');
+    assert.equal(pool.stats().disabled, false, 'a stopped pool has not failed');
+    assert.equal(pool.stats().discarded, 0, 'and an orderly shutdown is not a discard');
   });
 
   it('reports an unregistered sensor type as its own phase, not as a failed check', async () => {

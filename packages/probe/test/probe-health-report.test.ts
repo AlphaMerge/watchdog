@@ -40,6 +40,8 @@ const POOL: PoolStats = {
   timedOut: 1,
   deferred: 7,
   refused: 2,
+  discarded: 0,
+  disabled: false,
   workerCrashes: 0,
   waitMs: { p50: 1, p95: 40, p99: 90, max: 500 },
   runMs: { p50: 30, p95: 200, p99: 900, max: 3_000 },
@@ -148,7 +150,7 @@ describe('the probe’s own health report', () => {
     assert.equal(report.childRefused, undefined);
   });
 
-  it('names every runner that keeps its own counters in ProbeHealthSources', async () => {
+  it('names everything that keeps its own counters in ProbeHealthSources', async () => {
     // **The test that would have caught `P-61`, and the only shape that could.** Every number
     // `ProcessRunner` kept was correct; they simply reached nothing, because the interface that
     // decides what Probe Health reads had no key for it. Nothing behavioural can see that — the
@@ -162,25 +164,91 @@ describe('the probe’s own health report', () => {
     );
     assert.ok(declaration.includes('scheduler'), 'found the ProbeHealthSources declaration');
 
-    const dir = join(root, 'src', 'runner');
+    // **Both directories, because reading one is how `P-64` stayed hidden.** This test was
+    // written for `P-61` and pointed at `src/runner/`, so the two listeners — which keep counters
+    // of exactly the same kind, and reached exactly as far — were outside its reach. A rule that
+    // only looks where the last defect was found is a rule that finds the last defect.
     const checked: string[] = [];
-    for (const file of await readdir(dir)) {
-      if (!file.endsWith('.ts')) continue;
-      const text = await readFile(join(dir, file), 'utf8');
-      const stats = /^ {2}stats\(\): (\w+)/m.exec(text);
-      if (stats === null) continue;
-      const type = stats[1] ?? '';
-      checked.push(`${file} -> ${type}`);
-      assert.ok(
-        declaration.includes(type),
-        `${file} keeps a ${type} that no ProbeHealthSources key reads, so nothing it counts ` +
-          `reaches a health sensor — the defect P-61 was`,
-      );
+    for (const where of ['runner', 'listeners']) {
+      const dir = join(root, 'src', where);
+      for (const file of await readdir(dir)) {
+        if (!file.endsWith('.ts')) continue;
+        const text = await readFile(join(dir, file), 'utf8');
+        const stats = /^ {2}stats\(\): (\w+)/m.exec(text);
+        if (stats === null) continue;
+        const type = stats[1] ?? '';
+        checked.push(`${where}/${file} -> ${type}`);
+        assert.ok(
+          declaration.includes(type),
+          `${where}/${file} keeps a ${type} that no ProbeHealthSources key reads, so nothing it ` +
+            `counts reaches a health sensor — the defect P-61 and P-64 both were`,
+        );
+      }
     }
     assert.ok(
-      checked.length >= 2,
-      `expected both runners to be checked, saw ${checked.join(', ')}`,
+      checked.length >= 4,
+      `expected both runners and both listeners to be checked, saw ${checked.join(', ')}`,
     );
+  });
+
+  it('says whether the pool is alive, and what it threw away', () => {
+    // `P-62`. A latched pool reports `busy: 0` like an idle one, so the state has to travel
+    // separately from the counters — and the counter says what the failure cost.
+    const alive = reporter({}).report();
+    assert.equal(alive.poolState, 0);
+    assert.equal(alive.discarded, 0);
+
+    const dead = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => ({ ...POOL, disabled: true, discarded: 412, size: 0, busy: 0 }),
+    }).report();
+    assert.equal(dead.poolState, 1, 'a state an operator can alarm on');
+    assert.equal(dead.discarded, 412, 'and the volume behind it');
+  });
+
+  it('carries what each listener heard, accepted and turned away', () => {
+    // **`rejected` is the channel this exists for** (`P-64`). A device sending the wrong community
+    // has every message dropped before the ring, so the sensor drains nothing, throws nothing, and
+    // renders "no traps since …" — a green sensor reporting a quiet network at a receiver that is
+    // refusing everything. Nothing else on the probe knows that number.
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      trapListener: () => ({
+        running: true,
+        received: 900,
+        rejected: 412,
+        malformed: 3,
+        buffered: 20_000,
+        cursors: 2,
+        overwritten: 8_000_000,
+      }),
+      syslogListener: () => ({
+        running: true,
+        received: 40_000,
+        rejected: 0,
+        malformed: 17,
+        buffered: 20_000,
+        cursors: 1,
+        overwritten: 0,
+      }),
+    }).report();
+
+    assert.equal(report.trapReceived, 900);
+    assert.equal(report.trapRejected, 412, 'the number that turns "reads zero" into a diagnosis');
+    assert.equal(report.trapMalformed, 3);
+    assert.equal(report.syslogReceived, 40_000);
+    assert.equal(report.syslogRejected, 0);
+    assert.equal(report.syslogMalformed, 17);
+  });
+
+  it('says nothing about a listener this probe does not run', () => {
+    // Absent stays absent. A probe with no syslog listener must gap rather than report a zero that
+    // cannot be told from a listener nothing is sending to — and both are separate keys because a
+    // probe may run either, both, or neither.
+    const report = reporter({}).report();
+    assert.equal(report.trapReceived, undefined);
+    assert.equal(report.syslogReceived, undefined);
   });
 
   it('reports the spool when there is one', () => {
