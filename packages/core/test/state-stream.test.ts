@@ -471,17 +471,18 @@ describe(
         const snapshot = await arrived('snapshot');
         assert.equal(snapshot['objectId'], deviceId);
 
-        // `P-60`: the broadcaster asks the transport how far behind it is, so a route that does
-        // not answer reads as 0 for ever and can never be cut off — silently, which is exactly
-        // how the counter it replaced went unnoticed. This pins that the route answers, and with
-        // the socket's own number. It does not make that number large: filling a socket's buffer
-        // takes hundreds of kilobytes and would be a slow, flaky way to say the same thing.
-        // Absent, this reads `undefined` against a number, so the assertion is both halves at
-        // once: the route answers, and answers with the socket's own figure.
+        // **What this pins, and what it does not.** It pins that the route gives its subscriber
+        // a `backlog` at all: absent, the call below is `undefined`, the comparison fails, and a
+        // route added later without one would be uncuttable and silent about it — which is how
+        // the counter it replaced went unnoticed. It does *not* pin that the number comes from
+        // the server's socket. `socket` here is the client end, both ends read 0 on an idle
+        // connection, and an implementation returning a constant 0 would pass just as well; the
+        // first version of this test claimed otherwise and was wrong. What covers the arithmetic
+        // is `stream-backlog.test.ts`, against a socket a test can move by hand.
         assert.equal(
           registered[0]?.backlog?.(),
-          socket.bufferedAmount,
-          'the stream route must report its socket’s backlog, or it can never be cut off',
+          0,
+          'the stream route must report a backlog, or it can never be cut off',
         );
 
         // Twice, because the two-step rule takes a sensor through Warning before it is Down —

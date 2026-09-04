@@ -5457,11 +5457,16 @@ because each is a decision rather than a defect:
       must not turn a stack of factories into gaps.
 
       **The fix has its own failure mode, and it is guarded.** A `maxAgeSeconds` that arrives from
-      the row as something unparseable becomes `NaN`, and `NaN` widens to `Infinity` under the
-      `Math.max` that bounds the query — every reading fresh, for every factory at once. That is a
-      worse version of the original defect reachable from a single bad row, so the loader clamps
-      to the schema's own bounds and a test writes `"whenever"` into `sensor_config.params` to
-      prove it.
+      the row as something unparseable becomes `NaN`, so the loader falls back to the default and
+      a test writes `"whenever"` into `sensor_config.params` to prove it.
+
+      The reason first written here was wrong, and `P-66` corrected it: `NaN` does not widen to
+      `Infinity` under the `Math.max` that bounds the query — `Math.max(0, NaN)` is `NaN`. The
+      query parameter therefore becomes the string `"NaN"`, and PostgreSQL answers `invalid input
+      syntax for type interval: "NaN seconds"` (measured against the dev database). That throws
+      the one query the whole sweep depends on, so a single unparseable row stops **every** factory
+      sensor in the installation reporting rather than widening one sensor's cut-off. A worse
+      consequence than the one claimed, by a different mechanism, and the same guard covers it.
 
       **The test that was already there could not have caught this, and the mutation says why.**
       "treats a stale reading as absent rather than as still true" survives deleting the age check
@@ -5610,6 +5615,43 @@ because each is a decision rather than a defect:
       deliberately does not store — and `stop()` returned in 0 ms for both. The 90 s was the
       orphaned connection alone, which is the defect above. Recorded because the reasoning is
       sound and the conclusion is still wrong, and the next person will re-derive it.
+
+- [x] **P-66 — `P-60`'s cut-off counts the snapshot it sends, and detaches healthy clients** · S ·
+      P-60 · Found by an adversarial review of `P-60` itself, and it is worse than the defect
+      `P-60` fixed. The overflow cut-off reads `socket.bufferedAmount` — and the snapshot travels
+      down that same socket. `snapshotLimit` defaults to 20,000 sensors, which is megabytes handed
+      to `ws` in one call, against a `backlogLimitBytes` of 1 MiB. The subscriber is attached
+      *before* the snapshot is sent, deliberately, so that no change is missed — so on any large
+      installation the first state event after subscribing sees the whole snapshot still buffered,
+      detaches a client that is keeping up perfectly, and tells it to resubscribe. Which takes
+      another snapshot. **`P-60` turned dead code into a resubscribe storm**, on exactly the
+      installations that need the stream most.
+
+      Fixed by giving a snapshot an allowance for its own bytes. `socketBacklog` clamps that
+      allowance to whatever is still buffered on every reading, so it only ever shrinks: while the
+      snapshot is going out it forgives itself, once it is on the wire it is gone, and the guard is
+      armed at full strength. A client that stalls *during* its snapshot still trips, because the
+      events piling up behind it are counted in full — the forgiveness is for what we chose to
+      send, not for the backlog.
+
+      **`P-60`'s test for this was vacuous and said so was not.** It asserted
+      `registered[0]?.backlog?.() === socket.bufferedAmount` inside the real-socket test, where
+      `socket` is the *client* end and the reported figure comes from the *server's*. Both read 0
+      on an idle connection, so it was `0 === 0` and would have passed against an implementation
+      returning a constant. The commit message claimed it pinned "the socket's figure"; it pinned
+      that the method exists. It now says exactly that, and the arithmetic is covered by
+      `stream-backlog.test.ts` against a socket a test can move by hand — six cases, four of which
+      die when the allowance is removed. That file is deliberately outside the database-gated
+      suite, so it runs everywhere.
+
+      **One gap left open rather than papered over.** Nothing fails if somebody removes the
+      `backlog.allow(send(…))` that wires the allowance to the snapshot. Catching it needs a real
+      socket whose buffer stays non-empty, and on loopback it drains before it can be observed —
+      which is the same reason the original assertion was empty. The arithmetic is pinned, the
+      wiring is one commented line, and pretending otherwise is what `P-60` did.
+
+      Also corrected here: the `readMaxAge` rationale in `P-59`, in the code comment, the ticket
+      and the commit message. `Math.max(0, NaN)` is `NaN`, not `Infinity`. See `P-59`.
 
 - [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so

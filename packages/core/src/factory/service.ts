@@ -358,9 +358,13 @@ export class FactoryService {
 /**
  * A sensor's staleness cut-off, or the default when the stored parameter is not usable.
  *
- * Params come out of the database as whatever was written there, and a cut-off that arrived as
- * `NaN` would widen to `Infinity` under the `Math.max` that bounds the query — every reading
- * fresh, for every factory in the installation. The schema's own bounds are the ones enforced.
+ * Params come out of the database as whatever was written there, and `Math.max(0, NaN)` is
+ * `NaN`, not a number — so the query's interval parameter becomes the string `'NaN'`, and
+ * PostgreSQL answers `invalid input syntax for type interval: "NaN seconds"` (measured). That
+ * throws the one query the whole sweep depends on, so a single unparseable row stops **every**
+ * factory sensor in the installation reporting, not just its own. Out of range falls back to the
+ * default rather than clamping to the nearer bound: a stored 5 is not evidence that somebody
+ * meant 30, and the schema's default is the only value here that anybody actually chose.
  */
 function readMaxAge(raw: unknown): number {
   const value = Number(raw);

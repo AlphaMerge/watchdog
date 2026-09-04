@@ -51,6 +51,39 @@ const PROTOCOL = 1;
  * cursor would mean keeping a buffer whose length is a guess about how long a browser tab can be
  * asleep, and getting that guess wrong shows somebody a stale tree with no way to tell.
  */
+/**
+ * How far behind a WebSocket is, discounting a snapshot still on its way out (`P-66`).
+ *
+ * **The snapshot travels down the same socket the cut-off measures**, and it is the one frame
+ * big enough to trip it: up to `snapshotLimit` sensors, megabytes on a large installation, handed
+ * to `ws` in one call. `P-60` read `bufferedAmount` raw, so the first state event after
+ * subscribing saw the whole snapshot still buffered and detached a client that was keeping up
+ * perfectly — which sent it back to resubscribe, take another snapshot, and be detached again.
+ *
+ * So a snapshot buys an allowance for its own bytes, and the allowance **only ever shrinks**: it
+ * is clamped to whatever is still buffered on every reading, so once those bytes are on the wire
+ * it is gone and the guard is armed at full strength. What is left over is the part of the
+ * backlog this connection did not ask for — the events — which is the quantity the cut-off is
+ * about.
+ */
+export function socketBacklog(socket: { readonly bufferedAmount: number }): {
+  report: () => number;
+  allow: (bytes: number) => void;
+} {
+  let allowance = 0;
+  return {
+    allow: (bytes: number): void => {
+      allowance += bytes;
+    },
+    report: (): number => {
+      const buffered = socket.bufferedAmount;
+      // Never more than is actually still queued. A snapshot that has gone out forgives nothing.
+      if (allowance > buffered) allowance = buffered;
+      return buffered - allowance;
+    },
+  };
+}
+
 export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions): void {
   const { db, stream } = options;
 
@@ -78,9 +111,14 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       let detach: (() => void) | undefined;
       let closed = false;
 
-      const send = (frame: ServerFrame): void => {
-        if (closed || socket.readyState !== socket.OPEN) return;
-        socket.send(JSON.stringify(frame));
+      const backlog = socketBacklog(socket);
+
+      /** Returns the bytes handed to `ws`, so a snapshot can be discounted from the backlog. */
+      const send = (frame: ServerFrame): number => {
+        if (closed || socket.readyState !== socket.OPEN) return 0;
+        const text = JSON.stringify(frame);
+        socket.send(text);
+        return Buffer.byteLength(text);
       };
 
       const unsubscribe = (): void => {
@@ -103,14 +141,18 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
               detach = undefined;
               send({ type: 'overflow', reason: 'too far behind; subscribe again' });
             },
-            // What `ws` has accepted and not yet written to the socket. The one number that
-            // actually grows when a client stops reading — a browser tab suspended in the
-            // background does exactly that, and nothing else here would notice (`P-60`).
-            backlog: () => socket.bufferedAmount,
+            // What `ws` has accepted and not yet written, less a snapshot still going out. The
+            // one number that actually grows when a client stops reading — a browser tab
+            // suspended in the background does exactly that, and nothing else here would notice
+            // (`P-60`) — but counting our own snapshot against it cuts off healthy clients on a
+            // large installation (`P-66`).
+            backlog: backlog.report,
           },
           objectId,
         );
-        send({ type: 'snapshot', ...(await stream.snapshot(db, objectId)) });
+        // The snapshot's own bytes are not this client falling behind, so they are forgiven
+        // until they have gone out. See `socketBacklog`.
+        backlog.allow(send({ type: 'snapshot', ...(await stream.snapshot(db, objectId)) }));
       };
 
       socket.on('message', (raw: Buffer) => {
