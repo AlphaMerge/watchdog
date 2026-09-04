@@ -6481,7 +6481,7 @@ because each is a decision rather than a defect:
       because nothing could test it. `due-dispatch.ts` is this same extraction applied there.
       Construction and shutdown ordering remain.
 
-- [ ] **P-25 — A sensors suite hook that fails about once in four runs** · S · — · One full
+- [x] **P-25 — A sensors suite hook that fails about once in four runs** · **not reproducible** · S · — · One full
       `npm test` on 2026-08-29 reported `@ms/sensors` as 755 passed, 1 failed. Three subsequent
       full runs of that package on the same machine reported 781/781. **The arithmetic says which
       shape it is**: 755 + 1 + 25 = 781, so twenty-five tests were *cancelled*, which is what
@@ -6508,6 +6508,27 @@ because each is a decision rather than a defect:
       `port-dns`, `jitter-range` and `tls` through their own `listen` helpers, and
       `TestSnmpAgent`/`TestSshServer` in `packages/simulators`, which say so in a comment. There
       is no fixed port anywhere to collide on.
+
+      **Closed 2026-09-04 as not reproducible, on a measurement rather than a shrug.** Fifty-seven
+      full-run logs now sit under `dev/data/test-logs/`, spanning 2026-08-29 to 2026-09-04, and
+      **not one carries an unexplained cancellation**. The only two that carry any are
+      `20260829T151823Z` and `20260829T152259Z`, both reading "803 pass, 0 fail" with 2 and 3
+      cancelled — which is this ticket's own planted suite, described three paragraphs above in
+      exactly those words.
+
+      Eleven of those runs were today, on a machine under deliberately adversarial load: several
+      of them shared it with an 81-agent review and a 17-agent design workflow, which is the
+      contention that surfaced `P-63` and `P-65`. `@ms/sensors` reported 807 of 807 in every one.
+      Today's runs did produce two failures — `P-65`'s session-replacement race and a transient in
+      a test written for `P-62` — and both arrived as `failed`, not `cancelled`, which is the
+      distinction this ticket turns on.
+
+      Closing on absence of recurrence would normally be the wrong move, and is not here, because
+      **the reason it was worth a ticket has been fixed rather than waited out**. A hook that
+      throws now fails the run loudly and keeps its log, so the next occurrence is diagnosable at
+      the moment it happens instead of being reconstructed from arithmetic a week later. What made
+      this dangerous was never the flake; it was that twenty-five tests could not run and the run
+      still said clean. That cannot happen again, whatever the hook was.
 
       What can still throw in a `before`: the simulator starts, and `ssh-session.test.ts`, whose
       hook opens a real session and reads the host key back — 34 tests behind one handshake. Its
