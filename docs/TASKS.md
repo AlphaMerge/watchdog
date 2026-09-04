@@ -3413,6 +3413,21 @@ because each is a decision rather than a defect:
       Measured after: no horizontal document scroll on any route at 320px, no text or control
       boundary under its threshold in either theme, and nothing pressable under 24px.
 
+      **Independently re-checked on 2026-09-04** against the live stack at the v1 target — 5,051
+      sensors, 5,329 objects, real alarms — rather than against fixtures, since scale and real
+      strings are what break a layout that passes on seed data. Overview, Tree, Alarms, Logs and a
+      sensor detail page: no console errors, and at a 320px viewport `documentElement.scrollWidth`
+      equals `clientWidth` on every one, with the wide tables contained by their own
+      `overflow-x-auto` wrappers rather than by the document. A contrast sweep over every element
+      holding a text node, in **both** themes, reported zero pairs under 4.5:1 (3:1 for large).
+      Both of this ticket's headline fixes are still in place: titles read "Tree —
+      MonitoringSystem", "Probe Health — MonitoringSystem" per route, and the light theme's border
+      is no longer the 1.23:1 it was.
+
+      A spot check across five routes rather than a fresh audit of all nine, and no substitute for
+      a screen reader — but it is evidence against the usual decay, which is that a pass like this
+      is true on the day it is done and quietly stops being.
+
 - [x] **U-16 — Clear the Fast Refresh allowlist** · S · U-01 · Thirteen web modules exported a
       pure helper beside their components, so `@vitejs/plugin-react` could not Fast Refresh them:
       every edit reloaded the page and dropped whatever UI state was open.
