@@ -42,6 +42,7 @@ function sources(
     p95: number;
     overflowed: number;
     probesDown: number;
+    probesSilent: number;
     pending: number;
     failed: number;
     oldestPendingAgeMs: number;
@@ -70,7 +71,10 @@ function sources(
       nextWakeAt: overrides.nextWakeAt ?? null,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
-    probes: () => ({ probesDown: overrides.probesDown ?? 0 }),
+    probes: () => ({
+      probesDown: overrides.probesDown ?? 0,
+      probesSilent: overrides.probesSilent ?? 0,
+    }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));

@@ -141,6 +141,11 @@ const CORE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'probesSilent',
+    name: 'ms_core_probes_not_delivering',
+    help: 'Probes whose session is up and heartbeating while no results arrive.',
+  },
+  {
     key: 'probesDown',
     name: 'ms_core_probes_disconnected',
     help: 'Approved probes the core currently has no connection from.',

@@ -62,6 +62,18 @@ export interface ChannelResolverOptions {
    * Absent leaves every channel created here `unset`, which is what it did before.
    */
   declaredLimits?: (sensorType: string, channelKey: string) => ChannelLimits | null;
+  /**
+   * The rest of the declaration — the lookup and counter width (`P-80`).
+   *
+   * Without it a channel this path creates is judged by nothing (a lookup channel with a null
+   * `lookup_id` and no limits falls through every branch of `evaluateChannel`) and a counter is
+   * stored as a cumulative total rather than a rate. Both were silent on exactly the
+   * installations that matter: the ones that existed before the channel was declared.
+   */
+  declaredShape?: (
+    sensorType: string,
+    channelKey: string,
+  ) => { lookup: string | null; counterBits: number | null };
 }
 
 const DEFAULT_MAX_CACHED = 50_000;
@@ -83,6 +95,7 @@ export class ChannelResolver {
   readonly #lookups: LookupCatalogue | undefined;
   readonly #maxCached: number;
   readonly #declaredLimits: ChannelResolverOptions['declaredLimits'];
+  readonly #declaredShape: ChannelResolverOptions['declaredShape'];
   readonly #cache = new Map<string, ResolvedChannel>();
   /** Lookup ids already complained about, so a missing one is one log line and not one a scan. */
   readonly #missingLookups = new Set<string>();
@@ -91,6 +104,7 @@ export class ChannelResolver {
     this.#logger = options.logger.child({ component: 'channel-resolver' });
     this.#lookups = options.lookups;
     this.#declaredLimits = options.declaredLimits;
+    this.#declaredShape = options.declaredShape;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
   }
 
@@ -146,11 +160,7 @@ export class ChannelResolver {
     const declared = this.#declaredLimits;
     if (declared === undefined) return wanted.map(() => null);
 
-    const rows = await q.query<{ object_id: string; type: string }>(
-      'SELECT object_id::text, type FROM sensor_config WHERE object_id = ANY($1::bigint[])',
-      [[...new Set(wanted.map((one) => one.sensorId))]],
-    );
-    const types = new Map(rows.map((row) => [row.object_id, row.type]));
+    const types = await this.#typesFor(q, wanted);
 
     return wanted.map((one) => {
       const type = types.get(String(one.sensorId));
@@ -158,6 +168,38 @@ export class ChannelResolver {
       const limits = declared(type, one.key);
       return limits === null ? null : JSON.stringify(limits);
     });
+  }
+
+  /**
+   * The lookup and counter width each wanted channel declares, in the same order.
+   *
+   * Shares `#typesFor` with `#declaredFor` rather than repeating the query: both need the sensor's
+   * *type*, which is what carries the declaration, and two round trips for one answer on the
+   * first-sighting path would be a cost paid for nothing.
+   */
+  async #shapesFor(
+    q: Queryable,
+    wanted: readonly { sensorId: number; key: string }[],
+  ): Promise<{ lookup: string | null; counterBits: number | null }[]> {
+    const declared = this.#declaredShape;
+    if (declared === undefined) return wanted.map(() => ({ lookup: null, counterBits: null }));
+    const types = await this.#typesFor(q, wanted);
+    return wanted.map((one) => {
+      const type = types.get(String(one.sensorId));
+      if (type === undefined) return { lookup: null, counterBits: null };
+      return declared(type, one.key);
+    });
+  }
+
+  async #typesFor(
+    q: Queryable,
+    wanted: readonly { sensorId: number; key: string }[],
+  ): Promise<Map<string, string>> {
+    const rows = await q.query<{ object_id: string; type: string }>(
+      'SELECT object_id::text, type FROM sensor_config WHERE object_id = ANY($1::bigint[])',
+      [[...new Set(wanted.map((one) => one.sensorId))]],
+    );
+    return new Map(rows.map((row) => [row.object_id, row.type]));
   }
 
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
@@ -194,21 +236,32 @@ export class ChannelResolver {
     const sensorIds = wanted.map((row) => row.sensorId);
     const keys = wanted.map((row) => row.key);
     const limits = await this.#declaredFor(q, wanted);
+    const shapes = await this.#shapesFor(q, wanted);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
     // raise would fail the whole batch — including every other sensor's readings in it.
     const created = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, limits, limits_source)
-       SELECT s.sensor_id, s.key, s.name, s.unit,
+      `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
+                            limits, limits_source)
+       SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
               COALESCE(s.limits, '{}'::jsonb),
               CASE WHEN s.limits IS NULL THEN 'unset' ELSE 'declared' END
-       FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::jsonb[])
-            AS s(sensor_id, key, name, unit, limits)
+       FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
+                   $6::text[], $7::smallint[])
+            AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
        WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
        ON CONFLICT (sensor_id, key) DO NOTHING
        RETURNING id`,
-      [sensorIds, keys, wanted.map((row) => row.name), wanted.map((row) => row.unit), limits],
+      [
+        sensorIds,
+        keys,
+        wanted.map((row) => row.name),
+        wanted.map((row) => row.unit),
+        limits,
+        shapes.map((shape) => shape.lookup),
+        shapes.map((shape) => shape.counterBits),
+      ],
     );
 
     // One lookup for the whole set: it picks up both what was just created and what already

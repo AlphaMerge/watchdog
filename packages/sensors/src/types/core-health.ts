@@ -172,6 +172,13 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   { key: 'probesDown', name: 'Probes not connected', unit: 'probes' },
+  // **Connected, and carrying nothing** (`P-74`, surfaced by `P-80`). Distinct from the line
+  // above, which is a link that is gone: this is a probe whose session is up and heartbeating
+  // while no results arrive, and folding the two together made Core Health say 'not connected'
+  // about a probe whose own Probe Health said it was. No limit — the per-probe alarm is
+  // `ms.probe.delivery` on that probe's own sensor, and a second one here for the same outage is
+  // what `CLAUDE.md` forbids. This is the installation-wide number an operator reads beside it.
+  { key: 'probesSilent', name: 'Probes not delivering', unit: 'probes' },
   // **The alarm scheduler's own two numbers** (`P-22`). It had a `stats()` like every other
   // subsystem and nothing read it, which is how a counter that was wrong stayed wrong through
   // `P-12` — `P-20` found it by hand.

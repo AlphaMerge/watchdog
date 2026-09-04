@@ -57,6 +57,16 @@ export interface DeliveryFacts {
    * as well — which covers the config push that follows every reconnect.
    */
   readonly configSentAt: Date | null;
+  /**
+   * When the probe's current session was established (`P-80`).
+   *
+   * A probe cannot have been silent for longer than the session it is silent on. Without this the
+   * ordinary reconnect — the probe kept its configuration fingerprint across the drop, so the
+   * core answers `config-unchanged` and stamps nothing — produced a session with no
+   * `configSentAt` and no `lastResultsAt`, and the window then ran from start-up plus grace: a
+   * probe that reconnected seconds ago was judged on the core's whole uptime.
+   */
+  readonly connectedAt: Date | null;
 }
 
 export interface DeliveryOptions {
@@ -155,14 +165,25 @@ export function verdict(
   const graceEndsAt = startedAt.getTime() + options.graceSeconds * 1_000;
   if (now.getTime() < graceEndsAt) return NOT_STALLED('in-grace');
 
-  // **The later of the three, and each is there for its own reason.** Start-up plus grace, because
+  // **The later of the four, and each is there for its own reason.** Start-up plus grace, because
   // a core that has just come up has not had time to hear from anybody. The config push, because a
-  // probe cannot be late with work it was only just given. And the last arrival, which is the
+  // probe cannot be late with work it was only just given. The session's own start, because a
+  // probe cannot be late on a connection that did not exist. And the last arrival, which is the
   // measurement itself.
-  const since = Math.max(
-    graceEndsAt,
-    facts.configSentAt?.getTime() ?? 0,
-    facts.lastResultsAt?.getTime() ?? 0,
+  //
+  // Clamped to `now`, which is not tidiness. Every input here is a wall-clock `Date`, and the
+  // comparison below only ever asked whether the gap exceeded the window — never whether it was
+  // negative. A backward clock step therefore put `since` in the future and answered 'delivering'
+  // for every probe until wall-clock caught up, without healing on arrival. Re-anchoring at the
+  // step costs one window of blindness instead of the whole step (`P-80`).
+  const since = Math.min(
+    now.getTime(),
+    Math.max(
+      graceEndsAt,
+      facts.configSentAt?.getTime() ?? 0,
+      facts.lastResultsAt?.getTime() ?? 0,
+      facts.connectedAt?.getTime() ?? 0,
+    ),
   );
   const silentForMs = now.getTime() - since;
   const windowMs = deliveryWindowMs(facts.cadenceSeconds, options);

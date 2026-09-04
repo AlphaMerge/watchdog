@@ -945,10 +945,34 @@ export class CheckPool {
 
     if (!slot.ready) {
       this.#startFailures += 1;
-      if (this.#startFailures >= MAX_CONSECUTIVE_START_FAILURES) {
+      // **Only when nothing is left working** (`P-80`). The counter is pool-wide and reset only by
+      // a worker reaching `ready`, and it used to latch on its own — so three failures during a
+      // *growth* burst killed a pool that was running fine. `#grow` spawns the whole shortfall at
+      // once (sixty at the v1 target, each loading the ~35 MB catalogue), so on a memory-tight
+      // host three of sixty die during bootstrap before any sibling reports ready, and the probe
+      // monitored nothing until somebody restarted it — `#admission` answers `disabled` before it
+      // looks at anything else. The latch is for a pool that cannot run checks at all, which is
+      // `P-62`'s broken registry: there every worker dies, so nothing is ready and this still
+      // fires. Holding ready workers is exactly the difference between the two.
+      const working = this.#slots.some((held) => held.ready);
+      if (this.#startFailures >= MAX_CONSECUTIVE_START_FAILURES && !working) {
         this.#disabled = true;
+        // **And answer what was already accepted.** A queued job carries no timeout — the timer is
+        // armed in `#dispatch`, when it *leaves* the queue — so returning here left every accepted
+        // check permanently unsettled: no result, no timer, and counted in none of `completed`,
+        // `failed`, `timedOut`, `refused` or `discarded`. `stop()` has always drained for this
+        // exact reason, and `check-flow.ts` states the guarantee verbatim: a check accepted by a
+        // runner must settle.
+        const abandoned = this.#queue.splice(0);
+        for (const job of abandoned) {
+          this.#settle(job, 'pool-disabled', 'the worker pool has given up and cannot run checks');
+        }
         this.#logger.error(
-          { failures: this.#startFailures, registry: this.#registryModule },
+          {
+            failures: this.#startFailures,
+            registry: this.#registryModule,
+            abandoned: abandoned.length,
+          },
           'check workers keep failing to start; the pool is disabled until the probe restarts',
         );
         return;

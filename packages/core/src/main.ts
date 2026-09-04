@@ -17,7 +17,11 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/
 import { LoggingAuditSink } from './objects/audit.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
-import { applyDeclaredLimits, declaredLimitsLookup } from './state/declared-limits.js';
+import {
+  applyDeclaredLimits,
+  declaredChannelLookup,
+  declaredLimitsLookup,
+} from './state/declared-limits.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
 import { VaultKeyring } from './vault/keyring.js';
@@ -272,6 +276,7 @@ async function serve(): Promise<void> {
     logger,
     lookups,
     declaredLimits: declaredLimitsLookup(catalogue),
+    declaredShape: declaredChannelLookup(catalogue),
   });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.

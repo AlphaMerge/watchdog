@@ -33,6 +33,16 @@ export class AssignmentStore {
    */
   #onDrop: ((sensorId: number) => void) | undefined;
 
+  /**
+   * Told when a sensor arrives, so per-sensor bookkeeping can start its clock (`P-80`).
+   *
+   * The counterpart of `#onDrop`, and needed for the same reason: only the store knows when this
+   * probe became responsible for a sensor. Without it the check-flow watchdog had to guess, and
+   * its guess — the process start — counted every sensor assigned later as behind schedule from
+   * the moment it arrived.
+   */
+  #onAdd: ((sensorId: number) => void) | undefined;
+
   constructor(wheel: TimingWheel) {
     this.#wheel = wheel;
   }
@@ -77,12 +87,20 @@ export class AssignmentStore {
   }
 
   #upsert(assignment: SensorAssignment): void {
+    // Only on arrival, not on every re-push of an assignment the probe already had: an edit to a
+    // sensor's parameters must not restart the clock on whether it is being checked.
+    const arriving = !this.#assignments.has(assignment.sensorId);
     this.#assignments.set(assignment.sensorId, assignment);
     this.#wheel.add({ id: assignment.sensorId, intervalSeconds: assignment.intervalSeconds });
+    if (arriving) this.#onAdd?.(assignment.sensorId);
   }
 
   onDrop(listener: (sensorId: number) => void): void {
     this.#onDrop = listener;
+  }
+
+  onAdd(listener: (sensorId: number) => void): void {
+    this.#onAdd = listener;
   }
 
   #drop(sensorId: number): void {

@@ -42,7 +42,16 @@ export interface CheckRequest {
  * it is what the probe logs, and "ETIMEDOUT" alone is not a diagnosis (CLAUDE.md).
  */
 export type CheckPhase =
-  'execute' | 'timeout' | 'aborted' | 'worker-crash' | 'pool-stopped' | 'unknown-type';
+  | 'execute'
+  | 'timeout'
+  | 'aborted'
+  | 'worker-crash'
+  | 'pool-stopped'
+  // The pool latched itself off with this check already accepted (`P-62`, drained by `P-80`).
+  // Distinct from `pool-stopped`, which is an orderly shutdown: this one is a fault, and the
+  // difference is what an operator reads in the result's message.
+  | 'pool-disabled'
+  | 'unknown-type';
 
 export interface ResultMeta {
   phase: CheckPhase;

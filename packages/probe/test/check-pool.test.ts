@@ -1,4 +1,6 @@
 import { strict as assert } from 'node:assert';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
@@ -19,6 +21,7 @@ interface Seen {
 }
 
 const pools: CheckPool[] = [];
+const scratches: string[] = [];
 
 async function poolOf(
   options: {
@@ -71,6 +74,7 @@ const request = (sensorId: number, sensorType: string, extra: Record<string, unk
 
 after(async () => {
   await Promise.all(pools.map((pool) => pool.stop()));
+  for (const dir of scratches) await rm(dir, { recursive: true, force: true });
 });
 
 describe('check pool', () => {
@@ -284,6 +288,64 @@ describe('check pool', () => {
       'the pool to disable itself',
     );
     assert.ok(pool.stats().workerCrashes >= 1);
+
+    // **The latch must answer what it already accepted** (`P-80`). This test reached the state and
+    // asserted nothing about it: sensor 100's first submit returned `accepted` — the latch had not
+    // fired yet — so a job went into `#queue` and a sensor into `#active`. A queued job carries no
+    // timeout, because the timer is armed in `#dispatch` when it *leaves* the queue, so the latch
+    // returning without draining left it permanently unsettled: no result, no timer, and counted
+    // in none of completed/failed/timedOut/refused/discarded. `check-flow.ts` states the
+    // guarantee this broke verbatim — 'a check accepted by a runner must settle'.
+    assert.equal(pool.stats().queued, 0, 'the latch answered every check it had accepted');
+    assert.ok(
+      seen.some((entry) => entry.result.sensorId === 100),
+      'and sensor 100 got a result rather than vanishing',
+    );
+  });
+
+  it('does not give up while it still has workers that are working', async () => {
+    // **`P-62`'s latch, over-triggering** (`P-80`). `#startFailures` is pool-wide and reset only
+    // by a worker reaching `ready`, and was never weighed against how many workers the pool still
+    // holds. `#grow` spawns the whole shortfall in one synchronous burst — 60 at once at the v1
+    // target, each loading the ~35 MB sensor catalogue — so on a memory-tight host three
+    // bootstrap failures among sixty land before any sibling reports ready, and the pool latches
+    // off for good with 57 healthy workers in it. `#admission` returns `disabled` before it looks
+    // at anything else, so a probe with a full complement of idle workers monitored nothing until
+    // somebody restarted it.
+    //
+    // The latch exists for a pool that cannot run checks *at all* — `P-62`'s broken registry,
+    // where every worker dies and the test above still latches. Holding ready workers is the
+    // difference between the two, and it is what the condition asks now.
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: silent,
+      size: 8,
+      minSize: 2,
+      registryModule: join(import.meta.dirname, 'support', 'breakable-registry.js'),
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    await pool.start();
+    await until(() => pool.stats().size >= 2, 'the initial workers to come up');
+
+    // Every worker spawned from here dies during bootstrap; the ones already up are untouched.
+    const scratch = await mkdtemp(join(tmpdir(), 'ms-pool-'));
+    scratches.push(scratch);
+    const sentinel = join(scratch, 'break');
+    await writeFile(sentinel, 'x');
+    process.env['MS_TEST_BREAK_REGISTRY'] = sentinel;
+    try {
+      // Enough queued work to make the pool grow, so it spawns — and every spawn fails.
+      for (let id = 1; id <= 8; id += 1) {
+        pool.submit({ ...request(id, 'test.slow'), params: { delayMs: 40 } });
+      }
+      await until(() => pool.stats().workerCrashes >= 3, 'three failed starts');
+
+      assert.notEqual(pool.submit(request(99, 'test.ok')), 'disabled', 'the pool still works');
+      await until(() => seen.length >= 1, 'checks to keep coming back');
+    } finally {
+      delete process.env['MS_TEST_BREAK_REGISTRY'];
+    }
   });
 
   it('says it has given up, rather than looking like an idle probe', async () => {

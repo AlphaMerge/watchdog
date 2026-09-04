@@ -25,6 +25,12 @@ function harness(options: { stallAfterMs?: number; intervals?: Record<number, nu
     unassign: (sensorId: number): void => {
       assigned = assigned.filter((one) => one !== sensorId);
     },
+    // Both halves, because that is what production does: `AssignmentStore` adds the sensor and
+    // tells the watchdog through `onAdd` in the same breath (`main.ts`).
+    assign: (sensorId: number): void => {
+      assigned = [...assigned, sensorId];
+      watchdog.assigned(sensorId);
+    },
     // A property rather than a shorthand method: these are destructured, and a bare method that
     // is would trip `unbound-method`.
     advance: (ms: number): void => {
@@ -46,13 +52,60 @@ describe('whether checks are coming back', () => {
   });
 
   it('is untroubled by a check that is merely slow', () => {
+    // `advance(90_000)` rather than 60_000 on purpose (`P-80`). `overdue` is a conjunction —
+    // past the window AND past twice the check's own timeout — and at exactly 60_000 against a
+    // 30_000 timeout the second conjunct is false on its own under the strict `>`. The constant
+    // was load-bearing for the *pass*, so deleting the window clause left this green. 90_000
+    // clears `timeoutMs * 2` and leaves only the window clause holding the assertion up.
     const { watchdog, advance } = harness();
     watchdog.dispatched(1, 30_000);
-    advance(60_000);
-    assert.equal(watchdog.stats().completing, 1, 'a minute is not a stall');
+    advance(90_000);
+    assert.equal(watchdog.stats().completing, 1, 'ninety seconds is not a stall');
     assert.equal(watchdog.stats().outstanding, 1);
     watchdog.completed(1);
     assert.equal(watchdog.stats().outstanding, 0);
+  });
+
+  it('does not call a quiet probe stalled the moment one short check runs long', () => {
+    // **The discriminating case for the window clause** (`P-80`). A probe carrying only
+    // long-interval sensors is legitimately quiet, so `#lastCompletionNs` ages past the window on
+    // its own. Without `waited > stallAfterMs`, the first check to outlive twice its 10 s timeout
+    // — 21 seconds in — flips the whole probe to stalled, 279 seconds before the design says it
+    // may. Nothing in this file could see that: every other case is absorbed by the boundary
+    // above or by the recency clause.
+    const { watchdog, advance } = harness();
+    advance(400_000);
+    watchdog.dispatched(1, 10_000);
+    advance(100_000);
+    assert.equal(watchdog.stats().completing, 1, 'one check 100 s into its life is not a stall');
+  });
+
+  it('does not count a sensor as behind before it has had an interval to be checked in', () => {
+    // **`P-77` fixed the worst case by creating a new one.** Counting over the assigned set was
+    // right — a probe where nothing ever completed had no completions to iterate and read
+    // `behind: 0`. But the fallback for "never completed" was the watchdog's own start, so any
+    // sensor assigned later was measured against the probe's entire uptime and counted behind
+    // from the instant it arrived, before it could possibly have been checked.
+    //
+    // The amplifier is the ordinary reconnect: the core's full push is chunked, so a `config-set`
+    // of the first 1,000 sensors drops the other 4,000 — `onDrop` clears their completion history
+    // — and the deltas re-add them milliseconds later. A probe up five days and checking all
+    // 5,000 on time reported 4,000 sensors behind schedule.
+    const { watchdog, advance, assign, unassign } = harness({ intervals: { 1: 60, 2: 60 } });
+    unassign(2); // sensor 2 is not on this probe yet; it arrives ten minutes in
+    watchdog.dispatched(1, 30_000);
+    watchdog.completed(1);
+    advance(600_000);
+    assert.equal(watchdog.stats().behind, 1, 'sensor 1 genuinely is');
+
+    assign(2);
+    assert.equal(watchdog.stats().behind, 1, 'sensor 2 was assigned a moment ago');
+
+    advance(100_000);
+    assert.equal(watchdog.stats().behind, 1, 'and is still inside its first four intervals');
+
+    advance(200_000);
+    assert.equal(watchdog.stats().behind, 2, 'past them without reporting, it counts');
   });
 
   it('says the runners have stopped when nothing comes back at all', () => {

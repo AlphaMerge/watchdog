@@ -301,6 +301,12 @@ async function main(): Promise<void> {
   assignments.onDrop((sensorId) => {
     checkFlow.forget(sensorId);
   });
+  // And the other half (`P-80`): a sensor's four intervals start when this probe becomes
+  // responsible for it, not when the process did. Without this a reconnect's chunked config push
+  // reported thousands of healthy sensors as behind schedule.
+  assignments.onAdd((sensorId) => {
+    checkFlow.assigned(sensorId);
+  });
 
   // ── the pool ceiling, derived from the work this probe was actually given (`P-34`) ──────────
   //

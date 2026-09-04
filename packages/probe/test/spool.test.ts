@@ -223,6 +223,12 @@ describe('result spool', () => {
       [1, 2],
       'one bad line must not block every result behind it',
     );
+    // Counted when the cursor moves past it, not when it is read (`P-80`). A `peek` is
+    // provisional — the drain re-reads the same bytes until the core acknowledges them — so
+    // counting at read turned one torn record into a per-second rate during any outage that
+    // nacked. Passing it is what makes it definitively unreadable, and passing it is `commit`.
+    assert.equal(second.stats().corrupt, 0, 'not yet: this batch is unconfirmed');
+    await second.commit();
     assert.equal(second.stats().corrupt, 1);
     await second.close();
   });
@@ -329,6 +335,88 @@ describe('result spool', () => {
     assert.equal(spool.stats().unwritten, 0, 'a healthy spool counts nothing');
     assert.equal((await spool.peek(10)).length, 1, 'and still holds what it was given');
     await spool.close();
+  });
+
+  it('refuses to write after it is closed, instead of silently succeeding', async () => {
+    // **The hole in `P-78`'s own promise.** `#appendNow` wrote with `await this.#handle?.write` —
+    // an optional chain — and `close()` sets `#handle = undefined` while leaving `#segments`
+    // populated. A later append therefore took the no-roll branch, short-circuited the write to a
+    // no-op, incremented `pending` and `bytes` for records on no disk, and RESOLVED. Because it
+    // resolved, `P-78`'s counter never fired: `unwritten` stayed 0. Drop without counting, in the
+    // ticket written to stop dropping without counting.
+    //
+    // It is reachable on every shutdown: the spool-drain hook runs first (hooks run in reverse
+    // registration order), so `close()` happens while the runners are still settling checks into
+    // `spoolResult`.
+    const spool = await openSpool(dir);
+    await spool.append([result(1)]);
+    await spool.close();
+
+    await assert.rejects(spool.append([result(2)]), 'a closed spool must not accept results');
+    assert.equal(spool.stats().unwritten, 1, 'and what it refused is counted');
+
+    const reopened = await openSpool(dir);
+    assert.equal(reopened.stats().pending, 1, 'only the pre-close result is on disk');
+    await reopened.close();
+  });
+
+  it('subtracts a line it could not parse, so the spool can still reach empty', async () => {
+    // `peek` advanced `consumed` past an unparseable line but counted only parseable ones into
+    // `#peeked.records`, and `commit` subtracts `records` from `segment.pending` — while
+    // `#countPending` had counted that line at load, because it counts newlines. Every torn line
+    // left a permanent +1 residue that nothing could remove.
+    //
+    // The consequence is three false alarms, not one lost byte: `#reclaim` breaks on
+    // `oldest.pending > 0`, so drained segments are never deleted and the spool grows to its cap;
+    // `#evict` then reports `spoolDropped` for results that were delivered; and `peek` returning
+    // empty while `pending` is non-zero drives the drain's stall detector.
+    const spool = await openSpool(dir);
+    await spool.append([result(1), result(2)]);
+    await spool.close();
+    await appendFile(
+      join(dir, (await readdir(dir)).filter((f) => f.endsWith('.ndjson'))[0] ?? ''),
+      'not json\n',
+    );
+
+    const second = await openSpool(dir);
+    assert.equal(second.stats().pending, 3, 'the torn line is counted at load');
+    const batch = await second.peek(10);
+    assert.equal(batch.length, 2, 'and skipped when read');
+    await second.commit();
+
+    assert.equal(second.stats().pending, 0, 'a line that will never parse is not still pending');
+    assert.deepEqual(await second.peek(10), [], 'and there is nothing left to offer');
+    await second.close();
+  });
+
+  it('counts one torn record once, however many times the drain re-reads it', async () => {
+    // `spoolCorrupt` became a counter channel in `P-79`, which turns it into a rate. But
+    // `#corrupt` was incremented inside `peek`, and `peek` re-reads from the cursor until the
+    // batch is committed — and the drain does NOT commit on a retryable nack (`queue-full`,
+    // `storage-error`, `unavailable`, `shutting-down`). So one torn line during a core outage was
+    // re-counted once a second, and the graph showed a sustained rate of unreadable results on a
+    // probe that had not crashed since — inverting the exact diagnostic the channel exists for.
+    const spool = await openSpool(dir);
+    await spool.append([result(1)]);
+    await spool.close();
+    await appendFile(
+      join(dir, (await readdir(dir)).filter((f) => f.endsWith('.ndjson'))[0] ?? ''),
+      '{tor\n',
+    );
+
+    const second = await openSpool(dir);
+    await second.peek(10);
+    await second.peek(10);
+    await second.peek(10);
+    assert.equal(second.stats().corrupt, 0, 're-reading unconfirmed bytes counts nothing');
+
+    await second.commit();
+    assert.equal(second.stats().corrupt, 1, 'one torn line, counted once when it was passed');
+
+    await second.peek(10);
+    await second.commit();
+    assert.equal(second.stats().corrupt, 1, 'and not again afterwards');
+    await second.close();
   });
 
   it('ignores an empty append', async () => {

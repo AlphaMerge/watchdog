@@ -106,9 +106,22 @@ export class ProbeReachability {
     this.#now = options.now ?? ((): Date => new Date());
   }
 
-  stats(): { probesDown: number; sensorsUnknown: number; outages: number } {
+  stats(): {
+    probesDown: number;
+    probesSilent: number;
+    sensorsUnknown: number;
+    outages: number;
+  } {
+    // **Split by reason** (`P-80`). `probesDown` is published to Core Health as 'Probes not
+    // connected', and `P-74` began putting `reason: 'silence'` entries into this same map — for
+    // probes whose session is up and heartbeating. The number then contradicted that probe's own
+    // Probe Health, which reported it connected, and sent operators looking for a network fault
+    // while the true signal was buried under the disagreement.
+    let silent = 0;
+    for (const held of this.#byProbe.values()) if (held.reason === 'silence') silent += 1;
     return {
-      probesDown: this.#byProbe.size,
+      probesDown: this.#byProbe.size - silent,
+      probesSilent: silent,
       sensorsUnknown: this.#unreachable.size,
       outages: this.#outages,
     };
@@ -172,14 +185,35 @@ export class ProbeReachability {
     // **The overlay is in place before the re-evaluation runs**, which is what makes this one
     // statement rather than a parameter threaded through the state machine: `reevaluate` loads
     // the facts, the service overlays `probeReachable` from this set, and layer 3 does the rest.
-    const moved = await this.#db.tx((q) =>
-      this.#states.reevaluate(q, sensorIds, this.#now(), {
-        message:
-          reason === 'link'
-            ? 'the probe carrying this sensor stopped answering'
-            : 'the probe carrying this sensor is connected but has stopped sending results',
-      }),
-    );
+    //
+    // And taken back out if the write does not land (`P-80`). The overlay has to go in first, but
+    // leaving it in after a rejected transaction claims an outage that was never written: no
+    // `sensor_state` row, every sensor still reading Up, and `offlineReason` answering 'silence'
+    // for ever — so the delivery sweep, whose whole `P-77` fix was to read this instead of a
+    // shadow set, would see "already handled" and never retry. The failure this rolls back is the
+    // same shape as the one that fix was for, one layer down.
+    let moved: number;
+    try {
+      moved = await this.#db.tx((q) =>
+        this.#states.reevaluate(q, sensorIds, this.#now(), {
+          message:
+            reason === 'link'
+              ? 'the probe carrying this sensor stopped answering'
+              : 'the probe carrying this sensor is connected but has stopped sending results',
+        }),
+      );
+    } catch (error) {
+      this.#byProbe.delete(probeObjectId);
+      for (const id of sensorIds) this.#unreachable.delete(id);
+      this.#outages -= 1;
+      // Returned rather than rethrown, for the reason the `#sensorsUnder` failure above gives:
+      // one probe the database would not answer for must not abort the sweep over the others.
+      this.#logger.error(
+        { probeObjectId, reason, sensors: sensorIds.length, err: describeError(error) },
+        'could not mark a lost probe’s sensors Unknown; leaving it unmarked so the next pass retries',
+      );
+      return 0;
+    }
     this.#logger.warn(
       { probeObjectId, reason, sensors: sensorIds.length, moved },
       'a probe went offline; its sensors are Unknown rather than Down',

@@ -92,8 +92,29 @@ export class ResultSpool {
   #dropped = 0;
   #corrupt = 0;
   #unwritten = 0;
-  /** How many records the last `peek` returned, so `commit` knows what it is confirming. */
-  #peeked: { records: number; segment: string; offset: number } | undefined;
+  /**
+   * Shut down, so `append` must refuse rather than pretend (`P-80`).
+   *
+   * `#appendNow` writes through `await this.#handle?.write` and `close()` clears that handle, so
+   * without this flag an append after close short-circuited to a no-op, incremented `pending` and
+   * `bytes` for records on no disk, and **resolved** — which meant `P-78`'s counter never fired
+   * either. It is reachable on every shutdown: the spool-drain hook runs first, so the runners are
+   * still settling checks into `spoolResult` when the handle goes.
+   */
+  #closed = false;
+  /**
+   * What the last `peek` covered, so `commit` knows what it is confirming.
+   *
+   * `skipped` is lines consumed that could never become a record — blank, or unparseable. They
+   * have to be here because `#countPending` counts *newlines*, so a line the reader passes over
+   * and `commit` does not subtract leaves a permanent residue in `segment.pending` that no path
+   * can remove (`P-80`). `torn` is the subset that failed to parse, counted into `#corrupt` at
+   * commit rather than at read: `peek` re-reads from the cursor until the batch is confirmed, and
+   * the drain does not confirm on a retryable nack, so counting at read turned one torn record
+   * into a fabricated per-second rate of unreadable results.
+   */
+  #peeked:
+    { records: number; skipped: number; torn: number; segment: string; offset: number } | undefined;
   /**
    * Appends run one at a time.
    *
@@ -129,6 +150,12 @@ export class ResultSpool {
 
   async append(results: readonly CheckResult[]): Promise<void> {
     if (results.length === 0) return;
+    if (this.#closed) {
+      // Counted before throwing, because the caller only gets an error and an error carries no
+      // number — the same reasoning as the `.catch` below, for the case that never reached it.
+      this.#unwritten += results.length;
+      throw new Error('the result spool is closed and cannot accept results');
+    }
     const queued = this.#writing.then(() => this.#appendNow(results));
     // Swallowed on the chain so one failed append cannot reject every later one; the caller
     // still sees its own error.
@@ -170,6 +197,10 @@ export class ResultSpool {
     if (this.#cursor.segment === null || max <= 0) return [];
 
     const results: CheckResult[] = [];
+    // Consumed but unusable, and the unparseable subset of it. Across segments, because one peek
+    // may span a boundary.
+    let skipped = 0;
+    let torn = 0;
     // Where the *next* unread record starts. Kept as a pair rather than recomputed at the end:
     // running off the last segment must leave this at that segment's end, not reset it to the
     // beginning — which would make every commit re-read the batch it just confirmed.
@@ -192,13 +223,17 @@ export class ResultSpool {
         if (results.length >= max) break;
         consumed += line.length + 1;
         const text = line.toString('utf8').trim();
-        if (text === '') continue;
+        if (text === '') {
+          skipped += 1;
+          continue;
+        }
         try {
           results.push(JSON.parse(text) as CheckResult);
         } catch {
-          // A torn line from a crash boundary. Counted rather than hidden, and skipped rather
-          // than allowed to stop the whole spool from draining.
-          this.#corrupt += 1;
+          // A torn line from a crash boundary. Skipped rather than allowed to stop the spool
+          // draining, and carried to `commit` rather than counted here — see `#peeked`.
+          skipped += 1;
+          torn += 1;
         }
       }
 
@@ -219,7 +254,16 @@ export class ResultSpool {
       if (consumed === 0 && position.segment === current) break;
     }
 
-    this.#peeked = results.length === 0 ? undefined : { records: results.length, ...position };
+    this.#peeked =
+      results.length === 0 && skipped === 0
+        ? undefined
+        : { records: results.length, skipped, torn, ...position };
+
+    // Bytes consumed, nothing to send. No batch means nothing will ever acknowledge these, so
+    // nothing would call `commit` — and the same unusable lines would be re-read for ever while
+    // `pending` never reached zero. Confirming here discards no result: only lines that cannot
+    // become one.
+    if (results.length === 0 && skipped > 0) await this.commit();
     return results;
   }
 
@@ -229,7 +273,11 @@ export class ResultSpool {
     if (peeked === undefined) return;
     this.#peeked = undefined;
 
-    let remaining = peeked.records;
+    // Counted here, once, for the reason given on `#peeked`.
+    this.#corrupt += peeked.torn;
+    // Skipped lines are subtracted too: `pending` is a count of lines, so a line the reader
+    // passed over is no longer pending however unusable it was.
+    let remaining = peeked.records + peeked.skipped;
     for (const segment of [...this.#segments]) {
       if (remaining <= 0) break;
       const taken = Math.min(segment.pending, remaining);
@@ -243,6 +291,10 @@ export class ResultSpool {
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
+    // Appends accepted before this point are already on the chain and must finish while the handle
+    // is still open; without this they ran after it was cleared and vanished silently.
+    await this.#writing.catch(() => undefined);
     await this.#handle?.close();
     this.#handle = undefined;
     await this.#saveCursor();

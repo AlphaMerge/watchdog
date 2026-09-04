@@ -36,7 +36,7 @@ export interface CoreHealthSources {
   /** `StateBroadcaster.stats()` — subscribers cut off for falling behind. */
   stream: () => { overflowed: number };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
-  probes: () => { probesDown: number };
+  probes: () => { probesDown: number; probesSilent: number };
   /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
   alarms: () => { fired: number; nextWakeAt: Date | null };
   /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
@@ -181,6 +181,7 @@ export class CoreHealthService {
       streamCutoffs: stream.overflowed,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
+      probesSilent: probes.probesSilent,
       // Never negative: a wake that is still ahead is not "minus forty seconds overdue", it is
       // on time. A scheduler that has never armed anything has no wake at all, which is also on
       // time — a gap here would read as "unknown" for a state that is simply quiet.
@@ -332,6 +333,10 @@ function describe(reading: CoreHealthReading): string {
   }
   const down = reading['probesDown'];
   if (down !== null && down !== undefined && down > 0) parts.push(`${String(down)} probes down`);
+  const silent = reading['probesSilent'];
+  if (silent !== null && silent !== undefined && silent > 0) {
+    parts.push(`${String(silent)} connected but not delivering`);
+  }
   return parts.join(', ');
 }
 

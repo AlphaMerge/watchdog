@@ -6066,6 +6066,88 @@ because each is a decision rather than a defect:
       Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
       reading, counted nowhere.
 
+- [x] **P-80 — Twelve defects an adversarial review panel found in the watchdogs** · L · P-74,
+      P-76, P-77, P-78, P-79 · A 109-agent review of `9a65f64..HEAD`, run in isolated worktrees,
+      with three independent skeptics per finding and a majority needed to keep it. Twenty
+      findings survived; twelve are fixed here, each with a test observed to fail against the
+      unfixed code. The rest are `P-81`–`P-83` below.
+
+      **Two of them are regressions this run's own tickets introduced**, which is the argument for
+      the panel in one line.
+
+      **The spool could not be trusted to say what it lost.** Three defects, all in the counter
+      `P-78` had just added or the accounting around it. `#appendNow` wrote through
+      `await this.#handle?.write` — an optional chain — and `close()` clears that handle, so an
+      append after close short-circuited to a no-op, incremented `pending` and `bytes` for records
+      on no disk, and *resolved*; because it resolved, `P-78`'s `.catch` never fired and
+      `unwritten` stayed 0. It is reachable on every shutdown: the spool-drain hook runs first, so
+      the runners are still settling checks into `spoolResult` when the handle goes. Second, `peek`
+      consumed unparseable and blank lines without counting them into what `commit` subtracts,
+      while `#countPending` counted them at load — a permanent residue in `segment.pending` that
+      stopped `#reclaim` for ever, grew the spool to its cap, and then produced *two* false Errors:
+      `spoolDropped` for results that were delivered, and a stalled drain. Third, `#corrupt` was
+      incremented inside `peek`, which re-reads until the batch is confirmed — and the drain does
+      not confirm on a retryable nack — so `P-79`'s new counter channel turned one torn record into
+      a sustained per-second rate of unreadable results.
+
+      **`P-77` broke the ordinary reconnect.** Narrowing `configSentAt` to the branch that actually
+      sends configuration was right in itself, but the ordinary reconnect *is* `config-unchanged`:
+      the probe keeps its fingerprint across a drop, so the core sends nothing and stamps nothing.
+      That session then had no `configSentAt` and no `lastResultsAt`, so the window collapsed to
+      start-up-plus-grace and a probe that reconnected two seconds ago was judged on the core's
+      entire uptime — a false page, a `resultAge` of hours, and two spurious transitions per sensor
+      per link flap, into the table SLA is computed from. `ProbeLink` had carried `connectedAt` all
+      along; the rule was simply never given it. A probe cannot have been silent for longer than
+      the session it is silent on.
+
+      **`P-77` also fixed `checksBehind`'s worst case by creating a new one.** Counting over the
+      assigned set was right; using the watchdog's own start as the reference for a sensor that has
+      never completed was not. Any sensor assigned after the process came up was measured against
+      the probe's whole uptime and counted behind from the instant it arrived. The amplifier is
+      again the reconnect: the core's full push is chunked, so a `config-set` of the first 1,000
+      drops the other 4,000 — `onDrop` clears their history — and the deltas re-add them
+      milliseconds later. A probe up five days, checking all 5,000 on time, reported 4,000 behind.
+      `AssignmentStore` gained the `onAdd` seam that should always have sat beside `onDrop`.
+
+      **`P-77`'s own fix, one layer down.** `ProbeReachability.lost` writes its in-memory marks
+      before the transaction — deliberately, the overlay has to be in place for the re-evaluation —
+      and nothing rolled them back when that transaction rejected. `offlineReason()` then answered
+      'silence' for a probe whose sensors were never touched, so the sweep read "already handled"
+      for ever: exactly the failure `P-77` replaced the shadow `Set` to prevent, reached through
+      the thing that replaced it.
+
+      **Core Health said "Probes not connected" about connected probes.** `probesDown` is
+      `#byProbe.size`, and `P-74` started putting `silence` entries in that map. An operator saw
+      Core Health and that probe's own Probe Health flatly contradict each other. Split by reason,
+      with `probesSilent` as its own channel and metric — which also gives the delivery sweep the
+      installation-wide number it never had.
+
+      **The worker pool latched itself off while it was working.** `#startFailures` is pool-wide,
+      reset only by a worker reaching `ready`, and was never weighed against how many workers the
+      pool still held. `#grow` spawns the whole shortfall in one burst — sixty at the v1 target,
+      each loading the ~35 MB catalogue — so three bootstrap failures among sixty on a memory-tight
+      host disabled a pool holding fifty-seven healthy workers, permanently, with `#admission`
+      answering `disabled` before it looks at anything else. And the latch returned without
+      draining `#queue`: a queued job has no timeout, because the timer is armed when it *leaves*
+      the queue, so every accepted check vanished unsettled and uncounted — the guarantee
+      `check-flow.ts` states verbatim, broken by the ticket that stated it.
+
+      **The headline alarm of `P-74`, `P-76` and `P-62` could not fire on any installation that
+      already existed.** `ChannelResolver` is the only path by which a newly declared channel key
+      reaches an existing sensor, and its INSERT wrote limits but not `lookup_id` or
+      `counter_bits`. A lookup channel with neither is judged by *nothing* — `evaluateChannel`
+      falls through every branch — so `delivering`, `checksCompleting` and `poolState` existed only
+      on installations created by their own build. A counter with no width is the same shape: the
+      rate conversion is skipped, a cumulative total is stored, and a limit written for a rate
+      latches Down for the life of the probe process. Both readers fail *quietly*, which is why
+      nothing caught it; and every test in the suite creates its sensors on the current build,
+      which is why no test could.
+
+      **Two of the panel's findings were about tests rather than code**, and both were mine.
+      `is untroubled by a check that is merely slow` advanced exactly `timeoutMs * 2`, so the
+      conjunct it was named for was already false on its own and the window clause could be deleted
+      with the file staying green. It advances 90 s now, and a discriminating case sits beside it.
+
 - [x] **P-79 — Five numbers the probe measures, sends, and nobody can read** · S · P-78 · Found
       while wiring `P-78`'s counter through the same three files for the third time in a day, and
       asking what else had made that journey only part of the way. Five fields were in

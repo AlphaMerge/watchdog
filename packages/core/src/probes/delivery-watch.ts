@@ -72,6 +72,9 @@ export class ProbeDeliveryWatch {
         cadenceSeconds: link.cadenceSeconds,
         lastResultsAt: link.lastResultsAt,
         configSentAt: link.configSentAt,
+        // The session's own clock (`P-80`). `ProbeLink` has always carried it; the rule was
+        // simply never given it, so an ordinary reconnect was judged on the core's uptime.
+        connectedAt: link.connectedAt,
       },
       this.#now(),
       this.#options.startedAt,

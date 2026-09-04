@@ -95,12 +95,28 @@ export class CheckFlowWatchdog {
   readonly #nowNs: () => bigint;
   readonly #intervalFor: (sensorId: number) => number | undefined;
   readonly #assigned: () => Iterable<number>;
-  /** When this watchdog started, as the reference for a sensor that has never completed. */
-  readonly #startedNs: bigint;
   /** Accepted and not yet settled. Bounded by the runners' own admission, not by sensor count. */
   readonly #outstanding = new Map<number, Outstanding>();
   /** When each sensor last produced a result of any kind, for `behind`. */
   readonly #lastCompleted = new Map<number, bigint>();
+  /** When this watchdog started, for a sensor assigned before anything could tell us. */
+  readonly #startedNs: bigint;
+  /**
+   * When each assigned sensor was first *seen* here, as the reference for one that has never
+   * completed (`P-80`).
+   *
+   * `P-77` used the watchdog's own start for that, which counted every sensor assigned after the
+   * process came up as behind from the instant it arrived — measured against the probe's whole
+   * uptime, before it could possibly have been checked. The ordinary reconnect made that loud:
+   * the core's full push is chunked, so a `config-set` of the first 1,000 sensors drops the rest
+   * and the deltas re-add them milliseconds later, re-anchoring 4,000 healthy sensors onto a
+   * five-day-old constant.
+   *
+   * Stamped by `assigned()`, which `AssignmentStore.onAdd` drives — the counterpart of the
+   * `onDrop` seam that already feeds `forget`. A guess made here instead would be exactly the
+   * guess that produced the defect.
+   */
+  readonly #assignedAt = new Map<number, bigint>();
   #lastCompletionNs: bigint;
 
   constructor(options: CheckFlowOptions = {}) {
@@ -131,10 +147,21 @@ export class CheckFlowWatchdog {
     this.#lastCompletionNs = now;
   }
 
+  /**
+   * This probe has become responsible for a sensor, so its four intervals start now.
+   *
+   * Idempotent on purpose: a re-push of an assignment the probe already holds must not restart
+   * the clock, or a busy installation's config churn would hide a sensor that is genuinely late.
+   */
+  assigned(sensorId: number): void {
+    if (!this.#assignedAt.has(sensorId)) this.#assignedAt.set(sensorId, this.#nowNs());
+  }
+
   /** A sensor that is no longer assigned stops counting toward `behind`. */
   forget(sensorId: number): void {
     this.#outstanding.delete(sensorId);
     this.#lastCompleted.delete(sensorId);
+    this.#assignedAt.delete(sensorId);
   }
 
   stats(): CheckFlowStats {
@@ -157,14 +184,19 @@ export class CheckFlowWatchdog {
     // anything has come back *recently* cannot be pinned by a single stuck entry.
     const stalled = overdue && msSince(this.#lastCompletionNs, now) > this.#stallAfterMs;
 
-    // Over the assigned set. A sensor that has never completed counts from when this watchdog
-    // started, so "never came back at all" is behind rather than invisible — which is the case
-    // that matters most and the one counting completions could not see.
+    // Over the assigned set. A sensor that has never completed counts from when it was first seen
+    // here, so "never came back at all" is behind rather than invisible — the case that matters
+    // most and the one counting completions could not see — while a sensor that arrived a moment
+    // ago is given its four intervals like any other rather than being behind on arrival.
     let behind = 0;
     for (const sensorId of this.#assigned()) {
       const intervalSeconds = this.#intervalFor(sensorId);
       if (intervalSeconds === undefined || intervalSeconds <= 0) continue;
-      const since = this.#lastCompleted.get(sensorId) ?? this.#startedNs;
+      // A sensor assigned before anything told us — which is every sensor if the seam is not
+      // wired — falls back to this watchdog's start, so the `P-77` case it was written for
+      // (nothing has *ever* come back) still counts rather than silently reading zero.
+      const since =
+        this.#lastCompleted.get(sensorId) ?? this.#assignedAt.get(sensorId) ?? this.#startedNs;
       if (msSince(since, now) > intervalSeconds * BEHIND_INTERVALS * 1_000) behind += 1;
     }
 

@@ -30,6 +30,44 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * channel created lazily by ingestion and one created with its sensor get the same answer from
  * the same place. Two lookups would eventually disagree, and the disagreement would be invisible.
  */
+/**
+ * The rest of a channel's declaration, for channels the ingestion path creates (`P-80`).
+ *
+ * `ChannelResolver` is the only way a key a sensor type newly declares reaches the `channel`
+ * table on a sensor that already exists, and its INSERT wrote limits but not `lookup_id` or
+ * `counter_bits`. So on any installation that predates a new channel, a lookup channel got
+ * `lookup_id = NULL` and empty limits — which `evaluateChannel` falls straight through, judging
+ * it by nothing at all. `delivering` (`P-74`), `checksCompleting` (`P-76`) and `poolState`
+ * (`P-62`) are all lookup channels with no limits, so the headline alarm of each of those tickets
+ * existed only on installations created by that build. A counter with no `counter_bits` is the
+ * same shape of wrong: the rate conversion is skipped, the stored sample is a cumulative total,
+ * and a limit written for a rate latches Down for the life of the probe process.
+ */
+export function declaredChannelLookup(
+  catalogue: SensorCatalogue,
+): (
+  sensorType: string,
+  channelKey: string,
+) => { lookup: string | null; counterBits: number | null } {
+  const shapes = new Map<string, { lookup: string | null; counterBits: number | null }>();
+  for (const id of catalogue.ids()) {
+    let defs;
+    try {
+      defs = catalogue.channelsFor(id, {});
+    } catch {
+      continue;
+    }
+    for (const def of defs) {
+      shapes.set(`${id} ${def.key}`, {
+        lookup: def.lookup ?? null,
+        counterBits: def.counter?.bits ?? null,
+      });
+    }
+  }
+  return (sensorType, channelKey) =>
+    shapes.get(`${sensorType} ${channelKey}`) ?? { lookup: null, counterBits: null };
+}
+
 export function declaredLimitsLookup(
   catalogue: SensorCatalogue,
 ): (sensorType: string, channelKey: string) => ChannelLimits | null {

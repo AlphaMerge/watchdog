@@ -24,6 +24,7 @@ const facts = (over: Partial<DeliveryFacts> = {}): DeliveryFacts => ({
   cadenceSeconds: 60,
   lastResultsAt: null,
   configSentAt: null,
+  connectedAt: START,
   ...over,
 });
 
@@ -53,6 +54,62 @@ describe('the delivery window', () => {
 });
 
 describe('whether a connected probe is delivering', () => {
+  it('gives a probe that has only just connected its window, not the core’s uptime', () => {
+    // **`P-80`, and a regression `P-77` introduced.** `P-77` narrowed `configSentAt` to the branch
+    // that actually sends configuration — correct in itself, because stamping it on every
+    // recompute pushed the window out on every probe forever. But the ordinary reconnect is
+    // `config-unchanged`: the probe kept its fingerprint across the drop, so the core sends
+    // nothing and stamps nothing. That session then has `configSentAt` and `lastResultsAt` both
+    // null, so `since` collapsed to start-up-plus-grace and a probe that reconnected two seconds
+    // ago was judged to have been silent for the core's entire uptime — marked Unknown, paged on,
+    // and given a `resultAge` of hours. One link flap on a long-running core did it.
+    //
+    // A probe cannot have been silent for longer than its current session has existed, so the
+    // session's own clock belongs in the window alongside the other two.
+    const sixHoursUp = after(21_600);
+    const seen = verdict(
+      facts({ lastResultsAt: null, configSentAt: null, connectedAt: after(21_597) }),
+      sixHoursUp,
+      START,
+    );
+    assert.equal(seen.stalled, false, 'three seconds into a session is not six hours of silence');
+    assert.equal(seen.silentForMs, 3_000);
+  });
+
+  it('does not let the session clock excuse a probe that has been connected and quiet', () => {
+    // The other side of it: `connectedAt` is a floor on the window, not a reprieve. A probe
+    // connected an hour ago that has never delivered is still stalled.
+    const seen = verdict(
+      facts({ lastResultsAt: null, configSentAt: null, connectedAt: after(1_000) }),
+      after(4_600),
+      START,
+    );
+    assert.equal(seen.stalled, true);
+    assert.equal(seen.silentForMs, 3_600_000);
+  });
+
+  it('never reports a negative age, whatever the wall clock does', () => {
+    // A backward clock step puts `since` in the future, and `silentForMs` was published straight
+    // onto Probe Health's `resultAge` channel with no clamp — a negative duration stored as a
+    // sample, which is a nonsense reading rather than a gap.
+    //
+    // **This clamp is not a fix for the underlying problem and is not claimed as one.** With
+    // `since` pinned to `now` the age reads 0 for the whole duration of the step, so the watchdog
+    // is still blind across it — it has only stopped publishing a negative number while blind.
+    // The rule measures a *duration* out of wall-clock instants, which `CLAUDE.md` says is the
+    // wrong clock for the job ("time is monotonic for scheduling, wall-clock for data"). Fixing
+    // that means giving the session monotonic stamps and changing this function to take ages
+    // rather than dates: `P-81`, filed rather than bolted on here, because it changes this rule's
+    // interface and deserves its own test pass.
+    const stepped = verdict(
+      facts({ lastResultsAt: after(5_000), configSentAt: after(4_900), connectedAt: after(4_000) }),
+      after(4_000),
+      START,
+    );
+    assert.equal(stepped.silentForMs, 0, 'clamped, never negative');
+    assert.equal(stepped.stalled, false);
+  });
+
   it('has no opinion about a probe with nothing assigned', () => {
     // The assignment list already excludes every pause source, schedule window, dependency and
     // core-evaluated type, so a legitimately quiet probe arrives here with nothing to be late

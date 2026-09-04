@@ -82,7 +82,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
           writeMs: { p95: 12.5 },
         }),
         stream: () => ({ overflowed: 2 }),
-        probes: () => ({ probesDown: 1 }),
+        probes: () => ({ probesDown: 1, probesSilent: 2 }),
         alarms: () => ({ fired: 6, nextWakeAt: null }),
         queries: () => ({ refused: 2 }),
         delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
