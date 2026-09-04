@@ -175,6 +175,41 @@ describe('documentation links', () => {
 
     assert.deepEqual(broken, [], `dead documentation links:\n  ${broken.join('\n  ')}`);
   });
+
+  /**
+   * And the other direction, which is the one that actually happened.
+   *
+   * A dead link is loud when someone follows it. A finding that nothing links to is silent for
+   * ever: it was written, committed, and is now reachable only by listing the directory. Two of
+   * the findings written on 2026-09-04 sat unindexed until somebody thought to look, and there is
+   * no reason to expect the next author to think of it either.
+   */
+  it('leave no findings document unreachable', async () => {
+    const findingsDir = join(repoRoot, 'docs', 'findings');
+    const findings = (await readdir(findingsDir)).filter((name) => name.endsWith('.md'));
+
+    // Everything outside `findings/` itself: a finding cited only by another finding is still
+    // unreachable from the documentation an operator or a maintainer actually starts from.
+    const corpus: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const here = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (here !== findingsDir) await walk(here);
+        } else if (entry.name.endsWith('.md')) corpus.push(await readFile(here, 'utf8'));
+      }
+    };
+    await walk(join(repoRoot, 'docs'));
+    corpus.push(await readFile(join(repoRoot, 'CLAUDE.md'), 'utf8'));
+
+    const text = corpus.join('\n');
+    const orphans = findings.filter((name) => !text.includes(name));
+    assert.deepEqual(
+      orphans,
+      [],
+      `findings nothing links to — add them to docs/README.md's index:\n  ${orphans.join('\n  ')}`,
+    );
+  });
 });
 
 /**

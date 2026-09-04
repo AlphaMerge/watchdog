@@ -5319,8 +5319,21 @@ because each is a decision rather than a defect:
       confirmed to resolve by hand, once; the useful check is a human reading what the reference
       claims.
 
-      Mutation-checked: a link to a findings file that does not exist fails the test naming both
-      ends.
+      **And the other direction**, which is the one that actually happened: a finding nothing links
+      to is silent for ever, reachable only by listing the directory. A dead link is loud when
+      someone follows it; an orphan never gets followed. Two of the findings written on 2026-09-04
+      sat unindexed until somebody thought to look, and there is no reason to expect the next
+      author to think of it either. All 25 are reachable today.
+
+      Mutation-checked both ways: a link to a findings file that does not exist fails the test
+      naming both ends, and a findings file nothing references fails it naming the file.
+
+      **What the orphan check does not promise**, because the first mutation written for it passed
+      and said so: it asserts a finding is referenced *somewhere* outside `findings/`, not that it
+      is in `docs/README.md`'s index. Deleting a line from that index did not fail the test,
+      because `TASKS.md` cites the same document — which is correct behaviour for "is this
+      reachable" and would be wrong for "is the index complete". The index is still maintained by
+      hand and nothing checks it.
 
 - [x] **P-53 — Nothing was checking the scripts that install on Windows** · S · P-51, H-06 ·
       `H-06` says a parse error in `ms-setup.ps1` "would break every Windows install", and that the
