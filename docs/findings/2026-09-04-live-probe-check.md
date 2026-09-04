@@ -125,3 +125,34 @@ nothing to thrash *with*, and a probe without `P-41` would have looked identical
 The premise is confirmed; the fix's effect is not distinguishable here. Seeing that would need a
 workload whose derived ceiling is above the floor — the `autosize.mjs` benchmark, which is where it
 is already measured.
+
+## A startup peak the sizing formula does not describe
+
+Re-run at the end of the day against the final code (`P-42`–`P-52`), same stack, same 5,047
+sensors, sampled from the first minute rather than from the fifth:
+
+| uptime | resident |
+| --- | --- |
+| 60 s | 2,878 MB |
+| 90 s | **2,912 MB** |
+| 150 s | 1,975 MB |
+| 210 s | 1,964 MB |
+| 270 s | 1,992 MB |
+
+**It peaks about 930 MB above where it settles**, and the peak is roughly 23% above what
+`docs/sizing.md`'s `120 MB + workers × 35 MB` predicts for 64 workers (2,360 MB). Sixty-four
+workers all load the sensor catalogue at once during the ramp, and the first major collection has
+not run yet; by two and a half minutes the collector has given back nearly a gigabyte and the
+number is *below* the formula rather than above it.
+
+The operational consequence is the useful part: **a probe sized exactly to the steady-state formula
+can die during its own start-up and be fine for ever afterwards** — which is the worst shape of
+failure to diagnose, because every measurement taken after the restart looks healthy. Size for the
+peak.
+
+This is one start-up, not a distribution, and it is recorded as an observation rather than a rule.
+It also vindicates the caveat written earlier in this document: read at 60 seconds this probe looks
+like it needs 2.9 GB, and read at 270 it looks like 2.0 GB. Neither reading alone is the answer.
+
+Scheduler lag over the same window was 5.1–8.9 ms, and nothing was deferred, refused, timed out or
+crashed — the day's changes are healthy under the v1 target's load.

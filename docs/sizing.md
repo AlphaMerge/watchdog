@@ -122,6 +122,14 @@ The 35 MB is what a worker costs in a real probe, where each one loads the senso
 measured over 24 hours at 48 workers and 1,790 MB resident. A synthetic pool with no catalogue
 costs about 12 MB a worker, so do not size from a benchmark.
 
+**Size for the start-up peak, not for this number.** The workers all load the catalogue at once
+while the pool ramps, and the first major collection has not run yet: a probe measured at 64
+workers peaked at **2,912 MB** ninety seconds in and settled at **1,975 MB** by two and a half
+minutes (`findings/2026-09-04-live-probe-check.md`). That peak is about 23% above what the formula
+gives. A box sized exactly to the steady state can die during its own start-up and then look
+perfectly healthy in every measurement taken after the restart, which is a miserable thing to
+diagnose — so add headroom of about a third, or size the box from the peak directly.
+
 **The pool settles near the burst, so the burst is what you are buying memory for.** Measured at
 a ceiling of 48, **with 200 ms checks** — the ceiling has since risen to 64, so the two pinned
 rows would now pin at 64 and cost proportionally more:
