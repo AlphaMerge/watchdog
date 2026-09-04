@@ -5388,33 +5388,102 @@ because each is a decision rather than a defect:
       being a closure; it is passed as one now, with its return type written down, since leaving
       that to inference makes `wheel` circular through it.
 
-- [ ] **P-58 — Five audit candidates that nobody has verified by hand** · S · P-55 · An
+- [x] **P-58 — Five audit candidates that nobody has verified by hand** · S · P-55 · An
       invariant-audit on 2026-09-04 produced fourteen candidates; eight were put to an adversary
       told to default to refuting, and it refuted **none of them**. Zero out of eight is not a
       result to trust: the two credential findings (`P-55`, `P-56`) and the listener one (`P-57`)
       were each re-verified by hand against the source before being acted on, and all three held.
-      The remaining five have **not** been, and are recorded here as candidates rather than as
-      defects:
+      The remaining five were recorded here as candidates rather than as defects, and have now
+      been read.
 
-      - `packages/core/src/factory/service.ts:283` — `#readInputs` collapses every factory
-        sensor's `maxAgeSeconds` into one installation-wide maximum with a floor of 600, so a
-        stale input can be computed into a fresh-looking number instead of leaving a gap. Claims
-        to violate "no-data is not zero".
-      - `packages/core/src/state/stream.ts:280` — the overflow cut-off guards on
-        `attached.pending`, which is incremented and decremented around a `send` the interface
-        declares synchronous, so the counter is claimed to be zero at every check and the
-        detach-a-slow-client path unreachable.
-      - `packages/probe/src/runner/pool.ts:527` — once `#disabled` latches, `submit` returns
-        `stopped` before incrementing any counter, so checks are claimed to vanish uncounted.
-      - `packages/probe/src/runner/process-runner.ts:359` and `main.ts:381` — `ProcessRunner`
-        keeps `#deferred`, `#refused`, `#timedOut` and a queue depth in a `stats()` that
-        `ProbeHealthReporter` never reads, so EXE/Script backpressure is claimed to reach no
-        health sensor. Both entries are the same defect from two ends.
+      All four distinct defects survive — the fifth entry was the fourth seen from its other end.
+      Each is filed below with the evidence that convinced, and none of them is fixed here:
 
-      Each needs the treatment the other three got — read the code, decide whether the failure is
-      reachable, and only then file or discard it. Recording them unverified is deliberate: the
-      alternative is losing work that is probably real, and the alternative to *that* is asserting
-      eight defects on the word of an adversary that refuted nothing.
+      - `P-59` — the Sensor Factory staleness collapse. Confirmed, and worse than it was filed:
+        the installation-wide maximum means one sensor set to 86,400 s raises every other
+        factory's cut-off, and the floor of 600 makes the schema's own `minimum: 30` unreachable.
+      - `P-60` — the stream's overflow cut-off. Confirmed: `send` reaches `socket.send`, which is
+        fire-and-forget, so `pending` is back to zero before the next event is considered.
+      - `P-61` — `ProcessRunner`'s counters. Confirmed by exhaustion: `ProbeHealthSources`
+        declares four sources, `main.ts` passes exactly those four, and `processRunner.stats()`
+        is called nowhere in `packages/probe/src` but `.stop()`.
+      - `P-62` — the pool's `#disabled` latch. Confirmed, and *less* severe than it was filed:
+        the audit called it silent, but the latch logs an error and the `workerCrashes` that
+        caused it has already been counted. What is lost is the volume discarded after it.
+
+      Eight for eight, in the end. The distrust was still the right response to the rate — an
+      adversary that refutes nothing has told you about itself and not about the code — but it
+      is worth recording that reading them was what settled it, both times.
+
+- [ ] **P-59 — A Sensor Factory reads stale channels its own setting says to ignore** · S · P-58 ·
+      `maxAgeSeconds` is documented in the sensor type's own parameter description as the age past
+      which a reading "counts as absent — which makes the formula a gap rather than a number
+      computed from something that stopped being true an hour ago". `FactoryService.#readInputs`
+      does not implement that. It folds every factory sensor's setting into a single
+      installation-wide `Math.max(600, …)` and passes that one interval to one SQL cut-off, so:
+
+      - a sensor set to 60 s accepts a 24-hour-old reading the moment any *other* factory sensor
+        anywhere in the installation is set to 86,400 s — and then reports "older than 60 s" in
+        its own error text, because the message at `service.ts:179` reads the per-sensor value
+        that the query ignored;
+      - the floor of 600 makes the schema's `minimum: 30` unreachable — every setting below the
+        default silently *is* the default.
+
+      This is "no-data is not zero" failing in the direction that hurts: the gap becomes a number,
+      and the number looks like data. The fix keeps the single over-fetching query — select each
+      sample's age alongside its value, bounded by the widest setting in play — and applies each
+      sensor's own cut-off where the formula reads the channel, so the write-back that lets a
+      factory read a factory within one sweep keeps working, at an age of zero.
+
+      Wants a table-driven test over (own setting, sample age, other sensors' settings): the
+      defect is invisible with one factory sensor configured, which is why nothing caught it.
+
+- [ ] **P-60 — The stream's overflow cut-off cannot fire, and nothing else bounds the backlog** ·
+      S · P-58 · `api-reference.md` tells the operator that a client which cannot keep up "is sent
+      `overflow` and detached rather than being quietly trimmed". `StateBroadcaster.#deliver`
+      guards that path on `attached.pending >= queueLimit` — but `pending` is incremented and
+      decremented around a call to `StateSubscriber.send`, which the interface declares
+      `send(event: StateEvent): void` and whose only implementation calls
+      `socket.send(JSON.stringify(frame))`. `ws`'s `send` returns immediately and buffers
+      internally, so `pending` is back to 0 long before the next event is considered. The counter
+      is zero at every check, the cut-off is dead code, and `queueLimit` bounds nothing.
+
+      A suspended browser tab therefore grows `socket.bufferedAmount` without limit — "never queue
+      unboundedly" broken in the one place the documentation promises it is not. The quantity that
+      actually measures the backlog is `bufferedAmount`, and that is where the guard belongs.
+
+      The test needs a subscriber that does not drain. Every existing one accepts instantly, which
+      is exactly why a guard that can never fire has always passed.
+
+- [ ] **P-61 — EXE and Script backpressure reaches no health sensor** · S · P-58 · `ProcessRunner`
+      counts `#deferred`, `#refused`, `#timedOut`, `#crashed`, a live count and a queue depth, and
+      exposes all of them through `stats()`. `ProbeHealthSources` declares four sources —
+      `scheduler`, `pool`, `spool`, `drain` — `main.ts` passes exactly those four, and
+      `processRunner.stats()` is called nowhere else in `packages/probe/src` but `.stop()`. Every
+      counter it keeps reaches nothing.
+
+      So a probe whose child-process ceiling is saturated by slow EXE and Script sensors reports a
+      perfectly healthy Probe Health while it defers and refuses checks. "Backpressure is visible,
+      never silent" and "any new subsystem with a queue, a pool or a connection adds a metric to
+      one of them" are broken by the same omission: the counting was done, and never wired up.
+
+      A fifth source is the whole fix. The test that would have caught it is structural — every
+      runner that has a `stats()` is named in `ProbeHealthSources`.
+
+- [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
+      Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so
+      every check submitted from then on vanishes without appearing in `deferred`, `refused`, or
+      anywhere else on Probe Health.
+
+      The audit filed this as silent, and it is not quite: the latch logs an error, and the
+      `workerCrashes` that caused it has already been counted, so an operator reading the logs
+      learns the pool died. What nobody can see is the volume behind it — a probe with 400 sensors
+      discards 400 checks an interval, and Probe Health shows precisely what a probe with four
+      would show. The counter is the difference between "the pool failed" and "the pool failed,
+      and here is what that cost".
+
+      Smallest of the four: a `discarded` counter incremented in the `stopped` branch, and a
+      channel to carry it.
 
 - [x] **P-54 — The documentation is a graph and nothing checked its edges** · S · H-07 · Adding a
       finding means adding a line to `docs/README.md`'s index by hand, and the two findings written
