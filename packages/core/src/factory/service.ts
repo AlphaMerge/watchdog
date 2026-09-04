@@ -1,6 +1,14 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
-import { FormulaError, evaluate, parseFormula, referencedSensors, type Node } from './formula.js';
+import {
+  FormulaError,
+  evaluate,
+  parseFormula,
+  referencedSensors,
+  type ChannelReading,
+  type FormulaInputs,
+  type Node,
+} from './formula.js';
 
 /**
  * Evaluating Sensor Factory sensors (`T-21`).
@@ -125,6 +133,14 @@ export class FactoryService {
         continue;
       }
 
+      // One shared map of readings, one cut-off per sensor. Sharing the map is what lets the
+      // write-back below reach the factories downstream; sharing the cut-off was `P-59`.
+      const view: FormulaInputs = {
+        channels: inputs.channels,
+        up: inputs.up,
+        maxAgeSeconds: sensor.maxAgeSeconds,
+      };
+
       const readings: { key: string; value: number }[] = [];
       const missing: string[] = [];
       const broken: string[] = [];
@@ -135,7 +151,7 @@ export class FactoryService {
           broken.push(`${channel.key}: ${parsed?.message ?? 'no formula'}`);
           continue;
         }
-        const value = evaluate(parsed, inputs);
+        const value = evaluate(parsed, view);
         if (value === null || !Number.isFinite(value)) {
           // A gap, never a zero. A total that quietly lost a term is a number that looks like
           // data and is wrong, which is the failure mode a factory is most likely to produce.
@@ -148,7 +164,7 @@ export class FactoryService {
 
         // Within one sweep, a factory over a factory sees this sweep's value. Only possible
         // because the whole thing runs in one place, in dependency order.
-        inputs.channels.set(`${String(sensor.sensorId)}:${channel.key}`, value);
+        inputs.channels.set(`${String(sensor.sensorId)}:${channel.key}`, { value, ageSeconds: 0 });
       }
 
       if (broken.length > 0) {
@@ -261,7 +277,7 @@ export class FactoryService {
       out.push({
         sensorId,
         channels,
-        maxAgeSeconds: Number(row.params['maxAgeSeconds'] ?? 600),
+        maxAgeSeconds: readMaxAge(row.params['maxAgeSeconds']),
         parsed,
         reads,
       });
@@ -276,16 +292,19 @@ export class FactoryService {
    * reading five channels each is still two round trips.
    */
   async #readInputs(sensors: readonly FactorySensor[]): Promise<{
-    channels: Map<string, number>;
+    channels: Map<string, ChannelReading>;
     up: Map<number, boolean>;
   }> {
     const wanted = new Set<number>();
-    let maxAge = 600;
+    // The widest cut-off in play, and nothing more: it bounds how far back the one query has to
+    // look so that every sensor can apply its own cut-off to the result. No sensor is subject to
+    // it — reading it as a cut-off is exactly the defect `P-59` fixed.
+    let widest = 0;
     for (const sensor of sensors) {
       for (const id of sensor.reads) wanted.add(id);
-      maxAge = Math.max(maxAge, sensor.maxAgeSeconds);
+      widest = Math.max(widest, sensor.maxAgeSeconds);
     }
-    const channels = new Map<string, number>();
+    const channels = new Map<string, ChannelReading>();
     const up = new Map<number, boolean>();
     if (wanted.size === 0) return { channels, up };
 
@@ -294,17 +313,23 @@ export class FactoryService {
       // `DISTINCT ON` is the cheap "latest row per group" in PostgreSQL, and the index on
       // `(channel_id, time DESC)` the sample hypertable already carries is what makes it one
       // seek per channel rather than a scan.
-      this.#db.query<{ sensor_id: string; channel_key: string; value: string }>(
+      this.#db.query<{
+        sensor_id: string;
+        channel_key: string;
+        value: string;
+        age_seconds: string;
+      }>(
         `
         SELECT DISTINCT ON (c.id)
-               c.sensor_id, c.key AS channel_key, s.value
+               c.sensor_id, c.key AS channel_key, s.value,
+               EXTRACT(EPOCH FROM (now() - s.time)) AS age_seconds
         FROM channel c
         JOIN sample s ON s.channel_id = c.id
         WHERE c.sensor_id = ANY($1::int[])
           AND s.time > now() - ($2 || ' seconds')::interval
         ORDER BY c.id, s.time DESC
         `,
-        [ids, String(maxAge)],
+        [ids, String(widest)],
       ),
       // `sensor_runtime`, not `sensor_state`: the latter is the append-only history uptime is
       // computed from, and asking it for "the state right now" means a `DISTINCT ON` per sensor
@@ -316,13 +341,31 @@ export class FactoryService {
     ]);
 
     for (const row of values) {
-      channels.set(`${row.sensor_id}:${row.channel_key}`, Number(row.value));
+      channels.set(`${row.sensor_id}:${row.channel_key}`, {
+        value: Number(row.value),
+        // Aged by the database's clock, in the same query that read the sample, so a core whose
+        // clock has drifted from the database's cannot make a reading look fresh.
+        ageSeconds: Number(row.age_seconds),
+      });
     }
     for (const row of states) {
       up.set(Number(row.object_id), row.state === 'up' || row.state === 'warning');
     }
     return { channels, up };
   }
+}
+
+/**
+ * A sensor's staleness cut-off, or the default when the stored parameter is not usable.
+ *
+ * Params come out of the database as whatever was written there, and a cut-off that arrived as
+ * `NaN` would widen to `Infinity` under the `Math.max` that bounds the query — every reading
+ * fresh, for every factory in the installation. The schema's own bounds are the ones enforced.
+ */
+function readMaxAge(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 30 || value > 86_400) return 600;
+  return Math.floor(value);
 }
 
 /**

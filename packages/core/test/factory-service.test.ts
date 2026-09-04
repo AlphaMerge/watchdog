@@ -192,6 +192,95 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     assert.equal(valueOf(both, 'stale'), undefined);
   });
 
+  /**
+   * `P-59`: the cut-off used to be one `Math.max` over every factory sensor in the installation,
+   * floored at 600. Every row below therefore runs with a neighbouring factory set to a day — it
+   * is the *neighbour* that exposes the collapse. With a single factory configured, the two
+   * readings of the code agree, which is exactly why the test above passed throughout.
+   */
+  const CUTOFFS = [
+    { what: 'a fresh reading under a tight cut-off', cutOff: 60, ageSeconds: 10, reads: true },
+    { what: 'a stale reading under a tight cut-off', cutOff: 60, ageSeconds: 3_000, reads: false },
+    {
+      what: 'a reading under a cut-off below the old floor',
+      cutOff: 30,
+      ageSeconds: 300,
+      reads: false,
+    },
+    {
+      what: 'an old reading the sensor asked to accept',
+      cutOff: 86_400,
+      ageSeconds: 3_000,
+      reads: true,
+    },
+  ] as const;
+
+  for (const row of CUTOFFS) {
+    it(`${row.reads ? 'reads' : 'gaps'} ${row.what}`, async () => {
+      const measured = await source('measured', 'v', 42, { ageSeconds: row.ageSeconds });
+      const formula = [{ key: 'v', formula: `channel(${String(measured)}, 'v')` }];
+      const subject = await makeFactory('Subject', formula, { maxAgeSeconds: row.cutOff });
+      // Exists only to be relaxed. Under the old code its cut-off silently became everyone's.
+      await makeFactory('Neighbour', formula, { maxAgeSeconds: 86_400 });
+
+      await factory.sweep();
+      assert.equal(valueOf(subject, 'v'), row.reads ? 42 : undefined);
+    });
+  }
+
+  it('names the cut-off it actually applied when everything it reads is too old', async () => {
+    // The message read the per-sensor setting while the query used the installation-wide one, so
+    // it could report “older than 60 s” about a reading it had just accepted at 24 hours.
+    const measured = await source('measured', 'v', 42, { ageSeconds: 3_000 });
+    const formula = [{ key: 'v', formula: `channel(${String(measured)}, 'v')` }];
+    const subject = await makeFactory('Subject', formula, { maxAgeSeconds: 60 });
+    await makeFactory('Neighbour', formula, { maxAgeSeconds: 86_400 });
+
+    await factory.sweep();
+    assert.equal(resultFor(subject)?.outcome, 'error');
+    assert.match(resultFor(subject)?.message ?? '', /older than 60 s/);
+  });
+
+  it('does not age a factory’s own output on the way to the factory above it', async () => {
+    // The write-back that lets a factory read a factory within one sweep hands over a value with
+    // no sample behind it. It is this sweep's, so it is new — a tight cut-off upstairs must not
+    // turn the whole stack into gaps.
+    const measured = await source('measured', 'v', 10, { ageSeconds: 5 });
+    const lower = await makeFactory(
+      'Lower',
+      [{ key: 'v', formula: `channel(${String(measured)}, 'v') * 2` }],
+      { maxAgeSeconds: 86_400 },
+    );
+    const upper = await makeFactory(
+      'Upper',
+      [{ key: 'v', formula: `channel(${String(lower)}, 'v') + 1` }],
+      { maxAgeSeconds: 30 },
+    );
+
+    await factory.sweep();
+    assert.equal(valueOf(lower, 'v'), 20);
+    assert.equal(valueOf(upper, 'v'), 21);
+  });
+
+  it('falls back to the default when a stored cut-off is not a usable number', async () => {
+    // Params are whatever is in the row. A cut-off that arrives as `NaN` widens to `Infinity`
+    // under the `Math.max` that bounds the query — every reading fresh, for every factory at
+    // once — so this guards the fix rather than the original defect.
+    const measured = await source('measured', 'v', 42, { ageSeconds: 3_000 });
+    const formula = [{ key: 'v', formula: `channel(${String(measured)}, 'v')` }];
+    const broken = await makeFactory('Broken', formula, { maxAgeSeconds: 60 });
+    const strict = await makeFactory('Strict', formula, { maxAgeSeconds: 60 });
+    await db.query(
+      `UPDATE sensor_config SET params = jsonb_set(params, '{maxAgeSeconds}', '"whenever"')
+       WHERE object_id = $1`,
+      [broken],
+    );
+
+    await factory.sweep();
+    assert.equal(valueOf(broken, 'v'), undefined, 'the default, not no cut-off at all');
+    assert.equal(valueOf(strict, 'v'), undefined, 'and the neighbour is untouched');
+  });
+
   it('fails rather than reporting nothing when every channel gapped', async () => {
     // Not a reading of none: every source this sensor is built on is missing, which is a fault
     // of its own rather than a quiet period.

@@ -313,12 +313,28 @@ export function referencedSensors(node: Node, into: Set<number> = new Set()): Se
   return into;
 }
 
+/** One channel's latest reading, with the age that decides whether it still counts. */
+export interface ChannelReading {
+  readonly value: number;
+  /**
+   * Seconds between the sample and the sweep reading it. A factory's own output, written back
+   * within the sweep that computed it, is 0 — it does not get older by being passed along.
+   */
+  readonly ageSeconds: number;
+}
+
 /** What a formula is evaluated against: the latest reading per channel, and each sensor's state. */
 export interface FormulaInputs {
-  /** `sensorId:channelKey` to the latest value. Absent is a gap, not a zero. */
-  readonly channels: ReadonlyMap<string, number>;
+  /** `sensorId:channelKey` to the latest reading. Absent is a gap, not a zero. */
+  readonly channels: ReadonlyMap<string, ChannelReading>;
   /** `sensorId` to whether that sensor is currently Up. Absent is unknown, which is not up. */
   readonly up: ReadonlyMap<number, boolean>;
+  /**
+   * Past this age a reading counts as absent. It belongs here rather than on the reading because
+   * it is the *reading sensor's* setting: one factory willing to work from day-old data must not
+   * widen the cut-off of a factory next to it that is not, which is what `P-59` was.
+   */
+  readonly maxAgeSeconds: number;
 }
 
 /**
@@ -336,8 +352,11 @@ export function evaluate(node: Node, inputs: FormulaInputs): number | null {
       return node.value;
 
     case 'channel': {
-      const value = inputs.channels.get(`${String(node.sensorId)}:${node.channelKey}`);
-      return value === undefined ? null : value;
+      const reading = inputs.channels.get(`${String(node.sensorId)}:${node.channelKey}`);
+      // Too old is absent, and absent is a gap. A source that stopped reporting leaves its last
+      // value behind for ever, and arithmetic over it produces a number that looks like data.
+      if (reading === undefined || reading.ageSeconds > inputs.maxAgeSeconds) return null;
+      return reading.value;
     }
 
     case 'status':

@@ -19,9 +19,16 @@ import {
 const inputs = (
   channels: Record<string, number> = {},
   up: Record<number, boolean> = {},
+  options: { ages?: Record<string, number>; maxAgeSeconds?: number } = {},
 ): FormulaInputs => ({
-  channels: new Map(Object.entries(channels)),
+  channels: new Map(
+    Object.entries(channels).map(([key, value]) => [
+      key,
+      { value, ageSeconds: options.ages?.[key] ?? 0 },
+    ]),
+  ),
   up: new Map(Object.entries(up).map(([id, value]) => [Number(id), value])),
+  maxAgeSeconds: options.maxAgeSeconds ?? 600,
 });
 
 const value = (formula: string, given: FormulaInputs = inputs()): number | null =>
@@ -84,6 +91,41 @@ describe('channels and status', () => {
   it('counts a cluster, which is what status() is for', () => {
     const given = inputs({}, { 1: true, 2: true, 3: false });
     assert.equal(value('status(1) + status(2) + status(3)', given), 2);
+  });
+});
+
+describe('staleness', () => {
+  /**
+   * `P-59`. The cut-off lives on the inputs rather than on the reading because it is the
+   * *reading sensor's* setting: two factories over the same channel can disagree about how old
+   * is too old, and each is entitled to its own answer.
+   */
+  const aged = (ageSeconds: number, maxAgeSeconds = 600): FormulaInputs =>
+    inputs({ '1:v': 42, '2:v': 100 }, {}, { ages: { '1:v': ageSeconds }, maxAgeSeconds });
+
+  it('reads a channel inside the cut-off and gaps one past it', () => {
+    assert.equal(value("channel(1, 'v')", aged(500)), 42);
+    assert.equal(value("channel(1, 'v')", aged(700)), null);
+  });
+
+  it('counts a reading exactly at the cut-off as still current', () => {
+    // `>` and not `>=`: “older than” is what the parameter promises, and a boundary the other
+    // way would gap a source that reports at exactly the period it was configured for.
+    assert.equal(value("channel(1, 'v')", aged(600)), 42);
+  });
+
+  it('propagates a stale channel as a gap through arithmetic', () => {
+    // The whole point. A total that quietly lost a term is a number that looks like data.
+    assert.equal(value("channel(1, 'v') + channel(2, 'v')", aged(4_000)), null);
+  });
+
+  it('lets default() stand in for a stale reading, the same as for a missing one', () => {
+    assert.equal(value("default(channel(1, 'v'), 0)", aged(4_000)), 0);
+  });
+
+  it('answers the same question differently for two cut-offs over one reading', () => {
+    assert.equal(value("channel(1, 'v')", aged(3_000, 86_400)), 42);
+    assert.equal(value("channel(1, 'v')", aged(3_000, 60)), null);
   });
 });
 

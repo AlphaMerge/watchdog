@@ -5415,7 +5415,7 @@ because each is a decision rather than a defect:
       adversary that refutes nothing has told you about itself and not about the code — but it
       is worth recording that reading them was what settled it, both times.
 
-- [ ] **P-59 — A Sensor Factory reads stale channels its own setting says to ignore** · S · P-58 ·
+- [x] **P-59 — A Sensor Factory reads stale channels its own setting says to ignore** · S · P-58 ·
       `maxAgeSeconds` is documented in the sensor type's own parameter description as the age past
       which a reading "counts as absent — which makes the formula a gap rather than a number
       computed from something that stopped being true an hour ago". `FactoryService.#readInputs`
@@ -5437,6 +5437,39 @@ because each is a decision rather than a defect:
 
       Wants a table-driven test over (own setting, sample age, other sensors' settings): the
       defect is invisible with one factory sensor configured, which is why nothing caught it.
+
+      **Fixed by moving the cut-off to where the formula reads the channel.** `FormulaInputs`
+      carries a `maxAgeSeconds` and each reading carries its `ageSeconds`, so `evaluate` answers
+      the same channel differently for two factories that disagree about how old is too old —
+      which is the thing the old shape could not express at all. The query still makes one round
+      trip for the whole sweep: it selects each sample's age alongside its value, bounded by the
+      widest setting in play. That bound is an over-fetch so that every sensor has enough rows to
+      apply its own cut-off to; it is not a cut-off anyone is subject to, and the comment says so
+      where the next reader will be tempted.
+
+      Two details worth keeping. The age is computed by the database in the same query that read
+      the sample, so a core whose clock has drifted from the database's cannot make a stale
+      reading look fresh. And the boundary is `>`, not `>=` — "older than" is what the parameter
+      promises, and the other way would gap a source reporting at exactly its own period.
+
+      The write-back that lets a factory read a factory within one sweep hands over an age of 0.
+      It has no sample behind it because it *is* this sweep's value, and a tight cut-off upstairs
+      must not turn a stack of factories into gaps.
+
+      **The fix has its own failure mode, and it is guarded.** A `maxAgeSeconds` that arrives from
+      the row as something unparseable becomes `NaN`, and `NaN` widens to `Infinity` under the
+      `Math.max` that bounds the query — every reading fresh, for every factory at once. That is a
+      worse version of the original defect reachable from a single bad row, so the loader clamps
+      to the schema's own bounds and a test writes `"whenever"` into `sensor_config.params` to
+      prove it.
+
+      **The test that was already there could not have caught this, and the mutation says why.**
+      "treats a stale reading as absent rather than as still true" survives deleting the age check
+      from `evaluate` outright: with one factory configured, at exactly the floor of 600, the SQL
+      cut-off alone excludes the 4,000-second reading. It was passing on the query, not on the
+      rule, and both of its numbers had to be what they were. The four rows added around it each
+      run with a neighbouring factory set to a day, because the collapse is only visible when
+      there are two — and three of them die when the age check goes.
 
 - [ ] **P-60 — The stream's overflow cut-off cannot fire, and nothing else bounds the backlog** ·
       S · P-58 · `api-reference.md` tells the operator that a client which cannot keep up "is sent
