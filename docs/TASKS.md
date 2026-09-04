@@ -4117,9 +4117,10 @@ because each is a decision rather than a defect:
       faithfully to be wrong about any of them.
 
       **Not done here:** no sensor type uses this yet — that is `T-08`. The pool duplicates the
-      SNMP pool's lease counting and idle eviction; extracting the shared half is `P-24` below,
+      SNMP pool's lease counting and idle eviction; extracting the shared half was `P-24`,
       deliberately deferred until `T-09` makes it a third instance and the shape is actually
-      known rather than guessed from two.
+      known rather than guessed from two. `T-09` turned out not to be one, so it moved to v2 as
+      `V2-17` on 2026-09-04, where its third caller — `V2-08` — actually lives.
 - [x] **P-20 — `alarm-scheduler` sweep test is timing-flaky** · S · — · "counts what it did, for
       Core Health" in `packages/core/test/alarm-scheduler.test.ts` asserts a timer *fired* within a
       real wall-clock window. It passes 17/17 in isolation and fails about one run in ten inside
@@ -5685,57 +5686,6 @@ because each is a decision rather than a defect:
       One caution for whoever picks it up: a "reproduction" here turned out to be a deliberately
       failing probe file leaking into a concurrent background run. Do not plant one while runs of
       the same suite are in flight.
-- [ ] **P-24 — One session pool for every transport** · M · T-09 · _(Was a second `P-19`; renumbered, because two open tickets sharing a number is how the wrong one gets ticked.)_  `support/snmp/pool.ts` and
-      `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
-      unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
-      **Added by `T-07`:** extracting it at two instances would have guessed which half varies;
-      `T-09`'s WinRM transport is the third and the point at which the shape is known. **`T-09`
-      landed and is not a third instance** — it is a shell-out with no session to keep, so the two
-      pools are still two and this ticket's trigger never fired. Whoever picks it up decides on
-      that basis: either two instances are enough to see the shape, or this waits for a third
-      transport — which is `V2-08`, and therefore v2. See the re-check below. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
-      deliberately, not incidentally.
-
-      **Decided 2026-09-03: wait for `D-05`, and here is the evidence so nobody re-derives it.**
-      The shape *is* now visible without a third instance — the two pools differ on exactly one
-      axis, `open`: SNMP's is synchronous, SSH's is `async` with in-flight sharing (`#opening`),
-      a liveness check and an `#attach` step. Everything else is shared, and it is not
-      approximately shared:
-
-      | Method | Difference |
-      | --- | --- |
-      | `sweep()` | **byte-identical** but for `sessions` / `connections` |
-      | `#makeRoom()` | byte-identical but for the same rename and one word of prose |
-      | `#lease`, `#startSweeping`, `#stopSweeping`, `stats()`, `closeAll()` | same |
-
-      **And that is the argument for waiting rather than against it.** Byte-identical after
-      months means the duplication has cost nothing — no fix has landed in one and missed the
-      other, which is the failure extraction prevents. Against that: the shared code is
-      credential-keyed session handling, the stat names `sessions` and `connections` are not
-      interchangeable prose, and a third transport is the instance that would say whether the
-      varying half is "async open" or something wider. Refactoring working, tested, undrifted code
-      in that area for tidiness alone is a bad trade; refactoring it when a third caller forces the
-      shape is a good one.
-
-      **The re-check this ticket asked for has been done, and its trigger was pointing at the wrong
-      thing** (2026-09-04). It said "re-check the diff when `D-05` lands", and named "`D-05`'s
-      VMware transport" as the third instance. `D-05` is *Default master dependency*; it landed and
-      has no transport in it. Virtualisation sensors are **`V2-08`**, which is v2 — so the third
-      caller this ticket waits for **cannot arrive in v1**, and the instruction to re-check had
-      silently come due without anyone noticing, because it named a ticket that was never about
-      what it claimed.
-
-      **The re-check itself says: still no drift.** Neither `support/snmp/pool.ts` nor
-      `support/ssh/pool.ts` has been touched since 2026-08-27 — nine days, one commit each, the
-      ones that created them — and the only difference in their method sets remains SNMP's
-      `acquire` against SSH's `#attach`. So the "waiting has cost nothing" argument holds on its
-      own evidence; what has changed is that waiting now means waiting for v2.
-
-      **So the decision is between two honest options, and it is not this ticket's to take
-      quietly**: extract at two instances, accepting the guess `P-19` warns about, or move this to
-      the v2 backlog beside `V2-08` where its trigger actually lives. It should not sit in the v1
-      list appearing merely deferred, because nothing in v1 will ever unblock it.
-
 - [x] **T-08 — SSH Script / Disk Free / Load Average / Meminfo** · L · T-07 · Four sensors,
       documented script output format for the first.
 
@@ -5849,7 +5799,8 @@ because each is a decision rather than a defect:
 
       **`P-24` should not wait for this ticket.** It is written as "extract the pool at the third
       transport", with `T-09` named as the third. A shell-out has no session to keep, so there is
-      no third instance; the two pools are still two, and whoever picks `P-24` up should decide on
+      no third instance; the two pools are still two. `P-24` moved to v2 as `V2-17` on 2026-09-04
+      on exactly that basis — its third caller is `V2-08`. Whoever picks it up there decides on
       that basis rather than on this dependency.
 - [x] **T-10 — Windows CPU / Memory / Volume / Service sensors** · L · T-09 · The v1 Windows set.
 
@@ -8406,3 +8357,68 @@ Ordered by expected value. Not scheduled.
 - **V2-14** Unusual-value detection (historic baseline per weekday and hour)
 - **V2-15** Mobile push notifications
 - **V2-16** Declarative YAML config export/import for version-controlled setups
+- **V2-17** One session pool for every transport — the shared half of the SNMP and SSH session pools (was `P-24`; its third caller is `V2-08`). Full record below.
+
+---
+
+### V2-17 — One session pool for every transport
+
+`support/snmp/pool.ts` and
+      `support/ssh/pool.ts` share their lease counting, idle eviction, LRU room-making and
+unref'd sweeper, and differ in async open, in-flight sharing and liveness checking.
+**Added by `T-07`:** extracting it at two instances would have guessed which half varies;
+`T-09`'s WinRM transport is the third and the point at which the shape is known. **`T-09`
+landed and is not a third instance** — it is a shell-out with no session to keep, so the two
+pools are still two and this ticket's trigger never fired. Whoever picks it up decides on
+that basis: either two instances are enough to see the shape, or this waits for a third
+transport — which is `V2-08`, and therefore v2. See the re-check below. Keep the SNMP pool's synchronous `acquire` working or update its 21 tests
+deliberately, not incidentally.
+
+**Decided 2026-09-03: wait for `D-05`, and here is the evidence so nobody re-derives it.**
+The shape *is* now visible without a third instance — the two pools differ on exactly one
+axis, `open`: SNMP's is synchronous, SSH's is `async` with in-flight sharing (`#opening`),
+a liveness check and an `#attach` step. Everything else is shared, and it is not
+approximately shared:
+
+| Method | Difference |
+| --- | --- |
+| `sweep()` | **byte-identical** but for `sessions` / `connections` |
+| `#makeRoom()` | byte-identical but for the same rename and one word of prose |
+| `#lease`, `#startSweeping`, `#stopSweeping`, `stats()`, `closeAll()` | same |
+
+**And that is the argument for waiting rather than against it.** Byte-identical after
+months means the duplication has cost nothing — no fix has landed in one and missed the
+other, which is the failure extraction prevents. Against that: the shared code is
+credential-keyed session handling, the stat names `sessions` and `connections` are not
+interchangeable prose, and a third transport is the instance that would say whether the
+varying half is "async open" or something wider. Refactoring working, tested, undrifted code
+in that area for tidiness alone is a bad trade; refactoring it when a third caller forces the
+shape is a good one.
+
+**The re-check this ticket asked for has been done, and its trigger was pointing at the wrong
+thing** (2026-09-04). It said "re-check the diff when `D-05` lands", and named "`D-05`'s
+VMware transport" as the third instance. `D-05` is *Default master dependency*; it landed and
+has no transport in it. Virtualisation sensors are **`V2-08`**, which is v2 — so the third
+caller this ticket waits for **cannot arrive in v1**, and the instruction to re-check had
+silently come due without anyone noticing, because it named a ticket that was never about
+what it claimed.
+
+**The re-check itself says: still no drift.** Neither `support/snmp/pool.ts` nor
+`support/ssh/pool.ts` has been touched since 2026-08-27 — nine days, one commit each, the
+ones that created them — and the only difference in their method sets remains SNMP's
+`acquire` against SSH's `#attach`. So the "waiting has cost nothing" argument holds on its
+own evidence; what has changed is that waiting now means waiting for v2.
+
+**Moved here on 2026-09-04, by the operator's decision**, of the two options this ticket had
+narrowed itself to: extract at two instances and accept the guess `P-19` warns about, or follow
+the trigger to where it actually lives. The trigger is a third transport, the third transport is
+`V2-08`, and the two now sit in the same backlog — which is the point, since the extraction is a
+good trade exactly when that third caller forces the shape and a bad one until then.
+
+**It keeps the name `P-24` as well as its new one.** `P-36`, `T-01`, `T-07`, `T-09`, `T-20`,
+`P-54` and a comment in `support/windows/powershell.ts` all cite it by that name; renumbering live
+cross-references in order to record a scope move would trade one kind of staleness for another.
+
+**Whoever picks this up starts by re-running the diff above.** It was byte-identical on
+2026-08-27 and again on 2026-09-04. If the two have drifted by then, that changes the answer on
+its own and the argument for waiting is void.
