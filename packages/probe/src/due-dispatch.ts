@@ -59,7 +59,7 @@ export interface DueDispatchDeps {
    * counting it would make backpressure look like a stall. The outcome is already returned here
    * and was already being discarded — this is the one place that knows.
    */
-  onDispatch?: (sensorId: number) => void;
+  onDispatch?: (sensorId: number, timeoutMs: number) => void;
 }
 
 export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) => void {
@@ -86,7 +86,7 @@ export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) =>
         ...(received === undefined ? {} : { received }),
         timeoutMs: assignment.timeoutMs,
       });
-      if (outcome === 'accepted') deps.onDispatch?.(sensorId);
+      if (outcome === 'accepted') deps.onDispatch?.(sensorId, assignment.timeoutMs);
     }
   };
 }

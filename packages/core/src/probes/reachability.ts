@@ -114,6 +114,19 @@ export class ProbeReachability {
     };
   }
 
+  /**
+   * Why this probe's sensors are Unknown, or `undefined` if they are not.
+   *
+   * **So a caller can tell an edge from a level without keeping its own copy.** The delivery
+   * sweep did keep one, and the copy could diverge from this in the one direction that matters:
+   * it recorded a probe as marked *before* `lost` had succeeded, and `lost` logs and returns
+   * without marking anything when it cannot read the probe's sensors. The shadow then said
+   * "already handled" for ever, and the sensors it never marked stayed Up (`P-77`).
+   */
+  offlineReason(probeObjectId: number): OfflineReason | undefined {
+    return this.#byProbe.get(probeObjectId)?.reason;
+  }
+
   /** Whether this sensor's probe is answering. Read on every state decision. */
   reachable(sensorId: number): boolean {
     return !this.#unreachable.has(sensorId);

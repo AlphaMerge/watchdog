@@ -685,10 +685,19 @@ export class ProbeEndpoint {
    * One place, because `sentSensors` is set from two branches and a cadence that disagreed with
    * the list it was derived from would give a window for work the probe is not doing (`P-74`).
    */
-  #noteAssignments(session: ProbeSession, sensors: readonly SensorAssignment[]): void {
+  #noteAssignments(
+    session: ProbeSession,
+    sensors: readonly SensorAssignment[],
+    sent: boolean,
+  ): void {
     session.sentSensors = sensors;
-    session.configSentAt = new Date();
     session.cadenceSeconds = medianInterval(sensors);
+    // **Only when the probe was actually given something** (`P-77`). `pushAllConfigs` runs on any
+    // change anywhere in the tree — a schedule window opening, a dependency pausing — and most of
+    // those recompute to the version the probe already has. Stamping the clock there postponed
+    // the delivery window on every connected probe every time anything moved, so on an
+    // installation with ordinary config churn the watchdog could never fire.
+    if (sent) session.configSentAt = new Date();
   }
 
   #queueResults(
@@ -1003,7 +1012,7 @@ export class ProbeEndpoint {
         const held = presented ?? session.sentVersion;
         if (assignments.version === held) {
           session.sentVersion = assignments.version;
-          this.#noteAssignments(session, assignments.sensors);
+          this.#noteAssignments(session, assignments.sensors, false);
           session.sentStamps = assignments.stamps;
           if (presented !== undefined) {
             session.connection.send({ type: 'config-unchanged', version: assignments.version });
@@ -1025,7 +1034,7 @@ export class ProbeEndpoint {
               );
 
         session.sentVersion = assignments.version;
-        this.#noteAssignments(session, assignments.sensors);
+        this.#noteAssignments(session, assignments.sensors, true);
         session.sentStamps = assignments.stamps;
 
         // Only the upserts are weighed against the snapshot: a removal is an integer, an upsert

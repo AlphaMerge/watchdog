@@ -6066,6 +6066,58 @@ because each is a decision rather than a defect:
       Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
       reading, counted nowhere.
 
+- [x] **P-77 — Four defects in the two tickets written to catch defects like them** · M · P-74,
+      P-76 · Found by auditing `P-74` and `P-76` the day they were written, before either had run
+      against anything real. All four are in the *watchdogs* — the code whose entire job is to
+      notice when monitoring has stopped — and in each one the failure mode is the watchdog going
+      quiet rather than going wrong, which is the failure mode a watchdog is least able to report.
+
+      **1. The sweep recorded a marking that never happened.** `ProbeDeliveryWatch` kept its own
+      `Set` of probes it had marked silent, and added to it *before* awaiting
+      `ProbeReachability.lost`. But `lost` logs and returns `0` without marking anything when it
+      cannot read the probe's sensors — the deliberate judgement in `reachability.ts` that a query
+      failure is not a reason to decide something about a probe. The shadow then said "already
+      handled" for ever, and the sensors it never marked stayed Up: `P-74`'s exact failure,
+      reached through the mechanism built to prevent it. It reads `offlineReason` now, so a
+      marking that did not take is simply still absent and the next sweep tries again.
+
+      The mutation exposed a second symptom nobody had looked for: the shadow also survived a
+      *reconnect*, which clears the reachability entry (`found`, `R-05`). A probe that disconnected
+      while silent and came back still silent would never be marked again, because the sweep still
+      held a claim on a state that had been cleared underneath it. One `Set` and two ways to be
+      permanently wrong.
+
+      **2. Routine config churn postponed the silence window.** `configSentAt` — the stamp that
+      answers "when did this probe last get work it has not yet reported on" — was written on both
+      branches of the config push, including `config-unchanged`. Editing one sensor recomputes
+      every connected probe, so on an installation of any size the window was pushed out by a full
+      cycle on every probe, continuously. A genuinely silent probe would never be caught on a busy
+      system, which is the only system where it matters.
+
+      **3. The worst case read best.** `checksBehind` iterated `#lastCompleted`, so a probe on
+      which nothing has *ever* come back had nothing to iterate and reported `behind: 0` — for a
+      probe that was 100% behind. It counts the assigned set now, with `#startedNs` standing in
+      for a sensor that has never reported, which also makes `behind` respond to assignments
+      rather than to memory: a sensor stops counting by *leaving* the assignment list, and
+      `forget` releases its entry without deciding anything. `assignments.onDrop` is wired to it
+      in `main.ts` so the two cannot drift.
+
+      **4. One leaked check disabled the stall detector for the life of the process.** The
+      predicate read `lastCompletionNs <= oldestNs`. A check that never settles pins `oldestNs` at
+      its dispatch for ever, so the first completion after it made the comparison false and no
+      subsequent stall could ever be seen — silently, with `completing: 1` reported throughout. It
+      asks whether anything has completed *recently* now, which a single stuck entry cannot pin.
+      The overdue clause gained the check's own timeout as well (`waited > timeoutMs * 2`), so a
+      sensor legitimately configured to run longer than the window is not called stalled for
+      taking exactly the time it was given.
+
+      **Every fix carries a test that was run against the reverted code and observed to fail** —
+      five mutations, five tests, each killed by its own and no other. That is the rule from
+      `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`, applied on the same
+      day it was written, to the work of the person who wrote it. Four of these are mine, they are
+      in the newest code in the repo, and the audit that found them was cheaper than any of them
+      would have been in production.
+
 - [x] **P-75 — `npm run lint` was in `package.json` and in no script** · S · P-49 · Found while
       running eslint over a directory rather than a file during `P-62`: a real
       `no-unnecessary-condition` error had been sitting in

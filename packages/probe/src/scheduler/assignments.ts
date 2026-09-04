@@ -24,6 +24,15 @@ export class AssignmentStore {
   readonly #wheel: TimingWheel;
   readonly #assignments = new Map<number, SensorAssignment>();
 
+  /**
+   * Told when a sensor leaves, so whatever is keeping per-sensor state can release it (`P-77`).
+   *
+   * The check-flow watchdog holds a last-completion time per sensor; without this it kept one for
+   * every sensor the probe had ever been assigned, which on a probe that is repeatedly reassigned
+   * grows without bound. The store is the only thing that knows a sensor has gone.
+   */
+  #onDrop: ((sensorId: number) => void) | undefined;
+
   constructor(wheel: TimingWheel) {
     this.#wheel = wheel;
   }
@@ -72,8 +81,13 @@ export class AssignmentStore {
     this.#wheel.add({ id: assignment.sensorId, intervalSeconds: assignment.intervalSeconds });
   }
 
+  onDrop(listener: (sensorId: number) => void): void {
+    this.#onDrop = listener;
+  }
+
   #drop(sensorId: number): void {
     this.#assignments.delete(sensorId);
     this.#wheel.remove(sensorId);
+    this.#onDrop?.(sensorId);
   }
 }

@@ -48,8 +48,7 @@ export class ProbeDeliveryWatch {
   readonly #options: DeliveryWatchOptions;
   readonly #settings: DeliveryOptions;
   readonly #now: () => Date;
-  /** Probes this sweep has marked, so it can tell an edge from a level. */
-  readonly #silent = new Set<number>();
+  #silentNow = 0;
   #sweeps = 0;
   #transitions = 0;
 
@@ -60,7 +59,7 @@ export class ProbeDeliveryWatch {
   }
 
   stats(): DeliveryStats {
-    return { silent: this.#silent.size, sweeps: this.#sweeps, transitions: this.#transitions };
+    return { silent: this.#silentNow, sweeps: this.#sweeps, transitions: this.#transitions };
   }
 
   /** What the watch makes of one probe, for Probe Health to report without repeating the rule. */
@@ -103,29 +102,28 @@ export class ProbeDeliveryWatch {
     }
 
     let moved = 0;
+    let silent = 0;
     for (const row of probes) {
       const probeObjectId = Number(row.id);
-      const seen = this.verdictFor(probeObjectId);
-      if (seen === null) {
-        // Not connected: `R-05` owns it from the moment the link went, and this sweep must not
-        // clear what that set. The claim is dropped rather than held, because a probe that
-        // reconnects and is *still* silent has to be markable again — holding it would leave the
-        // next `stalled` looking like no change at all, and the probe would never be re-marked.
-        this.#silent.delete(probeObjectId);
-        continue;
-      }
+      // **The truth, not a copy of it** (`P-77`). Asking `ProbeReachability` what it actually
+      // holds means a `lost` that failed — it logs and returns without marking when it cannot
+      // read the probe's sensors — is simply retried on the next sweep, instead of being recorded
+      // as done by a shadow set that nothing could correct. A probe not connected is `R-05`'s and
+      // reads `link`, so neither branch below fires for it.
+      const marked = this.#options.reachability.offlineReason(probeObjectId);
+      if (marked === 'silence') silent += 1;
 
-      const wasSilent = this.#silent.has(probeObjectId);
-      if (seen.stalled && !wasSilent) {
-        this.#silent.add(probeObjectId);
+      const seen = this.verdictFor(probeObjectId);
+      if (seen === null) continue;
+
+      if (seen.stalled && marked === undefined) {
         this.#transitions += 1;
         this.#options.logger.warn(
           { probeObjectId, silentForMs: seen.silentForMs, windowMs: seen.windowMs },
           'a probe is connected but has stopped sending results; its sensors are Unknown',
         );
         moved += await this.#options.reachability.lost(probeObjectId, 'silence');
-      } else if (!seen.stalled && wasSilent) {
-        this.#silent.delete(probeObjectId);
+      } else if (!seen.stalled && marked === 'silence') {
         this.#transitions += 1;
         this.#options.logger.info(
           { probeObjectId },
@@ -134,6 +132,7 @@ export class ProbeDeliveryWatch {
         moved += await this.#options.reachability.resumed(probeObjectId);
       }
     }
+    this.#silentNow = silent;
     return moved;
   }
 }

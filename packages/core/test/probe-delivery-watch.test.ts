@@ -35,17 +35,37 @@ function link(over: Partial<Extract<ProbeLink, { connected: true }>> = {}): Prob
 }
 
 /** Records what the sweep asked of reachability, without touching a database. */
-function fakeReachability() {
+function fakeReachability(options: { lostFails?: boolean } = {}) {
   const calls: string[] = [];
+  // A reason map rather than a boolean, because that is what the real one keeps — and because the
+  // sweep now reads it instead of shadowing it (`P-77`).
+  const reasons = new Map<number, string>();
   return {
     calls,
+    reasons,
     service: {
+      offlineReason: (probeObjectId: number) => reasons.get(probeObjectId),
       lost: (probeObjectId: number, reason?: string) => {
         calls.push(`lost:${String(probeObjectId)}:${reason ?? 'link'}`);
+        // The real `lost` logs and returns without marking when it cannot read the probe's
+        // sensors. Modelling that is the whole point of this fake.
+        if (options.lostFails === true) return Promise.resolve(0);
+        reasons.set(probeObjectId, reason ?? 'link');
+        return Promise.resolve(3);
+      },
+      // What the endpoint calls when a reconnecting probe claims its branch
+      // (`probe-endpoint.ts`, at the first config poll of every new session). It clears the entry
+      // whatever the reason — the probe is back, and `R-05` says its sensors return to their last
+      // reading. This sweep then re-decides from scratch, which is the point.
+      found: (probeObjectId: number) => {
+        calls.push(`found:${String(probeObjectId)}`);
+        reasons.delete(probeObjectId);
         return Promise.resolve(3);
       },
       resumed: (probeObjectId: number) => {
         calls.push(`resumed:${String(probeObjectId)}`);
+        if (reasons.get(probeObjectId) !== 'silence') return Promise.resolve(0);
+        reasons.delete(probeObjectId);
         return Promise.resolve(3);
       },
     } as unknown as ProbeReachability,
@@ -58,8 +78,12 @@ function fakeDb(probeIds: number[]): Database {
   } as unknown as Database;
 }
 
-function watchOver(links: Map<number, ProbeLink>, clock: { now: Date }) {
-  const reach = fakeReachability();
+function watchOver(
+  links: Map<number, ProbeLink>,
+  clock: { now: Date },
+  options: { lostFails?: boolean } = {},
+) {
+  const reach = fakeReachability(options);
   const watch = new ProbeDeliveryWatch({
     db: fakeDb([...links.keys()]),
     logger: silentLogger,
@@ -68,7 +92,7 @@ function watchOver(links: Map<number, ProbeLink>, clock: { now: Date }) {
     startedAt: START,
     now: () => clock.now,
   });
-  return { watch, calls: reach.calls };
+  return { watch, calls: reach.calls, reasons: reach.reasons, reach: reach.service };
 }
 
 const at = (seconds: number): Date => new Date(START.getTime() + seconds * 1_000);
@@ -134,7 +158,7 @@ describe('the probe delivery sweep', () => {
     // would read the next stall as no change and never mark it again.
     const clock = { now: at(GRACE_OVER + 1_000) };
     const links = new Map<number, ProbeLink>([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
-    const { watch, calls } = watchOver(links, clock);
+    const { watch, calls, reach } = watchOver(links, clock);
     await watch.settle();
     assert.deepEqual(calls, ['lost:7:silence']);
 
@@ -142,11 +166,48 @@ describe('the probe delivery sweep', () => {
     await watch.settle();
 
     // Back, and still not delivering: its config was pushed on reconnect and nothing has arrived.
+    // The endpoint calls `found` as the new session claims its branch, which is what clears the
+    // mark — this sweep does not track the reconnect itself, it just stops seeing a mark.
     clock.now = at(GRACE_OVER + 3_000);
     links.set(7, link({ lastResultsAt: null, configSentAt: at(GRACE_OVER + 1_500) }));
+    await reach.found(7);
     await watch.settle();
 
-    assert.deepEqual(calls, ['lost:7:silence', 'lost:7:silence'], 'marked again, not forgotten');
+    assert.deepEqual(
+      calls,
+      ['lost:7:silence', 'found:7', 'lost:7:silence'],
+      'marked again, not forgotten',
+    );
+  });
+
+  it('retries a marking that did not take, instead of recording it as done', async () => {
+    // **`P-77`.** The sweep kept its own set of marked probes and added to it *before* awaiting
+    // `lost`, which logs and returns without marking anything when it cannot read the probe's
+    // sensors. The shadow then said "already handled" for ever and the sensors it never marked
+    // stayed Up — the exact failure this whole ticket exists to prevent, reached through the
+    // thing meant to prevent it. It reads reachability's own state now, so a failed marking is
+    // simply still unmarked and the next sweep tries again.
+    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
+    const clock = { now: at(GRACE_OVER + 1_000) };
+    const { watch, calls } = watchOver(links, clock, { lostFails: true });
+
+    await watch.settle();
+    await watch.settle();
+    await watch.settle();
+
+    assert.deepEqual(calls, ['lost:7:silence', 'lost:7:silence', 'lost:7:silence']);
+  });
+
+  it('leaves a probe already marked for a lost link alone', async () => {
+    // `R-05` owns that probe. Re-marking it would be wrong and un-marking it would be worse: the
+    // link is genuinely down, and this sweep has no business deciding otherwise.
+    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER + 900) })]]);
+    const clock = { now: at(GRACE_OVER + 1_000) };
+    const { watch, calls, reasons } = watchOver(links, clock);
+    reasons.set(7, 'link');
+
+    await watch.settle();
+    assert.deepEqual(calls, [], 'delivering, but not this sweep’s to clear');
   });
 
   it('survives a database that cannot list probes', async () => {

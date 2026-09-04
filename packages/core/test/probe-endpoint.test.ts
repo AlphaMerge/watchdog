@@ -745,11 +745,14 @@ describe(
       /** Credential rotation stamps, so a test can rotate one without touching a sensor. */
       stamps = new Map<number, string>();
       touched: number[] = [];
+      /** Recomputes served, so a test can wait on a push having been *processed*. */
+      recomputes = 0;
 
       probeObjectFor(): Promise<number | null> {
         return Promise.resolve(this.claimed);
       }
       assignmentsFor(): Promise<ProbeAssignments> {
+        this.recomputes += 1;
         return Promise.resolve({
           version: fingerprint(this.sensors, this.stamps),
           sensors: [...this.sensors],
@@ -875,6 +878,58 @@ describe(
         },
         { configVersion: fingerprint([sensor(1), sensor(2)]) },
       );
+    });
+
+    it('starts no delivery clock for a probe it sent no configuration to', async () => {
+      // `configSentAt` answers one question for `P-74`: when did this probe last get work it has
+      // not yet reported on. A probe that arrived already current was sent nothing, so there is
+      // no such moment, and claiming one would postpone the silence window for a probe that
+      // should be delivering from the first tick.
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(
+        source,
+        async (probe, endpoint) => {
+          await probe.waitFor((m) => m.type === 'config-unchanged');
+          const link = endpoint.linkFor(7);
+          assert.ok(link.connected);
+          assert.equal(link.configSentAt, null, 'nothing was sent, so nothing was stamped');
+          // The control: the rest of `#noteAssignments` plainly did run on this branch, so the
+          // null above is a decision and not an untaken code path.
+          assert.equal(link.assignedSensors, 2);
+          assert.equal(link.cadenceSeconds, 60);
+        },
+        { configVersion: fingerprint([sensor(1), sensor(2)]) },
+      );
+    });
+
+    it('does not restart the delivery clock when a recompute changes nothing', async () => {
+      // **`P-77`.** The stamp was written on both branches, so any change anywhere in the tree —
+      // one sensor edited in an installation of five thousand — recomputed every connected probe
+      // and pushed `P-74`'s window out by a full cycle on all of them. A genuinely silent probe
+      // would then never be caught on a busy system, which is precisely the system that needs it.
+      const source = new StubSource();
+      source.sensors = [sensor(1)];
+
+      await withProbe(source, async (probe, endpoint) => {
+        await probe.waitFor((m) => m.type === 'config-set');
+        const first = endpoint.linkFor(7);
+        assert.ok(first.connected && first.configSentAt !== null);
+        const stamped = first.configSentAt.getTime();
+
+        // `Date` has millisecond resolution: without a gap a re-stamp would land on the same
+        // value and this would pass against the defect it is here to catch.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+
+        const before = source.recomputes;
+        endpoint.pushConfig(7);
+        await waitUntil(() => source.recomputes > before);
+
+        const after = endpoint.linkFor(7);
+        assert.ok(after.connected);
+        assert.equal(after.configSentAt?.getTime(), stamped, 'the clock was restarted by churn');
+      });
     });
 
     it('sends an empty configuration to a probe no branch has claimed', async () => {

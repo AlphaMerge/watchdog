@@ -129,6 +129,9 @@ async function main(): Promise<void> {
     // after the wheel, so reading the binding here would be its temporal dead zone.
     intervalFor: (sensorId: number): number | undefined =>
       assignments.get(sensorId)?.intervalSeconds,
+    // Over the assignments rather than over what has completed: a probe where nothing has ever
+    // come back has no completions to count, and reported `behind: 0` for being 100% behind.
+    assigned: (): Iterable<number> => assignments.ids(),
   });
 
   const spoolResult = (result: CheckResult, meta: ResultMeta): void => {
@@ -285,14 +288,19 @@ async function main(): Promise<void> {
       isolated,
       pool,
       processRunner,
-      onDispatch: (sensorId) => {
-        checkFlow.dispatched(sensorId);
+      onDispatch: (sensorId, timeoutMs) => {
+        checkFlow.dispatched(sensorId, timeoutMs);
       },
     }),
   });
   // Constructed before the wheel is started: `onDue` closes over this binding, and a tick that
   // fired first would find it in the temporal dead zone.
   const assignments = new AssignmentStore(wheel);
+  // A sensor that has left stops being this probe's business, and its per-sensor state goes with
+  // it — otherwise the watchdog keeps one entry for every sensor ever assigned (`P-77`).
+  assignments.onDrop((sensorId) => {
+    checkFlow.forget(sensorId);
+  });
 
   // ── the pool ceiling, derived from the work this probe was actually given (`P-34`) ──────────
   //

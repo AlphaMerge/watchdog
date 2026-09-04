@@ -29,6 +29,15 @@
 /** A check accepted by a runner, and when. Monotonic, because this is a duration and not a date. */
 interface Outstanding {
   readonly atNs: bigint;
+  /**
+   * This check's own timeout.
+   *
+   * The stall window has to clear it, or a sensor legitimately configured to take longer than the
+   * window is reported as a stall for running exactly as long as it was told to. A check that has
+   * outlived twice its own timeout is overdue by its *own* standard, which is the only standard
+   * that means anything across a catalogue where an ICMP ping and an EXE script share a probe.
+   */
+  readonly timeoutMs: number;
 }
 
 export interface CheckFlowStats {
@@ -67,6 +76,15 @@ export interface CheckFlowOptions {
   readonly nowNs?: () => bigint;
   /** The assigned scan interval for a sensor, for the `behind` count. */
   readonly intervalFor?: (sensorId: number) => number | undefined;
+  /**
+   * Every sensor this probe is currently assigned.
+   *
+   * Counting over the *assignments* rather than over what has completed is the difference between
+   * a number that works and one that reads best in the worst case: a probe where nothing has ever
+   * come back has no completions to iterate, so counting those reported `behind: 0` for a probe
+   * that was 100% behind.
+   */
+  readonly assigned?: () => Iterable<number>;
 }
 
 const DEFAULT_STALL_AFTER_MS = 300_000;
@@ -76,6 +94,9 @@ export class CheckFlowWatchdog {
   readonly #stallAfterMs: number;
   readonly #nowNs: () => bigint;
   readonly #intervalFor: (sensorId: number) => number | undefined;
+  readonly #assigned: () => Iterable<number>;
+  /** When this watchdog started, as the reference for a sensor that has never completed. */
+  readonly #startedNs: bigint;
   /** Accepted and not yet settled. Bounded by the runners' own admission, not by sensor count. */
   readonly #outstanding = new Map<number, Outstanding>();
   /** When each sensor last produced a result of any kind, for `behind`. */
@@ -86,18 +107,20 @@ export class CheckFlowWatchdog {
     this.#stallAfterMs = options.stallAfterMs ?? DEFAULT_STALL_AFTER_MS;
     this.#nowNs = options.nowNs ?? ((): bigint => process.hrtime.bigint());
     this.#intervalFor = options.intervalFor ?? ((): undefined => undefined);
+    this.#assigned = options.assigned ?? ((): Iterable<number> => []);
     // Starting at "just completed" rather than at zero: a probe that has only just come up has
     // dispatched nothing and returned nothing, and calling that a stall would alarm on every start.
     this.#lastCompletionNs = this.#nowNs();
+    this.#startedNs = this.#lastCompletionNs;
   }
 
   /** A runner accepted this check. Only `accepted` — a deferral was never dispatched. */
-  dispatched(sensorId: number): void {
+  dispatched(sensorId: number, timeoutMs: number): void {
     // Re-dispatch of a sensor already outstanding cannot happen — both runners refuse it with
     // `already-running` — but if it ever did, keeping the *older* timestamp is the safe way round:
     // it is the one that would reveal a stall.
     if (this.#outstanding.has(sensorId)) return;
-    this.#outstanding.set(sensorId, { atNs: this.#nowNs() });
+    this.#outstanding.set(sensorId, { atNs: this.#nowNs(), timeoutMs });
   }
 
   /** A check settled, however it settled. An error is a completion: the runner came back. */
@@ -117,23 +140,32 @@ export class CheckFlowWatchdog {
   stats(): CheckFlowStats {
     const now = this.#nowNs();
     let oldestNs: bigint | null = null;
+    let overdue = false;
     for (const one of this.#outstanding.values()) {
       if (oldestNs === null || one.atNs < oldestNs) oldestNs = one.atNs;
+      // Against its own timeout as well as the window, so a check configured to run longer than
+      // the window is not reported as a stall for taking the time it was given.
+      const waited = msSince(one.atNs, now);
+      if (waited > this.#stallAfterMs && waited > one.timeoutMs * 2) overdue = true;
     }
     const oldestOutstandingMs = oldestNs === null ? 0 : msSince(oldestNs, now);
 
-    // Both clauses. Something stuck far past any timeout, *and* nothing at all having come back
-    // since it was dispatched — which is what separates a stopped runner from a slow check.
-    const stalled =
-      oldestNs !== null &&
-      oldestOutstandingMs > this.#stallAfterMs &&
-      this.#lastCompletionNs <= oldestNs;
+    // **Both clauses, and the second is recency rather than a comparison against the oldest.**
+    // It used to read `lastCompletionNs <= oldestNs`, which one leaked check disabled for ever:
+    // a check that never settles pins `oldestNs` at its dispatch, so any later completion makes
+    // the comparison false permanently and no subsequent stall could ever be seen. Asking whether
+    // anything has come back *recently* cannot be pinned by a single stuck entry.
+    const stalled = overdue && msSince(this.#lastCompletionNs, now) > this.#stallAfterMs;
 
+    // Over the assigned set. A sensor that has never completed counts from when this watchdog
+    // started, so "never came back at all" is behind rather than invisible — which is the case
+    // that matters most and the one counting completions could not see.
     let behind = 0;
-    for (const [sensorId, at] of this.#lastCompleted) {
+    for (const sensorId of this.#assigned()) {
       const intervalSeconds = this.#intervalFor(sensorId);
       if (intervalSeconds === undefined || intervalSeconds <= 0) continue;
-      if (msSince(at, now) > intervalSeconds * BEHIND_INTERVALS * 1_000) behind += 1;
+      const since = this.#lastCompleted.get(sensorId) ?? this.#startedNs;
+      if (msSince(since, now) > intervalSeconds * BEHIND_INTERVALS * 1_000) behind += 1;
     }
 
     return {
