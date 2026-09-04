@@ -81,29 +81,64 @@ the part that is not noise: `lost 0, duplicated 0, corrupt 0` still holds with a
 | — 1h → 1d | 150 ms for 15,000 buckets |
 | — on disk | raw 103.1 B/row, 5m 116.3 B/row |
 | Native compression, 300 channels × 1,440 readings | 40.0 MB → 4.0 MB, **10.1×**, in 123 ms |
-| Tree build, 5,000 objects over HTTP, budget 30 s | serial **25.9 s** (14% spare), 8 in flight 7.0 s, bulk **2.6 s** |
+| Tree build, 5,000 objects over HTTP, budget 30 s | serial **25.9 s** in this batch; **23.7 s (21% spare)** re-measured interleaved — see below |
 | Replay fairness: live probe while another empties an hour | passes |
 | Sizing pass over 5,000 assignments (`P-48`) | median **0.36 ms**, worst 1.24 ms, budget 50 ms |
 
-### The one number worth watching
+### The one number worth watching, and what happened when it was chased
 
-**Tree build has gone 21.0 s → 22.8 s → 25.9 s across three measurements**, and the margin against
-its 30 s budget is down to 14%. The first two figures are `S-16`'s baseline and this morning's run.
+The tree build read 21.0 s (`S-16`'s baseline), 22.8 s this morning and **25.9 s** here — margin
+against the 30 s budget down to 14%. Three increasing samples is a shape worth naming, so it was
+filed as `P-84` and chased the same evening. What came back is more useful than a regression would
+have been, and it starts with getting it wrong twice.
 
-I cannot attribute the latest step to anything I changed, and I am not going to pretend otherwise:
-object creation writes channels through `ObjectRepository.createChannels`, not through the
-`ChannelResolver` path `P-80` touched, and nothing else in `P-80`–`P-83` is on it. The load average
-was higher for this run than for the morning's, which is the ordinary explanation. But three
-increasing samples is a shape worth naming rather than filing away, and a single run cannot
-separate drift from host noise.
+**Round 1 — five runs, each in its own container.** 28.0, 26.9, 27.2, 28.0, 28.1 s. Spread 1.2 s.
+A tight spread and every sample above the 25.9 s recorded here reads unambiguously as *real drift*,
+and that is what it was called.
 
-**What would settle it:** run this one file five times on a quiet machine and look at the spread.
-That is `P-84`.
+**Round 2 — the bisect said no.** `2166bab` (before `P-80`): 23.8, 23.7, 23.7. `e109482` (after
+both `P-80` commits): 23.6, 23.7, 24.3. `d6de81e` (after `P-81`–`P-83`): 23.6, 23.5, 23.5. No
+commit steps. By elimination that left the *documentation* commit, whose only code change removed
+a duplicated query — a change that can only make things faster.
+
+**Round 3 — re-measure HEAD, back to back with the bisect.** 24.1, 23.7, 23.8 s. Identical to every
+historical commit. **The bisect had been comparing against a number taken twenty minutes earlier,
+and that number was the thing that was wrong.**
+
+| commit | when | how | serial (s) |
+| --- | --- | --- | --- |
+| `2166bab` | morning | full `test:perf` | 22.8 |
+| HEAD | 16:5x | full `test:perf` | 25.9 |
+| HEAD | 17:23–27 | 5 runs, **5 containers** | 28.0 26.9 27.2 28.0 28.1 |
+| `2166bab` | 17:29 | 3 runs, **1 container** | 23.8 23.7 23.7 |
+| `e109482` | 17:32 | 3 runs, 1 container | 23.6 23.7 24.3 |
+| `d6de81e` | 17:35 | 3 runs, 1 container | 23.6 23.5 23.5 |
+| HEAD | 17:37 | 3 runs, 1 container | 24.1 23.7 23.8 |
+
+**Within a batch the spread is ≤ 1.2 s. Across batches on the same commit it is 23.7 to 28.1 s.**
+That is the finding: **repeats inside one batch are not independent samples.** They share whatever
+the environment happened to be for those two minutes, so a batch reports its own precision and
+says nothing about its accuracy — which is exactly how five tight samples at 27–28 s manufactured
+a regression that was not there.
+
+The one systematic difference between the fast and slow batches is one process per container versus
+three sharing one, which is a plausible mechanism and is **not** established here: it is one
+uncontrolled variable in a comparison with several. It is written down as a hypothesis for whoever
+needs the number to be tighter, not as a conclusion.
+
+**The answer for the budget:** `serial` at HEAD is **23.7 s, 21% spare**, unchanged from before
+`P-80` when measured the same way in the same minutes. Nothing in `P-80`–`P-83` moved it.
+
+**The rule this produced, which now applies to every row on this page:** a measurement is only
+comparable to one taken *in the same batch*. Comparing today's number against yesterday's page
+answers a different question from the one it looks like it answers, and the only honest way to
+compare two commits is to interleave them.
 
 One thing *was* found by reading rather than measuring while writing this page: `ChannelResolver`
 issued the `sensor_config` type query **twice** on the first-sighting path — once for the declared
 limits and once for the shape `P-80` added — under a comment claiming the two shared it. Fixed
-here; it is not on the tree-build path and does not explain the number above.
+here. It is on the ingestion path and not the tree-build one, and it explains nothing above; it is
+recorded because the comment was false, not because the query was slow.
 
 ## Host, stated because it bounds every number
 
@@ -112,6 +147,9 @@ No `ms-server`, and no review workflow — the earlier one had been patching fil
 tree, which is why the previous page says to check for that before trusting a run.
 
 **Read these as budgets comfortably met, not as a regression baseline.** 209 ms into 1,000 ms,
-159 ms into 300,000 ms, 0.36 ms into 50 ms. The exception is tree build, which is the only row
-where the margin is small enough that host noise and real drift are hard to tell apart — which is
-exactly why it gets a ticket rather than a sentence.
+159 ms into 300,000 ms, 0.36 ms into 50 ms. Tree build is the only row where the margin is small
+enough for the batch effect above to matter, and its interleaved answer is 23.7 s — 21% spare.
+
+Every other row on this page is a single batch and inherits the same caveat. None of them is close
+enough to its budget for it to change the conclusion, which is the only reason they are not
+re-measured the same way.

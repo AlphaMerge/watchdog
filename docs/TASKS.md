@@ -6154,9 +6154,9 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
-- [ ] **P-84 — Tree build has moved 21.0 s to 25.9 s across three measurements** · S · P-19 ·
-      Noticed while writing up `P-80`–`P-83`'s budgets, and filed rather than explained away
-      because a single run cannot tell drift from host noise.
+- [x] **P-84 — Tree build had not moved; the measurements had** · S · P-19 · Filed while writing up
+      `P-80`–`P-83`'s budgets and settled the same evening. The answer is that there was no
+      regression, and the way the wrong answer was reached is the part worth keeping.
 
       `creates a 5,000-object tree through the API inside its budget` has read 21.0 s (the `S-16`
       baseline recorded in `PLAN.md`), 22.8 s (2026-09-04 morning) and 25.9 s (2026-09-04
@@ -6166,13 +6166,32 @@ because each is a decision rather than a defect:
       none. Nothing in `P-80`–`P-83` is on that path: object creation writes channels through
       `ObjectRepository.createChannels`, not the `ChannelResolver` path those tickets touched.
 
-      **What would settle it, and it is cheap**: run that one file five times on a quiet machine
-      and look at the spread. If the spread covers three seconds, this is the host and the row can
-      say so with a number behind it. If it does not, something on the create path got slower
-      between the two runs and `git bisect` over a day's commits will find it.
+      **Five runs on a quiet machine gave 28.0, 26.9, 27.2, 28.0, 28.1 s — spread 1.2 s.** A tight
+      spread, every sample above the recorded 25.9 s: that reads as real drift, and it was called
+      real drift.
 
-      Worth doing before it becomes the interesting question the day the budget is missed, which
-      is the point at which the three earlier samples stop being available to compare against.
+      **The bisect disagreed.** `2166bab` 23.8/23.7/23.7, `e109482` 23.6/23.7/24.3, `d6de81e`
+      23.6/23.5/23.5 — no commit steps, which by elimination blamed a documentation commit whose
+      only code change *removed* a duplicated query.
+
+      **Re-measuring HEAD back to back with the bisect gave 24.1/23.7/23.8**, identical to every
+      historical commit. The comparison had been against a number taken twenty minutes earlier,
+      and that number was the thing that was wrong.
+
+      **Within a batch the spread is ≤ 1.2 s; across batches on the same commit it is 23.7 to
+      28.1 s.** Repeats inside one batch share whatever the environment was for those two minutes,
+      so a batch reports its own *precision* and nothing about its *accuracy* — which is how five
+      tight samples manufactured a regression. The tightness was the trap, not the reassurance.
+
+      `serial` at HEAD is **23.7 s, 21% spare**, unchanged from before `P-80` when measured the
+      same way in the same minutes. One systematic difference between the fast and slow batches —
+      one process per container against three sharing one — is written down in the findings page
+      as a hypothesis, because it is one uncontrolled variable among several and proving it was
+      not what this ticket was for.
+
+      **The rule:** two measurements are comparable only if they were taken in the same batch. The
+      way to compare two commits is to interleave them, not to compare against a page written
+      earlier. That now applies to every row in `docs/findings/2026-09-04-perf-budgets-*`.
 
 - [x] **P-83 — Three tests that pinned less than their names claimed** · S · P-74, P-76, P-80 · From the
       `P-80` panel, and the sixth, seventh and eighth entries in the family
