@@ -1,18 +1,27 @@
-# Five tests that passed for the wrong reason, and what exposed each
+# Nine tests that passed for the wrong reason, and what exposed each
 
-`P-58`–`P-76`, 2026-09-04.
+`P-58`–`P-83`, 2026-09-04. **Extended the same day**, which is the finding.
 
-A day spent on `P-58`'s backlog turned up five tests that were green, had been green for weeks,
-and did not test what their names said. None was a careless test. Each was written by somebody
-who understood the defect, and each passed for a reason that had nothing to do with it.
+A morning spent on `P-58`'s backlog turned up five tests that were green, had been green for
+weeks, and did not test what their names said. None was a careless test. Each was written by
+somebody who understood the defect, and each passed for a reason that had nothing to do with it.
 
-This is the catalogue, because the interesting part is not the individual bugs — those are in
-their tickets — but that **five independent instances of one failure appeared in one day**, and
-that a different technique was needed to expose each. A green suite is evidence about the suite.
+That was the first five. Then an adversarial review panel — 109 agents over the day's own
+commits, three independent skeptics per finding — was pointed at the code written to *fix* them,
+and found four more. **Three of the four were in tests written that afternoon, by the author of
+this document, after writing it.** One of them was in the guard built the previous ticket to catch
+exactly this family of defect.
+
+That is why the catalogue is worth keeping. The individual bugs are in their tickets; what is
+here is that **nine independent instances of one failure appeared in one day**, that a different
+technique was needed to expose each, and that knowing about the failure mode in detail — having
+just catalogued it — did not stop somebody producing four more instances of it before dinner.
+
+A green suite is evidence about the suite.
 
 ---
 
-## The five
+## The first five
 
 ### 1. A cut-off in the query, not the rule (`P-59`)
 
@@ -96,6 +105,86 @@ became 13–29 ms and six for six.
 
 ---
 
+## The four the review panel found
+
+These came from `P-80`'s adversarial panel and were fixed under `P-80` and `P-83`. All four are in
+code written on 2026-09-04, most of it after the five above had been written up.
+
+### 6. A conjunct made vacuous by the test's own constant (`P-80`)
+
+`check-flow.test.ts` — "is untroubled by a check that is merely slow". `overdue` is a conjunction:
+past the stall window **and** past twice the check's own timeout. The test dispatched with
+`timeoutMs: 30_000` and advanced exactly `60_000`, so `waited === timeoutMs * 2` and the second
+conjunct was already false under the strict `>`.
+
+The consequence: **delete `waited > stallAfterMs &&` and the whole file stays green.** Every other
+case in it is absorbed either by that boundary or by the separate recency clause. What the mutant
+permits is a probe carrying only long-interval sensors — legitimately quiet, so the recency clause
+is already satisfied — flipping to stalled 21 seconds into one hung 10 s check, 279 seconds before
+the design says it may.
+
+**Exposed by:** the panel, reading the conjunction against each test in the file rather than each
+test on its own.
+
+**What it needed:** 90,000 instead of 60,000, so the second conjunct is true and only the clause
+under test holds the assertion up — plus a discriminating case that fails against the mutant.
+
+### 7. A test whose subject cannot express the property (`P-83`)
+
+`check-flow.test.ts` — "counts an error as a completion, because the runner came back".
+`CheckFlowWatchdog.completed(sensorId)` takes **no outcome**. The test could only call it five
+times and observe a counter, and would pass identically against a `completed` that ignored
+outcomes — which is what it has. The property lived at one line in `main()`, which had no test
+file at all.
+
+Measured rather than argued: wrapping that line in `if (result.outcome === 'ok')` left the entire
+probe suite green, this test included.
+
+**Exposed by:** the panel, comparing the assertion's reach against its subject's *signature*.
+
+**What it needed:** the sink extracted out of `main()` — `result-sink.ts`, the way `P-43`
+extracted the config handlers — and the property asserted against the unconditional call that
+actually carries it. The same mutation now fails two tests. The old test kept its scenario and
+lost its name.
+
+### 8. Forty copies of one assertion (`P-83`)
+
+`probe-delivery.test.ts` — "does not fire on a probe replaying an hour of spool", billed in
+`P-74`'s commit message as "the trap the whole design turns on". Its forty iterations each
+advanced `now` and `lastResultsAt` by the same 30,000 ms, so `silentForMs` was 30,000 and
+`windowMs` 240,000 in every one.
+
+Worse than the repetition: `DeliveryFacts` carried no field for the probe's own clock, so **no
+implementation of the rule could have failed it** without also failing its neighbour. The forty
+iterations were forty copies of an assertion the rule could not get wrong.
+
+**Exposed by:** the panel, asking what change to the subject would turn the test red.
+
+**What it needed:** the assertion at the *endpoint*, which is the one line that stamps arrival and
+the only place where arrival and `result.at` differ. The replacement sends a batch stamped an hour
+ago and asserts the link's age is seconds; it fails against ageing from `result.at`, which is the
+design `P-74` rejected.
+
+### 9. A guard satisfied by a substring (`P-80`)
+
+`build-hygiene.test.ts` — `P-79`'s new structural check that every field in `PROBE_HEALTH_SCHEMA`
+is read by the core. It matched with `code.includes(field)`, so a field whose name is a *prefix*
+of another — `sessionsOpen` against `sessionsOpened` — was satisfied by its longer sibling.
+
+The guard carried a floor on its own extracted field count, precisely because a regex that
+silently matched nothing would make it pass for ever. That floor catches an extraction that finds
+too little. It cannot catch a match that is accidentally satisfied, and nothing else did either.
+
+**Exposed by:** the panel, reading the guard as adversarially as the code it guards.
+
+**What it needed:** a word boundary. One line.
+
+**The reason it is in this list rather than a footnote:** this is the ticket written the day
+before, whose entire purpose was to stop a field being added and silently never read. It was
+built as the durable fix for this family and shipped with an instance of it inside.
+
+---
+
 ## What actually found them
 
 Ranked by what each cost and what it caught:
@@ -107,15 +196,20 @@ Ranked by what each cost and what it caught:
 | Adversarial review of a *fix* | 3 | Expensive; caught what its author could not see |
 | Running it N times and counting | 4 | Cheap and nobody does it |
 | Instrumenting durations, then a log spy | 5 | Minutes, once the duration looked wrong |
+| **A review panel with a refutation bar** | **6, 7, 8, 9** | **Very expensive; the only thing that caught the author's blind spot four times** |
 
 The one that generalises: **a passing test is a hypothesis, and the mutation is the experiment.**
-Four of the five had never had the mutation run against them.
+Four of the first five had never had the mutation run against them; 7 was settled by one in
+minutes once somebody thought to ask.
 
-The one that does not: an adversarial reviewer found the two defects their own author had looked
-straight at. `P-60`'s snapshot storm and `P-66`'s allowance were both written by somebody who had
-just spent an hour thinking about that exact code.
+The one that does not, and it is the sharper half: **an author cannot review their own tests for
+this defect, and knowing about the defect in detail does not help.** Entries 6, 7 and 9 were
+written *after* entries 1–5 were catalogued, by the person who catalogued them, on the same day.
+Entry 9 was written *inside the guard built to prevent this family*. The panel was independent,
+worked from the code rather than from the intent, and had to defeat three skeptics to report
+anything — and that structure, not more care, is what found them.
 
-## Three rules this produced
+## Five rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -126,6 +220,15 @@ just spent an hour thinking about that exact code.
    for the *pass*, ask what it proves at any other value.
 3. **Run a race a hundred times before calling it deterministic.** Cheap, and it is the only thing
    that separates a guard from a coin flip.
+4. **Ask what change to the subject would turn this test red — and if the answer is "none",
+   the test is scenery.** Entry 8's rule had no field that could distinguish the case the test was
+   named for; entry 7's subject had no parameter that could carry the property. Neither needed a
+   mutation to see, only the question. When the honest answer is "the subject cannot express it",
+   the fix is to move the assertion to where the property lives, which usually means extracting
+   something out of `main()`.
+5. **Review the guards as adversarially as the code.** Entry 9 was in the structural check written
+   the day before to catch exactly this. A guard is code, it is written by somebody who has just
+   convinced themselves of something, and it is the *last* thing anybody re-reads.
 
 ## What is still not covered, and is said so on purpose
 
@@ -133,3 +236,22 @@ just spent an hour thinking about that exact code.
 Catching it needs a socket whose buffer stays non-empty, and on loopback it drains before it can be
 observed — which is the same reason `P-60`'s original assertion was empty. The arithmetic is pinned
 and the wiring is not. Pretending otherwise is what `P-60` did.
+
+`P-82` gives the check-flow watchdog a per-runner completion clock, and the probe-side wiring that
+tells it *which* runner accepted a check runs through `due-dispatch` into `main()`. This paragraph
+first said the wiring was one line of trust — which was true when written and is the reason it was
+written down. It is now pinned: `due-dispatch.test.ts` asserts the label for both branches, and
+hard-coding it to `'pool'` fails there while **every check-flow test stays green**, because they
+pass the label themselves. That is the same structure as entry 7 — a subject that cannot express
+the property, and an assertion that had to move to where it lives.
+
+What remains unpinned is `main()`'s own composition: that `assignments.onAdd`, `onDrop` and the
+dispatcher's `onDispatch` are wired to the watchdog at all. `main()` has no test file, and three
+of the day's fixes now depend on lines in it.
+
+## The honest bottom line
+
+Nine instances in one day is not nine unlucky tests. It is the base rate for tests written by
+somebody who already knows what the answer should be, which is every test anybody writes about
+their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
+something — that did not write the code and is rewarded for refuting rather than agreeing.

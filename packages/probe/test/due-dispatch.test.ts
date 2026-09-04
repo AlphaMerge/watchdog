@@ -34,6 +34,7 @@ function harness(verdict: SubmitOutcome, sensorType = 'snmp.trap') {
   const ring = new NotificationRing(100);
   const pool = runner(verdict);
   const processRunner = runner(verdict);
+  const dispatched: { sensorId: number; timeoutMs: number; runner: string }[] = [];
   const dispatch = dueDispatcher({
     assignments: { get: (id) => (id === 1 ? assignment(1, sensorType) : undefined) },
     listenerFor: new Map([['snmp.trap', TRAP]]),
@@ -41,6 +42,9 @@ function harness(verdict: SubmitOutcome, sensorType = 'snmp.trap') {
     isolated: new Set(['exe.script']),
     pool,
     processRunner,
+    onDispatch: (sensorId, timeoutMs, runnerName) => {
+      dispatched.push({ sensorId, timeoutMs, runner: runnerName });
+    },
   });
   const push = (n: number): void => {
     for (let i = 0; i < n; i += 1) {
@@ -52,7 +56,7 @@ function harness(verdict: SubmitOutcome, sensorType = 'snmp.trap') {
       });
     }
   };
-  return { dispatch, ring, pool, processRunner, push };
+  return { dispatch, ring, pool, processRunner, push, dispatched };
 }
 
 /**
@@ -109,6 +113,35 @@ describe('handing a due listener sensor its notifications (P-57)', () => {
 
     assert.equal(h.processRunner.seen.length, 1);
     assert.equal(h.pool.seen.length, 0);
+  });
+
+  it('tells the watchdog which runner took the check, not merely that one did', () => {
+    // **`P-82`'s wiring, which the rule's own tests cannot reach.** `CheckFlowWatchdog` judges each
+    // runner against its own completions now, and this is the only place that knows which runner
+    // a check went to — both settle into one sink that cannot say. A label that was always 'pool'
+    // would restore the exact defect `P-82` fixed, silently, with every check-flow test still
+    // green because they pass the label themselves.
+    const worker = harness('accepted');
+    worker.dispatch([1]);
+    assert.deepEqual(
+      worker.dispatched.map((one) => one.runner),
+      ['pool'],
+    );
+
+    const isolated = harness('accepted', 'exe.script');
+    isolated.dispatch([1]);
+    assert.deepEqual(
+      isolated.dispatched.map((one) => one.runner),
+      ['process'],
+    );
+  });
+
+  it('tells it nothing at all about a check that was not accepted', () => {
+    // A deferral was never dispatched, so counting it would make backpressure look like a stall —
+    // the reason `onDispatch` fires only on `accepted`.
+    const h = harness('already-running');
+    h.dispatch([1]);
+    assert.deepEqual(h.dispatched, []);
   });
 
   it('skips a due sensor the store no longer holds', () => {

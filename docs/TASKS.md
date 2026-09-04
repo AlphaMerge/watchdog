@@ -6154,6 +6154,26 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
+- [ ] **P-84 — Tree build has moved 21.0 s to 25.9 s across three measurements** · S · P-19 ·
+      Noticed while writing up `P-80`–`P-83`'s budgets, and filed rather than explained away
+      because a single run cannot tell drift from host noise.
+
+      `creates a 5,000-object tree through the API inside its budget` has read 21.0 s (the `S-16`
+      baseline recorded in `PLAN.md`), 22.8 s (2026-09-04 morning) and 25.9 s (2026-09-04
+      afternoon). The budget is 30 s, so the margin is down from 30% to **14%**. Two of the steps
+      have an explanation already in the test's own output — Phase 3 made each create write a
+      `sensor_runtime` row (`M-02`) and check for a paused ancestor (`M-08`) — and the third has
+      none. Nothing in `P-80`–`P-83` is on that path: object creation writes channels through
+      `ObjectRepository.createChannels`, not the `ChannelResolver` path those tickets touched.
+
+      **What would settle it, and it is cheap**: run that one file five times on a quiet machine
+      and look at the spread. If the spread covers three seconds, this is the host and the row can
+      say so with a number behind it. If it does not, something on the create path got slower
+      between the two runs and `git bisect` over a day's commits will find it.
+
+      Worth doing before it becomes the interesting question the day the budget is missed, which
+      is the point at which the three earlier samples stop being available to compare against.
+
 - [x] **P-83 — Three tests that pinned less than their names claimed** · S · P-74, P-76, P-80 · From the
       `P-80` panel, and the sixth, seventh and eighth entries in the family
       `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` catalogues. None is

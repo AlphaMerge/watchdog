@@ -153,14 +153,12 @@ export class ChannelResolver {
    * declaration and the resolver is given ids, so it has to be read; there is no way round that
    * short of the probe sending a type it has no reason to know the core cares about.
    */
-  async #declaredFor(
-    q: Queryable,
+  #declaredFor(
+    types: ReadonlyMap<string, string>,
     wanted: readonly { sensorId: number; key: string }[],
-  ): Promise<(string | null)[]> {
+  ): (string | null)[] {
     const declared = this.#declaredLimits;
     if (declared === undefined) return wanted.map(() => null);
-
-    const types = await this.#typesFor(q, wanted);
 
     return wanted.map((one) => {
       const type = types.get(String(one.sensorId));
@@ -173,17 +171,17 @@ export class ChannelResolver {
   /**
    * The lookup and counter width each wanted channel declares, in the same order.
    *
-   * Shares `#typesFor` with `#declaredFor` rather than repeating the query: both need the sensor's
-   * *type*, which is what carries the declaration, and two round trips for one answer on the
-   * first-sighting path would be a cost paid for nothing.
+   * Takes the type map rather than reading it, so the one query that answers both this and
+   * `#declaredFor` is made once by the caller. It said it shared the query before and did not:
+   * each of them awaited `#typesFor` separately, which is two identical round trips on the
+   * first-sighting path and a comment that was simply untrue.
    */
-  async #shapesFor(
-    q: Queryable,
+  #shapesFor(
+    types: ReadonlyMap<string, string>,
     wanted: readonly { sensorId: number; key: string }[],
-  ): Promise<{ lookup: string | null; counterBits: number | null }[]> {
+  ): { lookup: string | null; counterBits: number | null }[] {
     const declared = this.#declaredShape;
     if (declared === undefined) return wanted.map(() => ({ lookup: null, counterBits: null }));
-    const types = await this.#typesFor(q, wanted);
     return wanted.map((one) => {
       const type = types.get(String(one.sensorId));
       if (type === undefined) return { lookup: null, counterBits: null };
@@ -235,8 +233,13 @@ export class ChannelResolver {
     const wanted = [...missing.values()];
     const sensorIds = wanted.map((row) => row.sensorId);
     const keys = wanted.map((row) => row.key);
-    const limits = await this.#declaredFor(q, wanted);
-    const shapes = await this.#shapesFor(q, wanted);
+    // One query for both: the sensor's *type* is what carries every part of the declaration.
+    const types =
+      this.#declaredLimits === undefined && this.#declaredShape === undefined
+        ? new Map<string, string>()
+        : await this.#typesFor(q, wanted);
+    const limits = this.#declaredFor(types, wanted);
+    const shapes = this.#shapesFor(types, wanted);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
