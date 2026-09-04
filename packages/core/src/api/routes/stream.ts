@@ -34,6 +34,49 @@ type ServerFrame =
 const PROTOCOL = 1;
 
 /**
+ * How much of what a WebSocket still holds is *events* rather than its own snapshot.
+ *
+ * **The snapshot travels down the same socket the cut-off measures**, and it is the one frame big
+ * enough to trip it: up to `snapshotLimit` sensors, megabytes on a large installation, handed to
+ * `ws` in one call. `P-60` read `bufferedAmount` raw, so the first state event after subscribing
+ * saw the whole snapshot still buffered and detached a client that was keeping up perfectly —
+ * which sent it back to resubscribe, take another snapshot, and be detached again.
+ *
+ * **A socket is FIFO, and that is the whole trick.** The snapshot was queued first, so every byte
+ * of it leaves before any event byte does. Counting the event bytes written since the snapshot
+ * gives `min(bufferedAmount, sent)`: while any of the snapshot is still queued the buffer exceeds
+ * `sent` and the answer is `sent` — every event byte, none of the snapshot; once the snapshot has
+ * gone the buffer is events alone and the answer is the buffer. Both cases fall out of the one
+ * expression, and the snapshot's size never has to be known.
+ *
+ * `P-66` tried to do this by forgiving the snapshot's bytes and clamping that allowance to
+ * whatever was still buffered. That was wrong, and `ws` is why: `bufferedAmount` is
+ * `_writableState.length + _sender._bufferedBytes`, and Node clears `_writableState.length` only
+ * when a whole write completes — measured, a 3 MiB write to a peer that is not reading still
+ * reads 3,145,728 three seconds later. So the buffer does not decay as the snapshot drains, it
+ * drops in one step; the clamp then pulled the allowance down onto the *events* queued behind it
+ * and forgave those instead, leaving a client that stalled mid-snapshot permanently uncuttable.
+ */
+export function socketBacklog(socket: { readonly bufferedAmount: number }): {
+  report: () => number;
+  /** A snapshot resets the accounting: everything before it has been superseded. */
+  snapshot: () => void;
+  /** Event bytes handed to `ws`, which is what the cut-off is actually about. */
+  wrote: (bytes: number) => void;
+} {
+  let sent = 0;
+  return {
+    snapshot: (): void => {
+      sent = 0;
+    },
+    wrote: (bytes: number): void => {
+      sent += bytes;
+    },
+    report: (): number => Math.min(socket.bufferedAmount, sent),
+  };
+}
+
+/**
  * Live state changes over a WebSocket (`U-02`).
  *
  * **Push, not polling.** `PLAN.md`'s Phase 5 exit criterion is a tree that stays responsive at
@@ -51,39 +94,6 @@ const PROTOCOL = 1;
  * cursor would mean keeping a buffer whose length is a guess about how long a browser tab can be
  * asleep, and getting that guess wrong shows somebody a stale tree with no way to tell.
  */
-/**
- * How far behind a WebSocket is, discounting a snapshot still on its way out (`P-66`).
- *
- * **The snapshot travels down the same socket the cut-off measures**, and it is the one frame
- * big enough to trip it: up to `snapshotLimit` sensors, megabytes on a large installation, handed
- * to `ws` in one call. `P-60` read `bufferedAmount` raw, so the first state event after
- * subscribing saw the whole snapshot still buffered and detached a client that was keeping up
- * perfectly — which sent it back to resubscribe, take another snapshot, and be detached again.
- *
- * So a snapshot buys an allowance for its own bytes, and the allowance **only ever shrinks**: it
- * is clamped to whatever is still buffered on every reading, so once those bytes are on the wire
- * it is gone and the guard is armed at full strength. What is left over is the part of the
- * backlog this connection did not ask for — the events — which is the quantity the cut-off is
- * about.
- */
-export function socketBacklog(socket: { readonly bufferedAmount: number }): {
-  report: () => number;
-  allow: (bytes: number) => void;
-} {
-  let allowance = 0;
-  return {
-    allow: (bytes: number): void => {
-      allowance += bytes;
-    },
-    report: (): number => {
-      const buffered = socket.bufferedAmount;
-      // Never more than is actually still queued. A snapshot that has gone out forgives nothing.
-      if (allowance > buffered) allowance = buffered;
-      return buffered - allowance;
-    },
-  };
-}
-
 export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions): void {
   const { db, stream } = options;
 
@@ -132,12 +142,18 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         unsubscribe();
         // Attached first. Anything that commits from here on is queued for this subscriber, so
         // the snapshot below cannot miss a change that happens while it is being read.
+        // Set if the cut-off gives up on this socket while the snapshot below is being read.
+        // A holder rather than a bare `let`: both `detach` and a plain boolean get narrowed to
+        // their initial value here, because the compiler cannot see the callback that changes
+        // them run. A property read after an intervening call is not narrowed away.
+        const cutOff = { dropped: false };
         detach = stream.subscribe(
           {
             send: (event) => {
-              send({ type: 'state', ...event });
+              backlog.wrote(send({ type: 'state', ...event }));
             },
             overflow: () => {
+              cutOff.dropped = true;
               detach = undefined;
               send({ type: 'overflow', reason: 'too far behind; subscribe again' });
             },
@@ -150,9 +166,14 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           },
           objectId,
         );
-        // The snapshot's own bytes are not this client falling behind, so they are forgiven
-        // until they have gone out. See `socketBacklog`.
-        backlog.allow(send({ type: 'snapshot', ...(await stream.snapshot(db, objectId)) }));
+        // A snapshot supersedes everything before it, so the event accounting starts again from
+        // here and its own bytes are never counted. See `socketBacklog`.
+        const frame = { type: 'snapshot' as const, ...(await stream.snapshot(db, objectId)) };
+        // Detached while the snapshot was being read — sending it now would append megabytes to a
+        // socket the cut-off has already given up on, which is the amplification `P-70` closes.
+        if (cutOff.dropped) return;
+        backlog.snapshot();
+        send(frame);
       };
 
       socket.on('message', (raw: Buffer) => {

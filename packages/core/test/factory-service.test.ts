@@ -263,9 +263,11 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
   });
 
   it('falls back to the default when a stored cut-off is not a usable number', async () => {
-    // Params are whatever is in the row. A cut-off that arrives as `NaN` widens to `Infinity`
-    // under the `Math.max` that bounds the query — every reading fresh, for every factory at
-    // once — so this guards the fix rather than the original defect.
+    // Params are whatever is in the row. `Math.max(0, NaN)` is `NaN`, so the query's interval
+    // parameter becomes the string `"NaN"` and PostgreSQL answers `invalid input syntax for type
+    // interval` — throwing the one query the whole sweep depends on, so a single unparseable row
+    // stops every factory in the installation. This guards the fix rather than the original
+    // defect.
     const measured = await source('measured', 'v', 42, { ageSeconds: 3_000 });
     const formula = [{ key: 'v', formula: `channel(${String(measured)}, 'v')` }];
     const broken = await makeFactory('Broken', formula, { maxAgeSeconds: 60 });

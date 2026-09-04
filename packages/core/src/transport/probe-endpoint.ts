@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { createServer, type Server, type TLSSocket } from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import {
@@ -319,7 +320,7 @@ export class ProbeEndpoint {
    * mid-handshake, one left pending approval, and one whose session was superseded are all live
    * sockets that nothing in it points at. `Server.close()` waits for every one of them.
    */
-  readonly #sockets = new Set<TLSSocket>();
+  readonly #sockets = new Set<Socket>();
   #server: Server | undefined;
 
   constructor(options: ProbeEndpointOptions) {
@@ -347,6 +348,18 @@ export class ProbeEndpoint {
       minVersion: 'TLSv1.2',
     });
 
+    // **Tracked at `connection`, not `secureConnection`** (`P-70`). `P-67` did the latter, which
+    // leaves out the connection that matters most: a peer that opens a TCP socket and never
+    // starts a TLS handshake is never handed to `secureConnection`, so nothing knew about it and
+    // `server.close()` waited on it for ever — the very hang `P-67` was fixing, through the one
+    // door it left open. `connection` fires for every accepted socket, and destroying the raw
+    // socket takes the TLS one with it.
+    server.on('connection', (socket: Socket) => {
+      this.#sockets.add(socket);
+      socket.on('close', () => {
+        this.#sockets.delete(socket);
+      });
+    });
     server.on('secureConnection', (socket) => {
       this.#accept(socket);
     });
@@ -406,10 +419,6 @@ export class ProbeEndpoint {
   }
 
   #accept(socket: TLSSocket): void {
-    this.#sockets.add(socket);
-    socket.on('close', () => {
-      this.#sockets.delete(socket);
-    });
     const remoteAddress = socket.remoteAddress ?? 'unknown';
     const connectionLogger = this.#logger.child({ remoteAddress });
     const { config, coreVersion } = this.#options;

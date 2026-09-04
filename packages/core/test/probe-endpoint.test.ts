@@ -530,6 +530,36 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     );
   });
 
+  it('shuts down with a socket that never started a TLS handshake', async () => {
+    // **The door `P-67` left open** (`P-70`). It tracked sockets at `secureConnection`, so a peer
+    // that opens TCP and says nothing is handed to nothing, is in no set, and `server.close()`
+    // waits on it for ever — the same hang, through the one connection state the fix skipped.
+    // The handshake timer does not save it: that fires on a socket the endpoint knows about.
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir, { heartbeatIntervalMs: 30_000 }),
+      logger: silentLogger,
+      coreVersion: '0.1.0',
+    });
+    const address = await endpoint.start();
+    const silent = new Socket();
+    await new Promise<void>((resolve, reject) => {
+      silent.once('connect', resolve);
+      silent.once('error', reject);
+      silent.connect(address.port, '127.0.0.1');
+    });
+
+    const outcome = await Promise.race([
+      endpoint.stop().then(() => 'stopped'),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve('still waiting');
+        }, 8_000).unref();
+      }),
+    ]);
+    silent.destroy();
+    assert.equal(outcome, 'stopped');
+  });
+
   it('acknowledges a results batch', async () => {
     const received: string[] = [];
     const results: ResultReceiver = {

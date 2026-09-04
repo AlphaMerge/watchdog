@@ -5683,6 +5683,67 @@ because each is a decision rather than a defect:
       The test fails deterministically at eight seconds when the grace is removed, and passes at
       1,014 ms with it.
 
+- [x] **P-70 — What the review found wrong with the fixes for what the review found** · S · P-66 ·
+      An 81-agent adversarial review of `P-59`, `P-60` and `P-63` upheld nine findings out of
+      twenty-five and then turned a completeness critic on the fixes themselves. Two of those hit
+      code written hours earlier in this same run.
+
+      **`P-66`'s allowance was wrong, and `ws` is why.** It forgave a snapshot's bytes and clamped
+      that allowance to whatever was still buffered, on the assumption that `bufferedAmount` decays
+      as a snapshot drains. It does not. `ws` reports `_socket._writableState.length +
+      _sender._bufferedBytes`, and Node clears `_writableState.length` only when a whole write
+      completes — measured by the review, a 3 MiB write to a peer that is not reading still reads
+      3,145,728 three seconds later, then drops in one step. So the clamp came down onto the
+      *events* queued behind the snapshot and forgave those instead, and a client that stalled
+      mid-snapshot became permanently uncuttable. That is the hole `P-66` noticed and waved away.
+
+      The correct accounting falls out of the socket being FIFO. The snapshot is queued first, so
+      every byte of it leaves before any event byte does; counting event bytes written since the
+      snapshot, the event backlog is exactly `min(bufferedAmount, sent)` — while any snapshot is
+      still queued the buffer exceeds `sent` and the answer is every event byte and none of the
+      snapshot, and once the snapshot has gone the buffer is events alone and the answer is the
+      buffer. One expression, both cases, and the snapshot's size never has to be known at all.
+
+      Two more from the same finding: the snapshot was sent after its `await` without checking
+      whether the cut-off had detached the subscriber meanwhile — appending megabytes to a socket
+      already given up on, which is the amplification worth closing whatever else is true — and the
+      compiler cannot see a callback clear a flag, so the guard is a property on a holder rather
+      than a `let` it would narrow to a constant.
+
+      **`P-67` left the door it was closing.** It tracked sockets at `secureConnection`, so a peer
+      that opens TCP and never starts a TLS handshake was handed to nothing, was in no set, and
+      held `server.close()` open for ever — the same hang, through the one connection state the fix
+      skipped, and the handshake timer does not help because it fires on sockets the endpoint knows
+      about. Tracked at `connection` now, which is every accepted socket; the new test fails at
+      eight seconds against `P-67`'s version.
+
+      **`P-63` swept the simulators and stopped one short.** `TestSshServer.stop()` had a 500 ms
+      timer beside its `close()`, and the sweep read "does not hang" as "fixed". It is not: the
+      timer made `stop()` *resolve while the server was still listening*, so a suite moved on
+      believing a fixture was gone. Its connections are ended now and the callback actually
+      arrives.
+
+      **Two of the critic's findings were checked and did not hold.** It called the new
+      deterministic `P-63` guard "~3% reliable and passing against the unfixed simulator"; measured
+      directly against the old tracking, a bare TCP connection held `close()` open **12 times out
+      of 12**. And it called `P-67`'s "a service that has to be SIGKILLed" contradicted by a
+      five-second budget; `deploy/systemd/ms-core.service` sets `TimeoutStopSec=30`, so systemd
+      does kill it, and the wording stands. Recorded because a review that is right nine times is
+      not therefore right the tenth — which is the whole lesson of `P-58`, pointed the other way.
+
+      Two documentation defects it found were real: `P-66` had orphaned the `U-02` design block
+      from `streamRoutes` so it read as `socketBacklog`'s, and the `readMaxAge` test still carried
+      the `NaN`-widens-to-`Infinity` rationale that `P-66` corrected everywhere else.
+
+- [ ] **P-71 — The web client answers `overflow` with an instant resubscribe** · S · P-70 · Raised
+      by the review of `P-60` and not verified by hand. `packages/web/src/api/stream.ts` handles an
+      `overflow` frame by calling `#send()` immediately on the same socket, with no backoff — the
+      `retryMs` backoff beside it applies only to a dropped socket. Each resubscribe runs the full
+      recursive-CTE snapshot query and appends another snapshot to a buffer that may still be over
+      the limit, so one false cut-off becomes a cycle that costs a query and a multi-megabyte frame
+      per turn. `P-70` makes a false cut-off much less likely; it does not make the response to one
+      safe, and a client that is genuinely too slow will still be told to resubscribe for ever.
+
 - [ ] **P-68 — `MessageConnection` declares a backpressure signal that reaches nothing** · S · P-61
       · `pendingInboundBytes` is documented on the connection as "a backpressure signal for Probe
       Health" and is read by nothing. The same shape as `P-61` and `P-64`, in the transport: a

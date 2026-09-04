@@ -1,5 +1,5 @@
 import ssh2 from 'ssh2';
-import type { Server, ServerChannel } from 'ssh2';
+import type { Server, ServerChannel, ServerConnection } from 'ssh2';
 
 /**
  * A real SSH server, on a real socket, that misbehaves on request.
@@ -41,6 +41,15 @@ export interface CommandResult {
 
 export class TestSshServer {
   readonly #server: Server;
+  /**
+   * Live connections, so `stop()` can end them rather than give up on them (`P-70`).
+   *
+   * `P-63` swept the HTTP and mail simulators for teardowns that wait on connections they never
+   * close, saw the 500 ms escape hatch here, and left it — reading "does not hang" as "fixed".
+   * It is not: the timer made `stop()` *resolve* while the server was still listening and its
+   * sockets still open, so a suite moved on believing a fixture was gone.
+   */
+  readonly #connections = new Set<ServerConnection>();
   #port = 0;
   #behaviour: SshServerBehaviour = { password: 'monitor' };
   readonly #commands = new Map<string, CommandResult>();
@@ -61,6 +70,10 @@ export class TestSshServer {
 
     server.on('connection', (connection) => {
       instance.connections += 1;
+      instance.#connections.add(connection);
+      connection.on('close', () => {
+        instance.#connections.delete(connection);
+      });
 
       connection.on('authentication', (context) => {
         const behaviour = instance.#behaviour;
@@ -158,13 +171,16 @@ export class TestSshServer {
   }
 
   async stop(): Promise<void> {
+    // Ended first, for the reason `close()` alone was not enough: it waits for every open
+    // connection, and a client that is still attached keeps it waiting. Ending them is what makes
+    // the callback below actually arrive, rather than being raced by a timer that resolved while
+    // the server was still up (`P-70`).
+    for (const connection of this.#connections) connection.end();
+    this.#connections.clear();
     await new Promise<void>((resolve) => {
       this.#server.close(() => {
         resolve();
       });
-      // A server with a client still attached does not always call back; the test process
-      // should not hang on shutdown for it.
-      setTimeout(resolve, 500).unref();
     });
   }
 }
