@@ -5443,6 +5443,14 @@ because each is a decision rather than a defect:
       claim was weaker than it sounded, and that is worth having written down rather than
       discovered again.
 
+      **What was actually missing, concretely.** CLAUDE.md's hard constraint is that *every schema
+      change ships with a tested rollback*, and exactly one test proves it — `migrator.test.ts`'s
+      "applies the real migration set forward and all the way back", which rolls all forty
+      migrations forward and then all the way down. It needs PostgreSQL. In this morning's run it
+      **did not execute at all**, and the script printed `clean`. So for those runs one of the
+      project's stated guarantees was unverified and nothing said so. (Checked afterwards: it
+      passes, no migration is marked `irreversible`, and the constraint genuinely holds.)
+
       **Then the gap was actually closed**, which is the point of having found it. Every compose
       dependency up — the default services plus `--profile db` for MySQL and SQL Server — gives
       **3,246 tests, 3,246 passed, 0 failed, 0 cancelled, and one suite skipped**, that one being
