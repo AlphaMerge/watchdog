@@ -5267,6 +5267,39 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-50 — No budget covered the loop that had the 427 ms stall** · S · P-48 · The question
+      `P-48` raised and did not answer: why did a synchronous 427 ms pass on the probe's own thread
+      survive as long as the sizing loop has existed, with a `test:perf` suite whose whole purpose
+      is measured budgets?
+
+      Because nothing in it ran the loop. `grep` across every `test/perf` suite finds no reference
+      to `poolSizer`, `poolDemand`, `setMaxSize` or `typicalDurationMs` — the probe's perf tests
+      all pin `CheckPool` to a fixed `size` and measure dispatch beneath it, exactly as
+      `bench.mjs` does. The budgets covered the pool and never the thing that sizes it.
+
+      **The same shape as `P-49`, one layer up.** There, coverage that looked complete was missing
+      two thirds of the core; here, a suite whose reason for existing is catching performance
+      regressions had no view of the code that had one. Both were invisible because the summary
+      said what a complete run says.
+
+      **A budget now exists**: one `poolDemand` pass over the v1 target's 5,000 assignments against
+      a real `CheckPool` whose duration windows have been filled by 1,000 completed checks — an
+      empty window is the cheap case and would have measured the arithmetic while missing the sort
+      entirely. **50 ms**, which is a ceiling and not the measurement: about 100× the 0.42–0.57 ms
+      it actually takes and about 16× under the defect, loose enough to survive a loaded machine
+      and tight enough that the regression cannot hide.
+
+      **Verified by putting the defect back.** With `P-48`'s cache removed the pass measures
+      796 ms and the budget fails by 16×; with it restored, 0.57 ms. Three orders of magnitude
+      between them, which is why the loose ceiling is safe.
+
+      **`npm run test:perf` was deliberately not run for this.** CLAUDE.md wants a quiet machine and
+      this one was carrying load averages between 5 and 26 from another project's containers, the
+      editor itself at 197% and Spotlight indexing the files the unit suite had just written. A
+      budget measured there is not a measurement. Establishing that none of `P-45`, `P-46` or
+      `P-48` can move an existing budget — none of that code is reachable from any perf suite —
+      is what made deferring it safe rather than convenient.
+
 - [x] **P-49 — "Clean" covered a third of the core and said nothing** · S · P-25 · Noticed by
       accident: a full run reported **3,244 tests** where every earlier run today reported about
       1,945. Nothing had been added — PostgreSQL happened to be up, because the dev stack had been

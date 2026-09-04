@@ -215,3 +215,9 @@ neither of which is on Probe Health. The live probe read 5.7 ms of lag while doi
 Caching one answer per type per pass is also the more correct thing to do independently of speed: a
 pass that asked twice and got two numbers would be summing a workload that never existed at any
 instant.
+
+**There is now a budget** (`P-50`), because nothing had one: no `test:perf` suite referenced
+`poolSizer`, `poolDemand` or `typicalDurationMs`, so the loop that had this stall was invisible to
+the suite whose purpose is catching exactly that. One pass over 5,000 assignments against a pool
+whose windows have been filled, ceiling **50 ms**. Measured 0.42–0.57 ms with the cache and
+**796 ms** without it on the same machine — the budget fails by 16× when the defect is put back.
