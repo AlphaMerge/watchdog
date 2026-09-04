@@ -6066,6 +6066,47 @@ because each is a decision rather than a defect:
       Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
       reading, counted nowhere.
 
+- [x] **P-79 — Five numbers the probe measures, sends, and nobody can read** · S · P-78 · Found
+      while wiring `P-78`'s counter through the same three files for the third time in a day, and
+      asking what else had made that journey only part of the way. Five fields were in
+      `PROBE_HEALTH_SCHEMA`, measured on the probe, put on the wire every heartbeat, validated on
+      arrival, and then discarded: `skippedTicks`, `spoolCorrupt`, `sessionsOpened`,
+      `checksOutstanding` and `checkStalledMs`.
+
+      Nothing was failing. The probe measured them correctly, the schema accepted them, the core
+      did not crash. That is the shape this family always takes — a run that reports what it
+      measured and says nothing about what it never looked at, the same as `P-49`'s 88 silent
+      skips, `P-52`'s missing workspace and `P-75`'s lint that never ran. `CLAUDE.md` says the
+      system monitors itself; a counter nobody can read is not monitoring, it is bookkeeping.
+
+      **Two of the five are `P-76`'s, written the day before.** `checksCompleting` says *whether*
+      checks are settling and raises the Warning; `checksOutstanding` and `checkStalledMs` say how
+      many are stuck and for how long. Only the alarm was wired, so an operator got "checks have
+      stopped settling" and no way to see the size of it — the diagnostic half measured, sent, and
+      dropped on arrival.
+
+      **`sessionsOpened` is the sharpest of the five**, because the gap was written down. The
+      comment on `sessionsEvicted` tells an operator to read eviction against openings to spot a
+      pool whose `idleMs` is shorter than the scan interval, and calls it "invisible without
+      this" — while `sessionsOpened` was on no channel at all. The document described a diagnosis
+      that could not be made. It is also why a hand audit missed it: a broad grep for the name
+      across `packages/core` matched that very comment.
+
+      All five have channels now and all five are diagnostics without limits, because each already
+      has an alarming sibling — `schedulerLag` for skipped ticks, `checksCompleting` for the two
+      check counters, `spoolDropped`/`spoolUnwritten` for corruption, `sessionOverflows` for
+      openings. A second alarm for one outage is the thing `CLAUDE.md` forbids. `spoolCorrupt`
+      deserves a note of its own: one torn record after an unclean shutdown is a *normal* recovery
+      and paging for it would be paging for the system working, so what matters is a rate that
+      climbs while the probe is not crashing — a graph, not a threshold.
+
+      **The durable half is the guard**, in `build-hygiene.test.ts`: every property of
+      `PROBE_HEALTH_SCHEMA` must appear in `probe-health.ts`, the one file where a health field
+      becomes a channel reading, with comments stripped so a mention in prose cannot satisfy it.
+      It carries a floor on its own extraction, because a regex that quietly matched nothing would
+      make the guard pass for ever while checking nothing — this exact defect, arriving inside the
+      thing built to prevent it, which `P-77` had just spent a morning on.
+
 - [x] **P-78 — A spool that cannot be written loses every reading, silently** · S · P-76 · Filed
       out of `P-76`, which spotted it and left it: `spoolResult`'s `.catch` in `main.ts` logged a
       line and the readings were gone, counted nowhere. `CLAUDE.md` has one sentence about this —

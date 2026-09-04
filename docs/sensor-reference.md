@@ -1003,12 +1003,16 @@ cost: **light** · evaluated by the core, never by a probe
 | `resultAge` | Since last result | s | — |
 | `checksCompleting` | Checks settling | — | lookup `ms.probe.checks` |
 | `checksBehind` | Sensors behind schedule | sensors | — |
+| `checksOutstanding` | Checks in flight | checks | — |
+| `checkStalled` | Oldest check waiting | s | — |
 | `protocol` | Protocol version skew | — | lookup `ms.probe.protocol` |
 | `schedulerLag` | Scheduler lag (p95) | ms | default limits: warn above 1000, error above 5000 |
+| `skippedTicks` | Ticks skipped | ticks | 64-bit counter → rate |
 | `poolUsage` | Worker pool in use | % | default limits: warn above 80, error above 95 |
 | `sessionsOpen` | Device sessions held | sessions | — |
 | `sessionOverflows` | Sessions opened past the bound | sessions | 64-bit counter → rate; default limits: error above 0.5 |
 | `sessionsEvicted` | Sessions closed when idle | sessions | 64-bit counter → rate |
+| `sessionsOpened` | Sessions opened | sessions | 64-bit counter → rate |
 | `queued` | Checks waiting for a worker | checks | — |
 | `checkWait` | Wait for a worker (p95) | ms | — |
 | `deferred` | Checks deferred | checks | 64-bit counter → rate |
@@ -1035,6 +1039,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |
 | `spoolUnwritten` | Results not written | results | 64-bit counter → rate; default limits: error above 0.00001 |
+| `spoolCorrupt` | Results unreadable | results | 64-bit counter → rate |
 | `spoolStalled` | Spool stalled for | s | default limits: error above 0.5 |
 | `clockJumps` | Clock jumps | jumps | 64-bit counter → rate |
 | `cpu` | CPU | % | — |

@@ -150,6 +150,10 @@ export class ProbeHealthService {
       // `undefinedState` makes that a warning rather than a confident "settling".
       checksCompleting: health?.checksCompleting ?? null,
       checksBehind: health?.checksBehind ?? null,
+      checksOutstanding: health?.checksOutstanding ?? null,
+      // Milliseconds on the wire, seconds on the channel — as `spoolStalled` below.
+      checkStalled:
+        health?.checkStalledMs === undefined ? null : round(health.checkStalledMs / 1000, 1),
       // Null rather than 0 for a probe running no such listener: a channel that gaps says "not
       // running one", and a zero says "running one and hearing nothing", which are different
       // answers to the question an operator is asking.
@@ -174,11 +178,14 @@ export class ProbeHealthService {
       sessionsOpen: health?.sessionsOpen ?? null,
       sessionOverflows: health?.sessionOverflows ?? null,
       sessionsEvicted: health?.sessionsEvicted ?? null,
+      sessionsOpened: health?.sessionsOpened ?? null,
       scheduled: health?.scheduled ?? null,
+      skippedTicks: health?.skippedTicks ?? null,
       spoolDepth: health?.spoolPending ?? null,
       spoolBytes: health?.spoolBytes === undefined ? null : round(health.spoolBytes / MB, 1),
       spoolDropped: health?.spoolDropped ?? null,
       spoolUnwritten: health?.spoolUnwritten ?? null,
+      spoolCorrupt: health?.spoolCorrupt ?? null,
       // Milliseconds on the wire, seconds on the channel: every other duration an operator reads
       // here is in seconds, and a threshold written in milliseconds beside them would be read
       // wrong exactly once.

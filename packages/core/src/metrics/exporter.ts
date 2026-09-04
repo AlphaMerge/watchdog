@@ -323,10 +323,38 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'sessionsOpened',
+    name: 'ms_probe_sessions_opened_total',
+    help: 'Device sessions opened. Read against evictions to spot a pool that never reuses one.',
+    counter: true,
+  },
+  {
+    key: 'spoolCorrupt',
+    name: 'ms_probe_spool_corrupt_total',
+    help: 'Spooled lines that did not parse — a torn write at a crash boundary.',
+    counter: true,
+  },
+  {
     key: 'spoolUnwritten',
     name: 'ms_probe_spool_unwritten_total',
     help: 'Results the spool could not write. Each one was lost before it reached disk.',
     counter: true,
+  },
+  {
+    key: 'skippedTicks',
+    name: 'ms_probe_scheduler_skipped_ticks_total',
+    help: 'Whole scheduler ticks that were never visited, so their checks ran late.',
+    counter: true,
+  },
+  {
+    key: 'checksOutstanding',
+    name: 'ms_probe_checks_outstanding',
+    help: 'Checks accepted by a runner and not yet settled.',
+  },
+  {
+    key: 'checkStalled',
+    name: 'ms_probe_check_oldest_wait_seconds',
+    help: 'How long the oldest outstanding check has been waiting.',
   },
   {
     key: 'clockJumps',

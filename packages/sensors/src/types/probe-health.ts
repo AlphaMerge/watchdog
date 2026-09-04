@@ -51,6 +51,19 @@ const CHANNELS: readonly ChannelDef[] = [
   // How much of the probe is affected, which the state above cannot say. No limit: one outage,
   // one alarm, and the lookup is already it.
   { key: 'checksBehind', name: 'Sensors behind schedule', unit: 'sensors' },
+  // **The two numbers that say how bad, beside the one that says whether** (`P-79`). The probe
+  // has always measured and sent these; nothing on this side read them, so an operator got a
+  // Warning saying checks had stopped settling and no way to see how many were stuck or for how
+  // long. No limits on either: `checksCompleting` above is the alarm, and a second one for the
+  // same outage is the thing `CLAUDE.md` forbids.
+  { key: 'checksOutstanding', name: 'Checks in flight', unit: 'checks' },
+  {
+    key: 'checkStalled',
+    name: 'Oldest check waiting',
+    // Seconds, like `spoolStalled` and for the same reason: every other duration an operator
+    // reads on this sensor is in seconds, and one in milliseconds beside them is misread once.
+    unit: 's',
+  },
   {
     key: 'protocol',
     name: 'Protocol version skew',
@@ -73,6 +86,12 @@ const CHANNELS: readonly ChannelDef[] = [
       errorMessage: 'checks are starting so late that their spacing is no longer their interval',
     },
   },
+  // **Whole ticks the wheel never visited** (`P-79`) — the other half of the lateness story, and
+  // measured only by the wheel. `schedulerLag` says how late a tick was; this says how many
+  // vanished entirely because the process was off-CPU for longer than a tick. The checks in them
+  // were coalesced onto a later pass, so their spacing is not their interval any more. No limits:
+  // `schedulerLag` beside it is the alarm, and this is what an operator reads to see why.
+  { key: 'skippedTicks', name: 'Ticks skipped', unit: 'ticks', counter: { bits: 64 } },
   {
     key: 'poolUsage',
     name: 'Worker pool in use',
@@ -134,6 +153,11 @@ const CHANNELS: readonly ChannelDef[] = [
     // with `sessionsOpened` is a pool whose `idleMs` is shorter than the scan interval, so every
     // check pays a handshake it need not — expensive on SSH, and invisible without this.
   },
+  // **The other half of the comment above** (`P-79`). It described reading eviction against
+  // openings, and `sessionsOpened` was measured, sent, and read by nothing on this side — so the
+  // diagnosis it names was one an operator could not actually make. No threshold, for the same
+  // reason as its pair: a pool that opens sessions is a pool doing its job.
+  { key: 'sessionsOpened', name: 'Sessions opened', unit: 'sessions', counter: { bits: 64 } },
   { key: 'queued', name: 'Checks waiting for a worker', unit: 'checks' },
   { key: 'checkWait', name: 'Wait for a worker (p95)', unit: 'ms' },
   // Skip-if-still-running: the previous scan of that sensor had not finished. Counted, never
@@ -215,6 +239,13 @@ const CHANNELS: readonly ChannelDef[] = [
       errorMessage: 'the spool cannot be written and readings are being lost',
     },
   },
+  // **The third way a reading stops existing** (`P-79`): a line that will not parse, which is a
+  // torn write at a crash boundary. Counted at read time, and unlike the two above it is usually
+  // a *normal* recovery — one truncated record after an unclean shutdown is what a crash costs.
+  // So it is visible and has no limits: paging somebody for the system correctly surviving a
+  // power cut is worse than not knowing, and a rate that climbs while the probe is *not* crashing
+  // is what an operator should be looking at, which is a graph and not a threshold.
+  { key: 'spoolCorrupt', name: 'Results unreadable', unit: 'results', counter: { bits: 64 } },
   // **Depth cannot tell a stall from a catch-up, which is why this is a separate channel.** A
   // spool with thousands of results in it is a probe replaying an outage, and a threshold on
   // `spoolDepth` would alarm on exactly that — which is why it has none. What is never healthy is

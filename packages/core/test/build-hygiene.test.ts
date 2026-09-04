@@ -371,3 +371,66 @@ async function compare(
     }
   }
 }
+
+/**
+ * Every number the probe sends must be read by something (`P-79`).
+ *
+ * `PROBE_HEALTH_SCHEMA` is `additionalProperties: false`, so adding a field to it is a deliberate
+ * act with a protocol bump attached — and precisely *because* it is deliberate, it is easy to
+ * finish the probe side, bump the version, watch the tests pass, and never wire the core side at
+ * all. Five fields had reached that state: `skippedTicks`, `spoolCorrupt` and `sessionsOpened`
+ * from older tickets, and `checksOutstanding` and `checkStalledMs` from `P-76`, which was written
+ * the day before this check was. All five were measured on the probe, validated on the wire, and
+ * discarded on arrival.
+ *
+ * Nothing failed, because nothing was wrong — the probe measured correctly and the core did not
+ * crash. That is the shape of every defect in this family: a run that reports what it measured
+ * and says nothing about what it never looked at (`P-49`, `P-52`, `P-75`). `CLAUDE.md` says the
+ * system monitors itself; a counter nobody can read is not monitoring, it is bookkeeping.
+ *
+ * The check is against `probe-health.ts` alone, with comments stripped, because that is the one
+ * place a health field becomes a channel reading. A broad grep across `packages/core` is what
+ * missed `sessionsOpened` when this was first audited by hand: the name appeared in a *comment*
+ * beside `sessionsEvicted`, describing a diagnosis the operator could not actually make.
+ */
+describe('the probe health protocol', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+
+  it('has every field it defines read by the core', async () => {
+    const schema = await readFile(
+      join(repoRoot, 'packages', 'shared', 'src', 'protocol', 'messages.ts'),
+      'utf8',
+    );
+    const start = schema.indexOf('const PROBE_HEALTH_SCHEMA');
+    const end = schema.indexOf('\n} as const', start);
+    assert.ok(start !== -1 && end !== -1, 'PROBE_HEALTH_SCHEMA has moved or changed shape');
+    const fields = [
+      ...new Set(
+        [...schema.slice(start, end).matchAll(/^ {4}([a-zA-Z][a-zA-Z0-9]*):\s*\S/gm)].map(
+          (m) => m[1] ?? '',
+        ),
+      ),
+    ];
+    // A sanity floor on the extraction itself: a regex that silently matched nothing would make
+    // this test pass for ever while checking absolutely nothing, which is the failure it exists
+    // to catch, arriving in the guard.
+    assert.ok(fields.length > 30, `only found ${String(fields.length)} fields; the parse is wrong`);
+
+    const source = await readFile(
+      join(repoRoot, 'packages', 'core', 'src', 'health', 'probe-health.ts'),
+      'utf8',
+    );
+    // Comments stripped: a field named only in prose is exactly the case that fooled the manual
+    // audit, and a mention is not a reading.
+    const code = source.replaceAll(/\/\*[\s\S]*?\*\//g, ' ').replaceAll(/\/\/[^\n]*/g, ' ');
+
+    const unread = fields.filter((field) => !code.includes(field));
+    assert.deepEqual(
+      unread,
+      [],
+      `the probe sends these and the core reads none of them — give each a channel in ` +
+        `packages/sensors/src/types/probe-health.ts and map it in packages/core/src/health/` +
+        `probe-health.ts, or delete it from the protocol:\n  ${unread.join('\n  ')}`,
+    );
+  });
+});
