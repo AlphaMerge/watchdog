@@ -5282,6 +5282,33 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-54 — The documentation is a graph and nothing checked its edges** · S · H-07 · Adding a
+      finding means adding a line to `docs/README.md`'s index by hand, and the two findings written
+      on 2026-09-04 were missing from it until somebody happened to look. A typo in a path would
+      have been exactly as silent, and the reader who follows a dead link is the one person who
+      needed that document.
+
+      `H-07` generates the two references that *can* be generated, on the argument that a
+      hand-written reference is right on the day it is written and silently wrong from then on.
+      This is the same argument applied to the half that cannot be generated: the prose stays
+      hand-written, and a link inside it either resolves or the build goes red. 262 links across
+      every markdown file under `docs/`, plus `CLAUDE.md` and `README.md`.
+
+      The runbook's `docs/findings/<date>-field-test.md` is skipped by an explicit placeholder rule
+      — it is an instruction to an operator about where to write their results, not a link to
+      follow — rather than by pretending the check found nothing.
+
+      **Ticket cross-references are deliberately *not* checked**, and the reason is `P-24`, found
+      an hour earlier the same day. It waited on "`D-05`'s VMware transport", and `D-05` exists: a
+      name-resolution check would have passed it every time while the ticket sat blocked on
+      something that was never what it claimed. Checking that a name exists would have said
+      nothing here and implied a guarantee it cannot give. All 139 referenced tickets were
+      confirmed to resolve by hand, once; the useful check is a human reading what the reference
+      claims.
+
+      Mutation-checked: a link to a findings file that does not exist fails the test naming both
+      ends.
+
 - [x] **P-53 — Nothing was checking the scripts that install on Windows** · S · P-51, H-06 ·
       `H-06` says a parse error in `ms-setup.ps1` "would break every Windows install", and that the
       only thing anywhere that would catch one is its `windows-install` CI job. **That job has

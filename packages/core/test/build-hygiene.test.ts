@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
@@ -111,6 +112,69 @@ describe('generated documentation', () => {
       );
     });
   }
+});
+
+/**
+ * Every link between documents points at a file that exists (`P-54`).
+ *
+ * **The documentation is a graph and nothing was checking its edges.** Adding a finding means
+ * adding a line to `docs/README.md`'s index by hand, and the two findings written on 2026-09-04
+ * were missing from it until somebody happened to look — a typo in the path would have been just
+ * as silent, and the reader who follows a dead link is the one person who needed the document.
+ *
+ * `H-07` generates the two references that *can* be generated so they cannot drift. This is the
+ * same argument for the half that cannot be: the prose stays hand-written, but a link in it either
+ * resolves or the build goes red.
+ *
+ * Ticket cross-references are deliberately not checked here. `P-24` waited on `D-05`'s "VMware
+ * transport" for weeks, and `D-05` exists — the reference resolved perfectly and was pointing at a
+ * ticket that had never been about that. Checking that a name exists would have said nothing, and
+ * would have implied a guarantee it cannot give.
+ */
+describe('documentation links', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+  // Written for an operator to fill in when they run the field test, not a link to follow.
+  const placeholder = /<[^>]+>/;
+
+  it('all resolve to a file that exists', async () => {
+    const roots = ['docs', 'CLAUDE.md', 'README.md'];
+    const files: string[] = [];
+    for (const root of roots) {
+      const full = join(repoRoot, root);
+      if (root.endsWith('.md')) {
+        files.push(full);
+        continue;
+      }
+      const walk = async (dir: string): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          const here = join(dir, entry.name);
+          if (entry.isDirectory()) await walk(here);
+          else if (entry.name.endsWith('.md')) files.push(here);
+        }
+      };
+      await walk(full);
+    }
+
+    const broken: string[] = [];
+    for (const file of files) {
+      const text = await readFile(file, 'utf8');
+      // `[label](path.md)` and paths named in backticks, which is how this repo cites documents.
+      const targets = [
+        ...[...text.matchAll(/\]\(([^)#\s]+\.md)[^)]*\)/g)].map((m) => m[1]),
+        ...[...text.matchAll(/`((?:docs|findings)\/[^`\s]+\.md)`/g)].map((m) => m[1]),
+      ];
+      for (const target of targets) {
+        if (target === undefined || target.startsWith('http') || placeholder.test(target)) continue;
+        const beside = join(file, '..', target);
+        const fromRoot = join(repoRoot, target);
+        if (!existsSync(beside) && !existsSync(fromRoot)) {
+          broken.push(`${relative(repoRoot, file)} → ${target}`);
+        }
+      }
+    }
+
+    assert.deepEqual(broken, [], `dead documentation links:\n  ${broken.join('\n  ')}`);
+  });
 });
 
 /**
