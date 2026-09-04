@@ -6066,9 +6066,9 @@ because each is a decision rather than a defect:
       Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
       reading, counted nowhere.
 
-- [ ] **P-81 — The delivery rule measures a duration out of wall-clock instants** · M · P-74,
-      P-80 · From the `P-80` panel; the two clock findings are one defect with two faces, and both
-      are left open on purpose because the fix changes `verdict`'s interface.
+- [x] **P-81 — The delivery rule measured a duration out of wall-clock instants** · M · P-74,
+      P-80 · From the `P-80` panel; the two clock findings were one defect with two faces, and both
+      close together because the fix changes `verdict`'s interface.
 
       `CLAUDE.md`: *time is monotonic for scheduling, wall-clock for data.* `verdict()` computes
       `silentForMs = now - max(graceEndsAt, configSentAt, lastResultsAt, connectedAt)` from five
@@ -6087,15 +6087,35 @@ because each is a decision rather than a defect:
       thirty-minute chrony step writes a spurious Unknown interval into the table SLA is computed
       from, for whole probes at a time, then a second transition each when results resume.
 
-      **The fix is one change, not two.** Give the session monotonic stamps beside its `Date`s —
-      the `Date`s stay for display, `resultAge` and the API — and change `verdict` to take *ages*
-      rather than instants. A step then moves no age at all, and both faces close together.
-      Worth pairing with a per-sweep cap on `lost()` calls, on `AlarmEngine`'s reasoning, so that
-      no single sweep can ever write the whole installation's history.
+      **Landed as one change, not two.** The session carries `connectedAtNs`, `lastResultsAtNs`
+      and `configSentAtNs` beside its `Date`s — the `Date`s stay, because `resultAge` and the API
+      genuinely want the wall-clock answer — and `linkFor` turns them into ages when the link is
+      read, which is the only place holding both the stamps and a monotonic clock. `verdict` takes
+      `coreUptimeMs` and three ages, and its arithmetic is the exact dual of the `Math.max` over
+      instants it replaces: the most recent anchor is the *smallest* age.
 
-- [ ] **P-82 — Two blind spots the watchdogs have by construction** · M · P-74, P-76, P-80 · From
-      the `P-80` panel. Neither is a slip; both are the design doing exactly what it says while
-      the thing it says is not quite what an operator needs.
+      **The one trap in the translation, and it is a real one.** Under `Math.max` over instants,
+      an anchor that never happened was `?? 0` — correctly, because zero could never win a
+      maximum. Under `Math.min` over ages the same `?? 0` reads as "just now" and would excuse a
+      probe for the life of the process, so it is `Infinity`. There is a test named for that
+      inversion alone, because it is the sort of thing a mechanical translation gets wrong and
+      nothing else would catch.
+
+      Neither clock defect is now *expressible* against the interface rather than merely untested:
+      an age is a difference of two `process.hrtime.bigint()` readings, so it cannot be negative
+      and no step can move it. The suite says so in a test that asserts the property rather than a
+      scenario, since the scenario can no longer be constructed.
+
+      **And the per-sweep cap, on `AlarmEngine`'s reasoning.** Twenty probes a sweep, with the rest
+      counted into `deferred` and logged rather than silently skipped — `CLAUDE.md`'s rule that
+      backpressure is visible. Monotonic ages make the clock jump unreachable, but a real
+      core-wide outage still leaves every probe silent at once, and the honest answer is to mark
+      them all without doing it in one transaction storm. What is deferred is still stalled thirty
+      seconds later, and the test walks four sweeps to prove it clears.
+
+- [x] **P-82 — Two blind spots the watchdogs had by construction** · M · P-74, P-76, P-80 · From
+      the `P-80` panel. Neither was a slip; both were the design doing exactly what it said while
+      the thing it said was not quite what an operator needs.
 
       **One stopped runner is masked by the other.** `#lastCompletionNs` is a single value, and
       `main.ts` feeds it from `spoolResult` — the one sink both `CheckPool` and `ProcessRunner`
@@ -6108,6 +6128,13 @@ because each is a decision rather than a defect:
       because `checksCompleting` was supposed to be the alarm. Fix: one watchdog per runner, or a
       per-runner `lastCompletionNs`, so a runner is judged against its own completions.
 
+      **Landed as a per-runner clock.** The outstanding entry carries which runner accepted the
+      check — the one place that knows, since the dispatcher chooses and both settle into one sink
+      — and `completed` reads it back before deleting. A stall is now asked of the runner that is
+      overdue rather than of the probe. A completion nobody can attribute moves no runner's clock,
+      which is the conservative answer in both directions: crediting the wrong runner would hide
+      its stall, crediting all of them would hide every stall.
+
       **`assignedSensors: 0` cannot tell "nothing to do" from "we never worked it out".**
       `verdict` short-circuits to `nothing-assigned`, and the number is `session.sentSensors.length`
       — what the core successfully built for this session. On every path where that computation did
@@ -6117,10 +6144,17 @@ because each is a decision rather than a defect:
       where it is permanent for the life of the session. A probe carrying 300 sensors and checking
       none of them then reports `delivering: 1` — the exact failure `P-74` exists to catch, and
       `delivery.ts:8` names "an assignment list that never arrived" as one of its cases. The
-      session already knows: `sentVersion === null` means nothing was ever computed. Carry it on
-      `ProbeLink` and let the rule tell the two apart.
+      session already knows: `sentVersion === null` means nothing was ever computed. `ProbeLink`
+      carries it as `configured` now, and `verdict` answers `unconfigured` rather than
+      `nothing-assigned` — a distinct reason because it is a distinct fault with a distinct fix,
+      and the message an operator reads must not send them to a probe host that is behaving.
 
-- [ ] **P-83 — Three tests that pin less than their names claim** · S · P-74, P-76, P-80 · From the
+      **With `configurable` beside it, so one outage stays one alarm.** A probe below the
+      config-push version also has `configured: false`, and it also scans nothing — but `R-06`'s
+      `protocol` channel already says so with its own lookup. That case short-circuits to
+      `too-old` and this rule stays quiet about it.
+
+- [x] **P-83 — Three tests that pinned less than their names claimed** · S · P-74, P-76, P-80 · From the
       `P-80` panel, and the sixth, seventh and eighth entries in the family
       `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` catalogues. None is
       wrong; each simply cannot observe the property it is named for.
@@ -6133,16 +6167,23 @@ because each is a decision rather than a defect:
       `main.ts` has no test file. Wrap that line in `if (result.outcome === 'ok')` and the whole
       suite stays green — while a probe watching a network segment that has gone down reports
       nothing but errors, freezes `#lastCompletionNs`, and raises a Warning for monitoring
-      correctly and reporting bad news. Killing it needs `spoolResult` extracted the way `P-43`
-      extracted the config handlers.
+      correctly and reporting bad news. **Measured, then fixed**: the mutation left the whole probe
+      suite green, including that test. `spoolResult` is extracted to `result-sink.ts` the way
+      `P-43` extracted the config handlers, the property is asserted there against the one
+      unconditional call that carries it, and the same mutation now fails two tests. The
+      check-flow test is renamed to the smaller true thing it does pin — a stream of completions,
+      whatever they were, is not a stall.
 
       **`does not fire on a probe replaying an hour of spool`**, billed in `P-74`'s commit message
       as "the trap the whole design turns on". All forty iterations pass `lastResultsAt: now` and
       `now + 30_000`, so `silentForMs` is 30,000 and `windowMs` 240,000 in every one — one
       assertion repeated forty times. `DeliveryFacts` carries no probe-clock field, so no
       implementation of `verdict` could fail it without also failing its neighbour. The property
-      genuinely at risk — a probe shipping batches stamped an hour ago is not silent — belongs one
-      level up, in `probe-delivery-watch.test.ts`, where arrival and `result.at` can differ.
+      genuinely at risk — a probe shipping batches stamped an hour ago is not silent — belongs at
+      the *endpoint*, which is where arrival and `result.at` actually differ: it is the one line
+      that stamps the arrival clock, and nothing pinned it. The new test sends a batch whose
+      results are stamped an hour ago and asserts the link's age is seconds. It fails against the
+      rejected design — ageing from `result.at` — which the forty iterations could not do.
 
       **`P-79`'s own guard matched substrings** — fixed in `P-80` rather than left here, being one
       line. `code.includes(field)` meant a schema field whose name is a prefix of another

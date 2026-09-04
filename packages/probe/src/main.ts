@@ -4,7 +4,6 @@ import {
   describeError,
   probeConfigSchema,
   runConfigCheck,
-  type CheckResult,
   type ProbeConfig,
   type SensorAssignment,
 } from '@ms/shared';
@@ -14,7 +13,7 @@ import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import { QueryRunner } from './queries/runner.js';
-import type { ResultMeta } from './runner/types.js';
+import { resultSink } from './result-sink.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { LISTENER_ID as SYSLOG_LISTENER_ID, SyslogListener } from './listeners/syslog-listener.js';
 import { mkdir } from 'node:fs/promises';
@@ -134,31 +133,9 @@ async function main(): Promise<void> {
     assigned: (): Iterable<number> => assignments.ids(),
   });
 
-  const spoolResult = (result: CheckResult, meta: ResultMeta): void => {
-    // However it ended. An error is a completion — the runner came back, and a probe reporting
-    // nothing but failures is monitoring and telling the truth, not stalled.
-    checkFlow.completed(result.sensorId);
-    logger.debug(
-      { sensorId: result.sensorId, outcome: result.outcome, phase: meta.phase },
-      'check finished',
-    );
-    // Straight to disk, then woken so the drain offers it immediately if the core is up.
-    // The pool's callback is synchronous and must not wait for a write: `append` serialises
-    // internally, so ordering holds without the scheduler ever blocking on the filesystem.
-    void spool
-      .append([result])
-      .then(() => {
-        drain.wake();
-      })
-      .catch((error: unknown) => {
-        // A spool that cannot write is a probe that will lose readings, and the only thing
-        // worse than losing them is losing them quietly.
-        logger.error(
-          { ...describeError(error), sensorId: result.sensorId },
-          'could not spool a result',
-        );
-      });
-  };
+  // Extracted, because the rule it carries — an error is a completion — could not be asserted
+  // while it lived here (`P-83`). `result-sink.ts` says why.
+  const spoolResult = resultSink({ logger, spool, drain, checkFlow });
 
   // Where PowerShell is, for the Windows sensors (`T-09`). In *this* process's environment
   // rather than a runner's `childEnv`, because a Windows check runs in a worker and a worker
@@ -288,8 +265,8 @@ async function main(): Promise<void> {
       isolated,
       pool,
       processRunner,
-      onDispatch: (sensorId, timeoutMs) => {
-        checkFlow.dispatched(sensorId, timeoutMs);
+      onDispatch: (sensorId, timeoutMs, runner) => {
+        checkFlow.dispatched(sensorId, timeoutMs, runner);
       },
     }),
   });

@@ -223,6 +223,23 @@ export type ProbeLink =
       cadenceSeconds: number | null;
       lastResultsAt: Date | null;
       configSentAt: Date | null;
+      /**
+       * The same three facts as monotonic ages in milliseconds, for the delivery rule (`P-81`).
+       *
+       * The `Date`s above are for display and the API; these are for arithmetic. A duration
+       * computed by subtracting wall-clock instants is wrong across a clock step in both
+       * directions — blind going backwards, indistinguishable from silence going forwards — and
+       * `CLAUDE.md` says as much: time is monotonic for scheduling, wall-clock for data. Computed
+       * here rather than by the reader because this is the only place that holds both the stamps
+       * and a monotonic clock.
+       */
+      connectedForMs: number;
+      sinceResultsMs: number | null;
+      sinceConfigMs: number | null;
+      /** Whether the core has worked out this probe's assignments on this session (`P-82`). */
+      configured: boolean;
+      /** Whether it is new enough to be sent them at all (`R-06`). */
+      configurable: boolean;
       /** Absent from a probe below protocol 7, which cannot report its own numbers. */
       health?: ProbeHealthReport;
     };
@@ -273,10 +290,26 @@ interface ProbeSession {
   lastResultsAt: Date | null;
   /** When this probe was last given its assignments — it cannot be late with work it lacks. */
   configSentAt: Date | null;
+  /**
+   * The same three instants on the **monotonic** clock (`P-81`).
+   *
+   * The `Date`s above answer "when", which is data. These answer "how long ago", which is
+   * scheduling — and a duration taken from wall-clock instants is wrong across a clock step in
+   * both directions. Kept side by side rather than replacing them, because the API and the
+   * `resultAge` channel genuinely want the wall-clock answer.
+   */
+  connectedAtNs: bigint;
+  lastResultsAtNs: bigint | null;
+  configSentAtNs: bigint | null;
   /** The median assigned scan interval, so the window is the probe's own cadence (`P-74`). */
   cadenceSeconds: number | null;
   /** The credential stamps that went with `sentSensors`; the delta needs them (`T-08`). */
   sentStamps: ReadonlyMap<number, string>;
+}
+
+/** Milliseconds between two readings of the monotonic clock. */
+function msSinceNs(fromNs: bigint, nowNs: bigint): number {
+  return Number((nowNs - fromNs) / 1_000_000n);
 }
 
 /** Constant-time comparison, so a wrong key cannot be found one character at a time. */
@@ -697,7 +730,10 @@ export class ProbeEndpoint {
     // those recompute to the version the probe already has. Stamping the clock there postponed
     // the delivery window on every connected probe every time anything moved, so on an
     // installation with ordinary config churn the watchdog could never fire.
-    if (sent) session.configSentAt = new Date();
+    if (sent) {
+      session.configSentAt = new Date();
+      session.configSentAtNs = process.hrtime.bigint();
+    }
   }
 
   #queueResults(
@@ -708,7 +744,10 @@ export class ProbeEndpoint {
   ): void {
     // **Stamped on arrival, before anything is written.** The clock is when the batch landed, not
     // when it finished being ingested, so a slow write cannot make a delivering probe look silent.
-    if (message.results.length > 0) session.lastResultsAt = new Date();
+    if (message.results.length > 0) {
+      session.lastResultsAt = new Date();
+      session.lastResultsAtNs = process.hrtime.bigint();
+    }
     const receiver = this.#options.results;
     if (receiver === undefined) {
       logger.warn({ batchId: message.batchId }, 'results arrived before ingestion was wired up');
@@ -919,6 +958,9 @@ export class ProbeEndpoint {
       sentSensors: [],
       lastResultsAt: null,
       configSentAt: null,
+      connectedAtNs: process.hrtime.bigint(),
+      lastResultsAtNs: null,
+      configSentAtNs: null,
       cadenceSeconds: null,
       sentStamps: new Map(),
     };
@@ -1141,6 +1183,7 @@ export class ProbeEndpoint {
    * answer this method gives.
    */
   linkFor(probeObjectId: number): ProbeLink {
+    const nowNs = process.hrtime.bigint();
     for (const session of this.#sessions.values()) {
       if (session.probeObjectId !== probeObjectId) continue;
       return {
@@ -1154,6 +1197,16 @@ export class ProbeEndpoint {
         cadenceSeconds: session.cadenceSeconds,
         lastResultsAt: session.lastResultsAt,
         configSentAt: session.configSentAt,
+        connectedForMs: msSinceNs(session.connectedAtNs, nowNs),
+        sinceResultsMs:
+          session.lastResultsAtNs === null ? null : msSinceNs(session.lastResultsAtNs, nowNs),
+        sinceConfigMs:
+          session.configSentAtNs === null ? null : msSinceNs(session.configSentAtNs, nowNs),
+        // `sentVersion` rather than `sentSensors.length`: the empty set a session opens with is
+        // indistinguishable from a probe that legitimately has nothing, and telling those two
+        // apart is the whole of `P-82`.
+        configured: session.sentVersion !== null,
+        configurable: capabilitiesFor(session.protocolVersion).configPush,
         ...(session.health === undefined ? {} : { health: session.health }),
       };
     }

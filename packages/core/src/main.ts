@@ -984,7 +984,6 @@ async function serve(): Promise<void> {
     logger,
     reachability,
     linkFor: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
-    startedAt: new Date(),
   });
 
   const probeHealth = new ProbeHealthService({

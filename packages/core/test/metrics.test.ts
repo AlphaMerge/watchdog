@@ -109,6 +109,11 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
     agentVersion: '1.0.0',
     assignedSensors: 120,
     cadenceSeconds: 60,
+    connectedForMs: Number.MAX_SAFE_INTEGER,
+    sinceResultsMs: 0,
+    sinceConfigMs: 0,
+    configured: true,
+    configurable: true,
     lastResultsAt: new Date(),
     configSentAt: new Date(),
     health: {

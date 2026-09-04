@@ -59,7 +59,7 @@ export interface DueDispatchDeps {
    * counting it would make backpressure look like a stall. The outcome is already returned here
    * and was already being discarded — this is the one place that knows.
    */
-  onDispatch?: (sensorId: number, timeoutMs: number) => void;
+  onDispatch?: (sensorId: number, timeoutMs: number, runner: 'pool' | 'process') => void;
 }
 
 export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) => void {
@@ -68,7 +68,8 @@ export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) =>
       const assignment = deps.assignments.get(sensorId);
       if (assignment === undefined) continue;
 
-      const runner = deps.isolated.has(assignment.sensorType) ? deps.processRunner : deps.pool;
+      const isolated = deps.isolated.has(assignment.sensorType);
+      const runner = isolated ? deps.processRunner : deps.pool;
 
       // The drain is a slice of a ring buffer — O(what arrived) and no I/O — so it is safe on the
       // wheel's own thread, which must never wait for anything. Asking first costs a Set lookup.
@@ -86,7 +87,10 @@ export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) =>
         ...(received === undefined ? {} : { received }),
         timeoutMs: assignment.timeoutMs,
       });
-      if (outcome === 'accepted') deps.onDispatch?.(sensorId, assignment.timeoutMs);
+      // Which runner took it, because both settle into one sink and only here knows (`P-82`).
+      if (outcome === 'accepted') {
+        deps.onDispatch?.(sensorId, assignment.timeoutMs, isolated ? 'process' : 'pool');
+      }
     }
   };
 }

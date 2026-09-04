@@ -671,6 +671,75 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('ages a batch from when it arrived, not from when the probe stamped it', async () => {
+    // **The trap `P-74`'s whole design turns on, tested where it can actually fail** (`P-83`).
+    //
+    // A probe replaying an hour of spool ships results *stamped* an hour ago that *arrive* now.
+    // A watchdog keyed off `result.at` stays an hour behind for the whole catch-up and fires
+    // hardest on the probe that is recovering correctly — one of the two designs `P-74` rejected.
+    //
+    // The rule's own test could not see this: `DeliveryFacts` has no field carrying the probe's
+    // clock, so no implementation of `verdict` could fail it, and the forty iterations it spent
+    // on the case were forty copies of one assertion about a 30 s gap in a 240 s window. The
+    // property lives *here*, in the one line that stamps arrival, and nothing pinned it.
+    const results: ResultReceiver = {
+      acceptResults: (_source, message) =>
+        Promise.resolve({
+          type: 'results-ack',
+          batchId: message.batchId,
+          storedSamples: message.results.length,
+          retryAfterMs: 0,
+        }),
+    };
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      results,
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+    });
+    const address = await endpoint.start();
+
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello());
+      await probe.waitFor((m) => m.type === 'welcome');
+      await waitUntil(() => endpoint.linkFor(7).connected);
+
+      probe.send({
+        type: 'results',
+        batchId: 'replay-1',
+        results: [
+          {
+            // An hour before this test runs, which is what a spool replay looks like.
+            sensorId: 42,
+            at: new Date(Date.now() - 3_600_000).toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 3,
+            channels: [{ key: 'rtt', value: 12 }],
+          },
+        ],
+      });
+      await probe.waitFor((m) => m.type === 'results-ack');
+
+      const link = endpoint.linkFor(7);
+      assert.ok(link.connected);
+      assert.ok(
+        link.sinceResultsMs !== null && link.sinceResultsMs < 5_000,
+        `the batch landed now, however old its contents: ${String(link.sinceResultsMs)} ms`,
+      );
+      probe.close();
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
   it('refuses results when nothing is there to store them', async () => {
     // The transport is usable without ingestion wired up — the handshake tests rely on it — so
     // the probe has to be told, rather than left waiting for an acknowledgement forever.

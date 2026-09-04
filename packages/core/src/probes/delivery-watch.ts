@@ -30,10 +30,30 @@ export interface DeliveryWatchOptions {
   readonly reachability: ProbeReachability;
   /** What the core knows about one probe's link, right now. The endpoint's own accessor. */
   readonly linkFor: (probeObjectId: number) => ProbeLink;
-  /** When this core process came up, for the start-up grace. */
-  readonly startedAt: Date;
-  readonly now?: () => Date;
+  /**
+   * How long this core process has been running, monotonically (`P-81`).
+   *
+   * Was a `startedAt: Date` compared against `new Date()`. That is a duration measured on the
+   * wall clock, which a step moves in either direction: blind going backwards, and going forwards
+   * indistinguishable from that much silence on every probe at once.
+   */
+  readonly uptimeMs?: () => number;
   readonly settings?: DeliveryOptions;
+  /**
+   * How many probes one sweep may mark, at most (`P-81`).
+   *
+   * Each `lost` walks a probe's subtree, opens a transaction, re-evaluates every sensor under it
+   * and writes a `sensor_state` row per sensor that moves — the table uptime and SLA are computed
+   * from. Nothing bounded how many probes one pass could do that to, while `AlarmEngine` in this
+   * same codebase bounds `maxPerSweep` with a comment naming a forward clock jump as the reason
+   * it exists.
+   *
+   * Monotonic ages make the clock jump itself unreachable, so this is the belt to that braces: a
+   * genuine core-wide outage — a switch, the core's own uplink — really can leave every probe
+   * silent at once, and the honest answer is still to mark them, just not all in one transaction
+   * storm. What is left is still stalled at the next sweep thirty seconds later.
+   */
+  readonly maxPerSweep?: number;
 }
 
 export interface DeliveryStats {
@@ -42,24 +62,51 @@ export interface DeliveryStats {
   /** Sweeps run, and how many of them changed anything. */
   readonly sweeps: number;
   readonly transitions: number;
+  /**
+   * Probes a sweep found stalled and deferred because it had hit its cap (`P-81`).
+   *
+   * Counted rather than silent, for the reason `CLAUDE.md` gives about backpressure: work put off
+   * is visible or it is a lie. Non-zero means an installation-wide event, which is exactly when
+   * an operator wants to know the sweep is rationing itself.
+   */
+  readonly deferred: number;
 }
+
+/**
+ * Probes one sweep will mark, at most.
+ *
+ * Twenty rather than a percentage: it is a bound on *write* volume, and what makes a storm is the
+ * transaction count and the history rows, neither of which scales with how many probes an
+ * installation happens to have. At a thirty-second sweep it still clears a hundred probes inside
+ * three minutes, which is well within the window that made them stalled in the first place.
+ */
+const DEFAULT_MAX_PER_SWEEP = 20;
 
 export class ProbeDeliveryWatch {
   readonly #options: DeliveryWatchOptions;
   readonly #settings: DeliveryOptions;
-  readonly #now: () => Date;
+  readonly #uptimeMs: () => number;
   #silentNow = 0;
   #sweeps = 0;
   #transitions = 0;
+  #deferred = 0;
 
   constructor(options: DeliveryWatchOptions) {
     this.#options = options;
     this.#settings = options.settings ?? DELIVERY_DEFAULTS;
-    this.#now = options.now ?? ((): Date => new Date());
+    const startedNs = process.hrtime.bigint();
+    this.#uptimeMs =
+      options.uptimeMs ??
+      ((): number => Number((process.hrtime.bigint() - startedNs) / 1_000_000n));
   }
 
   stats(): DeliveryStats {
-    return { silent: this.#silentNow, sweeps: this.#sweeps, transitions: this.#transitions };
+    return {
+      silent: this.#silentNow,
+      sweeps: this.#sweeps,
+      transitions: this.#transitions,
+      deferred: this.#deferred,
+    };
   }
 
   /** What the watch makes of one probe, for Probe Health to report without repeating the rule. */
@@ -70,14 +117,14 @@ export class ProbeDeliveryWatch {
       {
         assignedSensors: link.assignedSensors,
         cadenceSeconds: link.cadenceSeconds,
-        lastResultsAt: link.lastResultsAt,
-        configSentAt: link.configSentAt,
-        // The session's own clock (`P-80`). `ProbeLink` has always carried it; the rule was
-        // simply never given it, so an ordinary reconnect was judged on the core's uptime.
-        connectedAt: link.connectedAt,
+        // Ages, computed by the endpoint against a monotonic clock (`P-81`).
+        sinceResultsMs: link.sinceResultsMs,
+        sinceConfigMs: link.sinceConfigMs,
+        connectedForMs: link.connectedForMs,
+        configured: link.configured,
+        configurable: link.configurable,
       },
-      this.#now(),
-      this.#options.startedAt,
+      this.#uptimeMs(),
       this.#settings,
     );
   }
@@ -106,6 +153,9 @@ export class ProbeDeliveryWatch {
 
     let moved = 0;
     let silent = 0;
+    let marked = 0;
+    let deferred = 0;
+    const cap = this.#options.maxPerSweep ?? DEFAULT_MAX_PER_SWEEP;
     for (const row of probes) {
       const probeObjectId = Number(row.id);
       // **The truth, not a copy of it** (`P-77`). Asking `ProbeReachability` what it actually
@@ -113,20 +163,28 @@ export class ProbeDeliveryWatch {
       // read the probe's sensors — is simply retried on the next sweep, instead of being recorded
       // as done by a shadow set that nothing could correct. A probe not connected is `R-05`'s and
       // reads `link`, so neither branch below fires for it.
-      const marked = this.#options.reachability.offlineReason(probeObjectId);
-      if (marked === 'silence') silent += 1;
+      const held = this.#options.reachability.offlineReason(probeObjectId);
+      if (held === 'silence') silent += 1;
 
       const seen = this.verdictFor(probeObjectId);
       if (seen === null) continue;
 
-      if (seen.stalled && marked === undefined) {
+      if (seen.stalled && held === undefined) {
+        // Bounded (`P-81`). The probe is still stalled at the next sweep, and deferring is the
+        // one option here that writes nothing wrong — the alternative on an installation-wide
+        // event is one pass re-evaluating every sensor the core has.
+        if (marked >= cap) {
+          deferred += 1;
+          continue;
+        }
+        marked += 1;
         this.#transitions += 1;
         this.#options.logger.warn(
           { probeObjectId, silentForMs: seen.silentForMs, windowMs: seen.windowMs },
           'a probe is connected but has stopped sending results; its sensors are Unknown',
         );
         moved += await this.#options.reachability.lost(probeObjectId, 'silence');
-      } else if (!seen.stalled && marked === 'silence') {
+      } else if (!seen.stalled && held === 'silence') {
         this.#transitions += 1;
         this.#options.logger.info(
           { probeObjectId },
@@ -136,6 +194,13 @@ export class ProbeDeliveryWatch {
       }
     }
     this.#silentNow = silent;
+    this.#deferred = deferred;
+    if (deferred > 0) {
+      this.#options.logger.warn(
+        { deferred, cap },
+        'more probes stopped delivering at once than one sweep will mark; the rest follow',
+      );
+    }
     return moved;
   }
 }

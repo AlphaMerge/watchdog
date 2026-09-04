@@ -26,9 +26,22 @@
  * separate from `P-74` rather than folded into it.
  */
 
+/** Which runner a check went to. Both settle into one sink, so only dispatch knows (`P-82`). */
+export type RunnerName = 'pool' | 'process';
+
 /** A check accepted by a runner, and when. Monotonic, because this is a duration and not a date. */
 interface Outstanding {
   readonly atNs: bigint;
+  /**
+   * The runner it was accepted by (`P-82`).
+   *
+   * Without it a stall was a claim about the *probe*: `#lastCompletionNs` was one value fed from
+   * `spoolResult`, the single sink both runners settle into, so a wedged `ProcessRunner` could
+   * never be seen while the worker pool kept completing eight checks a second beside it. On any
+   * probe carrying both worker checks and EXE/Script checks — which is most of them — the file's
+   * own promise that "a runner that has returned nothing since is everybody's" was false.
+   */
+  readonly runner: RunnerName;
   /**
    * This check's own timeout.
    *
@@ -117,7 +130,8 @@ export class CheckFlowWatchdog {
    * guess that produced the defect.
    */
   readonly #assignedAt = new Map<number, bigint>();
-  #lastCompletionNs: bigint;
+  /** Per runner, because a stall is a claim about a runner and not about the probe (`P-82`). */
+  readonly #lastCompletionNs = new Map<RunnerName, bigint>();
 
   constructor(options: CheckFlowOptions = {}) {
     this.#stallAfterMs = options.stallAfterMs ?? DEFAULT_STALL_AFTER_MS;
@@ -126,25 +140,32 @@ export class CheckFlowWatchdog {
     this.#assigned = options.assigned ?? ((): Iterable<number> => []);
     // Starting at "just completed" rather than at zero: a probe that has only just come up has
     // dispatched nothing and returned nothing, and calling that a stall would alarm on every start.
-    this.#lastCompletionNs = this.#nowNs();
-    this.#startedNs = this.#lastCompletionNs;
+    this.#startedNs = this.#nowNs();
+    this.#lastCompletionNs.set('pool', this.#startedNs);
+    this.#lastCompletionNs.set('process', this.#startedNs);
   }
 
   /** A runner accepted this check. Only `accepted` — a deferral was never dispatched. */
-  dispatched(sensorId: number, timeoutMs: number): void {
+  dispatched(sensorId: number, timeoutMs: number, runner: RunnerName = 'pool'): void {
     // Re-dispatch of a sensor already outstanding cannot happen — both runners refuse it with
     // `already-running` — but if it ever did, keeping the *older* timestamp is the safe way round:
     // it is the one that would reveal a stall.
     if (this.#outstanding.has(sensorId)) return;
-    this.#outstanding.set(sensorId, { atNs: this.#nowNs(), timeoutMs });
+    this.#outstanding.set(sensorId, { atNs: this.#nowNs(), timeoutMs, runner });
   }
 
   /** A check settled, however it settled. An error is a completion: the runner came back. */
   completed(sensorId: number): void {
     const now = this.#nowNs();
+    // Read before the delete: the outstanding entry is the only record of which runner took it,
+    // and both runners settle into one callback that cannot say (`P-82`).
+    const runner = this.#outstanding.get(sensorId)?.runner;
     this.#outstanding.delete(sensorId);
     this.#lastCompleted.set(sensorId, now);
-    this.#lastCompletionNs = now;
+    // A completion nobody can attribute — a result for a sensor already forgotten, say — moves no
+    // runner's clock. Guessing would be worse in both directions: crediting the wrong runner
+    // hides its stall, and crediting all of them hides every stall.
+    if (runner !== undefined) this.#lastCompletionNs.set(runner, now);
   }
 
   /**
@@ -167,22 +188,25 @@ export class CheckFlowWatchdog {
   stats(): CheckFlowStats {
     const now = this.#nowNs();
     let oldestNs: bigint | null = null;
-    let overdue = false;
+    const overdueRunners = new Set<RunnerName>();
     for (const one of this.#outstanding.values()) {
       if (oldestNs === null || one.atNs < oldestNs) oldestNs = one.atNs;
       // Against its own timeout as well as the window, so a check configured to run longer than
       // the window is not reported as a stall for taking the time it was given.
       const waited = msSince(one.atNs, now);
-      if (waited > this.#stallAfterMs && waited > one.timeoutMs * 2) overdue = true;
+      if (waited > this.#stallAfterMs && waited > one.timeoutMs * 2) overdueRunners.add(one.runner);
     }
     const oldestOutstandingMs = oldestNs === null ? 0 : msSince(oldestNs, now);
 
-    // **Both clauses, and the second is recency rather than a comparison against the oldest.**
-    // It used to read `lastCompletionNs <= oldestNs`, which one leaked check disabled for ever:
-    // a check that never settles pins `oldestNs` at its dispatch, so any later completion makes
-    // the comparison false permanently and no subsequent stall could ever be seen. Asking whether
-    // anything has come back *recently* cannot be pinned by a single stuck entry.
-    const stalled = overdue && msSince(this.#lastCompletionNs, now) > this.#stallAfterMs;
+    // **Both clauses, per runner** (`P-82`). The second is recency rather than a comparison
+    // against the oldest: it used to read `lastCompletionNs <= oldestNs`, which one leaked check
+    // disabled for ever, because a check that never settles pins `oldestNs` at its dispatch. And
+    // it is asked of the runner that is overdue rather than of the probe, because one busy runner
+    // was otherwise enough to vouch for a wedged one.
+    const stalled = [...overdueRunners].some((runner) => {
+      const last = this.#lastCompletionNs.get(runner) ?? this.#startedNs;
+      return msSince(last, now) > this.#stallAfterMs;
+    });
 
     // Over the assigned set. A sensor that has never completed counts from when it was first seen
     // here, so "never came back at all" is behind rather than invisible — the case that matters

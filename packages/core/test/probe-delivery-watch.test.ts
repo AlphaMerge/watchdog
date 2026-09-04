@@ -16,7 +16,15 @@ import { silentLogger } from './support/database.js';
  */
 
 const START = new Date('2026-09-04T00:00:00.000Z');
-const GRACE_OVER = 200; // seconds; the default grace is 120
+/**
+ * Core uptime for these tests: well past the 120 s grace, in milliseconds (`P-81`).
+ *
+ * The sweep is driven by a monotonic uptime now rather than a wall-clock instant, so what a test
+ * moves is a duration. That is not a cosmetic change: a scenario where `now` goes backwards, or
+ * jumps forward independently of how long a probe has actually been quiet, is no longer
+ * expressible against this interface — which is the point of the ticket.
+ */
+const UPTIME = 2_000_000;
 
 function link(over: Partial<Extract<ProbeLink, { connected: true }>> = {}): ProbeLink {
   return {
@@ -28,8 +36,16 @@ function link(over: Partial<Extract<ProbeLink, { connected: true }>> = {}): Prob
     agentVersion: '1.0.0',
     assignedSensors: 100,
     cadenceSeconds: 60,
+    // The `Date`s the API and `resultAge` still want; the rule reads the ages below (`P-81`).
     lastResultsAt: START,
     configSentAt: START,
+    connectedForMs: Number.MAX_SAFE_INTEGER,
+    // A healthy probe: configured long ago at connect, delivering right now. A test that wants a
+    // silent one overrides the arrival age.
+    sinceResultsMs: 0,
+    sinceConfigMs: 1_000_000,
+    configured: true,
+    configurable: true,
     ...over,
   };
 }
@@ -80,8 +96,8 @@ function fakeDb(probeIds: number[]): Database {
 
 function watchOver(
   links: Map<number, ProbeLink>,
-  clock: { now: Date },
-  options: { lostFails?: boolean } = {},
+  clock: { uptimeMs: number },
+  options: { lostFails?: boolean; maxPerSweep?: number } = {},
 ) {
   const reach = fakeReachability(options);
   const watch = new ProbeDeliveryWatch({
@@ -89,13 +105,11 @@ function watchOver(
     logger: silentLogger,
     reachability: reach.service,
     linkFor: (id) => links.get(id) ?? { connected: false },
-    startedAt: START,
-    now: () => clock.now,
+    uptimeMs: () => clock.uptimeMs,
+    ...(options.maxPerSweep === undefined ? {} : { maxPerSweep: options.maxPerSweep }),
   });
   return { watch, calls: reach.calls, reasons: reach.reasons, reach: reach.service };
 }
-
-const at = (seconds: number): Date => new Date(START.getTime() + seconds * 1_000);
 
 describe('the probe delivery sweep', () => {
   it('marks a silent probe once, not once per sweep', async () => {
@@ -103,8 +117,8 @@ describe('the probe delivery sweep', () => {
     // writes state history, so calling it every thirty seconds while a probe stayed stalled would
     // write a transition per sweep into the table uptime and SLA are computed from — worse than
     // the silence it is fixing.
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
-    const clock = { now: at(GRACE_OVER + 1_000) };
+    const links = new Map([[7, link({ sinceResultsMs: 1_000_000 })]]);
+    const clock = { uptimeMs: UPTIME };
     const { watch, calls } = watchOver(links, clock);
 
     await watch.settle();
@@ -117,19 +131,19 @@ describe('the probe delivery sweep', () => {
   });
 
   it('says silence, not a lost link, so the message an operator reads is true', async () => {
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
-    const { watch, calls } = watchOver(links, { now: at(GRACE_OVER + 1_000) });
+    const links = new Map([[7, link({ sinceResultsMs: 1_000_000 })]]);
+    const { watch, calls } = watchOver(links, { uptimeMs: UPTIME });
     await watch.settle();
     assert.deepEqual(calls, ['lost:7:silence']);
   });
 
   it('clears it when results start arriving again, once', async () => {
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
-    const clock = { now: at(GRACE_OVER + 1_000) };
+    const links = new Map([[7, link({ sinceResultsMs: 1_000_000 })]]);
+    const clock = { uptimeMs: UPTIME };
     const { watch, calls } = watchOver(links, clock);
     await watch.settle();
 
-    links.set(7, link({ lastResultsAt: clock.now }));
+    links.set(7, link({ sinceResultsMs: 0 }));
     await watch.settle();
     await watch.settle();
 
@@ -137,15 +151,15 @@ describe('the probe delivery sweep', () => {
   });
 
   it('leaves a probe that is delivering completely alone', async () => {
-    const clock = { now: at(GRACE_OVER + 1_000) };
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER + 900) })]]);
+    const clock = { uptimeMs: UPTIME };
+    const links = new Map([[7, link({ sinceResultsMs: 100_000 })]]);
     const { watch, calls } = watchOver(links, clock);
     await watch.settle();
     assert.deepEqual(calls, []);
   });
 
   it('hands a disconnected probe to R-05 rather than deciding anything about it', async () => {
-    const clock = { now: at(GRACE_OVER + 1_000) };
+    const clock = { uptimeMs: UPTIME };
     const links = new Map<number, ProbeLink>([[7, { connected: false }]]);
     const { watch, calls } = watchOver(links, clock);
     await watch.settle();
@@ -156,8 +170,8 @@ describe('the probe delivery sweep', () => {
     // The case a naive edge-trigger gets wrong. The reconnect clears the reachability entry —
     // `R-05`'s rule, sensors return to their last reading — so a watch still holding its claim
     // would read the next stall as no change and never mark it again.
-    const clock = { now: at(GRACE_OVER + 1_000) };
-    const links = new Map<number, ProbeLink>([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
+    const clock = { uptimeMs: UPTIME };
+    const links = new Map<number, ProbeLink>([[7, link({ sinceResultsMs: 1_000_000 })]]);
     const { watch, calls, reach } = watchOver(links, clock);
     await watch.settle();
     assert.deepEqual(calls, ['lost:7:silence']);
@@ -168,8 +182,8 @@ describe('the probe delivery sweep', () => {
     // Back, and still not delivering: its config was pushed on reconnect and nothing has arrived.
     // The endpoint calls `found` as the new session claims its branch, which is what clears the
     // mark — this sweep does not track the reconnect itself, it just stops seeing a mark.
-    clock.now = at(GRACE_OVER + 3_000);
-    links.set(7, link({ lastResultsAt: null, configSentAt: at(GRACE_OVER + 1_500) }));
+    clock.uptimeMs = UPTIME + 2_000_000;
+    links.set(7, link({ sinceResultsMs: null, sinceConfigMs: 1_500_000 }));
     await reach.found(7);
     await watch.settle();
 
@@ -187,8 +201,8 @@ describe('the probe delivery sweep', () => {
     // stayed Up — the exact failure this whole ticket exists to prevent, reached through the
     // thing meant to prevent it. It reads reachability's own state now, so a failed marking is
     // simply still unmarked and the next sweep tries again.
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER) })]]);
-    const clock = { now: at(GRACE_OVER + 1_000) };
+    const links = new Map([[7, link({ sinceResultsMs: 1_000_000 })]]);
+    const clock = { uptimeMs: UPTIME };
     const { watch, calls } = watchOver(links, clock, { lostFails: true });
 
     await watch.settle();
@@ -201,13 +215,36 @@ describe('the probe delivery sweep', () => {
   it('leaves a probe already marked for a lost link alone', async () => {
     // `R-05` owns that probe. Re-marking it would be wrong and un-marking it would be worse: the
     // link is genuinely down, and this sweep has no business deciding otherwise.
-    const links = new Map([[7, link({ lastResultsAt: at(GRACE_OVER + 900) })]]);
-    const clock = { now: at(GRACE_OVER + 1_000) };
+    const links = new Map([[7, link({ sinceResultsMs: 100_000 })]]);
+    const clock = { uptimeMs: UPTIME };
     const { watch, calls, reasons } = watchOver(links, clock);
     reasons.set(7, 'link');
 
     await watch.settle();
     assert.deepEqual(calls, [], 'delivering, but not this sweep’s to clear');
+  });
+
+  it('rations itself when every probe stops delivering at once', async () => {
+    // **`P-81`.** Each `lost` walks a subtree, opens a transaction and writes a `sensor_state`
+    // row per sensor that moves. Nothing bounded how many probes one pass could do that to —
+    // while `AlarmEngine` in this same codebase bounds `maxPerSweep` naming a forward clock jump
+    // as the reason. Monotonic ages make the clock jump unreachable, but a real core-wide outage
+    // still leaves every probe silent at once, and the honest answer is to mark them all without
+    // doing it in a single transaction storm.
+    const links = new Map<number, ProbeLink>();
+    for (let id = 1; id <= 10; id += 1) links.set(id, link({ sinceResultsMs: 1_000_000 }));
+    const { watch, calls } = watchOver(links, { uptimeMs: UPTIME }, { maxPerSweep: 3 });
+
+    await watch.settle();
+    assert.equal(calls.length, 3, 'three this pass');
+    assert.equal(watch.stats().deferred, 7, 'and the rest counted rather than forgotten');
+
+    // Still stalled thirty seconds later, so the sweep works through them.
+    await watch.settle();
+    await watch.settle();
+    await watch.settle();
+    assert.equal(calls.length, 10, 'every one of them, in four passes');
+    assert.equal(watch.stats().deferred, 0);
   });
 
   it('survives a database that cannot list probes', async () => {
@@ -216,8 +253,7 @@ describe('the probe delivery sweep', () => {
       logger: silentLogger,
       reachability: fakeReachability().service,
       linkFor: () => ({ connected: false }),
-      startedAt: START,
-      now: () => at(GRACE_OVER + 1_000),
+      uptimeMs: () => UPTIME,
     });
     assert.equal(await watch.settle(), 0, 'a sweep that cannot read decides nothing');
   });

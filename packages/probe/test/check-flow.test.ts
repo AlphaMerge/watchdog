@@ -147,9 +147,16 @@ describe('whether checks are coming back', () => {
     assert.equal(watchdog.stats().outstanding, 0);
   });
 
-  it('counts an error as a completion, because the runner came back', () => {
-    // `completed` is called for every settled check whatever its outcome. A probe returning
-    // nothing but failures is not stalled — it is monitoring, and reporting bad news.
+  it('is not stalled by a run of checks that all completed', () => {
+    // **Renamed, because its old name was a claim it could not make** (`P-83`). It read "counts an
+    // error as a completion, because the runner came back" — but `completed(sensorId)` takes no
+    // outcome, so nothing here can tell one from another and this passed identically against a
+    // `completed` that ignored outcomes. Measured: wrapping the call in `main`'s sink with
+    // `if (result.outcome === 'ok')` left this green.
+    //
+    // That property now lives where it can fail, in `result-sink.test.ts`, against the one
+    // unconditional call that carries it. What this pins is the smaller true thing: a stream of
+    // completions, whatever they were, is not a stall.
     const { watchdog, advance } = harness();
     for (let i = 0; i < 5; i += 1) {
       watchdog.dispatched(i, 30_000);
@@ -242,6 +249,46 @@ describe('whether checks are coming back', () => {
     watchdog.dispatched(1, 30_000);
     watchdog.completed(1);
     assert.equal(watchdog.stats().behind, 2);
+  });
+
+  it('sees a stopped child runner even while the worker pool is busy', () => {
+    // **`P-82`.** `#lastCompletionNs` was one value, fed from `spoolResult` — the single sink both
+    // `CheckPool` and `ProcessRunner` settle into — so a stall was a claim about the *probe*. On
+    // any probe carrying both worker checks and EXE/Script checks, a wedged child runner could
+    // never be seen: the pool completes several checks a second beside it and kept refreshing the
+    // one timestamp. Those sensors sat frozen with no alarm anywhere, because `checksBehind` has
+    // no limit by design — `checksCompleting` was supposed to be the alarm.
+    //
+    // The file's own header promised otherwise in as many words: "a runner that has returned
+    // nothing since is everybody's". This is that sentence, made true.
+    const { watchdog, advance } = harness();
+    watchdog.dispatched(1, 30_000, 'process'); // wedged: never completes
+    advance(600_001);
+
+    // Meanwhile the pool works normally throughout.
+    for (let i = 2; i < 12; i += 1) {
+      watchdog.dispatched(i, 30_000, 'pool');
+      advance(10_000);
+      watchdog.completed(i);
+    }
+
+    assert.equal(watchdog.stats().completing, 0, 'the child runner has returned nothing');
+    assert.equal(watchdog.stats().outstanding, 1);
+  });
+
+  it('does not blame the pool for a child runner that is wedged', () => {
+    // The other direction, so the fix is not simply "always stalled": a pool that is completing
+    // normally with nothing of its own overdue is not stalled, whatever the other runner is doing
+    // — and once the wedged check is the only thing outstanding and its runner is caught up, the
+    // probe reads healthy again.
+    const { watchdog, advance } = harness();
+    watchdog.dispatched(1, 30_000, 'process');
+    advance(600_001);
+    assert.equal(watchdog.stats().completing, 0);
+
+    // The child runner comes back to life and settles it.
+    watchdog.completed(1);
+    assert.equal(watchdog.stats().completing, 1, 'nothing overdue anywhere');
   });
 
   it('keeps the older timestamp if a sensor is somehow dispatched twice', () => {

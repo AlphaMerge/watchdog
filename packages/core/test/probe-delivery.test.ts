@@ -14,17 +14,25 @@ import {
  * of the ticket: every design that got this wrong got it wrong in the *predicate*, not in the
  * plumbing. The two that were rejected fired during a legitimate spool replay and alarmed on
  * every sensor after a core restart respectively, and both are rows here.
+ *
+ * **Everything is an age in milliseconds** (`P-81`). The rule used to take `Date`s and subtract
+ * them, which is a duration on the wrong clock — `CLAUDE.md`: time is monotonic for scheduling,
+ * wall-clock for data. Ages cannot be negative and no clock step can move one, so the two clock
+ * defects `P-80` found are not expressible against this interface rather than merely untested.
  */
 
-const START = new Date('2026-09-04T00:00:00.000Z');
-const after = (seconds: number): Date => new Date(START.getTime() + seconds * 1_000);
+const GRACE_MS = DELIVERY_DEFAULTS.graceSeconds * 1_000;
+/** Core uptime at `seconds` past the end of the grace, which is where every window starts. */
+const pastGrace = (seconds: number): number => GRACE_MS + seconds * 1_000;
 
 const facts = (over: Partial<DeliveryFacts> = {}): DeliveryFacts => ({
   assignedSensors: 100,
   cadenceSeconds: 60,
-  lastResultsAt: null,
-  configSentAt: null,
-  connectedAt: START,
+  sinceResultsMs: null,
+  sinceConfigMs: null,
+  connectedForMs: Number.MAX_SAFE_INTEGER,
+  configured: true,
+  configurable: true,
   ...over,
 });
 
@@ -54,69 +62,37 @@ describe('the delivery window', () => {
 });
 
 describe('whether a connected probe is delivering', () => {
-  it('gives a probe that has only just connected its window, not the core’s uptime', () => {
-    // **`P-80`, and a regression `P-77` introduced.** `P-77` narrowed `configSentAt` to the branch
-    // that actually sends configuration — correct in itself, because stamping it on every
-    // recompute pushed the window out on every probe forever. But the ordinary reconnect is
-    // `config-unchanged`: the probe kept its fingerprint across the drop, so the core sends
-    // nothing and stamps nothing. That session then has `configSentAt` and `lastResultsAt` both
-    // null, so `since` collapsed to start-up-plus-grace and a probe that reconnected two seconds
-    // ago was judged to have been silent for the core's entire uptime — marked Unknown, paged on,
-    // and given a `resultAge` of hours. One link flap on a long-running core did it.
-    //
-    // A probe cannot have been silent for longer than its current session has existed, so the
-    // session's own clock belongs in the window alongside the other two.
-    const sixHoursUp = after(21_600);
-    const seen = verdict(
-      facts({ lastResultsAt: null, configSentAt: null, connectedAt: after(21_597) }),
-      sixHoursUp,
-      START,
-    );
-    assert.equal(seen.stalled, false, 'three seconds into a session is not six hours of silence');
-    assert.equal(seen.silentForMs, 3_000);
-  });
-
-  it('does not let the session clock excuse a probe that has been connected and quiet', () => {
-    // The other side of it: `connectedAt` is a floor on the window, not a reprieve. A probe
-    // connected an hour ago that has never delivered is still stalled.
-    const seen = verdict(
-      facts({ lastResultsAt: null, configSentAt: null, connectedAt: after(1_000) }),
-      after(4_600),
-      START,
-    );
-    assert.equal(seen.stalled, true);
-    assert.equal(seen.silentForMs, 3_600_000);
-  });
-
-  it('never reports a negative age, whatever the wall clock does', () => {
-    // A backward clock step puts `since` in the future, and `silentForMs` was published straight
-    // onto Probe Health's `resultAge` channel with no clamp — a negative duration stored as a
-    // sample, which is a nonsense reading rather than a gap.
-    //
-    // **This clamp is not a fix for the underlying problem and is not claimed as one.** With
-    // `since` pinned to `now` the age reads 0 for the whole duration of the step, so the watchdog
-    // is still blind across it — it has only stopped publishing a negative number while blind.
-    // The rule measures a *duration* out of wall-clock instants, which `CLAUDE.md` says is the
-    // wrong clock for the job ("time is monotonic for scheduling, wall-clock for data"). Fixing
-    // that means giving the session monotonic stamps and changing this function to take ages
-    // rather than dates: `P-81`, filed rather than bolted on here, because it changes this rule's
-    // interface and deserves its own test pass.
-    const stepped = verdict(
-      facts({ lastResultsAt: after(5_000), configSentAt: after(4_900), connectedAt: after(4_000) }),
-      after(4_000),
-      START,
-    );
-    assert.equal(stepped.silentForMs, 0, 'clamped, never negative');
-    assert.equal(stepped.stalled, false);
-  });
-
   it('has no opinion about a probe with nothing assigned', () => {
     // The assignment list already excludes every pause source, schedule window, dependency and
     // core-evaluated type, so a legitimately quiet probe arrives here with nothing to be late
     // with — and none of that exclusion logic is restated, which is how the two would drift.
-    const seen = verdict(facts({ assignedSensors: 0 }), after(100_000), START);
+    const seen = verdict(facts({ assignedSensors: 0 }), pastGrace(100_000));
     assert.equal(seen.stalled, false);
     assert.equal(seen.reason, 'nothing-assigned');
+  });
+
+  it('does not mistake a configuration the core never built for a probe with no work', () => {
+    // **`P-82`.** `assignedSensors` is what the core *built*, and on every path where that
+    // computation did not happen it is still the empty set a session opens with — which reads
+    // exactly like the row above. `assignmentsFor` throwing is logged once and the connection is
+    // kept, and on a stable installation nothing retries for days, so a probe carrying three
+    // hundred sensors and checking none of them reported itself as delivering: the precise
+    // failure this rule exists to catch, reached through the rule.
+    const seen = verdict(facts({ assignedSensors: 0, configured: false }), pastGrace(100_000));
+    assert.equal(seen.stalled, true);
+    assert.equal(seen.reason, 'unconfigured', 'a distinct fault, with a distinct fix');
+  });
+
+  it('leaves a probe too old to be configured to the channel that already alarms for it', () => {
+    // One outage, one alarm. A probe below the config-push version scans nothing, but `R-06`'s
+    // `protocol` channel says so with its own lookup, and this raising a second alarm for the
+    // same cause is what `CLAUDE.md` forbids.
+    const seen = verdict(
+      facts({ assignedSensors: 0, configured: false, configurable: false }),
+      pastGrace(100_000),
+    );
+    assert.equal(seen.stalled, false);
+    assert.equal(seen.reason, 'too-old');
   });
 
   it('says nothing at all while the core is still starting up', () => {
@@ -124,7 +100,7 @@ describe('whether a connected probe is delivering', () => {
     // `probeReachable: true` optimistically and the reachability set starts empty, both
     // deliberately, so a restart does not generate its own alarm storm. A watchdog without a
     // grace produces exactly that storm on the way back up.
-    const seen = verdict(facts(), after(DELIVERY_DEFAULTS.graceSeconds - 1), START);
+    const seen = verdict(facts(), GRACE_MS - 1_000);
     assert.equal(seen.stalled, false);
     assert.equal(seen.reason, 'in-grace');
   });
@@ -132,69 +108,83 @@ describe('whether a connected probe is delivering', () => {
   it('runs its window from the end of the grace, not from the core’s start', () => {
     // Otherwise the grace is not a grace: a probe would be judged on silence from before the
     // core existed to hear it.
-    const justInside = verdict(facts(), after(DELIVERY_DEFAULTS.graceSeconds + 239), START);
-    assert.equal(justInside.stalled, false, '239 s after the grace, against a 240 s window');
-
-    const justOutside = verdict(facts(), after(DELIVERY_DEFAULTS.graceSeconds + 241), START);
-    assert.equal(justOutside.stalled, true);
+    assert.equal(verdict(facts(), pastGrace(239)).stalled, false, '239 s against a 240 s window');
+    assert.equal(verdict(facts(), pastGrace(241)).stalled, true);
   });
 
   it('runs its window from the config push, because new work cannot already be late', () => {
-    const sentAt = after(1_000);
-    const soonAfter = verdict(facts({ configSentAt: sentAt }), after(1_100), START);
+    const soonAfter = verdict(facts({ sinceConfigMs: 100_000 }), pastGrace(100_000));
     assert.equal(soonAfter.stalled, false, 'a hundred seconds into a 240 s window');
     assert.equal(soonAfter.reason, 'delivering');
 
-    const longAfter = verdict(facts({ configSentAt: sentAt }), after(1_400), START);
-    assert.equal(longAfter.stalled, true);
+    assert.equal(verdict(facts({ sinceConfigMs: 400_000 }), pastGrace(100_000)).stalled, true);
   });
 
   it('counts from the last arrival once there has been one', () => {
-    const arrived = after(5_000);
-    assert.equal(verdict(facts({ lastResultsAt: arrived }), after(5_200), START).stalled, false);
-    assert.equal(verdict(facts({ lastResultsAt: arrived }), after(5_300), START).stalled, true);
+    assert.equal(verdict(facts({ sinceResultsMs: 200_000 }), pastGrace(5_000)).stalled, false);
+    assert.equal(verdict(facts({ sinceResultsMs: 300_000 }), pastGrace(5_000)).stalled, true);
   });
 
   it('is punctual, not late, at exactly its own window', () => {
     // `>` and not `>=`. A probe reporting on exactly the period it was given must not be called
     // late for being on time — the same boundary `P-59` settled for staleness.
-    const arrived = after(5_000);
-    const exactly = verdict(facts({ lastResultsAt: arrived }), after(5_240), START);
+    const exactly = verdict(facts({ sinceResultsMs: 240_000 }), pastGrace(5_000));
     assert.equal(exactly.stalled, false);
     assert.equal(exactly.silentForMs, 240_000);
     assert.equal(exactly.windowMs, 240_000);
   });
 
-  it('takes the latest evidence, whichever of the three it is', () => {
+  it('takes the most recent evidence, whichever of the four it is', () => {
     // A probe that was silent, then had its assignments re-sent, is not still silent for the
-    // original span: the push resets the question.
+    // original span: the push resets the question. Among ages the most recent is the smallest.
     const seen = verdict(
-      facts({ lastResultsAt: after(1_000), configSentAt: after(9_000) }),
-      after(9_100),
-      START,
+      facts({ sinceResultsMs: 8_000_000, sinceConfigMs: 100_000 }),
+      pastGrace(9_000),
     );
     assert.equal(seen.stalled, false);
     assert.equal(seen.silentForMs, 100_000);
   });
 
-  it('does not fire on a probe replaying an hour of spool', () => {
-    // **The trap the whole design turns on.** A replay delivers results *stamped* an hour ago but
-    // *arriving* now. Nothing here reads the probe's timestamp for a check, so a catch-up that is
-    // working looks exactly like ordinary delivery — which it is.
-    let now = after(10_000);
-    for (let i = 0; i < 40; i += 1) {
-      // Batches landing every 30 s, each carrying results the probe stamped an hour earlier.
-      const seen = verdict(facts({ lastResultsAt: now }), new Date(now.getTime() + 30_000), START);
-      assert.equal(seen.stalled, false, `replay batch ${String(i)} must not trip the watchdog`);
-      now = new Date(now.getTime() + 30_000);
-    }
+  it('gives a probe that has only just connected its window, not the core’s uptime', () => {
+    // **`P-80`, and a regression `P-77` introduced.** `P-77` narrowed `configSentAt` to the branch
+    // that actually sends configuration — correct in itself — but the ordinary reconnect is
+    // `config-unchanged`: the probe kept its fingerprint across the drop, so the core sends
+    // nothing and stamps nothing. That session then has neither an arrival nor a push, and the
+    // window ran from the core's whole uptime. A probe cannot have been silent for longer than
+    // the session it is silent on.
+    const seen = verdict(
+      facts({ sinceResultsMs: null, sinceConfigMs: null, connectedForMs: 3_000 }),
+      pastGrace(21_600),
+    );
+    assert.equal(seen.stalled, false, 'three seconds into a session is not six hours of silence');
+    assert.equal(seen.silentForMs, 3_000);
+  });
+
+  it('does not let the session clock excuse a probe that has been connected and quiet', () => {
+    // The other side of it: the session's own age is a floor on the window, not a reprieve.
+    const seen = verdict(
+      facts({ sinceResultsMs: null, sinceConfigMs: null, connectedForMs: 3_600_000 }),
+      pastGrace(4_000),
+    );
+    assert.equal(seen.stalled, true);
+    assert.equal(seen.silentForMs, 3_600_000);
+  });
+
+  it('treats an anchor that has never happened as forever ago, never as just now', () => {
+    // The one arithmetic trap in moving from instants to ages. `null` meaning "no arrival yet"
+    // has to read as `Infinity` in a `Math.min`, because 0 would read as "this instant" and
+    // excuse the probe for the life of the process — the mirror of the `?? 0` that was correct
+    // under `Math.max` over instants.
+    const seen = verdict(
+      facts({ sinceResultsMs: null, sinceConfigMs: null, connectedForMs: 900_000 }),
+      pastGrace(1_000),
+    );
+    assert.equal(seen.stalled, true, 'never having delivered is not the same as having just');
+    assert.equal(seen.silentForMs, 900_000);
   });
 
   it('can be switched off entirely', () => {
-    const seen = verdict(facts(), after(1_000_000), START, {
-      ...DELIVERY_DEFAULTS,
-      intervals: 0,
-    });
+    const seen = verdict(facts(), pastGrace(1_000_000), { ...DELIVERY_DEFAULTS, intervals: 0 });
     assert.equal(seen.stalled, false);
     assert.equal(seen.reason, 'disabled');
   });
@@ -203,13 +193,29 @@ describe('whether a connected probe is delivering', () => {
     // Once stalled, more silence cannot make it un-stalled; the only thing that clears it is
     // something arriving. Stated as a law because a rule that flaps writes garbage into the state
     // history uptime and SLA are computed from.
-    const arrived = after(5_000);
     let sawStalled = false;
-    for (let s = 5_000; s <= 6_000; s += 10) {
-      const seen = verdict(facts({ lastResultsAt: arrived }), after(s), START);
+    for (let ms = 0; ms <= 1_000_000; ms += 10_000) {
+      const seen = verdict(facts({ sinceResultsMs: ms }), pastGrace(100_000));
       if (seen.stalled) sawStalled = true;
-      else assert.equal(sawStalled, false, `un-stalled at ${String(s)} s after having stalled`);
+      else assert.equal(sawStalled, false, `un-stalled at ${String(ms)} ms of silence`);
     }
     assert.equal(sawStalled, true, 'and it does stall eventually');
+  });
+
+  it('cannot express a negative age, which is what the clock defects were', () => {
+    // `P-80` found the rule answering 'delivering' for every probe after a backward clock step,
+    // because `silentForMs` was a difference of two wall-clock instants and nothing checked its
+    // sign. There is no longer an input that could produce one: every field is a monotonic age,
+    // and `Math.min` over non-negative numbers is non-negative. This asserts the property rather
+    // than a scenario, because the scenario is no longer constructible.
+    for (const over of [
+      { sinceResultsMs: 0 },
+      { sinceConfigMs: 0, connectedForMs: 0 },
+      { sinceResultsMs: 0, sinceConfigMs: 0, connectedForMs: 0 },
+    ]) {
+      const seen = verdict(facts(over), pastGrace(0));
+      assert.ok((seen.silentForMs ?? 0) >= 0, `negative age from ${JSON.stringify(over)}`);
+      assert.equal(seen.stalled, false, 'and zero silence is never a stall');
+    }
   });
 });

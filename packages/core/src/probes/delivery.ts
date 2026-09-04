@@ -28,7 +28,20 @@
  * second copy of it that could drift.
  */
 
-/** What the sweep knows about one probe. Everything here is the core's own knowledge. */
+/**
+ * What the sweep knows about one probe.
+ *
+ * **Ages, not instants** (`P-81`). Every field here used to be a wall-clock `Date` and the rule
+ * subtracted them, which `CLAUDE.md` forbids in as many words: *time is monotonic for scheduling,
+ * wall-clock for data*. This is a duration, so it is scheduling. A backward step put the reference
+ * in the future and the watchdog answered 'delivering' for every probe until wall-clock caught up;
+ * a forward step was indistinguishable from that much silence and marked whole probes Unknown.
+ * Both are arithmetic on the wrong clock, and neither can happen to a difference of two readings
+ * of `process.hrtime.bigint()`.
+ *
+ * The endpoint computes these when the link is read, because it is the only thing that holds both
+ * the stamps and a monotonic clock. The `Date`s it also carries are for display and the API.
+ */
 export interface DeliveryFacts {
   /**
    * Sensors the core has told this probe to scan.
@@ -46,27 +59,45 @@ export interface DeliveryFacts {
    */
   readonly cadenceSeconds: number | null;
   /**
-   * When a results batch last **arrived**. Never `result.at`. Null when none has since the core
-   * started, or since this probe was last seen at all.
+   * Milliseconds since a results batch last **arrived**. Never `result.at`. Null when none has
+   * since the core started, or since this probe was last seen at all.
    */
-  readonly lastResultsAt: Date | null;
+  readonly sinceResultsMs: number | null;
   /**
-   * When this probe was last sent its assignments.
+   * Milliseconds since this probe was last sent its assignments.
    *
-   * A probe cannot be late with work it has only just been given, so the window runs from here
-   * as well — which covers the config push that follows every reconnect.
+   * A probe cannot be late with work it has only just been given, so the window runs from here as
+   * well — which covers the config push that follows every reconnect. Null when this session has
+   * been sent none, which `configured` below tells apart from "sent none because there are none".
    */
-  readonly configSentAt: Date | null;
+  readonly sinceConfigMs: number | null;
   /**
-   * When the probe's current session was established (`P-80`).
+   * Milliseconds since this probe's current session was established.
    *
-   * A probe cannot have been silent for longer than the session it is silent on. Without this the
-   * ordinary reconnect — the probe kept its configuration fingerprint across the drop, so the
-   * core answers `config-unchanged` and stamps nothing — produced a session with no
-   * `configSentAt` and no `lastResultsAt`, and the window then ran from start-up plus grace: a
-   * probe that reconnected seconds ago was judged on the core's whole uptime.
+   * A probe cannot have been silent for longer than the session it is silent on. Without it the
+   * ordinary reconnect — the probe kept its fingerprint, so the core answers `config-unchanged`
+   * and stamps nothing — was judged on the core's whole uptime (`P-80`).
    */
-  readonly connectedAt: Date | null;
+  readonly connectedForMs: number;
+  /**
+   * Whether the core has successfully worked out what this probe should scan, on this session.
+   *
+   * **`assignedSensors: 0` cannot answer it** (`P-82`). That number is what the core *built*, and
+   * on every path where the computation did not happen it is still the empty set a session opens
+   * with — which reads exactly like a probe that legitimately has nothing to do. `assignmentsFor`
+   * throwing is logged once and the connection is kept, and on a stable installation nothing
+   * retries for days: a probe carrying three hundred sensors and checking none of them reported
+   * `delivering: 1`, the precise failure this file exists to catch.
+   */
+  readonly configured: boolean;
+  /**
+   * Whether this probe is new enough to be sent configuration at all (`R-06`).
+   *
+   * Separate from `configured` so that one outage stays one alarm: a probe below the config-push
+   * version scans nothing, but Probe Health's `protocol` channel already says so with its own
+   * lookup, and a second alarm here for the same cause is what `CLAUDE.md` forbids.
+   */
+  readonly configurable: boolean;
 }
 
 export interface DeliveryOptions {
@@ -108,7 +139,17 @@ export type DeliveryReason =
   /** Something arrived inside the window. */
   | 'delivering'
   /** Assigned work, and nothing has arrived for longer than the window allows. */
-  | 'silent';
+  | 'silent'
+  /**
+   * Connected, and the core never managed to work out what it should scan (`P-82`).
+   *
+   * A distinct reason because it is a distinct fault with a distinct fix: the probe is fine and
+   * the core's own configuration build failed, so the message an operator reads must not send
+   * them to the probe host.
+   */
+  | 'unconfigured'
+  /** Below the config-push protocol version, so `R-06`'s `protocol` channel owns this one. */
+  | 'too-old';
 
 export interface DeliveryVerdict {
   readonly stalled: boolean;
@@ -149,47 +190,53 @@ export function deliveryWindowMs(
 /**
  * Is this probe still delivering?
  *
- * `startedAt` is when this core process came up, not when the probe connected: the grace exists
- * to stop a restart alarming on probes it has not heard from *yet*, and a probe that reconnects
- * an hour later is not in anybody's grace period.
+ * `coreUptimeMs` is how long this core process has been running, monotonically. The grace is
+ * measured against it because the grace exists to stop a restart alarming on probes it has not
+ * heard from *yet* — a probe that reconnects an hour later is in nobody's grace period.
+ *
+ * **Every input is an age, and every age is a monotonic difference**, so none of them can be
+ * negative and no clock step can move one (`P-81`). The arithmetic below is the exact dual of the
+ * `Math.max` over instants it replaces: the most recent anchor is the *smallest* age.
  */
 export function verdict(
   facts: DeliveryFacts,
-  now: Date,
-  startedAt: Date,
+  coreUptimeMs: number,
   options: DeliveryOptions = DELIVERY_DEFAULTS,
 ): DeliveryVerdict {
   if (options.intervals <= 0) return NOT_STALLED('disabled');
-  if (facts.assignedSensors <= 0) return NOT_STALLED('nothing-assigned');
+  // Before anything else, because a probe the core cannot configure is `R-06`'s to report and its
+  // `protocol` channel already does — one outage, one alarm (`P-82`).
+  if (!facts.configurable) return NOT_STALLED('too-old');
 
-  const graceEndsAt = startedAt.getTime() + options.graceSeconds * 1_000;
-  if (now.getTime() < graceEndsAt) return NOT_STALLED('in-grace');
+  const graceMs = options.graceSeconds * 1_000;
+  if (coreUptimeMs < graceMs) return NOT_STALLED('in-grace');
+  const sinceGraceMs = coreUptimeMs - graceMs;
 
-  // **The later of the four, and each is there for its own reason.** Start-up plus grace, because
-  // a core that has just come up has not had time to hear from anybody. The config push, because a
-  // probe cannot be late with work it was only just given. The session's own start, because a
-  // probe cannot be late on a connection that did not exist. And the last arrival, which is the
-  // measurement itself.
-  //
-  // Clamped to `now`, which is not tidiness. Every input here is a wall-clock `Date`, and the
-  // comparison below only ever asked whether the gap exceeded the window — never whether it was
-  // negative. A backward clock step therefore put `since` in the future and answered 'delivering'
-  // for every probe until wall-clock caught up, without healing on arrival. Re-anchoring at the
-  // step costs one window of blindness instead of the whole step (`P-80`).
-  const since = Math.min(
-    now.getTime(),
-    Math.max(
-      graceEndsAt,
-      facts.configSentAt?.getTime() ?? 0,
-      facts.lastResultsAt?.getTime() ?? 0,
-      facts.connectedAt?.getTime() ?? 0,
-    ),
-  );
-  const silentForMs = now.getTime() - since;
+  // **"Nothing assigned" only when we actually worked it out** (`P-82`). An unconfigured session
+  // carries the same empty set as a legitimately empty probe, and answering `nothing-assigned` for
+  // it is how a probe with three hundred unchecked sensors reported itself as delivering.
+  if (facts.configured && facts.assignedSensors <= 0) return NOT_STALLED('nothing-assigned');
+
   const windowMs = deliveryWindowMs(facts.cadenceSeconds, options);
+
+  // **The most recent of the four, which among ages is the smallest.** Start-up plus grace,
+  // because a core that has just come up has not had time to hear from anybody. The config push,
+  // because a probe cannot be late with work it was only just given. The session's own start,
+  // because a probe cannot be late on a connection that did not exist. And the last arrival, which
+  // is the measurement itself. An anchor that has never happened is `Infinity` — not zero, which
+  // would read as "just now" and excuse the probe for ever.
+  const silentForMs = Math.min(
+    sinceGraceMs,
+    facts.sinceConfigMs ?? Number.POSITIVE_INFINITY,
+    facts.sinceResultsMs ?? Number.POSITIVE_INFINITY,
+    facts.connectedForMs,
+  );
 
   // `>` rather than `>=`: "silent for longer than the window" is what the sentence says, and a
   // probe reporting exactly on its own period must not be called late for being punctual.
-  if (silentForMs > windowMs) return { stalled: true, reason: 'silent', silentForMs, windowMs };
+  if (silentForMs > windowMs) {
+    const reason: DeliveryReason = facts.configured ? 'silent' : 'unconfigured';
+    return { stalled: true, reason, silentForMs, windowMs };
+  }
   return { stalled: false, reason: 'delivering', silentForMs, windowMs };
 }
