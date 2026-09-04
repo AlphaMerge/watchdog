@@ -281,6 +281,58 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     assert.equal(valueOf(strict, 'v'), undefined, 'and the neighbour is untouched');
   });
 
+  it('propagates a gap up a factory stack instead of last sweep’s number', async () => {
+    // `P-69`. `#readInputs` loads the latest stored sample for every referenced channel, and a
+    // factory read by another factory has samples of its own — real ingestion writes them. So
+    // when the lower one gaps, its *previous* reading is sitting in the shared map and the upper
+    // one computes from it, which is exactly what the dependency ordering exists to prevent:
+    // "this sweep's value rather than last sweep's" has to mean a gap when this sweep produced
+    // nothing.
+    //
+    // The stored row is written by hand because this harness's `ingest` collects results rather
+    // than storing them — which is also why nothing here noticed.
+    const measured = await source('measured', 'v', 10);
+    const lower = await makeFactory('Lower', [
+      { key: 'v', formula: `channel(${String(measured)}, 'v') * 2` },
+    ]);
+    const upper = await makeFactory('Upper', [
+      { key: 'v', formula: `channel(${String(lower)}, 'v') + 1` },
+    ]);
+
+    await factory.sweep();
+    assert.equal(valueOf(lower, 'v'), 20);
+    assert.equal(valueOf(upper, 'v'), 21);
+
+    // What ingestion would have written for `lower` on that sweep: the channel its result names,
+    // and a row in it. Creating a factory declares a channel called `value`; the keys its
+    // formulas actually report under only exist once something has ingested them, which is why
+    // this has to be done by hand in a harness whose `ingest` collects rather than stores.
+    const [lowerChannel] = await db.query<{ id: string }>(
+      `INSERT INTO channel (sensor_id, key, name, unit) VALUES ($1, 'v', 'v', '')
+       ON CONFLICT (sensor_id, key) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+      [lower],
+    );
+    await db.query(`INSERT INTO sample (channel_id, time, value) VALUES ($1, now(), 20)`, [
+      Number(lowerChannel?.id),
+    ]);
+    // Now take away only what `lower` reads. Its own stored 20 stays exactly where real
+    // ingestion left it.
+    await db.query(
+      `DELETE FROM sample WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)`,
+      [measured],
+    );
+    ingested = [];
+    await factory.sweep();
+
+    assert.equal(valueOf(lower, 'v'), undefined, 'its own source is gone');
+    assert.equal(
+      valueOf(upper, 'v'),
+      undefined,
+      'and the gap reaches the factory above, rather than the 20 it stored a moment ago',
+    );
+  });
+
   it('fails rather than reporting nothing when every channel gapped', async () => {
     // Not a reading of none: every source this sensor is built on is missing, which is a fault
     // of its own rather than a quiet period.

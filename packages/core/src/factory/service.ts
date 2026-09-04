@@ -114,6 +114,18 @@ export class FactoryService {
 
     const results: CheckResult[] = [];
     for (const sensor of order) {
+      // **A factory's own stored rows are not evidence about this sweep** (`P-69`). `#readInputs`
+      // loaded the latest sample for every referenced channel, and a factory read by another
+      // factory has samples of its own — so without this, a factory that gaps, fails on a broken
+      // formula, or sits in a cycle leaves its *previous* reading in the map, and the factory
+      // above computes a number from it. That is the one thing the dependency ordering exists to
+      // prevent: "this sweep's value rather than last sweep's" has to mean a gap when this sweep
+      // produced nothing. Cleared before any branch below can `continue`, and written back a few
+      // lines down for whatever this sensor actually computes.
+      for (const channel of sensor.channels) {
+        inputs.channels.delete(`${String(sensor.sensorId)}:${channel.key}`);
+      }
+
       const inCycle = cycles.get(sensor.sensorId);
       if (inCycle !== undefined) {
         this.#cycles += 1;

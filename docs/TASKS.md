@@ -5690,14 +5690,29 @@ because each is a decision rather than a defect:
       `P-59`/`P-60`/`P-63` and not yet verified by hand — the treatment `P-58` prescribes has not
       been applied, and the entry says so rather than pretending otherwise.
 
-- [ ] **P-69 — A gapped Sensor Factory leaves its stored sample where a factory above reads it** ·
-      S · P-59 · Raised by the review of `P-59` and not verified by hand. `#readInputs` loads the
-      latest stored sample for every referenced channel, including channels belonging to *factory*
-      sensors. When a factory's channel gaps this sweep the write-back does not happen — so the map
-      still holds that factory's own previous reading from the database, and a factory above it
-      computes from last sweep's number instead of seeing a gap. If it holds it is "no-data is not
-      zero" broken across a factory stack, and the fix is to evict a factory's channels from the
-      map when it gaps rather than leaving the stored row to stand in.
+- [x] **P-69 — A gapped Sensor Factory leaves its stored sample where a factory above reads it** ·
+      S · P-59 · Raised by the review of `P-59`, then verified by hand and by a test that fails
+      against the old code. `#readInputs` loads the latest stored sample for every referenced
+      channel, and a factory read by another factory has samples of its own — real ingestion writes
+      them. When the lower factory gaps, the write-back does not happen, so its *previous* reading
+      is still sitting in the shared map and the factory above computes from it. Same for a factory
+      with a formula that will not parse, and for one in a cycle: all three branches `continue`
+      without touching the map.
+
+      That is exactly what the dependency ordering exists to prevent. The sweep's own comment says
+      a factory over a factory "sees this sweep's value rather than last sweep's" — which has to
+      mean a gap when this sweep produced nothing, or the ordering buys nothing at all. Fixed by
+      clearing a factory's own channels from the map at the top of the loop, before any branch can
+      `continue`, so only what it actually computes this sweep is visible downstream.
+
+      **Two false starts, both worth recording.** The first test deleted every sample, which
+      removed the lower factory's stored row along with its source, so there was nothing left to
+      read and the test passed against the defect. The second inserted a sample for channel `v` and
+      matched no rows: creating a factory through the harness declares a channel called `value`,
+      because the *test catalogue's* stub for `core.factory` returns a fixed channel list and
+      ignores its params — the real type derives them correctly, so this is a test double and not a
+      defect, but it is enough to make a hand-written fixture miss. The reproducing test creates the
+      channel the way ingestion would and then inserts into it.
 
 - [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so
