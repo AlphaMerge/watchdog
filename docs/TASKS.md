@@ -227,7 +227,19 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
 
       What is left is what actually needs the host: the benchmark, and whether `setup.exe`
       composes with how an operator installs PostgreSQL on Windows — there is no Windows
-      counterpart to `scripts/smoke/provision-postgres.sh`. Re-check the availability finding
+      counterpart to `scripts/smoke/provision-postgres.sh`.
+
+      **Writing that counterpart blind was considered on 2026-09-04 and deliberately not done.**
+      The Linux script is 38 lines and the shape transfers — preload `timescaledb`, set the licence,
+      restart, wait, create the role and database, `CREATE EXTENSION`. What does not transfer is
+      every particular it depends on: the data directory, the service name, and whether
+      `setup.exe` places the extension where a running server will find it. The finding above says
+      in as many words that this is unverified, so a `.ps1` written now would be a guess at paths
+      and service names that reads like progress and proves nothing — and `P-53` would parse-check
+      it, which makes it look checked. Write it on the host, where the first run says whether it is
+      right.
+
+      Re-check the availability finding
       before a Windows release; an upstream that stopped publishing Windows builds would flip it.
       **Added by S-12:** if the answer is a fallback, the work is bounded and half-measured
       already. A `PlainPostgresEngine` needs four methods — `date_bin` for bucketing (verified
