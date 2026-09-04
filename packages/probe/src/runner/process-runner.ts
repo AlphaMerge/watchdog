@@ -164,16 +164,44 @@ export class ProcessRunner {
   }
 
   /** Fire and forget, exactly like `CheckPool.submit`: the wheel must never wait for a check. */
-  submit(request: CheckRequest): SubmitOutcome {
+  /**
+   * Whether a check offered right now would be taken — `submit`'s rule without `submit`'s counters
+   * (`P-57`).
+   *
+   * **It exists so a listener sensor's messages are not drained into a check that is then
+   * refused.** `NotificationRing.drain` advances the cursor unconditionally and hands the batch
+   * back, so a caller that drains first and submits second loses everything it drained whenever
+   * the answer is `already-running` — which is the ordinary case, not an exotic one: skipping
+   * while the previous scan is still going is the rule (`WORKFLOW.MD §3`), and a syslog sensor
+   * under a flood is exactly the sensor whose previous scan is still going.
+   *
+   * Safe to ask separately only because the wheel's `onDue` is synchronous and single-threaded:
+   * nothing can change between the question and the `submit` that follows it. It shares
+   * `#admission` with `submit` rather than restating the rule, so the two cannot drift.
+   */
+  accepts(sensorId: number): boolean {
+    return this.#admission(sensorId) === 'accepted';
+  }
+
+  /** The decision alone. Counting is `submit`'s, so asking twice never moves a counter. */
+  #admission(sensorId: number): SubmitOutcome {
     if (this.#stopped) return 'stopped';
+    // WORKFLOW.MD §3, the same rule the pool follows: a sensor never stacks.
+    if (this.#active.has(sensorId)) return 'already-running';
+    if (this.#queue.length >= this.#queueMax) return 'queue-full';
+    return 'accepted';
+  }
+
+  submit(request: CheckRequest): SubmitOutcome {
+    const verdict = this.#admission(request.sensorId);
+    if (verdict === 'stopped') return 'stopped';
     this.#submitted += 1;
 
-    if (this.#active.has(request.sensorId)) {
-      // WORKFLOW.MD §3, the same rule the pool follows: a sensor never stacks.
+    if (verdict === 'already-running') {
       this.#deferred += 1;
       return 'already-running';
     }
-    if (this.#queue.length >= this.#queueMax) {
+    if (verdict === 'queue-full') {
       this.#refused += 1;
       this.#logger.warn(
         { sensorId: request.sensorId, queued: this.#queue.length },

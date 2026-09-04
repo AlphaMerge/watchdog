@@ -6,6 +6,7 @@ import {
   runConfigCheck,
   type CheckResult,
   type ProbeConfig,
+  type SensorAssignment,
 } from '@ms/shared';
 import { standardCatalogue } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
@@ -20,6 +21,7 @@ import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
 import { coreHandlers } from './core-handlers.js';
+import { dueDispatcher, type DueListener } from './due-dispatch.js';
 import { poolSizer } from './pool-sizer.js';
 import { ResultSpool } from './spool/spool.js';
 import { SpoolDrain } from './spool/drain.js';
@@ -249,34 +251,27 @@ async function main(): Promise<void> {
 
   // The scheduler hands due sensors to the pool and returns. `onDue` runs on the wheel's own
   // thread, so it must never wait for a check — `submit` is fire-and-forget by design.
+  // A listener the operator disabled is simply absent, which is what lets the dispatcher do one
+  // lookup rather than a chain of conditionals per listener kind.
+  const listeners = new Map<string, DueListener>();
+  if (trapListener !== undefined) listeners.set(LISTENER_ID, trapListener);
+  if (syslogListener !== undefined) listeners.set(SYSLOG_LISTENER_ID, syslogListener);
+
   const wheel = new TimingWheel({
     logger,
-    onDue: (due) => {
-      for (const sensorId of due) {
-        const assignment = assignments.get(sensorId);
-        if (assignment === undefined) continue;
-        // A listener sensor is handed what arrived since its last scan instead of polling. The
-        // drain is a slice of a ring buffer — O(what arrived) and no I/O — so it is safe on the
-        // wheel's own thread, which must never wait for anything.
-        const wants = listenerFor.get(assignment.sensorType);
-        const received =
-          wants === LISTENER_ID && trapListener !== undefined
-            ? trapListener.drain(sensorId)
-            : wants === SYSLOG_LISTENER_ID && syslogListener !== undefined
-              ? syslogListener.drain(sensorId)
-              : undefined;
-        const runner = isolated.has(assignment.sensorType) ? processRunner : pool;
-        runner.submit({
-          sensorId,
-          sensorType: assignment.sensorType,
-          target: assignment.target,
-          params: assignment.params,
-          ...(assignment.credentials === undefined ? {} : { credentials: assignment.credentials }),
-          ...(received === undefined ? {} : { received }),
-          timeoutMs: assignment.timeoutMs,
-        });
-      }
-    },
+    onDue: dueDispatcher({
+      // A closure with its return type written down, not the binding itself. `assignments` is
+      // constructed below because it needs the wheel, so reading it here would be its temporal
+      // dead zone — and leaving the type to inference makes `wheel` circular through it.
+      assignments: {
+        get: (sensorId: number): SensorAssignment | undefined => assignments.get(sensorId),
+      },
+      listenerFor,
+      listeners,
+      isolated,
+      pool,
+      processRunner,
+    }),
   });
   // Constructed before the wheel is started: `onDue` closes over this binding, and a tick that
   // fired first would find it in the temporal dead zone.
