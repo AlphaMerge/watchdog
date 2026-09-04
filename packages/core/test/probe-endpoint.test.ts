@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Socket } from 'node:net';
 import { connect, type TLSSocket } from 'node:tls';
 import { before, describe, it } from 'node:test';
 import { pino } from 'pino';
@@ -173,10 +174,21 @@ class TestProbe {
     socket.on('error', () => undefined);
   }
 
-  static async connect(dir: string, port: number, certName = 'probe'): Promise<TestProbe> {
+  static async connect(
+    dir: string,
+    port: number,
+    certName = 'probe',
+    options: { wedged?: boolean } = {},
+  ): Promise<TestProbe> {
+    // A wedged peer is one that never answers our FIN. `allowHalfOpen` is a `net.Socket` option
+    // rather than a TLS one, so the socket is built first and handed to `connect` — which is also
+    // the only honest way to model a probe that has stopped reading (`P-67`).
+    const underlying =
+      options.wedged === true
+        ? new Socket({ allowHalfOpen: true }).connect(port, '127.0.0.1')
+        : undefined;
     const socket = connect({
-      host: '127.0.0.1',
-      port,
+      ...(underlying === undefined ? { host: '127.0.0.1', port } : { socket: underlying }),
       cert: await readIfPresent(join(dir, `${certName}.crt`)),
       key: await readIfPresent(join(dir, `${certName}.key`)),
       ca: await readIfPresent(join(dir, 'ca.crt')),
@@ -478,6 +490,44 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     } finally {
       await endpoint.stop();
     }
+  });
+
+  it('shuts down while a probe is wedged, rather than waiting for a FIN that never comes', async () => {
+    // **`Server.close()` waits for every open connection, and `stop()` only *asks* them to go.**
+    // A session is `end()`ed, not destroyed, so a probe that has stopped reading keeps its half
+    // of the socket open and the shutdown never completes — a core that has to be SIGKILLed, on
+    // exactly the restart most likely to be happening *because* a probe is wedged (`P-67`).
+    //
+    // This was suspected while fixing `P-65`, tested with an ordinary client, and wrongly written
+    // off: an ordinary client answers the FIN automatically, so `stop()` returned at once and the
+    // hang looked imaginary. `allowHalfOpen` is what makes the peer actually wedged.
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir, { heartbeatIntervalMs: 30_000 }),
+      logger: silentLogger,
+      coreVersion: '0.1.0',
+    });
+    const address = await endpoint.start();
+    const probe = await TestProbe.connect(dir, address.port, 'probe', { wedged: true });
+    probe.send(hello({ gid: 'probe-wedged' }));
+    await probe.waitFor((m) => m.type === 'welcome');
+
+    const startedAt = process.hrtime.bigint();
+    const outcome = await Promise.race([
+      endpoint.stop().then(() => 'stopped'),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve('still waiting');
+        }, 8_000).unref();
+      }),
+    ]);
+    const tookMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    probe.close();
+
+    assert.equal(outcome, 'stopped', `stop() did not finish, took ${tookMs.toFixed(0)} ms`);
+    assert.ok(
+      tookMs < 5_000,
+      `the grace is one second, so this must not approach the idle timeout; took ${tookMs.toFixed(0)} ms`,
+    );
   });
 
   it('acknowledges a results batch', async () => {

@@ -5608,13 +5608,19 @@ because each is a decision rather than a defect:
       socket inside the second it now allows. It went from 3,010 ms and one failure in six to
       13–29 ms and six for six, and it fails deterministically when the supersede is removed.
 
-      **A production shutdown hang was suspected here and does not exist.** Removing the supersede
-      made the test take 90 s rather than 1 s, which pointed at `stop()`: it closes only what is in
-      `#sessions`, and `server.close()` waits for every open connection. Two candidates were tried
-      — a peer that ignores its `bye`, and a probe left pending approval, which `#openSession`
-      deliberately does not store — and `stop()` returned in 0 ms for both. The 90 s was the
-      orphaned connection alone, which is the defect above. Recorded because the reasoning is
-      sound and the conclusion is still wrong, and the next person will re-derive it.
+      **A production shutdown hang was suspected here and written off. That was wrong — see
+      `P-67`.** Removing the supersede made the test take 90 s rather than 1 s, which pointed at
+      `stop()`: it closes only what is in `#sessions`, and `server.close()` waits for every open
+      connection. Two candidates were tried — a peer that ignores its `bye`, and a probe left
+      pending approval, which `#openSession` deliberately does not store — and `stop()` returned in
+      0 ms for both, so it was recorded here as a discard.
+
+      Both tests were incapable of producing the condition. An ordinary `tls.connect` client
+      answers the server's FIN automatically, so nothing was ever wedged; the peer has to be built
+      on a socket with `allowHalfOpen: true`. With one, `stop()` was still waiting after six
+      seconds. The hang is real and `P-67` fixes it. Left here rather than edited away, because a
+      discard on the strength of a test that could not fail is worth more as a warning than as a
+      deletion.
 
 - [x] **P-66 — `P-60`'s cut-off counts the snapshot it sends, and detaches healthy clients** · S ·
       P-60 · Found by an adversarial review of `P-60` itself, and it is worse than the defect
@@ -5652,6 +5658,46 @@ because each is a decision rather than a defect:
 
       Also corrected here: the `readMaxAge` rationale in `P-59`, in the code comment, the ticket
       and the commit message. `Math.max(0, NaN)` is `NaN`, not `Infinity`. See `P-59`.
+
+- [x] **P-67 — A wedged probe holds the core's shutdown open for ever** · S · P-65 · **`P-65`
+      refuted this and `P-65` was wrong.** `ProbeEndpoint.stop()` ends its sessions and then awaits
+      `server.close()`, which completes only when every accepted socket has closed. `close()` sends
+      `bye` and calls `socket.end()` — a half-close, an *ask*. A probe that has stopped reading
+      never answers with its own FIN, so the socket stays open, `server.close()` never calls back,
+      and the shutdown never finishes: a core that has to be SIGKILLed, on exactly the restart most
+      likely to be happening *because* a probe is wedged.
+
+      The refutation in `P-65` tested this with an ordinary `tls.connect` client, which answers the
+      server's FIN automatically — so `stop()` returned in 0 ms twice and the hang looked
+      imaginary. The peer has to be built on a socket with `allowHalfOpen: true` to be wedged at
+      all. With one, `stop()` was still waiting after six seconds. Two negative results against a
+      test that could not produce the condition, written up as a discard: the mistake `P-58` exists
+      to prevent, made three tickets later.
+
+      `#sessions` was never the set of open sockets and reading it as one is the root of it: a peer
+      mid-handshake, one left pending approval, and one whose session was superseded are all live
+      connections that nothing in that map points at. Every accepted socket is tracked now, and
+      after a one-second grace — long enough for `bye` and a FIN to cross a WAN link, short enough
+      that an operator does not think the restart has wedged — anything still open is destroyed.
+
+      The test fails deterministically at eight seconds when the grace is removed, and passes at
+      1,014 ms with it.
+
+- [ ] **P-68 — `MessageConnection` declares a backpressure signal that reaches nothing** · S · P-61
+      · `pendingInboundBytes` is documented on the connection as "a backpressure signal for Probe
+      Health" and is read by nothing. The same shape as `P-61` and `P-64`, in the transport: a
+      number computed, named for a consumer, and never wired to one. Raised by the review of
+      `P-59`/`P-60`/`P-63` and not yet verified by hand — the treatment `P-58` prescribes has not
+      been applied, and the entry says so rather than pretending otherwise.
+
+- [ ] **P-69 — A gapped Sensor Factory leaves its stored sample where a factory above reads it** ·
+      S · P-59 · Raised by the review of `P-59` and not verified by hand. `#readInputs` loads the
+      latest stored sample for every referenced channel, including channels belonging to *factory*
+      sensors. When a factory's channel gaps this sweep the write-back does not happen — so the map
+      still holds that factory's own previous reading from the database, and a factory above it
+      computes from last sweep's number instead of seeing a gap. If it holds it is "no-data is not
+      zero" broken across a factory stack, and the fix is to evict a factory's channels from the
+      map when it gaps rather than leaving the stored row to stand in.
 
 - [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so

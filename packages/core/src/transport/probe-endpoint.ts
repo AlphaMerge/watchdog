@@ -291,6 +291,15 @@ function keyMatches(presented: string, accepted: readonly string[]): boolean {
  */
 const CONFIG_CHUNK_SENSORS = 1_000;
 
+/**
+ * How long a probe has to answer `bye` before its socket is taken from under it (`P-67`).
+ *
+ * Long enough for a frame and a FIN to cross a WAN link to a remote probe, short enough that an
+ * operator restarting the core does not think it has wedged. A well-behaved probe closes in
+ * milliseconds and never sees this.
+ */
+const SHUTDOWN_GRACE_MS = 1_000;
+
 /** `items` in runs of `size`, the last one short. Never an empty chunk, even for no items. */
 function chunked<T>(items: readonly T[], size: number): (readonly T[])[] {
   if (items.length === 0) return [[]];
@@ -303,6 +312,14 @@ export class ProbeEndpoint {
   readonly #options: ProbeEndpointOptions;
   readonly #logger: Logger;
   readonly #sessions = new Map<string, ProbeSession>();
+  /**
+   * Every accepted socket, so shutdown cannot be held open by one that will not answer (`P-67`).
+   *
+   * `#sessions` is not this set and never was: it holds approved sessions only, so a peer
+   * mid-handshake, one left pending approval, and one whose session was superseded are all live
+   * sockets that nothing in it points at. `Server.close()` waits for every one of them.
+   */
+  readonly #sockets = new Set<TLSSocket>();
   #server: Server | undefined;
 
   constructor(options: ProbeEndpointOptions) {
@@ -373,11 +390,26 @@ export class ProbeEndpoint {
       server.close(() => {
         resolve();
       });
+      // **`close()` waits for every open connection, and `close()` above only asks.** A session
+      // is ended, not destroyed, so a probe that never answers our FIN keeps its half of the
+      // socket open for ever and the shutdown never completes — a service that has to be
+      // SIGKILLed, on the restart where a probe is wedged, which is the restart most likely to
+      // be happening because a probe is wedged. The grace is for the `bye` to reach a probe that
+      // *is* listening; after it, anything still here is not coming back (`P-67`).
+      const grace = setTimeout(() => {
+        for (const socket of this.#sockets) socket.destroy();
+        this.#sockets.clear();
+      }, SHUTDOWN_GRACE_MS);
+      grace.unref();
     });
     this.#logger.info('probe endpoint stopped');
   }
 
   #accept(socket: TLSSocket): void {
+    this.#sockets.add(socket);
+    socket.on('close', () => {
+      this.#sockets.delete(socket);
+    });
     const remoteAddress = socket.remoteAddress ?? 'unknown';
     const connectionLogger = this.#logger.child({ remoteAddress });
     const { config, coreVersion } = this.#options;
