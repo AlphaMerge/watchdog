@@ -286,9 +286,48 @@ describe('result spool', () => {
       segments: 0,
       dropped: 0,
       corrupt: 0,
+      unwritten: 0,
     });
     assert.deepEqual(await spool.peek(10), []);
     await spool.commit();
+    await spool.close();
+  });
+
+  it('counts the results a failed write lost, and still tells the caller', async () => {
+    // **`P-78`.** `main.ts` logged the rejection and the readings were gone, counted nowhere —
+    // the one thing `CLAUDE.md` forbids outright: never drop without counting. This is the worse
+    // of the two ways a reading stops existing, because a spool that cannot be written loses
+    // *every* check the probe runs, not the oldest ones, and `spoolDropped` would read a
+    // confident zero throughout.
+    const spool = await openSpool(dir);
+    // The directory out from under it: `#roll` opens the segment file there, so the write fails
+    // with ENOENT. Deterministic, and unlike a permissions trick it fails for root too.
+    await rm(dir, { recursive: true, force: true });
+
+    await assert.rejects(
+      spool.append([result(1), result(2)]),
+      'the caller must still see the error — the count is in addition to it, not instead',
+    );
+    assert.equal(spool.stats().unwritten, 2, 'two results were handed over and two were lost');
+    assert.equal(spool.stats().dropped, 0, 'and this is not eviction; the cap did nothing');
+  });
+
+  it('keeps counting across writes, and one failure does not poison the next', async () => {
+    // The count is cumulative, and the existing guarantee still holds: a rejected append must not
+    // reject every later one. Adding a second consumer to that promise chain is exactly the sort
+    // of change that could have broken it silently.
+    const spool = await openSpool(dir);
+    const gone = await scratch();
+    const doomed = await openSpool(gone);
+    await rm(gone, { recursive: true, force: true });
+
+    await assert.rejects(doomed.append([result(1)]));
+    await assert.rejects(doomed.append([result(2), result(3)]));
+    assert.equal(doomed.stats().unwritten, 3);
+
+    await spool.append([result(4)]);
+    assert.equal(spool.stats().unwritten, 0, 'a healthy spool counts nothing');
+    assert.equal((await spool.peek(10)).length, 1, 'and still holds what it was given');
     await spool.close();
   });
 

@@ -1034,6 +1034,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `spoolDepth` | Results spooled | results | — |
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |
+| `spoolUnwritten` | Results not written | results | 64-bit counter → rate; default limits: error above 0.00001 |
 | `spoolStalled` | Spool stalled for | s | default limits: error above 0.5 |
 | `clockJumps` | Clock jumps | jumps | 64-bit counter → rate |
 | `cpu` | CPU | % | — |

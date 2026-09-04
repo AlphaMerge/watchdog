@@ -62,7 +62,14 @@ const CHILDREN: ProcessRunnerStats = {
   runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
 };
 
-const SPOOL: SpoolStats = { pending: 500, bytes: 2_097_152, segments: 1, dropped: 4, corrupt: 0 };
+const SPOOL: SpoolStats = {
+  pending: 500,
+  bytes: 2_097_152,
+  segments: 1,
+  dropped: 4,
+  corrupt: 0,
+  unwritten: 2,
+};
 
 const DRAIN: DrainStats = {
   sent: 40,
@@ -284,6 +291,9 @@ describe('the probe’s own health report', () => {
     assert.equal(report.spoolPending, 500);
     assert.equal(report.spoolDropped, 4);
     assert.equal(report.spoolBytes, 2_097_152);
+    // The two ways a reading stops existing are separate numbers (`P-78`): evicted at the cap,
+    // and never written at all. An operator fixes a full disk differently from a broken one.
+    assert.equal(report.spoolUnwritten, 2);
   });
 
   /**
@@ -325,6 +335,7 @@ describe('the probe’s own health report', () => {
     const report = reporter({ spool: false }).report();
     assert.equal('spoolPending' in report, false);
     assert.equal('spoolDropped' in report, false);
+    assert.equal('spoolUnwritten' in report, false);
   });
 
   it('omits CPU on the first report and carries it after', () => {

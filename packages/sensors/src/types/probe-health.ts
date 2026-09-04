@@ -198,6 +198,23 @@ const CHANNELS: readonly ChannelDef[] = [
       errorMessage: 'the spool is full and readings are being discarded',
     },
   },
+  // **The other way a reading stops existing** (`P-78`). `spoolDropped` is the disk being full —
+  // a deliberate eviction, decided with the results already safely written. This is the write
+  // itself failing, so the readings never reached disk at all. The two want different fixes, and
+  // a probe that cannot write its spool is losing *every* check it runs rather than the oldest
+  // ones, which makes this the more urgent of the pair even though it will usually read zero.
+  {
+    key: 'spoolUnwritten',
+    name: 'Results not written',
+    unit: 'results',
+    counter: { bits: 64 },
+    // Not a matter of degree, and bounded below the smallest rate a single loss can produce
+    // rather than at zero — both for the same reasons as `spoolDropped` above.
+    limits: {
+      upperError: 0.000_01,
+      errorMessage: 'the spool cannot be written and readings are being lost',
+    },
+  },
   // **Depth cannot tell a stall from a catch-up, which is why this is a separate channel.** A
   // spool with thousands of results in it is a probe replaying an outage, and a threshold on
   // `spoolDepth` would alarm on exactly that — which is why it has none. What is never healthy is

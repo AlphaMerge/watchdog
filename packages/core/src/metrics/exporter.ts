@@ -323,6 +323,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'spoolUnwritten',
+    name: 'ms_probe_spool_unwritten_total',
+    help: 'Results the spool could not write. Each one was lost before it reached disk.',
+    counter: true,
+  },
+  {
     key: 'clockJumps',
     name: 'ms_probe_clock_jumps_total',
     help: 'Times the timing wheel resynchronised against a clock that moved.',

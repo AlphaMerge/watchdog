@@ -6066,6 +6066,29 @@ because each is a decision rather than a defect:
       Left for its own ticket, as filed above: `spoolResult`'s `.catch` still logs and loses the
       reading, counted nowhere.
 
+- [x] **P-78 — A spool that cannot be written loses every reading, silently** · S · P-76 · Filed
+      out of `P-76`, which spotted it and left it: `spoolResult`'s `.catch` in `main.ts` logged a
+      line and the readings were gone, counted nowhere. `CLAUDE.md` has one sentence about this —
+      *never drop without counting* — and this was the one place in the probe that did.
+
+      **`spoolDropped` could not cover it, and reads zero throughout.** That counter is eviction at
+      the cap: a full disk, decided deliberately, with the results already safely on it. A failed
+      write is the other thing entirely — the readings never reached disk at all — and it is the
+      worse of the two, because a spool that cannot be written loses *every* check the probe runs
+      rather than the oldest ones. An operator watching `spoolDropped` during a broken-disk outage
+      would have seen a confident, steady zero.
+
+      Counted in `ResultSpool.append` rather than at the call site, because that is the only place
+      that knows *how many* results a rejection lost — every caller sees a rejected promise and an
+      error, and neither carries a number. The error is rethrown untouched, so nothing above it
+      changes, and any future caller of `append` is covered without having to remember.
+
+      `spoolUnwritten` on the wire (protocol 15), a `Results not written` channel with the same
+      not-a-matter-of-degree error bound as `spoolDropped`, and
+      `ms_probe_spool_unwritten_total`. The tests kill the write by removing the spool directory
+      underneath it — `#roll` then fails with `ENOENT`, which is deterministic and, unlike a
+      permissions trick, fails for root as well.
+
 - [x] **P-77 — Four defects in the two tickets written to catch defects like them** · M · P-74,
       P-76 · Found by auditing `P-74` and `P-76` the day they were written, before either had run
       against anything real. All four are in the *watchdogs* — the code whose entire job is to

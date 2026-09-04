@@ -41,7 +41,8 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
- * Version 14 adds `checksCompleting` and `checksBehind` (`P-76`), version 13 the listeners'
+ * Version 15 adds `spoolUnwritten` (`P-78`), version 14 `checksCompleting` and
+ * `checksBehind` (`P-76`), version 13 the listeners'
  * throughput counters (`P-64`), version 12 the worker pool's
  * `discarded` count and `poolState` (`P-62`), version 11 the child-process runner's counters
  * (`P-61`), version 10 the session-pool counters (`P-36`), and version 9 `spoolStalledMs`
@@ -52,7 +53,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 /**
  * The oldest peer version this build still understands.
@@ -402,6 +403,15 @@ export interface ProbeHealthReport {
   /** Spool lines that did not parse — a torn write at a crash boundary. */
   spoolCorrupt?: number;
   /**
+   * Results the spool was given and could not write (`P-78`).
+   *
+   * Not `spoolDropped`, which is eviction at the cap — that is a full disk, decided with the
+   * results already written. This is a write that failed, so the readings were lost before the
+   * spool held them at all. A probe that cannot write its spool is losing every check it runs,
+   * and this is the only number that says so.
+   */
+  spoolUnwritten?: number;
+  /**
    * How long the spool has held results with the link up and nothing moving (`H-01`).
    *
    * Zero while the drain is making progress or has nothing to make progress on. Non-zero means
@@ -710,6 +720,7 @@ const PROBE_HEALTH_SCHEMA = {
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },
     spoolCorrupt: { type: 'integer', minimum: 0 },
+    spoolUnwritten: { type: 'integer', minimum: 0 },
     spoolStalledMs: { type: 'integer', minimum: 0 },
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },

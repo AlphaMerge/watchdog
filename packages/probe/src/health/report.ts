@@ -157,6 +157,7 @@ export class ProbeHealthReporter {
             spoolBytes: spool.bytes,
             spoolDropped: spool.dropped,
             spoolCorrupt: spool.corrupt,
+            spoolUnwritten: spool.unwritten,
           }),
       // Separate from the spool block above, so a build with a drain and no spool — or the
       // reverse — reports what it has rather than nothing. Absent is absent.

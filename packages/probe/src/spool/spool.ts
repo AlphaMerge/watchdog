@@ -50,6 +50,15 @@ export interface SpoolStats {
   dropped: number;
   /** Lines that did not parse — a torn write at a crash boundary. */
   corrupt: number;
+  /**
+   * Results handed to the spool that never reached disk (`P-78`).
+   *
+   * Distinct from `dropped`, which is eviction at the cap — a deliberate choice made with the
+   * results already safely written. This is the other kind: a write that failed, so the readings
+   * were lost before the spool ever held them. Both end with a measurement that exists nowhere,
+   * and an operator needs to tell a full disk from a broken one.
+   */
+  unwritten: number;
 }
 
 const SEGMENT_SUFFIX = '.ndjson';
@@ -82,6 +91,7 @@ export class ResultSpool {
   #cursor: Cursor = { segment: null, offset: 0 };
   #dropped = 0;
   #corrupt = 0;
+  #unwritten = 0;
   /** How many records the last `peek` returned, so `commit` knows what it is confirming. */
   #peeked: { records: number; segment: string; offset: number } | undefined;
   /**
@@ -113,6 +123,7 @@ export class ResultSpool {
       segments: this.#segments.length,
       dropped: this.#dropped,
       corrupt: this.#corrupt,
+      unwritten: this.#unwritten,
     };
   }
 
@@ -122,7 +133,15 @@ export class ResultSpool {
     // Swallowed on the chain so one failed append cannot reject every later one; the caller
     // still sees its own error.
     this.#writing = queued.catch(() => undefined);
-    return queued;
+    // **Counted here, not at the call site** (`P-78`). A failed write loses exactly these
+    // results, and this is the only place that knows how many — every caller sees a rejected
+    // promise and an error, neither of which carries a number. `main.ts` logged the error and the
+    // readings were gone, counted nowhere: the one thing `CLAUDE.md` says never to do. The error
+    // is rethrown untouched, so nothing above this changes.
+    return queued.catch((error: unknown) => {
+      this.#unwritten += results.length;
+      throw error;
+    });
   }
 
   async #appendNow(results: readonly CheckResult[]): Promise<void> {
