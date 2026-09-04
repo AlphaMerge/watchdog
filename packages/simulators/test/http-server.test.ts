@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { Socket } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { HttpSimulator } from '../src/http-server.js';
 
@@ -105,12 +106,12 @@ describe('the HTTP simulator', () => {
   // with no indication of which fixture is holding it. The client is deliberately never aborted,
   // because an aborted client tidies the socket up and hides the bug.
   //
-  // The wait before `stop()` is the whole point of the table (`P-63`). At 50 ms the request has
-  // reached the hang route and the socket is parked there; at 0 ms it has been accepted and has
-  // not been dispatched yet, which is a connection `close()` waits for and nothing was tracking.
-  // Only the second one fails against a simulator that destroys the hang route's sockets alone —
-  // and which of the two a loaded machine produces is luck, so this used to be a run that broke
-  // somewhere unrelated once in a while.
+  // The wait before `stop()` is what the table varies (`P-63`). At 50 ms the request has reached
+  // the hang route and the socket is parked there — which the old tracking handled, so that row
+  // passes either way and is a regression guard for nothing. At 0 ms the connection may or may
+  // not have been dispatched yet, and only the "not yet" case exercises the defect: a measured
+  // 17 runs in 100 idle, 27 in 100 loaded. Both rows are kept because they are cheap and they
+  // document the two states, but **neither is the guard** — the deterministic case below is.
   for (const waitMs of [0, 50]) {
     it(`shuts down ${String(waitMs)} ms into a request that is still hanging`, async () => {
       const hanging = new HttpSimulator({ routes: { '/hang': { hang: true } } });
@@ -143,6 +144,32 @@ describe('the HTTP simulator', () => {
       assert.equal(stopped, 'stopped');
     });
   }
+
+  it('shuts down with a connection that never sent a request at all', async () => {
+    // **The deterministic form of the row above.** A socket that is accepted and never speaks is
+    // permanently in the state the timed rows can only catch by luck: open, so `close()` waits
+    // for it, and known to nothing that tracked only the hang route's sockets. No sleep, no race
+    // — it fails every time against the old tracking, which is what a regression guard has to do.
+    const hanging = new HttpSimulator({ routes: { '/hang': { hang: true } } });
+    const port = await hanging.start();
+    const idle = new Socket();
+    await new Promise<void>((resolve, reject) => {
+      idle.once('connect', resolve);
+      idle.once('error', reject);
+      idle.connect(port, '127.0.0.1');
+    });
+
+    const stopped = await Promise.race([
+      hanging.stop().then(() => 'stopped'),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve('still waiting');
+        }, 5_000).unref();
+      }),
+    ]);
+    idle.destroy();
+    assert.equal(stopped, 'stopped');
+  });
 
   it('resets the connection when told to, which is not a status code', async () => {
     await assert.rejects(() => get('/reset'));

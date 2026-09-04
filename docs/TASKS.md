@@ -5697,8 +5697,21 @@ because each is a decision rather than a defect:
       same reason — the claim is that it does not hang, and a hang is unbounded, so a larger number
       catches the defect just as surely and never fires on a busy machine.
 
-      Two rows, 0 ms and 50 ms. Only the first fails against the old tracking, and the pair is the
-      whole point: 50 ms was passing for a reason that had nothing to do with what it asserts.
+      Two rows, 0 ms and 50 ms. Only the first can fail against the old tracking, and the pair is
+      the point: 50 ms was passing for a reason that had nothing to do with what it asserts.
+
+      **The 0 ms row is not a reliable guard either, and saying it was is the same mistake again.**
+      The review of this ticket measured it: it reproduces the defect 17 times in 100 idle runs and
+      27 in 100 loaded, because whether the connection has been *dispatched* by the time `stop()`
+      runs is exactly the race the defect lives in. A deterministic case has been added beside it —
+      a socket that connects and never sends a request at all is permanently in the state the timed
+      rows can only reach by luck, so it fails every time. The timed rows are kept for what they
+      document, not as the guard.
+
+      Proof of how badly that mattered: the full suite that certified `P-66` ran against a `dist`
+      still holding this defect — an incremental build had not picked up a mutation restore — and
+      came back clean, 3,602 tests. The only test that could have caught it rolled a 17% chance and
+      lost. The deterministic case fails against that same build every time.
 
 - [x] **P-54 — The documentation is a graph and nothing checked its edges** · S · H-07 · Adding a
       finding means adding a line to `docs/README.md`'s index by hand, and the two findings written
