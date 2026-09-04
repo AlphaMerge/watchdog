@@ -127,6 +127,18 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'timedOut', name: 'Checks timed out', unit: 'checks', counter: { bits: 64 } },
   { key: 'workerCrashes', name: 'Worker crashes', unit: 'workers', counter: { bits: 64 } },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
+  // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
+  // worker, with their own much smaller ceiling — so the pool channels above say nothing at all
+  // about them, and a probe can be turning every shell-out away while `poolBusy` looks calm.
+  // Separate channels rather than a sum, because the two saturate at completely different loads
+  // and an operator diagnosing one does not want the other folded in.
+  { key: 'childSlots', name: 'Child process slots', unit: 'processes' },
+  { key: 'childBusy', name: 'Child processes running', unit: 'processes' },
+  { key: 'childQueued', name: 'Checks waiting for a child process', unit: 'checks' },
+  { key: 'childDeferred', name: 'Child checks deferred', unit: 'checks', counter: { bits: 64 } },
+  { key: 'childRefused', name: 'Child checks refused', unit: 'checks', counter: { bits: 64 } },
+  { key: 'childTimedOut', name: 'Child checks timed out', unit: 'checks', counter: { bits: 64 } },
+  { key: 'childCrashes', name: 'Child process crashes', unit: 'processes', counter: { bits: 64 } },
   // Results written to disk and not yet acknowledged. Non-zero is not a fault — it is what a
   // probe does while the core is unreachable — but a number that climbs and never falls is.
   { key: 'spoolDepth', name: 'Results spooled', unit: 'results' },

@@ -1,5 +1,6 @@
 import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
+import type { ProcessRunnerStats } from '../runner/process-runner.js';
 import type { DrainStats } from '../spool/drain.js';
 import type { SpoolStats } from '../spool/spool.js';
 import type { WheelStats } from '../scheduler/wheel.js';
@@ -20,6 +21,16 @@ import type { WheelStats } from '../scheduler/wheel.js';
 export interface ProbeHealthSources {
   scheduler: () => WheelStats;
   pool: () => PoolStats;
+  /**
+   * The child-process runner, absent on a build that runs no isolated sensor types.
+   *
+   * **A second runner is a second source, and forgetting it is `P-61`.** EXE and Script checks
+   * never touch the worker pool: they have their own ceiling, their own queue and their own
+   * deferred and refused counts, and for as long as this key did not exist every one of those
+   * numbers was computed and thrown away. A probe saturated by slow shell-outs reported a
+   * healthy pool while it turned checks away.
+   */
+  children?: () => ProcessRunnerStats;
   /** Absent when this build runs no spool. */
   spool?: () => SpoolStats;
   /**
@@ -57,6 +68,7 @@ export class ProbeHealthReporter {
   report(): ProbeHealthReport {
     const scheduler = this.#sources.scheduler();
     const pool = this.#sources.pool();
+    const children = this.#sources.children?.();
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
@@ -83,6 +95,19 @@ export class ProbeHealthReporter {
             sessionOverflows: pool.sessions.overflowed,
             sessionsEvicted: pool.sessions.evicted,
             sessionsOpened: pool.sessions.opened,
+          }),
+      // Absent on a build with no child-process runner, so the channels gap rather than reading
+      // a confident zero that cannot be told from a probe running no EXE or Script sensors.
+      ...(children === undefined
+        ? {}
+        : {
+            childSlots: children.maxConcurrent,
+            childBusy: children.running,
+            childQueued: children.queued,
+            childDeferred: children.deferred,
+            childRefused: children.refused,
+            childTimedOut: children.timedOut,
+            childCrashes: children.crashed,
           }),
       ...(spool === undefined
         ? {}

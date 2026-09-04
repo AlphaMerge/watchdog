@@ -5518,7 +5518,7 @@ because each is a decision rather than a defect:
       One stale claim fixed in passing: the recorder helper's comment said it "can be told to stop
       draining", and nothing in it ever could. Now it can, because that is what these tests need.
 
-- [ ] **P-61 — EXE and Script backpressure reaches no health sensor** · S · P-58 · `ProcessRunner`
+- [x] **P-61 — EXE and Script backpressure reaches no health sensor** · S · P-58 · `ProcessRunner`
       counts `#deferred`, `#refused`, `#timedOut`, `#crashed`, a live count and a queue depth, and
       exposes all of them through `stats()`. `ProbeHealthSources` declares four sources —
       `scheduler`, `pool`, `spool`, `drain` — `main.ts` passes exactly those four, and
@@ -5532,6 +5532,48 @@ because each is a decision rather than a defect:
 
       A fifth source is the whole fix. The test that would have caught it is structural — every
       runner that has a `stats()` is named in `ProbeHealthSources`.
+
+      **Adding the fifth source was not the whole fix, because the report is on the wire.**
+      `ProbeHealthReport` is validated by a JSON schema with `additionalProperties: false`, so a
+      newer probe sending a field an older core does not know has *every heartbeat rejected*, with
+      nothing to say why. That is what the protocol version is for, and it is now 11. The ticket
+      did not mention this and neither did the audit that filed it: the omission is only visible
+      from the schema, three files away from the counters.
+
+      Seven channels rather than a sum into the pool's: `childSlots`, `childBusy`, `childQueued`,
+      `childDeferred`, `childRefused`, `childTimedOut`, `childCrashes`. The two runners saturate
+      at completely different loads — a worker pool holds tens of slots and a child-process runner
+      a handful — so folding them together would hide whichever is healthy behind whichever is
+      not, and an operator diagnosing one does not want the other in the number. The Prometheus
+      exporter gets the same six series for the same reason. Absent stays absent: a build with no
+      child runner omits the block and the channels gap, rather than reading a confident zero that
+      cannot be told from a runner sitting idle.
+
+      **The test is structural, and it had to be.** Every number `ProcessRunner` kept was correct;
+      they reached nothing, because the interface deciding what Probe Health reads had no key for
+      it. Nothing behavioural can see that — the subsystem works, and the silence *is* the defect.
+      So the rule is written down instead: every file in `packages/probe/src/runner/` that
+      declares a `stats()` must have its stats type named in `ProbeHealthSources`. It reads the
+      source rather than the build, so it fails on the regression whether or not it compiles.
+
+- [ ] **P-64 — The syslog and SNMP-trap listeners count what they lose, and tell nobody** · S ·
+      P-61 · Found while wiring `P-61`, by asking the same question one subsystem further out.
+      `TrapListener.stats()` and `SyslogListener.stats()` each keep `received`, `rejected`,
+      `malformed`, `buffered`, `cursors` and — the one that matters — `overwritten`: notifications
+      dropped from the ring because nothing drained them in time. Every one of those numbers
+      reaches exactly one place, a `logger.info` at shutdown.
+
+      So a probe under a syslog flood silently overwrites messages it was asked to watch for, and
+      the only record is a line written when the listener stops. That is `CLAUDE.md`'s
+      "backpressure is visible, never silent" and "the system monitors itself" broken in the
+      subsystem where the data being lost is the *point* — a trap that was overwritten is an event
+      nobody will ever know arrived.
+
+      Not the same fix as `P-61`. These are per-listener and a probe may run neither, one or both,
+      and `buffered`/`cursors` are gauges of a ring rather than of a queue — the channel set wants
+      thinking about rather than copying. `overwritten` is the one that is not a matter of degree,
+      like `spoolDropped`: any rate above zero is data that no longer exists anywhere, and it
+      should carry a limit that says so. Another protocol bump, for the reason `P-61` documents.
 
 - [ ] **P-62 — What the worker pool discards after it gives up is never counted** · S · P-58 ·
       Once `#disabled` latches, `#admission` returns `stopped` before any counter is touched, so

@@ -1012,6 +1012,13 @@ cost: **light** · evaluated by the core, never by a probe
 | `timedOut` | Checks timed out | checks | 64-bit counter → rate |
 | `workerCrashes` | Worker crashes | workers | 64-bit counter → rate |
 | `scheduled` | Sensors scheduled | sensors | — |
+| `childSlots` | Child process slots | processes | — |
+| `childBusy` | Child processes running | processes | — |
+| `childQueued` | Checks waiting for a child process | checks | — |
+| `childDeferred` | Child checks deferred | checks | 64-bit counter → rate |
+| `childRefused` | Child checks refused | checks | 64-bit counter → rate |
+| `childTimedOut` | Child checks timed out | checks | 64-bit counter → rate |
+| `childCrashes` | Child process crashes | processes | 64-bit counter → rate |
 | `spoolDepth` | Results spooled | results | — |
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |

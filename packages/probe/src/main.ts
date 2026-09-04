@@ -376,6 +376,10 @@ async function main(): Promise<void> {
   const health = new ProbeHealthReporter({
     scheduler: () => wheel.stats(),
     pool: () => pool.stats(),
+    // The second runner. EXE and Script checks never touch the pool above, so its counters say
+    // nothing about them — which is how `P-61` went unnoticed: ten numbers, computed and read by
+    // nobody, while a probe saturated by shell-outs looked healthy.
+    children: () => processRunner.stats(),
     spool: () => spool.stats(),
     // How much is waiting is the spool's; whether any of it is *moving* is only the drain's, and
     // the difference is the whole of `615c9f3` — a full spool and a healthy link read identically

@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { ProbeHealthReporter } from '../src/health/report.js';
+import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
 import type { DrainStats } from '../src/spool/drain.js';
 import type { SpoolStats } from '../src/spool/spool.js';
@@ -42,6 +45,21 @@ const POOL: PoolStats = {
   runMs: { p50: 30, p95: 200, p99: 900, max: 3_000 },
 };
 
+const CHILDREN: ProcessRunnerStats = {
+  maxConcurrent: 4,
+  running: 3,
+  queued: 9,
+  submitted: 200,
+  completed: 180,
+  failed: 6,
+  timedOut: 2,
+  deferred: 11,
+  refused: 5,
+  crashed: 1,
+  waitMs: { p50: 30, p95: 400, p99: 900, max: 3_000 },
+  runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
+};
+
 const SPOOL: SpoolStats = { pending: 500, bytes: 2_097_152, segments: 1, dropped: 4, corrupt: 0 };
 
 const DRAIN: DrainStats = {
@@ -54,6 +72,7 @@ const DRAIN: DrainStats = {
 };
 
 function reporter(options: {
+  children?: boolean;
   spool?: boolean;
   drain?: boolean;
   stalledForMs?: number;
@@ -69,6 +88,7 @@ function reporter(options: {
   return new ProbeHealthReporter({
     scheduler: () => WHEEL,
     pool: () => POOL,
+    ...(options.children === false ? {} : { children: () => CHILDREN }),
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
     ...(options.drain === false
       ? {}
@@ -103,6 +123,64 @@ describe('the probe’s own health report', () => {
     assert.equal(report.refused, 2);
     assert.equal(report.workerCrashes, 0);
     assert.equal(report.clockJumps, 1);
+  });
+
+  it('reports the child-process runner, which is a second runner and a second set of counters', () => {
+    // `P-61`: EXE and Script checks never touch the worker pool, so none of the pool numbers
+    // above say anything about them. A probe saturated by slow shell-outs deferred and refused
+    // checks while `poolBusy` looked calm and Probe Health said nothing at all.
+    const report = reporter({}).report();
+    assert.equal(report.childSlots, 4);
+    assert.equal(report.childBusy, 3);
+    assert.equal(report.childQueued, 9);
+    assert.equal(report.childDeferred, 11);
+    assert.equal(report.childRefused, 5);
+    assert.equal(report.childTimedOut, 2);
+    assert.equal(report.childCrashes, 1);
+  });
+
+  it('says nothing about a child runner it does not have, rather than zero', () => {
+    // The same rule the spool block follows: absent is absent. A build with no isolated sensor
+    // types has nothing to report, and a confident 0 cannot be told from a runner sitting idle.
+    const report = reporter({ children: false }).report();
+    assert.equal(report.childSlots, undefined);
+    assert.equal(report.childBusy, undefined);
+    assert.equal(report.childRefused, undefined);
+  });
+
+  it('names every runner that keeps its own counters in ProbeHealthSources', async () => {
+    // **The test that would have caught `P-61`, and the only shape that could.** Every number
+    // `ProcessRunner` kept was correct; they simply reached nothing, because the interface that
+    // decides what Probe Health reads had no key for it. Nothing behavioural can see that — the
+    // subsystem works, and the silence is the defect. So the rule is structural instead: a runner
+    // that measures itself is a runner Probe Health reports on.
+    const root = join(import.meta.dirname, '..', '..');
+    const sources = await readFile(join(root, 'src', 'health', 'report.ts'), 'utf8');
+    const declaration = sources.slice(
+      sources.indexOf('export interface ProbeHealthSources'),
+      sources.indexOf('const MB ='),
+    );
+    assert.ok(declaration.includes('scheduler'), 'found the ProbeHealthSources declaration');
+
+    const dir = join(root, 'src', 'runner');
+    const checked: string[] = [];
+    for (const file of await readdir(dir)) {
+      if (!file.endsWith('.ts')) continue;
+      const text = await readFile(join(dir, file), 'utf8');
+      const stats = /^ {2}stats\(\): (\w+)/m.exec(text);
+      if (stats === null) continue;
+      const type = stats[1] ?? '';
+      checked.push(`${file} -> ${type}`);
+      assert.ok(
+        declaration.includes(type),
+        `${file} keeps a ${type} that no ProbeHealthSources key reads, so nothing it counts ` +
+          `reaches a health sensor — the defect P-61 was`,
+      );
+    }
+    assert.ok(
+      checked.length >= 2,
+      `expected both runners to be checked, saw ${checked.join(', ')}`,
+    );
   });
 
   it('reports the spool when there is one', () => {

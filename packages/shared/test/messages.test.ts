@@ -1,4 +1,6 @@
 import { strict as assert } from 'node:assert';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   isProtocolCompatible,
@@ -519,6 +521,34 @@ describe('identification messages', () => {
     assert.equal(
       parseCoreToProbe({ type: 'identify-start', job: { ...job, concurrency: 128 } }).type,
       'identify-start',
+    );
+  });
+});
+
+describe('the protocol version and its own history', () => {
+  it('is the highest version its doc comment claims', async () => {
+    // **A field added to the health report without a bump is rejected by the far end, silently.**
+    // `PROBE_HEALTH_SCHEMA` is `additionalProperties: false`, so a newer probe sending a field an
+    // older core has never heard of has *every heartbeat* refused by validation, with nothing in
+    // the message to say why. The bump is the whole defence, and it is the easy half to forget:
+    // `P-61` added seven fields, wrote the history line for version 11, and shipped the constant
+    // still reading 10 — because both ends of every test are the same build, so nothing noticed.
+    //
+    // The history in that comment is the contract as written down. This pins the constant to it,
+    // in whichever direction they are allowed to drift apart.
+    const source = await readFile(
+      join(import.meta.dirname, '..', '..', 'src', 'protocol', 'messages.ts'),
+      'utf8',
+    );
+    const declared = [...source.matchAll(/[Vv]ersion (\d+) (?:adds|added)/g)].map((m) =>
+      Number(m[1]),
+    );
+    assert.ok(declared.length > 0, 'the comment must record what each version added');
+    assert.equal(
+      Math.max(...declared),
+      PROTOCOL_VERSION,
+      'PROTOCOL_VERSION and the version history in its comment disagree — one of them was ' +
+        'not updated, and a health-report field added without a bump is refused by the far end',
     );
   });
 });

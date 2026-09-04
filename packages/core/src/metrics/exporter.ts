@@ -228,6 +228,43 @@ const PROBE_METRICS: readonly Metric[] = [
     name: 'ms_probe_sensors_scheduled',
     help: 'Sensors this probe currently has on its wheel.',
   },
+  // The child-process runner (`P-61`). Separate series from the pool's, because EXE and Script
+  // checks never touch the pool and the two saturate at completely different loads — summing
+  // them would hide whichever is healthy behind whichever is not.
+  {
+    key: 'childBusy',
+    name: 'ms_probe_child_processes_running',
+    help: 'Check child processes running right now.',
+  },
+  {
+    key: 'childQueued',
+    name: 'ms_probe_child_checks_queued',
+    help: 'Checks waiting for a child-process slot.',
+  },
+  {
+    key: 'childDeferred',
+    name: 'ms_probe_child_checks_deferred_total',
+    help: 'Child-process checks skipped because the previous scan had not finished.',
+    counter: true,
+  },
+  {
+    key: 'childRefused',
+    name: 'ms_probe_child_checks_refused_total',
+    help: 'Child-process checks turned away because the queue was full.',
+    counter: true,
+  },
+  {
+    key: 'childTimedOut',
+    name: 'ms_probe_child_checks_timed_out_total',
+    help: 'Child-process checks killed at their timeout.',
+    counter: true,
+  },
+  {
+    key: 'childCrashes',
+    name: 'ms_probe_child_process_crashes_total',
+    help: 'Check child processes that died without producing a result.',
+    counter: true,
+  },
   {
     key: 'spoolDepth',
     name: 'ms_probe_spool_results',

@@ -41,15 +41,15 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
- * Version 10 adds the session-pool counters to that health report (`P-36`), and version 9 added
- * `spoolStalledMs` to it (`H-01`). **The bump is required by `additionalProperties: false` on
+ * Version 11 adds the child-process runner's counters to that health report (`P-61`), version 10
+ * added the session-pool counters (`P-36`), and version 9 added `spoolStalledMs` (`H-01`). **The bump is required by `additionalProperties: false` on
  * the health schema**, not by the fields themselves: a newer probe sending them to an older core
  * would have every heartbeat rejected by validation, with nothing to say why. `isProtocolCompatible` refuses a peer above this build's version at the
  * handshake instead, which is the same trade version 2 made — a clean rejection where an
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * The oldest peer version this build still understands.
@@ -318,6 +318,24 @@ export interface ProbeHealthReport {
   sessionOverflows?: number;
   sessionsEvicted?: number;
   sessionsOpened?: number;
+  /**
+   * The child-process runner (`P-61`).
+   *
+   * EXE and Script checks run in a process of their own rather than a worker, so they have their
+   * own ceiling, their own queue and their own counters — and until `P-61` none of them reached
+   * a health sensor at all. A probe saturated by slow shell-outs reported a perfectly healthy
+   * pool while it deferred and refused every check.
+   *
+   * **Absent together**, and absent on a probe that runs no isolated sensor types, so the
+   * channels gap rather than reading a confident zero on a build with nothing to say.
+   */
+  childSlots?: number;
+  childBusy?: number;
+  childQueued?: number;
+  childDeferred?: number;
+  childRefused?: number;
+  childTimedOut?: number;
+  childCrashes?: number;
   /** Results written to disk and not yet acknowledged by the core. */
   spoolPending?: number;
   spoolBytes?: number;
@@ -611,6 +629,13 @@ const PROBE_HEALTH_SCHEMA = {
     sessionOverflows: { type: 'integer', minimum: 0 },
     sessionsEvicted: { type: 'integer', minimum: 0 },
     sessionsOpened: { type: 'integer', minimum: 0 },
+    childSlots: { type: 'integer', minimum: 0 },
+    childBusy: { type: 'integer', minimum: 0 },
+    childQueued: { type: 'integer', minimum: 0 },
+    childDeferred: { type: 'integer', minimum: 0 },
+    childRefused: { type: 'integer', minimum: 0 },
+    childTimedOut: { type: 'integer', minimum: 0 },
+    childCrashes: { type: 'integer', minimum: 0 },
     spoolPending: { type: 'integer', minimum: 0 },
     spoolBytes: { type: 'integer', minimum: 0 },
     spoolDropped: { type: 'integer', minimum: 0 },

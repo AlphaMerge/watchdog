@@ -36,6 +36,13 @@ const FULL: ProbeHealthReport = {
   refused: 2,
   timedOut: 1,
   workerCrashes: 0,
+  childSlots: 4,
+  childBusy: 3,
+  childQueued: 9,
+  childDeferred: 11,
+  childRefused: 5,
+  childTimedOut: 2,
+  childCrashes: 1,
   spoolPending: 500,
   spoolBytes: 2 * 1024 * 1024,
   spoolDropped: 4,
@@ -159,6 +166,38 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['spoolDropped'], 4);
       assert.equal(reading['spoolStalled'], 420, 'milliseconds in, seconds out');
       assert.equal(reading['cpu'], 18.5);
+    });
+
+    it('carries the child-process runner’s counters, which no pool channel covers', () => {
+      // `P-61`: EXE and Script checks run in a child process, never in the worker pool, so
+      // `deferred` and `refused` above are silent about them entirely. A probe turning away
+      // every shell-out reported a calm pool and nothing else.
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['childSlots'], 4);
+      assert.equal(reading['childBusy'], 3);
+      assert.equal(reading['childQueued'], 9);
+      assert.equal(reading['childDeferred'], 11);
+      assert.equal(reading['childRefused'], 5);
+      assert.equal(reading['childTimedOut'], 2);
+      assert.equal(reading['childCrashes'], 1);
+    });
+
+    it('gaps the child channels for a probe that runs no child processes', () => {
+      // Same rule as the stall below. A probe with no isolated sensor types omits the fields,
+      // and zero would be a claim about a runner that never reported — no-data is not zero.
+      const {
+        childSlots: _a,
+        childBusy: _b,
+        childQueued: _c,
+        childDeferred: _d,
+        childRefused: _e,
+        childTimedOut: _f,
+        childCrashes: _g,
+        ...withoutChildren
+      } = FULL;
+      const { reading } = build(() => connected({ health: withoutChildren })).read(probeId);
+      assert.equal(reading['childSlots'], null);
+      assert.equal(reading['childRefused'], null);
     });
 
     /**

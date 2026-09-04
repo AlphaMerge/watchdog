@@ -118,6 +118,15 @@ export class ProbeHealthService {
       refused: health?.refused ?? null,
       timedOut: health?.timedOut ?? null,
       workerCrashes: health?.workerCrashes ?? null,
+      // Null, not 0, when the probe sends nothing: a build with no child-process runner has
+      // nothing to say here, and a confident zero cannot be told from one that is idle.
+      childSlots: health?.childSlots ?? null,
+      childBusy: health?.childBusy ?? null,
+      childQueued: health?.childQueued ?? null,
+      childDeferred: health?.childDeferred ?? null,
+      childRefused: health?.childRefused ?? null,
+      childTimedOut: health?.childTimedOut ?? null,
+      childCrashes: health?.childCrashes ?? null,
       // `?? null` throughout, so a probe whose registry keeps no session pools gaps these rather
       // than reading zero — a probe with nothing to report is not a probe with nothing open
       // (`P-36`, and `R-06` again).
