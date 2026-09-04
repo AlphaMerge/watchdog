@@ -5267,6 +5267,31 @@ because each is a decision rather than a defect:
       recomputing more often re-derives the same stale number. Both corrected in `docs/sizing.md`,
       numbers in `docs/findings/2026-09-04-autosize-loop.md`.
 
+- [x] **P-51 — The Windows transport was only ever tested against a fake** · S · P-49 · The last
+      suite still skipping once every compose dependency was up: `no pwsh on this machine`. It
+      gates `windows-transport.test.ts`'s real-PowerShell cases, and its own header says it "runs
+      wherever a `pwsh` exists so that never happens again silently" — *that* being a wrapper which
+      ran nothing at all and exited 0 (`findings/2026-08-27-powershell-transport.md`). The authors
+      meant it to run. It never had, on any machine this project has been built on, so the four
+      `windows.*` sensor types were verified only against a fake serialiser.
+
+      **The blocker was an architecture mistake, not a real one.** An earlier attempt ran an x64
+      build under emulation and got `qemu: uncaught target signal 6 (Aborted)`, which reads like
+      "PowerShell does not work here". Microsoft publishes a native `linux-arm64` build; it starts
+      in the toolchain container, reports 7.4.6, and round-trips `café` through `ConvertTo-Json`
+      correctly — which is the exact thing the suite asserts.
+
+      **Added to `dev/toolchain/Dockerfile`**, for the reason `ping` is already there: the product
+      shells out to it, so a toolchain without it cannot test the sensor that uses it. The tarball
+      rather than Microsoft's apt repository, because that repository has no `arm64` component for
+      bookworm and half the developers here are on Apple silicon. Architecture is chosen from
+      `dpkg --print-architecture` so an x86 machine gets `linux-x64`, and the build fails loudly on
+      anything else rather than producing an image that silently skips the suite again.
+
+      **Result: 3,250 tests, 3,250 passed, 0 failed, 0 cancelled, 0 skipped, and no suite skipped
+      for a missing dependency** — the first run today with nothing at all left out. For contrast,
+      the same command reported `clean` this morning at 1,945 tests with 88 suites skipped.
+
 - [x] **P-50 — No budget covered the loop that had the 427 ms stall** · S · P-48 · The question
       `P-48` raised and did not answer: why did a synchronous 427 ms pass on the probe's own thread
       survive as long as the sizing loop has existed, with a `test:perf` suite whose whole purpose
