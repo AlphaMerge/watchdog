@@ -194,6 +194,26 @@ describe('check pool', () => {
     assert.ok(pool.stats().workerCrashes >= 1, 'and the crash is counted');
   });
 
+  it('counts one dead worker once, however many events it fires', async () => {
+    // `P-73`. An uncaught exception in a worker fires `error` **and then** `exit`, and
+    // `#onWorkerGone` ran for both. One death counted two crashes, spent two of the
+    // consecutive-start-failure budget — so the pool gave up after two failing workers rather
+    // than the three its own comment describes — and spawned two replacements, leaving the pool
+    // one worker over its bound. `test.crash` cannot see this: `process.exit` fires `exit` alone.
+    const { pool, seen } = await poolOf({ size: 1 });
+    pool.submit(request(60, 'test.uncaught'));
+
+    await until(() => seen.length === 1, 'the crash to be reported', 8_000);
+    assert.equal(seen[0]?.meta.phase, 'worker-crash');
+
+    pool.submit(request(61, 'test.ok'));
+    await until(() => seen.length === 2, 'the pool to recycle', 8_000);
+    assert.equal(seen[1]?.result.outcome, 'ok');
+
+    assert.equal(pool.stats().workerCrashes, 1, 'one worker died, so one crash');
+    assert.equal(pool.stats().size, 1, 'and it was replaced once, not twice');
+  });
+
   // -----------------------------------------------------------------------------------------
   // Backpressure.
   // -----------------------------------------------------------------------------------------

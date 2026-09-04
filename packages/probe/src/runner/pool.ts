@@ -191,6 +191,17 @@ interface Slot {
    */
   retired: boolean;
   /**
+   * Set the first time this worker is reported gone, so it is only counted once (`P-73`).
+   *
+   * `retired` above covers the pool's own recycles. This covers the other double-count, which it
+   * did not: a worker that dies from an uncaught exception fires **both** `error` and `exit`, and
+   * `#onWorkerGone` ran for each. One death then counted two crashes, took two off the
+   * consecutive-start-failure budget — so the pool gave up after two failing workers rather than
+   * the three its own comment describes — and spawned two replacements, leaving the pool one
+   * worker over its bound each time.
+   */
+  gone: boolean;
+  /**
    * Monotonic instant this worker last had nothing to do, or `0n` while it has a job.
    *
    * **Per worker rather than per pool**, and that distinction is the whole of `P-26`. The pool
@@ -912,7 +923,8 @@ export class CheckPool {
 
   /** A worker died: mid-check, or during start-up. */
   #onWorkerGone(slot: Slot, reason: string): void {
-    if (this.#stopped || slot.retired) return;
+    if (this.#stopped || slot.retired || slot.gone) return;
+    slot.gone = true;
     this.#crashes += 1;
 
     const job = slot.job;
@@ -974,6 +986,7 @@ export class CheckPool {
       sessions: undefined,
       job: undefined,
       retired: false,
+      gone: false,
     };
     this.#slots.push(slot);
 

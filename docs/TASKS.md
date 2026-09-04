@@ -5889,7 +5889,7 @@ because each is a decision rather than a defect:
       Protocol 12, for the reason `P-61` documents: the health schema is `additionalProperties:
       false`, so a field without a bump has every heartbeat rejected by an older core.
 
-- [ ] **P-73 — Each failed worker start is counted twice, so the pool gives up at two** · S · P-62
+- [x] **P-73 — Each failed worker start is counted twice, so the pool gives up at two** · S · P-62
       · Found while verifying `P-62`, confirmed by reading and not yet fixed. `#spawn` registers
       both `worker.on('error')` and `worker.on('exit')`, each calling `#onWorkerGone`, whose only
       re-entry guard is `this.#stopped || slot.retired` — neither is set on a start failure. A
@@ -5901,6 +5901,16 @@ because each is a decision rather than a defect:
 
       The guard wants to be per-slot rather than per-pool — a `gone` flag on the slot, set on first
       entry — and the constant's comment wants to match whatever the count then means.
+
+      **Fixed with the per-slot flag, and the comment now needs no change** — three consecutive
+      failing starts really is three. `retired` was already there for the pool's own recycles, with
+      a comment describing this exact hazard ("would count its own recycle as a crash and spawn a
+      *second* replacement"); it simply did not cover the other way a worker can die twice.
+
+      `test.crash` could not have caught this and no existing test could: `process.exit` fires
+      `exit` alone. An uncaught exception fires `error` **and then** `exit`, so the new fixture
+      throws from a `setTimeout` where nothing can catch it. The test pins one crash and one
+      replacement, and fails on both counts when the flag is removed.
 
 - [ ] **P-74 — Nothing ages out a sensor whose probe stopped sending results** · M · P-62 · Found
       while verifying `P-62`, confirmed by reading. A sensor's state is re-evaluated only when a

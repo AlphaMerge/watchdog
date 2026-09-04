@@ -51,6 +51,19 @@ const registry: CheckRegistry = {
         process.exit(7);
         break;
 
+      case 'test.uncaught':
+        // Also takes the thread down, but by the *other* route, and the difference is the whole
+        // of `P-73`. `process.exit` fires `exit` alone; an uncaught exception fires `error` and
+        // then `exit`, so a pool that treats both as "a worker died" counts one death twice and
+        // spawns two replacements for it.
+        setTimeout(() => {
+          throw new Error('a library threw where nobody could catch it');
+        }, 5);
+        await new Promise<never>(() => {
+          /* until the throw above takes the thread down */
+        });
+        throw new Error('unreachable');
+
       case 'test.abort':
         // A *hard* crash — SIGABRT, which is what a native module segfaulting looks like from the
         // outside. `P-03` exists for this one: a worker thread cannot survive it and takes the
