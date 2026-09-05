@@ -88,6 +88,13 @@ export interface DependencyReactor {
  */
 export interface AlarmReactor {
   react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<unknown>;
+  /**
+   * Whether this batch has to be reconciled in full rather than only where the state moved.
+   *
+   * True exactly when some enabled threshold trigger exists (`P-104`): its condition is a
+   * reading, and a reading changes without the state changing.
+   */
+  reconcilesReadings(q: Queryable): Promise<boolean>;
 }
 
 export interface IngestorOptions {
@@ -465,12 +472,19 @@ export class Ingestor {
             : (await this.#dependencies.react(q, transitions, new Date())).moved;
         // After the dependency reaction, and in the same transaction. A chain armed against a
         // state that rolled back would page somebody about a sensor that is fine.
-        if (this.#alarms !== undefined && transitions.length > 0) {
-          await this.#alarms.react(
-            q,
-            [...new Set(transitions.map((transition) => transition.sensorId))],
-            new Date(),
-          );
+        //
+        // **Which sensors depends on what kind of trigger exists** (`P-104`). A state trigger
+        // fires on a transition, so the sensors that transitioned are the complete answer for
+        // it. A threshold trigger fires on a *reading* — and a reading changes without the
+        // state changing, so `transitions.length > 0` meant a breach on a stable Up sensor
+        // never armed anything, and a breach that cleared while the sensor stayed Up was never
+        // stood down and paged after its latency with a value that was minutes stale.
+        if (this.#alarms !== undefined) {
+          const moved = [...new Set(transitions.map((transition) => transition.sensorId))];
+          const scanned = (await this.#alarms.reconcilesReadings(q))
+            ? [...new Set(runtimes.keys())]
+            : moved;
+          if (scanned.length > 0) await this.#alarms.react(q, scanned, new Date());
         }
         return {
           stored: written,

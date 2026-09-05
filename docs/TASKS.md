@@ -6335,6 +6335,41 @@ because each is a decision rather than a defect:
       reading says, and one arriving under an offline probe becomes Unknown — saying Up about a
       sensor nothing is scanning is the claim `WORKFLOW.MD §12` forbids.
 
+- [x] **P-104 — Threshold triggers were dead between state changes, and four tests said otherwise**
+      · M · N-03 · Finding 17, and the largest single hole the panel found. The ingestion write is
+      the only path that sees new channel readings, and it called `AlarmEngine.react` **only when
+      the batch produced a state transition**, passing only the sensors that transitioned.
+
+      A state trigger fires on a transition, so that is complete for it. A threshold trigger fires
+      on a *reading*, and a reading changes without the state changing. So:
+
+      - **It never armed.** A device with `rtt above 80`, created while rtt was 20, on a sensor
+        that stays Up: rtt rises to 200 and stays there for hours. Every batch produces a
+        `RuntimeWrite` and no `StateTransition`, so `react` is never called, `notification_alarm`
+        stays empty, and no notification is ever queued.
+      - **It pages about breaches that ended.** An alarm armed by `TriggerSync` with a ten-minute
+        latency, cleared two minutes later while the sensor is still Up: no transition, so no
+        stand-down, and the sweep fires eight minutes after the breach ended with the stale value
+        on the row.
+
+      `react` has three call sites — this one, `reevaluate`, and `TriggerSync` on configuration
+      edits — and none of them is periodic. The engine's own sweep comment relies on the opposite:
+      "`react` stands the alarm down the moment a reading clears it". Nothing was calling it to.
+
+      **The gate is global on purpose.** Working out which sensors in a batch are covered by a
+      threshold trigger *is* the inheritance walk `react` performs, so asking that first would
+      cost the thing it is meant to avoid. One indexed existence check answers `false` on every
+      installation that has not configured a threshold trigger, and those pay nothing on the hot
+      path; one that has pays a full reconcile per batch, which is what making the feature work
+      costs.
+
+      **The tests were green because the helper made the call production did not.**
+      `threshold-engine.test.ts`'s `scan` called `engine.react` unconditionally — more generous
+      than the ingestion path has ever been. It mirrors the production rule now, and reverting the
+      fix turns four of them red, including the two the panel named: 'notifies nobody about a
+      breach that clears before its latency' and 'waits out the latency, then notifies and
+      clears'. Seventeen tests over a feature that did nothing.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

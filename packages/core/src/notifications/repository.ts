@@ -159,6 +159,25 @@ export class AlarmRepository {
     return rows.length > 0;
   }
 
+  /**
+   * Whether any enabled threshold trigger exists at all (`P-104`).
+   *
+   * The gate on reconciling a whole result batch rather than only the sensors that changed
+   * state. A threshold trigger's condition is a *reading*, and a reading changes without the
+   * sensor's state changing — so reacting only to transitions meant a breach on a stable sensor
+   * never armed and a cleared breach never stood down.
+   *
+   * Asked as one indexed existence check because the answer is `false` on most installations,
+   * and on those nothing about the hot path changes.
+   */
+  async anyThresholdTriggers(q: Queryable, kind: string): Promise<boolean> {
+    const rows = await q.query<{ one: number }>(
+      'SELECT 1 AS one FROM notification_trigger WHERE enabled AND kind = $1 LIMIT 1',
+      [kind],
+    );
+    return rows.length > 0;
+  }
+
   /** Where a batch of sensors currently stands. Missing ids are sensors that no longer exist. */
   async standingOf(
     q: Queryable,

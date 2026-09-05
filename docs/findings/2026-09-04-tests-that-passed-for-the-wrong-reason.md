@@ -1,4 +1,4 @@
-# Sixteen tests that passed for the wrong reason, and what exposed each
+# Seventeen tests that passed for the wrong reason, and what exposed each
 
 `P-58`–`P-95`, 2026-09-04 and 2026-09-05. **Extended twice**, which is the finding.
 
@@ -18,7 +18,7 @@ old, written unhurriedly and green ever since. It confirmed 29 defects, five of 
 here, and they are the ones that settle the argument: haste was never the explanation.
 
 That is why the catalogue is worth keeping. The individual bugs are in their tickets; what is
-here is that **sixteen independent instances of one failure have now been found**, that a
+here is that **seventeen independent instances of one failure have now been found**, that a
 different technique was needed to expose each, and that knowing about the failure mode in
 detail — having just catalogued it — did not stop somebody producing four more instances of it
 before dinner.
@@ -300,6 +300,25 @@ in both queries, every optional one in at least one. Written as "both queries ca
 it failed immediately on the two fields the type already marked optional, which is the guard
 finding the distinction rather than the author remembering it.
 
+### 17. A helper more generous than production, over a feature that did nothing (`P-104`)
+
+The sharpest instance on this page, because of the ratio. `threshold-engine.test.ts` has
+seventeen tests over threshold triggers. Its `scan` helper wrote the reading and then called
+`engine.react` unconditionally — while the ingestion path called `react` **only when the batch
+produced a state transition**. A threshold trigger fires on a *reading*, and a reading changes
+without the state changing, so in production the feature never armed on a stable sensor and
+never stood an alarm down. It was inert.
+
+Seventeen green tests, and the entire feature was dead. The helper was not wrong about anything
+it asserted; it was wrong about the world the assertions ran in.
+
+**A test helper that sets up state is fine; one that performs the step under test is a
+substitute for production, not a model of it.** The fix was to make the helper apply the same
+rule the ingestor does — mirroring it rather than restating it — after which reverting the
+production change turns four of the seventeen red, including the two the panel had predicted by
+name. This is entry 10's defect at the scale of a subsystem: there the missing call was three
+lines above the assertion, here it was in a shared helper every case in the file depended on.
+
 ## What actually found them
 
 Ranked by what each cost and what it caught:
@@ -314,6 +333,7 @@ Ranked by what each cost and what it caught:
 | **A review panel with a refutation bar** | **6, 7, 8, 9, 10, 11, 12, 13** | **Very expensive; the only thing that caught the author's blind spot, now eight times** |
 | Writing the test for the fix, then running its *file* | 14 | Free, and skipped by the `--test-name-pattern` loop everybody uses |
 | Running the whole suite after a fix that changes a mechanism | 15, 16 | Minutes, and the six red tests were the *fix* working |
+| Asking what production calls, then making the helper call exactly that | 17 | Free, and it emptied seventeen tests of their meaning at once |
 
 The one that generalises: **a passing test is a hypothesis, and the mutation is the experiment.**
 Four of the first five had never had the mutation run against them; 7 was settled by one in

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import { AlarmEngine } from '../src/notifications/engine.js';
 import { AlarmRepository } from '../src/notifications/repository.js';
 import { TriggerSync } from '../src/notifications/sync.js';
@@ -117,6 +117,28 @@ describe(
     // Helpers.
     // ---------------------------------------------------------------------------------------
 
+    /**
+     * Exactly what `Ingestor` does after writing a batch (`P-104`).
+     *
+     * These helpers used to call `engine.react` unconditionally for the sensor, which is more
+     * generous than production has ever been: the ingestion path reacted only when the batch
+     * produced a *state transition*. A threshold trigger fires on a reading, and a reading
+     * changes without the state changing — so a breach on a stable Up sensor never armed, and a
+     * breach that cleared while the sensor stayed Up was never stood down. Every case in this
+     * file passed anyway, because the helper supplied the call production did not make.
+     *
+     * Mirroring the rule rather than restating it: whichever way the gate goes, these tests see
+     * what an operator would.
+     */
+    async function reactLikeIngestion(
+      q: Queryable,
+      moved: readonly number[],
+      when: Date,
+    ): Promise<void> {
+      const scanned = (await engine.reconcilesReadings(q)) ? [sensorId] : [...new Set(moved)];
+      if (scanned.length > 0) await engine.react(q, scanned, when);
+    }
+
     /** One scan that produced a reading, written the way ingestion writes it. */
     async function scan(value: number, when: Date, channel = rttChannel): Promise<void> {
       const states = h.states;
@@ -131,7 +153,11 @@ describe(
         ]);
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
-        await engine.react(q, [sensorId], when);
+        await reactLikeIngestion(
+          q,
+          decisions.transitions.map((one) => one.sensorId),
+          when,
+        );
       });
     }
 
@@ -145,7 +171,11 @@ describe(
       await db.tx(async (q) => {
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
-        await engine.react(q, [sensorId], when);
+        await reactLikeIngestion(
+          q,
+          decisions.transitions.map((one) => one.sensorId),
+          when,
+        );
       });
     }
 

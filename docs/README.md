@@ -146,7 +146,7 @@ measurement is not a claim.
 - [The `test:perf` budgets, two that failed, and the re-run that closed them](findings/2026-09-03-perf-budgets.md) (`P-29`, `P-30`)
 - [The auto-sizing loop under load, and the feedback trap in it](findings/2026-09-04-autosize-loop.md) (`P-44`, `P-45`, `P-46`)
 - [Today's probe changes on a live stack, and a defect that was not one](findings/2026-09-04-live-probe-check.md) (`P-42`–`P-46`)
-- [Sixteen tests that passed for the wrong reason, and what exposed each](findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md) (`P-58`–`P-98`)
+- [Seventeen tests that passed for the wrong reason, and what exposed each](findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md) (`P-58`–`P-104`)
 - [The budgets after four tickets touched the dispatch path](findings/2026-09-04-perf-budgets-after-the-watchdogs.md) (`P-73`–`P-79`)
 - [The budgets after the review panel's twenty fixes](findings/2026-09-04-perf-budgets-after-the-panel.md) (`P-80`–`P-83`)
 

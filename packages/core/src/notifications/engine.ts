@@ -141,6 +141,28 @@ export class AlarmEngine {
    * would be an outage nobody is tracking, and one whose alarm committed without its state would
    * page somebody about a sensor that is fine.
    */
+  /**
+   * Whether a result batch has to be reconciled in full, or only where the state moved (`P-104`).
+   *
+   * A state trigger fires on a transition, so reacting to the sensors that transitioned is
+   * complete for it. A **threshold** trigger fires on a *reading*, and a reading changes without
+   * the state changing — so `if (transitions.length > 0)` on the ingestion path meant a breach on
+   * a stable Up sensor never armed anything, and a breach that cleared while the sensor stayed Up
+   * was never stood down and paged after its latency with a value that was minutes stale.
+   *
+   * The engine's own sweep comment relies on the opposite — "react stands the alarm down the
+   * moment a reading clears it" — and nothing was calling it to.
+   *
+   * **The gate is global on purpose.** Working out which sensors in a batch are covered by a
+   * threshold trigger is the inheritance walk that `react` itself does, so asking it first would
+   * cost the thing it is meant to avoid. One indexed existence check answers `false` on every
+   * installation that has not configured this feature, and those pay nothing; one that has pays
+   * a full reconcile per batch, which is what making the feature work costs.
+   */
+  async reconcilesReadings(q: Queryable): Promise<boolean> {
+    return this.#alarms.anyThresholdTriggers(q, THRESHOLD_TRIGGER.id);
+  }
+
   async react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<AlarmReaction> {
     if (sensorIds.length === 0) return { ...EMPTY };
     // The guard, first and cheapest. An installation that notifies nobody pays exactly this.
