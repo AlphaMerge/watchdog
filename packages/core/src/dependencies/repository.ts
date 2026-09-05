@@ -140,6 +140,58 @@ export class DependencyRepository {
    * exclusion the master would pause the instant it went Down and nothing would ever notice it
    * recover.
    */
+  /**
+   * The sensors each of these masters holds — who the recovery delay is *for* (`P-89`).
+   *
+   * The same downward walk `applyPauses` does, stopped at the point of asking who is assigned
+   * to whom. It exists because `dependency.delaySeconds` is configured on the object carrying
+   * the dependency and stored against the master, so answering "how long does this master hold
+   * for" means asking its dependents.
+   */
+  async dependentsOf(q: Queryable, masterIds: readonly number[]): Promise<Map<number, number[]>> {
+    if (masterIds.length === 0) return new Map();
+    const rows = await q.query<{ object_id: string; master_id: string }>(
+      `
+      WITH RECURSIVE assigned AS (
+        SELECT s.object_id AS node,
+               CASE WHEN jsonb_typeof(s.value) = 'number'
+                    THEN (s.value #>> '{}')::bigint END AS master_id,
+               0 AS depth
+        FROM object_setting s
+        WHERE s.key = $1
+
+        UNION ALL
+
+        SELECT c.id, a.master_id, a.depth + 1
+        FROM object c
+        JOIN assigned a ON c.parent_id = a.node
+        WHERE a.depth < ${String(MAX_WALK_DEPTH)}
+          AND NOT EXISTS (
+            SELECT 1 FROM object_setting s2
+            WHERE s2.object_id = c.id AND s2.key = $1
+          )
+      )
+      SELECT o.id::text AS object_id, a.master_id::text AS master_id
+      FROM object o
+      JOIN assigned a ON a.node = o.id
+      WHERE o.kind = 'sensor'
+        AND a.master_id = ANY($2::bigint[])
+        -- A master never depends on itself; "master object for parent device" makes every
+        -- sensor under the device inherit it, the master included.
+        AND a.master_id <> o.id
+      `,
+      [DEPENDENCY_MASTER_ID.key, [...masterIds]],
+    );
+    const byMaster = new Map<number, number[]>();
+    for (const row of rows) {
+      const master = Number(row.master_id);
+      const held = byMaster.get(master);
+      if (held === undefined) byMaster.set(master, [Number(row.object_id)]);
+      else held.push(Number(row.object_id));
+    }
+    return byMaster;
+  }
+
   async applyPauses(q: Queryable, now: Date): Promise<DependencyFlagChange[]> {
     const rows = await q.query<{ object_id: string; paused: boolean; master_id: string | null }>(
       `

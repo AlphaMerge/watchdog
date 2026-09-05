@@ -6154,6 +6154,114 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
+- [x] **P-85 — The channel verdict was the one fact the machine read and never stored** · M · M-04,
+      M-08 · From the state-machine review panel, finding 1 of 29. `sensor_runtime` held every
+      input §2 reads except §2.2's answer, under a comment saying so deliberately: "a limit
+      breach remembered across a restart would be a verdict on a measurement nobody took."
+
+      The reasoning does not survive the row it is written on. Two columns to the left,
+      `state = 'down', cause = 'limit'` — the *conclusion* was always persisted. Only the premise
+      was thrown away, so anything that re-ran the machine without a reading reached a different
+      answer from the same row.
+
+      A breach carries `consecutive_failures = 0` — the check succeeded, the reading did not — so
+      rebuilding with no verdict says "last scan fine, nothing judged" and layer 5 answers Up.
+      `reevaluate` then wrote that Up. **Acknowledging a sensor that was Down on a limit destroyed
+      the acknowledgement it had written three lines earlier, in the same transaction**, and the
+      API still answered `{acknowledged:[id], refused:[]}`. The sensor left the alarms view, a
+      recovery that never happened went into the table uptime and SLA are computed from, and the
+      unchanged breach raised a second alarm on the next scan — one outage, two alarms. The same
+      reset fired on a lifted simulated error, which §7 promises "returns it to the truth", and on
+      every probe reconnect, clearing every acknowledgement under that probe on the way.
+
+      Migration 040 adds `channel_state`/`channel_cause`, both-or-neither by check constraint.
+      Null for existing rows, because null means "nothing judged" and inventing a verdict from the
+      current state would be reconstructing a measurement rather than remembering one: a row Down
+      on a limit today reads Up once on its first re-decide and goes Down again on its next
+      reading. A resume clears it with the rest of the interval nobody watched; a failed scan
+      stores null, which is the machine's own rule rather than a shortcut.
+
+- [x] **P-86 — Every re-decide used the default failure policy, never the sensor's** · S · M-03 ·
+      Finding 3. `reevaluate` read `#policies`, and `#policies` was written only by `#warm`, which
+      is reached only from `decide`. So every state change that is not a result — a pause, a
+      resume, a schedule window, a dependency release, an acknowledgement, a simulated error, a
+      probe returning — evaluated §2.1 with `warnFor: 1` whenever the policy was not already
+      cached. It is empty after a restart, and `forgetPolicies` empties it on *any* setting change
+      anywhere in the installation, so this was the ordinary case rather than a corner of one.
+
+      A sensor under a group with `retryWarnings = 3`, sitting at two failures and Warning, went
+      Down the moment its probe came back: a false transition into the history uptime is computed
+      from, and a chain armed for an outage its own policy says has not begun. The mirror case is
+      as bad — with `retryWarnings = 0`, a genuine Down re-decided as Warning and its alarm
+      cleared.
+
+      Resolved now, for the sensors it can change the answer for: §2.1 consults the policy on a
+      failed scan and nowhere else, so pausing four thousand healthy sensors still resolves
+      nothing. **Resolved and not cached**, because `resolveForObjects` reads on its own
+      connection and cannot see an uncommitted move in the caller's transaction, while
+      `object.moved` clears `#policies` from inside that transaction — caching the answer would
+      pin the pre-move value with nothing left to invalidate it.
+
+- [x] **P-87 — Pausing a master never released its dependents, and the test supplied the missing
+      trigger itself** · S · M-11 · Finding 2, raised by three of seven lenses. §3 says a paused
+      master does not hold its dependents by dependency — it is switched off, not measured Down.
+      `DependencySync.invalidates` had no `object.paused`/`object.resumed` case, so they fell to
+      `default: return false`. `react` is reachable only from ingestion with the transitions a
+      result batch produced, and a paused master is excluded from `assignmentsFor`, so it produces
+      no further results and no further transitions. Nothing had a bounded lifetime.
+
+      Forty dependents kept `paused_by_dependency`, left the probe configuration, and were never
+      scanned again — while `#dependencyView.holding` is computed from the master's *current*
+      state, now `paused` rather than `down`, so `GET /objects/:id/pause` answered `paused: false`
+      and `DELETE` refused with "this object is not paused". Silently unmonitored, indefinitely,
+      unresumable, and unable to alarm; the switch could be repaired and they still never scanned.
+
+      **The test that claimed otherwise called `dependencies.recompute` by hand three lines after
+      the pause** — the exact trigger whose absence was the defect. Deleting those lines turned it
+      red immediately. A test that supplies the missing step tests the step after it; the case now
+      also asserts that the pause API agrees with the row.
+
+- [x] **P-88 — The audit sink that exists to release a deleted master's dependents ran before the
+      delete** · S · D-07, M-11 · Finding 4. `DependencySync` reacts to `object.deleted` precisely
+      so that "a stale flag would not pause them for ever with no object left to point at" — but
+      `ObjectService.delete` recorded the audit entry *before* `deleteIds`, and
+      `CompositeAuditSink.record` fans out synchronously inside that transaction. The reactor ran
+      while the master's rows were still present and still Down: `holding` still named it, nothing
+      moved, `#settle` broke on round 1.
+
+      The dependents were then dark rather than merely stuck — excluded from the probe
+      configuration, and `pauseState` computing the holder from an object that no longer exists
+      answered `paused: false`, so `resume` refused them too. An outage on any of them produced
+      nothing at all, until some unrelated master elsewhere happened to drag a global `#settle`
+      through.
+
+      Moved after `deleteIds`, still inside the transaction. The entry is unchanged: `object`,
+      `counts` and `refs` are captured before the delete, so the enumeration a mistaken delete is
+      reconstructed from is exactly what it always was, and an audit entry still cannot exist for
+      a rolled-back delete. The sink simply has to see the tree it is reacting to.
+
+- [x] **P-89 — The dependency recovery delay was read from the master's chain and configured on
+      the dependent's** · S · M-11 · Finding 5. `react` resolved `dependency.delaySeconds` on the
+      recovered *masters*; `setDependency` writes it to the object carrying the *dependency*, with
+      a comment saying why. The two coincide only in `device` mode, where the master sensor sits
+      inside the device the setting lands on — which is the mode the existing test used, which is
+      why it stayed green for a fortnight.
+
+      In `object` mode — WORKFLOW.MD §5's "every branch-office device depends on the WAN link
+      sensor" — the master is elsewhere in the tree, the value is not on its chain, and every
+      recovery fell back to the registry default of 0. `GET` and the resolver went on reporting
+      the configured value, so the UI showed a delay the engine never used. Each flap released and
+      re-paused every dependent: two rows each per bounce in `sensor_state`, and a bounce longer
+      than the scan interval plus the notification latency let the dependents arm and fire the
+      alarms the setting exists to prevent.
+
+      Resolved on the dependents now, via `DependencyRepository.dependentsOf` — the same downward
+      walk `applyPauses` does. **The longest wins when dependents disagree**, because
+      `dependency_clear_at` is one column on the master: releasing a dependent before its own
+      configured delay is the failure being prevented, and holding one longer than it asked costs
+      an interval on a device whose master has only just returned. In `device` mode they all
+      inherit the same value and the question does not arise.
+
 - [x] **P-84 — Tree build had not moved; the measurements had** · S · P-19 · Filed while writing up
       `P-80`–`P-83`'s budgets and settled the same evening. The answer is that there was no
       regression, and the way the wrong answer was reached is the part worth keeping.

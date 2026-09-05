@@ -62,6 +62,19 @@ function invalidates(mutation: Mutation): boolean {
     // stale flag would pause them for ever with no object left to point at.
     case 'object.deleted':
       return true;
+    // **The master being paused, or resumed, is a dependency change** (`P-87`).
+    // `docs/state-machine.md` §3 says a paused master does not hold its dependents by
+    // dependency — it is not Down, it is switched off, and nothing has been measured to hold
+    // anybody on. `applyPauses`' `holding` CTE implements that rule; nothing ran it. `react` is
+    // reachable only from ingestion, with the transitions a *result batch* produced, and a
+    // paused master is excluded from `assignmentsFor` and so produces no further results. So
+    // the dependents kept `paused_by_dependency`, dropped out of the probe configuration, and
+    // were never scanned again — while `#dependencyView.holding`, computed from the master's
+    // *current* state, reported nothing holding them, so the pause API said `paused: false` and
+    // `resume` refused them. Silently unmonitored, indefinitely, and unresumable.
+    case 'object.paused':
+    case 'object.resumed':
+      return true;
     default:
       return false;
   }

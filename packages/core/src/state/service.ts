@@ -25,6 +25,7 @@ import {
   operatorDecided,
   DEFAULT_FAILURE_POLICY,
   type FailurePolicy,
+  type SensorFacts,
 } from './machine.js';
 import type { ChannelOutcome } from './limits.js';
 import { canAcknowledge, type ResolvedAcknowledgement } from './acknowledgement.js';
@@ -336,6 +337,9 @@ export class SensorStateService {
         // acknowledgement on recovery and on expiry, and a clearing that only ever happened in
         // memory would come back the moment the cache went cold (`M-13`).
         acknowledged: runtime.facts.acknowledged,
+        // Likewise (`P-85`): §2.2's answer decides the state, so a state that outlives the
+        // process needs the answer that decided it to outlive it too.
+        channel: runtime.facts.channel,
       });
     }
 
@@ -391,13 +395,21 @@ export class SensorStateService {
     const rewrites: StateRewrite[] = [];
     const recovered: number[] = [];
 
+    // §3: when the last source clears, the sensor awaits its next scan rather than returning to
+    // the state it had before the pause — which the system has not checked since.
+    const facts = new Map<number, SensorFacts>();
     for (const [sensorId, runtime] of runtimes) {
-      const stillPaused = isPaused(runtime.facts.pause);
-      // §3: when the last source clears, the sensor awaits its next scan rather than returning
-      // to the state it had before the pause — which the system has not checked since.
-      const resuming = !stillPaused && runtime.state === 'paused';
-      const facts = resuming ? clearedByResume(runtime.facts) : runtime.facts;
-      const decision = evaluate(facts, this.#policies.get(sensorId) ?? this.#fallback);
+      const resuming = !isPaused(runtime.facts.pause) && runtime.state === 'paused';
+      facts.set(sensorId, resuming ? clearedByResume(runtime.facts) : runtime.facts);
+    }
+    const policies = await this.#policiesFor(facts);
+    const factsOf = (sensorId: number, fallback: SensorFacts): SensorFacts =>
+      facts.get(sensorId) ?? fallback;
+
+    for (const [sensorId, runtime] of runtimes) {
+      const facts = factsOf(sensorId, runtime.facts);
+      const resuming = facts !== runtime.facts;
+      const decision = evaluate(facts, policies(sensorId));
 
       // §2.4 clears an acknowledgement on a recovery, and a recovery does not have to arrive as
       // a result: lifting a simulated error is one, and so is a pause clearing. Before `M-16`
@@ -586,6 +598,43 @@ export class SensorStateService {
       });
     }
     return runtimes;
+  }
+
+  /**
+   * The failure policies `reevaluate` needs, resolved rather than assumed (`P-86`).
+   *
+   * `#warm` writes `#policies`, and `#warm` is reached only from `decide` — so every state
+   * change that is not a result evaluated §2.1 with `DEFAULT_FAILURE_POLICY` whenever the
+   * sensor's own policy was not already cached, which is *always* after a restart and after any
+   * setting change anywhere in the installation (`forgetPolicies` clears the lot). A sensor
+   * whose group says `retryWarnings = 3`, sitting at two failures, was re-decided as Down the
+   * moment its probe came back: a false transition into the table uptime is computed from, and
+   * a notification chain armed for an outage the sensor's own policy says has not happened.
+   *
+   * **Only the sensors it can change the answer for.** §2.1 consults the policy on a failed
+   * scan and nowhere else, so pausing four thousand healthy sensors resolves nothing and this
+   * costs one query only when a re-decide meets an actually-failing sensor.
+   *
+   * **Resolved, never cached.** `resolveForObjects` reads on its own connection, so it cannot
+   * see an uncommitted move in the caller's transaction — and `object.moved` clears `#policies`
+   * from inside that transaction. Caching what came back would pin the pre-move answer with
+   * nothing left to invalidate it. Reading it fresh is the cold path's price for being correct.
+   */
+  async #policiesFor(
+    facts: ReadonlyMap<number, SensorFacts>,
+  ): Promise<(sensorId: number) => FailurePolicy> {
+    const wanted = [...facts]
+      .filter(([id, one]) => one.scan.kind === 'failed' && !this.#policies.has(id))
+      .map(([id]) => id);
+    if (wanted.length === 0 || this.#settings === undefined) {
+      return (sensorId) => this.#policies.get(sensorId) ?? this.#fallback;
+    }
+    const resolved = await this.#settings.resolveForObjects(wanted, SCAN_RETRY_WARNINGS.key);
+    return (sensorId) => {
+      const setting = resolved.get(sensorId);
+      if (setting !== undefined) return this.#policyFrom(setting.value);
+      return this.#policies.get(sensorId) ?? this.#fallback;
+    };
   }
 
   async #warm(sensorIds: readonly number[]): Promise<void> {

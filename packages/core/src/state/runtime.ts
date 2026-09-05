@@ -9,7 +9,7 @@
  */
 
 import type { Queryable } from '../db/pool.js';
-import type { SensorFacts } from './machine.js';
+import type { ChannelVerdict, SensorFacts } from './machine.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
 /** One sensor's persisted working set. */
@@ -72,6 +72,14 @@ export interface RuntimeWrite {
    * `false` here means clear the columns and `true` means leave them exactly as they are.
    */
   readonly acknowledged: boolean;
+  /**
+   * §2.2's answer for the readings this write is about (`P-85`).
+   *
+   * Null on a failed check, and that is the machine's own rule rather than a shortcut: no-data
+   * is not zero, a failed scan produced no readings to judge, and carrying the last breach
+   * forward would keep it alive across an outage and blame a threshold for it.
+   */
+  readonly channel: ChannelVerdict | null;
 }
 
 /** What one batch of results decided. Both halves are written in the readings' transaction. */
@@ -98,14 +106,32 @@ interface RuntimeRow {
   acknowledged_by_kind?: string | null;
   acknowledged_by_label?: string | null;
   simulated_error: boolean;
+  /** §2.2's answer, or null when nothing was judged. Both columns move together (`P-85`). */
+  channel_state: SensorState | null;
+  channel_cause: SensorStateCause | null;
 }
 
 const RUNTIME_COLUMNS = `
   object_id::text AS object_id, state, cause, message, since,
   consecutive_failures, last_result_at,
   paused_by_parent, paused_by_dependency, paused_by_schedule, paused_manually,
-  acknowledged_at, acknowledged_until, simulated_error
+  acknowledged_at, acknowledged_until, simulated_error,
+  channel_state, channel_cause
 `;
+
+/**
+ * The stored verdict, or null.
+ *
+ * A `ChannelVerdict` cannot be `unknown` — §2.2 ranks against Up and an unranked state would
+ * outvote a genuine one — but the column is the full `sensor_state_kind`, because narrowing the
+ * enum for one column is not worth a second type. A row that somehow holds one is read as
+ * nothing judged rather than trusted into a state the machine does not model.
+ */
+function channelVerdict(row: RuntimeRow): ChannelVerdict | null {
+  const { channel_state: state, channel_cause: cause } = row;
+  if (state === null || cause === null) return null;
+  return state === 'up' || state === 'warning' || state === 'down' ? { state, cause } : null;
+}
 
 function toRuntime(row: RuntimeRow): SensorRuntime {
   return {
@@ -140,9 +166,13 @@ function toRuntime(row: RuntimeRow): SensorRuntime {
           : row.consecutive_failures === 0
             ? { kind: 'ok' }
             : { kind: 'failed', consecutiveFailures: row.consecutive_failures },
-      // Not persisted: the next result brings its own readings, and a limit breach remembered
-      // across a restart would be a verdict on a measurement nobody took.
-      channel: null,
+      // Persisted, because it is state (`P-85`). It was left out on the reasoning that a
+      // remembered breach would be "a verdict on a measurement nobody took" — but the row also
+      // stores the *conclusion* that verdict produced, so dropping the premise only meant
+      // re-deciding reached a different answer from the same row. A breach carries
+      // `consecutive_failures = 0`, so a null verdict reads as "last scan fine, nothing judged"
+      // and every non-result path answered Up.
+      channel: channelVerdict(row),
       lastResultAt: row.last_result_at,
       acknowledgedUntil: row.acknowledged_until,
     },
@@ -263,11 +293,15 @@ export async function writeRuntimes(
          acknowledged_at = CASE WHEN w.acknowledged THEN r.acknowledged_at END,
          acknowledged_until = CASE WHEN w.acknowledged THEN r.acknowledged_until END,
          acknowledged_by_kind = CASE WHEN w.acknowledged THEN r.acknowledged_by_kind END,
-         acknowledged_by_label = CASE WHEN w.acknowledged THEN r.acknowledged_by_label END
+         acknowledged_by_label = CASE WHEN w.acknowledged THEN r.acknowledged_by_label END,
+         channel_state = w.channel_state,
+         channel_cause = w.channel_cause
      FROM unnest(
        $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
-       $5::text[], $6::timestamptz[], $7::int[], $8::boolean[]
-     ) AS w(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged)
+       $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],
+       $9::sensor_state_kind[], $10::sensor_state_cause[]
+     ) AS w(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged,
+            channel_state, channel_cause)
      WHERE r.object_id = w.sensor_id
        AND (r.last_result_at IS NULL OR w.at > r.last_result_at)
      RETURNING r.object_id::text AS object_id`,
@@ -280,6 +314,8 @@ export async function writeRuntimes(
       writes.map((write) => write.since),
       writes.map((write) => write.consecutiveFailures),
       writes.map((write) => write.acknowledged),
+      writes.map((write) => write.channel?.state ?? null),
+      writes.map((write) => write.channel?.cause ?? null),
     ],
   );
   return rows.length;
@@ -491,7 +527,13 @@ export async function writeStateChanges(
          acknowledged_at = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_at END,
          acknowledged_until = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_until END,
          acknowledged_by_kind = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_kind END,
-         acknowledged_by_label = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_label END
+         acknowledged_by_label = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_label END,
+         -- A resume clears the verdict with the rest of the interval nobody watched: §3 says
+         -- the sensor awaits its next scan rather than returning to what it was. Every other
+         -- rewrite leaves it alone, which is the whole point — a re-decide without a reading
+         -- must read the same verdict the reading wrote.
+         channel_state = CASE WHEN w.reset THEN NULL ELSE r.channel_state END,
+         channel_cause = CASE WHEN w.reset THEN NULL ELSE r.channel_cause END
      FROM unnest(
        $1::bigint[], $2::sensor_state_kind[], $3::sensor_state_cause[], $4::text[],
        $5::timestamptz[], $6::boolean[]

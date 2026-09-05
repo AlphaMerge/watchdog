@@ -1971,25 +1971,6 @@ export class ObjectService {
         );
       }
 
-      // Recorded before the delete and inside the transaction: an audit entry can never exist
-      // for a rolled-back delete, and there is no recycle bin, so this enumeration is the only
-      // reconstruction path a mistaken delete has.
-      await this.#audit.record(
-        q,
-        actor,
-        [
-          {
-            action: 'object.deleted',
-            objectId: id,
-            kind: object.kind,
-            before: this.#redact(object),
-            deleted: counts,
-            destroyed: refs,
-          },
-        ],
-        new Date(),
-      );
-
       const destroyed = await this.#repo.deleteIds(
         q,
         refs.map((ref) => ref.id),
@@ -2006,6 +1987,36 @@ export class ObjectService {
           },
         );
       }
+
+      // **After the delete, and still inside the transaction** (`P-88`).
+      //
+      // Inside, because an audit entry must never exist for a rolled-back delete, and because
+      // there is no recycle bin: `object`, `counts` and `refs` were captured above, so the
+      // entry records exactly the same enumeration it always did — the only reconstruction path
+      // a mistaken delete has — regardless of when it is written.
+      //
+      // After, because `CompositeAuditSink.record` fans out synchronously into this
+      // transaction, and one of those sinks is `DependencySync`, which exists precisely so a
+      // deleted master does not "pause them for ever with no object left to point at". Running
+      // it while the master's rows were still present meant `applyPauses`' `holding` CTE still
+      // named it, nothing moved, and the dependents kept `paused_by_dependency` — out of the
+      // probe configuration, unscannable, and reported as not paused by the pause API, so they
+      // could not even be resumed. The sink has to see the tree it is reacting to.
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'object.deleted',
+            objectId: id,
+            kind: object.kind,
+            before: this.#redact(object),
+            deleted: counts,
+            destroyed: refs,
+          },
+        ],
+        new Date(),
+      );
 
       this.#logger.info({ objectId: id, deleted: counts }, 'subtree deleted');
       return { id, kind: object.kind, name: object.name, deleted: counts, destroyed: refs };

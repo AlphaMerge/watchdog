@@ -216,6 +216,43 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
     }
   });
 
+  it('re-decides on the sensor’s own failure policy, not the default', async () => {
+    // **`P-86`.** §2.1's policy is inheritable and resolved per sensor, but the cache that held
+    // it was written only by `decide` — so every path that re-decides without a result used
+    // `warnFor: 1`. It is empty after a restart and after any setting change anywhere in the
+    // installation, so this is the ordinary case rather than a corner of one.
+    //
+    // Two failures against `retryWarnings = 3` is Warning. A probe leaving and returning must
+    // not turn that into Down: `sensor_state` is what uptime is computed from, and an alarm
+    // chain armed here pages somebody for an outage the sensor's own policy says has not begun.
+    const [sensorId] = sensorIds;
+    assert.ok(sensorId !== undefined);
+    await harness.service.setSetting(testActor, deviceId, 'scan.retryWarnings', 3);
+
+    for (let failure = 0; failure < 2; failure += 1) {
+      const decisions = await states.decide([
+        { sensorId, at: new Date(), outcome: 'error', message: 'no reply' },
+      ]);
+      await db.tx(async (q) => {
+        await writeRuntimes(q, decisions.runtimes);
+        await writeStateHistory(q, decisions.transitions);
+      });
+    }
+    assert.equal((await stateOf(sensorId))?.state, 'warning', 'two failures against three');
+
+    // Exactly what a restart leaves behind: the row, and no resolved policy in memory.
+    states.forgetPolicies();
+
+    await reachability.lost(probeId);
+    await reachability.found(probeId);
+
+    assert.equal(
+      (await stateOf(sensorId))?.state,
+      'warning',
+      'a probe leaving and returning is not two more failed scans',
+    );
+  });
+
   it('one outage is one transition per sensor, not two', async () => {
     await scanned();
     await reachability.lost(probeId);

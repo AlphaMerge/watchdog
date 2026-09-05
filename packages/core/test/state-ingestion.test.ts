@@ -14,6 +14,7 @@ import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { SensorStateService } from '../src/state/service.js';
+import { resolveAcknowledgement } from '../src/state/acknowledgement.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
 import {
   createScratchDatabase,
@@ -165,6 +166,14 @@ describe(
       });
       await ingestor.stop();
       return reply.type;
+    }
+
+    async function acknowledgedAt(id = sensorId): Promise<Date | null> {
+      const rows = await db.query<{ acknowledged_at: Date | null }>(
+        'SELECT acknowledged_at FROM sensor_runtime WHERE object_id = $1',
+        [id],
+      );
+      return rows[0]?.acknowledged_at ?? null;
     }
 
     async function history(id = sensorId): Promise<HistoryRow[]> {
@@ -892,6 +901,68 @@ describe(
         assert.deepEqual(entry.diff, [
           { field: 'channel.rtt.upperError', before: null, after: 500 },
         ]);
+      });
+
+      it('keeps a limit breach across every path that re-decides without a reading', async () => {
+        // **The channel verdict is state, and it has to be persisted like the rest of it.**
+        // `reevaluate` rebuilds the facts from `sensor_runtime` and re-runs the machine, so
+        // every fact the machine reads has to survive that round trip. A limit breach carries
+        // `consecutive_failures = 0` — the check succeeded, the reading did not — so a
+        // non-persisted channel verdict rebuilds as "last scan OK, nothing judged" and layer 5
+        // answers Up. Acknowledging is the sharpest way to see it: `acknowledge` writes the
+        // columns and then calls `reevaluate` in the same transaction.
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        await setLimits('rtt', { upperError: 500 });
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 812)], 'b2');
+        assert.equal((await runtime()).state, 'down');
+
+        const resolved = resolveAcknowledgement({ kind: 'indefinite' }, 'ticket 41', AT);
+        assert.ok('acknowledgement' in resolved);
+        await db.tx((q) =>
+          build().states.acknowledge(
+            q,
+            [sensorId],
+            resolved.acknowledgement,
+            { kind: 'user', label: 'tester' },
+            AT,
+          ),
+        );
+
+        const current = await runtime();
+        assert.equal(current.state, 'down_acknowledged', 'not Up: nothing new was measured');
+        assert.equal(current.cause, 'user');
+        assert.notEqual(
+          await acknowledgedAt(),
+          null,
+          'the acknowledgement survives the reevaluate that acknowledging itself triggers',
+        );
+        assert.equal(
+          (await history()).filter((row) => row.state === 'up').length,
+          1,
+          'one Up, from the first clean reading — a recovery nobody measured is not a recovery',
+        );
+      });
+
+      it('keeps it across a probe reconnect and a lifted simulated error too', async () => {
+        // The same reset reached through the other two doors. `ProbeReachability.found` and
+        // `simulate(false)` both promise the sensor goes back to what its last reading said;
+        // for a limit breach that promise is only kept if the verdict was stored.
+        const first = build();
+        await deliver(first.service, first.ingestor, [measured(0, 10)]);
+        await setLimits('rtt', { upperError: 500 });
+        const second = build();
+        await deliver(second.service, second.ingestor, [measured(1, 812)], 'b2');
+
+        const states = build().states;
+        await db.tx((q) => states.simulate(q, [sensorId], true, 'rehearsal', AT));
+        assert.equal((await runtime()).state, 'down');
+        await db.tx((q) => states.simulate(q, [sensorId], false, '', AT));
+
+        const current = await runtime();
+        assert.equal(current.state, 'down', 'back to the truth, and the truth was a breach');
+        assert.equal(current.cause, 'limit');
       });
 
       it('404s for a channel the sensor does not have', async () => {

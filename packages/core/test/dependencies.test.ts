@@ -208,6 +208,7 @@ describe(
             message: '',
             since: NOW,
             consecutiveFailures: 0,
+            channel: null,
             acknowledged: false,
           },
         ],
@@ -297,6 +298,29 @@ describe(
       // "core-switch is Down" would name something that has no state of its own.
       assert.ok(message.includes('Ping'), message);
       assert.ok(message.includes('Down'), message);
+    });
+
+    it('releases them when the master is deleted, rather than holding them for ever', async () => {
+      // **`P-88`.** `DependencySync` reacts to `object.deleted` for exactly this reason — a
+      // stale flag "would pause them for ever with no object left to point at" — but the audit
+      // entry was recorded *before* the rows were deleted, and `CompositeAuditSink.record` fans
+      // out synchronously inside that same transaction. So the reactor ran while the master was
+      // still present and still Down: `holding` still named it, nothing moved, and the sink
+      // that exists to prevent this was the one thing guaranteed not to see it.
+      //
+      // The dependents are then invisible rather than merely stuck: `assignmentsFor` excludes
+      // them so the probe never scans them again, and `pauseState` computes the holder from a
+      // master that no longer exists and answers `paused: false` — so `resume` refuses them too.
+      await masterForDevice();
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'held while the master is Down');
+
+      await h.service.delete(testActor, pingId, { kind: 'leafOnly' }, { kind: 'none' });
+
+      const after = await runtimeOf(httpId);
+      assert.equal(after.dependency, false, 'nothing left to hold it');
+      assert.notEqual(after.state, 'paused', 'and it is scannable again');
     });
 
     it('releases them when the master recovers, with no delay configured', async () => {
@@ -419,6 +443,49 @@ describe(
       assert.equal(released, 2);
       assert.equal((await runtimeOf(httpId)).state, 'unknown');
       assert.equal((await runtimeOf(pingId)).clearAt, null, 'and the deadline is spent');
+    });
+
+    it('applies the delay a dependent in another subtree configured', async () => {
+      // **`P-89`.** The existing case above uses `device` mode, where the master sensor sits
+      // inside the device the setting lands on — so resolving the delay on the *master* happens
+      // to find it. WORKFLOW.MD §5's other mode is "every branch-office device depends on the
+      // WAN link sensor", where the master is somewhere else entirely: the value is not on its
+      // chain, and every recovery fell back to the registry default of 0 while `GET` and the
+      // resolver went on reporting the configured 300.
+      //
+      // The visible cost is a flap storm. Released immediately, the dependents are pushed back
+      // into the probe configuration, re-scanned and re-paused on the next bounce — two rows
+      // each per bounce in `sensor_state`, which uptime and SLA are computed from.
+      const branch = await h.service.create(testActor, {
+        kind: 'device',
+        parentId: groupId,
+        name: 'branch-office',
+        host: '192.0.2.20',
+      });
+      const branchSensor = await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: branch.id,
+        name: 'Branch ping',
+        sensorType: 'icmp.ping',
+      });
+      await h.service.setDependency(testActor, branch.id, 'object', pingId, 300);
+      assert.equal(
+        (await h.resolver.resolve<number>(branchSensor.id, DEPENDENCY_DELAY_SECONDS.key)).value,
+        300,
+        'the delay is configured, and the resolver says so',
+      );
+
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      assert.equal((await runtimeOf(branchSensor.id)).state, 'paused');
+
+      await setState(pingId, 'up');
+      await react([{ sensorId: pingId, state: 'up', previousState: 'down' }]);
+      assert.ok(
+        (await runtimeOf(pingId)).clearAt !== null,
+        'the master holds for the delay its dependent configured, not for the default of 0',
+      );
+      assert.equal((await runtimeOf(branchSensor.id)).state, 'paused', 'still held');
     });
 
     it('restarts the delay when the master flaps, rather than accumulating one', async () => {

@@ -190,6 +190,7 @@ describe(
             message: '',
             since: OUTSIDE,
             consecutiveFailures: 0,
+            channel: null,
             acknowledged: false,
           },
         ],
@@ -440,9 +441,6 @@ describe(
         { kind: 'indefinite' },
         'master maintenance',
       );
-      await db.tx(async (q) => {
-        await h.dependencies?.recompute(q, OUTSIDE);
-      });
 
       assert.equal((await flagsOf(masterId)).state, 'paused');
       assert.deepEqual(
@@ -450,6 +448,15 @@ describe(
         [],
         'the dependent is released: a paused master is not a Down master',
       );
+
+      // **And the release is what production does, not what this test does** (`P-87`). This
+      // case passed for two weeks while calling `dependencies.recompute` by hand on the line
+      // above — supplying the exact trigger whose absence was the defect. `DependencySync` saw
+      // `object.paused` fall through to `default: return false`, so nothing recomputed and the
+      // dependent stayed held for ever. A test that provides the missing step tests the step
+      // after it.
+      const pauseState = await h.service.pauseState(sensorId);
+      assert.equal(pauseState.paused, false, 'and the API agrees with the row');
     });
 
     it('reports every holder at once, so a UI can show all four', async () => {

@@ -157,24 +157,55 @@ export class DependencyPauses {
       else if (wasDown) recoveredIds.push(change.sensorId);
     }
 
+    await this.#repo.markRecoveries(q, await this.#delaysFor(q, recoveredIds), failed, reactedAt);
+
+    return this.#settle(q, reactedAt);
+  }
+
+  /**
+   * How long each recovered master keeps holding — resolved on the objects that configure it.
+   *
+   * **`P-89`: this used to resolve `dependency.delaySeconds` on the masters.** The setting is
+   * written to the object that carries the *dependency* — `ObjectService.setDependency` says so
+   * in as many words, because a delay set alongside "master object for parent device" must land
+   * on the device rather than on the sensor. The two coincide only in `device` mode, where the
+   * master sensor sits inside the device the setting lands on; that is the mode the existing
+   * test used, which is why it stayed green. In `object` mode — WORKFLOW.MD §5's "every branch
+   * office depends on the WAN link sensor" — the master lives elsewhere in the tree, the value
+   * is not on its chain, and every recovery fell back to the registry default of 0. The API and
+   * the resolver went on reporting the configured delay, so the UI showed a number the engine
+   * never used, and each flap of the master released and re-paused every dependent: two rows
+   * per dependent per bounce in the table uptime is computed from, and long enough bounces let
+   * the dependents arm and fire the alarms the setting exists to prevent.
+   *
+   * **The longest wins when dependents disagree.** `dependency_clear_at` is one column on the
+   * master, so one master has one deadline. Releasing a dependent before its own configured
+   * delay is the failure this setting exists to prevent, and holding one a little longer than
+   * it asked for costs an interval of monitoring on a device whose master has only just come
+   * back. In `device` mode every dependent inherits the same value and the question does not
+   * arise.
+   */
+  async #delaysFor(
+    q: Queryable,
+    recoveredIds: readonly number[],
+  ): Promise<{ sensorId: number; delaySeconds: number }[]> {
+    if (recoveredIds.length === 0) return [];
+    const dependents = await this.#repo.dependentsOf(q, recoveredIds);
+    const wanted = [...new Set([...dependents.values()].flat())];
     const delays =
-      recoveredIds.length === 0
+      wanted.length === 0
         ? new Map<number, { value: number }>()
         : await this.#settings
             .withExecutor(q)
-            .resolveForObjects(recoveredIds, DEPENDENCY_DELAY_SECONDS.key);
+            .resolveForObjects(wanted, DEPENDENCY_DELAY_SECONDS.key);
 
-    await this.#repo.markRecoveries(
-      q,
-      recoveredIds.map((sensorId) => ({
-        sensorId,
-        delaySeconds: delays.get(sensorId)?.value ?? 0,
-      })),
-      failed,
-      reactedAt,
-    );
-
-    return this.#settle(q, reactedAt);
+    return recoveredIds.map((sensorId) => ({
+      sensorId,
+      delaySeconds: (dependents.get(sensorId) ?? []).reduce(
+        (longest, dependent) => Math.max(longest, delays.get(dependent)?.value ?? 0),
+        0,
+      ),
+    }));
   }
 
   /**
