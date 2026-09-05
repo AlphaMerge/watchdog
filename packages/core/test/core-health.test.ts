@@ -39,6 +39,7 @@ function sources(
     queuedRows: number;
     refusedRows: number;
     dependencyPauses: number;
+    deferredReactions: number;
     p95: number;
     overflowed: number;
     probesDown: number;
@@ -64,6 +65,7 @@ function sources(
       queuedRows: overrides.queuedRows ?? 0,
       refusedRows: overrides.refusedRows ?? 0,
       dependencyPauses: overrides.dependencyPauses ?? 0,
+      deferredReactions: overrides.deferredReactions ?? 0,
       writeMs: { p95: overrides.p95 ?? 0 },
     }),
     stream: () => ({ overflowed: overrides.overflowed ?? 0 }),
@@ -322,6 +324,16 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // quietly retrying a button that keeps refusing.
       const reading = await build({ queriesRefused: 5 }).read();
       assert.equal(reading['queriesRefused'], 5);
+    });
+
+    it('carries the alarm reactions a catch-up is holding', async () => {
+      // **`P-157`.** `P-146` skipped the alarm reaction for a batch a probe is replaying, and
+      // dropped it; deferring it instead is what stops an outage that began during a drain going
+      // unalarmed. `CLAUDE.md`: nothing is deferred silently. A gauge rather than a counter,
+      // because the shape is the message — it rises during a drain and comes back to zero, and
+      // one that stays up is a probe whose sensors have no armed alarms.
+      const reading = await build({ deferredReactions: 12 }).read();
+      assert.equal(reading['reactionsDeferred'], 12);
     });
 
     it('carries the results refused for an implausible clock', async () => {

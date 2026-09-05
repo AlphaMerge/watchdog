@@ -31,6 +31,8 @@ export interface CoreHealthSources {
     queuedRows: number;
     refusedRows: number;
     dependencyPauses: number;
+    /** Sensors whose alarm reaction is waiting for a batch that is not a replay (`P-157`). */
+    deferredReactions: number;
     writeMs: { p95: number };
   };
   /** `StateBroadcaster.stats()` — subscribers cut off for falling behind. */
@@ -208,6 +210,7 @@ export class CoreHealthService {
       alarmsFired: alarms.fired,
       queriesRefused: queries.refused,
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
+      reactionsDeferred: ingestion.deferredReactions,
     };
   }
 

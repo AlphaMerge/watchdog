@@ -12,6 +12,7 @@ import {
   FrameDecoder,
   PROTOCOL_VERSION,
   type CoreConfig,
+  parseCoreToProbe,
   type CoreToProbeMessage,
   type ProbeToCoreMessage,
   type SensorAssignment,
@@ -167,7 +168,14 @@ class TestProbe {
     this.#socket = socket;
     socket.on('data', (chunk: Buffer) => {
       for (const value of this.#decoder.push(chunk)) {
-        this.received.push(value as CoreToProbeMessage);
+        // **Through the real parser, not a cast** (`R18`). A cast accepts anything the core
+        // sends; the probe runs `parseCoreToProbe`, whose schemas are `additionalProperties:
+        // false`, and closes the connection on a protocol violation. Adding a field to the
+        // TypeScript union and not to the schema therefore passed every test here and wedged the
+        // dev stack on the first real handshake — the probe refused every configuration message,
+        // reconnected, refused it again. Parsing here makes this fake probe as strict as the one
+        // it stands in for.
+        this.received.push(parseCoreToProbe(value));
         this.#onMessage?.();
       }
     });

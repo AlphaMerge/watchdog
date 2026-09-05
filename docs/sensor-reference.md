@@ -990,6 +990,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `alarmsFired` | Notification steps fired | steps | 64-bit counter → rate |
 | `queriesRefused` | On-demand checks refused | queries | 64-bit counter → rate |
 | `resultsFutureDated` | Results refused as future-dated | results | 64-bit counter → rate |
+| `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 
 Takes no parameters.
 

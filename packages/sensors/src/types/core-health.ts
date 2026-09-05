@@ -235,6 +235,19 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'results',
     counter: { bits: 64 },
   },
+  // `P-157`. Alarm reactions held back because the batch that carried them was a probe replaying
+  // its spool: they are folded into the first batch that is not, which is what stops an outage
+  // that began during a drain going unalarmed. `CLAUDE.md`: nothing is deferred silently.
+  //
+  // **A gauge, not a counter, and that is the whole value of it.** It rises during a drain and
+  // returns to zero when the drain ends. One that stays up is a probe that never reports itself
+  // caught up — a slow clock on a probe that does not report its backlog — and every sensor
+  // counted here has an alarm that is not armed.
+  {
+    key: 'reactionsDeferred',
+    name: 'Alarm reactions waiting on a catch-up',
+    unit: 'sensors',
+  },
 ];
 
 export const coreHealth: SensorType = {

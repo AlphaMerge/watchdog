@@ -1052,6 +1052,8 @@ const coreToProbeSchema = {
           maxItems: 5000,
           items: sensorAssignmentSchema,
         },
+        // Optional, so an older core that does not send it still parses (`R18`).
+        final: { type: 'boolean' },
       },
       required: ['type', 'version', 'sensors'],
       additionalProperties: false,
@@ -1062,6 +1064,7 @@ const coreToProbeSchema = {
         version: { type: 'string', maxLength: 128 },
         upserted: { type: 'array', maxItems: 5000, items: sensorAssignmentSchema },
         removed: { type: 'array', maxItems: 5000, items: { type: 'integer', minimum: 1 } },
+        final: { type: 'boolean' },
       },
       required: ['type', 'version', 'upserted', 'removed'],
       additionalProperties: false,

@@ -79,6 +79,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
           queuedRows: 41,
           refusedRows: 7,
           dependencyPauses: 3,
+          deferredReactions: 0,
           writeMs: { p95: 12.5 },
         }),
         stream: () => ({ overflowed: 2 }),

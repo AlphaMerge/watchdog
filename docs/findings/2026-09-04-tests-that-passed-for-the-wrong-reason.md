@@ -382,10 +382,11 @@ and cause and writes nothing at all. So the fix ships with no test that fails wi
 `TASKS.md` says that in as many words. **A test that passes either way is worse than no test: it
 is a claim of coverage that a later reader will believe.**
 
-## The four the third panel found, in the fixes for the second
+## The five the third panel found, in the fixes for the second
 
 A third panel, over the diff that fixed the second panel's 45. It confirmed 36 more, and four of
-them were again the guards rather than the code.
+them were again the guards rather than the code. A fifth was found the way three others in this
+document were: by starting the server.
 
 ### 22. A sweep whose principal could not tell a coarse bar from a correct one (`A-11`)
 
@@ -449,6 +450,24 @@ Writing the version that puts both failures in the stale batch also caught a sec
 first attempt built a fresh ingestor per batch, as the tests around it do, which meant the
 deferred set was empty by construction. It failed for the right reason and for the wrong one at
 once, and only reading the failure told them apart.
+
+### 26. A fake peer more permissive than the real one (`R18`, found by starting the server)
+
+Adding a field to a wire message means widening two declarations: the TypeScript union and the
+runtime JSON schema the peer validates against. Only the first was widened. The probe's
+`parseCoreToProbe` has `additionalProperties: false`, so it refused every configuration message,
+closed the connection on a protocol violation, reconnected and refused it again — the `P-148`
+wedge, reached by a different road.
+
+Both new tests passed, and so did the other 3,499. `TestProbe`, the fake probe in
+`probe-endpoint.test.ts`, **cast** what it decoded — `value as CoreToProbeMessage` — instead of
+parsing it. A stand-in strictly more permissive than the thing it stands in for, in the one file
+whose entire subject is what the core puts on the wire. It parses now, and removing the field
+from the schema turns six tests red.
+
+This is the third defect in this document caught by *starting the dev server* after a green
+suite, and the second in three days caught on the probe link specifically. The cost is under a
+minute.
 
 ## What actually found them
 

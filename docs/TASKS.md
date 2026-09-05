@@ -10656,6 +10656,16 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       not claiming is what makes it recoverable, exactly as a failed apply already was. Tests: 2
       new. Mutation 2/2.
 
+      **And it shipped broken for ten minutes, which is the part worth writing down.** The
+      TypeScript union and the runtime schema are two declarations of one wire format, and only
+      the first was widened — so the probe's own `parseCoreToProbe`, whose schemas are
+      `additionalProperties: false`, refused every configuration message and closed the
+      connection on a protocol violation, reconnected, and refused it again. The `P-148` failure
+      exactly, by a different route. Every test passed, because `TestProbe` **cast** what it
+      decoded instead of parsing it: a fake probe strictly more permissive than the real one, in
+      the file whose whole subject is what the core puts on the wire. It parses now, and removing
+      `final` from the schema turns six tests red.
+
 - [x] **P-167 — four comments that had become false, and one contract that always was**
       Not defects in behaviour, and each one is a load-bearing sentence a reader would reason
       from.
