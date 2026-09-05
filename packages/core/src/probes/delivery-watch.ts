@@ -166,6 +166,40 @@ export class ProbeDeliveryWatch {
       const held = this.#options.reachability.offlineReason(probeObjectId);
       if (held === 'silence') silent += 1;
 
+      // **A probe that is simply not there** (`P-110`). `verdictFor` answers `null` for a
+      // disconnected probe because delivery is `R-05`'s question, not this rule's — and `R-05`
+      // learns about a disconnect from `ProbeEndpoint.#handleClose`, which fires only for a
+      // session that *existed*. So a probe whose host went away while the core was down had no
+      // session to close, nothing seeded `#unreachable` at boot, and `loadRuntimes` restores
+      // `probeReachable: true` optimistically: its sensors read Up, green in the tree, absent
+      // from the alarms view, with `since` from before the crash. `sensor_state` got no row at
+      // all, so the whole absence integrated as Up for uptime and SLA.
+      //
+      // The same probe dropping while the core is *running* becomes Unknown within seconds. A
+      // restart therefore silently reversed the correct answer for an outage still in progress,
+      // and this file's own comment claimed the staleness is corrected by "the probe's own
+      // reconnect *or its absence*". Absence corrected nothing.
+      //
+      // After the grace, which is the same one the delivery rule uses and exists for the same
+      // reason: a core that has just started has not yet learned that a probe is missing, and
+      // marking thousands of sensors Unknown on every restart would be an alarm storm generated
+      // by the restart itself.
+      if (!this.#options.linkFor(probeObjectId).connected) {
+        if (held !== undefined || this.#uptimeMs() < this.#settings.graceSeconds * 1_000) continue;
+        if (marked >= cap) {
+          deferred += 1;
+          continue;
+        }
+        marked += 1;
+        this.#transitions += 1;
+        this.#options.logger.warn(
+          { probeObjectId },
+          'a probe has not connected since this core started; its sensors are Unknown',
+        );
+        moved += await this.#options.reachability.lost(probeObjectId, 'link');
+        continue;
+      }
+
       const seen = this.verdictFor(probeObjectId);
       if (seen === null) continue;
 

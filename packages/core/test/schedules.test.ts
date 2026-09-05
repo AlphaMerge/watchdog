@@ -712,6 +712,53 @@ describe(
       assert.equal((await flagsOf(sensorId)).schedule, true, 'the edit paused it in its own tx');
     });
 
+    it('pauses a sensor created inside a closed window, before it can scan', async () => {
+      // **`P-109`.** `invalidates` skipped `object.created`, justified by "a sensor created
+      // inside a closed window starts unpaused and is paused by the next sweep, within a minute
+      // and before its first scan interval has usually elapsed". The cost half of that was
+      // right; the timing half was not. `TimingWheel.add` implements the opposite — "the first
+      // firing is the next tick that lands on the sensor's own phase — not a whole interval
+      // away" — so the first scan lands uniformly in (0, intervalSeconds] while the sweep is
+      // armed at the next wall-clock minute. At the default 60 s that is a coin flip; below it
+      // the scan always wins.
+      //
+      // A sensor created at 02:00 on a weekend-maintenance window therefore scanned the target
+      // being patched, wrote a transition timestamped *inside* the window, and armed a chain: a
+      // page at 02:00 out of the exact window that exists to prevent one. §3 says a paused
+      // sensor has "no scans, no notifications, no uptime accrual".
+      const closed = (
+        await schedules.create(testActor, {
+          name: 'Weekend patching',
+          periods: aroundNow(),
+          polarity: 'inactive',
+        })
+      ).id;
+      await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, closed);
+      await recompute(new Date());
+
+      const late = await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'Created inside the window',
+        sensorType: 'icmp.ping',
+      });
+
+      // No sweep in between: the flag has to be right the moment the sensor exists.
+      const flags = await flagsOf(late.id);
+      assert.equal(flags.schedule, true, 'held by the window it was created inside');
+      assert.equal(flags.state, 'paused');
+
+      // And the probe is never told to scan it, which is the consequence that matters.
+      const assignments = await new ProbeConfigService({
+        db,
+        resolver: h.resolver,
+      }).assignmentsFor(probeId);
+      assert.ok(
+        !assignments.sensors.some((sensor) => sensor.sensorId === late.id),
+        'a paused sensor is not in its probe’s configuration at all',
+      );
+    });
+
     it('takes effect when a device is moved into a scheduled group', async () => {
       const other = (
         await h.service.create(testActor, { kind: 'group', parentId: probeId, name: 'unscheduled' })

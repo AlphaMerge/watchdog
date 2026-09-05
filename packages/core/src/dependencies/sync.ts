@@ -80,8 +80,10 @@ function invalidates(mutation: Mutation): boolean {
         mutation.key === DEPENDENCY_MASTER_ID.key || mutation.key === DEPENDENCY_DELAY_SECONDS.key
       );
     // A device moved into a subtree that carries a dependency inherits it on arrival. Rare and
-    // bounded, unlike a create.
+    // bounded, unlike a create — and a clone is the same shape, one mutation for a subtree whose
+    // sensors it does not name, so it cannot take the narrow path a create does (`P-109`).
     case 'object.moved':
+    case 'object.cloned':
       return true;
     // The master itself going away. Its dependents have nothing holding them any more, and a
     // stale flag would pause them for ever with no object left to point at.

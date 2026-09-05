@@ -68,7 +68,41 @@ export class SchedulePauses {
    * Runs inside the caller's transaction — the flag, the state history row and the audit entry
    * of whatever prompted it all commit together or not at all.
    */
+  /**
+   * Pauses sensors that were just created inside a closed window (`P-109`).
+   *
+   * `invalidates` skipped `object.created`, justified by "a sensor created inside a closed window
+   * therefore starts unpaused and is paused by the next sweep, within a minute and before its
+   * first scan interval has usually elapsed". The second half of that is wrong.
+   * `TimingWheel.add` documents and implements the opposite — "the first firing is the next tick
+   * that lands on the sensor's own phase — not a whole interval away" — so the first scan lands
+   * uniformly in (0, intervalSeconds], while the sweep is armed at the next wall-clock minute.
+   * For the registry default of 60 s that is a coin flip; below 60 s the scan always wins.
+   *
+   * So a sensor created at 02:00 on a weekend-maintenance window scanned the target being
+   * patched, wrote a `down` transition timestamped *inside* the window, and armed a notification
+   * chain — a page at 02:00 out of the exact window that exists to prevent one. §3 says a paused
+   * sensor has "no scans, no notifications, no uptime accrual", and its storage note says the
+   * flags are derived "on every pause, resume, move and create".
+   *
+   * The manual source is already asymmetric with this: `ObjectService.create` recomputes parent
+   * pauses at birth, with the comment "without this it would scan, alarm and record readings
+   * inside a maintenance window nobody reopened". This is that comment applied to the other
+   * source of the same window.
+   *
+   * The cost objection that shaped the exclusion is answered the way `P-93` answered it for
+   * dependencies: the create resolves the flag for *its own* sensors only.
+   */
+  async holdNew(q: Queryable, sensorIds: readonly number[], now: Date): Promise<number> {
+    if (sensorIds.length === 0) return 0;
+    return (await this.#recompute(q, now, sensorIds)).moved;
+  }
+
   async recompute(q: Queryable, now: Date): Promise<ScheduleRecompute> {
+    return this.#recompute(q, now);
+  }
+
+  async #recompute(q: Queryable, now: Date, only?: readonly number[]): Promise<ScheduleRecompute> {
     // Nothing assigned and nothing currently held: this is the one query an installation that
     // never uses schedules pays for the feature.
     if (!(await this.#repo.anyWork(q))) return NOTHING;
@@ -78,6 +112,7 @@ export class SchedulePauses {
     const changes = await this.#repo.applyPauses(
       q,
       inactive.map((schedule) => schedule.id),
+      only,
     );
     if (changes.length === 0) return { ...NOTHING, inactive: inactive.map((s) => s.id) };
 

@@ -6487,6 +6487,70 @@ because each is a decision rather than a defect:
       same sensor, same instant, same state and cause is a batch arriving twice, and advancing it
       would duplicate the timeline instead of deduplicating it.
 
+- [x] **P-109 — A sensor created inside a closed schedule window scanned before anything paused
+      it** · S · M-09, M-10 · Finding 21, and the same shape as `P-93` one subsystem over.
+      `ScheduleSync.invalidates` skipped `object.created`, justified by "a sensor created inside a
+      closed window starts unpaused and is paused by the next sweep, within a minute and before
+      its first scan interval has usually elapsed".
+
+      The cost half of that was right — a recompute walks every sensor and discovery creates them
+      in thousands, which is the regression `P-04`'s budget caught in `M-08`. **The timing half was
+      contradicted by the probe's own scheduler.** `TimingWheel.add` documents and implements the
+      opposite: "the first firing is the next tick that lands on the sensor's own phase — not a
+      whole interval away", so the first scan lands uniformly in (0, intervalSeconds] while the
+      sweep is armed at the next wall-clock minute. At the registry default of 60 s that is a coin
+      flip; below 60 s the scan always wins.
+
+      So a sensor created at 02:00 on a weekend-maintenance window scanned the target being
+      patched, wrote a `down` transition timestamped *inside* the window, and armed a chain — a
+      page at 02:00 out of the exact window that exists to prevent one. §3 says a paused sensor
+      has "no scans, no notifications, no uptime accrual", and its storage note says the flags are
+      derived "on every pause, resume, move and create". The manual source was already asymmetric
+      with this: `ObjectService.create` recomputes parent pauses at birth, with the comment
+      "without this it would scan, alarm and record readings inside a maintenance window nobody
+      reopened".
+
+      The subtree-scoped recompute that was filed for later is here: a create resolves the flag
+      for the sensors it made and nothing else. A bulk create emits one mutation per object, so
+      the whole batch is named.
+
+      **`object.cloned` takes the full recompute instead**, and was missing from the list
+      altogether — undocumented, in both this sink and the dependency one. It cannot be narrowed:
+      cloning a device emits *one* mutation, for the device, and the sensors it produced are not
+      in it. Clones are rare and bounded, which is the argument that already admits
+      `object.moved`.
+
+- [x] **P-110 — A probe already gone when the core started was never marked lost** · S · R-05 ·
+      Finding 27. `lost()` has exactly two callers: `ProbeEndpoint.#handleClose`, which fires only
+      for a session that *existed*, and `ProbeDeliveryWatch.settle`, which returned early for any
+      probe whose link is absent — `verdictFor` answers null for a disconnected probe, because
+      delivery is `R-05`'s question rather than that rule's. Nothing in `main.ts` seeds the set at
+      boot.
+
+      So a probe whose host or site went away while the core was down had no session to close and
+      no verdict to reach. `loadRuntimes` restores `probeReachable: true` optimistically — for the
+      good reason that a restart must not generate its own alarm storm — and layer 3 never fired:
+      its sensors read Up, green in the tree, absent from the alarms view, `since` from before the
+      crash, and **no `sensor_state` row at all**, so the whole multi-day absence integrated as Up
+      for any uptime or SLA figure. The same probe dropping while the core is running becomes
+      Unknown within seconds, so a restart silently reversed the correct answer for an outage that
+      was still in progress.
+
+      This file's own comment claimed the staleness is corrected by "the probe's own reconnect *or
+      its absence*". Absence corrected nothing.
+
+      The sweep already iterates every probe in the object table, so the branch goes there, after
+      the same grace the delivery rule uses and for the same reason. `#handleClose` still marks the
+      ordinary disconnect, so this is a backstop for the case nothing else covers rather than a
+      second opinion on one that is covered — `held !== undefined` is what keeps it to one.
+
+      **Not reproduced end to end.** The panel's own settle is a six-step manual procedure — kill
+      the core, stop the probe, restart, wait past the grace and two sweeps — which the unit suite
+      cannot express. The defect is settled by reading (two callers, neither reachable for a probe
+      that never connects, nothing seeding at boot) and the fix is pinned at the sweep: marked
+      after the grace, silent during it, and once rather than once per sweep. What is *not*
+      covered is the wiring from a real restart to that sweep.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

@@ -276,6 +276,7 @@ export class ScheduleRepository {
   async applyPauses(
     q: Queryable,
     inactiveScheduleIds: readonly number[],
+    only?: readonly number[],
   ): Promise<ScheduleFlagChange[]> {
     const rows = await q.query<{ object_id: string; paused: boolean; schedule_id: string | null }>(
       `
@@ -307,6 +308,10 @@ export class ScheduleRepository {
         FROM object o
         LEFT JOIN assigned a ON a.node = o.id
         WHERE o.kind = 'sensor'
+          -- Restricted to a named set when the caller has one (P-109): a create knows which
+          -- sensors it made, and discovery makes them in thousands, so answering for those is
+          -- one indexed lookup rather than a walk over every sensor in the installation.
+          AND ($3::bigint[] IS NULL OR o.id = ANY($3::bigint[]))
       )
       UPDATE sensor_runtime r
       SET paused_by_schedule = want.paused
@@ -316,7 +321,7 @@ export class ScheduleRepository {
       RETURNING r.object_id::text AS object_id, want.paused,
                 want.schedule_id::text AS schedule_id
       `,
-      [inactiveScheduleIds, SCHEDULE_ID.key],
+      [inactiveScheduleIds, SCHEDULE_ID.key, only === undefined ? null : [...only]],
     );
     return rows.map((row) => ({
       sensorId: Number(row.object_id),
