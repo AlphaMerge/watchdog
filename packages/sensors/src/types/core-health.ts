@@ -221,6 +221,20 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'queries',
     counter: { bits: 64 },
   },
+  // `P-99`. A result stamped far in the future is refused rather than stored, because storing
+  // one freezes that sensor's history for ever — `last_result_at` is a high-water mark, and
+  // everything genuine after it reads as stale. Refusing it fixes the freeze; this channel is
+  // what stops the refusal being the new silence. `CLAUDE.md`: never drop without counting.
+  //
+  // A rising line here is one probe host with a wrong clock, and it names a fix an operator can
+  // carry out. Zero on every healthy installation, which is what makes any movement worth
+  // looking at.
+  {
+    key: 'resultsFutureDated',
+    name: 'Results refused as future-dated',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
 ];
 
 export const coreHealth: SensorType = {

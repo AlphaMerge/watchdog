@@ -42,6 +42,14 @@ export interface CoreHealthSources {
   /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
   queries: () => { refused: number };
   /**
+   * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`).
+   *
+   * The only one of that service's discard counters on this sensor, and deliberately: the others
+   * describe a batch that was rejected and will be re-offered, while this one describes data
+   * that is gone and a probe host that needs its clock fixed.
+   */
+  ingestionDiscards: () => { discardedFutureTime: number };
+  /**
    * The last housekeeping pass's view of the disk (`S-17`).
    *
    * Read from the *report* rather than measured here, and that is deliberate: the number Core
@@ -188,6 +196,7 @@ export class CoreHealthService {
       alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
       alarmsFired: alarms.fired,
       queriesRefused: queries.refused,
+      resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
     };
   }
 

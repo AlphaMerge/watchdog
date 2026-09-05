@@ -140,6 +140,11 @@ describe(
       };
     }
 
+    /** A failed check, which carries no readings — no-data is not zero. */
+    function failedResult(minutes: number): CheckResult {
+      return result({ at: at(minutes), outcome: 'error', message: 'no reply', channels: [] });
+    }
+
     function result(overrides: Partial<CheckResult> = {}): CheckResult {
       return {
         sensorId,
@@ -692,6 +697,58 @@ describe(
             }),
           /scan\.retryWarnings/,
         );
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
+    // A clock that cannot be believed (P-99).
+    // -------------------------------------------------------------------------------------
+
+    describe('a result stamped in the future', () => {
+      it('is refused, rather than freezing the sensor’s history for ever', async () => {
+        // **`P-99`.** `CheckResult.at` was bounded only by "parses to a number", and
+        // `last_result_at` is a high-water mark: `isStaleResult` discards everything no newer
+        // and `writeRuntimes` refuses to move a row backwards. So one result from a probe whose
+        // RTC is wrong — a VM restored from a snapshot, a dead CMOS battery — made every
+        // genuine result after it stale, including the ones reporting a real outage.
+        //
+        // Nothing self-healed: the only thing that ever reset `last_result_at` was a resume, and
+        // `P-97` stopped even that. The sensor's SLA reads 100% through a multi-day outage and
+        // no alarm can fire, because the state never moves again.
+        const first = build();
+        await deliver(first.service, first.ingestor, [result({ at: at(0) })]);
+
+        const wrong = build();
+        await deliver(
+          wrong.service,
+          wrong.ingestor,
+          [result({ at: new Date('2030-01-01T00:00:00Z').toISOString() })],
+          'b2',
+        );
+        assert.equal(wrong.service.stats().discardedFutureTime, 1, 'refused, and counted');
+
+        const current = await runtime();
+        assert.equal(
+          current.last_result_at?.toISOString(),
+          at(0),
+          'the high-water mark did not move to a time nobody measured',
+        );
+
+        // And the sensor still works, which is the whole point.
+        const later = build();
+        await deliver(later.service, later.ingestor, [failedResult(5)], 'b3');
+        assert.equal(later.service.stats().discardedFutureTime, 0);
+        assert.equal((await runtime()).consecutive_failures, 1, 'the next real result applies');
+      });
+
+      it('allows the ordinary forward skew of a probe host a little fast', async () => {
+        // The bound is generous on purpose. Honest forward skew is seconds — a host slightly
+        // fast, a batch assembled just before it was sent — and a tight bound would discard good
+        // data during ordinary NTP drift. What is being excluded is a clock that is years out.
+        const near = build();
+        const soon = new Date(Date.now() + 60_000).toISOString();
+        await deliver(near.service, near.ingestor, [result({ at: soon })], 'b9');
+        assert.equal(near.service.stats().discardedFutureTime, 0);
       });
     });
 

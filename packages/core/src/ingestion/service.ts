@@ -33,7 +33,22 @@ export interface IngestionServiceOptions {
    * throughput benchmark wants and no running system does.
    */
   states?: SensorStateService;
+  /**
+   * How far ahead of this core's clock a result may be stamped before it is refused (`P-99`).
+   *
+   * Generous, because the honest sources of forward skew are small and legitimate — a probe host
+   * a few seconds fast, a batch assembled just before it was sent — while the failure this
+   * bounds is a clock that is *years* out. A tight bound would discard good data during ordinary
+   * NTP drift; the point is only to keep one absurd timestamp from becoming a permanent
+   * high-water mark.
+   */
+  maxFutureSkewMs?: number;
+  /** The core's clock. Injectable so a test can state the skew rather than race it. */
+  now?: () => Date;
 }
+
+/** Fifteen minutes. See `maxFutureSkewMs`. */
+export const DEFAULT_MAX_FUTURE_SKEW_MS = 15 * 60_000;
 
 export interface ResultStats {
   resultsReceived: number;
@@ -42,6 +57,8 @@ export interface ResultStats {
   discardedOnError: number;
   /** Readings whose timestamp was not a date. */
   discardedInvalidTime: number;
+  /** Results stamped further ahead of this core's clock than `maxFutureSkewMs` (`P-99`). */
+  discardedFutureTime: number;
   /** Readings for sensors that no longer exist — a spool replayed after a deletion. */
   discardedUnknownSensor: number;
   /**
@@ -94,11 +111,14 @@ export class IngestionService {
   readonly #resolver: ChannelResolver;
   readonly #pacer: ReplayPacer | undefined;
   readonly #states: SensorStateService | undefined;
+  readonly #maxFutureSkewMs: number;
+  readonly #now: () => Date;
 
   #resultsReceived = 0;
   #readingsReceived = 0;
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
+  #discardedFutureTime = 0;
   #discardedUnknownSensor = 0;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
@@ -117,6 +137,8 @@ export class IngestionService {
     this.#resolver = options.resolver ?? new ChannelResolver({ logger: options.logger });
     this.#pacer = options.pacer;
     this.#states = options.states;
+    this.#maxFutureSkewMs = options.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS;
+    this.#now = options.now ?? (() => new Date());
   }
 
   stats(): ResultStats {
@@ -125,6 +147,7 @@ export class IngestionService {
       readingsReceived: this.#readingsReceived,
       discardedOnError: this.#discardedOnError,
       discardedInvalidTime: this.#discardedInvalidTime,
+      discardedFutureTime: this.#discardedFutureTime,
       discardedUnknownSensor: this.#discardedUnknownSensor,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -342,13 +365,40 @@ export class IngestionService {
     }
 
     // Every result, whatever its outcome: a check that failed has no readings and is precisely
-    // the one the state machine exists for. Only an unparseable timestamp is dropped — it is
-    // already counted above, and a result that cannot be ordered against the last one cannot be
-    // folded into a machine that is a fold over time.
+    // the one the state machine exists for. Two timestamps are dropped — one that cannot be
+    // read, because a result that cannot be ordered against the last one cannot be folded into
+    // a machine that is a fold over time, and one too far in the future to be believed.
+    //
+    // **The future bound is not tidiness; without it one bad result freezes a sensor for ever**
+    // (`P-99`). `last_result_at` is a high-water mark: `isStaleResult` discards everything no
+    // newer, and `writeRuntimes` refuses to move a row backwards. A probe whose clock is years
+    // out — a VM restored from a snapshot, a dead RTC — sends one result stamped 2030 and every
+    // genuine result after it, including the ones reporting a real outage, is counted stale and
+    // dropped. No `sensor_state` row is ever written for that sensor again, its SLA reads 100%
+    // through a multi-day outage, no alarm can fire because the state never moves, and nothing
+    // self-heals: the only thing that reset `last_result_at` was a resume, and `P-97` stopped
+    // even that.
+    //
+    // Discarded rather than clamped. Clamping would write a reading at a time nobody measured
+    // it, and `CLAUDE.md` is explicit that a value the system cannot stand behind is a gap.
+    const horizon = this.#now().getTime() + this.#maxFutureSkewMs;
     const results: SensorResult[] = [];
     for (const result of all) {
       const at = Date.parse(result.at);
       if (Number.isNaN(at)) continue;
+      if (at > horizon) {
+        this.#discardedFutureTime += 1;
+        this.#logger.warn(
+          {
+            sensorId: result.sensorId,
+            at: result.at,
+            skewMs: at - this.#now().getTime(),
+            allowedMs: this.#maxFutureSkewMs,
+          },
+          'a result is stamped too far in the future to be believed; check the probe host clock',
+        );
+        continue;
+      }
       results.push({
         sensorId: result.sensorId,
         at: new Date(at),

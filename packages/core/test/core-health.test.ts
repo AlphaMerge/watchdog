@@ -50,6 +50,7 @@ function sources(
     alarmsFired: number;
     nextWakeAt: Date | null;
     queriesRefused: number;
+    resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
   }> = {},
@@ -71,6 +72,7 @@ function sources(
       nextWakeAt: overrides.nextWakeAt ?? null,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
+    ingestionDiscards: () => ({ discardedFutureTime: overrides.resultsFutureDated ?? 0 }),
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
       probesSilent: overrides.probesSilent ?? 0,
@@ -320,6 +322,19 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // quietly retrying a button that keeps refusing.
       const reading = await build({ queriesRefused: 5 }).read();
       assert.equal(reading['queriesRefused'], 5);
+    });
+
+    it('carries the results refused for an implausible clock', async () => {
+      // **`P-99`.** One result stamped years ahead used to freeze a sensor's history for ever,
+      // because `last_result_at` is a high-water mark and everything genuine after it read as
+      // stale. Refusing it fixes the freeze; this channel is what stops the refusal being the
+      // new silence — `CLAUDE.md`: never drop without counting, and never count without
+      // somewhere to see it.
+      //
+      // Zero on every healthy installation, so any movement is one probe host with a wrong
+      // clock and names a fix an operator can carry out.
+      const reading = await build({ resultsFutureDated: 3 }).read();
+      assert.equal(reading['resultsFutureDated'], 3);
     });
 
     it('counts what is actually queued in the housekeeping tables', async () => {

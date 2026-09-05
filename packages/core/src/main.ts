@@ -970,6 +970,7 @@ async function serve(): Promise<void> {
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,
       queries: () => probeQueries.stats(),
+      ingestionDiscards: () => ingestion.stats(),
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {

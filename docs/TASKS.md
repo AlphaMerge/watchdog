@@ -6206,6 +6206,36 @@ because each is a decision rather than a defect:
       A guard rather than a convention, because the convention *was* written down, in the first
       query's own comment, and did not survive the second column.
 
+- [x] **P-99 — One future-dated result froze a sensor's history permanently** · S · M-02, R-06 ·
+      Finding 10. `CheckResult.at` was bounded only by "parses to a number" — no upper bound
+      anywhere. `last_result_at` is a high-water mark: `isStaleResult` discards everything no
+      newer and `writeRuntimes` refuses to move a row backwards.
+
+      So one result from a probe whose RTC is wrong — a VM restored from a snapshot, a dead CMOS
+      battery — set the mark to 2030, and every genuine result after it was counted stale and
+      dropped, including the ones reporting a real outage. No `sensor_state` row was ever written
+      for that sensor again; its SLA read 100% through a multi-day outage and no alarm could fire
+      because the state never moved. The alarms view sorts on `since`, so a future `since` sorted
+      it to the wrong end and rendered a negative duration.
+
+      Nothing self-healed. The only thing that ever reset `last_result_at` was a resume, and
+      `P-97` deliberately stopped even that — so this got permanently worse the same day, which
+      is the argument for fixing both together.
+
+      **Refused, not clamped.** Clamping writes a reading at a time nobody measured it, and a
+      value the system cannot stand behind is a gap. The bound is fifteen minutes, which is
+      generous on purpose: honest forward skew is seconds, and a tight bound would discard good
+      data during ordinary NTP drift. What is being excluded is a clock that is years out.
+
+      **And it is visible.** The panel noted that the counter which saw this was unreachable —
+      `IngestionService.stats()` reaches no health sensor at all. `resultsFutureDated` is now a
+      Core Health channel, so refusing the result does not simply move the silence: a rising line
+      is one probe host with a wrong clock, and it names a fix an operator can carry out. Zero on
+      every healthy installation, which is what makes any movement worth looking at.
+
+      The other discard counters are deliberately not on it: they describe batches that were
+      rejected and will be re-offered. This one describes data that is gone.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

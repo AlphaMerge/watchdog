@@ -989,6 +989,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `alarmOverdue` | Alarm sweep overdue by | s | default limits: warn above 60, error above 300 |
 | `alarmsFired` | Notification steps fired | steps | 64-bit counter → rate |
 | `queriesRefused` | On-demand checks refused | queries | 64-bit counter → rate |
+| `resultsFutureDated` | Results refused as future-dated | results | 64-bit counter → rate |
 
 Takes no parameters.
 
