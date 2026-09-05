@@ -126,6 +126,69 @@ describe('lookup validation', () => {
     assert.ok(problems.some((problem) => problem.includes('is empty')));
   });
 
+  it('refuses a singleInt entry with no value, which nothing can ever match', () => {
+    // **`P-101`.** One `items` schema served both lookup types with `value`, `from` and `to` all
+    // optional, so a forgotten `"value": 3` was accepted. `applyLookup`'s `each.value === value`
+    // never matched it: the reading fell to `undefinedState` — Up, on most definitions — while
+    // the message told the operator the lookup "does not define" a code they can see in their
+    // own file. `docs/state-machine.md` §2.2.1: a definition that is wrong is refused, not
+    // repaired.
+    //
+    // **Through `register`, because the boundary is where this is caught.** `LookupDefinition`
+    // in TypeScript already requires `value`; only the schema guards a file on disk, so a test
+    // calling `validateLookup` directly would be checking a shape the compiler says cannot
+    // exist. The JSON round-trip is the same door the loader uses.
+    const catalogue = new LookupCatalogue();
+    const written = JSON.parse(
+      JSON.stringify({
+        ...status,
+        entries: [
+          { value: 1, state: 'up', text: 'up' },
+          { value: 2, state: 'down', text: 'down' },
+          { state: 'warning', text: 'testing' },
+        ],
+      }),
+    ) as LookupDefinition;
+
+    assert.equal(catalogue.register(written, '/data/lookups/status.json'), false);
+    const reported = catalogue.problems()[0]?.problems.join('; ') ?? '';
+    assert.ok(reported.includes('value'), reported);
+  });
+
+  it('refuses a range entry with neither bound, which matches everything', () => {
+    // The mirror case. `(-inf, +inf)` trips neither the empty-range check nor the overlap check
+    // when it is the only entry, so one unbounded entry was accepted and forced every reading
+    // to its state.
+    const catalogue = new LookupCatalogue();
+    const written = JSON.parse(
+      JSON.stringify({ ...band, entries: [{ state: 'down', text: 'anything at all' }] }),
+    ) as LookupDefinition;
+
+    assert.equal(catalogue.register(written, '/data/lookups/band.json'), false);
+    assert.ok((catalogue.problems()[0]?.problems.length ?? 0) > 0);
+  });
+
+  it('still allows a range open at one end, which is the ordinary case', () => {
+    // "Above 90 is critical" has no upper bound and is exactly what these are for. The rule is
+    // that an entry must bound at least one side, not both — a fix that refused these would be
+    // worse than the defect.
+    const catalogue = new LookupCatalogue();
+    assert.equal(
+      catalogue.register(
+        {
+          ...band,
+          entries: [
+            { to: 90, state: 'up', text: 'fine' },
+            { from: 90, state: 'down', text: 'critical' },
+          ],
+        },
+        '/data/lookups/band.json',
+      ),
+      true,
+      catalogue.problems()[0]?.problems.join('; '),
+    );
+  });
+
   it('refuses an id nothing could reference', () => {
     assert.ok(validateLookup({ ...status, id: 'Not An Id' }).length > 0);
   });
@@ -181,6 +244,34 @@ describe('the lookup catalogue', () => {
     assert.equal(catalogue.register(status, '/data/lookups/a.json'), true);
     assert.equal(catalogue.register(status, '/data/lookups/b.json'), false);
     assert.ok(catalogue.problems()[0]?.problems[0]?.includes('a.json'));
+  });
+
+  it('refuses a second custom definition even when the id has a built-in', () => {
+    // **`P-100`.** The guard asked `!this.#builtInIds.has(id)` — a question about the *id*
+    // rather than about what currently holds it — and `#builtInIds` is never cleared. So for
+    // every id this build ships, the guard was permanently disabled: two operator files
+    // claiming `ms.snmp.if-oper-status` were resolved by directory order, with no entry in
+    // `problems()`, and renaming a file silently changed which one judged every interface
+    // sensor in the installation.
+    //
+    // The case above uses an id with no built-in, which is why it stayed green: that path was
+    // always correct. Overriding a built-in *once* is still the whole point of the directory,
+    // so both halves are asserted here.
+    const catalogue = new LookupCatalogue();
+    catalogue.register({ ...status, name: 'Shipped' }, 'built-in', true);
+
+    assert.equal(
+      catalogue.register({ ...status, name: 'First' }, '/data/lookups/a.json'),
+      true,
+      'one operator file may replace a built-in',
+    );
+    assert.equal(
+      catalogue.register({ ...status, name: 'Second' }, '/data/lookups/b.json'),
+      false,
+      'a second may not, whatever the directory order says',
+    );
+    assert.ok(catalogue.problems()[0]?.problems[0]?.includes('a.json'));
+    assert.equal(catalogue.get('test.status')?.name, 'First', 'and the refusal changed nothing');
   });
 
   it('refuses to register once sealed', () => {

@@ -124,6 +124,9 @@ export function validateLookup(definition: LookupDefinition): string[] {
   if (definition.type === 'singleInt') {
     const seen = new Set<number>();
     for (const entry of definition.entries) {
+      // A missing `value` is refused by the schema now (`P-101`), which is where it belongs and
+      // is the only place that can see it: this function's parameter type already promises the
+      // field is there, so a check here is one the compiler calls unreachable and is wrong to.
       if (seen.has(entry.value)) {
         problems.push(`value ${String(entry.value)} is listed more than once`);
       }
@@ -134,6 +137,8 @@ export function validateLookup(definition: LookupDefinition): string[] {
 
   // Ranges: every entry must bound something, and no two may claim the same value — first match
   // would otherwise win silently, and which entry is "first" is an accident of authoring order.
+  //
+  // An entry with neither bound claims everything, and is refused by the schema (`P-101`).
   const bounded = definition.entries.map((entry, index) => ({
     index,
     from: entry.from ?? Number.NEGATIVE_INFINITY,
@@ -162,7 +167,21 @@ export function validateLookup(definition: LookupDefinition): string[] {
   return problems;
 }
 
-/** The shape, for the file loader and for anything that accepts a definition over the wire. */
+/**
+ * The shape, for the file loader and for anything that accepts a definition over the wire.
+ *
+ * **Discriminated on `type`, because the entry shapes are not interchangeable** (`P-101`). One
+ * `items` schema used to serve both kinds with `value`, `from` and `to` all optional — so a
+ * singleInt entry with a forgotten `"value"` and a range entry with neither bound were both
+ * accepted. The first can never match, and the reading fell through to `undefinedState` while
+ * the message told the operator the lookup "does not define" a code they can see in their own
+ * file; the second matches everything and forced every reading to one state.
+ *
+ * `TypeScript` already said this — `SingleIntEntry.value` is required — and the schema did not,
+ * which is the sort of disagreement that only shows up through the door the type cannot guard:
+ * a file on disk. `CLAUDE.md` says validate at boundaries with JSON Schema, so the boundary is
+ * where this belongs rather than in a hand-written check the compiler then calls unreachable.
+ */
 export const lookupDefinitionSchema = {
   type: 'object',
   additionalProperties: false,
@@ -191,4 +210,21 @@ export const lookupDefinitionSchema = {
       },
     },
   },
+  allOf: [
+    {
+      if: { properties: { type: { const: 'singleInt' } }, required: ['type'] },
+      // One integer per entry, so an entry without one can never match anything.
+      then: { properties: { entries: { items: { required: ['state', 'text', 'value'] } } } },
+    },
+    {
+      if: { properties: { type: { const: 'range' } }, required: ['type'] },
+      // At least one bound. Open at one end is the ordinary case — "above 90 is critical" — so
+      // this refuses only the entry that is open at *both*, which matches every reading.
+      then: {
+        properties: {
+          entries: { items: { anyOf: [{ required: ['from'] }, { required: ['to'] }] } },
+        },
+      },
+    },
+  ],
 } as const;

@@ -34,6 +34,8 @@ interface Held {
   readonly definition: LookupDefinition;
   readonly source: string;
   readonly overridesBuiltIn: boolean;
+  /** Whether *this* entry is a built-in, as opposed to an id that has one somewhere (`P-100`). */
+  readonly builtIn: boolean;
 }
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -85,7 +87,14 @@ export class LookupCatalogue {
     }
 
     const replacing = this.#held.get(definition.id);
-    if (replacing !== undefined && !builtIn && !this.#builtInIds.has(definition.id)) {
+    // **What is being refused is a second *custom* file, not a second registration** (`P-100`).
+    // This used to ask `!this.#builtInIds.has(definition.id)`, which is a question about the id
+    // rather than about what currently holds it — and `#builtInIds` is never cleared, so for
+    // any id this build ships the guard was permanently disabled. Two operator files claiming
+    // `ms.snmp.if-oper-status` were silently resolved by directory order, and renaming a file
+    // changed which one judged every interface sensor in the installation. The same mistake on
+    // an id with no built-in was correctly refused, which is what made it invisible.
+    if (replacing !== undefined && !builtIn && !replacing.builtIn) {
       // Two custom files claiming one id. Which one wins would be directory order, which is not
       // a decision anybody made.
       this.#problems.push({
@@ -101,6 +110,7 @@ export class LookupCatalogue {
       definition,
       source,
       overridesBuiltIn: !builtIn && this.#builtInIds.has(definition.id),
+      builtIn,
     });
     return true;
   }

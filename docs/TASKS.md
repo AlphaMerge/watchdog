@@ -6236,6 +6236,53 @@ because each is a decision rather than a defect:
       The other discard counters are deliberately not on it: they describe batches that were
       rejected and will be re-offered. This one describes data that is gone.
 
+- [x] **P-100 — The duplicate-lookup-id guard could never fire for an id this build ships** · S ·
+      M-06 · Finding 25. The condition was `replacing !== undefined && !builtIn &&
+      !this.#builtInIds.has(definition.id)` — a question about the *id* rather than about what
+      currently holds it. `#builtInIds` is populated when a built-in registers and is never
+      cleared, so for every id shipped in this build the third clause was permanently false.
+
+      Two operator files claiming `ms.snmp.if-oper-status` were therefore resolved by directory
+      order, with nothing in `problems()` and one clean entry in `GET /lookups`. Every interface
+      sensor was judged by whichever file happened to sort later, and **renaming a file silently
+      changed sensor states**. The same mistake on an id with no built-in was correctly refused,
+      which is exactly what made this invisible — and is why the existing test, which uses such
+      an id, stayed green.
+
+      Asks whether the *held entry* is a built-in now. Overriding a built-in once is still the
+      whole point of the directory; the second override is what nobody decided.
+
+- [x] **P-101 — A lookup entry that can never match, and one that matches everything, were both
+      accepted** · S · M-06 · Finding 26. One entry shape serves both lookup types and is not
+      discriminated on `type`, so the JSON schema marks `value`, `from` and `to` all optional.
+
+      A singleInt entry with a forgotten `"value": 3` passed the schema and `validateLookup`, and
+      `applyLookup`'s `each.value === value` never matched it: the reading fell to
+      `undefinedState` — Up, on most definitions — while the message told the operator the lookup
+      "does not define" a code they can see in their own file. An interface in testing state read
+      Up for ever. The mirror case is a range entry with neither bound: `(-inf, +inf)` trips
+      neither the empty-range check nor the overlap check when it is the only entry, so one
+      unbounded entry was accepted and forced **every** reading to its state.
+      `docs/state-machine.md` §2.2.1: a definition that is wrong is refused, not repaired.
+
+      Open at one end stays legal — "above 90 is critical" is what these are for — so the rule is
+      that a range must bound at least one side, not both. A test asserts that half too, because
+      a fix that refused those would be worse than the defect.
+
+      **`LookupDefinition` in TypeScript already required `value`; the JSON schema did not.**
+      That disagreement is the finding, and it settles where the fix belongs. Nothing constructed
+      in this codebase can be malformed this way — only something read off disk — so the schema
+      is the only thing that can see it, and `CLAUDE.md` says validate at boundaries with JSON
+      Schema. The `items` schema is discriminated on `type` now: `value` required for singleInt,
+      at least one of `from`/`to` for range.
+
+      Written first as a hand-rolled check inside `validateLookup`, which passed its tests and
+      then failed lint with "unnecessary conditional, the types have no overlap" — the compiler
+      correctly pointing out that the parameter type already promises the field is there. That is
+      the same disagreement showing up from the other side, and moving the rule to the boundary
+      resolves both. The tests go through `register` for the same reason, over a JSON round-trip:
+      calling `validateLookup` directly would assert on a shape the compiler says cannot exist.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`
