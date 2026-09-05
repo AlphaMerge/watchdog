@@ -518,7 +518,10 @@ async function serve(): Promise<void> {
       configNotifier.flush();
     },
   });
-  scheduleSweep.start();
+  // **Awaited, here, before the probe endpoint exists** (`P-131`). A core that was down when a
+  // window closed comes back with every `paused_by_schedule` flag as it was before the boundary,
+  // and the configuration the probes are handed is built from those flags.
+  await scheduleSweep.start();
   lifecycle.onShutdown({
     name: 'schedule-sweep',
     timeoutMs: 2_000,

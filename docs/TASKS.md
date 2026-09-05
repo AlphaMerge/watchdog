@@ -10109,6 +10109,42 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       Tests: 8 new — the starved digest batch, the shared backoff, the settled-at window, both
       parked cases, and both core-health callers. Mutation 5/5.
 
+- [x] **P-127 — A grid read back and submitted again inverted an inactive schedule**
+      `toGrid` applies the polarity on the way out, so a schedule stored as "inactive during
+      Sunday" is served as a grid of the six days it *does* monitor — together with
+      `polarity: 'inactive'`, because that is what is stored. A client that read that view and
+      sent it back unchanged, which is what a form does, stored the monitored hours as the
+      inactive ones: the maintenance window became the only time anything was watched. A grid is
+      stored as `active` now, whatever polarity travels with it — polarity is not a second degree
+      of freedom on top of a grid, it is the thing the grid has already resolved.
+
+- [x] **P-128 — `nextChangeAfter` was an hour late every spring**
+      Week-minutes are local time and the delta is elapsed time, so a spring-forward between now
+      and the next edge makes the edge arrive an hour *sooner* than the arithmetic predicts. The
+      candidate therefore already read as changed, the verification was satisfied by exactly that,
+      and the answer was an hour late — every year, in every zone that does it. The candidate is
+      verified in both directions now.
+
+- [x] **P-129 — A delete refusal reported a page size as the number of objects**
+      `usedBy` returns fifty rows and the message was built from its length, so a schedule
+      assigned to two hundred objects said fifty. The operator clears fifty, tries again, and is
+      told fifty again.
+
+- [x] **P-130 — Deleting a schedule a rediscovery rule used raised a raw constraint violation**
+      `discovery_schedule.schedule_id` is a `RESTRICT` foreign key and nothing checked it, so the
+      delete reached the database and came back as a 500 with a constraint name in it. The other
+      two users of a schedule are refused by name; this one is now too.
+
+- [x] **P-131 — No schedule recompute at startup, so probes scanned inside a closed window**
+      `paused_by_schedule` is a stored flag and the probes' configuration is built from it. A core
+      that was down when a window closed came back with every flag as it stood before the
+      boundary and handed the probes a list that said to keep scanning — for up to sixty seconds,
+      on every restart, when the whole point of a maintenance window is that nothing scans in it.
+      `ScheduleSweep.start` sweeps once before arming, and `main` awaits it before the probe
+      endpoint exists.
+
+      Tests: 8 new. Mutation 5/5.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

@@ -224,6 +224,43 @@ export class ScheduleRepository {
     return rows.map((row) => ({ templateId: Number(row.id), name: row.name }));
   }
 
+  /**
+   * How many objects name this schedule, which is not how many the page above returned.
+   *
+   * **`P-129`.** `usedBy` is a page — fifty rows — and the refusal was built from its length, so
+   * a schedule assigned to two hundred objects told the operator it was assigned to fifty. They
+   * clear fifty, try again, and are told fifty again.
+   */
+  async usedByCount(q: Queryable, id: number): Promise<number> {
+    const rows = await q.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM object_setting
+       WHERE key = $1 AND value = to_jsonb($2::bigint)`,
+      [SCHEDULE_ID.key, id],
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  /**
+   * Rediscovery rules whose permitted window is this schedule (`D-07`).
+   *
+   * **A real foreign key with `ON DELETE RESTRICT`, and nothing was checking it** (`P-130`). The
+   * other two users of a schedule are refused by name; this one reached the delete and came back
+   * as a raw constraint violation — a 500 with a constraint name in it, for an operator doing
+   * something perfectly ordinary and correctable.
+   */
+  async rediscoveryUsing(
+    q: Queryable,
+    id: number,
+    limit = 50,
+  ): Promise<{ ruleId: number; name: string }[]> {
+    const rows = await q.query<{ id: string; name: string }>(
+      `SELECT id::text AS id, name FROM discovery_schedule
+       WHERE schedule_id = $1 ORDER BY name LIMIT $2`,
+      [id, limit],
+    );
+    return rows.map((row) => ({ ruleId: Number(row.id), name: row.name }));
+  }
+
   /** How many objects name each schedule. One query for a list that shows usage per row. */
   async usageCounts(q: Queryable): Promise<Map<number, number>> {
     const rows = await q.query<{ schedule_id: string; uses: string }>(

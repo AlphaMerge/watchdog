@@ -32,6 +32,10 @@ export interface ScheduleServiceOptions {
 export interface ScheduleInput {
   readonly name: string;
   readonly description?: string;
+  /**
+   * Ignored when a `grid` is given: the grid's marked cells are the monitored hours already
+   * (`P-127`). Meaningful only alongside `periods`.
+   */
   readonly polarity?: SchedulePolarity;
   readonly timezone?: string | null;
   /** The text form, `ww:hh:mm-ww:hh:mm` separated by spaces or commas. */
@@ -219,13 +223,17 @@ export class ScheduleService {
 
       const users = await this.#repo.usedBy(q, id);
       if (users.length > 0) {
+        // **The count, not the page's length** (`P-129`). `usedBy` returns fifty rows, so a
+        // schedule assigned to two hundred objects said "assigned to 50 object(s)". The operator
+        // clears fifty, tries again, and is told fifty again.
+        const total = await this.#repo.usedByCount(q, id);
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',
-          `"${before.name}" is still assigned to ${String(users.length)} object(s); ` +
+          `"${before.name}" is still assigned to ${String(total)} object(s); ` +
             'clear the assignment first',
           {
             context: { phase: 'schedules' },
-            details: { scheduleId: id, usedBy: users },
+            details: { scheduleId: id, usedBy: users, usedByTotal: total },
           },
         );
       }
@@ -239,6 +247,23 @@ export class ScheduleService {
           {
             context: { phase: 'schedules' },
             details: { scheduleId: id, usedByTemplates: templates },
+          },
+        );
+      }
+
+      // **The third user of a schedule, and the one nothing was checking** (`P-130`). A
+      // rediscovery rule's permitted window is a `RESTRICT` foreign key, so the delete reached
+      // the database and came back as a constraint violation — a 500 with a constraint name in
+      // it, for an operator doing something ordinary and correctable. Named, like the other two.
+      const rediscovery = await this.#repo.rediscoveryUsing(q, id);
+      if (rediscovery.length > 0) {
+        throw new ObjectError(
+          'OBJECT_NOT_DELETABLE',
+          `"${before.name}" is still the permitted window of ` +
+            `${String(rediscovery.length)} rediscovery rule(s)`,
+          {
+            context: { phase: 'schedules' },
+            details: { scheduleId: id, usedByRediscovery: rediscovery },
           },
         );
       }
@@ -299,7 +324,16 @@ export class ScheduleService {
 
     const definition: ScheduleDefinition = {
       periods: normaliseIntervals(periods),
-      polarity: input.polarity ?? 'active',
+      // **A grid is always `active`, whatever polarity came with it** (`P-127`). The grid's marked
+      // cells *are* the monitored hours — `toGrid` applies the polarity on the way out, so a
+      // schedule stored as "inactive during these periods" is served as a grid of the hours it
+      // does monitor. A client that read that view and sent it back unchanged, which is what a
+      // form does, was storing the monitored hours as the *inactive* ones: a maintenance window
+      // became the only time anything was watched, and the round trip did it silently.
+      //
+      // Polarity is not a second degree of freedom on top of a grid; it is the thing the grid has
+      // already resolved. An operator who wants to express the complement types the periods.
+      polarity: hasGrid ? 'active' : (input.polarity ?? 'active'),
       timezone,
     };
     if (problems.length === 0) problems.push(...validateDefinition(definition));

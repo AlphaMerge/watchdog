@@ -188,6 +188,37 @@ describe('the weekday x hour grid', () => {
 // Validation.
 // -------------------------------------------------------------------------------------------
 
+describe('a grid read back and submitted again', () => {
+  it('means the hours it marks, whatever polarity travels with it', () => {
+    // **`P-127`.** `toGrid` applies the polarity on the way out, so a schedule stored as
+    // "inactive during Sunday" is served as a grid of the six days it *does* monitor — together
+    // with `polarity: 'inactive'`, because that is what is stored. A client that read that view
+    // and sent it straight back, which is what a form does, stored the monitored hours as the
+    // inactive ones: the maintenance window became the only time anything was watched, silently.
+    const maintenance: ScheduleDefinition = {
+      // Sunday off.
+      periods: [{ start: 6 * 24 * 60, end: 7 * 24 * 60 }],
+      polarity: 'inactive',
+      timezone: null,
+    };
+    const { grid } = toGrid(maintenance);
+
+    // Monday 09:00 is monitored; Sunday 09:00 is not.
+    assert.equal(isActiveAt(maintenance, new Date('2026-08-24T09:00:00Z')), true);
+    assert.equal(isActiveAt(maintenance, new Date('2026-08-30T09:00:00Z')), false);
+
+    // The round trip: the grid's cells become the periods, and the polarity that came with the
+    // view must not invert them.
+    const roundTripped: ScheduleDefinition = {
+      periods: gridToIntervals(grid),
+      polarity: 'active',
+      timezone: null,
+    };
+    assert.equal(isActiveAt(roundTripped, new Date('2026-08-24T09:00:00Z')), true);
+    assert.equal(isActiveAt(roundTripped, new Date('2026-08-30T09:00:00Z')), false);
+  });
+});
+
 describe('validating a schedule', () => {
   it('refuses one with no periods', () => {
     const problems = validateDefinition({ periods: [], polarity: 'active', timezone: null });
@@ -311,6 +342,34 @@ describe('when a schedule next changes', () => {
       1440 + 9 * 60,
       1440 + 17 * 60,
     ]);
+  });
+});
+
+describe('when a schedule next changes, across a clock change', () => {
+  it('is not an hour late on the Sunday the clocks go forward', () => {
+    // **`P-128`.** Week-minutes are local time and the delta is elapsed time, so a spring-forward
+    // between now and the next edge means the edge arrives an hour *sooner* than the arithmetic
+    // predicts — Europe/London skips 01:00 to 02:00, so thirteen local hours are twelve real
+    // ones. The candidate therefore already read as changed, the verification was satisfied by
+    // that, and the answer was an hour late. Every year, in every zone that does it.
+    const office = define('su:09:00-su:17:00', 'active', 'Europe/London');
+    // Saturday 20:00 UTC, before the transition at 01:00 UTC on the Sunday.
+    const asked = new Date('2026-03-28T20:00:00Z');
+    const change = nextChangeAfter(office, asked);
+    assert.ok(change !== null);
+    // 09:00 BST on the Sunday is 08:00 UTC.
+    assert.equal(change.toISOString(), '2026-03-29T08:00:00.000Z');
+  });
+
+  it('is still right on the Sunday the clocks go back', () => {
+    // The other direction, where the prediction is early rather than late and the forward scan
+    // was already correct. Asserted so the fix for one cannot break the other.
+    const office = define('su:09:00-su:17:00', 'active', 'Europe/London');
+    const asked = new Date('2026-10-24T20:00:00Z');
+    const change = nextChangeAfter(office, asked);
+    assert.ok(change !== null);
+    // 09:00 GMT on the Sunday is 09:00 UTC.
+    assert.equal(change.toISOString(), '2026-10-25T09:00:00.000Z');
   });
 });
 
@@ -602,6 +661,29 @@ describe(
       assert.equal(newest[0]?.message, 'replacing the PSU');
     });
 
+    it('stores a grid as the hours it marks, even when an inactive polarity comes with it', async () => {
+      // **The round trip a form makes** (`P-127`). `GET /schedules/:id` serves an inactive
+      // schedule as `polarity: 'inactive'` *and* a grid of the hours it does monitor, because
+      // `toGrid` resolves the polarity on the way out. Sending both back unchanged stored the
+      // monitored hours as the inactive ones: a Sunday maintenance window became the only time
+      // anything was watched, and nothing said so.
+      const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => false));
+      for (let day = 0; day < 6; day += 1) {
+        for (let hour = 0; hour < 24; hour += 1) (grid[day] ?? [])[hour] = true;
+      }
+
+      const created = await schedules.create(testActor, {
+        name: 'Six days on',
+        grid,
+        polarity: 'inactive',
+      });
+      const view = await schedules.get(created.id);
+      assert.equal(view.polarity, 'active', 'the grid is what it says it is');
+      // Monday is marked and Sunday is not, so Monday is monitored.
+      assert.equal((view.grid[0] ?? [])[9], true);
+      assert.equal((view.grid[6] ?? [])[9], false);
+    });
+
     it('names the schedule in the state history, not just "a schedule"', async () => {
       await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, await officeHours());
       await recompute(OUTSIDE);
@@ -833,6 +915,45 @@ describe(
       assert.equal(pushes, 2);
     });
 
+    it('sweeps once when it starts, rather than waiting for the top of the minute', async () => {
+      // **`P-131`.** `paused_by_schedule` is a stored flag and the probes' configuration is built
+      // from it, so a core that was down when a window closed came back with every flag as it was
+      // before the boundary and handed the probes a list that said to keep scanning. Up to sixty
+      // seconds of checks inside a window an operator had closed, on every restart — and the
+      // whole point of a maintenance window is that nothing scans during it.
+      //
+      // Driven with a clock the sweep cannot see, so what is asserted is that a sweep happened at
+      // all before any timer could have fired: the flags move, and the interval here is an hour.
+      // Its own schedule, not the shared one: this test closes the window by writing to the row,
+      // and a later test reading a schedule this one had shut would fail for no reason of its own.
+      const window = (
+        await schedules.create(testActor, { name: 'Restart window', periods: 'mo:00:00-su:24:00' })
+      ).id;
+      await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, window);
+      await recompute(INSIDE);
+      assert.notEqual(
+        (await flagsOf(sensorId)).cause,
+        'schedule',
+        'inside the window to begin with',
+      );
+
+      // The window closes while nothing is running — which is what a restart across a boundary
+      // looks like from the database's point of view. Closed at every hour rather than at a
+      // particular one, so what this asserts is that a sweep ran and not what the wall clock
+      // happened to be when the suite did.
+      await db.query(`UPDATE schedule SET polarity = 'inactive' WHERE id = $1`, [window]);
+
+      const sweep = new ScheduleSweep({ db, pauses, logger: silent, intervalMs: 60 * 60_000 });
+      await sweep.start();
+      sweep.stop();
+
+      assert.equal(
+        (await flagsOf(sensorId)).cause,
+        'schedule',
+        'the flags were brought up to date before anything could be served',
+      );
+    });
+
     it('survives a failure rather than taking every future window with it', async () => {
       const broken = new SchedulePauses({
         logger: silent,
@@ -879,6 +1000,82 @@ describe(
       await h.service.clearSetting(testActor, deviceId, SCHEDULE_ID.key);
       await schedules.delete(testActor, id);
       await assert.rejects(() => schedules.get(id));
+    });
+
+    it('reports how many objects hold it, not how many the page returned', async () => {
+      // **`P-129`.** The refusal was built from `usedBy`'s length, and `usedBy` is a page of
+      // fifty. A schedule assigned to more than that told the operator fifty; they clear fifty,
+      // try again, and are told fifty again. Asserted with a small page rather than 51 objects,
+      // because the defect is the two numbers being confused and not the size of either.
+      const id = (
+        await schedules.create(testActor, { name: 'Popular', periods: 'mo:09:00-mo:17:00' })
+      ).id;
+      // Past the page, on purpose: at fifty or fewer the two numbers agree and the defect is
+      // invisible, which is exactly why it survived. Written straight into `object_setting`
+      // rather than through fifty-one object creations — the assignment is what is counted, and
+      // building a tree to prove an off-by-a-page would be a slow test of something else.
+      const assigned: number[] = [deviceId, sensorId];
+      for (let i = 0; i < 50; i += 1) {
+        assigned.push(
+          (
+            await h.service.create(testActor, {
+              kind: 'sensor',
+              parentId: deviceId,
+              name: `filler-${String(i)}`,
+              sensorType: 'icmp.ping',
+            })
+          ).id,
+        );
+      }
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         SELECT unnest($1::bigint[]), $2, to_jsonb($3::bigint)`,
+        [assigned, SCHEDULE_ID.key, id],
+      );
+
+      assert.equal((await repo.usedBy(db, id)).length, 50, 'the page stops at fifty');
+      assert.equal(await repo.usedByCount(db, id), 52, 'and the count is the truth');
+
+      await assert.rejects(
+        () => schedules.delete(testActor, id),
+        (error: unknown) => {
+          const err = error as { message: string; details?: { usedByTotal?: number } };
+          assert.equal(err.details?.usedByTotal, 52);
+          assert.match(err.message, /assigned to 52 object/);
+          return true;
+        },
+      );
+    });
+
+    it('refuses a schedule a rediscovery rule uses, by name rather than by constraint', async () => {
+      // **`P-130`.** `discovery_schedule.schedule_id` is a `RESTRICT` foreign key and nothing was
+      // checking it, so this delete reached the database and came back as a constraint violation
+      // — a 500 with a constraint name in it, for something ordinary and correctable.
+      const id = (
+        await schedules.create(testActor, {
+          name: 'Rediscovery window',
+          periods: 'mo:09:00-mo:17:00',
+        })
+      ).id;
+      await db.query(
+        `INSERT INTO discovery_schedule
+           (name, group_id, probe_id, range_text, cadence, schedule_id)
+         VALUES ('nightly', $1, $2, '192.0.2.0/24', 'daily', $3)`,
+        [groupId, probeId, id],
+      );
+
+      await assert.rejects(
+        () => schedules.delete(testActor, id),
+        (error: unknown) => {
+          const err = error as {
+            code?: string;
+            details?: { usedByRediscovery?: { name: string }[] };
+          };
+          assert.equal(err.code, 'OBJECT_NOT_DELETABLE');
+          assert.equal(err.details?.usedByRediscovery?.[0]?.name, 'nightly');
+          return true;
+        },
+      );
     });
 
     it('refuses to delete a built-in, because the manual points at it', async () => {

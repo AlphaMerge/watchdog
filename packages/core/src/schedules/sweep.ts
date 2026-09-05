@@ -51,8 +51,21 @@ export class ScheduleSweep {
     this.#intervalMs = options.intervalMs;
   }
 
-  start(): void {
+  /**
+   * Sweeps once, now, and then on every wall-clock minute.
+   *
+   * **The immediate one is not a nicety** (`P-131`). `paused_by_schedule` is a stored flag, and
+   * the probes' configuration is built from it — so a core that was down when a window closed
+   * came back with every flag as it was before the boundary and handed the probes a list that
+   * said to keep scanning. Waiting for the top of the next minute meant up to sixty seconds of
+   * checks inside a window an operator had closed, on every restart, and the whole point of a
+   * maintenance window is that nothing scans during it.
+   *
+   * Awaited, so a caller can order it before anything is served. Production does.
+   */
+  async start(): Promise<void> {
     if (this.#timer !== undefined || this.#stopped) return;
+    await this.sweep();
     this.#arm();
   }
 
