@@ -6408,6 +6408,50 @@ because each is a decision rather than a defect:
       production could no longer reach, which is entry 7's defect exactly. Walked as sequences,
       all three die under it.
 
+- [x] **P-106 — Every counter reading in a batch divided against the pre-batch baseline** · S ·
+      T-02 · Finding 23. `counterBaselines` is loaded once per batch and was never advanced while
+      the batch was walked, so each reading was compared against the sample that preceded the
+      *whole batch* rather than the one before it. `counterSeen` fed only the end-of-batch save.
+
+      A batch routinely carries many consecutive scans of one sensor — a spool drain after an
+      outage is exactly that, up to `spoolCatchUpMaxRows` of them — so every stored rate became
+      the running average since the pre-batch sample. Traffic of 6,000 octets in the first minute
+      and none afterwards stored 100, 50, 33.3, 25 … instead of 100, 0, 0, 0. Worse, the span from
+      the frozen baseline grows with every reading, so once it passed `MAX_GAP_MS` every remaining
+      one came back `stale`: a two-hour replay produced **zero** counter samples for the whole
+      window and `counterStale` climbed by one per reading.
+
+      Every existing test submitted one result per `acceptResults` call — the single shape that
+      cannot show this — and a constant-rate fixture would have hidden it anyway, because the
+      running average equals the instantaneous rate exactly when the rate is constant. Both new
+      cases are deliberately non-constant.
+
+      The batch is also sorted by time now. The state machine already sorts each sensor's results
+      because it is a fold over time; a counter is the same kind of fold, and nothing in the
+      protocol *promises* the order a running baseline needs.
+
+- [x] **P-107 — The counter baseline was committed before the batch that moved it** · M · T-02,
+      R-02 · Finding 24. `#prepare` saved `channel_counter` in its own transaction, before
+      `#decide` and before `Ingestor.submit`. A refused batch — queue-full during an alarm storm —
+      was never stored, and the probe kept it spooled and re-offered it; but the baseline had
+      already advanced to that batch's own last sample.
+
+      On the resend every reading divided against itself: `current.at - previous.at` is zero for
+      the last and negative for the earlier ones, so `rateFrom` answered `no-elapsed` for all of
+      them and produced no samples at all. The interval's traffic was gone for good, with nothing
+      counted and no log line, during exactly the pressure event an operator was investigating.
+
+      `SensorStateService.forget` exists for precisely this hazard on the state side; the counter
+      store had no equivalent. Rather than add a second rewind, the baselines now ride the batch
+      and are written in the samples' own transaction — the same argument `IngestBatch.states`
+      already makes in as many words. If the write rolls back, the baseline rolls back with it.
+
+      **The empty-batch short-circuit had to learn about them too.** `submit` accepts a batch with
+      no samples and no state rows without queueing it, and a counter's *first* reading produces
+      no sample — it is the one reading that has nothing to divide by, and the one that most has
+      to move the baseline. That is the same point the comment above that check already makes
+      about failed checks, which is how it was spotted: twelve counter tests went red at once.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

@@ -225,6 +225,98 @@ describe(
       assert.deepEqual(await storedRates(), [0]);
     });
 
+    it('divides each reading in a batch by the one before it, not by the pre-batch baseline', async () => {
+      // **`P-106`.** `counterBaselines` is loaded once per batch and was never advanced as the
+      // batch was walked, so every reading divided against the sample that preceded the *whole*
+      // batch. That turns each rate into the running average since that point.
+      //
+      // A batch routinely carries many consecutive scans of one sensor — a spool drain after an
+      // outage is exactly that. Every test in this file submitted one result per call, which is
+      // the one shape that cannot show it, and a constant-rate fixture would have hidden it
+      // anyway: the running average equals the instantaneous rate only when the rate is
+      // constant. This one deliberately is not.
+      await submit(scan(1_000n, 0));
+      await submit(scan(7_000n, 60), scan(7_000n, 120), scan(13_000n, 180));
+
+      assert.deepEqual(
+        await storedRates(),
+        [100, 0, 100],
+        '6,000 octets, then none, then 6,000 — not a smeared 100, 50, 66.7',
+      );
+    });
+
+    it('does not call every reading in a replayed batch stale', async () => {
+      // The same defect past `MAX_GAP_MS`. With the baseline frozen at the pre-batch sample, the
+      // span from it grows with every reading — so once it passed an hour, `rateFrom` answered
+      // `stale` for all of them and a two-hour outage replayed as *zero* counter samples for the
+      // whole window, with `counterStale` climbing by one per reading.
+      await submit(scan(0n, 0));
+      const before = service.stats().counterStale;
+      await submit(scan(6_000n, 3_660), scan(12_000n, 3_720));
+
+      assert.deepEqual(
+        await storedRates(),
+        [100],
+        'the first crosses a genuine gap; the second follows it by a minute',
+      );
+      assert.equal(service.stats().counterStale - before, 1, 'one gap, not one per reading');
+    });
+
+    it('does not advance the baseline for a batch the ingestor refused', async () => {
+      // **`P-107`.** The baseline used to be committed in `#prepare`, in its own transaction,
+      // *before* the batch was offered. A refused batch — queue-full during an alarm storm — was
+      // never stored, and the probe kept it spooled and re-offered it; but the baseline had
+      // already advanced to that batch's own last sample, so on the resend every reading divided
+      // against itself. `current.at - previous.at` is zero for the last and negative for the
+      // earlier ones, so `rateFrom` answered `no-elapsed` for all of them and produced no
+      // samples at all. The interval's traffic was gone for good, with nothing counted and no
+      // log line, during exactly the pressure event an operator was investigating.
+      //
+      // The state machine has an explicit rewind for this hazard (`SensorStateService.forget`);
+      // the counter store had none. Writing the baseline in the samples' own transaction is the
+      // same fix a different way — if the write rolls back, so does the baseline.
+      await submit(scan(1_000n, 0));
+      assert.equal((await baseline())?.value, '1000');
+
+      // A service whose ingestor cannot accept anything.
+      const full = new IngestionService({
+        db,
+        logger: silent,
+        ingestor: new Ingestor({
+          db,
+          logger: silent,
+          config: {
+            queueMaxRows: 0,
+            batchMaxRows: 5_000,
+            batchMaxDelayMs: 5,
+            slowDownAtPercent: 50,
+            retryAfterMs: 1_000,
+            replay: {
+              maxConcurrentProbes: 4,
+              stepMs: 250,
+              maxDelayMs: 30_000,
+              idleAfterMs: 30_000,
+            },
+          },
+        }),
+      });
+      const refused = await full.acceptResults('probe-1', {
+        type: 'results',
+        batchId: 'refused',
+        results: [scan(7_000n, 60)],
+      });
+      assert.equal(refused.type, 'results-nack', 'the batch was not stored');
+      assert.equal(
+        (await baseline())?.value,
+        '1000',
+        'and the baseline did not move for readings nobody kept',
+      );
+
+      // The probe re-offers exactly the same batch, and it measures.
+      await submit(scan(7_000n, 60));
+      assert.deepEqual(await storedRates(), [100]);
+    });
+
     it('counts why a counter produced no sample', async () => {
       // "The graph has holes in it" has three very different causes, and only these numbers
       // separate a new sensor from a rebooting device from a monitoring outage.

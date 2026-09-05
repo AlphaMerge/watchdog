@@ -16,6 +16,14 @@ export type ResultsMessage = Extract<ProbeToCoreMessage, { type: 'results' }>;
 interface Prepared {
   samples: SampleRow[];
   results: SensorResult[];
+  /**
+   * Every counter that was read, including the ones that produced no sample (`P-107`).
+   *
+   * A reset, a stale gap and a first reading all have to move the baseline forward, or the next
+   * scan divides against a value the device passed long ago and reports the same failure for
+   * ever. Carried to the ingestor rather than committed here: see `IngestBatch.counters`.
+   */
+  counters: Map<number, CounterSample>;
 }
 
 /** Distinguishable from `undefined`, which means "no state machine is wired". */
@@ -192,6 +200,9 @@ export class IngestionService {
     const outcome = await this.#ingestor.submit({
       source,
       samples,
+      // With the samples, not before them (`P-107`). A baseline that advanced for a batch the
+      // ingestor refused would make the resent batch divide against itself.
+      ...(prepared.counters.size === 0 ? {} : { counters: prepared.counters }),
       ...(decisions === undefined ? {} : { states: decisions }),
     });
     if (!outcome.accepted) {
@@ -262,6 +273,12 @@ export class IngestionService {
       if (result.channels.length > 0) withReadings.push(result);
     }
 
+    // **In time order, because a counter is a fold over time** (`P-106`). The state machine
+    // already sorts each sensor's results for the same reason; a batch is one message and the
+    // probe writes its spool in the order it scanned, but nothing in the protocol *promises*
+    // that order, and a running baseline walked out of order would divide against the future.
+    withReadings.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+
     const resolved =
       withReadings.length === 0
         ? null
@@ -309,13 +326,23 @@ export class IngestionService {
             continue;
           }
           const sample = { value: exact, at };
+          // **The previous reading, not the pre-batch one** (`P-106`). `counterBaselines` is
+          // loaded once for the whole batch, and a batch routinely carries many consecutive
+          // scans of one sensor — a spool drain after an outage is exactly that, up to
+          // `spoolCatchUpMaxRows` of them. Dividing every reading against the sample that
+          // preceded the *batch* turns each rate into the running average since that point:
+          // 6,000 octets in the first minute and none afterwards stored 100, 50, 33.3, 25 …
+          // instead of 100, 0, 0, 0. And once the span passed `MAX_GAP_MS` every remaining
+          // reading came back `stale` and was dropped, so a two-hour outage replayed as zero
+          // counter samples for the whole window.
+          const previous = counterSeen.get(channel.id) ?? counterBaselines.get(channel.id) ?? null;
           counterSeen.set(channel.id, sample);
 
           // The reading's own width wins: which counter the device actually offered is
           // discovered at scan time, and the channel's is what the type declared when the
           // sensor was created.
           const bits = reading.counterBits ?? channel.counterBits;
-          const outcome = rateFrom(counterBaselines.get(channel.id) ?? null, sample, bits);
+          const outcome = rateFrom(previous, sample, bits);
           if (outcome.kind !== 'rate') {
             // Every one of these is a gap rather than a zero: a first reading has nothing to
             // divide, a reset has a discontinuity in it, and a stale one spans a gap a 32-bit
@@ -355,13 +382,6 @@ export class IngestionService {
         });
       }
       if (readings.length > 0) outcomes.set(result, rollUp(readings));
-    }
-
-    // Every counter that was read, including the ones that produced no sample: a reset, a stale
-    // gap and a first reading all have to move the baseline forward, or the next scan divides
-    // against a value the device passed long ago and reports the same failure for ever.
-    if (counterSeen.size > 0) {
-      await this.#db.tx((q) => this.#counters.save(q, counterSeen));
     }
 
     // Every result, whatever its outcome: a check that failed has no readings and is precisely
@@ -408,6 +428,6 @@ export class IngestionService {
       });
     }
 
-    return { samples, results };
+    return { samples, results, counters: counterSeen };
   }
 }

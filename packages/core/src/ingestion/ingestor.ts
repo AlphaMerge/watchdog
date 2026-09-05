@@ -1,5 +1,7 @@
 import { describeError, type IngestionConfig, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import { CounterStore } from './counter-store.js';
+import type { CounterSample } from './counters.js';
 import { writeRuntimes, writeStateHistory } from '../state/runtime.js';
 import type {
   CommittedStates,
@@ -19,6 +21,23 @@ export interface IngestBatch {
   /** Where it came from — a probe gid, or `local`. For logs and per-source metrics. */
   source: string;
   samples: readonly SampleRow[];
+  /**
+   * The counter baselines these readings advanced (`P-107`).
+   *
+   * **Written in the readings' own transaction**, for the reason `states` is. They used to be
+   * committed in `#prepare`, before the batch was even offered — so a batch the ingestor refused
+   * (queue-full) or failed to write left the baseline advanced to its own last sample. The probe
+   * still held the batch and re-offered it, and on the resend every reading divided against
+   * itself: `current.at - previous.at` is zero for the last one and negative for the earlier
+   * ones, so `rateFrom` answered `no-elapsed` for all of them and produced no samples at all.
+   * The interval's traffic was gone for good, with no counter incremented and no log line,
+   * during exactly the pressure event an operator was investigating.
+   *
+   * The state machine has an explicit rewind for this hazard — `SensorStateService.forget` — and
+   * the counter store had none. Committing with the samples is the same fix a different way: if
+   * the write rolls back, the baseline rolls back with it.
+   */
+  counters?: ReadonlyMap<number, CounterSample>;
   /**
    * What the same results did to their sensors' states (`M-02`).
    *
@@ -203,6 +222,8 @@ export class Ingestor {
   readonly #logger: Logger;
   readonly #config: IngestionConfig;
   readonly #lateData: LateDataSink | undefined;
+  /** Stateless, so a second instance is the same store (`P-107`). */
+  readonly #counters = new CounterStore();
   readonly #dependencies: DependencyReactor | undefined;
   readonly #alarms: AlarmReactor | undefined;
   readonly #onStatesCommitted: CommittedStates | undefined;
@@ -256,6 +277,10 @@ export class Ingestor {
     // acknowledge an outage and never write it down.
     const stateRows =
       (batch.states?.transitions.length ?? 0) + (batch.states?.runtimes.length ?? 0);
+    // And for the same reason again (`P-107`): a counter's *first* reading produces no sample —
+    // there is nothing to divide it by yet — and it is precisely the one that has to move the
+    // baseline, or the next scan has nothing to divide either and the channel never reports.
+    const counterRows = batch.counters?.size ?? 0;
 
     if (this.#stopping) {
       this.#refuse(rows);
@@ -264,7 +289,7 @@ export class Ingestor {
 
     // An empty batch is not an error — a probe with nothing due has results for nothing — and it
     // must still be acknowledged, or the probe will offer it again for ever.
-    if (rows === 0 && stateRows === 0) {
+    if (rows === 0 && stateRows === 0 && counterRows === 0) {
       this.#acceptedBatches += 1;
       return { accepted: true, storedSamples: 0, retryAfterMs: this.#retryHint() };
     }
@@ -414,6 +439,9 @@ export class Ingestor {
     // One runtime row per sensor, whatever the merge swept in: the UPDATE joins on the sensor
     // id, and two rows for the same sensor would let the database pick either of them.
     const runtimes = new Map<number, RuntimeWrite>();
+    // One baseline per channel, newest wins — the same merge rule as `runtimes`, and for the
+    // same reason: two rows for one channel would let the database pick either (`P-107`).
+    const counters = new Map<number, CounterSample>();
     for (const queued of taken) {
       for (const sample of queued.batch.samples) {
         times.push(sample.at);
@@ -422,6 +450,12 @@ export class Ingestor {
         const at = sample.at.getTime();
         if (at < oldest) oldest = at;
         if (at > newest) newest = at;
+      }
+      for (const [channelId, sample] of queued.batch.counters ?? []) {
+        const held = counters.get(channelId);
+        if (held === undefined || sample.at.getTime() >= held.at.getTime()) {
+          counters.set(channelId, sample);
+        }
       }
       const states = queued.batch.states;
       if (states === undefined) continue;
@@ -462,6 +496,9 @@ export class Ingestor {
         // together or not at all (M-02).
         const appended = await writeStateHistory(q, transitions, this.#onStatesCommitted);
         const advanced = await writeRuntimes(q, [...runtimes.values()]);
+        // Same transaction, same reason again (`P-107`): a baseline that advanced for readings
+        // that were never stored makes the next scan of that counter unmeasurable.
+        if (counters.size > 0) await this.#counters.save(q, counters);
         // Last, and in the same transaction: a master's dependents must be paused by the time
         // the master's own Down is visible. Reacting after the commit would leave a window in
         // which a dependent's result arrives, finds itself unpaused, and raises exactly the
