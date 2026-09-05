@@ -20,6 +20,20 @@ export type ConfigUpdate =
  * to arrive on. `TimingWheel.add` already returns early for an unchanged interval, so an upsert
  * can be unconditional and still leave untouched sensors exactly where they were.
  */
+/**
+ * What the store tells, and who it tells (`P-111`).
+ *
+ * Both are required. A store whose arrivals and departures reach nobody is not a configuration
+ * anybody wants — it is the shape two shipped fixes silently reverted to when the lines in
+ * `main()` that registered these were deleted, with every test still green.
+ */
+export interface AssignmentListeners {
+  /** A sensor became this probe's responsibility (`P-80`). */
+  readonly onAdd: (sensorId: number) => void;
+  /** A sensor stopped being it, so per-sensor state goes with it (`P-77`). */
+  readonly onDrop: (sensorId: number) => void;
+}
+
 export class AssignmentStore {
   readonly #wheel: TimingWheel;
   readonly #assignments = new Map<number, SensorAssignment>();
@@ -31,7 +45,7 @@ export class AssignmentStore {
    * every sensor the probe had ever been assigned, which on a probe that is repeatedly reassigned
    * grows without bound. The store is the only thing that knows a sensor has gone.
    */
-  #onDrop: ((sensorId: number) => void) | undefined;
+  readonly #onDrop: (sensorId: number) => void;
 
   /**
    * Told when a sensor arrives, so per-sensor bookkeeping can start its clock (`P-80`).
@@ -41,10 +55,24 @@ export class AssignmentStore {
    * its guess — the process start — counted every sensor assigned later as behind schedule from
    * the moment it arrived.
    */
-  #onAdd: ((sensorId: number) => void) | undefined;
+  readonly #onAdd: (sensorId: number) => void;
 
-  constructor(wheel: TimingWheel) {
+  /**
+   * `onAdd` and `onDrop` are taken here rather than registered afterwards (`P-111`).
+   *
+   * They were `store.onAdd(...)` calls in `main()`, and deleting both of them compiled and left
+   * all 283 probe tests green — the watchdog's own tests call `assigned` and `forget` directly,
+   * so they prove the *mechanism* and never the wiring. `P-80` and `P-82` both depend on these
+   * lines, and neither could tell you they were gone.
+   *
+   * A constructor parameter is the cheapest guard there is: the compiler refuses a store that
+   * tells nobody, which is the same thing that already protects `reconcilesReadings` and
+   * `ingestionDiscards` on the core side.
+   */
+  constructor(wheel: TimingWheel, listeners: AssignmentListeners) {
     this.#wheel = wheel;
+    this.#onAdd = listeners.onAdd;
+    this.#onDrop = listeners.onDrop;
   }
 
   get size(): number {
@@ -92,20 +120,12 @@ export class AssignmentStore {
     const arriving = !this.#assignments.has(assignment.sensorId);
     this.#assignments.set(assignment.sensorId, assignment);
     this.#wheel.add({ id: assignment.sensorId, intervalSeconds: assignment.intervalSeconds });
-    if (arriving) this.#onAdd?.(assignment.sensorId);
-  }
-
-  onDrop(listener: (sensorId: number) => void): void {
-    this.#onDrop = listener;
-  }
-
-  onAdd(listener: (sensorId: number) => void): void {
-    this.#onAdd = listener;
+    if (arriving) this.#onAdd(assignment.sensorId);
   }
 
   #drop(sensorId: number): void {
     this.#assignments.delete(sensorId);
     this.#wheel.remove(sensorId);
-    this.#onDrop?.(sensorId);
+    this.#onDrop(sensorId);
   }
 }

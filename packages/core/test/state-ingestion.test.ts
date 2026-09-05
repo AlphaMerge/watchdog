@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { PauseRepository } from '../src/objects/pause-repository.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import type { CheckResult, IngestionConfig } from '@ms/shared';
@@ -124,7 +125,12 @@ describe(
       states: SensorStateService;
       channels: ChannelResolver;
     } {
-      const states = new SensorStateService({ db, logger: silent, settings: harness.resolver });
+      const states = new SensorStateService({
+        db,
+        logger: silent,
+        settings: harness.resolver,
+        pauses: new PauseRepository(),
+      });
       const channels = new ChannelResolver({ logger: silent, lookups });
       const ingestor = new Ingestor({ db: target ?? db, logger: silent, config: CONFIG });
       return {

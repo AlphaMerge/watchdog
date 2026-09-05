@@ -29,11 +29,18 @@ function harness() {
     now: () => ns,
     wallNow: () => 1_700_000_000_000,
   });
-  const store = new AssignmentStore(wheel);
+  const added: number[] = [];
+  const dropped: number[] = [];
+  const store = new AssignmentStore(wheel, {
+    onAdd: (sensorId) => added.push(sensorId),
+    onDrop: (sensorId) => dropped.push(sensorId),
+  });
 
   return {
     store,
     wheel,
+    added,
+    dropped,
     /** Every id that came due over the next `seconds`, in order. */
     run: (seconds: number): number[] => {
       const from = fired.length;
@@ -203,6 +210,34 @@ describe('a chunked configuration push (P-41)', () => {
    * Handed a fraction of the assignment set it becomes data loss instead, and silent data loss at
    * that, because a deleted cursor is indistinguishable from a sensor that has never drained.
    */
+  it('tells its listener when a sensor arrives, and only when it arrives', () => {
+    // **`P-111`.** `P-80` gave the store an arrival callback so the check-flow watchdog could
+    // start a sensor's clock when the probe became responsible for it, rather than at process
+    // start — without which a reconnect's chunked config push reported thousands of healthy
+    // sensors as behind schedule. Nothing pinned the store's half of that: the watchdog's own
+    // tests call `assigned` directly, under a comment noting that `main.ts` does it "in the same
+    // breath", so they prove the mechanism and never the contract.
+    //
+    // The `arriving` condition is the substance. A config push re-sends every sensor it still
+    // owns, so firing on each push would restart the clock of every healthy sensor on every
+    // reconnect — which is the defect `P-80` fixed, arrived at from the other direction.
+    const h = harness();
+    h.store.apply(set([assignment(1), assignment(2)]));
+    assert.deepEqual(h.added, [1, 2]);
+
+    h.store.apply(set([assignment(1), assignment(2), assignment(3)]));
+    assert.deepEqual(h.added, [1, 2, 3], 're-pushed sensors did not arrive again');
+  });
+
+  it('tells its listener when a sensor leaves', () => {
+    // The counterpart (`P-77`): the watchdog holds per-sensor state, and without this it keeps
+    // an entry for every sensor the probe was ever assigned.
+    const h = harness();
+    h.store.apply(set([assignment(1), assignment(2)]));
+    h.store.apply(set([assignment(1)]));
+    assert.deepEqual(h.dropped, [2]);
+  });
+
   it('makes the listener cursor sweep discard buffered notifications, mid-push', () => {
     const { store } = harness();
     const ring = new NotificationRing(1_000);

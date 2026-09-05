@@ -272,17 +272,18 @@ async function main(): Promise<void> {
   });
   // Constructed before the wheel is started: `onDue` closes over this binding, and a tick that
   // fired first would find it in the temporal dead zone.
-  const assignments = new AssignmentStore(wheel);
-  // A sensor that has left stops being this probe's business, and its per-sensor state goes with
-  // it — otherwise the watchdog keeps one entry for every sensor ever assigned (`P-77`).
-  assignments.onDrop((sensorId) => {
-    checkFlow.forget(sensorId);
-  });
-  // And the other half (`P-80`): a sensor's four intervals start when this probe becomes
-  // responsible for it, not when the process did. Without this a reconnect's chunked config push
-  // reported thousands of healthy sensors as behind schedule.
-  assignments.onAdd((sensorId) => {
-    checkFlow.assigned(sensorId);
+  const assignments = new AssignmentStore(wheel, {
+    // A sensor's four intervals start when this probe becomes responsible for it, not when the
+    // process did (`P-80`). Without this a reconnect's chunked config push reported thousands of
+    // healthy sensors as behind schedule.
+    onAdd: (sensorId) => {
+      checkFlow.assigned(sensorId);
+    },
+    // And a sensor that has left stops being this probe's business, so its per-sensor state goes
+    // with it — otherwise the watchdog keeps one entry for every sensor ever assigned (`P-77`).
+    onDrop: (sensorId) => {
+      checkFlow.forget(sensorId);
+    },
   });
 
   // ── the pool ceiling, derived from the work this probe was actually given (`P-34`) ──────────

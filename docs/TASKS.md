@@ -212,6 +212,45 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       database. Retention is `housekeeping.retention.auditDays`, 730 by default: twice the raw
       data, because "who changed this" is asked long after the readings either side of the
       change have been rolled up.
+- [x] **P-111 — Four load-bearing lines in `main()` could be deleted with nothing failing** · M ·
+      P-80, P-82, P-94, P-103 · The gap
+      `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` already named — "what
+      remains unpinned is `main()`'s own composition" — measured rather than argued.
+
+      **Deleted `pauses` and `reachabilitySync` from `packages/core/src/main.ts`: 2,118 core tests
+      pass. Deleted `onAdd` and `onDispatch` from `packages/probe/src/main.ts`: 283 probe tests
+      pass.** Four shipped fixes — `P-80`, `P-82`, `P-94`, `P-103` — silently reverted, with a
+      green suite. `buildHarness` constructs its own state service and its own audit sink, and the
+      watchdog's tests call `assigned` and `forget` directly under a comment noting that `main.ts`
+      does it "in the same breath", so every one of them proves the *mechanism* and none proves
+      the wiring.
+
+      **The fix is the one already working elsewhere in the same file.** Two of today's additions
+      — `reconcilesReadings` and `ingestionDiscards` — could not be deleted, for one reason: they
+      are required interface members, so the compiler is the guard. So the other three became
+      required too: `onDispatch` on the dispatcher deps, `pauses` on `SensorStateServiceOptions`,
+      and the assignment listeners moved from `store.onAdd(...)` registrations into the
+      constructor as a required `AssignmentListeners`. A caller with nobody to tell can still say
+      so with an empty function; what it can no longer do is say nothing.
+
+      **The fourth could not be typed**, because a sink in an `AuditSink[]` has no shape to
+      require. The three lists are extracted into `objects/audit-composition.ts` as named
+      functions with a required parameter per sink, and `audit-composition.test.ts` asserts each
+      list's membership — so removing one fails there. The differences between the three lists are
+      asserted too, because they are the interesting part: only the object service gets
+      reachability, a schedule edit skips the result cache and the alarm chain, a trigger edit
+      skips the configuration push.
+
+      Two contract tests came with it, for a store whose own behaviour nothing had pinned: `onAdd`
+      fires when a sensor arrives and **not** on a re-push — which is exactly `P-80`'s rule, since
+      firing on every push would restart the clock of every healthy sensor on every reconnect —
+      and `onDrop` fires when one leaves.
+
+      **What is still not covered**, and is said so on purpose: that `main()` passes these lists to
+      those three services, and that it constructs the store and the dispatcher at all. That is one
+      line each, `main()` still has no test file, and closing it properly means extracting the
+      composition into something a test can build. The gap is smaller and it is not gone.
+
 - [ ] **S-11 — Resolve TimescaleDB on Windows** · M · S-06 · Spike: install and benchmark on
       Windows Server. Decide TimescaleDB vs plain-Postgres fallback and record the outcome in
       ADR-001. _Blocks the Windows release story._

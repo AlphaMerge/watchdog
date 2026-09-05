@@ -17,6 +17,12 @@ import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/
 import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
+import {
+  objectAuditSinks,
+  scheduleAuditSinks,
+  triggerAuditSinks,
+  type AuditSinkSet,
+} from './objects/audit-composition.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import {
@@ -356,10 +362,22 @@ async function serve(): Promise<void> {
   const dependencySync = new DependencySync({ pauses: dependencyPauses, logger });
   // A move onto a live probe is the obvious remediation for a dead one, and it used to leave
   // every moved sensor reading Unknown for as long as the dead probe stayed away (`P-103`).
+  // Named once, so no call site can quietly compose a different set (`P-111`).
   const reachabilitySync = new ReachabilitySync({
     reachability: () => reachabilityRef,
     logger,
   });
+
+  const auditSinks: AuditSinkSet = {
+    database: new DatabaseAuditSink(),
+    logging: new LoggingAuditSink(logger),
+    configNotifier,
+    cacheInvalidator,
+    scheduleSync,
+    dependencySync,
+    reachabilitySync,
+    triggerSync,
+  };
 
   // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
   // may be constrained by a permission window, and what an evaluator needs is the definition
@@ -373,16 +391,7 @@ async function serve(): Promise<void> {
     // Both, inside every mutation's own transaction: the table is what the history tab reads
     // and what S-10 made queryable, and the log is the plain-text audit component
     // CAPABILITIES.MD §9 lists — the copy that survives someone dropping the database.
-    audit: new CompositeAuditSink([
-      new DatabaseAuditSink(),
-      new LoggingAuditSink(logger),
-      configNotifier,
-      cacheInvalidator,
-      scheduleSync,
-      dependencySync,
-      reachabilitySync,
-      triggerSync,
-    ]),
+    audit: new CompositeAuditSink(objectAuditSinks(auditSinks)),
     sensorTypes: catalogueSensorTypeGate(catalogue),
     // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
     // for maintenance means now, and a sensor that alarmed thirty seconds into a planned outage
@@ -416,13 +425,7 @@ async function serve(): Promise<void> {
   // The library itself. Its own audit sink, so a schedule edit re-derives the flags in the same
   // transaction that changed it — the same composite the object service uses, because a
   // schedule change has to reach the probes exactly as an object change does.
-  const scheduleAudit = new CompositeAuditSink([
-    new DatabaseAuditSink(),
-    new LoggingAuditSink(logger),
-    configNotifier,
-    scheduleSync,
-    dependencySync,
-  ]);
+  const scheduleAudit = new CompositeAuditSink(scheduleAuditSinks(auditSinks));
   const schedules = new ScheduleService({ db, audit: scheduleAudit, logger });
   await schedules.seedBuiltIns();
 
@@ -433,11 +436,7 @@ async function serve(): Promise<void> {
   // carries it.
   const triggers = new TriggerService({
     db,
-    audit: new CompositeAuditSink([
-      new DatabaseAuditSink(),
-      new LoggingAuditSink(logger),
-      triggerSync,
-    ]),
+    audit: new CompositeAuditSink(triggerAuditSinks(auditSinks)),
     logger,
   });
 

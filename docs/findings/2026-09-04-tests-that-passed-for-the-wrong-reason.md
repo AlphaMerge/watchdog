@@ -398,9 +398,24 @@ hard-coding it to `'pool'` fails there while **every check-flow test stays green
 pass the label themselves. That is the same structure as entry 7 — a subject that cannot express
 the property, and an assertion that had to move to where it lives.
 
-What remains unpinned is `main()`'s own composition: that `assignments.onAdd`, `onDrop` and the
-dispatcher's `onDispatch` are wired to the watchdog at all. `main()` has no test file, and three
-of the day's fixes now depend on lines in it.
+`main()`'s own composition was unpinned, and this section used to end by saying so and leaving it
+there. `P-111` measured it instead: **deleting `pauses` and `reachabilitySync` from the core's
+`main()` left all 2,118 core tests green, and deleting `onAdd` and `onDispatch` from the probe's
+left all 283 green** — four shipped fixes silently reverted by a suite that noticed nothing.
+`buildHarness` builds its own state service and audit sink, and the watchdog's tests call
+`assigned` and `forget` directly under a comment noting that `main.ts` does it "in the same
+breath". Every one of them proves the mechanism; none proves the wiring.
+
+The fix was already working ten lines away. Two additions from the same day could *not* be
+deleted, for one reason: `reconcilesReadings` and `ingestionDiscards` are required interface
+members, so the compiler is the guard. Three of the four became required too; the fourth, a sink
+in an `AuditSink[]`, has no shape to require, so the three lists are named functions now with a
+test that asserts their membership.
+
+**What is still unpinned is one line each**: that `main()` passes those lists to those services,
+and constructs the store and the dispatcher at all. `main()` still has no test file. The gap is
+smaller and it is not closed — which is the same sentence this section carried before, about a
+larger gap, and it is worth noticing that writing it down did not fix it. Measuring it did.
 
 ## The honest bottom line
 

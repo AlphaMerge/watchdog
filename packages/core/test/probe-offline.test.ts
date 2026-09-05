@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { PauseRepository } from '../src/objects/pause-repository.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { ProbeReachability } from '../src/probes/reachability.js';
 import { ReachabilitySync } from '../src/probes/reachability-sync.js';
@@ -57,6 +58,7 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       db,
       logger: silentLogger,
       settings: harness.resolver,
+      pauses: new PauseRepository(),
       unreachableSensors: () => reachability.unreachableSensors(),
     });
     reachability = new ProbeReachability({

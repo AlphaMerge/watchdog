@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { PauseRepository } from '../src/objects/pause-repository.js';
 import { after, before, describe, it } from 'node:test';
 import type { CheckResult, IngestionConfig } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
@@ -164,7 +165,12 @@ describe(
         db,
         logger: silent,
         ingestor,
-        states: new SensorStateService({ db, logger: silent, settings: harness.resolver }),
+        states: new SensorStateService({
+          db,
+          logger: silent,
+          settings: harness.resolver,
+          pauses: new PauseRepository(),
+        }),
         resolver: new ChannelResolver({ logger: silent, lookups }),
       });
 

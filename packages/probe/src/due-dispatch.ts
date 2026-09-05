@@ -59,7 +59,16 @@ export interface DueDispatchDeps {
    * counting it would make backpressure look like a stall. The outcome is already returned here
    * and was already being discarded — this is the one place that knows.
    */
-  onDispatch?: (sensorId: number, timeoutMs: number, runner: 'pool' | 'process') => void;
+  /**
+   * Told which runner accepted each check (`P-82`), and **required** (`P-111`).
+   *
+   * Optional was the wrong shape: `CheckFlowWatchdog` judges each runner against its own
+   * completions, and this is the only place that knows which runner a check went to. Deleting the
+   * one line in `main()` that passes it compiled, ran, and left every check-flow test green —
+   * because they pass the label themselves. A caller that genuinely has nobody to tell can say so
+   * with an empty function; the point is that it has to say it.
+   */
+  onDispatch: (sensorId: number, timeoutMs: number, runner: 'pool' | 'process') => void;
 }
 
 export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) => void {
@@ -89,7 +98,7 @@ export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) =>
       });
       // Which runner took it, because both settle into one sink and only here knows (`P-82`).
       if (outcome === 'accepted') {
-        deps.onDispatch?.(sensorId, assignment.timeoutMs, isolated ? 'process' : 'pool');
+        deps.onDispatch(sensorId, assignment.timeoutMs, isolated ? 'process' : 'pool');
       }
     }
   };

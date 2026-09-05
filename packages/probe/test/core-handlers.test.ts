@@ -47,7 +47,7 @@ function harness(over: Partial<CoreHandlerDeps> = {}) {
     now: () => 0n,
     wallNow: () => 1_700_000_000_000,
   });
-  const store = new AssignmentStore(wheel);
+  const store = new AssignmentStore(wheel, { onAdd: () => undefined, onDrop: () => undefined });
   const traps = sweeper();
   const syslog = sweeper();
   const calls: string[] = [];

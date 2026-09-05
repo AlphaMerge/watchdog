@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { PauseRepository } from '../../src/objects/pause-repository.js';
 import { after, before, describe, it } from 'node:test';
 import { coreConfigSchema, loadConfig, type CheckResult, type CoreConfig } from '@ms/shared';
 import type { Database } from '../../src/db/pool.js';
@@ -287,7 +288,15 @@ describe(
             db,
             logger: silent,
             ingestor,
-            ...(states ? { states: new SensorStateService({ db, logger: silent }) } : {}),
+            ...(states
+              ? {
+                  states: new SensorStateService({
+                    db,
+                    logger: silent,
+                    pauses: new PauseRepository(),
+                  }),
+                }
+              : {}),
           }),
         };
       };

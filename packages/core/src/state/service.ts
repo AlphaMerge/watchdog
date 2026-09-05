@@ -105,8 +105,16 @@ export interface SensorStateServiceOptions {
    * system does — `main.ts` passes the inheritance resolver.
    */
   settings?: PolicySource;
-  /** Where an operator's pause message comes from. `main.ts` passes the pause repository. */
-  pauses?: PauseMessages;
+  /**
+   * Where an operator's pause message comes from (`P-94`), and **required** (`P-111`).
+   *
+   * Optional was the wrong shape. Deleting the one line in `main()` that passes it compiled, ran,
+   * and left all 2,118 core tests green — because `buildHarness` constructs its own service and
+   * passes its own, so every test that exercises the fix proves the *mechanism* and none of them
+   * proves `main()` wires it. A caller with no pause store can pass one that answers nothing; the
+   * point is that it has to decide.
+   */
+  pauses: PauseMessages;
   /** The policy for a sensor with no resolver. Also the registry default's shape. */
   policy?: FailurePolicy;
   /** Sensors held in memory. The v1 target is 5,000, so the default holds every one of them. */
@@ -163,7 +171,7 @@ export class SensorStateService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #settings: PolicySource | undefined;
-  readonly #pauses: PauseMessages | undefined;
+  readonly #pauses: PauseMessages;
   readonly #fallback: FailurePolicy;
   readonly #maxCached: number;
   readonly #alarms: AlarmReactor | undefined;
@@ -645,7 +653,7 @@ export class SensorStateService {
     facts: ReadonlyMap<number, SensorFacts>,
     at: Date,
   ): Promise<ReadonlyMap<number, string>> {
-    if (cause.sources === undefined || this.#pauses === undefined) return new Map();
+    if (cause.sources === undefined) return new Map();
     const wanted = [...facts]
       .filter(([, one]) => one.pause.manual || one.pause.parent)
       .map(([id]) => id);
