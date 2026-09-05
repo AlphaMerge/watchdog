@@ -10220,6 +10220,35 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 6 new. Mutation 4/4.
 
+- [x] **P-140 — The pause API spoke for every cause, including ones it does not own**
+      `P-94` gave `reevaluate` a `sources` parameter — which causes a caller may supply words for
+      — and taught the schedule sweep to use it. The pause API, the other operator-facing caller,
+      was never given one, and an absent `sources` means *every* cause. Fixed by symmetry, and it
+      ships **without a test that fails without it**: every sequence tried reaches the
+      higher-precedence pause through a re-evaluation that already sets the state, so the later
+      manual pause decides the same state and cause and writes nothing at all. Said out loud
+      rather than papered over with a test that passes either way.
+
+- [x] **P-141 — A clone carried the trigger fence and none of the triggers**
+      The clone copies `inherits_triggers` deliberately — a clone of a lab device is still a lab
+      device, and one that notified nobody must not start notifying — and copied none of the
+      triggers behind the fence. So a cloned object with the fence up inherited nothing and owned
+      nothing: it notified **nobody**, which is the one failure a monitoring system must not
+      arrive at quietly, and it looked identical to a working one. The triggers travel now,
+      `enabled` included, and the clone reports how many.
+
+- [x] **P-142 — Acknowledging an alarm reset how long it had been broken**
+      The alarms list's duration column and its "what has been broken longest" sort read
+      `sensor_runtime.since` — when the sensor entered its *current state*. Acknowledging a Down
+      is a state change, so at the moment an operator said "I am on it" the duration reset to zero
+      and the sensor dropped to the bottom of that sort; the acknowledgement lapsing reset it
+      again. `CLAUDE.md` already says where a duration comes from — uptime is computed from state
+      history, not from the runtime row — and this was the one place that did not. The outage is
+      dated from the earliest transition after the last non-alarm state, falling back to the
+      runtime row for an outage older than the retained history.
+
+      Tests: 3 new. Mutation 2/2 (`P-140` has none by construction, as above).
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

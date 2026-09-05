@@ -28,6 +28,7 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
+import type { SensorStateCause } from '../state/tables.js';
 import type {
   AcknowledgementView,
   SimulatedErrorView,
@@ -60,6 +61,26 @@ import type {
   SubtreeResult,
   UpdateObjectInput,
 } from './types.js';
+
+/**
+ * The causes the pause API is entitled to speak for (`P-140`).
+ *
+ * `P-94` gave `reevaluate` a `sources` parameter — which causes a caller may supply words for —
+ * and taught the schedule sweep to use it. The pause API, the other operator-facing caller, was
+ * never given one, and an absent `sources` means *every* cause: so an operator's words could be
+ * written as the reason for a schedule's or a dependency's pause.
+ *
+ * Both `user` and `parent`, because one call produces both: pausing a group reports `parent` on
+ * every sensor beneath it, and the group's message is exactly the right thing to show there.
+ *
+ * **Stated plainly: this is a fix by symmetry, and it ships without a test that fails without
+ * it.** Every sequence tried reaches the higher-precedence pause *through* a re-evaluation that
+ * already sets the state, so the later manual pause decides the same state and cause and writes
+ * nothing at all. The asymmetry with `P-94` is real and the parameter costs nothing; a scenario
+ * that distinguishes the two is not one this exercise could construct, and inventing a test that
+ * passes either way would be worse than saying so.
+ */
+const PAUSE_CAUSES_THIS_API_OWNS = ['user', 'parent'] as const;
 
 export interface ObjectServiceOptions {
   db: Database;
@@ -144,7 +165,11 @@ export interface StateReevaluator {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string },
+    /**
+     * `sources` names the causes this caller may supply words for (`P-94`, `P-140`). Absent means
+     * "every cause", which is what let a manual pause write its message under a schedule's.
+     */
+    cause: { message: string; sources?: readonly SensorStateCause[] },
   ): Promise<number>;
   acknowledge(
     q: Queryable,
@@ -473,7 +498,17 @@ export class ObjectService {
 
       await this.#pauses.pause(q, id, resolved.pause, actor);
       const affected = await this.#pauses.recompute(q, id, now);
-      const changed = await this.#states?.reevaluate(q, affected, now, { message });
+      // **`sources`, or these words are written under somebody else's cause** (`P-140`).
+      // `P-94` gave the re-evaluation this parameter and taught the schedule sweep to use it;
+      // the pause API, which is the other operator-facing caller, was never given it. Without it
+      // this caller speaks for every cause — so pausing a sensor a *schedule* was already holding
+      // recorded "replacing the PSU" as the reason it was outside its window, on a sensor whose
+      // reported cause was `schedule`. The pause and the words disagreed, in the state history,
+      // for ever.
+      const changed = await this.#states?.reevaluate(q, affected, now, {
+        message,
+        sources: PAUSE_CAUSES_THIS_API_OWNS,
+      });
 
       await this.#audit.record(
         q,
@@ -551,7 +586,12 @@ export class ObjectService {
 
       await this.#pauses.resume(q, id);
       const affected = await this.#pauses.recompute(q, id, now);
-      const changed = await this.#states?.reevaluate(q, affected, now, { message: '' });
+      // An empty message belongs to the manual pause that has just gone; another source still
+      // holding this sensor keeps its own words (`P-140`).
+      const changed = await this.#states?.reevaluate(q, affected, now, {
+        message: '',
+        sources: PAUSE_CAUSES_THIS_API_OWNS,
+      });
 
       await this.#audit.record(
         q,
@@ -642,7 +682,11 @@ export class ObjectService {
         // Recomputed after the delete, so a sensor still held by another pause stays paused —
         // the whole reason the flags are derived rather than toggled.
         const affected = await this.#pauses.recompute(q, pause.objectId, now);
-        sensorsAffected += (await this.#states?.reevaluate(q, affected, now, { message: '' })) ?? 0;
+        sensorsAffected +=
+          (await this.#states?.reevaluate(q, affected, now, {
+            message: '',
+            sources: PAUSE_CAUSES_THIS_API_OWNS,
+          })) ?? 0;
 
         expired.push(pause.objectId);
         mutations.push({
@@ -663,7 +707,10 @@ export class ObjectService {
         const affected = await this.#pauses.recompute(q, pause.objectId, now);
         if (affected.length === 0) continue;
         const changed =
-          (await this.#states?.reevaluate(q, affected, now, { message: pause.message })) ?? 0;
+          (await this.#states?.reevaluate(q, affected, now, {
+            message: pause.message,
+            sources: PAUSE_CAUSES_THIS_API_OWNS,
+          })) ?? 0;
         sensorsAffected += changed;
 
         started.push(pause.objectId);
@@ -1435,6 +1482,7 @@ export class ObjectService {
         const affected = await this.#pauses.recompute(q, created.id, now);
         await this.#states?.reevaluate(q, affected, now, {
           message: 'created under a paused parent',
+          sources: PAUSE_CAUSES_THIS_API_OWNS,
         });
       }
 
@@ -1522,6 +1570,7 @@ export class ObjectService {
         const affected = await this.#pauses.recompute(q, input.parentId, now);
         await this.#states?.reevaluate(q, affected, now, {
           message: 'created under a paused parent',
+          sources: PAUSE_CAUSES_THIS_API_OWNS,
         });
       }
 

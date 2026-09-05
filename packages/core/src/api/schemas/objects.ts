@@ -610,13 +610,21 @@ export const cloneResultSchema = {
     clonedCount: {
       type: 'object',
       additionalProperties: false,
-      required: ['group', 'device', 'sensor', 'channel', 'setting', 'total'],
+      required: ['group', 'device', 'sensor', 'channel', 'setting', 'trigger', 'total'],
       properties: {
         group: { type: 'integer' },
         device: { type: 'integer' },
         sensor: { type: 'integer' },
         channel: { type: 'integer' },
         setting: { type: 'integer' },
+        trigger: {
+          type: 'integer',
+          description:
+            'Notification triggers copied with the objects that own them (`P-141`). The clone ' +
+            'already carried the trigger *fence* and none of the triggers behind it, so a ' +
+            'cloned object with the fence up notified nobody and looked identical to one that ' +
+            'did.',
+        },
         total: { type: 'integer' },
       },
     },

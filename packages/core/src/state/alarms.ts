@@ -154,7 +154,29 @@ export class AlarmService {
       `
       WITH RECURSIVE alarming AS (
         -- The partial index answers this. Everything below walks a few dozen rows, not the tree.
-        SELECT r.object_id AS sensor_id, r.state, r.cause, r.message, r.since,
+        SELECT r.object_id AS sensor_id, r.state, r.cause, r.message,
+               -- **How long it has been wrong, from the state history** (P-142). This read
+               -- sensor_runtime.since, which is when the sensor entered its *current state* --
+               -- and acknowledging a Down is a state change, so the moment an operator said "I
+               -- am on it" the duration column reset to zero and the sensor moved to the bottom
+               -- of a list sorted by "what has been broken longest". The acknowledgement lapsing
+               -- reset it a second time. CLAUDE.md already says where durations come from:
+               -- uptime is computed from state history, not from the runtime row.
+               --
+               -- The outage began at the earliest transition after the last one that was not an
+               -- alarm state. COALESCE back to the runtime row for a sensor whose history has
+               -- been dropped by retention, which is honest -- an outage older than the history
+               -- cannot be dated more precisely than "at least this long".
+               COALESCE(
+                 (SELECT min(h.time) FROM sensor_state h
+                   WHERE h.sensor_id = r.object_id
+                     AND h.state = ANY($1::sensor_state_kind[])
+                     AND h.time > COALESCE(
+                       (SELECT max(h2.time) FROM sensor_state h2
+                         WHERE h2.sensor_id = r.object_id
+                           AND NOT (h2.state = ANY($1::sensor_state_kind[]))),
+                       '-infinity'::timestamptz)),
+                 r.since) AS since,
                r.acknowledged_at, r.acknowledged_until, r.consecutive_failures
         FROM sensor_runtime r
         WHERE r.state = ANY($1::sensor_state_kind[])

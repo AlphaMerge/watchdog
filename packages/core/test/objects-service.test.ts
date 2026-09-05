@@ -462,6 +462,31 @@ describe(
         return g;
       };
 
+      it('copies the triggers, so a clone behind the fence still notifies somebody', async () => {
+        // **`P-141`.** The clone already copied `inherits_triggers` — a clone of a lab device is
+        // still a lab device — and copied none of the triggers the fence exists to protect. A
+        // cloned object with the fence up inherited nothing and owned nothing: it notified
+        // *nobody*, silently, and looked identical to one that worked.
+        const source = await buildSubtree(probeId);
+        await scratch.db.query(`UPDATE object SET inherits_triggers = false WHERE id = $1`, [
+          source,
+        ]);
+        await scratch.db.query(
+          `INSERT INTO notification_trigger (object_id, kind, settings)
+           VALUES ($1, 'state', '{"state":"down","initialTemplateId":1}'::jsonb)`,
+          [source],
+        );
+
+        const result = await h.service.clone(testActor, source, {});
+
+        assert.equal(result.clonedCount.trigger, 1);
+        const copied = await scratch.db.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM notification_trigger WHERE object_id = $1',
+          [result.object.id],
+        );
+        assert.equal(copied[0]?.n, '1', 'the clone has the trigger the fence was protecting');
+      });
+
       it('copies the whole subtree with new ids, leaving the source untouched', async () => {
         const source = await buildSubtree(probeId);
         const target = await group(probeId, 'Target');

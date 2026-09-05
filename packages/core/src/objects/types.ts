@@ -528,6 +528,8 @@ export interface CloneCounts {
   readonly sensor: number;
   readonly channel: number;
   readonly setting: number;
+  /** Notification triggers copied with the objects that own them (`P-141`). */
+  readonly trigger: number;
   readonly total: number;
 }
 

@@ -1353,6 +1353,23 @@ export class ObjectRepository {
       SELECT count(*) AS count FROM inserted
     `);
 
+    // **The triggers travel with the fence** (`P-141`). The clone already copies
+    // `inherits_triggers` — a clone of a lab device is still a lab device — and copied none of
+    // the triggers the fence exists to protect. A cloned object with the fence up inherited
+    // nothing and owned nothing: it notified *nobody*, which is the one failure a monitoring
+    // system must not arrive at quietly, and the object looked identical to a working one.
+    //
+    // `enabled` travels too: a trigger somebody switched off is switched off on the copy.
+    const triggerRows = await q.query<{ count: string }>(`
+      WITH inserted AS (
+        INSERT INTO notification_trigger (object_id, kind, settings, enabled)
+        SELECT m.new_id, t.kind, t.settings, t.enabled
+        FROM clone_map m JOIN notification_trigger t ON t.object_id = m.src_id
+        RETURNING 1
+      )
+      SELECT count(*) AS count FROM inserted
+    `);
+
     const droppedRows = await q.query<{ kind: string }>(`
       SELECT DISTINCT cs.kind
       FROM credential_set cs JOIN clone_map m ON m.src_id = cs.object_id
@@ -1375,6 +1392,7 @@ export class ObjectRepository {
       sensor: countOf(kindRows, 'sensor'),
       channel: Number(channelRows[0]?.count ?? 0),
       setting: Number(settingRows[0]?.count ?? 0),
+      trigger: Number(triggerRows[0]?.count ?? 0),
       total,
     };
 

@@ -204,6 +204,29 @@ describe(
       assert.equal(alarm.message, 'engineer on site');
     });
 
+    it('keeps saying how long it has been wrong when somebody acknowledges it', async () => {
+      // **`P-142`.** The duration column and the "what has been broken longest" sort read
+      // `sensor_runtime.since` — when the sensor entered its *current state*. Acknowledging a
+      // Down is a state change, so the moment an operator said "I am on it" the duration reset to
+      // zero and the sensor dropped to the bottom of that sort; the acknowledgement lapsing reset
+      // it again. `CLAUDE.md` already says where durations come from: uptime is computed from
+      // state history, not from the runtime row.
+      await knockDown(ping, NOW);
+      const before = (await list({ limit: 100 })).items[0]?.since;
+      assert.ok(before !== undefined);
+
+      await h.service.acknowledge(testActor, ping, { kind: 'indefinite' }, 'engineer on site');
+
+      const after = (await list({ limit: 100 })).items[0];
+      assert.ok(after);
+      assert.equal(after.state, 'down_acknowledged');
+      assert.equal(
+        after.since,
+        before,
+        'the outage started when it started, not when somebody noticed it',
+      );
+    });
+
     it('can hide the acknowledged ones, for the reader who wants what is unhandled', async () => {
       await knockDown(ping, NOW);
       await knockDown(http, NOW);
