@@ -6551,7 +6551,7 @@ because each is a decision rather than a defect:
       after the grace, silent during it, and once rather than once per sweep. What is *not*
       covered is the wiring from a real restart to that sweep.
 
-- [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
+- [x] **P-96 — `pool-sizer`'s timer test was load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`
       and has not failed since under any narrower run.
@@ -6569,6 +6569,16 @@ because each is a decision rather than a defect:
       Not folded into `P-94`/`P-95`: it is in a package neither of them touches, it predates them
       (`packages/probe/test/pool-sizer.test.ts` last moved in `P-75`), and a flake fixed in the
       same commit as a behaviour change is a flake nobody will be able to attribute later.
+
+      **Fixed by waiting for the property instead of sleeping past it.** `>= 2` ticks after a
+      fixed `delay(40)` is a claim about how responsive the event loop is, not about the sizer;
+      the loop now waits until the timer has fired twice, with a deadline generous enough that
+      only a *stopped* timer trips it. The stop half was already deterministic and is kept as it
+      was — `clearInterval` is synchronous and `size` is synchronous, so nothing can be in flight
+      when `stop()` returns, and anything arriving after it is a timer that was never cleared.
+
+      Both halves mutation-tested: a `stop` that does not clear, and a timer that fires without
+      sizing. 0 failures in 15 consecutive runs of the file.
 
 - [x] **P-95 — The restart catch-up window advanced past whatever the batch limit truncated** ·
       M · M-10 · Findings 15 and 29, which are the same defect reached from two directions.

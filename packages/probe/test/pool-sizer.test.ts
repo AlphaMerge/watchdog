@@ -127,15 +127,29 @@ describe('the derived pool ceiling (P-34, P-40, P-44)', () => {
   });
 
   it('recomputes on its own timer, and stops when told', async () => {
+    // **Waited for, not slept through** (`P-96`). This asserted `>= 2` ticks after a fixed
+    // `delay(40)` at a 5 ms interval, which is a claim about how responsive the event loop is
+    // rather than about the sizer: it passed 0/60 runs alone and 0/4 for this package, and
+    // failed once under the whole-monorepo run where ~2,000 database tests saturate the same
+    // Docker VM. A constant chosen so the assertion holds is the smell
+    // `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` names as rule 2.
+    //
+    // The property is "it fires more than once on its own", and waiting until it has is the
+    // same property without the race. The deadline is generous because it exists to fail a
+    // *stopped* timer, not a slow one.
     const pool = fakePool(64, { 'icmp.ping': 3_000 });
     const h = harness({ intervalMs: 5, min: 4 }, pool);
 
     h.sizer.start();
-    await delay(40);
-    const ticked = pool.set.length;
-    assert.ok(ticked >= 2, `the timer fired (${String(ticked)} times)`);
+    const deadline = Date.now() + 5_000;
+    while (pool.set.length < 2 && Date.now() < deadline) await delay(5);
+    assert.ok(pool.set.length >= 2, `the timer fired (${String(pool.set.length)} times)`);
 
+    // Deterministic, and worth keeping for that reason: `stop` clears the interval and `size` is
+    // synchronous, so no tick can be in flight when this returns. Anything after it is a timer
+    // that was never cleared.
     h.sizer.stop();
+    const ticked = pool.set.length;
     await delay(40);
     assert.equal(pool.set.length, ticked, 'and nothing after stop');
   });
