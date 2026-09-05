@@ -238,9 +238,11 @@ export async function writeStateHistory(
   q: Queryable,
   changes: readonly StateTransition[],
   onCommitted?: CommittedStates,
+  stamping: Stamping = 'after-the-newest',
 ): Promise<number> {
   if (changes.length === 0) return 0;
-  const ordered = await orderedAfterLast(q, changes);
+  const ordered =
+    stamping === 'as-measured' ? await asMeasured(q, changes) : await orderedAfterLast(q, changes);
   const rows = await q.query<{ sensor_id: string; time: Date }>(
     `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
      SELECT * FROM unnest(
@@ -316,6 +318,74 @@ export async function writeStateHistory(
  * instant, same state and cause is the batch arriving twice, and it should collide. Anything
  * else is a new fact about the sensor and gets the next millisecond.
  */
+/**
+ * How a transition's instant is chosen when the table already has rows for that sensor.
+ *
+ * **Two callers, two clocks, and they need different answers** (`P-145`).
+ *
+ * `after-the-newest` is `P-108`'s rule and belongs to the *core's* own transitions — a pause, an
+ * acknowledgement, a dependency cascade, a schedule window. They happen at the moment the core
+ * decides them, so they must sort after everything already stored: a probe two minutes fast
+ * otherwise left its sensors' newest row ahead of the core, and a pause at 12:00:30 sorted before
+ * an `up` at 12:02:00, so the log said Up while the badge said Paused.
+ *
+ * `as-measured` belongs to *results*, and is the half `P-108` got wrong. A spool replay is an
+ * hour of genuine history arriving late, and stamping each row after the newest one rewrote the
+ * whole outage into consecutive milliseconds — in the table `CLAUDE.md` says uptime is computed
+ * from. A four-hour outage replayed as four milliseconds and the SLA read 100%. History that
+ * arrives out of order is still history; only a genuine *collision* is moved, and only far enough
+ * to make room.
+ */
+export type Stamping = 'after-the-newest' | 'as-measured';
+
+/**
+ * The same transitions at the instants they were measured, moving only what would collide.
+ *
+ * The unique index is `(sensor_id, time)` with `ON CONFLICT DO NOTHING`, which makes a resent
+ * batch idempotent and would otherwise silently discard a *different* fact that happened to land
+ * on an occupied instant — `P-108`'s finding, and still true here. So the occupied instants are
+ * read first: an identical row is left to collide, and anything else takes the next millisecond.
+ */
+async function asMeasured(
+  q: Queryable,
+  changes: readonly StateTransition[],
+): Promise<StateTransition[]> {
+  const rows = await q.query<{
+    sensor_id: string;
+    time: Date;
+    state: SensorState;
+    cause: SensorStateCause;
+  }>(
+    `SELECT sensor_id::text AS sensor_id, time, state, cause
+     FROM sensor_state
+     WHERE (sensor_id, time) IN (
+       SELECT * FROM unnest($1::bigint[], $2::timestamptz[])
+     )`,
+    [changes.map((change) => change.sensorId), changes.map((change) => change.at)],
+  );
+  const key = (sensorId: number, at: Date): string => `${String(sensorId)}@${at.toISOString()}`;
+  const occupied = new Map(rows.map((row) => [key(Number(row.sensor_id), row.time), row] as const));
+
+  return changes.map((change) => {
+    let at = change.at;
+    for (let step = 0; step < 1_000; step += 1) {
+      const held = occupied.get(key(change.sensorId, at));
+      if (held === undefined) break;
+      // The same fact arriving twice, which is what makes a resent batch harmless.
+      if (held.state === change.state && held.cause === change.cause) break;
+      at = new Date(at.getTime() + 1);
+    }
+    // Claimed, so two changes in one batch cannot both take it.
+    occupied.set(key(change.sensorId, at), {
+      sensor_id: String(change.sensorId),
+      time: at,
+      state: change.state,
+      cause: change.cause,
+    });
+    return at === change.at ? change : { ...change, at };
+  });
+}
+
 async function orderedAfterLast(
   q: Queryable,
   changes: readonly StateTransition[],
@@ -382,10 +452,22 @@ export async function writeRuntimes(
   if (writes.length === 0) return 0;
   const rows = await q.query<{ object_id: string }>(
     `UPDATE sensor_runtime r
-     SET state = w.state,
-         cause = w.cause,
-         message = w.message,
-         since = w.since,
+     -- **A pause that committed while this batch was in flight is not overwritten** (P-147).
+     -- decide() evaluates layer 1 -- a pause dominates everything -- against an in-memory cache
+     -- read up to batchMaxDelayMs before this statement runs, and this write had no pause guard
+     -- of its own: it set state = 'down' on a row whose pause flags were true, and the reaction
+     -- in the same transaction then read that row back and armed a chain for the sensor an
+     -- operator had just paused. Exactly the alarm the pause was pressed to stop, from the
+     -- press itself. Nothing self-healed until that sensor's next scan re-decided it.
+     --
+     -- Everything a result carries is still written -- last_result_at, the failure count, the
+     -- readings' channel verdict -- because they are facts about the check, which did happen.
+     -- Only the state, and the words that describe it, are left to the pause. That is what
+     -- decide() would have produced had the pause been visible to it.
+     SET state = CASE WHEN w.held THEN r.state ELSE w.state END,
+         cause = CASE WHEN w.held THEN r.cause ELSE w.cause END,
+         message = CASE WHEN w.held THEN r.message ELSE w.message END,
+         since = CASE WHEN w.held THEN r.since ELSE w.since END,
          consecutive_failures = w.consecutive_failures,
          last_result_at = w.at,
          -- Only ever cleared here. §2.4 clears an acknowledgement on a recovery a reading
@@ -397,12 +479,22 @@ export async function writeRuntimes(
          acknowledged_by_label = CASE WHEN w.acknowledged THEN r.acknowledged_by_label END,
          channel_state = w.channel_state,
          channel_cause = w.channel_cause
-     FROM unnest(
-       $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
-       $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],
-       $9::sensor_state_kind[], $10::sensor_state_cause[]
-     ) AS w(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged,
-            channel_state, channel_cause)
+     FROM (
+       SELECT t.*,
+              -- Whether a pause already on the row outranks what this write decided (P-147).
+              -- Layer 1 of the state machine: a pause dominates everything. A write whose own
+              -- cause *is* a pause is the pause being applied, and must not be held by itself.
+              (SELECT p.paused_manually OR p.paused_by_parent
+                        OR p.paused_by_schedule OR p.paused_by_dependency
+                 FROM sensor_runtime p WHERE p.object_id = t.sensor_id)
+                AND t.cause NOT IN ('user', 'parent', 'schedule', 'dependency') AS held
+       FROM unnest(
+         $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
+         $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],
+         $9::sensor_state_kind[], $10::sensor_state_cause[]
+       ) AS t(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged,
+              channel_state, channel_cause)
+     ) AS w
      WHERE r.object_id = w.sensor_id
        -- Both floors (P-97). GREATEST ignores nulls, so a sensor that has never reported and
        -- never resumed passes on the IS NULL arm.

@@ -308,8 +308,16 @@ export class IngestionService {
     // Keyed by the result itself rather than by sensor id: one batch can carry several scans of
     // the same sensor, and each of them is judged on its own readings.
     const outcomes = new Map<CheckResult, ChannelOutcome>();
+    // **Computed before the readings, because it governs them too** (`P-144`). The future bound
+    // below rejected the *result* — so the state machine never saw it — after this loop had
+    // already turned its readings into samples. A probe with a clock years out wrote graph points
+    // stamped 2030 that nothing would overwrite and no query would reach, and the sensor's own
+    // state never moved. Half of one result was believed and half was not, which is the one
+    // outcome a bound like this must not produce.
+    const horizon = this.#now().getTime() + this.#maxFutureSkewMs;
     for (const result of withReadings) {
       const at = new Date(result.at);
+      if (at.getTime() > horizon) continue;
       const readings: ChannelReadingFacts[] = [];
       for (const reading of result.channels) {
         const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
@@ -401,7 +409,6 @@ export class IngestionService {
     //
     // Discarded rather than clamped. Clamping would write a reading at a time nobody measured
     // it, and `CLAUDE.md` is explicit that a value the system cannot stand behind is a gap.
-    const horizon = this.#now().getTime() + this.#maxFutureSkewMs;
     const results: SensorResult[] = [];
     for (const result of all) {
       const at = Date.parse(result.at);

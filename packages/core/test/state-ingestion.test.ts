@@ -775,6 +775,62 @@ describe(
         assert.equal((await history()).length, before, 'no second row for the same fact');
       });
 
+      it('keeps a spool replay at the times it was measured, not at the next millisecond', async () => {
+        // **`P-145`, the half `P-108` got wrong.** `orderedAfterLast` stamps every transition
+        // after that sensor's newest stored row. That is right for the core's own decisions —
+        // they happen now — and wrong for results, which carry the probe's clock and arrive late
+        // by design: a probe that spooled through an outage replays an hour of genuine history,
+        // and every row of it was rewritten to `newest + 1 ms`, `+ 2 ms`, `+ 3 ms`. A four-hour
+        // outage became four milliseconds in the table `CLAUDE.md` says uptime is computed from,
+        // and the SLA read 100% through it.
+        //
+        // The core writes a newer row first — which is exactly what happens when a probe goes
+        // away: the reachability tracker marks its sensors Unknown at the core's clock.
+        const seed = build();
+        await deliver(seed.service, seed.ingestor, [result({ at: at(0) })]);
+        // Written straight in, because what matters is only that the *newest stored row* is
+        // newer than the replay — pausing the sensor to arrange it would also stop the replayed
+        // results producing any transitions at all, which is a different behaviour.
+        const marker = new Date(AT.getTime() + 4 * 60 * 60_000);
+        await db.query(
+          `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
+           VALUES ($2, $1, 'unknown', 'up', 'probe', 'the probe stopped answering')`,
+          [sensorId, marker],
+        );
+
+        // Now the probe reconnects and replays the outage it spooled, hours ago.
+        const replay = build();
+        await deliver(
+          replay.service,
+          replay.ingestor,
+          [
+            result({
+              at: new Date(AT.getTime() + 60 * 60_000).toISOString(),
+              outcome: 'error',
+              message: 'no reply',
+              channels: [],
+            }),
+            result({
+              at: new Date(AT.getTime() + 61 * 60_000).toISOString(),
+              outcome: 'error',
+              message: 'no reply',
+              channels: [],
+            }),
+          ],
+          'b-replay',
+        );
+
+        const rows = await db.query<{ time: Date; state: SensorState }>(
+          'SELECT time, state FROM sensor_state WHERE sensor_id = $1 ORDER BY time',
+          [sensorId],
+        );
+        const replayed = rows.filter((row) => row.time.getTime() < marker.getTime());
+        assert.ok(
+          replayed.some((row) => row.time.getTime() >= AT.getTime() + 60 * 60_000),
+          'the replayed history is stored an hour in, where it happened',
+        );
+      });
+
       it('orders a core-clock transition after a probe whose clock runs ahead', async () => {
         // **Finding 9.** Result-driven transitions carry the probe's wall clock — the protocol
         // says the core does not rewrite it — and every other transition carries the core's. A
@@ -806,6 +862,150 @@ describe(
     // -------------------------------------------------------------------------------------
     // A clock that cannot be believed (P-99).
     // -------------------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------------------
+    // A probe draining its spool (`P-146`).
+    // -------------------------------------------------------------------------------------
+
+    describe('a batch that is hours behind', () => {
+      it('is written to history but not reacted to, so nobody is paged for an old outage', async () => {
+        // **`P-146`.** The chain's clock is not `now`: `arm` takes `initialDueAt(sensor.since)`,
+        // and `since` is the *replayed result's* own timestamp. A Down replayed from six hours
+        // ago armed with a due time six hours in the past, `onArmed` woke the scheduler, and the
+        // sweep fired within a second — then the escalation on the next sweep, then the repeat,
+        // because every deadline computed from that `since` was also in the past. The recovery
+        // that ended the outage was still in the probe's spool, tens of batches behind. Every
+        // blip a probe spooled was paged, escalated and repeated, and the initial latency —
+        // "a 30-second blip on a five-minute latency produces no notification at all" — bought
+        // nothing at all.
+        const reacted: number[][] = [];
+        const alarms = {
+          anyWork: () => Promise.resolve(true),
+          reconcilesReadings: () => Promise.resolve(false),
+          react: (_q: unknown, sensorIds: readonly number[]) => {
+            reacted.push([...sensorIds]);
+            return Promise.resolve();
+          },
+        };
+        // A fresh pair per batch: `deliver` stops the ingestor when it has drained, which is what
+        // makes it deterministic, and a stopped ingestor accepts nothing more.
+        const withStub = (): { service: IngestionService; ingestor: Ingestor } => {
+          const states = new SensorStateService({
+            db,
+            logger: silent,
+            settings: harness.resolver,
+            pauses: new PauseRepository(),
+          });
+          const ingestor = new Ingestor({
+            db,
+            logger: silent,
+            config: CONFIG,
+            alarms,
+          });
+          return {
+            ingestor,
+            service: new IngestionService({
+              db,
+              logger: silent,
+              ingestor,
+              states,
+              resolver: new ChannelResolver({ logger: silent, lookups }),
+            }),
+          };
+        };
+        const drain = withStub();
+
+        const long = new Date(Date.now() - 6 * 60 * 60_000);
+        await deliver(
+          drain.service,
+          drain.ingestor,
+          [
+            result({
+              at: long.toISOString(),
+              outcome: 'error',
+              message: 'no reply',
+              channels: [],
+            }),
+          ],
+          'b-drain',
+        );
+        assert.deepEqual(reacted, [], 'a batch six hours behind cannot decide the present');
+        assert.equal(drain.ingestor.stats().staleReactions, 1, 'and it is counted, not silent');
+
+        // The history is still written — this defers the *reaction*, never the record.
+        const rows = await db.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM sensor_state WHERE sensor_id = $1 AND time = $2`,
+          [sensorId, long],
+        );
+        assert.equal(rows[0]?.n, '1');
+
+        // And the live batch that ends the drain reconciles, as it should. Two results, because
+        // the two-step rule needs a second failure to reach Down and it is the *transition* the
+        // reaction is keyed on.
+        const live = withStub();
+        await deliver(
+          live.service,
+          live.ingestor,
+          [
+            result({
+              at: new Date().toISOString(),
+              outcome: 'error',
+              message: 'no reply',
+              channels: [],
+            }),
+          ],
+          'b-live',
+        );
+        assert.ok(reacted.length >= 1, 'the batch that can see the present is the one that acts');
+      });
+    });
+
+    describe('a pause that commits while a batch is in flight', () => {
+      it('is not clobbered back to Down by the batch that was already decided', async () => {
+        // **`P-147`.** `acceptResults` calls `decide` before `submit`, and `decide` evaluates
+        // layer 1 — a pause dominates everything — from an in-memory cache. The write that lands
+        // up to `batchMaxDelayMs` later had no pause guard of its own: it set `state = 'down'` on
+        // a row whose pause flags were true, and the alarm reaction in the same transaction read
+        // that row back and armed a chain for the sensor an operator had just paused. Exactly the
+        // alarm the pause was pressed to stop, produced by the press itself; nothing self-healed
+        // until that sensor's next scan re-decided it.
+        //
+        // Reproduced by writing the flag between the two halves, which is what the race does.
+        // One service throughout, so its cache is warm — which is the whole mechanism: `decide`
+        // reads layer 1 from that cache, and the pause lands after it has been read.
+        const racing = build();
+        await racing.service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'b-warm',
+          results: [result({ at: at(0) })],
+        });
+
+        // The operator's pause commits, setting the flags without going through `reevaluate` —
+        // which is what the race amounts to: the flags are true and the cache does not know.
+        await db.query(`UPDATE sensor_runtime SET paused_manually = true WHERE object_id = $1`, [
+          sensorId,
+        ]);
+
+        await racing.service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'b-race',
+          results: [failedResult(1), failedResult(2)],
+        });
+        await racing.ingestor.stop();
+
+        const row = await runtime();
+        assert.notEqual(
+          row.state,
+          'down',
+          'the pause on the row outranks a batch decided before it existed',
+        );
+        assert.equal(
+          row.consecutive_failures,
+          2,
+          'and the check still happened, so what it measured is still recorded',
+        );
+      });
+    });
 
     describe('a result stamped in the future', () => {
       it('is refused, rather than freezing the sensor’s history for ever', async () => {
@@ -842,6 +1042,34 @@ describe(
         await deliver(later.service, later.ingestor, [failedResult(5)], 'b3');
         assert.equal(later.service.stats().discardedFutureTime, 0);
         assert.equal((await runtime()).consecutive_failures, 1, 'the next real result applies');
+      });
+
+      it('writes none of its readings either, so no half of it is believed', async () => {
+        // **`P-144`.** The bound rejected the *result* — the state machine never saw it — after
+        // the readings had already been turned into samples. A probe with a clock years out wrote
+        // graph points stamped 2030 that nothing would overwrite and no query would reach, while
+        // the sensor's own state never moved. Half of one result believed and half not is the one
+        // outcome a bound like this must not produce.
+        const before = await db.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM sample s
+           JOIN channel c ON c.id = s.channel_id WHERE c.sensor_id = $1`,
+          [sensorId],
+        );
+
+        const wrong = build();
+        await deliver(
+          wrong.service,
+          wrong.ingestor,
+          [result({ at: new Date('2031-01-01T00:00:00Z').toISOString() })],
+          'b-future-readings',
+        );
+
+        const after = await db.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM sample s
+           JOIN channel c ON c.id = s.channel_id WHERE c.sensor_id = $1`,
+          [sensorId],
+        );
+        assert.equal(after[0]?.n, before[0]?.n, 'no sample was written for a result nobody read');
       });
 
       it('allows the ordinary forward skew of a probe host a little fast', async () => {

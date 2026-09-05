@@ -124,6 +124,14 @@ export interface IngestorOptions {
   lateData?: LateDataSink;
   dependencies?: DependencyReactor;
   /**
+   * How far behind a batch's newest result may be and still be reacted to (`P-146`).
+   *
+   * A live batch is milliseconds old. Anything older than this is a probe draining its spool, and
+   * the present cannot be decided from it. Generous by default: a minute covers an ordinary scan
+   * interval and a slow network, and what is being excluded is hours.
+   */
+  catchUpGraceMs?: number;
+  /**
    * What arms and stands down notification chains (`N-02`).
    *
    * Reacts **after** the dependency reaction. In an alarm storm every dependent records its own
@@ -183,6 +191,14 @@ export interface IngestionStats {
    * instead.
    */
   dependencyPauses: number;
+  /**
+   * Batches whose newest result was too old to decide the present from, so the alarm reaction was
+   * left to the batch after them (`P-146`).
+   *
+   * Counted rather than silent, which is `CLAUDE.md`'s rule for anything deferred: a probe that
+   * never catches up is a probe whose alarms are never reconciled, and that has to be visible.
+   */
+  staleReactions: number;
   writes: number;
   /** Write latency in milliseconds over the last 1,024 writes. */
   writeMs: { p50: number; p95: number; p99: number; max: number };
@@ -190,6 +206,9 @@ export interface IngestionStats {
   slowingDown: boolean;
   backfillsQueued: number;
 }
+
+/** A minute: an ordinary scan interval and a slow network, against the hours a drain spans. */
+const DEFAULT_CATCH_UP_GRACE_MS = 60_000;
 
 interface Queued {
   batch: IngestBatch;
@@ -229,6 +248,8 @@ export class Ingestor {
   readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #onDependencyChange: (() => void) | undefined;
   #dependencyPauses = 0;
+  #staleReactions = 0;
+  readonly #catchUpGraceMs: number;
 
   readonly #queue: Queued[] = [];
   readonly #latencies: number[] = [];
@@ -258,6 +279,7 @@ export class Ingestor {
     this.#config = options.config;
     this.#lateData = options.lateData;
     this.#dependencies = options.dependencies;
+    this.#catchUpGraceMs = options.catchUpGraceMs ?? DEFAULT_CATCH_UP_GRACE_MS;
     this.#alarms = options.alarms;
     this.#onStatesCommitted = options.onStatesCommitted;
     this.#onDependencyChange = options.onDependencyChange;
@@ -360,6 +382,7 @@ export class Ingestor {
       runtimeWrites: this.#runtimeWrites,
       staleRuntimeWrites: this.#staleRuntimeWrites,
       dependencyPauses: this.#dependencyPauses,
+      staleReactions: this.#staleReactions,
       writes: this.#writes,
       writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       slowingDown: this.#retryHint() > 0,
@@ -494,7 +517,26 @@ export class Ingestor {
             : await this.#lateData.noteWrittenRange(q, new Date(oldest), new Date(newest));
         // Same transaction, same reason: the readings and the state they decided commit
         // together or not at all (M-02).
-        const appended = await writeStateHistory(q, transitions, this.#onStatesCommitted);
+        // **At the instants the probe measured them** (`P-145`). A spool replay is an hour of
+        // genuine history arriving late; stamping it after the newest stored row rewrote the
+        // whole outage into consecutive milliseconds, in the table uptime is computed from.
+        // How far behind the newest result in this batch is. A live batch is milliseconds old; a
+        // spool drain is hours. Measured from the *newest*, because a batch that carries anything
+        // current is one the present can be decided from.
+        const newestTransitionAt = transitions.reduce(
+          (best, transition) => Math.max(best, transition.at.getTime()),
+          0,
+        );
+        const stale =
+          newestTransitionAt > 0 && Date.now() - newestTransitionAt > this.#catchUpGraceMs;
+        if (stale) this.#staleReactions += 1;
+
+        const appended = await writeStateHistory(
+          q,
+          transitions,
+          this.#onStatesCommitted,
+          'as-measured',
+        );
         const advanced = await writeRuntimes(q, [...runtimes.values()]);
         // Same transaction, same reason again (`P-107`): a baseline that advanced for readings
         // that were never stored makes the next scan of that counter unmeasurable.
@@ -516,7 +558,27 @@ export class Ingestor {
         // state changing, so `transitions.length > 0` meant a breach on a stable Up sensor
         // never armed anything, and a breach that cleared while the sensor stayed Up was never
         // stood down and paged after its latency with a value that was minutes stale.
-        if (this.#alarms !== undefined) {
+        //
+        // **And not at all while a probe is still catching up** (`P-146`). The chain's clock is
+        // not `now`: `arm` takes `initialDueAt(sensor.since, settings)`, and `since` is the
+        // *replayed result's* own timestamp. A Down replayed from six hours ago arms with a due
+        // time six hours in the past, `onArmed` wakes the scheduler, and the sweep fires within a
+        // second — then the escalation on the next sweep, and the repeat after that, because
+        // every deadline computed from that `since` is also in the past. The recovery that ended
+        // the outage is still in the probe's spool, tens of batches behind: at 5,000 sensors on a
+        // 60 s interval a ten-minute outage separates its Down from its Up by roughly
+        // twenty-five ingest transactions.
+        //
+        // So the whole point of the initial latency — "a 30-second blip on a five-minute latency
+        // produces no notification at all" — is defeated for every blip a probe spooled, and the
+        // operator is paged, escalated and repeated about an outage that ended before the link
+        // came back. Reconciliation is state-based, so skipping a stale batch costs nothing: the
+        // drain ends with a live batch, and that one decides the present correctly. What it must
+        // not do is decide it twenty-five times on the way there.
+        //
+        // `reactionTime` in `dependencies/pauses.ts` exists because the dependency reaction had
+        // this class of bug; the alarm reaction had no equivalent.
+        if (this.#alarms !== undefined && !stale) {
           const moved = [...new Set(transitions.map((transition) => transition.sensorId))];
           const scanned = (await this.#alarms.reconcilesReadings(q))
             ? [...new Set(runtimes.keys())]

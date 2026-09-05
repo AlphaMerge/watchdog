@@ -10249,6 +10249,49 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 3 new. Mutation 2/2 (`P-140` has none by construction, as above).
 
+- [x] **P-143 — The HTTP timeout was idle-based, so a trickling endpoint stalled a hop for ever**
+      `request.setTimeout` fires when the socket has been *quiet* for that long, and the deadline
+      across redirect hops is only consulted between them. An endpoint sending one byte a second
+      reset it indefinitely, and the delivery loop that awaits it is not concurrent: one endpoint
+      held up every notification behind it. A wall-clock deadline per hop now runs beside the idle
+      one. The mutation that removes it does not fail the test — it hangs it, which is the point.
+
+- [x] **P-144 — A future-dated result was rejected but its readings were written anyway**
+      The horizon that refuses a result no clock could have produced (`P-99`) ran *after* the loop
+      that turns readings into samples. A probe years out wrote graph points stamped 2030 that
+      nothing would overwrite and no query would reach, while the sensor's state never moved. Half
+      a result believed and half not is the one outcome a bound like this must not produce.
+
+- [x] **P-145 — A spool replay rewrote hours of history into consecutive milliseconds**
+      `P-108` stamps every transition after that sensor's newest stored row. Right for the core's
+      own decisions — they happen now — and wrong for results, which carry the probe's clock and
+      arrive late by design. A probe replaying an hour of spooled history had every row rewritten
+      to `newest + 1 ms`, `+ 2 ms`, `+ 3 ms`: a four-hour outage became four milliseconds in the
+      table `CLAUDE.md` says uptime is computed from, and the SLA read 100% through it. The two
+      callers now say which they are; results are stamped as measured, and only a genuine
+      collision moves, far enough to make room.
+
+- [x] **P-146 — A spool replay paged, escalated and repeated for an outage that had ended**
+      The chain's clock is not `now`: `arm` takes `initialDueAt(sensor.since)`, and `since` is the
+      replayed result's own timestamp. A Down replayed from six hours ago armed with a due time
+      six hours past, `onArmed` woke the scheduler, the sweep fired within a second — then the
+      escalation, then the repeat, because every deadline from that `since` was also past. The
+      recovery was still in the probe's spool, tens of batches behind. Every blip a probe spooled
+      was paged in full, and the initial latency bought nothing. A batch whose newest result is
+      older than the catch-up grace is written to history and not reacted to; the drain ends with
+      a live batch, and that one decides the present. Counted, not silent.
+
+- [x] **P-147 — A pause committing mid-batch was clobbered back to Down, and armed a chain**
+      `decide` evaluates layer 1 — a pause dominates everything — from an in-memory cache, and the
+      write that lands up to `batchMaxDelayMs` later had no pause guard of its own. It set
+      `state = 'down'` on a row whose pause flags were true, and the alarm reaction in the same
+      transaction read that row back and armed a chain: exactly the alarm the pause was pressed to
+      stop, produced by the press itself. Nothing self-healed until the next scan. The write keeps
+      everything the check measured and leaves the state to the pause — which is what `decide`
+      would have produced had it seen it.
+
+      Tests: 5 new. Mutation 5/5.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

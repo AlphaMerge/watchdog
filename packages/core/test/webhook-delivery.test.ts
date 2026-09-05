@@ -498,6 +498,33 @@ describe('the webhook transport', () => {
 
   // ── timeouts ───────────────────────────────────────────────────────────────────────────
 
+  it('gives up on an endpoint that trickles, which an idle timeout never would', async () => {
+    // **`P-143`.** `request.setTimeout` fires when the socket has been *quiet* for that long, so
+    // an endpoint that sends one byte every so often resets it for ever — and the deadline across
+    // redirect hops is only consulted between hops, so a single stalled hop was unbounded. The
+    // delivery loop that awaits this is not concurrent: one endpoint holding a connection open
+    // holds up every notification behind it, indefinitely.
+    const timers: NodeJS.Timeout[] = [];
+    respond = (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      // A byte every 50 ms against a 300 ms timeout: never idle, never finished.
+      const tick = setInterval(() => {
+        response.write('.');
+      }, 50);
+      timers.push(tick);
+    };
+
+    const started = Date.now();
+    const result = await transport().send(message({ settings: { url: url(), timeoutMs: 300 } }));
+    for (const timer of timers) clearInterval(timer);
+
+    assert.ok(!result.ok);
+    assert.ok(
+      Date.now() - started < 5_000,
+      'it must not wait for an endpoint that is never going to stop',
+    );
+  });
+
   it('gives up on an endpoint that never answers, and will try again', async () => {
     respond = () => {
       // Nothing. The socket stays open until the transport's own timeout closes it.

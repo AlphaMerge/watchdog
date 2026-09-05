@@ -195,7 +195,26 @@ export class GuardedHttpClient {
     const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
     const hasBody = options.body !== '' && options.verb !== 'GET';
 
-    return new Promise<Exchange>((resolve, reject) => {
+    return new Promise<Exchange>((resolveExchange, rejectExchange) => {
+      // **A wall-clock deadline for the hop, not only an idle one** (`P-143`).
+      // `request.setTimeout` fires when the socket has been *quiet* for that long, so an endpoint
+      // that trickles one byte a second resets it for ever — and the deadline across hops is only
+      // consulted between them, so a single stalled hop was unbounded. The delivery loop that
+      // awaits this is not concurrent: one endpoint holding a connection open holds up every
+      // notification behind it.
+      const hard = setTimeout(() => {
+        request.destroy(new Error(`timed out after ${String(options.timeoutMs)} ms`));
+      }, options.timeoutMs);
+      hard.unref();
+      const settle = <T>(fn: (value: T) => void) => {
+        return (value: T): void => {
+          clearTimeout(hard);
+          fn(value);
+        };
+      };
+      const resolve = settle(resolveExchange);
+      const reject = settle(rejectExchange);
+
       const request: ClientRequest = send(
         target,
         {
@@ -254,6 +273,8 @@ export class GuardedHttpClient {
         },
       );
 
+      // Kept as well: it fails a connection that never establishes at the same bound, and it
+      // fires sooner than the wall clock on a socket that goes quiet early.
       request.setTimeout(options.timeoutMs, () => {
         request.destroy(new Error(`timed out after ${String(options.timeoutMs)} ms`));
       });
