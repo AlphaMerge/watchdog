@@ -19,9 +19,12 @@ export interface DependencySyncOptions {
  *
  * `object.created` is handled, but not by a recompute (`P-93`). It used to be skipped on the
  * grounds that "a sensor created under a held master is picked up by the next state change of
- * that master or by the next sweep", and neither was true. There is no periodic dependency
- * recompute anywhere — `sweepPauses` calls only `releaseElapsed`, which does nothing unless a
- * `dependency_clear_at` is due — and the next state change of the master does not arrive while
+ * that master or by the next sweep", and neither was true. `ScheduleSweep` does settle
+ * dependencies on the minute now (`P-136`), but that is a repair rather than a schedule to wait
+ * for: a sensor created under a held master would scan unheld until the next tick, which at a
+ * ten-second interval is several checks, and `sweepPauses` still calls only `releaseElapsed`,
+ * which does nothing unless a `dependency_clear_at` is due. The next state change of the master
+ * does not arrive while
  * it stays Down, because `react` runs on the transitions a *result batch* produced and a master
  * sitting at Down produces none. So the new sensor scanned through the outage, failed, went
  * Down and armed its own alarm: one outage, two alarms, out of the exact topology the

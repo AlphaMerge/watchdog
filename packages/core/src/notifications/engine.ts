@@ -233,7 +233,22 @@ export class AlarmEngine {
             ? (readings?.get(settings.channelKey) ?? null)
             : null;
           this.#applyThreshold(sensor, trigger, alarm, settings, reading, now, out);
+          continue;
         }
+
+        // **A kind this build does not know is not an orphan either** (`G13`). `P-114` made an
+        // unreadable *settings* shape leave its alarm standing, on the reasoning that a trigger
+        // this build cannot judge is not a trigger that has gone away — and left the identical
+        // case one level up unhandled. A `speed` trigger written by build N+1 matches neither
+        // branch, so it never claims its alarm, and the orphan sweep below deletes it: no
+        // recovery notification, nothing logged past a `cleared` count, and on the roll-forward
+        // the chain arms fresh from the sensor's current `since` — a second initial page for
+        // one continuous outage, with the escalation deadline reset.
+        alarms.delete(trigger.id);
+        this.#logger.warn(
+          { triggerId: trigger.id, kind: trigger.kind, sensorId },
+          'this build does not know that trigger kind; leaving its alarm as it stands',
+        );
       }
 
       // Whatever is left applied to this sensor once and no longer does — a trigger deleted, or

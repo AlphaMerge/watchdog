@@ -31,6 +31,7 @@ const methodHealthSchema = {
   required: [
     'method',
     'pending',
+    'parked',
     'retrying',
     'failed',
     'discarded',
@@ -41,6 +42,7 @@ const methodHealthSchema = {
   properties: {
     method: { type: 'string' },
     pending: { type: 'integer' },
+    parked: { type: 'integer' },
     retrying: { type: 'integer' },
     failed: { type: 'integer' },
     discarded: { type: 'integer' },
@@ -58,6 +60,7 @@ const healthSchema = {
     'status',
     'problems',
     'pending',
+    'parked',
     'retrying',
     'failed',
     'discarded',
@@ -72,6 +75,18 @@ const healthSchema = {
     status: { type: 'string', enum: ['ok', 'warning', 'down'] },
     problems: { type: 'array', items: { type: 'string' } },
     pending: { type: 'integer' },
+    /**
+     * Queued but deliberately not sent yet — collecting into an open digest window, or held
+     * because the template is outside its activation schedule (`P-125`, `R06`).
+     *
+     * **Declared here or it does not exist.** `additionalProperties: false` means
+     * fast-json-stringify removes any key the schema does not list, silently, so a count the
+     * report computes and the route spreads was deleted on its way out. Requests that used to
+     * appear in `pending` appeared in neither — forty alarms collecting into a digest window
+     * answered `pending: 0` with no other number anywhere, which is the opposite of what the
+     * ticket that added it set out to do.
+     */
+    parked: { type: 'integer' },
     retrying: { type: 'integer' },
     failed: { type: 'integer' },
     discarded: { type: 'integer' },

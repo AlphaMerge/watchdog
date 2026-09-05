@@ -103,6 +103,11 @@ const DOWN_STATES = new Set(['down', 'down_acknowledged']);
  * any sensor that changed is the master of anything — one indexed lookup — and an installation
  * with no dependencies never gets past it.
  *
+ * The one clock-driven caller is `ScheduleSweep`, which settles on the minute (`P-136`) because
+ * a *window* closing on a master moves no state and produces no mutation to ride. That is a
+ * second entry point, not a second design: it calls `recompute` and gets the same fixpoint, and
+ * it pays the same `anyWork` lookup first.
+ *
  * **The cascade is a fixpoint, not a recursion.** `WORKFLOW.MD §5` requires dependents of a
  * paused dependent to pause too, and a master held by its own master is itself holding. Each
  * round of `applyPauses` propagates one level, and the loop runs until nothing moves — bounded,

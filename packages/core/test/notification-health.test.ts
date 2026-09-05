@@ -16,6 +16,10 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { ApiServer } from '../src/api/server.js';
+import { HistoryService } from '../src/timeseries/history.js';
+import { AuditRepository } from '../src/audit/store.js';
+import { testCatalogue } from './support/sensor-types.js';
 
 const available = await databaseAvailable();
 
@@ -419,6 +423,65 @@ describe(
       const report = await new DeliveryHealthReader().read(db, new Date(), [templateId]);
       assert.equal(report.pending, 0);
       assert.equal(report.parked, 1);
+    });
+
+    it('answers the same number over HTTP, where a schema was quietly deleting it', async () => {
+      // **`R06` — two defects, one symptom, and no test on this route at all.**
+      //
+      // The response schemas declare `additionalProperties: false`, so fast-json-stringify
+      // removes any key they do not list — silently, which is the mechanism this repository
+      // documents at `routes/health.ts`. `parked` was computed, spread into the reply, and
+      // deleted on the way out. Requests that used to appear in `pending` appeared in neither:
+      // forty alarms collecting into a digest window answered `pending: 0` with no other number
+      // anywhere, and an operator asking "is anything queued" was told nothing was.
+      //
+      // The second half is which templates count as parked. Core Health passed the suppressed
+      // set and this route did not, so the same question had two answers depending on which of
+      // them you asked. The reader is given the activation service instead.
+      const templateId = await template();
+      const requestId = await queue(templateId);
+      const summary = await db.query<{ id: string }>(
+        `INSERT INTO notification_summary (template_id, opened_at, due_at)
+         VALUES ($1, now() - interval '6 hours', now() + interval '2 hours')
+         RETURNING id::text AS id`,
+        [templateId],
+      );
+      await db.query(
+        `UPDATE notification_request SET summary_id = $2, at = now() - interval '6 hours'
+         WHERE id = $1`,
+        [requestId, Number(summary[0]?.id ?? 0)],
+      );
+
+      const server = new ApiServer({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: false,
+        },
+        logger: silent,
+        version: '9.9.9',
+        service: h.service,
+        history: new HistoryService({ db, logger: silent }),
+        db,
+        audit: new AuditRepository(),
+        catalogue: testCatalogue(),
+        deliveryHealth: new DeliveryHealthReader(),
+      });
+      await server.build('9.9.9', h.service);
+      try {
+        const response = await server.app.inject({
+          method: 'GET',
+          url: '/api/v1/notification-health',
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{ pending: number; parked?: number }>();
+        assert.equal(body.pending, 0, 'nothing is waiting on a relay');
+        assert.equal(body.parked, 1, 'and the one that is waiting on the clock is reported');
+      } finally {
+        await server.app.close();
+      }
     });
 
     it('reads the queue rather than what this process remembers', async () => {

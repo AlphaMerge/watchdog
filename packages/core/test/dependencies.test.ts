@@ -8,6 +8,8 @@ import type { DependencyPauses } from '../src/dependencies/pauses.js';
 import { DependencySync } from '../src/dependencies/sync.js';
 import { resolveDependencyMode } from '../src/dependencies/mode.js';
 import { PauseSweep } from '../src/objects/pause-sweep.js';
+import { ScheduleSweep } from '../src/schedules/sweep.js';
+import { SchedulePauses } from '../src/schedules/pauses.js';
 import { ProbeConfigService } from '../src/probes/config.js';
 import { DEPENDENCY_DELAY_SECONDS, DEPENDENCY_MASTER_ID } from '../src/settings/registry.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -325,6 +327,42 @@ describe(
       assert.equal((await runtimeOf(snmpId)).dependency, false, 'nor it');
     });
 
+    it('still alarms on a sensor inside a cycle that is genuinely down', async () => {
+      // **`R15` — "a cycle contributes nothing and holds nobody" holds only while nothing in the
+      // cycle is down.** The test above sets every sensor Up first, so it exercises the
+      // ungrounded loop and cannot see this. With A and B as each other's masters and A
+      // genuinely failing, the seed was {A}, the recursion added B through A and then A again
+      // through B — so A was paused by a hold whose only justification was A itself. Inside one
+      // transaction A went down → paused → unknown, the outage was erased, no alarm was armed,
+      // and the next scan did it again: a real outage suppressed for as long as the cycle
+      // exists, with `sensor_state` churning every interval.
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         VALUES ($1, $3, to_jsonb($2::bigint)), ($2, $3, to_jsonb($1::bigint))`,
+        [httpId, snmpId, DEPENDENCY_MASTER_ID.key],
+      );
+      await db.query(`UPDATE sensor_runtime SET state = 'up', cause = 'scan'`);
+      await setState(httpId, 'down');
+
+      await db.tx((q) => pauses.recompute(q, NOW));
+
+      assert.equal(
+        (await runtimeOf(httpId)).dependency,
+        false,
+        'the sensor that is down is not held by a hold it is itself the reason for',
+      );
+      assert.equal(
+        (await runtimeOf(httpId)).state,
+        'down',
+        'and its outage survives, so an alarm can still be armed for it',
+      );
+      assert.equal(
+        (await runtimeOf(snmpId)).dependency,
+        true,
+        'while the one downstream of it is suppressed, which is the whole point',
+      );
+    });
+
     it('keeps the master in the probe-s configuration while its dependents leave it', async () => {
       const config = new ProbeConfigService({ db, resolver: h.resolver });
       await masterForDevice();
@@ -356,9 +394,11 @@ describe(
 
     it('holds a sensor created while the master is already Down', async () => {
       // **`P-93`.** `object.created` was skipped on the grounds that such a sensor "is picked up
-      // by the next state change of that master or by the next sweep". There is no dependency
-      // sweep — `sweepPauses` calls only `releaseElapsed`, which does nothing unless a
-      // `dependency_clear_at` is due — and the master emits no further transitions while it
+      // by the next state change of that master or by the next sweep". `ScheduleSweep` settles
+      // dependencies on the minute now (`P-136`), which is a repair and not a schedule to wait
+      // for — the new sensor would scan unheld until the next tick — and `sweepPauses` still
+      // calls only `releaseElapsed`, which does nothing unless a `dependency_clear_at` is due.
+      // The master emits no further transitions while it
       // stays Down, because `react` runs on what a *result batch* produced and a master sitting
       // at Down produces none.
       //
@@ -622,6 +662,52 @@ describe(
       assert.equal(pushes, 1, 'once, after the release');
       assert.equal(await sweep.sweep(), 0);
       assert.equal(pushes, 1, 'and not for a sweep that changed nothing');
+    });
+
+    it('is pushed by whichever sweep gets there first, not only by the pause sweep', async () => {
+      // **`R14`, `G09` — `P-136` added a settle to the schedule sweep and discarded its
+      // result.** `applyPauses` computes `holding` from `dependency_clear_at > now`, so the
+      // minute a master's recovery delay elapses it is *this* sweep that releases its
+      // dependents' flags — and the push decision read only the schedule half, which moved
+      // nothing. The `PauseSweep` that was meant to handle the event then found `releaseElapsed`
+      // settling nothing, so it did not push either. Forty sensors unpaused in the database,
+      // absent from the probe's assignment list, and unscanned until an unrelated configuration
+      // change happened to poke the fingerprint.
+      let pushes = 0;
+      const sweep = new ScheduleSweep({
+        db,
+        pauses: new SchedulePauses({
+          logger: silent,
+          ...(h.states === undefined ? {} : { states: h.states }),
+        }),
+        dependencies: pauses,
+        logger: silent,
+        onChanged: () => {
+          pushes += 1;
+        },
+      });
+
+      await h.service.setDependency(testActor, pingId, 'device', undefined, 300);
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      await setState(pingId, 'up');
+      await react([{ sensorId: pingId, state: 'up', previousState: 'down' }]);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'held through the delay');
+      await db.query(
+        `UPDATE sensor_runtime SET dependency_clear_at = now() - interval '1 second'
+         WHERE object_id = $1`,
+        [pingId],
+      );
+
+      // No schedule anywhere in this installation, so the schedule half moves nothing: this is
+      // the sweep whose only work is the dependency settle.
+      await sweep.sweep();
+      assert.equal(
+        (await runtimeOf(httpId)).dependency,
+        false,
+        'the delay elapsed, so this sweep is what released them',
+      );
+      assert.equal(pushes, 1, 'and the probes have to be told, because it moved a flag they read');
     });
 
     it('is released by the pause sweep, alongside every other deadline', async () => {

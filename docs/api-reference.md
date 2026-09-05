@@ -781,7 +781,7 @@ Whether notifications are actually being delivered
 
 Read from the queue rather than counted in memory, deliberately: a core that restarted five minutes ago would otherwise report a clean sheet over a queue full of undelivered alarms. `down` means an alarm was given up on, or one has been undeliverable long enough that the relay is not coming back on its own; `warning` means something is being retried.
 
-**200** { status, problems, pending, retrying, failed, discarded, oldestPendingAt, oldestPendingAgeMs, lastDeliveredAt, windowMs, staleAfterMs, methods }
+**200** { status, problems, pending, parked, retrying, failed, discarded, oldestPendingAt, oldestPendingAgeMs, lastDeliveredAt, windowMs, staleAfterMs, methods }
 
 ### `GET /api/v1/notification-requests`
 
@@ -1097,7 +1097,7 @@ Every schedule, with what it means right now
 
 Create a schedule
 
-Give either `periods` (`fr:19:00-mo:06:00`, space or comma separated) or `grid` (7 × 24 booleans, Monday first) — never both. `polarity` says which one the periods describe: `active` is when monitoring runs, `inactive` is when it is suspended.
+Give either `periods` (`fr:19:00-mo:06:00`, space or comma separated) or `grid` (7 × 24 booleans, Monday first) — never both. `polarity` says which one the periods describe: `active` is when monitoring runs, `inactive` is when it is suspended. It applies to `periods` only: a grid’s marked cells *are* the monitored hours, so a polarity sent beside a grid is ignored.
 
 **Body**
 

@@ -64,6 +64,19 @@ export interface DeliveryHealthOptions {
    * has been tried five times over twenty minutes is a relay that is not coming back on its own.
    */
   staleAfterMs?: number;
+  /**
+   * Who knows which templates are outside their activation schedule right now (`R06`).
+   *
+   * The `TemplateActivation` the dispatcher uses, so health and delivery cannot disagree about
+   * which messages are waiting on purpose. Absent in a test that has no schedules to evaluate,
+   * and then nothing is parked — which is true, rather than merely convenient.
+   */
+  activation?: ParkedTemplates;
+}
+
+/** The half of `TemplateActivation` this reader needs, named so a test can stub it. */
+export interface ParkedTemplates {
+  suppressed(q: Queryable, now: Date): Promise<{ readonly templateIds: readonly number[] }>;
 }
 
 const DEFAULT_WINDOW_MS = 60 * 60 * 1_000;
@@ -98,10 +111,12 @@ interface Row {
 export class DeliveryHealthReader {
   readonly #windowMs: number;
   readonly #staleAfterMs: number;
+  readonly #activation: ParkedTemplates | undefined;
 
   constructor(options: DeliveryHealthOptions = {}) {
     this.#windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
     this.#staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_MS;
+    this.#activation = options.activation;
   }
 
   get staleAfterMs(): number {
@@ -111,14 +126,16 @@ export class DeliveryHealthReader {
   /**
    * @param parked Template ids currently outside their activation schedule, whose queued requests
    *   are waiting because an operator said so rather than because anything is broken (`P-125`).
-   *   The dispatcher already computes this every pass; passing it in beats evaluating every
-   *   schedule again here, and beats this reader growing an opinion about schedules.
+   *
+   *   **Defaulted from the activation service rather than from an empty array** (`R06`). It was
+   *   an argument with a default of "none", passed by Core Health and not by the route — so the
+   *   same fact had two answers depending on which of them you asked, and the one an operator
+   *   reads when they want to know whether anything is queued was the wrong one. Still an
+   *   argument, because a caller that has already evaluated the schedules this pass should not
+   *   pay for it twice.
    */
-  async read(
-    q: Queryable,
-    now = new Date(),
-    parked: readonly number[] = [],
-  ): Promise<DeliveryHealth> {
+  async read(q: Queryable, now = new Date(), parked?: readonly number[]): Promise<DeliveryHealth> {
+    const held = parked ?? (await this.#activation?.suppressed(q, now))?.templateIds ?? [];
     const since = new Date(now.getTime() - this.#windowMs);
     const rows = await q.query<Row>(
       `
@@ -165,7 +182,7 @@ export class DeliveryHealthReader {
       GROUP BY 1
       ORDER BY 1
       `,
-      [since, [...parked]],
+      [since, [...held]],
     );
 
     const methods: DeliveryMethodHealth[] = rows.map((row) => ({

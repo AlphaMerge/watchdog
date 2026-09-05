@@ -372,6 +372,38 @@ describe('when a schedule next changes, across a clock change', () => {
     // 09:00 GMT on the Sunday is 09:00 UTC.
     assert.equal(change.toISOString(), '2026-10-25T09:00:00.000Z');
   });
+
+  it('finds the first change, not the nearest one, when a schedule flips twice in the shift', () => {
+    // **`R21`.** `P-128`'s backward branch walked to the start of the *contiguous* changed run
+    // containing the candidate, which is the first change only when nothing flips again inside
+    // the shifted window. Here the candidate lands inside the second period, the walk stops at
+    // its 09:50 edge, and the schedule actually opened at 09:00 — fifty minutes earlier. The
+    // UI's "monitoring resumes at" and `N-12`'s hold decision both act on that number.
+    const office = define('su:09:00-su:09:10 su:09:50-su:17:00', 'active', 'Europe/London');
+    const asked = new Date('2026-03-28T20:00:00Z');
+    const change = nextChangeAfter(office, asked);
+    assert.ok(change !== null);
+    // 09:00 BST on the Sunday is 08:00 UTC.
+    assert.equal(change.toISOString(), '2026-03-29T08:00:00.000Z');
+  });
+
+  it('covers a zone whose seasonal shift is two hours, not one', () => {
+    // **`R22`.** The scan was bounded at ninety minutes, justified by "the largest transition in
+    // the zone database is an hour". `Antarctica/Troll` shifts *two* — UTC+00 in winter, UTC+02
+    // in summer — so the edge was outside the window in both directions, and the backward branch
+    // had no fallback: it returned its own floor, a minute at which nothing changes.
+    const office = define('su:09:00-su:17:00', 'active', 'Antarctica/Troll');
+
+    // Spring: the shift is on 2026-03-29, and 09:00 local afterwards is 07:00 UTC.
+    const spring = nextChangeAfter(office, new Date('2026-03-28T20:00:00Z'));
+    assert.ok(spring !== null);
+    assert.equal(spring.toISOString(), '2026-03-29T07:00:00.000Z');
+
+    // Autumn: back to UTC+00 on 2026-10-25, so 09:00 local is 09:00 UTC.
+    const autumn = nextChangeAfter(office, new Date('2026-10-24T20:00:00Z'));
+    assert.ok(autumn !== null);
+    assert.equal(autumn.toISOString(), '2026-10-25T09:00:00.000Z');
+  });
 });
 
 describe('the built-in schedules', () => {

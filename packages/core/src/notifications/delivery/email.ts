@@ -183,7 +183,11 @@ export class EmailTransport implements DeliveryTransport {
       });
       // Narrowed rather than trusted: `@types/nodemailer` lags the runtime (see
       // `buildTransport`), so what comes back is `any` as far as the checker is concerned.
-      const envelope = sent as { messageId?: unknown; rejected?: unknown } | null;
+      const envelope = sent as {
+        messageId?: unknown;
+        rejected?: unknown;
+        accepted?: unknown;
+      } | null;
       const messageId =
         typeof envelope === 'object' && envelope !== null && 'messageId' in envelope
           ? String(envelope.messageId)
@@ -197,7 +201,20 @@ export class EmailTransport implements DeliveryTransport {
       const rejected = Array.isArray(envelope?.rejected)
         ? envelope.rejected.map((one) => String(one))
         : [];
-      if (rejected.length > 0 && rejected.length >= to.length) {
+      // **"Nobody got it" is `accepted`, not a count against our own list** (`R13`). `to.length`
+      // counts the recipient *entries* the template resolved, and one entry is a 320-character
+      // string that nothing stops from holding two addresses — `ops@x, oncall@x` passes the
+      // `includes('@')` check the template applies. nodemailer parses that into two envelope
+      // recipients, so one rejection out of two satisfied `rejected.length >= to.length`: a
+      // message a real person received was reported a permanent failure, the fallback relay sent
+      // them a second copy, and with no fallback Delivery Health went Down over an alarm that
+      // was delivered. nodemailer reports exactly who took it; ask that.
+      const accepted = Array.isArray(envelope?.accepted)
+        ? envelope.accepted.map((one) => String(one))
+        : undefined;
+      const nobodyTookIt =
+        accepted === undefined ? rejected.length >= to.length : accepted.length === 0;
+      if (rejected.length > 0 && nobodyTookIt) {
         return {
           ok: false,
           // Not retryable: a rejection at RCPT TO is the relay's permanent answer about that

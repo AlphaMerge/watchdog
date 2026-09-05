@@ -382,6 +382,74 @@ and cause and writes nothing at all. So the fix ships with no test that fails wi
 `TASKS.md` says that in as many words. **A test that passes either way is worse than no test: it
 is a claim of coverage that a later reader will believe.**
 
+## The four the third panel found, in the fixes for the second
+
+A third panel, over the diff that fixed the second panel's 45. It confirmed 36 more, and four of
+them were again the guards rather than the code.
+
+### 22. A sweep whose principal could not tell a coarse bar from a correct one (`A-11`)
+
+Entry 20 fixed the mutating sweep so a refusal beats a schema rejection, and it then ran twice:
+once as a read-only account, once as a read-scoped token. Both are stopped at the **role** gate,
+which every mutating route clears by declaring `write` — so a route that asks only for the role,
+and never resolves a right on the object it is about, answers 403 to both and looks exactly like
+a correctly guarded one.
+
+Five holes were invisible for that reason: `POST /objects/tree` created a subtree under any
+parent, `move` and `clone` relocated into any destination, `PUT` and `DELETE /triggers/:id`
+edited every trigger in the installation, and `POST /discovery` provisioned devices into any
+group. The principal that separates them is `readwrite` **with no grant anywhere**: it clears
+every role gate and holds `none` on every object, so anything it gets through was never guarded
+on an object at all. Added, it found all five the day it was written.
+
+**A negative sweep is only as sharp as the principal it uses.** Entry 20 was about the *answer*
+being unambiguous; this is about the *question*.
+
+### 23. A floor so far below the truth that nine missing modules fitted under it (`A-11`)
+
+The same file asserted `mutating().length > 25` under a comment about a silent zero not being a
+pass. The real number was 48, and nine of `ApiServer`'s optional services were still not
+registered by the harness — including the one carrying `POST /templates/:id/test`, **the route
+the ticket singles out by name** as the one that "really sent for anybody with a session". A
+sweep that cannot call the route it is cited for is not evidence, and twenty-nine routes cleared
+a floor of twenty-five without a murmur.
+
+This is entry 19 recurring in the same file, one commit after entry 19 was fixed there. The floor
+is close to the real count now, and beside it is a list naming the routes an absent module takes
+with it: a count cannot catch one missing service, and the absence is in the harness rather than
+in any route's source, so nothing in the source can declare it. **A guard with slack in it is
+sized by the slack, not by the guard.**
+
+### 24. A test that could not distinguish the fix from the bug (`P-147`)
+
+Written for this panel's own finding and it passed immediately — because the racing write and the
+row it was supposed not to overwrite decided the *same state*. The guard keeps `r.state` when it
+holds and applies `w.state` when it does not; with both equal to `down_acknowledged` the two
+branches are indistinguishable, and the test asserted a value that was already there.
+
+It took a deliberate mutation to notice: reverting the fix left it green. The repair was to make
+the racing write decide something different — an acknowledgement that *lapses*, which the machine
+answers `down` — so the branches produce different rows. **Mutation is not a formality after the
+test passes; it is the only thing that told this one apart from a tautology**, and it is entry 3
+in a new costume.
+
+### 25. Deferring by process rather than by state (`P-146`, found by writing the test)
+
+`P-146` skipped the alarm reaction for a replayed batch and reasoned that "the drain ends with a
+live batch, and that one decides the present correctly". It does not: the reaction is keyed on
+*this batch's* transitions, so an outage that began inside a skipped batch and is still happening
+transitions in no later one and is armed by nothing. One outage, zero alarms.
+
+The existing test could not see it, and its own comment says why: it puts the first failure in
+the stale batch and the second in the live one, so the two-step rule makes the Down transition
+land in the live batch, which then supplies the transition. **The test was constructed so the
+thing it was skipping never needed to be remembered.**
+
+Writing the version that puts both failures in the stale batch also caught a second thing: the
+first attempt built a fresh ingestor per batch, as the tests around it do, which meant the
+deferred set was empty by construction. It failed for the right reason and for the wrong one at
+once, and only reading the failure told them apart.
+
 ## What actually found them
 
 
@@ -414,7 +482,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Twelve rules this produced
+## Fifteen rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -461,6 +529,15 @@ anything — and that structure, not more care, is what found them.
     schema rejection is a 4xx. "Not allowed" is not a property; "401 or 403" is. The same rule as
     2, in the other direction: when a test passes for a reason it did not name, it will keep
     passing when that reason changes.
+13. **A negative sweep is only as sharp as the principal it uses.** Entry 22: both passes were
+    refused at the role gate, so a bar that asked only for the role was indistinguishable from a
+    correct one. Choose the principal that *clears* every check but the one under test.
+14. **A guard with slack in it is sized by the slack.** Entry 23's floor of 25 was cleared by 29
+    routes while nine modules were missing. Put the bound near the truth, and where a count cannot
+    express the property, name the thing that would disappear.
+15. **Mutate a test that passed first time before believing it.** Entry 24 passed against the bug
+    because both branches of the guard produced the same row. A test written for a fix and green
+    on the first run has told you nothing until the fix is reverted.
 
 ## What is still not covered, and is said so on purpose
 
@@ -503,11 +580,17 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Sixteen now, and the seven added later are the ones that settle the argument.** The first nine
-were all written in the rush of a single day, which is the comfortable explanation. Entries 10 to
-13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and green
-ever since — and each one had a name that described a property the test did not check. The base
-rate is not a function of haste.
+**Twenty-five now, and the sixteen added later are the ones that settle the argument.** The first
+nine were all written in the rush of a single day, which is the comfortable explanation. Entries
+10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
+green ever since — and each one had a name that described a property the test did not check. The
+base rate is not a function of haste.
+
+Entries 22 to 25 close the argument from the other end. They are the guards written *for the
+previous panel's findings*, by somebody who had just spent a day looking at exactly this failure
+mode, reviewed and green — and two of them are the same defect as entry 19 and entry 3, in the
+same file, one commit later. **Knowing the shape of the mistake does not stop you making it.**
+The only things that have caught it are a mutation and a reader who did not write the code.
 
 Entry 14 is the counterweight, and the cheapest thing on this page: it was caught by running a
 new test in its own file, which takes seconds. Two more defects in that same fix were caught only

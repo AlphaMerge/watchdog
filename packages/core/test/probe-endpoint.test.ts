@@ -1080,6 +1080,86 @@ describe(
       });
     });
 
+    it('marks only the last message of a push as the one that carries the version', async () => {
+      // **`R18`.** `P-148` chunked the *delta* path, and a delta was one message before that —
+      // so it arrived whole or not at all. Chunked, and with the probe stamping its
+      // `#configVersion` on the first message it applies, a link that drops between chunks
+      // leaves it holding part of the change under a fingerprint that says it is current: it
+      // reconnects, the fingerprint matches, the core answers `config-unchanged`, and the rest
+      // is never sent. An operator's pause of three thousand sensors half-lands, the probe goes
+      // on scanning the ones it was told to stop scanning, and nothing anywhere disagrees.
+      // `P-149`'s ack check cannot rescue it — the acks for the missing chunks never arrive,
+      // because the connection is what broke.
+      //
+      // So the core says which message ends the push, and the probe claims the version only on
+      // that one. Absent means final, so an older core is unaffected.
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 3_500 }, (_, at) => sensor(at + 1));
+
+      await withProbe(source, async (probe) => {
+        await probe.waitFor(
+          () =>
+            probe.received.filter((m) => m.type === 'config-set' || m.type === 'config-delta')
+              .length === 4,
+        );
+        const push = probe.received.filter(
+          (m): m is Extract<CoreToProbeMessage, { type: 'config-set' | 'config-delta' }> =>
+            m.type === 'config-set' || m.type === 'config-delta',
+        );
+        assert.deepEqual(
+          push.map((m) => m.final),
+          [false, false, false, true],
+          'only the message that completes the push may let the probe claim the version',
+        );
+      });
+    });
+
+    it('sends the whole set again to a probe that never saw the end of the last push', async () => {
+      // **`R18`, end to end.** The rule the `final` flag encodes, stated as the fake probe's
+      // behaviour and then exercised: a probe claims a version only on the message that
+      // completes the push, so one that lost the rest still presents the *old* fingerprint. The
+      // core compares, finds a mismatch, and sends a snapshot — which is the recovery that did
+      // not exist while the version was stamped on the first chunk.
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 3_500 }, (_, at) => sensor(at + 1));
+
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+        probeConfig: source,
+      });
+      const address = await endpoint.start();
+      try {
+        let heldVersion = '';
+        const first = await TestProbe.connect(dir, address.port);
+        first.send(hello());
+        await first.waitFor((m) => m.type === 'welcome');
+        const set = await first.waitFor((m) => m.type === 'config-set');
+        assert.ok(set.type === 'config-set');
+        // What the real client does: stamp only on a message the core marked final. Read before
+        // the assertion below, so this is the rule applied rather than a constant restated.
+        if (set.final !== false) heldVersion = set.version;
+        assert.equal(set.final, false, 'the first chunk of four does not complete the push');
+        first.close();
+
+        // It comes back presenting what it actually holds.
+        const again = await TestProbe.connect(dir, address.port);
+        again.send(hello({ configVersion: heldVersion }));
+        await again.waitFor((m) => m.type === 'welcome');
+        const resent = await again.waitFor((m) => m.type === 'config-set');
+        assert.ok(resent.type === 'config-set');
+        assert.equal(
+          resent.version,
+          set.version,
+          'the same configuration, sent again in full rather than declared unchanged',
+        );
+        again.close();
+      } finally {
+        await endpoint.stop();
+      }
+    });
+
     it('re-pushes to a probe that reconnected holding a version it never finished applying', async () => {
       // **`P-153`, and it is the case `P-149` was written for and could not reach.** A link that
       // drops mid-push leaves the probe with chunk one and a `#configVersion` it stamped on that

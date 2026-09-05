@@ -482,12 +482,20 @@ export async function writeRuntimes(
      FROM (
        SELECT t.*,
               -- Whether a pause already on the row outranks what this write decided (P-147).
-              -- Layer 1 of the state machine: a pause dominates everything. A write whose own
-              -- cause *is* a pause is the pause being applied, and must not be held by itself.
+              -- Layer 1 of the state machine: a pause dominates everything. A write that *is*
+              -- the pause being applied must not be held by itself — and the discriminator for
+              -- that is its state, not its cause (R05). 'user' is also the cause of both halves
+              -- of an acknowledgement: acknowledged() returns down_acknowledged/user and a
+              -- lapsing acknowledgement returns down/user. Exempting the cause meant that on any
+              -- sensor carrying an acknowledgement — which is to say, during exactly the outage
+              -- an operator is most likely to pause — the racing write P-147 exists to stop went
+              -- through, overwrote paused with down, and armed a chain for the sensor the
+              -- operator had just paused. Being paused, it is out of the probe configuration, so
+              -- nothing re-decides it: the row stays down until somebody resumes.
               (SELECT p.paused_manually OR p.paused_by_parent
                         OR p.paused_by_schedule OR p.paused_by_dependency
                  FROM sensor_runtime p WHERE p.object_id = t.sensor_id)
-                AND t.cause NOT IN ('user', 'parent', 'schedule', 'dependency') AS held
+                AND t.state <> 'paused' AS held
        FROM unnest(
          $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
          $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],

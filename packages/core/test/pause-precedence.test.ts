@@ -545,6 +545,45 @@ describe(
       );
     });
 
+    it('does not write the mover-s words under a schedule-s cause', async () => {
+      // **`G12` — `P-140` fixed six of eight callers.** `reevaluate` with no `sources` reads as
+      // "this caller owns every cause", which is the condition `P-94` and `P-140` both exist to
+      // remove: the operator-facing pause API writing its own message onto a transition whose
+      // cause belongs to a schedule or a dependency. The move path was one of the two left, and
+      // unlike the pause and resume paths — which can never produce a transition with a foreign
+      // cause — it is reachable. Moving a subtree out from under a paused group flips
+      // `paused_by_parent` true→false, and a sensor still held by a window changes its reported
+      // cause from `parent` to `schedule`, which is a written transition.
+      //
+      // So a sensor moved *out* from under a paused parent got "moved under a paused parent" as
+      // the message on its state history and its runtime row, against cause `schedule`, when
+      // what actually holds it is the window.
+      await turnOn('schedule');
+      await turnOn('parent');
+      assert.equal((await flagsOf(sensorId)).cause, 'parent', 'the nearer source reports');
+
+      const elsewhere = (
+        await h.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: `unpaused-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+      await h.service.move(testActor, deviceId, elsewhere, { kind: 'none' });
+
+      const after = await flagsOf(sensorId);
+      assert.equal(after.cause, 'schedule', 'the window is what still holds it');
+      const rows = await db.query<{ message: string }>(
+        'SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1',
+        [sensorId],
+      );
+      assert.notEqual(
+        rows[0]?.message,
+        'moved under a paused parent',
+        'the mover-s words were written against a cause it does not own',
+      );
+    });
+
     it('reports every holder at once, so a UI can show all four', async () => {
       for (const source of PAUSE_SOURCES) await turnOn(source);
       const view = await h.service.pauseState(sensorId);

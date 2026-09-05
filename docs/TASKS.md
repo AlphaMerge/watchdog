@@ -10211,8 +10211,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
 - [x] **P-139 — One trigger of an unknown kind broke the whole tab, and could not be deleted**
       A row written by a newer build, or left by a downgrade, made `triggerKinds.get` throw on the
-      *list* — so the trigger tab answered 500 and the operator could not see any of their
-      triggers, including the one causing it. It threw again in `delete`, which builds its audit
+      *list* — so the whole trigger tab was refused and the operator could not see any of their
+      triggers, including the one causing it. (`TriggerError` maps to a 400 `TRIGGER_INVALID`,
+      not the 500 this entry originally claimed; the list was equally unusable either way, but
+      the diagnosis written down for the next reader was wrong — `G14`.) It threw again in `delete`, which builds its audit
       summary through the kind, so the one action that would clear the row was the one action that
       could not be taken. Reading tolerates an unknown kind now and says so in the summary;
       *saving* still goes through `get`, because a kind this build cannot validate is one it must
@@ -10474,6 +10476,207 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       twice" with no qualification, and `BulkReport.requested` is documented as the count after
       collapsing while the route was overwriting it with the raw one. Collapsed once, before
       the partition, and `duplicates` derived there. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-157 — an outage that began during a spool drain was never alarmed at all**
+      `P-146` stopped the alarm reaction running on a batch a probe is replaying, which was
+      right, and skipped it outright, which was not. Its justification — "the drain ends with a
+      live batch, and that one decides the present correctly" — is false as written, because the
+      reaction is keyed on *this batch's* transitions. A sensor that goes Down during the spooled
+      window transitions once, in a skipped batch, and never transitions again while the outage
+      continues: every later batch has it in `runtimes` and not in `transitions`, so `scanned` is
+      empty and nothing is ever armed. A remote probe loses its link for two hours, a router it
+      watches goes Down ninety minutes in and is still down — the dashboard says Down, the state
+      history says Down, and nobody is told. One outage, zero alarms.
+
+      The moved ids are **deferred** now rather than dropped, and folded into the first batch
+      that is not a replay, which reconciles them against their current state: arming what is
+      still Down, standing down what recovered while the spool drained. Visible on the ingestor's
+      stats as `deferredReactions`, because a number that never comes back to zero is a probe
+      whose alarms are not being armed and that has to be legible.
+
+      Two more defects in the same guard, both about what "stale" was measured from:
+
+      - **It folded over transitions, not results.** The ticket's own text says "a batch whose
+        newest *result* is older than the catch-up grace", and so did the comment beside it.
+        During a drain most batches change no state at all, so those batches read as live — and
+        on any installation with a threshold trigger anywhere, `reconcilesReadings` widens the
+        scan to *every sensor in the batch*, reacting over runtime rows written from hours-old
+        readings and arming from a `since` six hours past. The storm `P-146` describes, one
+        batch later. Every result has a runtime write, including the Down ones that record no
+        reading, so measuring from those is both correct and available.
+      - **It compared two machines' clocks.** `transition.at` is the probe's wall clock — the
+        premise of `P-145` — and backward skew is deliberately unbounded because a replay
+        depends on it. A probe host five minutes slow stamps every *live* result in the past, so
+        every batch it ever sends is judged a replay and no sensor under it is ever armed:
+        connected, heartbeating, delivering results, no notifications, permanently. `backlog` is
+        already on the wire for the pacer and answers the question without a clock — a probe
+        reporting zero has nothing left to replay whatever its clock says. The timestamp test
+        remains the fallback for a probe that does not report it.
+
+      Tests: 3 new in `state-ingestion.test.ts`. Mutation 3/3.
+
+- [x] **P-158 — the pause guard exempted the acknowledgement's own cause**
+      `P-147` stopped a batch decided before a pause committed from overwriting that pause, with
+      a guard reading "a write whose own cause *is* a pause is the pause being applied, and must
+      not be held by itself" — implemented as `cause NOT IN ('user','parent','schedule',
+      'dependency')`. But `user` is also the cause of both halves of an acknowledgement:
+      `acknowledged()` returns `down_acknowledged`/`user`, and an acknowledgement lapsing on a
+      still-failing sensor returns `down`/`user`. Both reach `RuntimeWrite.cause` verbatim.
+
+      So on any sensor carrying an acknowledgement — which is to say, during exactly the outage
+      an operator is most likely to pause for maintenance — the race `P-147` exists to stop was
+      still unguarded. The pause is overwritten with the result's own state and `react` in the
+      same transaction arms a chain for the sensor the operator just paused; being paused, it is
+      out of the probe configuration, so nothing re-decides it and the row stays wrong until
+      somebody resumes.
+
+      The discriminator is the write's **state**, not its cause. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-159 — a trigger kind this build does not know still lost its alarm**
+      `react` claims a trigger out of the alarm map only inside the two `if (trigger.kind === …)`
+      branches, so a trigger whose *kind* is unrecognised never claims its alarm and the orphan
+      sweep at the end of the sensor deletes it — silently, counted as `cleared`. This is exactly
+      what `P-114` fixed one commit earlier for an unreadable *settings* shape, and its own
+      comment states the rule: a trigger this build cannot judge is not a trigger that has gone
+      away. `P-139` then taught every read path to tolerate an unknown kind, on the premise that
+      such rows exist, and left the one path that destroys data.
+
+      A roll-back deletes the standing alarm; the roll-forward arms the chain fresh from the
+      sensor's current `since` — a second initial page for one continuous outage with the
+      escalation deadline reset. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-160 — `parked` was computed, reported, and deleted on its way out**
+      `P-125` separated "waiting on a relay" from "waiting on purpose" so that a digest
+      collecting overnight would stop putting Core Health Down. The count reached the API route
+      and no further: both response schemas declare `additionalProperties: false`, so
+      fast-json-stringify removed the key — the same mechanism this repository documents at
+      `routes/health.ts`. Requests that used to appear in `pending` appeared in neither, and
+      `GET /notification-health` answered `pending: 0` over forty undelivered alarms.
+
+      The second half is *which* templates count. The parked set was an argument defaulting to
+      an empty array; Core Health passed it and the route did not, so the same question had two
+      answers depending on which of them you asked. The reader takes the activation service
+      instead, and the argument stays only for a caller that has already evaluated the schedules
+      this pass. **No test exercised this route at all**; there is one now. Mutation 1/1.
+
+- [x] **P-161 — the dependency settle nobody pushed, and the sweep that never ran at boot**
+      Two probe-visible pause changes that reached the database and not the probes.
+
+      `P-136` gave the schedule sweep a dependency settle and discarded its result: the push
+      decision read only the schedule half. `applyPauses` computes `holding` from
+      `dependency_clear_at > now`, so the minute a master's recovery delay elapses it is *this*
+      sweep that releases its dependents — with `moved: 0` on the half that decides whether to
+      push, therefore no `flush()` and no log line. `PauseSweep` was the component meant to
+      handle that event, and by the time it ran `releaseElapsed` settled nothing, so it did not
+      push either. Forty sensors unpaused in the database, absent from the probe's assignment
+      list, unscanned until an unrelated change happened to poke the fingerprint. Both halves
+      are counted and either one pushes now.
+
+      `PauseSweep.start()` armed without sweeping, while `ScheduleSweep.start()` sweeps first and
+      `main` awaits it — on reasoning that applies word for word to the flags this one writes.
+      `paused_manually` and `paused_by_parent` are filtered by the same predicate in
+      `ProbeConfigService`, and this sweep is the only thing that applies a maintenance window
+      whose `starts_at` passed while the core was down. Its first tick landed up to thirty
+      seconds after boot; the probe endpoint opens in between, the local probe reconnects within
+      a second, and it is handed a list built from flags that say to keep scanning the box
+      somebody is patching. Now async, sweeps once, and awaited beside the other.
+
+      Tests: 2 new. Mutation 2/2.
+
+- [x] **P-162 — a grounded cycle erased the outage instead of alarming on it**
+      `P-134`'s comment says "a cycle contributes nothing and holds nobody", and that is true
+      only while nothing in the cycle is independently Down. With A and B as each other's
+      masters — which a move can arrange, and only the assignment path refuses — and A genuinely
+      failing, `holding` seeds `{A}`, the recursion adds B through A and then A again through B.
+      So A was paused by a hold whose entire justification was A itself: inside one transaction
+      A went down → paused → unknown, the alarm was never armed, three history rows were written
+      per sensor, and the next scan did it again. A real outage suppressed for as long as the
+      cycle exists.
+
+      Each hold carries the outage it came from now, and a sensor is never held by one it is
+      itself the ground of. The genuinely down sensor stays down and alarms; everything
+      downstream of it is still suppressed, which is the point of the feature. The existing
+      cycle test set every sensor Up first, so it exercised only the ungrounded loop. Tests: 1
+      new. Mutation 1/1.
+
+- [x] **P-163 — the mover's words under a schedule's cause**
+      `P-140` passed `sources: PAUSE_CAUSES_THIS_API_OWNS` at six `reevaluate` call sites and
+      missed two. The clone path is benign — a fresh clone's schedule and dependency flags are
+      false, so the decided cause is always one this API owns — but the move path is the one
+      caller that can genuinely write a transition with a foreign cause: moving a subtree out
+      from under a paused group flips `paused_by_parent` true→false, and a sensor still held by
+      a maintenance window changes its reported cause from `parent` to `schedule`. That is a
+      written transition, and without `sources` it carried "moved under a paused parent" as its
+      message — for a sensor moved *out* from under one, whose actual reason is the window.
+      `P-94` and `P-140`'s defect verbatim, on a caller both tickets missed. Declared at both
+      sites; the clone one because "it happens to be unreachable" is not a property a later
+      change preserves. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-164 — the next schedule change, when the clocks move twice or by two hours**
+      Two defects in `P-128`'s verification of a predicted edge.
+
+      Its backward branch walked to the start of the *contiguous* changed run containing the
+      candidate, which is the first change only if the schedule does not flip again inside the
+      shifted window. `su:09:00-su:09:10 su:09:50-su:17:00` on a spring-forward Sunday put the
+      candidate inside the second period, the walk stopped at 09:50, and the answer was fifty
+      minutes after the 09:00 the schedule actually opens. One forward scan from the floor
+      answers both directions and needs no branch.
+
+      And the ±90-minute bound was justified with "which covers every transition the zone
+      database contains (the largest is an hour)". `Antarctica/Troll` is a current IANA zone
+      whose seasonal shift is **two** hours, so the edge was outside the window in both
+      directions — and the backward branch had no fallback, returning its floor, a minute at
+      which nothing happens. 150 minutes, with the margin stated. Tests: 2 new. Mutation 2/2.
+
+- [x] **P-165 — a partial rejection reported as a total one, and a duplicate sent**
+      `P-119` decides "the relay took it for nobody" by comparing `rejected.length` against the
+      number of recipient *entries* the template resolved. An entry is a 320-character string,
+      and nothing forbids two addresses in one — `ops@x, oncall@x` passes the `includes('@')`
+      check the template applies. The relay parses that into two envelope recipients; reject one
+      and accept the other and `1 >= 1` holds. A message a real person received is reported a
+      permanent failure, the fallback relay sends them a second copy, and with no fallback
+      Delivery Health goes Down over an alarm that was delivered.
+
+      nodemailer reports exactly who took it. The test stub did not — it returned
+      `{ messageId, rejected }`, a shape the real client never sends — which is why the case was
+      invisible. Tests: 1 new, and the stub now reports `accepted`. Mutation 1/1.
+
+- [x] **P-166 — a chunked delta could half-land and claim it was current**
+      `P-148` chunked the delta path. A delta was one message before that, so it arrived whole
+      or not at all; chunked, it is N messages at one version — and the probe stamps its
+      `#configVersion` on the first message it applies. A link that drops between chunks leaves
+      it holding part of the change under a fingerprint that says it is current: it reconnects,
+      the fingerprint matches, the core answers `config-unchanged`, and the rest is never sent.
+      An operator pauses three thousand sensors, the probe goes on scanning two thousand of
+      them, and nothing anywhere disagrees. `P-149`'s ack check cannot rescue it — the acks for
+      the missing chunks never arrive, because the connection is what broke.
+
+      `config-set` and `config-delta` carry `final` now, and the probe claims a version only on
+      the message that completes the push. Absent means final, so an older core is unaffected;
+      not claiming is what makes it recoverable, exactly as a failed apply already was. Tests: 2
+      new. Mutation 2/2.
+
+- [x] **P-167 — four comments that had become false, and one contract that always was**
+      Not defects in behaviour, and each one is a load-bearing sentence a reader would reason
+      from.
+
+      - `DependencySync` and `DependencyPauses` both say there is no periodic dependency
+        recompute anywhere. `P-136` made `ScheduleSweep` call one every minute, in every
+        installation. Corrected in both, and in the test comment that repeats it, without
+        weakening the reason `object.created` still settles its own flags: a repair on the
+        minute is not a schedule to wait for.
+      - `MessageContext.priority` still said "1 (highest) to 5" — the exact sentence `P-137`
+        corrected eighty lines below it, on the field the placeholder resolves from.
+      - `tryGet`'s comment and the `P-139` entry both say the unknown kind made the tab answer
+        500. `TriggerError` maps to a 400 `TRIGGER_INVALID`; the tab was equally unusable, but
+        the diagnosis written down for the next reader was wrong.
+      - `POST /schedules` and `ms:scheduleInput` promised that `polarity` says what the periods
+        mean, with no qualification, while `P-127` had made a grid override it. A client written
+        to the documented contract got the exact complement of what it asked for with a 201 on
+        it. Refusing the combination was the other option and is the wrong one: a schedule
+        stored as `inactive` periods is *served* as `polarity: 'inactive'` beside a grid of the
+        hours it does monitor, so the round trip `P-127` exists for sends exactly that pair. The
+        documentation is what was wrong.
 
 ## Phase 10 — Hardening and release
 

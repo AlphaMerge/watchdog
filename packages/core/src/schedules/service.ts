@@ -333,6 +333,18 @@ export class ScheduleService {
       //
       // Polarity is not a second degree of freedom on top of a grid; it is the thing the grid has
       // already resolved. An operator who wants to express the complement types the periods.
+      //
+      // **Which makes `polarity` a field of `periods`, and the contract now says so** (`R19`).
+      // It did not: `POST /schedules` and `ms:scheduleInput` both advertised the enum with no
+      // qualification, so a client written to the documented contract — a grid of six days with
+      // `polarity: 'inactive'`, meaning "pause during these" — was answered 201 and stored as
+      // "monitor only during these", the exact complement of what it asked for.
+      //
+      // Refusing that combination was the other option and is the wrong one here: a schedule
+      // stored as `inactive` periods is *served* as `polarity: 'inactive'` alongside a grid of
+      // the hours it does monitor, so the round trip this coercion exists for sends exactly
+      // that pair. Refusing it would break the case `P-127` fixed. The documentation is what
+      // was wrong.
       polarity: hasGrid ? 'active' : (input.polarity ?? 'active'),
       timezone,
     };

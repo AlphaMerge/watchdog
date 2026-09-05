@@ -75,7 +75,9 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
         description:
           'Give either `periods` (`fr:19:00-mo:06:00`, space or comma separated) or `grid` ' +
           '(7 × 24 booleans, Monday first) — never both. `polarity` says which one the periods ' +
-          'describe: `active` is when monitoring runs, `inactive` is when it is suspended.',
+          'describe: `active` is when monitoring runs, `inactive` is when it is suspended. It ' +
+          'applies to `periods` only: a grid’s marked cells *are* the monitored hours, so a ' +
+          'polarity sent beside a grid is ignored.',
         body: { $ref: 'ms:scheduleInput' },
         response: { 201: { $ref: 'ms:schedule' } },
       },

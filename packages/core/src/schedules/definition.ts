@@ -20,6 +20,19 @@ export type Weekday = (typeof WEEKDAYS)[number];
 export const MINUTES_PER_DAY = 24 * 60;
 export const MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
 
+/**
+ * How far either side of a predicted edge the real one can be (`R21`, `R22`).
+ *
+ * **Two and a half hours, not ninety minutes.** `P-128` justified ninety with "which covers
+ * every transition the zone database contains (the largest is an hour)", and that is not true:
+ * `Antarctica/Troll` is a current IANA zone whose seasonal shift is *two* hours (UTC+00 in
+ * winter, UTC+02 in summer). At ninety the scan missed its edge by half an hour in both
+ * directions, and the backward walk had no fallback at all — it returned its floor, a minute at
+ * which nothing happens. The margin above two hours is for a zone that grows a larger shift
+ * without this constant being revisited.
+ */
+const SKEW_MINUTES = 150;
+
 /** `[start, end)` in minutes from Monday 00:00. Half-open, so periods can abut without overlap. */
 export interface WeekInterval {
   readonly start: number;
@@ -399,9 +412,15 @@ export function boundaries(definition: ScheduleDefinition): number[] {
  * across a daylight-saving transition, where the local clock skips or repeats an hour. Rather
  * than reason about that, the candidate is *verified* — and verified in both directions
  * (`P-128`), because a transition moves the edge either way: an autumn repeat puts it later than
- * predicted, and a spring skip puts it earlier. Either way the minute the change really happens
- * is found by scanning the ninety minutes around the candidate, which covers every transition
- * the zone database contains (the largest is an hour).
+ * predicted, and a spring skip puts it earlier.
+ *
+ * **One forward scan for both directions** (`R21`). `P-128` branched on whether the candidate
+ * already read as changed and, in that branch, walked backwards to the start of the *contiguous*
+ * changed run — which is the first change only when the schedule does not flip again inside the
+ * shifted window. `su:09:00-su:09:10 su:09:50-su:17:00` on a spring-forward Sunday landed the
+ * candidate inside the second period, walked back to 09:50, and answered fifty minutes after
+ * the 09:00 the schedule actually opens. Scanning forward from the floor for the first minute
+ * that differs from now is the same answer in the ordinary case and the right one here.
  */
 export function nextChangeAfter(definition: ScheduleDefinition, at: Date): Date | null {
   const zone = zoneOf(definition);
@@ -426,29 +445,16 @@ export function nextChangeAfter(definition: ScheduleDefinition, at: Date): Date 
 
   const atMinute = Math.floor(at.getTime() / 60_000);
   const candidate = new Date((atMinute + delta) * 60_000);
-  if (isActiveAt(definition, candidate) !== activeNow) {
-    // **The prediction can be late as well as early** (`P-128`). Week-minutes are local time and
-    // the delta is elapsed time, so a spring-forward between here and the edge means the edge
-    // arrives an hour *sooner* than predicted — the local clock skips 02:00 to 03:00, so thirteen
-    // local hours are twelve real ones. The candidate then already reads as changed, this check
-    // was satisfied, and the answer was an hour late: a schedule that opens at 09:00 reported
-    // 10:00 on the Sunday the clocks go forward, every year, in every zone that does it.
-    //
-    // So walk back to the first minute that still reads as it does now. Bounded by the same
-    // ninety minutes as the forward scan, which covers every transition in the zone database.
-    const floor = Math.max(atMinute + 1, atMinute + delta - 90);
-    let earliest = atMinute + delta;
-    while (
-      earliest > floor &&
-      isActiveAt(definition, new Date((earliest - 1) * 60_000)) !== activeNow
-    ) {
-      earliest -= 1;
-    }
-    return new Date(earliest * 60_000);
-  }
 
-  const from = Math.max(atMinute + 1, atMinute + delta - 90);
-  for (let minute = from; minute <= atMinute + delta + 90; minute += 1) {
+  // **The prediction can be late as well as early** (`P-128`). Week-minutes are local time and
+  // the delta is elapsed time, so a spring-forward between here and the edge means the edge
+  // arrives sooner than predicted — the local clock skips 02:00 to 03:00, so thirteen local
+  // hours are twelve real ones — and an autumn repeat means it arrives later. Either way the
+  // true edge lies within one transition's worth of minutes of the candidate, so the first
+  // minute at or after that floor which no longer reads as *now* is the answer, whichever side
+  // of the candidate it falls.
+  const from = Math.max(atMinute + 1, atMinute + delta - SKEW_MINUTES);
+  for (let minute = from; minute <= atMinute + delta + SKEW_MINUTES; minute += 1) {
     const instant = new Date(minute * 60_000);
     if (isActiveAt(definition, instant) !== activeNow) return instant;
   }

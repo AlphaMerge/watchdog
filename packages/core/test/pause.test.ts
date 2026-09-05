@@ -692,6 +692,44 @@ describe(
         assert.equal((await runtimeOf(siblingId)).state, 'paused', 'every sensor beneath it');
       });
 
+      it('applies a window that opened while the core was down, before anything is served', async () => {
+        // **`G10`.** `P-131` made the *schedule* sweep sweep once before arming, and `main`
+        // awaits it before the probe endpoint exists, on the reasoning that `paused_by_schedule`
+        // is a stored flag the probes' configuration is built from. `paused_manually` and
+        // `paused_by_parent` are filtered by the same predicate in `ProbeConfigService`, and
+        // this sweep is the only thing that applies a window whose `starts_at` passed while the
+        // core was down — `#since` starts at the epoch precisely so the first pass reconciles
+        // them. It armed without sweeping, so its first pass landed up to thirty seconds after
+        // boot: the local probe reconnects within a second, is handed a list built from flags
+        // that say to keep scanning, and pages somebody about the box being patched.
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+        assert.equal(
+          (await runtimeOf(sensorId)).state,
+          'up',
+          'the flags are as the restart left them',
+        );
+
+        const sweep = new PauseSweep({ service: h.service, logger: silent });
+        await sweep.start();
+        try {
+          assert.equal(
+            (await runtimeOf(sensorId)).state,
+            'paused',
+            'start() has to reconcile before it returns, not thirty seconds later',
+          );
+        } finally {
+          sweep.stop();
+        }
+      });
+
       it('records the window-s own message in the state history', async () => {
         await makeUp(sensorId);
         const { from, until } = nextWeek();

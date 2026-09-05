@@ -62,6 +62,14 @@ export const scheduleInputSchema = {
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 200 },
     description: { type: 'string', maxLength: 500 },
+    /**
+     * What `periods` means, and **only** `periods` (`R19`).
+     *
+     * A grid's marked cells are the monitored hours by definition, so a `grid` is always stored
+     * as `active` and any polarity sent beside one is ignored — which is what makes the round
+     * trip work: a schedule stored as `inactive` periods is served as a grid of the hours it
+     * *does* monitor, and sending that view back unchanged must not invert it.
+     */
     polarity: { enum: ['active', 'inactive'], default: 'active' },
     /** IANA name, or null for the zone the core runs in. */
     timezone: { type: ['string', 'null'], maxLength: 80 },

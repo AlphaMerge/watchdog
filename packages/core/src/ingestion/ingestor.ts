@@ -48,6 +48,21 @@ export interface IngestBatch {
    * whole thing again.
    */
   states?: StateDecisions;
+  /**
+   * Whether the probe still had results on disk after this batch (`R16`, `R17`).
+   *
+   * **The probe's own answer to "am I catching up", which is the only reliable one.** `P-146`
+   * inferred it from timestamps — a batch whose newest result is older than the catch-up grace
+   * is a replay — and a timestamp comparison across two machines' clocks is exactly as good as
+   * those clocks. A probe five minutes slow stamps *every* live result in the past, so every
+   * batch it ever sends reads as a replay and its sensors are never reconciled at all, for as
+   * long as the drift lasts, with nothing anywhere saying so.
+   *
+   * `backlog` is already on the wire for the pacer, and it settles the question without a
+   * clock: a probe reporting zero has nothing left to replay whatever its clock says. Absent
+   * when the probe does not track it, and then the timestamp heuristic is still the fallback.
+   */
+  draining?: boolean;
 }
 
 export type IngestOutcome =
@@ -199,6 +214,14 @@ export interface IngestionStats {
    * never catches up is a probe whose alarms are never reconciled, and that has to be visible.
    */
   staleReactions: number;
+  /**
+   * Sensors whose alarm reaction is waiting for a batch that is not a replay (`R04`).
+   *
+   * **Visible because it is the shape of a stuck probe.** A number that goes up during a drain
+   * and back to zero when it ends is the mechanism working. A number that stays up is a probe
+   * that never reports itself caught up, and every one of those sensors has an unarmed alarm.
+   */
+  deferredReactions: number;
   writes: number;
   /** Write latency in milliseconds over the last 1,024 writes. */
   writeMs: { p50: number; p95: number; p99: number; max: number };
@@ -250,6 +273,24 @@ export class Ingestor {
   #dependencyPauses = 0;
   #staleReactions = 0;
   readonly #catchUpGraceMs: number;
+  /**
+   * Sensors whose state moved in a batch the alarm reaction skipped (`R04`, `G02`).
+   *
+   * **Deferred, not dropped, and that distinction is the whole ticket.** `P-146` skipped the
+   * reaction for a stale batch on the reasoning that "the drain ends with a live batch, and
+   * that one decides the present correctly". A live batch decides the present for the sensors
+   * *it* carries a transition for — and a sensor that went Down during the spooled window
+   * transitions once, in a skipped batch, and never transitions again while the outage
+   * continues. Every later batch has it in `runtimes` and not in `transitions`, so it is armed
+   * by nothing and nobody is paged for an outage that is still happening. One outage, zero
+   * alarms.
+   *
+   * So the ids are held here instead and folded into the first batch that is not stale, which
+   * reconciles them against their current state — arming what is still Down and standing down
+   * what recovered while the spool drained. Bounded by the sensor count, and cleared whole:
+   * every id in it is included in that reaction.
+   */
+  readonly #deferredReactions = new Set<number>();
 
   readonly #queue: Queued[] = [];
   readonly #latencies: number[] = [];
@@ -383,6 +424,7 @@ export class Ingestor {
       staleRuntimeWrites: this.#staleRuntimeWrites,
       dependencyPauses: this.#dependencyPauses,
       staleReactions: this.#staleReactions,
+      deferredReactions: this.#deferredReactions.size,
       writes: this.#writes,
       writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       slowingDown: this.#retryHint() > 0,
@@ -491,6 +533,31 @@ export class Ingestor {
       }
     }
 
+    // **Is any of this a replay?** Folded across the submissions this write coalesces, because
+    // one drain among live batches makes the whole write a replay for the sensors it carries.
+    // Undefined only when *no* submission reported a backlog at all (`R17`).
+    let draining: boolean | undefined;
+    for (const queued of taken) {
+      const reported = queued.batch.draining;
+      if (reported === undefined) continue;
+      draining = (draining ?? false) || reported;
+    }
+
+    // **From the results, not from the transitions** (`R16`). `P-146`'s own ticket text says "a
+    // batch whose newest *result* is older than the catch-up grace", and the comment beside the
+    // code said the same — but it folded over `transitions`, and during a drain most batches
+    // change no state at all. Those batches read as live and reacted, which on any installation
+    // with a threshold trigger anywhere means reacting over every sensor in the batch from
+    // hours-old runtime rows: the storm the ticket describes, one batch later. Every result in
+    // the batch has a runtime write, including the Down ones that record no reading.
+    const newestResultAt = [...runtimes.values()].reduce(
+      (best, write) => Math.max(best, write.at.getTime()),
+      transitions.reduce((best, transition) => Math.max(best, transition.at.getTime()), 0),
+    );
+    const stale =
+      draining ?? (newestResultAt > 0 && Date.now() - newestResultAt > this.#catchUpGraceMs);
+    if (stale) this.#staleReactions += 1;
+
     const startedAt = process.hrtime.bigint();
     try {
       const { stored, late, changes, moved, dependents } = await this.#db.tx(async (q) => {
@@ -520,17 +587,6 @@ export class Ingestor {
         // **At the instants the probe measured them** (`P-145`). A spool replay is an hour of
         // genuine history arriving late; stamping it after the newest stored row rewrote the
         // whole outage into consecutive milliseconds, in the table uptime is computed from.
-        // How far behind the newest result in this batch is. A live batch is milliseconds old; a
-        // spool drain is hours. Measured from the *newest*, because a batch that carries anything
-        // current is one the present can be decided from.
-        const newestTransitionAt = transitions.reduce(
-          (best, transition) => Math.max(best, transition.at.getTime()),
-          0,
-        );
-        const stale =
-          newestTransitionAt > 0 && Date.now() - newestTransitionAt > this.#catchUpGraceMs;
-        if (stale) this.#staleReactions += 1;
-
         const appended = await writeStateHistory(
           q,
           transitions,
@@ -572,17 +628,25 @@ export class Ingestor {
         // So the whole point of the initial latency — "a 30-second blip on a five-minute latency
         // produces no notification at all" — is defeated for every blip a probe spooled, and the
         // operator is paged, escalated and repeated about an outage that ended before the link
-        // came back. Reconciliation is state-based, so skipping a stale batch costs nothing: the
-        // drain ends with a live batch, and that one decides the present correctly. What it must
-        // not do is decide it twenty-five times on the way there.
+        // came back. What it must not do is decide the present twenty-five times on the way
+        // there.
+        //
+        // **But skipped is not the same as forgotten** (`R04`, `G02`). `P-146` skipped the
+        // reaction outright, reasoning that the last batch of the drain would decide the present
+        // — and the reaction is keyed on *this batch's* transitions, so a sensor that went Down
+        // inside a skipped batch and is still Down when the drain ends transitions in no later
+        // batch and is armed by nothing. Nobody is paged for an outage that is happening now.
+        // The moved ids are held instead and folded in here, so the first live batch reconciles
+        // them along with its own.
         //
         // `reactionTime` in `dependencies/pauses.ts` exists because the dependency reaction had
         // this class of bug; the alarm reaction had no equivalent.
         if (this.#alarms !== undefined && !stale) {
-          const moved = [...new Set(transitions.map((transition) => transition.sensorId))];
+          const moved = new Set(transitions.map((transition) => transition.sensorId));
+          for (const sensorId of this.#deferredReactions) moved.add(sensorId);
           const scanned = (await this.#alarms.reconcilesReadings(q))
-            ? [...new Set(runtimes.keys())]
-            : moved;
+            ? [...new Set([...runtimes.keys(), ...this.#deferredReactions])]
+            : [...moved];
           if (scanned.length > 0) await this.#alarms.react(q, scanned, new Date());
         }
         return {
@@ -593,6 +657,18 @@ export class Ingestor {
           dependents,
         };
       });
+
+      // **After the commit, because a rolled-back write decided nothing.** Held on a skipped
+      // batch, cleared whole on a live one — every deferred id was in that reaction's `scanned`
+      // (`R04`, `G02`). Only while there is an alarm engine to defer *to*; without one the set
+      // would grow for the life of the process and be read by nobody.
+      if (this.#alarms !== undefined) {
+        if (stale) {
+          for (const transition of transitions) this.#deferredReactions.add(transition.sensorId);
+        } else {
+          this.#deferredReactions.clear();
+        }
+      }
 
       this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);
       this.#queuedRows -= rows;

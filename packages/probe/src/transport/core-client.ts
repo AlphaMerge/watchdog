@@ -440,17 +440,23 @@ export class CoreClient {
       }
 
       case 'config-set': {
-        this.#applyConfig({ kind: 'set', version: message.version, sensors: message.sensors });
+        this.#applyConfig(
+          { kind: 'set', version: message.version, sensors: message.sensors },
+          message.final,
+        );
         return;
       }
 
       case 'config-delta': {
-        this.#applyConfig({
-          kind: 'delta',
-          version: message.version,
-          upserted: message.upserted,
-          removed: message.removed,
-        });
+        this.#applyConfig(
+          {
+            kind: 'delta',
+            version: message.version,
+            upserted: message.upserted,
+            removed: message.removed,
+          },
+          message.final,
+        );
         return;
       }
 
@@ -640,7 +646,7 @@ export class CoreClient {
    * sent: if the two disagree the core logs it, which is how a delta applied against a different
    * starting state stops being invisible.
    */
-  #applyConfig(update: ConfigUpdate): void {
+  #applyConfig(update: ConfigUpdate, final: boolean | undefined): void {
     const apply = this.#options.onConfig;
     if (apply === undefined) return;
 
@@ -657,7 +663,18 @@ export class CoreClient {
       return;
     }
 
-    this.#configVersion = update.version;
+    // **Stamped only when the whole push has landed** (`R18`). A push above the message cap is
+    // one `config-set` plus N-1 deltas at the same version, and stamping on the first of them
+    // meant a link that dropped between chunks left this probe holding part of the change under
+    // a fingerprint that says it is current — so the reconnect matched, the core answered
+    // `config-unchanged`, and the missing half was never sent. Not stamping is what makes it
+    // recoverable, exactly as the apply failure above is: the next handshake presents the old
+    // version, the fingerprint mismatches, and a full snapshot arrives.
+    //
+    // Absent means final, so an older core that does not send the flag is unaffected.
+    if (final !== false) this.#configVersion = update.version;
+    // The ack is sent for every message either way: the core counts them to know when a chunked
+    // push is complete (`P-150`), and its count check is the second line under this one.
     this.#connection?.send({ type: 'config-ack', version: update.version, scheduled });
     this.#logger.info(
       { version: update.version, scheduled, kind: update.kind },

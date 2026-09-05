@@ -98,21 +98,39 @@ export class ScheduleSweep {
     if (this.#running) return 0;
     this.#running = true;
     try {
-      const result = await this.#db.tx(async (q) => {
+      const { schedules, dependencies } = await this.#db.tx(async (q) => {
         const moved = await this.#pauses.recompute(q, now);
         // In the same transaction, so a window that closes on a master never leaves a moment
         // where the master is paused and its dependents still think it is Down (`P-136`).
-        await this.#dependencies.recompute(q, now);
-        return moved;
+        const settled = await this.#dependencies.recompute(q, now);
+        return { schedules: moved, dependencies: settled };
       });
-      if (result.moved > 0) {
+      if (schedules.moved > 0) {
         this.#logger.info(
-          { moved: result.moved, transitions: result.transitions, inactive: result.inactive },
+          {
+            moved: schedules.moved,
+            transitions: schedules.transitions,
+            inactive: schedules.inactive,
+          },
           'a schedule window opened or closed',
         );
-        this.#onChanged?.();
       }
-      return result.moved;
+      // **What the dependency settle moved counts too, and `P-136` discarded it** (`R14`, `G09`).
+      // `applyPauses` computes `holding` from `dependency_clear_at > now`, so the minute a
+      // master's recovery delay elapses *this* sweep is what releases its dependents' flags —
+      // and it did so with `result.moved === 0`, so nothing was pushed. `PauseSweep` was the
+      // component meant to handle that event, and by the time it ran `releaseElapsed` settled
+      // nothing, so it did not push either: forty sensors unpaused in the database, absent from
+      // the probe's assignment list, and unscanned until an unrelated change poked the
+      // fingerprint. Both halves of a pause flag change are probe-visible; both have to push.
+      if (dependencies.moved > 0) {
+        this.#logger.info(
+          { moved: dependencies.moved },
+          'a dependency hold was applied or released',
+        );
+      }
+      if (schedules.moved > 0 || dependencies.moved > 0) this.#onChanged?.();
+      return schedules.moved;
     } catch (error: unknown) {
       this.#logger.error({ err: describeError(error) }, 'the schedule sweep failed; retrying');
       return 0;

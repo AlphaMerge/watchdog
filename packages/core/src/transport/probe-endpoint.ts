@@ -1234,6 +1234,13 @@ export class ProbeEndpoint {
               version: assignments.version,
               upserted: [...(upserts[index] ?? [])],
               removed: [...(removals[index] ?? [])],
+              // **Only the last one lets the probe claim this version** (`R18`). A delta was one
+              // message before `P-148` chunked it, so it arrived whole or not at all; chunked, a
+              // link that drops between messages left the probe holding part of the change under
+              // a fingerprint that says it is current, and the reconnect was answered
+              // `config-unchanged`. An operator's pause of three thousand sensors half-landed
+              // and nothing anywhere disagreed.
+              final: index === messages - 1,
             });
           }
           logger.info(
@@ -1267,13 +1274,16 @@ export class ProbeEndpoint {
           type: 'config-set',
           version: assignments.version,
           sensors: [...first],
+          // The same rule for the full push, and the same reason (`R18`).
+          final: rest.length === 0,
         });
-        for (const chunk of rest) {
+        for (const [index, chunk] of rest.entries()) {
           session.connection.send({
             type: 'config-delta',
             version: assignments.version,
             upserted: [...chunk],
             removed: [],
+            final: index === rest.length - 1,
           });
         }
         logger.info(

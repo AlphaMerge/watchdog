@@ -232,8 +232,17 @@ export class DependencyRepository {
       -- recovery still inside its delay -- and holding propagates down the master chains from
       -- there. UNION rather than UNION ALL, which is what makes a loop terminate: a node already
       -- reached is not followed again, so a cycle contributes nothing and holds nobody.
+      --
+      -- **And each hold carries the outage it came from** (R15). "A cycle contributes nothing"
+      -- is true only while nothing in the cycle is independently Down. With A and B as each
+      -- other's masters and A genuinely down, the seed is {A}, the recursion adds B through A
+      -- and then A again through B -- so A was paused by a hold whose only justification was A
+      -- itself. Inside one transaction A went down -> paused -> unknown, the outage vanished
+      -- and no alarm was ever armed, and it repeated on every scan. Propagating the ground and
+      -- refusing a hold a sensor is its own reason for is what stops that: the genuinely down
+      -- sensor stays down and alarms, and everything downstream of it is still suppressed.
       holding AS (
-        SELECT m.object_id AS master_id
+        SELECT m.object_id AS master_id, m.object_id AS ground
         FROM sensor_runtime m
         WHERE m.state IN ('down', 'down_acknowledged')
            OR (m.dependency_clear_at IS NOT NULL AND m.dependency_clear_at > $1)
@@ -243,7 +252,7 @@ export class DependencyRepository {
         -- A sensor whose own master is holding is paused, and a paused sensor holds whatever
         -- depends on it. Self-reference is excluded for the reason wouldCycle exempts it: a
         -- master never depends on itself.
-        SELECT held.node
+        SELECT held.node, h.ground
         FROM holding h
         JOIN assigned held ON held.master_id = h.master_id AND held.node <> h.master_id
       ),
@@ -252,7 +261,8 @@ export class DependencyRepository {
                a.master_id,
                (a.master_id IS NOT NULL
                 AND a.master_id <> o.id
-                AND a.master_id IN (SELECT master_id FROM holding)) AS paused
+                AND EXISTS (SELECT 1 FROM holding h
+                             WHERE h.master_id = a.master_id AND h.ground <> o.id)) AS paused
         FROM object o
         LEFT JOIN assigned a ON a.node = o.id
         WHERE o.kind = 'sensor'

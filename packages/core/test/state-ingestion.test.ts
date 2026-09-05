@@ -176,11 +176,16 @@ describe(
       ingestor: Ingestor,
       results: readonly CheckResult[],
       batchId = 'b1',
+      backlog?: number,
     ): Promise<string> {
       const reply = await service.acceptResults('probe-state', {
         type: 'results',
         batchId,
         results: [...results],
+        // What the probe says it still has on disk. Absent by default, which is the shape a
+        // probe that does not track it sends — and the shape every test here sent before the
+        // ingestor learned to ask (`R16`, `R17`).
+        ...(backlog === undefined ? {} : { backlog }),
       });
       await ingestor.stop();
       return reply.type;
@@ -874,6 +879,65 @@ describe(
     // -------------------------------------------------------------------------------------
 
     describe('a batch that is hours behind', () => {
+      /** A failing result at a given instant — the shape every case in here delivers. */
+      const failure = (at: Date): CheckResult =>
+        result({ at: at.toISOString(), outcome: 'error', message: 'no reply', channels: [] });
+
+      /** Records what `react` was called with, and whether readings widen the scan (`P-104`). */
+      const reactionStub = (
+        reacted: number[][],
+        reconcilesReadings: boolean,
+      ): {
+        anyWork: () => Promise<boolean>;
+        reconcilesReadings: () => Promise<boolean>;
+        react: (q: unknown, sensorIds: readonly number[]) => Promise<void>;
+      } => ({
+        anyWork: () => Promise.resolve(true),
+        reconcilesReadings: () => Promise.resolve(reconcilesReadings),
+        react: (_q: unknown, sensorIds: readonly number[]) => {
+          reacted.push([...sensorIds]);
+          return Promise.resolve();
+        },
+      });
+
+      /**
+       * A fresh service and ingestor sharing one alarm stub.
+       *
+       * A fresh *pair* per batch on purpose: `deliver` stops the ingestor once it has drained,
+       * which is what makes these deterministic, and a stopped ingestor accepts nothing more.
+       * The stub is shared so the deferral carried between batches is the ingestor's own —
+       * which is the thing under test — rather than an artefact of the harness.
+       */
+      const withStubbedAlarms = (
+        alarms: ReturnType<typeof reactionStub>,
+      ): { service: IngestionService; ingestor: Ingestor } => {
+        const states = new SensorStateService({
+          db,
+          logger: silent,
+          settings: harness.resolver,
+          pauses: new PauseRepository(),
+        });
+        const ingestor = new Ingestor({ db, logger: silent, config: CONFIG, alarms });
+        return {
+          ingestor,
+          service: new IngestionService({
+            db,
+            logger: silent,
+            ingestor,
+            states,
+            resolver: new ChannelResolver({ logger: silent, lookups }),
+          }),
+        };
+      };
+
+      const stateOf = async (): Promise<string | undefined> =>
+        (
+          await db.query<{ state: string }>(
+            'SELECT state FROM sensor_runtime WHERE object_id = $1',
+            [sensorId],
+          )
+        )[0]?.state;
+
       it('is written to history but not reacted to, so nobody is paged for an old outage', async () => {
         // **`P-146`.** The chain's clock is not `now`: `arm` takes `initialDueAt(sensor.since)`,
         // and `since` is the *replayed result's* own timestamp. A Down replayed from six hours
@@ -964,6 +1028,113 @@ describe(
         );
         assert.ok(reacted.length >= 1, 'the batch that can see the present is the one that acts');
       });
+
+      it('still arms an outage whose Down landed inside the batch that was skipped', async () => {
+        // **`R04`, `G02` — the hole `P-146` left, and it is total.** Skipping was justified by
+        // "the drain ends with a live batch, and that one decides the present correctly". It
+        // does not: the reaction is keyed on *this batch's* transitions, and a sensor that goes
+        // Down during the spooled window transitions once — in a skipped batch — and never
+        // transitions again while the outage continues. Every later batch has it in `runtimes`
+        // and not in `transitions`, so nothing arms it. One outage, zero alarms, for an outage
+        // that is happening right now.
+        //
+        // The distinguishing detail against the test above: *both* failures go in the stale
+        // batch, so the two-step rule reaches Down there rather than in the live one.
+        const reacted: number[][] = [];
+        const stub = reactionStub(reacted, false);
+
+        const long = Date.now() - 6 * 60 * 60_000;
+        // **One ingestor across both batches**, unlike the cases around it: what is deferred is
+        // held on the ingestor, so a fresh one per batch would be testing the harness.
+        const { service, ingestor } = withStubbedAlarms(stub);
+        const offer = async (batchId: string, results: readonly CheckResult[]): Promise<void> => {
+          await service.acceptResults('probe-state', {
+            type: 'results',
+            batchId,
+            results: [...results],
+          });
+        };
+
+        await offer('r04-drain', [
+          failure(new Date(long)),
+          // The second failure is what reaches Down — and it is 30 s later, still hours old.
+          failure(new Date(long + 30_000)),
+        ]);
+        assert.deepEqual(reacted, [], 'a six-hour-old batch still cannot decide the present');
+        assert.equal(await stateOf(), 'down', 'but the state it decided is on the row');
+        assert.equal(
+          ingestor.stats().deferredReactions,
+          1,
+          'the sensor that moved is held, not dropped',
+        );
+
+        // The live batch that ends the drain carries no transition — the sensor is already Down
+        // and stays Down — so before this fix `scanned` was empty and nothing was ever armed.
+        await offer('r04-live', [failure(new Date())]);
+        await ingestor.stop();
+        assert.deepEqual(
+          reacted,
+          [[sensorId]],
+          'the outage that started during the drain was never armed',
+        );
+        assert.equal(
+          ingestor.stats().deferredReactions,
+          0,
+          'and the deferral is cleared once it has been reconciled',
+        );
+      });
+
+      it('does not react to a drain batch that carries no transition at all', async () => {
+        // **`R16`.** Staleness was folded over `transitions`, not results — while the ticket's
+        // own text says "a batch whose newest *result* is older than the catch-up grace". During
+        // a drain most batches change no state, so `transitions` is empty, the batch reads as
+        // live, and on any installation with a threshold trigger anywhere `scanned` widens to
+        // every sensor in it: `react` over runtime rows written from hours-old readings, arming
+        // from a `since` six hours past. The storm the ticket describes, one batch later.
+        const reacted: number[][] = [];
+        // `reconcilesReadings: true` is the widening case — an installation with any threshold
+        // trigger — and it is the one that turns this from a no-op into the storm.
+        const stub = reactionStub(reacted, true);
+
+        const long = Date.now() - 6 * 60 * 60_000;
+        const first = withStubbedAlarms(stub);
+        await deliver(first.service, first.ingestor, [failure(new Date(long))], 'r16-a');
+        assert.deepEqual(reacted, [], 'the batch that carries the transition is stale');
+
+        // A second stale batch: same failing sensor, already at its final state, so no
+        // transition. Its results are still six hours old.
+        const second = withStubbedAlarms(stub);
+        await deliver(second.service, second.ingestor, [failure(new Date(long + 60_000))], 'r16-b');
+        assert.deepEqual(reacted, [], 'a batch with no transition is not therefore current');
+      });
+
+      it('believes a probe that says its spool is empty, whatever its clock says', async () => {
+        // **`R17`.** `transition.at` is the probe's own wall clock — that is the premise of
+        // `P-145` — and backward skew is deliberately unbounded, because a spool replay depends
+        // on it. So a probe host five minutes slow stamps every *live* result in the past, every
+        // batch it ever sends is judged stale, and no sensor under that probe is ever armed. It
+        // is connected, heartbeating and delivering; the UI shows sensors going Down; no
+        // notification is ever sent. The condition is permanent, not a catch-up that ends.
+        //
+        // `backlog` is already on the wire for the pacer and settles it without a clock.
+        const reacted: number[][] = [];
+        const stub = reactionStub(reacted, false);
+        const slow = Date.now() - 5 * 60_000;
+
+        const drifted = withStubbedAlarms(stub);
+        await deliver(
+          drifted.service,
+          drifted.ingestor,
+          [failure(new Date(slow)), failure(new Date(slow + 30_000))],
+          'r17',
+          0,
+        );
+        assert.deepEqual(
+          reacted,
+          [[sensorId]],
+          'a probe with nothing left to replay is live, however wrong its clock',
+        );
+      });
     });
 
     describe('a pause that commits while a batch is in flight', () => {
@@ -1010,6 +1181,70 @@ describe(
           2,
           'and the check still happened, so what it measured is still recorded',
         );
+      });
+
+      it('is not clobbered by a batch decided while the sensor was acknowledged either', async () => {
+        // **`R05` — the guard `P-147` added was written on the cause, and the cause is shared.**
+        // It exempted `user`, `parent`, `schedule` and `dependency`, reasoning that "a write
+        // whose own cause *is* a pause is the pause being applied". But `user` is also the cause
+        // of both halves of an acknowledgement: `acknowledged()` returns down_acknowledged/user,
+        // and an acknowledgement lapsing on a still-failing sensor returns down/user. So on any
+        // sensor carrying an acknowledgement — which is to say, during exactly the outage an
+        // operator is most likely to pause for maintenance — the race was unguarded, and the
+        // paused row was overwritten with the result's own state.
+        //
+        // The discriminator is the write's *state*, not its cause.
+        const warm = build();
+        await warm.service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'ack-a',
+          results: [failedResult(1), failedResult(2)],
+        });
+        await warm.ingestor.stop();
+        assert.equal((await runtime()).state, 'down');
+
+        // Acknowledged for ten minutes, so the racing result — eleven minutes in — is the one
+        // that *lapses* it, which `machine.ts` answers with `{ state: 'down', cause: 'user' }`.
+        // That pairing is the whole point: a cause of `user` on a write that is not a pause.
+        const resolved = resolveAcknowledgement({ kind: 'duration', minutes: 10 }, 'ticket 41', AT);
+        assert.ok('acknowledgement' in resolved);
+        await db.tx((q) =>
+          build().states.acknowledge(
+            q,
+            [sensorId],
+            resolved.acknowledgement,
+            { kind: 'user', label: 'tester' },
+            AT,
+          ),
+        );
+        assert.equal((await runtime()).state, 'down_acknowledged');
+
+        // One service throughout, warmed first: `decide` reads layer 1 from that cache, and the
+        // pause has to land *after* it has been read or there is no race to reproduce.
+        const racing = build();
+        await racing.service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'ack-b',
+          results: [failedResult(3)],
+        });
+        await db.query(`UPDATE sensor_runtime SET paused_manually = true WHERE object_id = $1`, [
+          sensorId,
+        ]);
+        await racing.service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'ack-c',
+          // Past the acknowledgement's ten minutes, so it lapses: down, cause `user`.
+          results: [failedResult(11)],
+        });
+        await racing.ingestor.stop();
+
+        const row = await runtime();
+        assert.notEqual(
+          row.state,
+          'down',
+          'the pause on the row outranks an acknowledged result decided before it existed',
+        );
+        assert.equal(row.state, 'down_acknowledged', 'the row keeps what the pause left on it');
       });
     });
 

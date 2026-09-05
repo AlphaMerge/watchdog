@@ -204,6 +204,10 @@ export class IngestionService {
       // ingestor refused would make the resent batch divide against itself.
       ...(prepared.counters.size === 0 ? {} : { counters: prepared.counters }),
       ...(decisions === undefined ? {} : { states: decisions }),
+      // The probe's own answer to "am I still catching up", which is what decides whether the
+      // alarm reaction runs on this batch or is deferred (`R16`, `R17`). Absent when the probe
+      // does not track it, and then the ingestor falls back to comparing timestamps.
+      ...(message.backlog === undefined ? {} : { draining: message.backlog > 0 }),
     });
     if (!outcome.accepted) {
       // Nothing committed, so the probe will offer the batch again — but the machine has

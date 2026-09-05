@@ -470,7 +470,10 @@ async function serve(): Promise<void> {
       configNotifier.flush();
     },
   });
-  pauseSweep.start();
+  // **Awaited, for the reason the schedule sweep below is** (`P-131`, `G10`). This is the only
+  // thing that applies a maintenance window whose `starts_at` passed while the core was down,
+  // and `ProbeConfigService` filters on the flags it writes.
+  await pauseSweep.start();
   lifecycle.onShutdown({
     name: 'pause-sweep',
     timeoutMs: 2_000,
@@ -596,12 +599,15 @@ async function serve(): Promise<void> {
   // Read from the queue rather than counted in memory, so a core that restarted five minutes ago
   // does not report a clean sheet over a queue full of undelivered alarms (N-13). `P-12` turns
   // the same reader into channels on the Core Health sensor.
-  const deliveryHealth = new DeliveryHealthReader({
-    staleAfterMs: config.notifications.retry.staleAfterSeconds * 1_000,
-  });
   // The same evaluation the dispatcher makes every pass, so health and delivery cannot disagree
   // about which templates are currently parked (`P-125`).
   const templateActivation = new TemplateActivation();
+  const deliveryHealth = new DeliveryHealthReader({
+    staleAfterMs: config.notifications.retry.staleAfterSeconds * 1_000,
+    // Given to the reader rather than passed at each call (`R06`): Core Health passed it and
+    // the API route did not, so the two answered different numbers for the same question.
+    activation: templateActivation,
+  });
   // What "send test notification" sends through (N-14), and the same transports the alarms use.
   const tester = new NotificationTester({
     db,

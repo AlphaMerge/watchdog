@@ -773,6 +773,34 @@ describe(
       );
     });
 
+    it('leaves a standing alarm alone when this build does not know the trigger kind', async () => {
+      // **`G13` — the same case one level up, and `P-114` did not cover it.** `react` claims a
+      // trigger out of the alarm map only inside the two `if (trigger.kind === …)` branches, so
+      // a trigger whose *kind* is unrecognised never claims its alarm and the orphan sweep at
+      // the end of the sensor deletes it — silently, counted as `cleared`.
+      //
+      // `P-139` taught the read paths to tolerate an unknown kind on exactly the premise that
+      // such rows exist: a downgrade, or a row written by a newer build. It left the one path
+      // that destroys data. Rolling forward then arms the chain fresh from the sensor's current
+      // `since`: a second initial page for one continuous outage with the escalation deadline
+      // reset, which is what "one outage, one alarm" forbids.
+      const trigger = await downTrigger(deviceId);
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(60));
+      assert.equal((await standing()).length, 1);
+
+      await db.query(`UPDATE notification_trigger SET kind = 'from-the-future' WHERE id = $1`, [
+        trigger,
+      ]);
+
+      await scan([sensorId], false, at(120));
+      assert.equal(
+        (await standing()).length,
+        1,
+        'the alarm for an outage that is still happening was deleted as an orphan',
+      );
+    });
+
     it('does not overwrite an acknowledgement that lands while the sweep is deciding', async () => {
       // **The sweep is a read-modify-write with nothing between the halves.** It reads the due
       // rows, decides what each owes from what it read, and writes that decision back blind. An

@@ -595,7 +595,7 @@ export type CoreToProbeMessage =
       retryAfterMs: number;
     }
   /** The whole assignment set. Sent on connect, and whenever a delta would be larger. */
-  | { type: 'config-set'; version: string; sensors: SensorAssignment[] }
+  | { type: 'config-set'; version: string; sensors: SensorAssignment[]; final?: boolean }
   /**
    * What changed since the version the probe is holding.
    *
@@ -604,7 +604,27 @@ export type CoreToProbeMessage =
    * the session is alive. After a disconnect the answer is a snapshot or `config-unchanged`,
    * never a delta against a guess.
    */
-  | { type: 'config-delta'; version: string; upserted: SensorAssignment[]; removed: number[] }
+  /**
+   * `final: false` says another message of this push is still coming (`R18`).
+   *
+   * **A version is only true when the whole push has landed.** A push above the message cap is
+   * a `config-set` plus N-1 deltas at one version, and the probe stamped itself as holding that
+   * version on the first of them — so a link that dropped between chunks left it with part of
+   * the change and a fingerprint that says it is current. It reconnects, the fingerprint
+   * matches, the core answers `config-unchanged`, and nothing re-pushes: an operator's pause of
+   * three thousand sensors half-lands and nothing anywhere disagrees. The ack check (`P-149`)
+   * cannot rescue it, because the acks for the missing chunks never arrive — the connection is
+   * what broke.
+   *
+   * Absent means final, so an older core that does not send it still gets a probe that stamps.
+   */
+  | {
+      type: 'config-delta';
+      version: string;
+      upserted: SensorAssignment[];
+      removed: number[];
+      final?: boolean;
+    }
   /** The probe's fingerprint already matches. Nothing to send, and nothing to apply. */
   | { type: 'config-unchanged'; version: string }
   /** Start or resume a sweep (`D-01`). Sending one for a run already running resumes it. */

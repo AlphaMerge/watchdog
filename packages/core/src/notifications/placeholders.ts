@@ -27,7 +27,7 @@ export interface MessageContext {
   readonly location: string;
   readonly comments: string;
   readonly tags: readonly string[];
-  /** The sensor's own priority, 1 (highest) to 5 — not the template's. */
+  /** The sensor's own priority, 1 (lowest) to 5 (highest) — not the template's (`P-137`). */
   readonly priority: number;
   readonly state: SensorState;
   /** What it was before. Null when this is the first state it has ever had. */

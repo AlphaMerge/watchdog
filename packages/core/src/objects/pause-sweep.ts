@@ -81,8 +81,24 @@ export class PauseSweep {
     this.#onChanged = options.onChanged;
   }
 
-  start(): void {
+  /**
+   * One sweep now, then on the tick.
+   *
+   * **The immediate one is the same argument `P-131` made for schedules** (`G10`).
+   * `paused_manually` and `paused_by_parent` are stored flags that `ProbeConfigService` filters
+   * on in the same predicate as `paused_by_schedule`, and this sweep is the only thing that
+   * applies a maintenance window whose `starts_at` passed while the core was down — `#since`
+   * starts at the epoch precisely so the first pass reconciles them. Arming without sweeping
+   * put the first pass up to thirty seconds after boot, and the probe endpoint opens in the
+   * meantime: the local probe reconnects within a second and is handed a configuration built
+   * from flags that say to keep scanning a box somebody is patching. `P-131` closed one of the
+   * two restart holes and left the other, on its own stated reasoning.
+   *
+   * Awaited, so a caller can order it before anything is served. Production does.
+   */
+  async start(): Promise<void> {
     if (this.#timer !== undefined || this.#stopped) return;
+    await this.sweep();
     this.#arm();
   }
 

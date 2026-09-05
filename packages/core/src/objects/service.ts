@@ -1840,6 +1840,15 @@ export class ObjectService {
         const affected = await this.#pauses.recompute(q, id, movedAt);
         await this.#states?.reevaluate(q, affected, movedAt, {
           message: 'moved under a paused parent',
+          // **The seventh caller `P-140` missed, and the only one that can actually write the
+          // wrong words** (`G12`). Moving a subtree out from under a paused group flips
+          // `paused_by_parent` true→false, and a sensor still held by a maintenance window or a
+          // dependency then changes its reported cause from `parent` to `schedule` — a real
+          // transition, with a foreign cause, carrying "moved under a paused parent" as its
+          // message for a sensor that was moved *out* from under one. Without `sources`,
+          // `reevaluate` reads the caller as owning every cause, which is the condition `P-94`
+          // and `P-140` both exist to remove.
+          sources: PAUSE_CAUSES_THIS_API_OWNS,
         });
       }
 
@@ -1928,6 +1937,10 @@ export class ObjectService {
       const clonedSensors = await this.#pauses.recompute(q, cloneRoot.id, clonedAt);
       await this.#states?.reevaluate(q, clonedSensors, clonedAt, {
         message: `cloned from #${String(id)}`,
+        // Benign today — a freshly cloned sensor's schedule and dependency flags are false, so
+        // the decided cause is always one this API owns — and declared anyway, because "it
+        // happens to be unreachable" is not a property a later change preserves (`G12`).
+        sources: PAUSE_CAUSES_THIS_API_OWNS,
       });
 
       const bound = this.#resolver.withExecutor(q);

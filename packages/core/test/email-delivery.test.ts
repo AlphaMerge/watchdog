@@ -116,6 +116,16 @@ describe('the email transport', () => {
      * either took everything or threw.
      */
     rejected: readonly string[] = [],
+    /**
+     * Addresses the relay took it for (`R13`).
+     *
+     * **What nodemailer actually reports, and this stub did not.** A recipient *entry* is a
+     * 320-character string that nothing stops from holding two addresses, so the envelope can
+     * carry more recipients than the template resolved entries — which is how a partial
+     * rejection satisfied a "rejected everything" test written as a count against our own list.
+     * Undefined leaves it off, which is the older shape and exercises the fallback.
+     */
+    accepted?: readonly string[],
   ) {
     const sent: { relay: string; mail: Record<string, unknown> }[] = [];
     const build = (built: SmtpRelay): never =>
@@ -131,7 +141,11 @@ describe('the email transport', () => {
             return Promise.reject(error);
           }
           sent.push({ relay: name, mail });
-          return Promise.resolve({ messageId: `<${name}>`, rejected: [...rejected] });
+          return Promise.resolve({
+            messageId: `<${name}>`,
+            rejected: [...rejected],
+            ...(accepted === undefined ? {} : { accepted: [...accepted] }),
+          });
         },
         close: () => undefined,
       }) as never;
@@ -268,6 +282,21 @@ describe('the email transport', () => {
       false,
       'a rejection at RCPT TO is the relay\u2019s permanent answer about that address',
     );
+  });
+
+  it('does not call a partial rejection a total one when one entry held two addresses', async () => {
+    // **`R13`.** "Nobody got it" was a count against `to.length` — the recipient *entries* the
+    // template resolved — and one entry is a string that nothing stops from holding two
+    // addresses: `ops@example.test, oncall@example.test` passes the `includes('@')` check the
+    // template applies. The relay parses that into two envelope recipients, refuses one and
+    // takes the other, and `1 >= 1` held: a message a real person received was reported a
+    // permanent failure, the fallback relay sent them a second copy, and with no fallback
+    // Delivery Health went Down over an alarm that was delivered.
+    const { build } = stub({}, ['ops@example.test'], ['oncall@example.test']);
+    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const result = await transport.send(message());
+    assert.ok(result.ok, 'somebody received it, so it was delivered');
+    assert.match(result.detail, /rejected ops@example.test/, 'and the miss is still said');
   });
 
   it('still counts a partial send as delivered, and says who missed it', async () => {
