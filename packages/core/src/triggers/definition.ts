@@ -205,6 +205,20 @@ class Registry {
     return this.#entry(id).kind;
   }
 
+  /**
+   * The kind, or `undefined` for one this build does not know (`P-139`).
+   *
+   * **For reading, never for writing.** A stored trigger of an unrecognised kind — a downgrade,
+   * or a row written by a newer build — made `get` throw on the *list*, so the whole trigger tab
+   * answered 500 and the operator could not see any of their triggers; and it threw again in
+   * `delete`, which builds an audit summary through the kind, so the one action that would have
+   * cleared the bad row was the one action that could not be taken. Saving still goes through
+   * `get`: a kind this build cannot validate is a kind it must not accept.
+   */
+  tryGet(id: string): TriggerKind | undefined {
+    return this.#entries.get(id)?.kind;
+  }
+
   #entry(id: string): { kind: TriggerKind; validate: ValidateFunction } {
     const entry = this.#entries.get(id);
     if (entry === undefined) {

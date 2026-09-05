@@ -1,15 +1,31 @@
 import { describeError, type Logger } from '@ms/shared';
-import type { Database } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
 import type { SchedulePauses } from './pauses.js';
 
 export interface ScheduleSweepOptions {
   db: Database;
   pauses: SchedulePauses;
+  /**
+   * Settles `paused_by_dependency` after a window has moved (`P-136`).
+   *
+   * **Required, and it closes the last way into `P-87`'s failure.** A master pausing because its
+   * schedule closed is switched off rather than Down (`docs/state-machine.md` §3), so anything
+   * it was holding must be released — and the sweep is the one path that moves a window without
+   * a mutation to reach `DependencySync` through. The dependents kept the flag, dropped out of
+   * the probe configuration, and were never scanned again; the pause API, computing what holds
+   * them from the master's current state, said nothing did and refused to resume them.
+   */
+  dependencies: DependencySettler;
   logger: Logger;
   /** Poked after a sweep that moved something, so probes learn within the same second. */
   onChanged?: () => void;
   /** Override for tests. Production sweeps on the wall-clock minute and should not be told to. */
   intervalMs?: number;
+}
+
+/** Just enough of `DependencyPauses` to settle the flags after a window has moved. */
+export interface DependencySettler {
+  recompute(q: Queryable, at: Date): Promise<{ moved: number }>;
 }
 
 /** Sixty seconds: schedules have minute resolution, so nothing finer can be observed. */
@@ -36,6 +52,7 @@ const MINUTE = 60_000;
 export class ScheduleSweep {
   readonly #db: Database;
   readonly #pauses: SchedulePauses;
+  readonly #dependencies: DependencySettler;
   readonly #logger: Logger;
   readonly #onChanged: (() => void) | undefined;
   readonly #intervalMs: number | undefined;
@@ -46,6 +63,7 @@ export class ScheduleSweep {
   constructor(options: ScheduleSweepOptions) {
     this.#db = options.db;
     this.#pauses = options.pauses;
+    this.#dependencies = options.dependencies;
     this.#logger = options.logger.child({ component: 'schedule-sweep' });
     this.#onChanged = options.onChanged;
     this.#intervalMs = options.intervalMs;
@@ -80,7 +98,13 @@ export class ScheduleSweep {
     if (this.#running) return 0;
     this.#running = true;
     try {
-      const result = await this.#db.tx((q) => this.#pauses.recompute(q, now));
+      const result = await this.#db.tx(async (q) => {
+        const moved = await this.#pauses.recompute(q, now);
+        // In the same transaction, so a window that closes on a master never leaves a moment
+        // where the master is paused and its dependents still think it is Down (`P-136`).
+        await this.#dependencies.recompute(q, now);
+        return moved;
+      });
       if (result.moved > 0) {
         this.#logger.info(
           { moved: result.moved, transitions: result.transitions, inactive: result.inactive },

@@ -25,6 +25,7 @@ import { SchedulePauses } from '../src/schedules/pauses.js';
 import { ScheduleRepository } from '../src/schedules/repository.js';
 import { ScheduleService } from '../src/schedules/service.js';
 import { ScheduleSweep } from '../src/schedules/sweep.js';
+import type { DependencyPauses } from '../src/dependencies/pauses.js';
 import { ScheduleSync } from '../src/schedules/sync.js';
 import { SCHEDULE_ID } from '../src/settings/registry.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -414,6 +415,7 @@ describe(
     let app: FastifyInstance;
     let schedules: ScheduleService;
     let pauses: SchedulePauses;
+    let settler: DependencyPauses;
     let repo: ScheduleRepository;
     let probeId: number;
     let groupId: number;
@@ -435,6 +437,11 @@ describe(
       repo = new ScheduleRepository();
       assert.ok(h.states !== undefined);
       pauses = new SchedulePauses({ logger: silent, states: h.states, repository: repo });
+      // The one the harness built, so the sweep settles the same flags these tests read
+      // (`P-136`). A stub here would make the sweep's own settle unobservable.
+      const built = h.dependencies;
+      assert.ok(built !== undefined);
+      settler = built;
       const sync = new ScheduleSync({ pauses, logger: silent });
       // Where it sits in production: inside the mutation's own transaction, behind the audit
       // sink every write already goes through.
@@ -896,6 +903,7 @@ describe(
       const sweep = new ScheduleSweep({
         db,
         pauses,
+        dependencies: settler,
         logger: silent,
         intervalMs: 60_000,
         onChanged: () => {
@@ -943,7 +951,13 @@ describe(
       // happened to be when the suite did.
       await db.query(`UPDATE schedule SET polarity = 'inactive' WHERE id = $1`, [window]);
 
-      const sweep = new ScheduleSweep({ db, pauses, logger: silent, intervalMs: 60 * 60_000 });
+      const sweep = new ScheduleSweep({
+        db,
+        pauses,
+        dependencies: settler,
+        logger: silent,
+        intervalMs: 60 * 60_000,
+      });
       await sweep.start();
       sweep.stop();
 
@@ -961,7 +975,13 @@ describe(
           anyWork: () => Promise.reject(new Error('boom')),
         } as unknown as ScheduleRepository,
       });
-      const sweep = new ScheduleSweep({ db, pauses: broken, logger: silent, intervalMs: 60_000 });
+      const sweep = new ScheduleSweep({
+        db,
+        pauses: broken,
+        dependencies: settler,
+        logger: silent,
+        intervalMs: 60_000,
+      });
       assert.equal(await sweep.sweep(OUTSIDE), 0);
     });
 

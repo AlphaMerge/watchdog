@@ -651,6 +651,31 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     assert.equal(response.json<{ error: { code: string } }>().error.code, 'TRIGGER_INVALID');
   });
 
+  it('still lists and still deletes a trigger of a kind this build does not know', async () => {
+    // **`P-139`.** A row written by a newer build, or left behind by a downgrade, made
+    // `triggerKinds.get` throw on the *list* — so the whole trigger tab answered 500 and the
+    // operator could not see any of their triggers, including the one causing it. It threw again
+    // in `delete`, which builds its audit summary through the kind, so the one action that would
+    // have cleared the row was the one action that could not be taken.
+    const created = await triggers.create(testActor, sensorId, {
+      kind: 'state',
+      settings: { state: 'down', initialTemplateId: 7 },
+    });
+    await db.query(`UPDATE notification_trigger SET kind = 'from-the-future' WHERE id = $1`, [
+      created.id,
+    ]);
+
+    const listed = await triggers.effectiveFor(sensorId);
+    assert.equal(listed.length, 1, 'the list still answers');
+    const only = listed[0];
+    assert.ok(only !== undefined);
+    assert.equal(only.kind, 'from-the-future');
+    assert.match(only.summary, /does not know the trigger kind/);
+
+    await triggers.delete(testActor, created.id);
+    assert.equal((await triggers.effectiveFor(sensorId)).length, 0, 'and the row can be cleared');
+  });
+
   it('404s for a trigger that is not there', async () => {
     const response = await app.inject({ method: 'DELETE', url: '/api/v1/triggers/999999' });
     assert.equal(response.statusCode, 404);

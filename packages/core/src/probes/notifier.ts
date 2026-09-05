@@ -49,11 +49,31 @@ export class ConfigChangeNotifier implements AuditSink {
     this.#debounceMs = options.debounceMs ?? 250;
   }
 
-  record(_q: Queryable, _actor: Actor, mutations: readonly Mutation[], _at: Date): Promise<void> {
+  record(q: Queryable, _actor: Actor, mutations: readonly Mutation[], _at: Date): Promise<void> {
     // Nothing here touches the database or awaits anything: this runs inside the caller's
     // transaction, and a push that made mutations slower would be a bad trade for a probe
     // learning about a change a quarter of a second sooner.
-    if (mutations.length > 0) this.#schedule();
+    if (mutations.length === 0) return Promise.resolve();
+
+    // **Armed after the commit, not before it** (`P-138`). The debounce is 250 ms and this runs
+    // *inside* the mutation's transaction, so any transaction that takes longer than that — a
+    // bulk operation, a tree plan, a clone of a large subtree, a busy database — had its push
+    // fire against the uncommitted tree. The recomputation then produced the fingerprint that was
+    // already in place, decided nothing had moved, and pushed nothing; the timer was spent, so
+    // nothing rescheduled it. The probes were never told, and stayed on the old configuration
+    // until something else happened to change something.
+    //
+    // The class comment argued that running *after* the transaction is safe, including after a
+    // rollback, which is true and was never the risk. `afterCommit` is `U-02`'s hook and exists
+    // for exactly this: a rolled-back transaction schedules nothing at all.
+    if (q.afterCommit !== undefined) {
+      q.afterCommit(() => {
+        this.#schedule();
+      });
+      return Promise.resolve();
+    }
+    // No transaction to wait for — a sink called outside `tx`. Schedule as before.
+    this.#schedule();
     return Promise.resolve();
   }
 

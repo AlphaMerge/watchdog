@@ -257,6 +257,19 @@ describe('rendering a template', () => {
   });
 });
 
+describe('what the placeholder list tells an operator', () => {
+  it('says which end of the priority scale is the important one, and says it correctly', () => {
+    // **`P-137`.** The object model's own definition is the filter: `priorityMin` selects
+    // `priority >= n`, which only reads as "at least this important" if a larger number is more
+    // important, and the alarms list sorts descending for the same reason. The placeholder list
+    // is the one place the meaning is written down for an operator, and it said the opposite —
+    // which would put the least important sensors at the top of somebody's triage.
+    const described = describePlaceholders().find((one) => one.name === 'priority');
+    assert.ok(described !== undefined);
+    assert.match(described.description, /5 \(highest\)/);
+  });
+});
+
 describe('escaping a value into an HTML email', () => {
   it('escapes the five characters that can leave a text position', () => {
     // `P-118`. The email transport declared no escaping at all, so `html: message.body` put

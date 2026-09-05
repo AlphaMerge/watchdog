@@ -10184,6 +10184,42 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 5 new. Mutation 5/5.
 
+- [x] **P-136 — A window closing on the clock left a master's dependents held**
+      The last way into `P-87`'s failure. A schedule *edit* reaches `DependencySync`; a window
+      closing at 18:00 does not — there is no mutation, only the sweep. So the master was paused
+      and its dependents kept `paused_by_dependency`, dropped out of the probe configuration and
+      were never scanned again, while the pause API said nothing was holding them and refused to
+      resume them. The sweep settles the dependency flags in its own transaction now, and the
+      settler is a required constructor argument.
+
+- [x] **P-137 — `%priority` was documented upside down**
+      "1 (highest) to 5", against an object model whose own filter is `priority >= n` and whose
+      alarms list sorts descending. The placeholder list is the one place the meaning is written
+      down for an operator, and following it would put the least important sensors at the top of
+      somebody's triage. (A *template's* priority really is 1-high — it becomes `X-Priority` and
+      every mail client agrees on that — which is presumably where the confusion came from.)
+
+- [x] **P-138 — The configuration push could fire before the mutation committed**
+      The notifier rides the audit sink, which runs inside every mutation's transaction, and
+      debounces for 250 ms. Any transaction slower than that — a bulk operation, a tree plan, a
+      clone of a large subtree, a busy database — had its push fire against the uncommitted tree:
+      the recomputation produced the fingerprint already in place, decided nothing had moved and
+      pushed nothing, and the spent timer scheduled no other. The probes stayed on the old
+      configuration until something else happened to change something. The class comment argued
+      that running *after* a transaction is safe, including after a rollback — true, and never
+      the risk. It is armed from `afterCommit` now, so a rollback schedules nothing at all.
+
+- [x] **P-139 — One trigger of an unknown kind broke the whole tab, and could not be deleted**
+      A row written by a newer build, or left by a downgrade, made `triggerKinds.get` throw on the
+      *list* — so the trigger tab answered 500 and the operator could not see any of their
+      triggers, including the one causing it. It threw again in `delete`, which builds its audit
+      summary through the kind, so the one action that would clear the row was the one action that
+      could not be taken. Reading tolerates an unknown kind now and says so in the summary;
+      *saving* still goes through `get`, because a kind this build cannot validate is one it must
+      not accept.
+
+      Tests: 6 new. Mutation 4/4.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

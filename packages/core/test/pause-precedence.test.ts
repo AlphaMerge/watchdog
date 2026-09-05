@@ -10,6 +10,7 @@ import { ProbeConfigService } from '../src/probes/config.js';
 import { ScheduleService } from '../src/schedules/service.js';
 import { SchedulePauses } from '../src/schedules/pauses.js';
 import { ScheduleSync } from '../src/schedules/sync.js';
+import { ScheduleSweep } from '../src/schedules/sweep.js';
 import { SCHEDULE_ID } from '../src/settings/registry.js';
 import { PAUSE_PRECEDENCE, PAUSE_SOURCES, type PauseSource } from '../src/state/tables.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -497,6 +498,44 @@ describe(
         (await flagsOf(sensorId)).active,
         [],
         'so the dependent is released, without waiting for something else to recompute it',
+      );
+    });
+
+    it('releases a dependency when the sweep closes the window on the master', async () => {
+      // **The last way into `P-87`'s failure** (`P-136`). A schedule *edit* reaches
+      // `DependencySync`; a window closing on the clock does not — there is no mutation, only the
+      // sweep. So a master whose window shut at 18:00 was paused and its dependents kept
+      // `paused_by_dependency`, dropped out of the probe configuration and were never scanned
+      // again, while the pause API said nothing was holding them and refused to resume them.
+      await turnOn('dependency');
+      assert.deepEqual((await flagsOf(sensorId)).active, ['dependency']);
+
+      const window = (
+        await schedules.create(testActor, {
+          name: `master-hours-${String(process.hrtime.bigint())}`,
+          periods: 'mo:08:00-mo:18:00',
+        })
+      ).id;
+      await h.service.setSetting(testActor, masterId, SCHEDULE_ID.key, window);
+
+      // The sweep, at a time outside the window — which is what 18:00 looks like from here.
+      const dependencies = h.dependencies;
+      assert.ok(dependencies !== undefined);
+      const sweep = new ScheduleSweep({
+        db,
+        pauses: schedulePauses,
+        dependencies,
+        logger: silent,
+        intervalMs: 60 * 60_000,
+      });
+      await sweep.sweep(OUTSIDE);
+      sweep.stop();
+
+      assert.equal((await flagsOf(masterId)).state, 'paused');
+      assert.deepEqual(
+        (await flagsOf(sensorId)).active,
+        [],
+        'the dependent is released by the sweep itself, not by whatever happens next',
       );
     });
 

@@ -96,7 +96,20 @@ export const PLACEHOLDERS = define([
   },
   {
     name: 'priority',
-    description: 'The sensor’s priority, 1 (highest) to 5.',
+    /**
+     * **5 is the highest, and this said the opposite** (`P-137`).
+     *
+     * The object model's own definition is the filter: `priorityMin` selects `priority >= n`,
+     * which only reads as "at least this important" if a larger number is more important. The
+     * alarms list sorts descending for the same reason. An operator reading "1 (highest)" in the
+     * placeholder list — the one place the meaning is written down for them — would put the
+     * least important sensors at the top of their own notification triage, which is the one
+     * direction of that mistake that matters at three in the morning.
+     *
+     * Not to be confused with a *template's* priority, which is the mail convention (1 high, 5
+     * low) because it becomes `X-Priority` and every mail client already agrees on that.
+     */
+    description: 'The sensor’s priority, 1 (lowest) to 5 (highest).',
     resolve: (c) => String(c.priority),
   },
   { name: 'status', description: 'The state the notification is about.', resolve: (c) => c.state },

@@ -139,7 +139,11 @@ export class TriggerService {
             objectId: before.objectId,
             triggerId: id,
             triggerKind: before.kind,
-            summary: triggerKinds.get(before.kind).describe(before.settings),
+            // Not through `get`, which throws for a kind this build does not know — and deleting
+            // it is the one action that clears the row (`P-139`).
+            summary:
+              triggerKinds.tryGet(before.kind)?.describe(before.settings) ??
+              `a trigger of the unknown kind "${before.kind}"`,
           },
         ],
         now,
@@ -182,14 +186,20 @@ export class TriggerService {
     inherited: boolean,
     definedOn: { objectId: ObjectId; name: string },
   ): TriggerView {
-    const kind = triggerKinds.get(stored.kind);
+    // **Readable even when this build does not know the kind** (`P-139`). One row of an
+    // unrecognised kind used to make the whole list throw, so an operator could not see any of
+    // their triggers — and the row that caused it was the one they needed to find.
+    const kind = triggerKinds.tryGet(stored.kind);
     return {
       id: stored.id,
       kind: stored.kind,
-      kindName: kind.name,
+      kindName: kind?.name ?? stored.kind,
       settings: stored.settings,
       enabled: stored.enabled,
-      summary: kind.describe(stored.settings),
+      summary:
+        kind === undefined
+          ? `this build does not know the trigger kind "${stored.kind}"`
+          : kind.describe(stored.settings),
       inherited,
       definedOn,
       createdAt: stored.createdAt.toISOString(),

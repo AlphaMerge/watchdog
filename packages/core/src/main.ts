@@ -513,6 +513,9 @@ async function serve(): Promise<void> {
   const scheduleSweep = new ScheduleSweep({
     db,
     pauses: schedulePauses,
+    // A master pausing because its window closed is switched off, not Down, so what it was
+    // holding is released in the same transaction (`P-136`).
+    dependencies: dependencyPauses,
     logger,
     onChanged: () => {
       configNotifier.flush();
