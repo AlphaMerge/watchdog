@@ -319,7 +319,72 @@ production change turns four of the seventeen red, including the two the panel h
 name. This is entry 10's defect at the scale of a subsystem: there the missing call was three
 lines above the assertion, here it was in a shared helper every case in the file depended on.
 
+## The four the notifications panel found, in the guards themselves
+
+A second panel, over notifications, schedules and triggers, and then over five areas a critic
+said nobody had looked at. It confirmed 45 defects. Four of them were not defects in the code
+under review at all — they were the tests that were supposed to be watching it.
+
+### 18. A matrix that asserted the resolver against itself (`A-11`)
+
+`access-matrix.test.ts` is named for Phase 9's exit criterion: "an access-control test matrix
+passes for every combination of role, group and tree position", and its own comment says this is
+"where a route that forgot to ask would show up". Twelve rows, all green, for a year.
+
+Every one of them called `GET /objects/:id/access/effective` — the endpoint whose entire job is
+to *report* what the resolver says. So the matrix asserted `AccessService` against
+`AccessService`, and would have passed identically on a build where no route enforced anything.
+Which is what the build was: `requireFor` was called by nothing, `resolveFor` by that one
+reporting route, and every mutating route in the installation was open to any authenticated
+principal.
+
+The file's other half, the credential sweep, filtered to `GET` — and it says why, in a comment
+about hand-maintained lists going stale. **A sweep of reads cannot notice that no write is
+guarded.** Both halves were carefully built; neither could see the hole between them.
+
+### 19. Two harnesses missing the thing the defect was in (`P-133`, `A-11`)
+
+`pause-precedence.test.ts` builds its `ScheduleService` with a `DatabaseAuditSink` and a
+`ScheduleSync`. Production composes those *and* `DependencySync` — that is what
+`scheduleAuditSinks` is for, and there is a test asserting the membership of that list. So the
+file that exists to prove the four pause sources interact correctly could not observe the sink
+where the interaction was broken.
+
+`access-matrix.test.ts` had the same shape: it registered no triggers, templates or schedules
+service, so the routes the authorization finding was about were **not registered in the app it
+swept**. A sweep over routes that do not exist passes.
+
+Both were fixed by making the harness compose what `main()` composes. Neither is a hard rule
+about mocks — it is narrower than that: **a harness that omits a collaborator cannot fail on a
+defect in the collaboration**, and the omission is invisible because everything about the file
+still reads correctly.
+
+### 20. A sweep that could not distinguish a guard from a schema (`A-11`)
+
+The mutating-route sweep, newly written for `A-11`, posted `{}` at every non-GET route and
+asserted the answer was not 2xx. It passed. Then a mutation that let a read-only account write
+everything **also** passed — because Fastify validates the body before `preHandler`, so every
+route answered 400 for the empty payload and never reached the guard.
+
+The test was measuring the schema. Two changes fixed it: authorisation moved to `preValidation`,
+so a refusal is the *first* answer, and the assertion narrowed from "not 2xx" to "401 or 403".
+**A negative assertion has to name the reason it expects, or it will accept the wrong one.**
+
+### 21. A fix by symmetry with no test that can fail (`P-140`)
+
+Recorded because the honest thing to do with it was to say so. `P-94` gave `reevaluate` a
+`sources` parameter and taught one caller to use it; the pause API was never given one, and an
+absent `sources` means "every cause". The asymmetry is real and the fix costs nothing.
+
+Every sequence tried to make it *matter* reaches the higher-precedence pause through a
+re-evaluation that has already set the state, so the later manual pause decides the same state
+and cause and writes nothing at all. So the fix ships with no test that fails without it, and
+`TASKS.md` says that in as many words. **A test that passes either way is worse than no test: it
+is a claim of coverage that a later reader will believe.**
+
 ## What actually found them
+
+
 
 Ranked by what each cost and what it caught:
 
@@ -334,6 +399,9 @@ Ranked by what each cost and what it caught:
 | Writing the test for the fix, then running its *file* | 14 | Free, and skipped by the `--test-name-pattern` loop everybody uses |
 | Running the whole suite after a fix that changes a mechanism | 15, 16 | Minutes, and the six red tests were the *fix* working |
 | Asking what production calls, then making the helper call exactly that | 17 | Free, and it emptied seventeen tests of their meaning at once |
+| A second panel, with a critic asked what nobody had looked at | 18, 19 | Very expensive; the gap round found the authorisation hole nothing else had |
+| Mutating the *new* test's subject before trusting the new test | 20 | Minutes, and it caught a test written the same hour |
+| Trying to write the failing test, and failing | 21 | Free, and the only outcome that has to be written down rather than fixed |
 
 The one that generalises: **a passing test is a hypothesis, and the mutation is the experiment.**
 Four of the first five had never had the mutation run against them; 7 was settled by one in
@@ -346,7 +414,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Nine rules this produced
+## Twelve rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -382,6 +450,17 @@ anything — and that structure, not more care, is what found them.
    twice, and the only difference between the silent instance and the loud one was what a helper
    did with `undefined`. Where the compiler cannot see the boundary, a guard that parses the type
    and the query is not paranoia, it is the type system by other means.
+10. **A test that asks the subject what it thinks proves nothing about anybody else.** Entry 18's
+    matrix asked the resolver to report its own answer twelve times. The question a matrix over
+    *enforcement* has to ask is of the routes: call them and see what they do. If the endpoint
+    under test and the thing under test are the same object, the test is a mirror.
+11. **A harness that omits a collaborator cannot fail on a defect in the collaboration.** Entry 19,
+    twice in one panel. When a file exists to prove how N things interact, build it the way
+    `main()` builds them — and if that is inconvenient, the inconvenience is the finding.
+12. **A negative assertion has to name the reason it expects.** Entry 20 accepted any 4xx, and a
+    schema rejection is a 4xx. "Not allowed" is not a property; "401 or 403" is. The same rule as
+    2, in the other direction: when a test passes for a reason it did not name, it will keep
+    passing when that reason changes.
 
 ## What is still not covered, and is said so on purpose
 
