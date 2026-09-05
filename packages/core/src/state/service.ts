@@ -415,7 +415,7 @@ export class SensorStateService {
     const facts = new Map<number, SensorFacts>();
     for (const [sensorId, runtime] of runtimes) {
       const resuming = !isPaused(runtime.facts.pause) && runtime.state === 'paused';
-      facts.set(sensorId, resuming ? clearedByResume(runtime.facts) : runtime.facts);
+      facts.set(sensorId, resuming ? clearedByResume(runtime.facts, at) : runtime.facts);
     }
     const policies = await this.#policiesFor(facts);
     const pauseMessages = await this.#pauseMessagesFor(q, cause, facts, at);

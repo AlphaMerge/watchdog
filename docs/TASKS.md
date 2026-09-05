@@ -6154,6 +6154,58 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
+- [x] **P-97 — A resume erased the idempotence guard the probe protocol depends on** · M · M-02,
+      R-02 · Findings 28 and 7, which are one column doing two jobs. `last_result_at` is the
+      high-water mark that makes the at-least-once protocol safe — `isStaleResult` discards
+      anything no newer, and `writeRuntimes` refuses it a second time — and it was *also* how
+      "nothing has been measured since the resume" was expressed, by being set to NULL. §3 needs
+      the second; `drain.ts`'s guarantee that "a dropped connection costs a duplicate write rather
+      than a lost reading" needs the first.
+
+      **After any resume, duplicates stopped being duplicates.** A batch the core stored but never
+      acknowledged — the probe keeps it spooled until it hears back — was re-offered and applied
+      in full: `sensor_state` rows timestamped before the resume row, the two-step failure policy
+      advanced a second time, `sensor_runtime` reading Down since 09:59 while the newest history
+      row said Unknown at 10:05, and the alarms view raising an outage inside a window the
+      operator had paused and already ended.
+
+      **And it admitted readings measured inside the pause.** A probe that lost its link keeps
+      scanning and spooling; it cannot be told about a pause it never received.
+      `docs/state-machine.md` §3 assumes this away — "a paused sensor is not in its probe's
+      configuration at all" — which is true only of a probe currently connected to receive that
+      configuration. Neither the spec nor the code had a name for "a disconnected probe still
+      scanning a sensor the core has since paused", and those readings wrote Up and Down
+      transitions into a planned maintenance window that uptime and SLA are computed from.
+
+      Migration 042 adds `resumed_at`. `last_result_at` keeps its one job and is never nulled; a
+      sensor reads as never-scanned while `resumed_at` is at or after it, and a result is stale
+      unless newer than **both**. The third test is the one that matters for the shape of the
+      fix — a result measured *after* the resume still applies, because the guard is a floor and
+      not a wall.
+
+- [x] **P-98 — Two queries build the same row and only one of them was updated, twice** · S ·
+      M-02 · Found by `P-97`'s own suite run, and it is the second instance. `RuntimeRow` is
+      asserted from raw SQL so the compiler cannot check it, and two queries feed `toRuntime`:
+      `loadRuntimes`, which the machine decides on, and `readSensorState`, which answers
+      `GET /sensors/:id/state`. They carry separate column lists.
+
+      `P-85` added `channel_state`/`channel_cause` and updated only the first. The read side got
+      `undefined`, which `channelVerdict` read as "nothing judged" — so the API reported no
+      channel verdict while the machine had one, **silently**, and it shipped. `P-97` added
+      `resumed_at` the same way, and `neverScanned` calls `.getTime()` on it: that one threw, so
+      `GET /sensors/:id/state` answered 500 for every sensor. It was caught by an acknowledgement
+      test asserting over HTTP — nothing that was looking for it.
+
+      Both columns added, and `runtime-row.test.ts` now parses `RuntimeRow` and asserts that
+      every **required** field is selected by both queries and every **optional** one by at least
+      one. The optional/required split is not a convenience: the type already says which fields a
+      query may skip — `acknowledged_by_kind`/`_label` are the single-sensor read's alone
+      (`M-13`) — and the guard was written asserting both queries carry everything, which failed
+      immediately and correctly on exactly those two.
+
+      A guard rather than a convention, because the convention *was* written down, in the first
+      query's own comment, and did not survive the second column.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

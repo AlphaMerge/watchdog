@@ -260,6 +260,7 @@ describe(
       cause: SensorStateCause;
       flags: string[];
       last_result_at: Date | null;
+      resumed_at: Date | null;
       consecutive_failures: number;
     }> {
       const rows = await db.query<{
@@ -268,9 +269,10 @@ describe(
         paused_by_parent: boolean;
         paused_manually: boolean;
         last_result_at: Date | null;
+        resumed_at: Date | null;
         consecutive_failures: number;
       }>(
-        `SELECT state, cause, paused_by_parent, paused_manually, last_result_at,
+        `SELECT state, cause, paused_by_parent, paused_manually, last_result_at, resumed_at,
                 consecutive_failures
          FROM sensor_runtime WHERE object_id = $1`,
         [id],
@@ -285,6 +287,7 @@ describe(
           ...(row.paused_manually ? ['manual'] : []),
         ],
         last_result_at: row.last_result_at,
+        resumed_at: row.resumed_at,
         consecutive_failures: row.consecutive_failures,
       };
     }
@@ -423,7 +426,15 @@ describe(
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'unknown');
       assert.equal(current.cause, 'scan');
-      assert.equal(current.last_result_at, null, 'it awaits its next scan');
+      // **The invariant is that it awaits its next scan, not that the column is null** (`P-97`).
+      // Clearing `last_result_at` used to express it, and that also erased the staleness floor
+      // the at-least-once probe protocol depends on: after any resume, a re-offered batch was
+      // applied as new. `resumed_at` carries the meaning; `last_result_at` keeps its one job.
+      assert.ok(current.resumed_at !== null, 'it awaits its next scan');
+      assert.ok(
+        current.last_result_at !== null && current.resumed_at >= current.last_result_at,
+        'and nothing measured before the resume can be applied',
+      );
       assert.deepEqual(await history(sensorId), ['up->paused:user', 'paused->unknown:scan']);
     });
 
@@ -575,7 +586,10 @@ describe(
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'unknown', 'resumed, and awaiting its next scan');
       assert.equal(current.cause, 'scan');
-      assert.equal(current.last_result_at, null);
+      assert.ok(
+        current.resumed_at !== null,
+        '`P-97`: the resume is stamped, not the result erased',
+      );
       assert.equal((await h.service.pauseState(deviceId)).paused, false);
     });
 
@@ -712,7 +726,10 @@ describe(
         // §3 again: a resumed sensor awaits its next scan rather than returning to the state
         // nothing has checked since — the window is over, not the outage.
         assert.equal(current.state, 'unknown');
-        assert.equal(current.last_result_at, null);
+        assert.ok(
+          current.resumed_at !== null,
+          '`P-97`: the resume is stamped, not the result erased',
+        );
         assert.equal((await h.service.pauseState(deviceId)).paused, false);
       });
 

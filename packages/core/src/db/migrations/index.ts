@@ -40,6 +40,7 @@ import { migration038 } from './038-channel-limit-source.js';
 import { migration039 } from './039-probe-key-confirmed.js';
 import { migration040 } from './040-runtime-channel-verdict.js';
 import { migration041 } from './041-credential-delete-touch.js';
+import { migration042 } from './042-runtime-resumed-at.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -89,6 +90,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration039,
   migration040,
   migration041,
+  migration042,
 ];
 
 export type { Migration } from './types.js';

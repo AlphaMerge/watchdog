@@ -5,6 +5,7 @@ import {
   clearedByResume,
   evaluate,
   isPaused,
+  isStaleResult,
   pauseCause,
   queryState,
   CHANNELS_CLEAR,
@@ -18,6 +19,9 @@ import {
   type SensorFacts,
   type StateFacts,
 } from '../src/state/machine.js';
+
+/** An arbitrary resume instant, so the staleness floor has something to be relative to. */
+const RESUMED_AT = new Date('2026-08-25T12:00:00.000Z');
 import {
   PAUSE_PRECEDENCE,
   PAUSE_SOURCES,
@@ -125,9 +129,18 @@ describe('pause precedence', () => {
     const { facts: down } = run(['error', 'error']);
     assert.equal(evaluate(down).state, 'down');
 
-    const resumed = clearedByResume(down);
+    const resumed = clearedByResume(down, RESUMED_AT);
     assert.deepEqual(evaluate(resumed), { state: 'unknown', cause: 'scan' });
-    assert.equal(resumed.lastResultAt, null, 'it awaits its next scan');
+    // **The invariant is "nothing has been measured since", not "the column is null"**
+    // (`P-97`). It used to be expressed by clearing `lastResultAt`, which also erased the
+    // staleness floor the at-least-once probe protocol depends on. The scan facts carry it now,
+    // and `lastResultAt` keeps its one job.
+    assert.deepEqual(resumed.scan, { kind: 'none' }, 'it awaits its next scan');
+    assert.equal(resumed.lastResultAt, down.lastResultAt, 'and still knows what it last applied');
+    // The claim the old assertion could not make: a reading from before the resume — which is
+    // what a re-offered batch and a disconnected probe's spool both hold — has nothing to say.
+    assert.equal(isStaleResult(resumed, new Date(RESUMED_AT.getTime() - 1)), true);
+    assert.equal(isStaleResult(resumed, new Date(RESUMED_AT.getTime() + 1)), false, 'a floor');
   });
 });
 
@@ -377,7 +390,7 @@ describe('acknowledgement', () => {
   });
 
   it('is cleared by a resume', () => {
-    assert.equal(clearedByResume(acknowledgedDown(null)).acknowledged, false);
+    assert.equal(clearedByResume(acknowledgedDown(null), new Date()).acknowledged, false);
   });
 });
 
@@ -504,7 +517,7 @@ describe('invariants', () => {
       { name: 'paused', apply: (from) => evaluate({ ...from, pause: flags(['dependency']) }) },
       {
         name: 'resumed',
-        apply: (from) => evaluate(clearedByResume(from)),
+        apply: (from) => evaluate(clearedByResume(from, new Date())),
         when: (from) => from === 'paused',
       },
       { name: 'probe lost', apply: (from) => evaluate({ ...from, probeReachable: false }) },

@@ -231,8 +231,21 @@ function acknowledged(verdict: Verdict, facts: StateFacts): Decision {
 
 /** What the machine carries between results. The persisted half of it is `sensor_runtime`. */
 export interface SensorFacts extends StateFacts {
-  /** `null` until the first result, and again after a resume. */
+  /**
+   * The newest result ever applied. `null` until the first one, and **never nulled after**
+   * (`P-97`) — it is the high-water mark that makes the at-least-once probe protocol safe, and a
+   * resume that erased it turned every duplicate into a fresh reading.
+   */
   readonly lastResultAt: Date | null;
+  /**
+   * When this sensor last came back from a pause; `null` if it never has.
+   *
+   * The other half of what `lastResultAt` used to carry alone. It says "nothing measured since"
+   * — so the scan facts read `none` while it is at or after `lastResultAt` — and it is a second
+   * floor on staleness, because a probe that lost its link keeps scanning a sensor the core has
+   * since paused and its spool holds readings from inside the window.
+   */
+  readonly resumedAt: Date | null;
   /**
    * When an active acknowledgement lapses; `null` is indefinite.
    *
@@ -246,6 +259,7 @@ export interface SensorFacts extends StateFacts {
 export const INITIAL_SENSOR_FACTS: SensorFacts = {
   ...INITIAL_FACTS,
   lastResultAt: null,
+  resumedAt: null,
   acknowledgedUntil: null,
 };
 
@@ -262,8 +276,16 @@ export const INITIAL_SENSOR_FACTS: SensorFacts = {
  * rule production uses instead of a second copy of it that could drift from it.
  */
 export function isStaleResult(facts: SensorFacts, at: Date): boolean {
-  const last = facts.lastResultAt;
-  return last !== null && at.getTime() <= last.getTime();
+  // **Both watermarks, not just the newer result** (`P-97`). A resume used to erase
+  // `lastResultAt`, which turned every duplicate the at-least-once protocol can produce into a
+  // fresh reading — and admitted results a disconnected probe measured *inside* the pause
+  // window, which is a state neither the spec nor the code had a name for. `resumedAt` is the
+  // other floor: nothing measured at or before the resume has anything to say about now.
+  const floor = Math.max(
+    facts.lastResultAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+    facts.resumedAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+  );
+  return Number.isFinite(floor) && at.getTime() <= floor;
 }
 
 /** One check result, as much of it as the machine reads. */
@@ -378,13 +400,21 @@ export function reevaluate(
  * last-result time is what makes that fall out of layer 4 rather than being special-cased, and
  * the failure count goes with it because the next failure is genuinely the first one.
  */
-export function clearedByResume(facts: SensorFacts): SensorFacts {
+export function clearedByResume(facts: SensorFacts, at: Date): SensorFacts {
+  // `lastResultAt` survives (`P-97`): it is the idempotence guard, not a statement about
+  // whether anything has been measured since. The scan facts say that, and `resumedAt` is what
+  // reconstructs them from the row.
+  //
+  // `at` is taken rather than left to the row write, so these facts and the row the same
+  // transaction writes agree. They would otherwise differ for exactly as long as the cached
+  // entry lives, and "the cache is dropped on this path anyway" is the kind of reasoning that
+  // is true until somebody adds a path where it is not.
   return {
     ...facts,
-    lastResultAt: null,
     scan: { kind: 'none' },
     channel: null,
     acknowledged: false,
+    resumedAt: at,
   };
 }
 

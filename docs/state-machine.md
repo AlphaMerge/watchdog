@@ -527,6 +527,14 @@ is waiting for one task to set it:
 
 Two further notes for whoever picks those up:
 
+- **A resume is a floor on staleness, not an erasure of it** (`P-97`). `last_result_at` is the
+  high-water mark that makes the at-least-once protocol safe; `resumed_at` is what says nothing
+  has been measured since. They were one column until `P-97`, and a resume nulled it — so every
+  duplicate the protocol can produce was applied as new, and so were readings a *disconnected*
+  probe measured inside the pause window. §3 below says a paused sensor "is not in its probe's
+  configuration at all", which holds only for a probe currently connected to receive that
+  configuration; one that lost its link keeps scanning and spooling.
+
 - **Results for one sensor must arrive in order.** They do: a probe's spool drain keeps one
   batch in flight (`R-02`), and one probe owns one branch. A result no newer than the last one
   applied is discarded and counted as `resultsStale`, which is what makes an at-least-once

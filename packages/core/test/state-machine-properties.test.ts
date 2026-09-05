@@ -123,7 +123,10 @@ function step(
   // §3: when the last pause source clears, the sensor forgets what it measured before the
   // pause — reporting a state nothing has checked since would be worse than saying Unknown.
   const resuming = !isPaused(changed.pause) && state === 'paused';
-  const resumed = resuming ? clearedByResume(changed) : changed;
+  // A resume happens *now*, which is at or after everything applied so far — production stamps
+  // it with the mutation's own clock. Anchoring it to the last applied result is the faithful
+  // model of that and keeps the sequence monotonic without inventing a second timeline.
+  const resumed = resuming ? clearedByResume(changed, changed.lastResultAt ?? at(0)) : changed;
   const decision = evaluate(resumed, policy);
   // §2.4's recovery clearing, which `reevaluate` applies on this path too.
   return { ...base, after: clearedByRecovery(resumed, decision), decision, applied: true };
@@ -377,7 +380,11 @@ describe('the state machine over event sequences', () => {
             continue;
           }
           assert.equal(taken.decision.state, 'unknown');
-          assert.equal(taken.after.lastResultAt, null, 'and it forgot what it measured');
+          // Invariant 8 is that a resume reports nothing measured before the pause — which is
+          // stronger than "the column is null", and is what `P-97` made it say. Clearing
+          // `lastResultAt` used to be how this was expressed, and it disabled the staleness
+          // floor: every duplicate the probe protocol can produce was then applied as new.
+          assert.deepEqual(taken.after.scan, { kind: 'none' }, 'and nothing measured since');
         }
       }),
       { numRuns: RUNS },

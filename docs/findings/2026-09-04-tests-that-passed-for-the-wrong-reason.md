@@ -1,4 +1,4 @@
-# Fourteen tests that passed for the wrong reason, and what exposed each
+# Sixteen tests that passed for the wrong reason, and what exposed each
 
 `P-58`–`P-95`, 2026-09-04 and 2026-09-05. **Extended twice**, which is the finding.
 
@@ -18,7 +18,7 @@ old, written unhurriedly and green ever since. It confirmed 29 defects, five of 
 here, and they are the ones that settle the argument: haste was never the explanation.
 
 That is why the catalogue is worth keeping. The individual bugs are in their tickets; what is
-here is that **fourteen independent instances of one failure have now been found**, that a
+here is that **sixteen independent instances of one failure have now been found**, that a
 different technique was needed to expose each, and that knowing about the failure mode in
 detail — having just catalogued it — did not stop somebody producing four more instances of it
 before dinner.
@@ -266,6 +266,40 @@ The same fix produced the sharper lesson twice more, both caught only because th
   and nothing ever progressed past page one. **A truncating conversion in a pagination cursor
   fails silently and looks like a working loop.**
 
+### 15. An assertion on the implementation, which made the fix look like a regression (`P-97`)
+
+Six tests asserted `last_result_at === null` after a resume. That was never the invariant — §3's
+invariant 8 is *"a resume yields Unknown and never reports a state measured before the pause"* —
+it was the mechanism that happened to implement it. And the mechanism was the defect: nulling
+that column also erased the staleness floor the at-least-once probe protocol depends on.
+
+So the fix turned six green tests red, every one of them for the right reason. That is the
+failure mode worth naming, because it points the wrong way: **a test pinned to the mechanism
+makes a correct fix look like a regression, and the cheapest response is to revert.** The tell is
+that the assertion restates the code rather than the requirement — `null` is not a property
+anybody wants, "nothing measured since the resume" is. They now assert the scan facts and, in
+the pure model, the stronger claim the old form could not make: that a reading from before the
+resume is stale.
+
+### 16. Two queries, one row type, and only one of them updated — twice (`P-98`)
+
+Not a test that passed for the wrong reason; a defect the tests could not see at all, found while
+fixing entry 15. `RuntimeRow` is asserted from raw SQL, so the compiler cannot check that a query
+selects every field. Two queries feed `toRuntime`: the one the machine decides on, and the one
+`GET /sensors/:id/state` answers from.
+
+`P-85` added two columns and updated one query. The read side returned `undefined`, which the
+helper read as "nothing judged" — wrong, silent, shipped. `P-97` added another the same way, and
+its helper called `.getTime()` on it: 500 for every sensor, caught by an *acknowledgement* test
+asserting over HTTP, which is to say by luck.
+
+**The difference between the two is only that the second one threw.** That is not a property of
+the code, it is a property of what the helper happened to do with `undefined` — so the guard is
+now structural: `runtime-row.test.ts` parses the interface and requires every non-optional field
+in both queries, every optional one in at least one. Written as "both queries carry everything",
+it failed immediately on the two fields the type already marked optional, which is the guard
+finding the distinction rather than the author remembering it.
+
 ## What actually found them
 
 Ranked by what each cost and what it caught:
@@ -279,6 +313,7 @@ Ranked by what each cost and what it caught:
 | Instrumenting durations, then a log spy | 5 | Minutes, once the duration looked wrong |
 | **A review panel with a refutation bar** | **6, 7, 8, 9, 10, 11, 12, 13** | **Very expensive; the only thing that caught the author's blind spot, now eight times** |
 | Writing the test for the fix, then running its *file* | 14 | Free, and skipped by the `--test-name-pattern` loop everybody uses |
+| Running the whole suite after a fix that changes a mechanism | 15, 16 | Minutes, and the six red tests were the *fix* working |
 
 The one that generalises: **a passing test is a hypothesis, and the mutation is the experiment.**
 Four of the first five had never had the mutation run against them; 7 was settled by one in
@@ -291,7 +326,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Seven rules this produced
+## Nine rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -318,6 +353,15 @@ anything — and that structure, not more care, is what found them.
 7. **Run a new test inside its own file before believing it, and leave the database as you found
    it.** Entry 14 passed under `--test-name-pattern` and failed twice in the suite. The iteration
    loop that makes a fix fast is the one mode in which order-dependence is invisible.
+8. **Assert the requirement, not the mechanism that currently implements it.** `last_result_at
+   === null` is not a property anybody wants; "nothing measured since the resume" is. Six tests
+   pinned to the mechanism turned red on a correct fix, and the cheap response to that is to
+   revert the fix. If the assertion restates the code, it will punish the next person who
+   improves the code.
+9. **A row type asserted from raw SQL is unchecked, so check it structurally.** Entry 16 happened
+   twice, and the only difference between the silent instance and the loud one was what a helper
+   did with `undefined`. Where the compiler cannot see the boundary, a guard that parses the type
+   and the query is not paranoia, it is the type system by other means.
 
 ## What is still not covered, and is said so on purpose
 
@@ -345,7 +389,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Fourteen now, and the five added later are the ones that settle the argument.** The first nine
+**Sixteen now, and the seven added later are the ones that settle the argument.** The first nine
 were all written in the rush of a single day, which is the comfortable explanation. Entries 10 to
 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and green
 ever since — and each one had a name that described a property the test did not check. The base

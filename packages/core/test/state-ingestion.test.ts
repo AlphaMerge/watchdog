@@ -696,6 +696,98 @@ describe(
     });
 
     // -------------------------------------------------------------------------------------
+    // The resume watermark (P-97): what a resume must and must not erase.
+    // -------------------------------------------------------------------------------------
+
+    describe('results either side of a resume', () => {
+      /** Pause and then resume through the flags, which is what every pause source does. */
+      async function pauseThenResume(states: SensorStateService, at: Date): Promise<void> {
+        await db.tx(async (q) => {
+          await q.query('UPDATE sensor_runtime SET paused_manually = true WHERE object_id = $1', [
+            sensorId,
+          ]);
+          await states.reevaluate(q, [sensorId], at, { message: 'maintenance' });
+        });
+        await db.tx(async (q) => {
+          await q.query('UPDATE sensor_runtime SET paused_manually = false WHERE object_id = $1', [
+            sensorId,
+          ]);
+          await states.reevaluate(q, [sensorId], at, { message: '' });
+        });
+      }
+
+      const failed = (minutes: number): CheckResult =>
+        result({ at: at(minutes), outcome: 'error', message: 'no reply', channels: [] });
+
+      it('discards a re-offered batch after a resume, rather than replaying it as new', async () => {
+        // **`P-97`, findings 7 and 28.** `last_result_at` was doing two jobs: the high-water
+        // mark that makes the at-least-once probe protocol safe, and "nothing measured since the
+        // resume", expressed by nulling it. §3 needs the second; the spool's guarantee that "a
+        // dropped connection costs a duplicate write rather than a lost reading" needs the
+        // first. Nulling it meant that after any resume, duplicates stopped being duplicates.
+        //
+        // The probe keeps a batch spooled until the core acknowledges it, so a core that stored
+        // a batch and died before replying is re-offered exactly this.
+        const first = build();
+        await deliver(first.service, first.ingestor, [failed(1), failed(2)]);
+        assert.equal((await runtime()).consecutive_failures, 2);
+
+        const states = build().states;
+        await pauseThenResume(states, new Date(AT.getTime() + 5 * 60_000));
+        assert.equal((await runtime()).state, 'unknown', '§3: it awaits its next scan');
+
+        const again = build();
+        await deliver(again.service, again.ingestor, [failed(1), failed(2)], 'b2');
+
+        assert.equal(again.states.stats().resultsStale, 2, 'both were already applied');
+        const current = await runtime();
+        assert.equal(current.state, 'unknown', 'still awaiting a scan, not Down again');
+        assert.equal(current.consecutive_failures, 0, 'and the two-step rule did not re-advance');
+      });
+
+      it('discards results a disconnected probe measured inside the pause window', async () => {
+        // The other half, and a state neither the spec nor the code had a name for. §3 says "a
+        // paused sensor is not in its probe's configuration at all", which is true only of a
+        // probe currently connected to receive that configuration. One that lost its link keeps
+        // scanning and spooling, so its spool holds readings from inside a window it never heard
+        // about — and those wrote Up and Down transitions into a planned maintenance window that
+        // uptime and SLA are then computed from.
+        const first = build();
+        await deliver(first.service, first.ingestor, [result({ at: at(0) })]);
+
+        const states = build().states;
+        await pauseThenResume(states, new Date(AT.getTime() + 5 * 60_000));
+
+        // Measured at +2 and +3 minutes: after the last result, before the resume.
+        const late = build();
+        await deliver(late.service, late.ingestor, [failed(2), failed(3)], 'b2');
+
+        assert.equal(late.states.stats().resultsStale, 2, 'measured before the resume');
+        assert.equal((await runtime()).state, 'unknown');
+        const inside = (await history()).filter(
+          (row) => row.state === 'warning' || row.state === 'down',
+        );
+        assert.deepEqual(inside, [], 'no outage inside a window the operator paused');
+      });
+
+      it('still applies a result measured after the resume', async () => {
+        // The guard has to be a floor, not a wall: the whole point of resuming is to start
+        // scanning again.
+        const first = build();
+        await deliver(first.service, first.ingestor, [result({ at: at(0) })]);
+
+        const states = build().states;
+        await pauseThenResume(states, new Date(AT.getTime() + 5 * 60_000));
+
+        const after = build();
+        await deliver(after.service, after.ingestor, [result({ at: at(9) })], 'b2');
+
+        assert.equal(after.states.stats().resultsStale, 0);
+        assert.equal((await runtime()).state, 'up');
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
     // Channel limits (M-04). A successful check that measured something alarming.
     // -------------------------------------------------------------------------------------
 
