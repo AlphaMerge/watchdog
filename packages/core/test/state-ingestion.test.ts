@@ -14,6 +14,7 @@ import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { SensorStateService } from '../src/state/service.js';
+import { writeStateHistory } from '../src/state/runtime.js';
 import { resolveAcknowledgement } from '../src/state/acknowledgement.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
 import {
@@ -696,6 +697,102 @@ describe(
               kind: 'none',
             }),
           /scan\.retryWarnings/,
+        );
+      });
+    });
+
+    // -------------------------------------------------------------------------------------
+    // The history keeps every transition it is given (P-108).
+    // -------------------------------------------------------------------------------------
+
+    describe('two transitions at one instant', () => {
+      async function pauseFlag(column: string, on: boolean, states: SensorStateService, at: Date) {
+        await db.tx(async (q) => {
+          await q.query(`UPDATE sensor_runtime SET ${column} = $2 WHERE object_id = $1`, [
+            sensorId,
+            on,
+          ]);
+          await states.reevaluate(q, [sensorId], at, { message: '' });
+        });
+      }
+
+      it('keeps the second one rather than letting the unique index eat it', async () => {
+        // **`P-108`, findings 8 and 22.** `sensor_state` is keyed on `(sensor_id, time)` with
+        // `ON CONFLICT DO NOTHING`, and two callers reuse one timestamp: `sweepPauses` passes a
+        // single `now` to `releaseElapsed` and to both of its loops, and `CompositeAuditSink`
+        // hands `ScheduleSync` and `DependencySync` the same `at` — both of which react to
+        // `object.moved`. `writeStateChanges` has no conflict guard, so `sensor_runtime` took
+        // the change the history discarded, and the two disagreed permanently about what the
+        // sensor is. Uptime is computed from the one that lost the row.
+        const first = build();
+        await deliver(first.service, first.ingestor, [result({ at: at(0) })]);
+
+        const states = build().states;
+        const when = new Date(AT.getTime() + 60_000);
+        await pauseFlag('paused_by_schedule', true, states, when);
+        await pauseFlag('paused_by_dependency', true, states, when);
+
+        const rows = await history();
+        const runtime = await db.query<{ cause: SensorStateCause }>(
+          'SELECT cause FROM sensor_runtime WHERE object_id = $1',
+          [sensorId],
+        );
+        assert.equal(runtime[0]?.cause, 'dependency', 'the row moved to the second source');
+        assert.equal(
+          rows.at(-1)?.cause,
+          'dependency',
+          'and the history agrees, instead of stopping at the first',
+        );
+      });
+
+      it('still lets a genuine replay collide, which is what keeps it idempotent', async () => {
+        // The half that must not change. `ON CONFLICT DO NOTHING` is what makes a batch the
+        // probe re-offered write into the rows it wrote before; advancing *those* would
+        // duplicate the timeline instead of deduplicating it. Same sensor, same instant, same
+        // state and cause is the batch arriving twice.
+        const first = build();
+        await deliver(first.service, first.ingestor, [result({ at: at(0) })]);
+        const before = (await history()).length;
+
+        await db.tx((q) =>
+          writeStateHistory(q, [
+            {
+              sensorId,
+              at: new Date(at(0)),
+              state: 'up',
+              previousState: 'unknown',
+              cause: 'scan',
+              message: '',
+            },
+          ]),
+        );
+        assert.equal((await history()).length, before, 'no second row for the same fact');
+      });
+
+      it('orders a core-clock transition after a probe whose clock runs ahead', async () => {
+        // **Finding 9.** Result-driven transitions carry the probe's wall clock — the protocol
+        // says the core does not rewrite it — and every other transition carries the core's. A
+        // probe two minutes fast leaves its sensors' newest row *ahead* of the core, so a pause
+        // written now sorts *before* it: `GET /state-log` reports the old state with no duration
+        // while the badge says Paused, the `previous_state` chain reads backwards, and any
+        // uptime computed from the table books the whole maintenance window as monitored Up.
+        const first = build();
+        const ahead = new Date(AT.getTime() + 120_000);
+        await deliver(first.service, first.ingestor, [
+          result({ at: ahead.toISOString(), outcome: 'error', message: 'no reply', channels: [] }),
+        ]);
+
+        const states = build().states;
+        await pauseFlag('paused_manually', true, states, new Date(AT.getTime() + 30_000));
+
+        const rows = await db.query<{ time: Date; state: SensorState }>(
+          'SELECT time, state FROM sensor_state WHERE sensor_id = $1 ORDER BY time',
+          [sensorId],
+        );
+        assert.equal(rows.at(-1)?.state, 'paused', 'the newest row is the newest fact');
+        assert.ok(
+          (rows.at(-1)?.time.getTime() ?? 0) > ahead.getTime(),
+          'stamped after the probe’s own clock, not before it',
         );
       });
     });

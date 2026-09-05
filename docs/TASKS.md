@@ -6452,6 +6452,41 @@ because each is a decision rather than a defect:
       to move the baseline. That is the same point the comment above that check already makes
       about failed checks, which is how it was spotted: twelve counter tests went red at once.
 
+- [x] **P-108 — The unique index silently ate transitions, three different ways** · M · M-02 ·
+      Findings 8, 22 and 9. `sensor_state` is keyed on `(sensor_id, time)` with `ON CONFLICT DO
+      NOTHING`, and that guard was doing two jobs it cannot both do. It makes a *replayed* batch
+      idempotent, which is right. It also discarded any genuinely new transition landing on an
+      occupied instant — and `writeStateChanges` has no such guard, so `sensor_runtime` took the
+      change the history threw away. The two then disagree about what the sensor is, permanently,
+      and uptime is computed from the one that lost the row.
+
+      - **Two callers reusing one `now`.** `sweepPauses` takes a single timestamp and passes it to
+        `releaseElapsed` and to every iteration of both loops; `CompositeAuditSink` hands
+        `ScheduleSync` and `DependencySync` the same `at`, and both return true for
+        `object.moved`. A sensor released by a dependency and paused by a window in one tick
+        wrote `unknown` then `paused` and kept only the first — so a maintenance window was
+        accounted as Unknown for its whole length, and `U-02`'s stream never announced the pause.
+      - **Two clocks.** Result transitions carry the probe's wall clock, which the protocol says
+        the core does not rewrite; every other transition carries the core's. A probe two minutes
+        fast leaves its sensors' newest row *ahead* of the core, so a pause at 12:00:30 sorts
+        before an `up` at 12:02:00. `GET /state-log` reported Up with `durationMs: null` while the
+        badge said Paused, the `previous_state` chain read backwards, and any uptime booked the
+        entire maintenance window as monitored Up. The same shape with `reachability.lost` books a
+        whole probe outage as Up.
+      - **The backstop that could not report.** `reevaluate` discarded this function's return and
+        reported `transitions.length` — the count it *tried* to write — as its result, as
+        `#transitions` and as `#reevaluations`. The comment promising "the row count comes back so
+        a drop cannot pass unnoticed" was honoured by no caller.
+
+      `reactionTime` in `dependencies/pauses.ts` had already fixed this by construction for one
+      caller, with a doc comment explaining that the collision "is a corrupted SLA rather than a
+      cosmetic glitch". It was right; it was in one of the four places that needed it. The rule
+      now lives in `writeStateHistory`, so no future caller has to know.
+
+      **An identical row is still left to collide**, and that half is pinned by its own test:
+      same sensor, same instant, same state and cause is a batch arriving twice, and advancing it
+      would duplicate the timeline instead of deduplicating it.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

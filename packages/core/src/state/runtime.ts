@@ -240,26 +240,26 @@ export async function writeStateHistory(
   onCommitted?: CommittedStates,
 ): Promise<number> {
   if (changes.length === 0) return 0;
+  const ordered = await orderedAfterLast(q, changes);
   const rows = await q.query<{ sensor_id: string; time: Date }>(
     `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
      SELECT * FROM unnest(
        $1::timestamptz[], $2::bigint[], $3::sensor_state_kind[],
        $4::sensor_state_kind[], $5::sensor_state_cause[], $6::text[]
      )
-     -- Two transitions for one sensor at one instant is not something the system should
-     -- produce: the second is dropped, and then sensor_state and sensor_runtime disagree about
-     -- what the sensor is, which makes uptime wrong rather than merely untidy. The callers keep
-     -- their timestamps apart (see reactionTime in dependencies/pauses.ts); this stays as a
-     -- backstop, and the row count comes back so a drop cannot pass unnoticed.
+     -- Still here, and now it means only one thing: a genuine replay. orderedAfterLast above
+     -- has already moved any transition that would have displaced a *different* row, so what
+     -- reaches this guard is a batch the probe re-offered, writing into the rows it wrote
+     -- before -- the same idempotence the readings have, and for the same reason.
      ON CONFLICT (sensor_id, time) DO NOTHING
      RETURNING sensor_id::text AS sensor_id, time`,
     [
-      changes.map((write) => write.at),
-      changes.map((write) => write.sensorId),
-      changes.map((write) => write.state),
-      changes.map((write) => write.previousState),
-      changes.map((write) => write.cause),
-      changes.map((write) => write.message),
+      ordered.map((write) => write.at),
+      ordered.map((write) => write.sensorId),
+      ordered.map((write) => write.state),
+      ordered.map((write) => write.previousState),
+      ordered.map((write) => write.cause),
+      ordered.map((write) => write.message),
     ],
   );
 
@@ -268,7 +268,7 @@ export async function writeStateHistory(
     // and have only one of them land, and announcing the dropped one would describe a history
     // the table does not have.
     const landed = new Set(rows.map((row) => `${row.sensor_id}@${row.time.toISOString()}`));
-    const committed = changes.filter((change) =>
+    const committed = ordered.filter((change) =>
       landed.has(`${String(change.sensorId)}@${change.at.toISOString()}`),
     );
     const publish = (): void => {
@@ -279,6 +279,88 @@ export async function writeStateHistory(
     else q.afterCommit(publish);
   }
   return rows.length;
+}
+
+/**
+ * The same transitions, each stamped strictly after that sensor's newest stored row (`P-108`).
+ *
+ * `sensor_state` is keyed on `(sensor_id, time)` with `ON CONFLICT DO NOTHING`, and that guard
+ * was doing two jobs it cannot both do. It makes a *replayed* batch idempotent, which is right.
+ * It also silently discarded any genuinely new transition that landed on an occupied instant —
+ * and `writeStateChanges` has no such guard, so `sensor_runtime` took the change the history
+ * threw away. The two then disagree about what the sensor is, permanently, and uptime is
+ * computed from the one that lost the row.
+ *
+ * Three findings, one cause:
+ *
+ * - **Two callers reusing one `now`.** `sweepPauses` takes one timestamp and passes it to
+ *   `releaseElapsed` and to every iteration of both loops; `CompositeAuditSink` hands
+ *   `ScheduleSync` and `DependencySync` the same `at`, and both react to `object.moved`. A
+ *   sensor released by a dependency and paused by a window in one tick wrote `unknown` and then
+ *   `paused`, and kept only the first.
+ * - **Two clocks.** Result-driven transitions carry the probe's wall clock, which the protocol
+ *   says the core does not rewrite; every other transition carries the core's. A probe two
+ *   minutes fast left its sensors' newest row *ahead* of the core, so a pause at 12:00:30 sorted
+ *   before an `up` at 12:02:00: `GET /state-log` reported Up with no duration while the badge
+ *   said Paused, and any uptime figure booked the whole maintenance window as monitored Up.
+ * - **The backstop that could not report.** `reevaluate` discarded this function's return and
+ *   reported `transitions.length` instead — the count it *tried* to write — so the comment
+ *   promising "a drop cannot pass unnoticed" was not honoured by any caller.
+ *
+ * `reactionTime` in `dependencies/pauses.ts` fixed this for one caller by construction, with a
+ * doc comment explaining that the collision "is a corrupted SLA rather than a cosmetic glitch".
+ * It was right; it was just in one of the four places that needed it. Doing it here means no
+ * future caller has to know.
+ *
+ * **An identical row is left alone**, which is what keeps a replay idempotent: same sensor, same
+ * instant, same state and cause is the batch arriving twice, and it should collide. Anything
+ * else is a new fact about the sensor and gets the next millisecond.
+ */
+async function orderedAfterLast(
+  q: Queryable,
+  changes: readonly StateTransition[],
+): Promise<StateTransition[]> {
+  const rows = await q.query<{
+    sensor_id: string;
+    time: Date;
+    state: SensorState;
+    cause: SensorStateCause;
+  }>(
+    `SELECT DISTINCT ON (sensor_id) sensor_id::text AS sensor_id, time, state, cause
+     FROM sensor_state WHERE sensor_id = ANY($1::bigint[])
+     ORDER BY sensor_id, time DESC`,
+    [[...new Set(changes.map((change) => change.sensorId))]],
+  );
+  const newest = new Map(rows.map((row) => [Number(row.sensor_id), row]));
+
+  return changes.map((change) => {
+    const last = newest.get(change.sensorId);
+    if (last === undefined || change.at.getTime() > last.time.getTime()) {
+      newest.set(change.sensorId, {
+        sensor_id: String(change.sensorId),
+        time: change.at,
+        state: change.state,
+        cause: change.cause,
+      });
+      return change;
+    }
+    // The same fact arriving twice. Let it collide; that is what makes a resent batch harmless.
+    if (
+      change.at.getTime() === last.time.getTime() &&
+      change.state === last.state &&
+      change.cause === last.cause
+    ) {
+      return change;
+    }
+    const at = new Date(last.time.getTime() + 1);
+    newest.set(change.sensorId, {
+      sensor_id: String(change.sensorId),
+      time: at,
+      state: change.state,
+      cause: change.cause,
+    });
+    return { ...change, at };
+  });
 }
 
 /**

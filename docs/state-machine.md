@@ -527,6 +527,13 @@ is waiting for one task to set it:
 
 Two further notes for whoever picks those up:
 
+- **A transition is never dropped for landing on an occupied instant** (`P-108`).
+  `writeStateHistory` stamps each change strictly after that sensor's newest stored row, so two
+  callers sharing one `now` — the pause sweep's loops, or two audit sinks reacting to one move —
+  both land, and a probe whose clock runs ahead of the core cannot push a later core-clock
+  transition into the past. An *identical* row still collides, which is what makes a replayed
+  batch idempotent.
+
 - **The unreachable overlay is derived from the tree, not snapshotted against it** (`P-103`).
   `lost` records which sensors a probe was carrying; a move, a create or a delete changes that
   answer, and the overlay is re-derived inside the same transaction. Without it a sensor moved
