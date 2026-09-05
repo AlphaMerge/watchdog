@@ -6370,6 +6370,44 @@ because each is a decision rather than a defect:
       breach that clears before its latency' and 'waits out the latency, then notifies and
       clears'. Seventeen tests over a feature that did nothing.
 
+- [x] **P-105 — Leaving the armed state deleted the alarm, losing a recovery and re-paging an
+      outage that never ended** · M · N-02 · Findings 18 and 19, which are one rule seen twice.
+      `reconcile` ended an alarm outright on any non-Up exit: `isRecovery(current) ? recover :
+      cancel`.
+
+      **Finding 18 — no recovery after coming back through Warning.** A ping sensor with a `loss`
+      warning limit goes Down and pages. The link returns flaky: 30% loss, so query state Up,
+      channel state Warning, worst Warning. The alarm is cancelled with nothing queued. The next
+      scan is clean, `reconcile(null, 'up', …)` is `idle`, and the operator paged "ping-01 is
+      down" is never told it came back — while `CAPABILITIES.MD §5.1` promises a recovery
+      notification on return to Up, and the sensor did return to Up. `docs/state-machine.md §4`
+      lists `down -> warning` as ordinary.
+
+      **Finding 19 — a probe blip re-arms a fresh chain.** 09:00 the sensor goes Down, the initial
+      page is delivered, escalation due 09:30. 09:10 the probe restarts: sensors read
+      `unknown`/`probe`, the alarm is cancelled and the 09:30 deadline with it. 09:11 it
+      reconnects, `found()` puts the sensor straight back to Down with `since` reset, and a *new*
+      alarm arms at phase `pending` with zero latency — a second "is down" for an outage that
+      never ended. A probe flapping every twenty minutes never escalates at all and pages once per
+      flap per Down sensor. `CLAUDE.md`: one outage, one alarm.
+
+      One rule fixes both: **only a pause ends an alarm.** That is a decision that the outage is
+      not being watched any more (§3), so there is nothing to escalate and nothing to announce.
+      Everything else — flaky, Unknown, anything that is neither recovered nor switched off —
+      *suspends* it, reusing the `suppress`/`resume` machinery written for an acknowledgement
+      lapsing, which is the same question about a different interruption. Nobody is paged in
+      limbo, the eventual return to Up still owes its recovery, and a return to the armed state
+      picks the chain up where it stopped.
+
+      The test that asserted the old behaviour bundled `unknown`, `paused` and `warning` into one
+      loop expecting `cancel` — the mechanism, not the requirement. The requirement is that none
+      of them is a *recovery*, which still holds and is asserted separately.
+
+      **And the two scenario tests were rewritten before they were trusted.** Written first from a
+      hand-built suppressed alarm, they passed under the mutation that removes the fix — a state
+      production could no longer reach, which is entry 7's defect exactly. Walked as sequences,
+      all three die under it.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

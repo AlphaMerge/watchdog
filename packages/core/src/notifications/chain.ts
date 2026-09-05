@@ -120,6 +120,26 @@ export function isRecovery(current: SensorState): boolean {
 }
 
 /**
+ * Whether leaving the armed state ends the alarm outright, rather than suspending it.
+ *
+ * Only a pause (`P-105`). An operator switching monitoring off is a decision that the outage is
+ * not being watched any more — `docs/state-machine.md` §3 — so there is nothing left to escalate
+ * and nothing to say when it comes back; the sensor resumes to Unknown and awaits a fresh scan.
+ *
+ * **Everything else suspends instead**, which is the fix for two separate holes. Leaving `down`
+ * for `warning` used to delete the alarm, so the later `warning -> up` found nothing to recover
+ * from and the operator who was paged "is down" was never told it came back — while
+ * `CAPABILITIES.MD §5.1` promises a recovery notification on return to Up, and the sensor did
+ * return to Up. And leaving `down` for `unknown` on a probe blip deleted it too, so the reconnect
+ * armed a *fresh* chain: a second initial page for an outage that never ended, with the
+ * escalation deadline reset, so a probe flapping every twenty minutes never escalated at all and
+ * paged once per flap per sensor. `CLAUDE.md`: one outage, one alarm.
+ */
+export function endsAlarm(current: SensorState): boolean {
+  return current === 'paused';
+}
+
+/**
  * When the initial notification falls due, measured from the state's own beginning.
  *
  * From `since`, not from now: an engine that started counting when it *noticed* would restart
@@ -227,7 +247,17 @@ export function reconcile(
     // Sent nothing yet? Then nobody knows there was an alarm, and a recovery notification would
     // be the first anyone heard of it. This is the blip: it produces no notification at all.
     if (alarm.phase === 'pending') return { kind: 'cancel' };
-    return isRecovery(current) ? { kind: 'recover' } : { kind: 'cancel' };
+    if (isRecovery(current)) return { kind: 'recover' };
+    // An operator switched monitoring off. Nothing to escalate, nothing to announce.
+    if (endsAlarm(current)) return { kind: 'cancel' };
+    // **Neither recovered nor stood down, so the obligation survives** (`P-105`). The sensor has
+    // left the state that was paged about without coming back to normal — flaky rather than
+    // fixed, or Unknown because its probe went. Suspending keeps three things true: nobody is
+    // paged while it is in limbo, the eventual return to Up still owes a recovery notification,
+    // and a return to the armed state picks the chain up where it stopped instead of starting a
+    // second one. That last is the `resume` branch below, already written for an acknowledgement
+    // lapsing, which is the same question asked about a different interruption.
+    return alarm.suppressed ? { kind: 'hold' } : { kind: 'suppress' };
   }
 
   if (chainStopped(current)) {

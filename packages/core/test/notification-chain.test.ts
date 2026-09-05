@@ -224,15 +224,80 @@ describe('reconciling an alarm', () => {
     assert.deepEqual(reconcile(notified, 'up', at(600), settings(), at(600)), { kind: 'recover' });
   });
 
-  it('stands an alarm down without a recovery when the sensor goes anywhere but Up', () => {
+  it('never calls a state that is not Up a recovery', () => {
+    // The invariant, unchanged: "recovery notification on return to Up" (`CAPABILITIES.MD
+    // §5.1`), and a sensor that is Unknown or flaky has not returned to anything.
     for (const state of ['unknown', 'paused', 'warning'] as const) {
       const notified = alarm({ phase: 'notified', nextDueAt: null });
+      const decided = reconcile(notified, state, at(600), settings(), at(600));
+      assert.notEqual(decided.kind, 'recover', `${state} is not a recovery`);
+    }
+  });
+
+  it('ends the alarm when an operator pauses the sensor, and only then', () => {
+    // **`P-105`.** Leaving the armed state used to delete the alarm whatever it left for, which
+    // is right for exactly one case: a pause is a decision that the outage is not being watched
+    // any more, so there is nothing to escalate and nothing to announce when it returns.
+    const notified = alarm({ phase: 'notified', nextDueAt: null });
+    assert.deepEqual(reconcile(notified, 'paused', at(600), settings(), at(600)), {
+      kind: 'cancel',
+    });
+  });
+
+  it('suspends rather than deletes when the sensor is neither recovered nor paused', () => {
+    // The other half, and two separate holes. Deleting on `down -> warning` meant the later
+    // `warning -> up` found no alarm and the operator who was paged "is down" was never told it
+    // came back. Deleting on `down -> unknown` meant a probe blip armed a *fresh* chain on
+    // reconnect: a second initial page for an outage that never ended.
+    for (const state of ['warning', 'unknown'] as const) {
+      const notified = alarm({ phase: 'notified', nextDueAt: at(1800) });
       assert.deepEqual(
         reconcile(notified, state, at(600), settings(), at(600)),
-        { kind: 'cancel' },
-        `${state} is not a recovery`,
+        { kind: 'suppress' },
+        `${state} is limbo, not an ending`,
       );
     }
+  });
+
+  it('owes a recovery notification after coming back through Warning', () => {
+    // `down -> warning -> up`, which `docs/state-machine.md §4` lists as an ordinary transition.
+    // Walked as a sequence rather than started from a hand-built suppressed alarm: the point is
+    // that production *reaches* that state, and a test beginning there would still pass with the
+    // suspension removed — entry 7's defect, a subject that cannot express the property.
+    const notified = alarm({ phase: 'notified', nextDueAt: at(1800) });
+
+    // The link comes back flaky. Nobody is paged, and the alarm is kept.
+    const flaky = reconcile(notified, 'warning', at(600), settings(), at(600));
+    assert.deepEqual(flaky, { kind: 'suppress' });
+
+    // What `suppress` stores: the chain stopped, the alarm standing (engine.ts:432).
+    const suspended = alarm({ ...notified, nextDueAt: null, suppressed: true });
+
+    // Then it clears entirely, and the operator who was paged "is down" is told it came back.
+    assert.deepEqual(reconcile(suspended, 'up', at(660), settings(), at(660)), {
+      kind: 'recover',
+    });
+  });
+
+  it('picks the chain up where a probe blip interrupted it, rather than paging again', () => {
+    // **One outage, one alarm** (`CLAUDE.md`). The sensor was Down at T0 and paged; its probe
+    // dropped at T+600 and came back at T+660 with the sensor still Down. The escalation was due
+    // at T+1800 and must still be — arming afresh would page "is down" a second time for an
+    // outage that never ended, and a probe flapping every twenty minutes would never escalate at
+    // all while paging once per flap per sensor.
+    //
+    // Walked as a sequence, for the reason the case above gives.
+    const chain = settings({ escalationLatencySeconds: 1800 });
+    const notified = alarm({ phase: 'notified', nextDueAt: at(1800), since: T0 });
+
+    // `ProbeReachability.lost` turns the sensor Unknown. The alarm is kept, not deleted.
+    assert.deepEqual(reconcile(notified, 'unknown', at(600), chain, at(600)), { kind: 'suppress' });
+    const suspended = alarm({ ...notified, nextDueAt: null, suppressed: true });
+
+    // The probe returns and the sensor reads Down again, because it never stopped being down.
+    const resumed = reconcile(suspended, 'down', at(660), chain, at(660));
+    assert.equal(resumed.kind, 'resume', 'not a second arm');
+    assert.deepEqual(resumed.nextDueAt, at(1800), 'the original escalation, not a new latency');
   });
 
   it('suppresses the chain on acknowledgement and keeps the alarm', () => {
