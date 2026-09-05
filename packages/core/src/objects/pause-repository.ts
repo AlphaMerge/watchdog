@@ -68,6 +68,22 @@ function toStored(row: PauseRow): StoredPause {
  * its side tables, this one is a fact *about* a subtree — and because the recompute below is the
  * only recursive write in the system and deserves to be findable.
  */
+/**
+ * Where a paged walk of `startedIn` stopped (`P-95`).
+ *
+ * `startsAt` is Postgres's own text form rather than a `Date`, because the column holds
+ * microseconds and a `Date` holds milliseconds: truncating puts the cursor *before* the row it
+ * was taken from, so the next page returns that row again and the walk never advances.
+ * `objectId` breaks ties, which a bulk pause written in one transaction produces.
+ */
+export interface PauseCursor {
+  readonly startsAt: string;
+  readonly objectId: ObjectId;
+}
+
+/** The beginning of time, which is where a restarted sweep starts looking. */
+export const PAUSE_CURSOR_START: PauseCursor = { startsAt: '-infinity', objectId: 0 };
+
 export class PauseRepository {
   /** Writes or replaces an object's pause. Replacing is extending a maintenance window. */
   async pause(q: Queryable, objectId: ObjectId, pause: ResolvedPause, actor: Actor): Promise<void> {
@@ -220,6 +236,46 @@ export class PauseRepository {
   }
 
   /**
+   * The words behind each sensor's manual or inherited pause (P-94).
+   *
+   * The nearest in-force pause up each sensor's chain, own first — the same ordering
+   * `effective` uses for one object, asked for a set. It exists because the message a sensor
+   * shows has to describe the cause it *reports*, and only this table knows what an operator
+   * typed. Before this, whichever subsystem happened to trigger the re-evaluation supplied the
+   * message, so a schedule window opening on a hand-paused sensor wrote the schedule's name as
+   * the reason it was still paused — at the moment that schedule had stopped being a reason for
+   * anything.
+   */
+  async messagesFor(
+    q: Queryable,
+    sensorIds: readonly number[],
+    now: Date,
+  ): Promise<Map<number, string>> {
+    if (sensorIds.length === 0) return new Map();
+    const rows = await q.query<{ sensor_id: string; message: string }>(
+      `
+      WITH RECURSIVE chain AS (
+        SELECT s.id AS sensor_id, s.id AS node, s.parent_id, 0 AS depth
+        FROM object s WHERE s.id = ANY($1::bigint[])
+        UNION ALL
+        SELECT chain.sensor_id, p.id, p.parent_id, chain.depth + 1
+        FROM object p JOIN chain ON p.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT DISTINCT ON (chain.sensor_id)
+             chain.sensor_id::text AS sensor_id, op.message
+      FROM chain
+      JOIN object_pause op ON op.object_id = chain.node
+      WHERE op.starts_at <= $2
+        AND (op.paused_until IS NULL OR op.paused_until > $2)
+      ORDER BY chain.sensor_id, chain.depth
+      `,
+      [[...sensorIds], now],
+    );
+    return new Map(rows.map((row) => [Number(row.sensor_id), row.message]));
+  }
+
+  /**
    * Whether anything in the installation is paused at all.
    *
    * The guard in front of `recompute`. That query is two recursive CTEs and an `UPDATE … FROM`,
@@ -288,19 +344,44 @@ export class PauseRepository {
    * With `since` at the epoch this returns every pause already in force, which is exactly what
    * the first sweep after a restart should reconcile: windows that opened while the core was
    * down, and any drift a crash left behind.
+   *
+   * **Keyset, not a bare timestamp** (`P-95`). That first pass is also the one most likely to
+   * be truncated by the limit — an installation with a few hundred long-standing pauses fills
+   * the page with them — so the caller has to be able to resume from where the page stopped.
+   * `starts_at` alone cannot express that: advancing to the last row's timestamp re-reads it
+   * for ever, and advancing past it silently drops anything sharing that instant, which a bulk
+   * pause in one transaction produces. `(starts_at, object_id)` is unique and totally ordered,
+   * which is the same reason `object_parent_name_id_idx` carries `id`.
    */
-  async startedIn(q: Queryable, since: Date, now: Date, limit: number): Promise<StoredPause[]> {
-    const rows = await q.query<PauseRow>(
+  async startedIn(
+    q: Queryable,
+    since: PauseCursor,
+    now: Date,
+    limit: number,
+  ): Promise<{ pauses: StoredPause[]; last: PauseCursor | null }> {
+    const rows = await q.query<PauseRow & { starts_at_cursor: string }>(
       `SELECT object_id::text AS object_id, paused_at, starts_at, paused_until, message,
-              actor_kind, actor_ref, actor_label
+              actor_kind, actor_ref, actor_label,
+              -- Text, at the column's own precision. A cursor that round-trips through a JS
+              -- Date loses the microseconds Postgres stores, lands just *before* the row it
+              -- came from, and reads it again for ever (P-95).
+              starts_at::text AS starts_at_cursor
        FROM object_pause
-       WHERE starts_at > $1 AND starts_at <= $2
-         AND (paused_until IS NULL OR paused_until > $2)
-       ORDER BY starts_at
-       LIMIT $3`,
-      [since, now, limit],
+       WHERE (starts_at, object_id) > ($1::timestamptz, $2::bigint)
+         AND starts_at <= $3
+         AND (paused_until IS NULL OR paused_until > $3)
+       ORDER BY starts_at, object_id
+       LIMIT $4`,
+      [since.startsAt, since.objectId, now, limit],
     );
-    return rows.map(toStored);
+    const last = rows.at(-1);
+    return {
+      pauses: rows.map(toStored),
+      last:
+        last === undefined
+          ? null
+          : { startsAt: last.starts_at_cursor, objectId: Number(last.object_id) },
+    };
   }
 
   /** The root object id, which is where a whole-installation recompute starts. */

@@ -1,4 +1,5 @@
 import { pino } from 'pino';
+import { PauseRepository } from '../../src/objects/pause-repository.js';
 import { Migrator } from '../../src/db/migrator.js';
 import { MIGRATIONS } from '../../src/db/migrations/index.js';
 import type { SensorType } from '@ms/sensors';
@@ -98,6 +99,7 @@ export async function buildHarness(
           db,
           logger: silent,
           settings: resolver,
+          pauses: new PauseRepository(),
           // Where the notification engine sits in production (`N-02`): `reevaluate` is the
           // choke point for every state change that is not a check result, so a pause, an
           // acknowledgement or a schedule window reaches it here or not at all.

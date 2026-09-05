@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { SensorStateCause } from '../state/tables.js';
 import { DEPENDENCY_DELAY_SECONDS } from '../settings/registry.js';
 import { DependencyRepository } from './repository.js';
 
@@ -9,7 +10,8 @@ export interface ReevaluatesSensors {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string },
+    /** `sources` names the causes this message speaks for — see `P-94` on `reevaluate`. */
+    cause: { message: string; sources?: readonly SensorStateCause[] },
   ): Promise<number>;
 }
 
@@ -273,7 +275,11 @@ export class DependencyPauses {
           masterId === null
             ? 'its master recovered'
             : `master #${String(masterId)}${name === undefined ? '' : ` (${name})`} is Down`;
-        transitions += (await this.#states?.reevaluate(q, sensorIds, now, { message })) ?? 0;
+        transitions +=
+          (await this.#states?.reevaluate(q, sensorIds, now, {
+            message,
+            sources: ['dependency'],
+          })) ?? 0;
       }
     }
 

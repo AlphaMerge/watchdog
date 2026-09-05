@@ -543,6 +543,65 @@ describe(
       assert.equal(resumed.state, 'unknown');
     });
 
+    it('does not write the schedule’s name over an operator’s own pause message', async () => {
+      // **`P-94`.** `recompute` passes the schedule's text to `reevaluate` in *both* directions,
+      // on the reasoning that the message is blanked for a sensor that is resuming. That holds
+      // only when the sensor fully resumes — which is the case where the message does not
+      // matter. A sensor also paused by hand stays paused; `PAUSE_SOURCES` puts `schedule` above
+      // `manual`, so the cause moves from `schedule` to `user`, which is a real change and
+      // writes a transition. The message written was the schedule's, at the exact instant that
+      // schedule stopped being the reason for anything.
+      //
+      // `pause-precedence.test.ts` walks this same transition and asserts only `state` and
+      // `cause`, never `message`, which is why it stayed green.
+      //
+      // The clock here is the wall clock, not this block's fixed `INSIDE`/`OUTSIDE`: a manual
+      // pause is stamped `new Date()` by `ObjectService.pause`, and a schedule re-evaluated at a
+      // date before that pause exists is not the situation being tested.
+      const now = new Date();
+      const closed = (
+        await schedules.create(testActor, {
+          name: 'Patching window',
+          periods: aroundNow(),
+          polarity: 'inactive',
+        })
+      ).id;
+      await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, closed);
+      await recompute(now);
+      assert.equal((await flagsOf(sensorId)).cause, 'schedule', 'held by the closed window');
+
+      await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'replacing the PSU');
+
+      // The window opens — the schedule stops applying, the operator's pause does not.
+      await schedules.update(testActor, closed, {
+        name: 'Patching window',
+        periods: aroundNow(),
+        polarity: 'active',
+      });
+      await recompute(new Date());
+
+      const held = await flagsOf(sensorId);
+      assert.equal(held.state, 'paused');
+      assert.equal(held.cause, 'user', 'the manual pause is what holds it now');
+
+      const runtime = await db.query<{ message: string }>(
+        'SELECT message FROM sensor_runtime WHERE object_id = $1',
+        [sensorId],
+      );
+      assert.equal(
+        runtime[0]?.message,
+        'replacing the PSU',
+        'the words belong to the source that is reported',
+      );
+
+      const newest = await db.query<{ message: string }>(
+        `SELECT message FROM sensor_state
+         WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1`,
+        [sensorId],
+      );
+      assert.equal(newest[0]?.message, 'replacing the PSU');
+    });
+
     it('names the schedule in the state history, not just "a schedule"', async () => {
       await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, await officeHours());
       await recompute(OUTSIDE);

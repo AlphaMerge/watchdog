@@ -750,6 +750,60 @@ describe(
         assert.equal((await runtimeOf(sensorId)).state, 'paused');
       });
 
+      it('does not skip a window the first pass’s batch limit truncated', async () => {
+        // **`P-95`.** `#since` starts at the epoch so the first pass after a restart reconciles
+        // every window that opened while the core was down — which means `startedIn` returns
+        // *every pause currently in force*, oldest first, capped at the batch size. `#since`
+        // then advanced to the sweep's start time regardless, so anything past the cap fell
+        // outside every later window and was never applied.
+        //
+        // Unlike the `expired` half, whose predicate `paused_until <= now` stays true so an
+        // unswept row is retried next tick, this one is window-triggered: `starts_at > since`
+        // can never match again, and nothing else sets the flags. The sensors under that window
+        // keep scanning through the planned outage and alarm — which is what pausing exists to
+        // prevent — and the window later "expires" through the `due` loop, whose recompute finds
+        // the flags already false and writes nothing, so no log line records that it did.
+        //
+        // A batch size of one stands in for the two hundred long-standing pauses a real
+        // installation accumulates; what matters is that the window under test sorts after at
+        // least one other, which every earlier test in this file has already arranged.
+        const older = await h.service.create(testActor, {
+          kind: 'device',
+          parentId: groupId,
+          name: 'decommissioned',
+          host: '192.0.2.99',
+        });
+        await h.service.pause(testActor, older.id, { kind: 'indefinite' }, 'awaiting disposal');
+        await moveWindow(older.id, '-30 days', '3650 days');
+
+        // The window that opened while the core was down. Newest, so it sorts last.
+        await h.service.pause(testActor, deviceId, { kind: 'indefinite' }, 'overnight patching');
+        await moveWindow(deviceId, '-3 hours', '3 hours');
+        await db.query('UPDATE sensor_runtime SET paused_by_parent = false WHERE object_id = $1', [
+          sensorId,
+        ]);
+        await db.query("UPDATE sensor_runtime SET state = 'up' WHERE object_id = $1", [sensorId]);
+
+        try {
+          // A new process, whose pages hold one window each. Swept enough times to walk past
+          // every pause this file has left in force — which is the point: with the watermark
+          // jumping to now after the first page, no number of passes ever reaches this window.
+          const restarted = new PauseSweep({ service: h.service, logger: silent, batchSize: 1 });
+          for (let pass = 0; pass < 25; pass += 1) await restarted.sweep();
+
+          assert.equal(
+            (await runtimeOf(sensorId)).state,
+            'paused',
+            'the window past the batch limit is applied by a later pass, not skipped for ever',
+          );
+        } finally {
+          // Both windows are still in force, and a pause this test opened would otherwise be a
+          // window the *next* test's sweep opens for the first time.
+          await h.service.resume(testActor, older.id);
+          await h.service.resume(testActor, deviceId);
+        }
+      });
+
       it('is cancelled by resuming it, before it has started', async () => {
         const { from, until } = nextWeek();
         await h.service.pause(

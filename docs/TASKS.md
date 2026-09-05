@@ -6154,6 +6154,87 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
+- [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
+      S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
+      when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`
+      and has not failed since under any narrower run.
+
+      **Measured, so the flake is not a guess:** 0 failures in 60 runs of the test alone, 0 in 12
+      runs of its file, 0 in 4 runs of the whole `@ms/probe` suite. The one failure was in the
+      monorepo run, where core's ~2,000 database tests are saturating the same Docker VM.
+
+      The shape is rule 2 from `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`
+      — a constant chosen so the assertion holds. `intervalMs: 5` against a `delay(40)` window
+      asserts `>= 2` ticks, which needs the event loop to be responsive within ~20 ms; under
+      contention it is not. Nothing about the sizer is wrong, and a slower interval with a
+      proportionally longer window would prove the same property without racing the scheduler.
+
+      Not folded into `P-94`/`P-95`: it is in a package neither of them touches, it predates them
+      (`packages/probe/test/pool-sizer.test.ts` last moved in `P-75`), and a flake fixed in the
+      same commit as a behaviour change is a flake nobody will be able to attribute later.
+
+- [x] **P-95 — The restart catch-up window advanced past whatever the batch limit truncated** ·
+      M · M-10 · Findings 15 and 29, which are the same defect reached from two directions.
+      `PauseSweep` starts at the epoch so the first pass after a restart reconciles every window
+      that opened while the core was down — which means `startedIn` returns *every pause currently
+      in force*, oldest first, capped at 200. `#since` then advanced to the sweep's start time
+      whether or not the page was full, so anything past the cap could never match
+      `starts_at > since` again.
+
+      Unlike the `expired` half, which is level-triggered on `paused_until <= now` and self-heals
+      over successive sweeps, this one is window-triggered and the truncation is permanent.
+      Nothing else sets those flags: `recompute` only derives them for pauses in force when it
+      runs, and it runs on a pause, a resume, a move, a create or a clone of that subtree. An
+      installation with a couple of hundred long-standing pauses would silently never apply a
+      maintenance window that opened during a restart — its sensors keep scanning through the
+      planned outage and alarm, which is the failure pausing exists to prevent — and the window
+      later "expires" through the `due` loop, whose recompute finds the flags already false and
+      writes nothing, so no log line records that it did nothing.
+
+      **Two things had to be right, and the second only showed up under test.**
+
+      The obvious fix — "advance only when the page was not full" — starves: `startedIn` returns
+      in-force pauses regardless of whether their flags are applied, so re-asking the same window
+      returns the same oldest rows for ever and the 201st is never reached. The watermark has to
+      be a **keyset** — `(starts_at, object_id)`, unique and totally ordered, the same reason
+      `object_parent_name_id_idx` carries `id`. Ties matter: a bulk pause written in one
+      transaction shares an instant.
+
+      And the cursor cannot round-trip through a JS `Date`. `timestamptz` holds microseconds and
+      `Date` holds milliseconds, so a truncated cursor lands *before* the row it was taken from
+      and the walk reads that row again for ever — which is exactly what the first version of
+      this fix did, silently, until the test caught it. The cursor is Postgres's own `::text`
+      form, opaque to everything but the query that produced it.
+
+      The finding's own suggested check — `report.started.length < batchSize` — would also have
+      been wrong: `started` holds only the windows that actually moved a flag, not the page.
+
+- [x] **P-94 — A schedule window opening wrote the schedule's name over the operator's pause
+      message** · M · M-09, M-10 · Finding 20. `SchedulePauses.recompute` passes the schedule's
+      text to `reevaluate` in *both* directions, justified by "reevaluate blanks the message for a
+      sensor that is resuming, so the same call covers both". That holds only when the sensor
+      fully resumes — precisely the case where the message does not matter.
+
+      `operatorDecided` is true for **any** paused decision, and `PAUSE_SOURCES` ranks `schedule`
+      above `manual`. So a sensor held by both reported cause `schedule`; when the window opened
+      the cause moved to `user` — a real change, so a transition was written — and the message
+      written was the schedule's text at the instant that schedule stopped being the reason for
+      anything. At 08:00, with office hours open, the detail page and the state log both read
+      "outside the Office hours schedule", the operator's "replacing the PSU" was gone from the
+      row and the newest history entry, and `since` reset so "paused for 12h" restarted at zero.
+
+      **The message has to describe the cause that is reported**, so the fix is not to suppress
+      the schedule's words but to use the right ones. `reevaluate` takes the causes a caller is
+      entitled to speak for; when the decided cause is not one of them, the words come from
+      whoever owns it, and only `object_pause` knows what an operator typed —
+      `PauseRepository.messagesFor` resolves the nearest in-force pause up each sensor's chain,
+      asked only when a scoped caller actually meets a sensor paused for something else.
+
+      `pause-precedence.test.ts` walks this exact transition and asserts `state` and `cause` and
+      never `message`, which is why it was green. The new case needed the wall clock rather than
+      the block's fixed dates: a manual pause is stamped `new Date()`, and a schedule
+      re-evaluated at a date before that pause exists is not the situation under test.
+
 - [x] **P-90 — The rollback `P-80` added to `lost` was never added to its mirror** · S · R-05 ·
       Finding 11. `#online` drops the `#byProbe` entry and every `#unreachable` id *before* the
       transaction that writes the recovery, and nothing put them back when it rejected — the exact

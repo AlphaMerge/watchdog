@@ -1,15 +1,18 @@
 import { describeError, type Logger } from '@ms/shared';
+import { PAUSE_CURSOR_START, type PauseCursor } from './pause-repository.js';
 
 /** Just enough of `ObjectService` to run the sweep. */
 export interface SweepsPauses {
   sweepPauses(
-    since: Date,
+    since: PauseCursor,
     limit?: number,
   ): Promise<{
     expired: number[];
     started: number[];
     released: number;
     sensorsAffected: number;
+    /** Where to resume from; null when the page was not truncated (`P-95`). */
+    startedThrough: PauseCursor | null;
   }>;
 }
 
@@ -68,7 +71,7 @@ export class PauseSweep {
    * windows that opened while the core was down. Idempotent, so it writes nothing when nothing
    * drifted.
    */
-  #since = new Date(0);
+  #since: PauseCursor = PAUSE_CURSOR_START;
 
   constructor(options: PauseSweepOptions) {
     this.#service = options.service;
@@ -99,7 +102,18 @@ export class PauseSweep {
       const report = await this.#service.sweepPauses(since, this.#batchSize);
       // Advanced only on success, so a failed pass is retried over the same interval rather
       // than leaving a window that opened during it unapplied for ever.
-      this.#since = startedAt;
+      //
+      // **And not past what the batch limit truncated** (`P-95`). `#since` starts at the epoch
+      // so the first pass after a restart reconciles every window that opened while the core
+      // was down — which means `startedIn` returns *every pause currently in force*, oldest
+      // first, capped at the batch size. Advancing to now regardless dropped everything past
+      // the cap permanently: unlike `expired`, whose predicate stays true so an unswept row is
+      // retried next tick, a missed `startedIn` row can never match `starts_at > since` again,
+      // and nothing else sets its flags. An installation with a few hundred long-standing
+      // pauses would silently never apply a maintenance window that opened during the restart —
+      // its sensors keep scanning through the planned outage and alarm, which is the exact
+      // failure pausing exists to prevent.
+      this.#since = report.startedThrough ?? { startsAt: startedAt.toISOString(), objectId: 0 };
       if (report.expired.length > 0) {
         this.#logger.info(
           { objects: report.expired, sensorsAffected: report.sensorsAffected },

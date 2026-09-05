@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { SensorStateCause } from '../state/tables.js';
 import { isActiveAt } from './definition.js';
 import { ScheduleRepository, type StoredSchedule } from './repository.js';
 
@@ -9,7 +10,8 @@ export interface ReevaluatesSensors {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string },
+    /** `sources` names the causes this message speaks for — see `P-94` on `reevaluate`. */
+    cause: { message: string; sources?: readonly SensorStateCause[] },
   ): Promise<number>;
 }
 
@@ -100,7 +102,16 @@ export class SchedulePauses {
       // `reevaluate` blanks the message for a sensor that is resuming, so the same call covers
       // both directions: the reason a sensor is Unknown after a window opens is that nothing
       // has scanned it yet, not the schedule's name.
-      transitions += (await this.#states?.reevaluate(q, sensorIds, now, { message })) ?? 0;
+      //
+      // **`sources` because a window opening does not always resume the sensor** (`P-94`). One
+      // held by a manual pause as well stays paused and its cause moves to `user`; without this
+      // the schedule's text was written over the operator's own words at the moment the
+      // schedule stopped being the reason for anything.
+      transitions +=
+        (await this.#states?.reevaluate(q, sensorIds, now, {
+          message,
+          sources: ['schedule'],
+        })) ?? 0;
     }
 
     this.#logger.debug(

@@ -42,6 +42,7 @@ import {
   type StateTransition,
 } from './runtime.js';
 import type { CommittedStates } from './runtime.js';
+import type { SensorStateCause } from './tables.js';
 
 /** One result, as much of it as the state machine reads. */
 export interface SensorResult {
@@ -75,6 +76,16 @@ export interface PolicySource {
 }
 
 /**
+ * Just enough of `PauseRepository` to say why a sensor is paused (`P-94`).
+ *
+ * Narrow for the same reason as `PolicySource`: the state machine has no business knowing how
+ * pauses are stored, only that something can answer "what did the operator write".
+ */
+export interface PauseMessages {
+  messagesFor(q: Queryable, sensorIds: readonly number[], now: Date): Promise<Map<number, string>>;
+}
+
+/**
  * Just enough of `AlarmEngine` to reconcile a batch of sensors (`N-02`).
  *
  * Narrow on purpose, like `PolicySource` above: this module has no business knowing what a
@@ -94,6 +105,8 @@ export interface SensorStateServiceOptions {
    * system does — `main.ts` passes the inheritance resolver.
    */
   settings?: PolicySource;
+  /** Where an operator's pause message comes from. `main.ts` passes the pause repository. */
+  pauses?: PauseMessages;
   /** The policy for a sensor with no resolver. Also the registry default's shape. */
   policy?: FailurePolicy;
   /** Sensors held in memory. The v1 target is 5,000, so the default holds every one of them. */
@@ -150,6 +163,7 @@ export class SensorStateService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #settings: PolicySource | undefined;
+  readonly #pauses: PauseMessages | undefined;
   readonly #fallback: FailurePolicy;
   readonly #maxCached: number;
   readonly #alarms: AlarmReactor | undefined;
@@ -178,6 +192,7 @@ export class SensorStateService {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'state' });
     this.#settings = options.settings;
+    this.#pauses = options.pauses;
     this.#fallback = options.policy ?? DEFAULT_FAILURE_POLICY;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
     this.#alarms = options.alarms;
@@ -384,7 +399,7 @@ export class SensorStateService {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string },
+    cause: { message: string; sources?: readonly SensorStateCause[] },
   ): Promise<number> {
     if (sensorIds.length === 0) return 0;
 
@@ -403,6 +418,7 @@ export class SensorStateService {
       facts.set(sensorId, resuming ? clearedByResume(runtime.facts) : runtime.facts);
     }
     const policies = await this.#policiesFor(facts);
+    const pauseMessages = await this.#pauseMessagesFor(q, cause, facts, at);
     const factsOf = (sensorId: number, fallback: SensorFacts): SensorFacts =>
       facts.get(sensorId) ?? fallback;
 
@@ -425,7 +441,23 @@ export class SensorStateService {
       // scanned it yet. `CAPABILITIES.MD §5.3` requires an acknowledgement's message to become
       // the sensor's last message; a pause's and a simulated error's are wanted for the same
       // reason, which is that a sensor showing an unexplained state is the thing to avoid.
-      const message = operatorDecided(decision) ? cause.message : '';
+      // **The message has to describe the cause that is reported** (`P-94`). `operatorDecided`
+      // is true for *any* paused decision, so whichever subsystem happened to trigger the
+      // re-evaluation supplied the words — and `sources` says which causes this caller is
+      // entitled to speak for. A schedule window opening on a sensor an operator had also
+      // paused by hand moved the cause from `schedule` to `user`, and wrote "outside the Office
+      // hours schedule" as the reason it was still paused, at 08:00, with office hours open.
+      //
+      // When the caller does not own the decided cause, the words come from whoever does. Only
+      // `object_pause` knows what an operator typed, so a manual or inherited pause is looked
+      // up rather than guessed; there is nothing to look up for the other causes, and an empty
+      // message is what a sensor awaiting its next scan has always carried.
+      const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
+      const message = !operatorDecided(decision)
+        ? ''
+        : owned
+          ? cause.message
+          : (pauseMessages.get(sensorId) ?? '');
       transitions.push({
         sensorId,
         at,
@@ -598,6 +630,27 @@ export class SensorStateService {
       });
     }
     return runtimes;
+  }
+
+  /**
+   * The operator's words for sensors this caller cannot speak for (`P-94`).
+   *
+   * Only asked when the caller named the causes it owns *and* some sensor is going to end up
+   * paused for a different one — which is the schedule/dependency sweep meeting a sensor an
+   * operator also paused by hand. Every other path resolves nothing.
+   */
+  async #pauseMessagesFor(
+    q: Queryable,
+    cause: { message: string; sources?: readonly SensorStateCause[] },
+    facts: ReadonlyMap<number, SensorFacts>,
+    at: Date,
+  ): Promise<ReadonlyMap<number, string>> {
+    if (cause.sources === undefined || this.#pauses === undefined) return new Map();
+    const wanted = [...facts]
+      .filter(([, one]) => one.pause.manual || one.pause.parent)
+      .map(([id]) => id);
+    if (wanted.length === 0) return new Map();
+    return this.#pauses.messagesFor(q, wanted, at);
   }
 
   /**

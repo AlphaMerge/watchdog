@@ -1,6 +1,6 @@
-# Nine tests that passed for the wrong reason, and what exposed each
+# Fourteen tests that passed for the wrong reason, and what exposed each
 
-`P-58`–`P-83`, 2026-09-04. **Extended the same day**, which is the finding.
+`P-58`–`P-95`, 2026-09-04 and 2026-09-05. **Extended twice**, which is the finding.
 
 A morning spent on `P-58`'s backlog turned up five tests that were green, had been green for
 weeks, and did not test what their names said. None was a careless test. Each was written by
@@ -12,10 +12,16 @@ and found four more. **Three of the four were in tests written that afternoon, b
 this document, after writing it.** One of them was in the guard built the previous ticket to catch
 exactly this family of defect.
 
+That was the first nine, all of them in code written that week. A second panel was then pointed
+at the state machine, dependencies, schedules, notifications and ingestion — code a fortnight
+old, written unhurriedly and green ever since. It confirmed 29 defects, five of which belong
+here, and they are the ones that settle the argument: haste was never the explanation.
+
 That is why the catalogue is worth keeping. The individual bugs are in their tickets; what is
-here is that **nine independent instances of one failure appeared in one day**, that a different
-technique was needed to expose each, and that knowing about the failure mode in detail — having
-just catalogued it — did not stop somebody producing four more instances of it before dinner.
+here is that **fourteen independent instances of one failure have now been found**, that a
+different technique was needed to expose each, and that knowing about the failure mode in
+detail — having just catalogued it — did not stop somebody producing four more instances of it
+before dinner.
 
 A green suite is evidence about the suite.
 
@@ -185,6 +191,81 @@ built as the durable fix for this family and shipped with an instance of it insi
 
 ---
 
+## The five the state-machine panel found, in code two weeks old
+
+The first nine were all in code written the same week. A second panel was run over
+`packages/core`'s state machine, dependencies, schedules, notifications and ingestion — older
+code, none of it written that day — and confirmed 29 defects. Five of them are this family, and
+they are the more interesting half: nobody was in a hurry when these were written.
+
+### 10. A test that supplied the missing trigger itself (`P-87`)
+
+`pause-precedence.test.ts` had a case called *releases a dependency when the master itself is
+paused, not when it is Down*. It passed for a fortnight. Three lines after pausing the master it
+called `dependencies.recompute` by hand — the exact step whose absence was the defect.
+`DependencySync.invalidates` had no `object.paused` case, so production ran nothing, and forty
+dependents stayed held for ever with the pause API insisting nothing held them.
+
+Deleting those three lines turned it red immediately. **A test that provides the missing step
+tests the step after it**, and the giveaway is on the page: a test that has to reach past the API
+into a collaborator to make the scenario happen is describing a scenario production cannot reach.
+
+### 11. The one mode where the wrong lookup happens to be right (`P-89`)
+
+The dependency recovery delay was resolved on the *master* and configured on the *dependent*. In
+`device` mode the master sensor sits inside the device the setting lands on, so resolving it on
+the master finds it anyway. The test used `device` mode. In `object` mode — the other half of
+what `WORKFLOW.MD §5` offers — every recovery silently fell back to a delay of zero.
+
+**A fixture that picks the configuration where two different things coincide cannot tell them
+apart.** The mutation is instructive: reverting the fix kills the new `object`-mode case and
+leaves the original `device`-mode one green, which is exactly the shape of a test that was never
+testing what its name said.
+
+### 12. A guard tested in one direction (`P-92`)
+
+`conditional-get.test.ts` asserted *does not serve 304 after a credential appears on an
+ancestor* — the INSERT direction. The trigger fired on `INSERT OR UPDATE` and not `DELETE`, so
+**revoking** a credential moved no version, the ETag was unchanged, and a client holding it got a
+304 and kept acting on a credential that had been taken away. The route's own comment says the
+digest exists so that "a 304 there would hide a revoked credential".
+
+**A cache-invalidation test that only adds things is half a test**, and it is the wrong half: the
+appearing case is the benign one.
+
+### 13. Asserting the two fields that could not move (`P-94`)
+
+`pause-precedence.test.ts` walks the transition where a schedule window opens on a sensor an
+operator has also paused by hand. It asserts `state` and `cause`. It never asserts `message` —
+which is the only field the defect touched. The sensor read "outside the Office hours schedule"
+at 08:00, with office hours open, and the operator's "replacing the PSU" was gone from both the
+row and the newest history entry.
+
+This is entry 8's rule reached from the other side. There the assertion could not distinguish the
+case; here it simply looked away from the field that could.
+
+### 14. A test that passed alone and failed in its file (`P-95`, found by writing it)
+
+Not a pre-existing test — one written for a fix, an hour before this paragraph. It passed run in
+isolation and failed twice in the full suite: it assumed it was the only in-force pause in the
+database, and it left its own pause behind, which broke a sibling three tests later.
+
+Worth recording because the failure mode is invisible to the loop everybody actually uses.
+`node --test --test-name-pattern` is how a fix gets iterated on, and it is precisely the mode in
+which order-dependence cannot appear. **A new test has to be run inside its own file before it is
+believed**, and it has to leave the database as it found it.
+
+The same fix produced the sharper lesson twice more, both caught only because the test existed:
+
+- The finding's own suggested check — "advance the watermark only when `report.started.length <
+  batchSize`" — is wrong. `started` holds the windows that moved a flag, not the page that was
+  read. A plausible fix from a careful reader, and it would have shipped.
+- The first *correct-looking* fix silently re-read the same row for ever. `timestamptz` holds
+  microseconds and a JS `Date` holds milliseconds, so a cursor round-tripped through JS lands
+  just *before* the row it came from. The watermark advanced, the query returned the same row,
+  and nothing ever progressed past page one. **A truncating conversion in a pagination cursor
+  fails silently and looks like a working loop.**
+
 ## What actually found them
 
 Ranked by what each cost and what it caught:
@@ -196,7 +277,8 @@ Ranked by what each cost and what it caught:
 | Adversarial review of a *fix* | 3 | Expensive; caught what its author could not see |
 | Running it N times and counting | 4 | Cheap and nobody does it |
 | Instrumenting durations, then a log spy | 5 | Minutes, once the duration looked wrong |
-| **A review panel with a refutation bar** | **6, 7, 8, 9** | **Very expensive; the only thing that caught the author's blind spot four times** |
+| **A review panel with a refutation bar** | **6, 7, 8, 9, 10, 11, 12, 13** | **Very expensive; the only thing that caught the author's blind spot, now eight times** |
+| Writing the test for the fix, then running its *file* | 14 | Free, and skipped by the `--test-name-pattern` loop everybody uses |
 
 The one that generalises: **a passing test is a hypothesis, and the mutation is the experiment.**
 Four of the first five had never had the mutation run against them; 7 was settled by one in
@@ -209,7 +291,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Five rules this produced
+## Seven rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -229,6 +311,13 @@ anything — and that structure, not more care, is what found them.
 5. **Review the guards as adversarially as the code.** Entry 9 was in the structural check written
    the day before to catch exactly this. A guard is code, it is written by somebody who has just
    convinced themselves of something, and it is the *last* thing anybody re-reads.
+6. **A test that reaches past the API to make its scenario happen is describing a scenario
+   production cannot reach.** Entry 10 called a collaborator by hand three lines after the action
+   under test. If the scenario needs a step the system does not take, that missing step *is* the
+   finding — delete the line and see.
+7. **Run a new test inside its own file before believing it, and leave the database as you found
+   it.** Entry 14 passed under `--test-name-pattern` and failed twice in the suite. The iteration
+   loop that makes a fix fast is the one mode in which order-dependence is invisible.
 
 ## What is still not covered, and is said so on purpose
 
@@ -255,3 +344,16 @@ Nine instances in one day is not nine unlucky tests. It is the base rate for tes
 somebody who already knows what the answer should be, which is every test anybody writes about
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
+
+**Fourteen now, and the five added later are the ones that settle the argument.** The first nine
+were all written in the rush of a single day, which is the comfortable explanation. Entries 10 to
+13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and green
+ever since — and each one had a name that described a property the test did not check. The base
+rate is not a function of haste.
+
+Entry 14 is the counterweight, and the cheapest thing on this page: it was caught by running a
+new test in its own file, which takes seconds. Two more defects in that same fix were caught only
+because the test existed at all — one of them a plausible fix suggested by a careful reader that
+would have shipped, and one a silent truncating conversion that looked exactly like a working
+loop. Most of this is not subtle. It is only invisible to the person who just decided what the
+answer is.

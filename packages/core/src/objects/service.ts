@@ -19,7 +19,7 @@ import {
 } from '../state/acknowledgement.js';
 import { downSensorsIn, sensorsIn } from '../state/runtime.js';
 import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
-import { PauseRepository, flattenActor } from './pause-repository.js';
+import { PauseRepository, flattenActor, type PauseCursor } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
@@ -590,26 +590,42 @@ export class ObjectService {
    * "have I applied this yet" column that could disagree with the rows it describes.
    */
   async sweepPauses(
-    since: Date,
+    since: PauseCursor,
     limit = 200,
   ): Promise<{
     expired: ObjectId[];
     started: ObjectId[];
     released: number;
     sensorsAffected: number;
+    /**
+     * How far the caller may advance its watermark (`P-95`).
+     *
+     * Null when the opening page was not full, meaning everything up to `now` was seen. When it
+     * *was* full there is more beyond the limit, and the caller must resume from inside the
+     * window rather than skipping to now — `started` cannot answer this, because it holds only
+     * the windows that actually moved a flag.
+     */
+    startedThrough: PauseCursor | null;
   }> {
     const now = new Date();
     const actor: Actor = { kind: 'system', component: 'pause-sweep' };
 
     return this.#db.tx(async (q) => {
       const due = await this.#pauses.expired(q, now, limit);
-      const opening = await this.#pauses.startedIn(q, since, now, limit);
+      const page = await this.#pauses.startedIn(q, since, now, limit);
+      const opening = page.pauses;
       // A dependency's recovery delay is a deadline like any other, so it is swept here rather
       // than by a third timer. A delay of zero never reaches this: it is released in the
       // transaction that recorded the master's recovery (`M-11`).
       const released = (await this.#dependencyDelays?.releaseElapsed(q, now, limit))?.moved ?? 0;
+      // A full page means the limit truncated it, so the caller resumes from where this one
+      // stopped rather than skipping past everything it did not see. `started` cannot answer
+      // this — it holds only the windows that actually moved a flag — and the cursor is the
+      // keyset `startedIn` orders by, so nothing sharing the boundary instant is lost.
+      const startedThrough = opening.length < limit ? null : page.last;
+
       if (due.length === 0 && opening.length === 0) {
-        return { expired: [], started: [], released, sensorsAffected: 0 };
+        return { expired: [], started: [], released, sensorsAffected: 0, startedThrough };
       }
 
       const expired: ObjectId[] = [];
@@ -663,7 +679,7 @@ export class ObjectService {
       }
 
       if (mutations.length > 0) await this.#audit.record(q, actor, mutations, now);
-      return { expired, started, released, sensorsAffected };
+      return { expired, started, released, sensorsAffected, startedThrough };
     });
   }
 

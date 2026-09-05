@@ -15,6 +15,7 @@ import { ApiServer } from './api/server.js';
 import { runMigrateCommand, type MigrateAction } from './commands/migrate.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/store.js';
 import { LoggingAuditSink } from './objects/audit.js';
+import { PauseRepository } from './objects/pause-repository.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import {
@@ -323,6 +324,10 @@ async function serve(): Promise<void> {
     db,
     logger,
     settings: resolver,
+    // Stateless, so a second instance is the same repository (`P-94`). It is here so that a
+    // sensor still paused after a schedule window opens shows the operator's own words rather
+    // than the name of the schedule that has just stopped applying.
+    pauses: new PauseRepository(),
     alarms,
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
