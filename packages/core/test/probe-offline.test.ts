@@ -65,6 +65,9 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       db,
       logger: silentLogger,
       states,
+      // The same one the harness built, so this test and the pause sweep are looking at one
+      // reactor rather than two that happen to agree (`P-135`).
+      dependencies: harness.dependencies ?? { recompute: () => Promise.resolve({ moved: 0 }) },
       coreEvaluatedTypes: ['core.factory', 'ms.core.health'],
     });
 
@@ -432,6 +435,41 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       [factory.id],
     );
     assert.equal(history[0]?.n, '1', 'the one transition its own first reading made');
+  });
+
+  it('releases the dependents of a master whose probe has gone', async () => {
+    // **`P-87`'s failure, reached down a path `P-87` did not cover** (`P-135`). A master under a
+    // probe that goes away becomes Unknown, and Unknown is not Down — so whatever it was holding
+    // must be released. Nothing ran that: the dependency reaction is reachable from ingestion,
+    // with the transitions a *result batch* produced, and a probe that has gone produces no
+    // results. The dependents kept `paused_by_dependency`, dropped out of the probe
+    // configuration and were never scanned again, while the pause API — which computes what is
+    // holding them from the master's current state — reported nothing holding them and refused
+    // to resume them. Silently unmonitored, indefinitely, and unresumable.
+    const [master, dependent] = sensorIds;
+    assert.ok(master !== undefined && dependent !== undefined);
+    await harness.service.setDependency(testActor, dependent, 'object', master, undefined);
+
+    await scanned();
+    // The master goes Down and takes its dependent with it, the ordinary way.
+    await db.query(`UPDATE sensor_runtime SET state = 'down' WHERE object_id = $1`, [master]);
+    const dependencies = harness.dependencies;
+    assert.ok(dependencies !== undefined);
+    await db.tx((q) => dependencies.recompute(q, new Date()));
+    const held = await db.query<{ paused: boolean }>(
+      'SELECT paused_by_dependency AS paused FROM sensor_runtime WHERE object_id = $1',
+      [dependent],
+    );
+    assert.equal(held[0]?.paused, true, 'held while the master is Down');
+
+    // Now the probe carrying both of them goes away.
+    await reachability.lost(probeId);
+
+    const after = await db.query<{ paused: boolean }>(
+      'SELECT paused_by_dependency AS paused FROM sensor_runtime WHERE object_id = $1',
+      [dependent],
+    );
+    assert.equal(after[0]?.paused, false, 'an Unknown master holds nobody');
   });
 
   it('reports a probe with no sensors without touching anything', async () => {

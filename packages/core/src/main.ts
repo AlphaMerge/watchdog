@@ -930,6 +930,10 @@ async function serve(): Promise<void> {
     db,
     logger,
     states,
+    // A master under a probe that has gone is Unknown, not Down, so whatever it was holding is
+    // released here (`P-135`) — nothing else would ever notice, because the dependency reaction
+    // runs on the transitions a result batch produced and a lost probe produces no results.
+    dependencies: dependencyPauses,
     // A core-evaluated sensor is not scanned by the probe it happens to sit under, so a probe
     // outage says nothing about it (`P-13`). Probe Health depends on this: it is a sensor under
     // the probe it reports on, and without the exclusion the outage it exists to raise would be

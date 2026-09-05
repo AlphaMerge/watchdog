@@ -73,9 +73,14 @@ describe(
       ]);
       schedules = new ScheduleService({
         db,
+        // **`DependencySync` too, which is what production composes** (`P-133`,
+        // `scheduleAuditSinks`). Leaving it out here is why nothing noticed that a schedule edit
+        // reached the dependency sink and was ignored: the harness did not have the sink the
+        // defect was in.
         audit: new CompositeAuditSink([
           new DatabaseAuditSink(),
           new ScheduleSync({ pauses: schedulePauses, logger: silent }),
+          new DependencySync({ pauses: h.dependencies, logger: silent }),
         ]),
         logger: silent,
       });
@@ -457,6 +462,42 @@ describe(
       // after it.
       const pauseState = await h.service.pauseState(sensorId);
       assert.equal(pauseState.paused, false, 'and the API agrees with the row');
+    });
+
+    it('releases a dependency when a schedule edit pauses the master', async () => {
+      // **The same rule, reached by the other path** (`P-133`). A master pausing on a schedule
+      // window is switched off, not Down, so its dependents must be released — and `DependencySync`
+      // is in `scheduleAuditSinks` for exactly this. It could not do it: `invalidates` matched
+      // none of the three schedule actions, so the sink was inert and the dependents stayed held
+      // until something unrelated happened to recompute them.
+      await turnOn('dependency');
+      assert.deepEqual((await flagsOf(sensorId)).active, ['dependency']);
+
+      // The master picks up a schedule that is open, then the schedule is edited shut. Editing is
+      // the path under test: it is the mutation that reaches the dependency sink.
+      const window = (
+        await schedules.create(testActor, {
+          name: `master-window-${String(process.hrtime.bigint())}`,
+          periods: 'mo:00:00-su:24:00',
+        })
+      ).id;
+      await h.service.setSetting(testActor, masterId, SCHEDULE_ID.key, window);
+      await db.tx((q) => schedulePauses.recompute(q, OUTSIDE));
+      assert.deepEqual((await flagsOf(sensorId)).active, ['dependency'], 'still held while open');
+
+      // Edited to a window that is closed at OUTSIDE — Monday 03:00 — rather than to one that is
+      // never open, which the validator refuses as a permanent pause dressed up as a schedule.
+      await schedules.update(testActor, window, {
+        name: 'master-window',
+        periods: 'mo:08:00-mo:18:00',
+      });
+
+      assert.equal((await flagsOf(masterId)).state, 'paused', 'the master is switched off');
+      assert.deepEqual(
+        (await flagsOf(sensorId)).active,
+        [],
+        'so the dependent is released, without waiting for something else to recompute it',
+      );
     });
 
     it('reports every holder at once, so a UI can show all four', async () => {

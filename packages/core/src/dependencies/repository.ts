@@ -218,15 +218,34 @@ export class DependencyRepository {
             WHERE s2.object_id = c.id AND s2.key = $2
           )
       ),
+      -- **The cascade, computed from ground truth rather than from its own last answer**
+      -- (P-134). This used to read m.paused_by_dependency -- the column this statement is
+      -- about to write -- so a master held by its own master kept holding, which is the
+      -- recursion the cascade needs and is also a fixpoint that can sustain itself. Two sensors
+      -- pointed at each other, which a move can arrange and only the assignment path refuses,
+      -- ended up holding one another: both flags true, each true because the other was, no
+      -- outage anywhere, permanently unmonitored and permanently unresumable, with nothing
+      -- logged because from the row's point of view nothing had changed.
+      --
+      -- So the closure is computed here instead: the ground is a real outage, an acknowledged
+      -- one (an acknowledgement is a statement about notifications, not about the target), or a
+      -- recovery still inside its delay -- and holding propagates down the master chains from
+      -- there. UNION rather than UNION ALL, which is what makes a loop terminate: a node already
+      -- reached is not followed again, so a cycle contributes nothing and holds nobody.
       holding AS (
         SELECT m.object_id AS master_id
         FROM sensor_runtime m
-        -- A genuine outage, an acknowledged one (an acknowledgement is a statement about
-        -- notifications, not about the target), a master held by its own master -- which is what
-        -- makes the cascade recursive -- or a recovery still inside its delay.
         WHERE m.state IN ('down', 'down_acknowledged')
-           OR m.paused_by_dependency
            OR (m.dependency_clear_at IS NOT NULL AND m.dependency_clear_at > $1)
+
+        UNION
+
+        -- A sensor whose own master is holding is paused, and a paused sensor holds whatever
+        -- depends on it. Self-reference is excluded for the reason wouldCycle exempts it: a
+        -- master never depends on itself.
+        SELECT held.node
+        FROM holding h
+        JOIN assigned held ON held.master_id = h.master_id AND held.node <> h.master_id
       ),
       want AS (
         SELECT o.id AS sensor_id,

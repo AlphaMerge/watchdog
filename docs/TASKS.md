@@ -10145,6 +10145,45 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 8 new. Mutation 5/5.
 
+- [x] **P-132 — A master forced Down never paused its dependents**
+      `M-14`'s simulated error puts sensors into the state the whole dependency mechanism exists
+      to react to — it fires the real notification chain at real people, which is what it is for —
+      and `invalidates` matched none of its mutations. So the storm the dependency was configured
+      to prevent arrived in full, from the button whose purpose is to rehearse exactly that; and
+      lifting the force never released anything it had held.
+
+- [x] **P-133 — `DependencySync` was wired into the schedule sinks for an effect it could not have**
+      It is in `scheduleAuditSinks`, deliberately and asserted by a test, and `invalidates`
+      matched none of the three schedule actions — so the sink was inert. A master pausing on a
+      schedule window is switched off rather than Down (`docs/state-machine.md` §3), so its
+      dependents must be released, and they stayed dark until something unrelated recomputed
+      them. `pause-precedence.test.ts` did not have the sink in its schedule service at all,
+      which is why nothing noticed; it composes what production composes now.
+
+- [x] **P-134 — The dependency cascade read its own output, so a loop of masters was permanent**
+      `holding` selected masters that were `paused_by_dependency` — the column the same statement
+      then writes. That is the recursion the cascade needs and it is also a fixpoint that can
+      sustain itself: two sensors pointing at each other, which a *move* can arrange because only
+      the assignment path checks for master loops, held one another with both flags true, each
+      true because the other was, no outage anywhere. Permanently unmonitored, permanently
+      unresumable, and nothing logged, because from the row's point of view nothing had changed.
+      The closure is computed from ground truth now — a real outage, an acknowledged one, or a
+      recovery inside its delay — and propagated with `UNION`, which is what makes a cycle
+      terminate holding nobody.
+
+- [x] **P-135 — A master whose probe went away held its dependents for ever**
+      A probe going offline moves its sensors to Unknown, and Unknown is not Down. Nothing
+      recomputed the dependency flags: the reaction is reachable from ingestion, with the
+      transitions a *result batch* produced, and a probe that has gone produces no results. The
+      dependents kept `paused_by_dependency`, dropped out of the probe configuration and were
+      never scanned again — while the pause API, which computes what is holding them from the
+      master's current state, reported nothing holding them and refused to resume them. `P-87`'s
+      failure exactly, down a path `P-87` did not cover. The recompute now runs in the same
+      transaction as the re-evaluation, on loss, on return and on a topology change, and the
+      dependency reactor is a **required** constructor argument for the reason `P-111` gives.
+
+      Tests: 5 new. Mutation 5/5.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

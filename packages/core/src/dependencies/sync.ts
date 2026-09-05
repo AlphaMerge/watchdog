@@ -102,6 +102,25 @@ function invalidates(mutation: Mutation): boolean {
     case 'object.paused':
     case 'object.resumed':
       return true;
+    // **A forced Down is a Down** (`P-132`). `M-14`'s simulated error puts sensors into the state
+    // the whole dependency mechanism exists to react to — it fires the real notification chain at
+    // real people, which is what it is for — and lifting it takes them out again. Neither ran a
+    // recompute, so a master forced Down never paused its dependents (the storm the dependency
+    // was configured to prevent arrived in full), and if they were already held, lifting the
+    // force never released them.
+    case 'sensor.simulatedError':
+      return true;
+    // **A schedule edit moves the master's own pause flag** (`P-133`). `DependencySync` is in
+    // `scheduleAuditSinks` — deliberately, and asserted by a test — for an effect this function
+    // could not produce: none of the three schedule actions matched, so the sink was inert. A
+    // master pausing on a schedule window does not hold its dependents (`docs/state-machine.md`
+    // §3: it is switched off, not Down, and nothing has been measured), so the dependents must be
+    // released — and they were not, so they stayed dark until something else happened to
+    // recompute them.
+    case 'schedule.created':
+    case 'schedule.updated':
+    case 'schedule.deleted':
+      return true;
     default:
       return false;
   }

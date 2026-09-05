@@ -271,6 +271,54 @@ describe(
       assert.equal((await runtimeOf(pingId)).state, 'down');
     });
 
+    it('pauses the dependents when an operator forces the master Down', async () => {
+      // **`P-132`.** `M-14`'s simulated error puts sensors into the state the whole dependency
+      // mechanism exists to react to — it fires the real notification chain at real people, which
+      // is what it is for — and `invalidates` matched none of its mutations. So a master forced
+      // Down never paused its dependents, and the storm the dependency was configured to prevent
+      // arrived in full, from the button whose purpose is to rehearse exactly that.
+      await masterForDevice();
+      await h.service.simulateError(testActor, pingId, true, 'rehearsing the failover');
+
+      assert.equal((await runtimeOf(httpId)).cause, 'dependency');
+      assert.equal((await runtimeOf(snmpId)).cause, 'dependency');
+
+      // And lifting it releases them, which is the same defect in the other direction.
+      await h.service.simulateError(testActor, pingId, false);
+      assert.equal((await runtimeOf(httpId)).dependency, false);
+    });
+
+    it('does not let two sensors that point at each other hold one another for ever', async () => {
+      // **The cascade used to read its own output** (`P-134`). `holding` selected masters that
+      // were `paused_by_dependency` — the column the same statement then wrote — which is the
+      // recursion the cascade needs and is also a fixpoint that can sustain itself. Two sensors
+      // pointing at each other, which a move can arrange and only the assignment path refuses,
+      // ended up holding one another: both flags true, each true because the other was, no
+      // outage anywhere, permanently unmonitored and permanently unresumable — and nothing
+      // logged, because from the row's point of view nothing had changed.
+      // Written straight into the settings, because the assignment path refuses the second one —
+      // and that is the point: only the assignment path refuses it. A move can arrange the same
+      // pair, and the move checks the *tree* for cycles, not the master chain.
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         VALUES ($1, $3, to_jsonb($2::bigint)), ($2, $3, to_jsonb($1::bigint))`,
+        [httpId, snmpId, DEPENDENCY_MASTER_ID.key],
+      );
+
+      // Both flags set, the way a real outage would leave them before the loop closed.
+      await db.query(
+        `UPDATE sensor_runtime SET paused_by_dependency = true WHERE object_id = ANY($1::bigint[])`,
+        [[httpId, snmpId]],
+      );
+      // Every sensor Up: there is no outage anywhere in the installation.
+      await db.query(`UPDATE sensor_runtime SET state = 'up', cause = 'scan'`);
+
+      await db.tx((q) => pauses.recompute(q, NOW));
+
+      assert.equal((await runtimeOf(httpId)).dependency, false, 'nothing is holding it');
+      assert.equal((await runtimeOf(snmpId)).dependency, false, 'nor it');
+    });
+
     it('keeps the master in the probe-s configuration while its dependents leave it', async () => {
       const config = new ProbeConfigService({ db, resolver: h.resolver });
       await masterForDevice();

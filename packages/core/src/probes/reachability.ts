@@ -56,7 +56,28 @@ export interface ProbeReachabilityOptions {
    * Absent, nothing is excluded, which is the behaviour before this.
    */
   coreEvaluatedTypes?: readonly string[];
+  /**
+   * Recomputes `paused_by_dependency` after this has moved sensors (`P-135`).
+   *
+   * **Required, not optional.** A probe going away moves its sensors to Unknown, and a master
+   * that is Unknown is not Down — so anything it was holding must be released. Nothing ran that:
+   * the dependency reaction is reachable from ingestion, with the transitions a *result batch*
+   * produced, and a probe that has gone produces no results. The dependents kept
+   * `paused_by_dependency`, dropped out of the probe configuration, and were never scanned
+   * again — while the pause API, which computes what is holding them from the master's *current*
+   * state, reported nothing holding them and refused to resume them. That is `P-87`'s failure
+   * exactly, reached down a path `P-87` did not cover.
+   *
+   * Required for the reason `P-111` gives: a wiring line that can be deleted with every test
+   * still green is a wiring line that will be.
+   */
+  dependencies: DependencyRecomputer;
   now?: () => Date;
+}
+
+/** Just enough of `DependencyPauses` to settle the flags after sensors have moved. */
+export interface DependencyRecomputer {
+  recompute(q: Queryable, at: Date): Promise<{ moved: number }>;
 }
 
 /**
@@ -72,6 +93,7 @@ export class ProbeReachability {
   readonly #db: Db;
   readonly #logger: Logger;
   readonly #states: StateReevaluator;
+  readonly #dependencies: DependencyRecomputer;
   readonly #coreEvaluatedTypes: readonly string[];
   readonly #now: () => Date;
 
@@ -103,6 +125,7 @@ export class ProbeReachability {
     this.#logger = options.logger.child({ component: 'probe-reachability' });
     this.#states = options.states;
     this.#coreEvaluatedTypes = options.coreEvaluatedTypes ?? [];
+    this.#dependencies = options.dependencies;
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -193,6 +216,9 @@ export class ProbeReachability {
       const moved = await this.#states.reevaluate(q, changed, this.#now(), {
         message: 'the probe carrying this sensor changed',
       });
+      // In the same transaction: a master that has just become Unknown is not Down, so anything
+      // it was holding is released here rather than at whatever recomputes next (`P-135`).
+      await this.#dependencies.recompute(q, this.#now());
       this.#logger.info(
         { sensors: changed.length, moved },
         'the tree moved sensors across a lost probe’s boundary',
@@ -277,14 +303,20 @@ export class ProbeReachability {
     // same shape as the one that fix was for, one layer down.
     let moved: number;
     try {
-      moved = await this.#db.tx((q) =>
-        this.#states.reevaluate(q, sensorIds, this.#now(), {
+      moved = await this.#db.tx(async (q) => {
+        const count = await this.#states.reevaluate(q, sensorIds, this.#now(), {
           message:
             reason === 'link'
               ? 'the probe carrying this sensor stopped answering'
               : 'the probe carrying this sensor is connected but has stopped sending results',
-        }),
-      );
+        });
+        // **The dependents of a master under this probe** (`P-135`). The master is Unknown now,
+        // not Down, so nothing is holding them — and nothing else was ever going to notice: the
+        // dependency reaction runs on the transitions a result batch produced, and a probe that
+        // has gone produces no results.
+        await this.#dependencies.recompute(q, this.#now());
+        return count;
+      });
     } catch (error) {
       this.#byProbe.delete(probeObjectId);
       for (const id of sensorIds) this.#unreachable.delete(id);
@@ -349,11 +381,14 @@ export class ProbeReachability {
     // and every probe after this one in the pass would be skipped.
     let moved: number;
     try {
-      moved = await this.#db.tx((q) =>
-        this.#states.reevaluate(q, sensorIds, this.#now(), {
+      moved = await this.#db.tx(async (q) => {
+        const count = await this.#states.reevaluate(q, sensorIds, this.#now(), {
           message: 'the probe carrying this sensor is answering again',
-        }),
-      );
+        });
+        // And the other direction: a master that is Down again holds what it should.
+        await this.#dependencies.recompute(q, this.#now());
+        return count;
+      });
     } catch (error) {
       this.#byProbe.set(probeObjectId, entry);
       for (const id of sensorIds) this.#unreachable.add(id);

@@ -42,6 +42,9 @@ function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } =
         return Promise.resolve(sensorIds.length);
       },
     },
+    // This file drives the marking with a stub database; the dependency settle is exercised
+    // against a real one in `probe-offline.test.ts`.
+    dependencies: { recompute: () => Promise.resolve({ moved: 0 }) },
   });
   return { service, reevaluated, failing };
 }
