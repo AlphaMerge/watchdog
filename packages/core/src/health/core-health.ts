@@ -149,7 +149,20 @@ export class CoreHealthService {
    * and the answer has to survive the case where writing a sensor's reading is exactly what is
    * broken.
    */
-  async read(meter: CpuMeter = this.#liveCpu): Promise<CoreHealthReading> {
+  async read(
+    meter: CpuMeter = this.#liveCpu,
+    /**
+     * Whether an unreachable database is a gap rather than a failure (`P-126`).
+     *
+     * **Two callers, two right answers.** The sweep writes a *sensor reading*, and a Core Health
+     * sensor whose numbers are unavailable must fail with a message and no channel values — a row
+     * of zeros is what a perfectly idle, perfectly healthy core looks like. `GET /core-health` is
+     * the other case: an operator asking how the core is, at the moment it is least well, was
+     * answered 500 — losing the CPU, the memory and the ingest queue too, none of which need a
+     * database at all. There the four database-backed channels become gaps and the rest answers.
+     */
+    degradeOnDatabaseError = false,
+  ): Promise<CoreHealthReading> {
     const now = this.#now();
     const ingestion = this.#sources.ingestion();
     const stream = this.#sources.stream();
@@ -159,12 +172,7 @@ export class CoreHealthService {
     const disk = this.#sources.disk();
 
     const memory = this.#process.memoryUsage();
-    const queues = await this.#db.tx(async (q) => ({
-      delivery: await this.#sources.delivery(q),
-      rollup: await this.#rollupLag(q, now),
-      backfill: await count(q, 'SELECT count(*)::int AS n FROM rollup_backfill'),
-      reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
-    }));
+    const queues = await this.#queues(now, degradeOnDatabaseError);
 
     return {
       ingestQueue: ingestion.queuedRows,
@@ -184,7 +192,10 @@ export class CoreHealthService {
       evictedChunks: this.#sources.evictedChunks(),
       reapQueue: queues.reap,
       notifyPending: queues.delivery.pending,
-      notifyOldest: Math.round(queues.delivery.oldestPendingAgeMs / 1_000),
+      notifyOldest:
+        queues.delivery.oldestPendingAgeMs === null
+          ? null
+          : Math.round(queues.delivery.oldestPendingAgeMs / 1_000),
       notifyFailed: queues.delivery.failed,
       streamCutoffs: stream.overflowed,
       dependencyPauses: ingestion.dependencyPauses,
@@ -280,6 +291,43 @@ export class CoreHealthService {
    * A tier that has never run has no row, and that is a gap rather than an infinite lag: a core
    * that started a minute ago has not fallen behind.
    */
+  /**
+   * The channels that need a database, or gaps where it could not be reached (`P-126`).
+   *
+   * Logged at warn rather than silently: a health reader that quietly reports gaps for an hour is
+   * indistinguishable from a subsystem that has nothing to say.
+   */
+  async #queues(
+    now: Date,
+    degrade: boolean,
+  ): Promise<{
+    delivery: { pending: number | null; oldestPendingAgeMs: number | null; failed: number | null };
+    rollup: number | null;
+    backfill: number | null;
+    reap: number | null;
+  }> {
+    try {
+      return await this.#db.tx(async (q) => ({
+        delivery: await this.#sources.delivery(q),
+        rollup: await this.#rollupLag(q, now),
+        backfill: await count(q, 'SELECT count(*)::int AS n FROM rollup_backfill'),
+        reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
+      }));
+    } catch (error: unknown) {
+      if (!degrade) throw error;
+      this.#logger.warn(
+        { err: describeError(error) },
+        'core health could not read the database; its queue channels are gaps for this reading',
+      );
+      return {
+        delivery: { pending: null, oldestPendingAgeMs: null, failed: null },
+        rollup: null,
+        backfill: null,
+        reap: null,
+      };
+    }
+  }
+
   async #rollupLag(q: Queryable, now: Date): Promise<number | null> {
     const rows = await q.query<{ tier: string; watermark: Date }>(
       'SELECT tier, watermark FROM rollup_watermark',

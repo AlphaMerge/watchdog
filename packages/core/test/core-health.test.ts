@@ -576,6 +576,32 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(service.stats().failed, 2);
     });
 
+    it('answers the route with gaps rather than nothing when the database is unreachable', async () => {
+      // **`P-126`.** The sweep above is right to fail the sensor — a row of zeros is what a
+      // perfectly idle, perfectly healthy core looks like. `GET /core-health` is the other case:
+      // an operator asking how the core is, at the moment it is least well, was answered 500,
+      // which loses the CPU, the memory and the ingest queue too — none of which need a database.
+      const service = build(
+        { deliveryThrows: true, queuedRows: 12 },
+        {
+          cpuUs: [],
+          elapsedNs: [],
+        },
+      );
+
+      const channels = await service.read(undefined, true);
+      assert.equal(channels['ingestQueue'], 12, 'what needs no database is still answered');
+      assert.equal(channels['notifyPending'], null, 'and what does is a gap, not a zero');
+      assert.equal(channels['notifyOldest'], null);
+      assert.equal(channels['notifyFailed'], null);
+      assert.equal(channels['backfillQueue'], null);
+    });
+
+    it('still throws for the sweep, which must not write a row of zeros', async () => {
+      const service = build({ deliveryThrows: true }, { cpuUs: [], elapsedNs: [] });
+      await assert.rejects(service.read());
+    });
+
     it('says what is not zero, and stays quiet about what is', async () => {
       const batches: CheckResult[][] = [];
       const service = build(

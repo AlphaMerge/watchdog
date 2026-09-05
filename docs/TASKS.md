@@ -10064,6 +10064,51 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       rejection, 1 on the full argument complement reaching the program, and 3 on the settings
       walk including the encoded-URL case. Mutation 5/5.
 
+- [x] **P-122 — One undeliverable digest window starved every other template's digests**
+      A closed window whose template had since been disabled, or whose method has no transport in
+      this build, holds requests the claim will never take. So it came back from `owing` on every
+      pass, produced no members, and consumed one of the caller's slots for ever. Enough of them
+      and no digest arrived anywhere — and nothing said so, because each pass looked like an
+      ordinary quiet one. `owing` now asks the same question the claim does; the rows stay in the
+      table, because re-enabling the template still owes those people the digest.
+
+- [x] **P-123 — A failed digest came back as several fragments, each labelled part 1 of 1**
+      Every member got its own jittered backoff, so a digest of forty that failed fell due at
+      forty different moments. The next pass claimed whichever handful had ripened, assembled them
+      into a digest of their own and labelled it complete. One outage arrived as half a dozen
+      fragments, in an order the jitter chose. One delay is now drawn per part and shared.
+
+- [x] **P-124 — Delivery Health counted failures by when they fell due**
+      `notification_request.at` is when the obligation *fell due* — migration 016 says so, and
+      that is the right meaning for a digest naming when an outage started. Counting failures by
+      it asks a different question: `DEFAULT_RETRY` spends 45 to 90 minutes on nine backoffs
+      against a 60-minute window, so a notification that exhausted its retries — the one failure
+      the whole subsystem exists to prevent — usually fell due outside the window and counted
+      zero. It stopped being `pending` at the same moment, so it dropped out of `oldest_retrying`
+      too: **Delivery Health flipped from Down back to `ok` at the exact instant the alarm was
+      abandoned**. Migration 043 adds `settled_at`, written on every terminal transition.
+
+- [x] **P-125 — A message waiting on purpose was counted as undeliverable**
+      A request collecting into an open digest window, or parked because its template is outside
+      its activation schedule, is doing exactly what an operator configured. Both were counted as
+      pending, so `notifyOldest` climbed all night and Core Health went Down telling an operator
+      to check a relay that was working, for a digest due at eight in the morning. They are
+      counted and reported separately now — "forty messages are waiting for the eight o'clock
+      digest" is worth showing and is not a fault. The parked set travels from the dispatcher's
+      own evaluation rather than the health reader growing a second opinion about schedules.
+
+- [x] **P-126 — `GET /core-health` answered 500 when the database was unreachable**
+      Two callers, two right answers, and only one was implemented. The sweep writes a *sensor
+      reading*, and a Core Health sensor whose numbers are unavailable must fail with a message
+      and no channel values — a row of zeros is what a perfectly idle, perfectly healthy core
+      looks like. The route is the other case: an operator asking how the core is, at the moment
+      it is least well, lost the CPU, the memory and the ingest queue as well, none of which need
+      a database at all. The four database-backed channels are gaps there now and the rest
+      answers.
+
+      Tests: 8 new — the starved digest batch, the shared backoff, the settled-at window, both
+      parked cases, and both core-health callers. Mutation 5/5.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

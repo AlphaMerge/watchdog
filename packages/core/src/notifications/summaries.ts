@@ -155,19 +155,35 @@ export class SummaryRepository {
     return rows[0]?.due_at ?? null;
   }
 
-  /** Closed windows that still owe a digest, oldest first. */
+  /**
+   * Closed windows that still owe a digest, oldest first.
+   *
+   * **Only windows this build could actually send** (`P-122`). A window whose template has since
+   * been disabled, or whose method has no transport in this build, holds requests that the claim
+   * will never take — so it came back from here on every pass, produced no members, and consumed
+   * one of the caller's slots for ever. Enough of them and every other template's digests stopped
+   * arriving: the batch was full of windows nothing could ever empty, and nothing anywhere said so
+   * because each pass looked like an ordinary quiet one.
+   *
+   * Left in the table rather than failed: re-enabling the template, or a build that has the
+   * transport, still owes those people the digest.
+   */
   async owing(
     q: Queryable,
     now: Date,
     limit: number,
     suppressed: readonly number[] = [],
+    methods: readonly string[] = [],
   ): Promise<ClosedWindow[]> {
     const rows = await q.query<{ id: string; template_id: string }>(
       `
       SELECT s.id::text AS id, s.template_id::text AS template_id
       FROM notification_summary s
+      JOIN notification_template t ON t.id = s.template_id
       WHERE s.closed_at IS NOT NULL
         AND NOT (s.template_id = ANY($3::bigint[]))
+        AND t.enabled
+        AND t.method = ANY($4::text[])
         AND EXISTS (
           SELECT 1 FROM notification_request r
           WHERE r.summary_id = s.id
@@ -177,7 +193,7 @@ export class SummaryRepository {
       ORDER BY s.id
       LIMIT $2
       `,
-      [now, limit, [...suppressed]],
+      [now, limit, [...suppressed], [...methods]],
     );
     return rows.map((row) => ({ id: Number(row.id), templateId: Number(row.template_id) }));
   }

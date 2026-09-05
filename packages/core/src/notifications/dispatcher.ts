@@ -419,7 +419,7 @@ export class NotificationDispatcher {
   /** Sends what the closed windows are holding. Returns how many requests it covered. */
   async #digests(now: Date, suppressed: readonly number[]): Promise<number> {
     const owing = await this.#db.tx((q) =>
-      this.#summaries.owing(q, now, this.#maxDigests, suppressed),
+      this.#summaries.owing(q, now, this.#maxDigests, suppressed, this.methods),
     );
     let covered = 0;
     for (const window of owing) {
@@ -442,7 +442,8 @@ export class NotificationDispatcher {
   async #discard(template: Suppression, now: Date): Promise<void> {
     const rows = await this.#db.query<{ id: string }>(
       `UPDATE notification_request
-       SET status = 'discarded', next_attempt_at = NULL, last_error = $2, delivered_at = NULL
+       SET status = 'discarded', next_attempt_at = NULL, last_error = $2, delivered_at = NULL,
+           settled_at = now()
        WHERE status = 'pending' AND template_id = $1
        RETURNING id::text AS id`,
       [template.templateId, discardReason(template)],
@@ -526,8 +527,17 @@ export class NotificationDispatcher {
             });
 
       if (result.ok) this.#stats.digests += 1;
+      // **One backoff for the whole part, not one per member** (`P-123`). `#record` draws a
+      // jittered delay of its own, so a digest of forty requests that failed came back due at
+      // forty different moments — and the next pass claimed whichever handful had ripened,
+      // assembled them into their own digest, and labelled it "part 1 of 1". One outage arrived
+      // as half a dozen fragments, in an order the jitter chose, each claiming to be complete.
+      const delayMs =
+        result.ok || !result.retryable
+          ? 0
+          : retryDelayMs(this.#retry, lead.row.attempts + 1, this.#random);
       for (const entry of part.members) {
-        await this.#record(Number(entry.row.id), entry.row.attempts + 1, result, now);
+        await this.#record(Number(entry.row.id), entry.row.attempts + 1, result, now, delayMs);
         covered += 1;
       }
     }
@@ -539,12 +549,18 @@ export class NotificationDispatcher {
     attempts: number,
     result: DeliveryResult,
     now: Date,
+    /**
+     * The delay to use instead of drawing one, so every member of a digest waits the same time
+     * (`P-123`). Ignored when the request is being given up on.
+     */
+    sharedDelayMs?: number,
   ): Promise<void> {
     if (result.ok) {
       this.#stats.sent += 1;
       await this.#db.query(
         `UPDATE notification_request
-         SET status = 'sent', delivered_at = $2, next_attempt_at = NULL, last_error = NULL
+         SET status = 'sent', delivered_at = $2, settled_at = $2, next_attempt_at = NULL,
+             last_error = NULL
          WHERE id = $1`,
         [requestId, now],
       );
@@ -559,16 +575,22 @@ export class NotificationDispatcher {
 
     // The backoff is written here rather than at claim time, because only here is the attempt
     // count that shapes it known to have been used. The claim wrote a lease; this replaces it.
-    const delayMs = givingUp ? 0 : retryDelayMs(this.#retry, attempts, this.#random);
+    const delayMs = givingUp
+      ? 0
+      : (sharedDelayMs ?? retryDelayMs(this.#retry, attempts, this.#random));
     await this.#db.query(
       `UPDATE notification_request
-       SET status = $3, last_error = $2, next_attempt_at = $4
+       SET status = $3, last_error = $2, next_attempt_at = $4,
+           -- When it stopped being owed, which is not when it fell due (P-124). Null while it is
+           -- still pending: a row waiting for its next attempt has not settled.
+           settled_at = CASE WHEN $3 = 'pending' THEN NULL ELSE $5::timestamptz END
        WHERE id = $1`,
       [
         requestId,
         result.error,
         givingUp ? 'failed' : 'pending',
         givingUp ? null : new Date(now.getTime() + delayMs),
+        now,
       ],
     );
 

@@ -41,6 +41,7 @@ import { migration039 } from './039-probe-key-confirmed.js';
 import { migration040 } from './040-runtime-channel-verdict.js';
 import { migration041 } from './041-credential-delete-touch.js';
 import { migration042 } from './042-runtime-resumed-at.js';
+import { migration043 } from './043-request-settled-at.js';
 
 /**
  * Every migration this build knows about, in order.
@@ -91,6 +92,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration040,
   migration041,
   migration042,
+  migration043,
 ];
 
 export type { Migration } from './types.js';

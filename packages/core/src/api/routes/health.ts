@@ -84,7 +84,12 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         await reply.status(503).send(mapped.body);
         return reply;
       }
-      return { at: new Date().toISOString(), channels: await service.read() };
+      // **Degraded rather than refused** (`P-126`). An unreachable database used to throw out of
+      // here and answer 500, which loses the CPU, the memory and the ingest queue as well — none
+      // of which need a database — at the exact moment an operator most needs to know how the
+      // core is. The four database-backed channels come back as gaps instead, which is what a
+      // channel that could not be measured is everywhere else in this system.
+      return { at: new Date().toISOString(), channels: await service.read(undefined, true) };
     },
   );
 

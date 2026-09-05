@@ -53,6 +53,7 @@ import { MessageContextLoader } from './notifications/context.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
+import { TemplateActivation } from './notifications/activation.js';
 import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
 import { CoreHealthService } from './health/core-health.js';
 import { ProbeHealthService } from './health/probe-health.js';
@@ -592,6 +593,9 @@ async function serve(): Promise<void> {
   const deliveryHealth = new DeliveryHealthReader({
     staleAfterMs: config.notifications.retry.staleAfterSeconds * 1_000,
   });
+  // The same evaluation the dispatcher makes every pass, so health and delivery cannot disagree
+  // about which templates are currently parked (`P-125`).
+  const templateActivation = new TemplateActivation();
   // What "send test notification" sends through (N-14), and the same transports the alarms use.
   const tester = new NotificationTester({
     db,
@@ -972,7 +976,15 @@ async function serve(): Promise<void> {
       ingestion: () => ingestor.stats(),
       stream: () => stream.stats,
       probes: () => reachability.stats(),
-      delivery: (q) => deliveryHealth.read(q),
+      // **The parked set travels with the read** (`P-125`). A template outside its activation
+      // schedule is holding messages because an operator said so; without this the oldest of them
+      // drove `notifyOldest` up all night and put Core Health Down with "check the relay" for a
+      // digest due at eight in the morning.
+      delivery: async (q) => {
+        const now = new Date();
+        const suppressed = await templateActivation.suppressed(q, now);
+        return deliveryHealth.read(q, now, suppressed.templateIds);
+      },
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,

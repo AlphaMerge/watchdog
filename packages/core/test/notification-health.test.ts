@@ -340,7 +340,11 @@ describe(
       const templateId = await template();
       const requestId = await queue(templateId);
       await db.query(
-        "UPDATE notification_request SET status = 'discarded', last_error = 'out of hours' WHERE id = $1",
+        // `settled_at` as well, which is what the discard path writes (`P-124`): the window is
+        // measured on when a request stopped being owed, not on when it fell due.
+        `UPDATE notification_request
+         SET status = 'discarded', last_error = 'out of hours', settled_at = now()
+         WHERE id = $1`,
         [requestId],
       );
 
@@ -348,6 +352,73 @@ describe(
       assert.equal(report.status, 'ok');
       assert.equal(report.discarded, 1);
       assert.equal(report.failed, 0);
+    });
+
+    it('counts a failure by when it was given up on, not by when it fell due', async () => {
+      // **`P-124`.** `at` is when the obligation fell due — migration 016 says so, and that is the
+      // right meaning for a digest naming when an outage started. Counting failures by it asks a
+      // different question: the default retry policy spends 45 to 90 minutes on nine backoffs
+      // against a 60-minute window, so a notification that exhausted its retries usually fell due
+      // outside the window and counted zero — and stopped being pending at the same moment, so
+      // Delivery Health flipped from Down back to `ok` at the exact instant the alarm was
+      // abandoned.
+      const templateId = await template();
+      const requestId = await queue(templateId);
+      await db.query(
+        `UPDATE notification_request
+         SET status = 'failed', last_error = 'the relay refused it',
+             at = now() - interval '90 minutes', settled_at = now() - interval '5 minutes'
+         WHERE id = $1`,
+        [requestId],
+      );
+
+      const report = await new DeliveryHealthReader().read(db);
+      assert.equal(report.failed, 1, 'it failed five minutes ago, inside any sane window');
+      assert.equal(report.status, 'down');
+    });
+
+    it('does not call a message waiting for its digest window undeliverable', async () => {
+      // **`P-125`.** A request collecting into an open window is doing what an operator
+      // configured. Counting it as pending drove `notifyOldest` up all night and put Core Health
+      // Down with "check the relay" for a digest due at eight in the morning.
+      const templateId = await template();
+      const requestId = await queue(templateId);
+      const summary = await db.query<{ id: string }>(
+        `INSERT INTO notification_summary (template_id, opened_at, due_at)
+         VALUES ($1, now() - interval '6 hours', now() + interval '2 hours')
+         RETURNING id::text AS id`,
+        [templateId],
+      );
+      await db.query(
+        `UPDATE notification_request SET summary_id = $2, at = now() - interval '6 hours'
+         WHERE id = $1`,
+        [requestId, Number(summary[0]?.id ?? 0)],
+      );
+
+      const report = await new DeliveryHealthReader().read(db);
+      assert.equal(report.pending, 0, 'nothing is waiting on a relay');
+      assert.equal(report.parked, 1, 'one is waiting on the clock, and says so');
+      assert.equal(report.oldestPendingAt, null);
+      assert.equal(report.status, 'ok');
+    });
+
+    it('does not call a message held by an activation schedule undeliverable either', async () => {
+      // The other way to be waiting on purpose. The suppressed set comes from the dispatcher,
+      // which computes it every pass anyway — this reader growing its own opinion about schedules
+      // would be a second place for the two to disagree.
+      const templateId = await template();
+      const requestId = await queue(templateId);
+      await db.query(
+        `UPDATE notification_request SET at = now() - interval '6 hours' WHERE id = $1`,
+        [requestId],
+      );
+
+      const unparked = await new DeliveryHealthReader().read(db);
+      assert.equal(unparked.pending, 1, 'ordinarily it is simply waiting to be delivered');
+
+      const report = await new DeliveryHealthReader().read(db, new Date(), [templateId]);
+      assert.equal(report.pending, 0);
+      assert.equal(report.parked, 1);
     });
 
     it('reads the queue rather than what this process remembers', async () => {

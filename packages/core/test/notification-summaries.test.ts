@@ -464,6 +464,81 @@ describe(
       assert.equal(seen.length, 1, 'sent on its own rather than waiting for ever');
     });
 
+    it('does not let a window nothing can send starve every other template', async () => {
+      // **`P-122`.** A closed window whose template has since been disabled holds requests the
+      // claim will never take, so it came back from `owing` on every pass, produced no members,
+      // and consumed one of the caller's slots for ever. With `maxDigests` of one — the shape the
+      // defect takes at any size — the working template's digest simply never arrived, and
+      // nothing anywhere said so: each pass looked like an ordinary quiet one.
+      const stuck = await template();
+      const working = await template();
+      await queue(stuck);
+      await queue(working);
+      const first = recorder();
+      const dispatcher = new NotificationDispatcher({
+        db,
+        logger: silent,
+        contexts,
+        transports: [first.transport],
+        retry: { firstDelayMs: 0, maxDelayMs: 0 },
+        leaseMs: 0,
+        maxDigests: 1,
+      });
+      // The first pass releases each template's first Down immediately and opens both windows.
+      await dispatcher.dispatch();
+      await queue(stuck);
+      await queue(working);
+      await elapse();
+
+      // The stuck template is switched off while its window is closing.
+      await db.query('UPDATE notification_template SET enabled = false WHERE id = $1', [stuck]);
+
+      const before = first.seen.length;
+      await dispatcher.dispatch();
+      assert.ok(
+        first.seen.length > before,
+        'the working template\u2019s digest should have been sent, not blocked behind a dead window',
+      );
+    });
+
+    it('gives every member of a failed digest the same retry time', async () => {
+      // **`P-123`.** `#record` drew a jittered delay per request, so a digest of forty that failed
+      // came back due at forty different moments. The next pass claimed whichever handful had
+      // ripened, assembled them into a digest of their own, and labelled it "part 1 of 1": one
+      // outage arrived as several fragments, in an order the jitter chose, each claiming to be
+      // complete. Asserted on the stored `next_attempt_at`, which is where the fragmentation
+      // starts — reproducing the fragments themselves would be a test of the jitter.
+      const templateId = await template();
+      for (const sensor of sensors) await queue(templateId, { sensor });
+      for (const sensor of sensors) await queue(templateId, { sensor });
+      const failing = recorder(() => ({ ok: false, retryable: true }));
+      const dispatcher = new NotificationDispatcher({
+        db,
+        logger: silent,
+        contexts,
+        transports: [failing.transport],
+        // A real backoff with real jitter: with `firstDelayMs: 0` every row would agree by
+        // accident, which is the pass this test must not have.
+        retry: { firstDelayMs: 60_000, maxDelayMs: 600_000, jitter: 0.5 },
+        leaseMs: 0,
+      });
+      await dispatcher.dispatch();
+      await elapse();
+      await dispatcher.dispatch();
+
+      const times = await db.query<{ next_attempt_at: Date | null }>(
+        `SELECT next_attempt_at FROM notification_request
+         WHERE status = 'pending' AND summary_id IS NOT NULL AND attempts > 0`,
+      );
+      assert.ok(times.length > 1, 'the digest should have had several members to retry');
+      const distinct = new Set(times.map((row) => row.next_attempt_at?.getTime() ?? 0));
+      assert.equal(
+        distinct.size,
+        1,
+        `the members of one digest fell due at ${String(distinct.size)} different times`,
+      );
+    });
+
     it('tidies away the windows that closed with nothing in them', async () => {
       // The common case for a template that notifies about one sensor at a time: a window opens,
       // releases the first Down immediately and never collects anything.

@@ -3,8 +3,16 @@ import type { Queryable } from '../db/pool.js';
 /** What delivery looks like right now, per method and overall (`N-13`). */
 export interface DeliveryMethodHealth {
   readonly method: string;
-  /** Undelivered obligations. */
+  /** Undelivered obligations this system is actually trying to deliver. */
   readonly pending: number;
+  /**
+   * Undelivered because an operator said so: collecting into an open digest window, or held by a
+   * template's activation schedule (`P-125`).
+   *
+   * Reported rather than folded into `pending`, and separate rather than omitted: "forty messages
+   * are waiting for the eight o'clock digest" is a fact worth showing, and it is not a fault.
+   */
+  readonly parked: number;
   /** Of those, the ones that have already failed at least once. */
   readonly retrying: number;
   /** Given up on inside the window. Each one is an alarm nobody received. */
@@ -32,6 +40,8 @@ export interface DeliveryHealth {
   /** Why it is not `ok`, in words. Empty when it is. */
   readonly problems: readonly string[];
   readonly pending: number;
+  /** Waiting because an operator configured it to: a digest window, or an activation schedule. */
+  readonly parked: number;
   readonly retrying: number;
   readonly failed: number;
   readonly discarded: number;
@@ -62,6 +72,7 @@ const DEFAULT_STALE_MS = 15 * 60 * 1_000;
 interface Row {
   method: string;
   pending: string;
+  parked: string;
   retrying: string;
   failed: string;
   discarded: string;
@@ -97,16 +108,39 @@ export class DeliveryHealthReader {
     return this.#staleAfterMs;
   }
 
-  async read(q: Queryable, now = new Date()): Promise<DeliveryHealth> {
+  /**
+   * @param parked Template ids currently outside their activation schedule, whose queued requests
+   *   are waiting because an operator said so rather than because anything is broken (`P-125`).
+   *   The dispatcher already computes this every pass; passing it in beats evaluating every
+   *   schedule again here, and beats this reader growing an opinion about schedules.
+   */
+  async read(
+    q: Queryable,
+    now = new Date(),
+    parked: readonly number[] = [],
+  ): Promise<DeliveryHealth> {
     const since = new Date(now.getTime() - this.#windowMs);
     const rows = await q.query<Row>(
       `
       SELECT coalesce(t.method, '(none)') AS method,
-             count(*) FILTER (WHERE r.status = 'pending')::text AS pending,
+             -- **Waiting on purpose is not waiting** (P-125). A request collecting into an open
+             -- digest window, or parked because its template is outside its activation schedule,
+             -- is doing exactly what an operator configured. Counting those as pending drove
+             -- notifyOldest up all night and put Core Health Down with "check the relay" for a
+             -- digest due at eight in the morning.
+             count(*) FILTER (WHERE r.status = 'pending' AND NOT deliberate)::text AS pending,
+             count(*) FILTER (WHERE r.status = 'pending' AND deliberate)::text AS parked,
              count(*) FILTER (WHERE r.status = 'pending' AND r.attempts > 0)::text AS retrying,
-             count(*) FILTER (WHERE r.status = 'failed' AND r.at >= $1)::text AS failed,
-             count(*) FILTER (WHERE r.status = 'discarded' AND r.at >= $1)::text AS discarded,
-             min(r.at) FILTER (WHERE r.status = 'pending') AS oldest_pending,
+             -- **By when they were given up on, not when they fell due** (P-124). settled_at is
+             -- the moment the obligation ended; at is when it began, and the default retry policy
+             -- puts 45 to 90 minutes between them against a 60 minute window. A notification that
+             -- exhausted its retries usually fell outside and counted zero -- and stopped being
+             -- pending at the same moment, so this flipped from down back to ok at the exact
+             -- instant the alarm was abandoned.
+             count(*) FILTER (WHERE r.status = 'failed' AND r.settled_at >= $1)::text AS failed,
+             count(*) FILTER (WHERE r.status = 'discarded' AND r.settled_at >= $1)::text
+               AS discarded,
+             min(r.at) FILTER (WHERE r.status = 'pending' AND NOT deliberate) AS oldest_pending,
              -- Attempted and still owed, which is the one that means delivery is broken rather
              -- than merely busy.
              min(r.at) FILTER (WHERE r.status = 'pending' AND r.attempts > 0) AS oldest_retrying,
@@ -114,21 +148,30 @@ export class DeliveryHealthReader {
              (array_agg(r.last_error ORDER BY r.id DESC)
                 FILTER (WHERE r.last_error IS NOT NULL AND r.status <> 'discarded'))[1]
                AS last_error
-      FROM notification_request r
+      FROM (
+        SELECT r.*,
+               -- Two ways to be waiting because somebody said so: an open digest window, and a
+               -- template outside its activation schedule that collects rather than discards.
+               (s.id IS NOT NULL AND s.closed_at IS NULL)
+                 OR r.template_id = ANY($2::bigint[]) AS deliberate
+        FROM notification_request r
+        LEFT JOIN notification_summary s ON s.id = r.summary_id
+      ) r
       LEFT JOIN notification_template t ON t.id = r.template_id
       -- Two indexed reaches and nothing else: the partial index on the pending rows, and the
-      -- (at, id) range for everything recent. Bounding it is what keeps a health check that a UI
-      -- polls from scanning a year of delivered notifications.
-      WHERE r.status = 'pending' OR r.at >= $1
+      -- settled_at range for everything recent. Bounding it is what keeps a health check that a
+      -- UI polls from scanning a year of delivered notifications.
+      WHERE r.status = 'pending' OR r.settled_at >= $1
       GROUP BY 1
       ORDER BY 1
       `,
-      [since],
+      [since, [...parked]],
     );
 
     const methods: DeliveryMethodHealth[] = rows.map((row) => ({
       method: row.method,
       pending: Number(row.pending),
+      parked: Number(row.parked),
       retrying: Number(row.retrying),
       failed: Number(row.failed),
       discarded: Number(row.discarded),
@@ -182,6 +225,7 @@ export class DeliveryHealthReader {
       status,
       problems,
       pending: total((one) => one.pending),
+      parked: total((one) => one.parked),
       retrying,
       failed,
       discarded: total((one) => one.discarded),
