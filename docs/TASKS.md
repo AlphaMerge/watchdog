@@ -10319,6 +10319,29 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 3 new. Mutation 3/3.
 
+- [x] **P-150 — `P-149` re-pushed on every partial ack, in a loop**
+      A regression in the fix immediately above it, and it announced itself the first time a real
+      probe connected: **a push is several messages and the probe acknowledges every one of
+      them.** A chunked set is a `config-set` plus N-1 deltas at one version, applied and acked
+      separately, so the acks arrive carrying 1,000, then 2,000, then 3,000 — each a truthful
+      report of a push still in progress. `P-149` compared the first against the total and
+      re-pushed, producing six more messages, another partial ack, and another re-push. The dev
+      stack at 5,047 sensors re-sent its whole configuration continuously, and because the
+      re-push nulled `sentVersion` to defeat the fingerprint check, every in-flight ack also
+      logged "a configuration version the core did not send".
+
+      Three things were wrong and all three are fixed. The count is judged only when the last
+      message of the push has been acknowledged — the session counts its outstanding acks, which
+      is the only moment the probe's total can be compared with the core's. The forced push says
+      so explicitly instead of lying about what was sent. And a forced push never sends a *delta*:
+      a delta is relative to state we believe the peer has, and a forced push is one made because
+      that belief has just been shown to be false, so diffing against `sentSensors` computed
+      "nothing to do" and sent an empty delta — the one answer that leaves the probe short.
+
+      **`P-149` had a test and it passed.** It pushed three sensors, which is one message, so the
+      single ack was also the last one and the loop could not appear. The new test replays what a
+      real probe sends: six messages, six acks, and nothing may come back. Mutation 1/1.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

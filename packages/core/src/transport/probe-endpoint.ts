@@ -305,6 +305,21 @@ interface ProbeSession {
   cadenceSeconds: number | null;
   /** The credential stamps that went with `sentSensors`; the delta needs them (`T-08`). */
   sentStamps: ReadonlyMap<number, string>;
+  /**
+   * Messages of the current push the probe has not acknowledged yet (`P-150`).
+   *
+   * **A push is several messages and the probe acknowledges every one of them.** A chunked set is
+   * a `config-set` plus N-1 deltas at one version, and each is applied and acked separately — so
+   * the acks arrive carrying 1,000, then 2,000, then 3,000 assignments, every one of them a
+   * truthful report of a push still in progress. `P-149` compared the first of those against the
+   * total and re-pushed, which produced another six messages, another partial ack, and another
+   * re-push: an unbounded loop that hit the dev stack the moment a probe with 5,047 sensors
+   * connected.
+   *
+   * So the count is only judged when this reaches zero, which is the only moment the probe's
+   * total can be compared with the core's.
+   */
+  configAcksOutstanding: number;
 }
 
 /** Milliseconds between two readings of the monotonic clock. */
@@ -579,19 +594,28 @@ export class ProbeEndpoint {
               { acked: message.version, sent: session.sentVersion },
               'probe acknowledged a configuration version the core did not send',
             );
+          } else if (session.configAcksOutstanding > 1) {
+            // **A push is several messages, and the probe acks every one of them** (`P-150`).
+            // The acks for a chunked set arrive carrying 1,000, then 2,000, then 3,000 — each a
+            // truthful report of a push still in progress. Judging the first against the total is
+            // what `P-149` did, and it re-pushed, which produced another partial ack and another
+            // re-push: an unbounded loop, which is how it announced itself the moment a probe
+            // with 5,047 sensors connected to the dev stack.
+            session.configAcksOutstanding -= 1;
           } else if (message.scheduled !== session.sentSensors.length) {
-            // **The count the ack carries, acted on rather than logged** (`P-149`). A full push
-            // is one `config-set` plus N-1 deltas at the same version, and the probe stamps
-            // itself as holding that version on the *first* one — so a link that drops mid-push
-            // leaves it with a fraction of its sensors and a version that says it is current. It
-            // reconnects, presents that version, the fingerprint matches, and the core answers
+            // **The count the ack carries, acted on rather than logged** (`P-149`), and only now
+            // that every message of the push has been acknowledged. A full push is one
+            // `config-set` plus N-1 deltas at the same version, and the probe stamps itself as
+            // holding that version on the *first* one — so a link that drops mid-push leaves it
+            // with a fraction of its sensors and a version that says it is current. It reconnects,
+            // presents that version, the fingerprint matches, and the core answers
             // `config-unchanged`. Nothing ever re-pushes: `pushAllConfigs` short-circuits on an
             // unchanged fingerprint, and the probe keeps delivering results for the sensors it
             // did keep, so `delivery.ts` reads it as healthy. The rest are never scanned again.
             //
             // The disagreement was already on the wire — `#applyConfig`'s own comment says the
-            // core logs it — and logging it was all that happened. Re-pushing is the answer: the
-            // probe asked for it by telling us a number that cannot be right.
+            // core logs it — and logging it was all that happened.
+            session.configAcksOutstanding = 0;
             logger.warn(
               {
                 version: message.version,
@@ -600,10 +624,13 @@ export class ProbeEndpoint {
               },
               'probe scheduled a different number of sensors than it was sent; pushing again',
             );
-            // Cleared first, so the push below cannot decide the fingerprint is unchanged.
-            session.sentVersion = null;
-            this.#queueConfig(session, logger);
+            // **Not by nulling `sentVersion`**: the acks for messages still in flight would then
+            // compare against null and log "a configuration version the core did not send" for
+            // every one of them. `forceConfig` says what is meant — this probe's state is not
+            // what we sent, so send it again — without lying about what we sent.
+            this.#queueConfig(session, logger, undefined, true);
           } else {
+            session.configAcksOutstanding = 0;
             logger.info(
               { version: message.version, scheduled: message.scheduled },
               'probe applied its configuration',
@@ -980,6 +1007,7 @@ export class ProbeEndpoint {
       probeObjectId: null,
       sentVersion: null,
       sentSensors: [],
+      configAcksOutstanding: 0,
       lastResultsAt: null,
       configSentAt: null,
       connectedAtNs: process.hrtime.bigint(),
@@ -1021,7 +1049,12 @@ export class ProbeEndpoint {
    * Never awaited by the message loop: a database round trip must not delay the heartbeat that
    * keeps the connection from being declared idle.
    */
-  #queueConfig(session: ProbeSession, logger: Logger, presented?: string): void {
+  /**
+   * @param force Send even when the fingerprint says the probe is current (`P-150`). Used by the
+   *   ack handler, which has just been told the probe's *contents* disagree with the version it
+   *   is holding — the fingerprint is exactly the thing that cannot be trusted in that case.
+   */
+  #queueConfig(session: ProbeSession, logger: Logger, presented?: string, force = false): void {
     const source = this.#options.probeConfig;
     if (source === undefined) return;
     // **The approval check lives here rather than at each call site** (`R-01`). Configuration
@@ -1104,11 +1137,14 @@ export class ProbeEndpoint {
             : await source.assignmentsFor(session.probeObjectId);
 
         const held = presented ?? session.sentVersion;
-        if (assignments.version === held) {
+        if (!force && assignments.version === held) {
           session.sentVersion = assignments.version;
           this.#noteAssignments(session, assignments.sensors, false);
           session.sentStamps = assignments.stamps;
           if (presented !== undefined) {
+            // Nothing was sent, so nothing is outstanding: an ack for this carries the count the
+            // probe already had, which is the answer this branch has just accepted.
+            session.configAcksOutstanding = 0;
             session.connection.send({ type: 'config-unchanged', version: assignments.version });
             logger.info({ version: assignments.version }, 'probe configuration is already current');
           }
@@ -1134,7 +1170,13 @@ export class ProbeEndpoint {
         // Only the upserts are weighed against the snapshot: a removal is an integer, an upsert
         // is a whole assignment, and counting them alike would turn "one sensor deleted from a
         // set of three" into a full resend.
+        // **Never a delta when forcing** (`P-150`). A delta is relative to state we believe the
+        // peer has, and a forced push is one made *because* that belief has just been shown to be
+        // false — the probe reported a different number of assignments from the one it was sent.
+        // Diffing against `sentSensors` would compute "nothing to do" and send an empty delta,
+        // which is precisely the answer that leaves the probe short.
         const worthADelta =
+          !force &&
           delta !== null &&
           !(delta.upserted.length >= assignments.sensors.length && assignments.sensors.length > 0);
 
@@ -1150,6 +1192,9 @@ export class ProbeEndpoint {
           const upserts = chunked(delta.upserted, CONFIG_CHUNK_SENSORS);
           const removals = chunked(delta.removed, CONFIG_CHUNK_SENSORS);
           const messages = Math.max(upserts.length, removals.length, 1);
+          // How many acks this push will produce (`P-150`). The probe applies and acknowledges
+          // each message separately, so only the last of them can be compared with the total.
+          session.configAcksOutstanding = messages;
           for (let index = 0; index < messages; index += 1) {
             session.connection.send({
               type: 'config-delta',
@@ -1184,6 +1229,7 @@ export class ProbeEndpoint {
         // carrying the same version. The end state is identical to one oversized message.
         const chunks = chunked(assignments.sensors, CONFIG_CHUNK_SENSORS);
         const [first = [], ...rest] = chunks;
+        session.configAcksOutstanding = chunks.length;
         session.connection.send({
           type: 'config-set',
           version: assignments.version,

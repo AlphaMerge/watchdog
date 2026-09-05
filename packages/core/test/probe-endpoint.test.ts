@@ -1033,6 +1033,53 @@ describe(
       });
     });
 
+    it('does not re-push on the partial acks a chunked push produces', async () => {
+      // **`P-150`, and `P-149` caused it.** A push is several messages and the probe applies and
+      // acknowledges *each one*: the acks for a chunked set arrive carrying 1,000, then 2,000,
+      // then 3,000 — every one of them a truthful report of a push still in progress. `P-149`
+      // compared the first of those against the total and re-pushed, which produced six more
+      // messages, another partial ack, and another re-push. An unbounded loop, and it announced
+      // itself the moment a real probe with 5,047 sensors connected to the dev stack: the core
+      // re-sent the whole configuration continuously, and every in-flight ack also logged
+      // "a configuration version the core did not send", because the re-push nulled `sentVersion`.
+      //
+      // The count is only judged when the last message of the push has been acknowledged.
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 5_047 }, (_, at) => sensor(at + 1));
+
+      await withProbe(source, async (probe) => {
+        const set = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(set.type === 'config-set');
+        await probe.waitFor(
+          () => probe.received.filter((m) => m.type === 'config-delta').length === 5,
+        );
+        const pushed = probe.received.filter(
+          (m) => m.type === 'config-set' || m.type === 'config-delta',
+        ).length;
+        assert.equal(pushed, 6, 'one set and five deltas');
+        probe.received.length = 0;
+
+        // Exactly what the probe really sends: one ack per message, each reporting the total it
+        // has applied so far.
+        for (const scheduled of [1_000, 2_000, 3_000, 4_000, 5_000, 5_047]) {
+          probe.send({ type: 'config-ack', version: set.version, scheduled });
+        }
+
+        // Nothing may come back. Asserted after a round trip through the connection — a
+        // heartbeat the core must answer — so this is not merely a race the test wins.
+        probe.send({ type: 'heartbeat', seq: 99, sentAt: new Date().toISOString() });
+        await probe.waitFor((m) => m.type === 'heartbeat-ack');
+        const configAfter = probe.received.filter(
+          (m) => m.type === 'config-set' || m.type === 'config-delta',
+        );
+        assert.deepEqual(
+          configAfter.map((m) => m.type),
+          [],
+          'the partial acks describe a push in progress, not a probe that is short',
+        );
+      });
+    });
+
     it('pushes again when the probe acknowledges a different number of sensors', async () => {
       // **`P-149`.** A full push is one `config-set` plus N-1 deltas at the same version, and the
       // probe stamps itself as holding that version on the *first* one — so a link that drops
