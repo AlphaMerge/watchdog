@@ -202,8 +202,24 @@ export class GuardedHttpClient {
       // consulted between them, so a single stalled hop was unbounded. The delivery loop that
       // awaits this is not concurrent: one endpoint holding a connection open holds up every
       // notification behind it.
+      // **`let`, and null-checked in the callback** (`P-151`). The timer has to be armed before
+      // the request so that a `send()` which blocks or throws is still bounded — but
+      // `http.request` throws *synchronously* from its own constructor for a header name that is
+      // not a token (`ERR_INVALID_HTTP_TOKEN`) or a value outside latin-1 (`ERR_INVALID_CHAR`),
+      // and both are reachable: a webhook template's `secretHeaders` keys are unconstrained, and
+      // `x-ms-subject` carries a rendered subject that can contain any character a sensor name
+      // has. When it threw, the executor unwound and the promise rejected — an ordinary retryable
+      // failure — but this timer stayed armed against a `const` in its temporal dead zone. It
+      // fired `ReferenceError: Cannot access 'request' before initialization` from a timer, which
+      // reaches `uncaughtException` in the lifecycle and takes the whole core down with it. Every
+      // retry re-armed the crash.
+      // `prefer-const` sees one assignment and asks for `const` back. Taking it would restore
+      // the crash above: the timer below closes over `request` and can fire before the
+      // assignment on a synchronous throw, which is a `ReferenceError` on a `const`.
+      // eslint-disable-next-line prefer-const
+      let request: ClientRequest | undefined;
       const hard = setTimeout(() => {
-        request.destroy(new Error(`timed out after ${String(options.timeoutMs)} ms`));
+        request?.destroy(new Error(`timed out after ${String(options.timeoutMs)} ms`));
       }, options.timeoutMs);
       hard.unref();
       const settle = <T>(fn: (value: T) => void) => {
@@ -215,7 +231,7 @@ export class GuardedHttpClient {
       const resolve = settle(resolveExchange);
       const reject = settle(rejectExchange);
 
-      const request: ClientRequest = send(
+      request = send(
         target,
         {
           method: options.verb,

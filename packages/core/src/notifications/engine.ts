@@ -9,6 +9,7 @@ import {
   type AlarmAdvance,
   type AlarmInsert,
   type AlarmRow,
+  type DueAlarm,
   type RequestInsert,
   type SensorStanding,
 } from './repository.js';
@@ -272,11 +273,45 @@ export class AlarmEngine {
    * Returns how many it fired, so a caller that got a full sweep can come straight back rather
    * than waiting for the next tick.
    */
+  /**
+   * Parks an alarm whose trigger this build cannot read (`P-152`).
+   *
+   * **`P-114` stopped the reaction from deleting these rows, and left the sweep unable to do
+   * anything with them at all.** After that change no path could clear one: `react` claims the
+   * trigger out of the orphan map and skips it, the sweep reads the same settings and bails, and
+   * the stale-alarm clear sits below that bail. A row whose `next_due_at` was already past — the
+   * ordinary state for anything pending past its latency or carrying a repeat — was returned by
+   * `due` on every pass for ever, and `AlarmScheduler` clamps an immediately-due row to its
+   * 25 ms floor: forty sweeps a second, two queries and a warn line each, until somebody noticed
+   * the log. That is the pathology `P-115` names as unacceptable, reintroduced in the same
+   * commit that fixed it.
+   *
+   * Parked rather than cleared, which keeps `P-114`'s point: the alarm still stands, so the
+   * outage it is about is not forgotten, and `suppressed` is what a chain waiting to be resumed
+   * already means. When the trigger becomes readable — an upgrade, or the settings corrected —
+   * `reconcile` takes the `resume` branch and the chain picks up where it stopped.
+   *
+   * **Collected separately from the firings**, because a park is not a firing: counting it as one
+   * would put it on Core Health's `alarmsFired` and tell a caller that got a full sweep to come
+   * straight back for more work that does not exist.
+   */
+  #park(alarm: DueAlarm, parked: AlarmAdvance[]): void {
+    parked.push({
+      id: alarm.id,
+      phase: alarm.phase,
+      nextDueAt: null,
+      repeats: alarm.repeats,
+      suppressed: true,
+      observed: alarm.observed,
+    });
+  }
+
   async sweep(q: Queryable, now: Date): Promise<{ fired: number; queued: number }> {
     const due = await this.#alarms.due(q, now, this.#maxPerSweep);
     if (due.length === 0) return { fired: 0, queued: 0 };
 
     const advance: AlarmAdvance[] = [];
+    const parked: AlarmAdvance[] = [];
     const requests: RequestInsert[] = [];
     const clear: number[] = [];
 
@@ -290,7 +325,10 @@ export class AlarmEngine {
           { id: alarm.triggerId, kind: THRESHOLD_TRIGGER.id, settings: alarm.triggerSettings },
           this.#logger,
         );
-        if (config === null) continue;
+        if (config === null) {
+          this.#park(alarm, parked);
+          continue;
+        }
         const firing = fireThreshold(config);
         requests.push({
           at: now,
@@ -319,7 +357,10 @@ export class AlarmEngine {
         { id: alarm.triggerId, kind: STATE_TRIGGER.id, settings: alarm.triggerSettings },
         this.#logger,
       );
-      if (settings === null) continue;
+      if (settings === null) {
+        this.#park(alarm, parked);
+        continue;
+      }
 
       // The alarm fell due for a state the sensor is no longer in. `react` should have stood it
       // down already, and does in every path that goes through a transaction — but the sweep is
@@ -357,13 +398,21 @@ export class AlarmEngine {
 
     const queued = await this.#alarms.queue(q, requests);
     if (queued > 0) this.#onQueued?.();
-    await this.#alarms.advance(q, advance);
+    await this.#alarms.advance(q, [...advance, ...parked]);
     const stale = await this.#alarms.clear(q, clear);
     this.#fired += advance.length;
     this.#queued += queued;
     this.#untemplated += requests.length - queued;
-    if (advance.length > 0 || stale > 0) {
-      this.#logger.info({ fired: advance.length, queued, stale }, 'notification chain advanced');
+    if (advance.length > 0 || stale > 0 || parked.length > 0) {
+      this.#logger.info(
+        {
+          fired: advance.length,
+          queued,
+          stale,
+          ...(parked.length === 0 ? {} : { parked: parked.length }),
+        },
+        'notification chain advanced',
+      );
     }
     return { fired: advance.length, queued };
   }

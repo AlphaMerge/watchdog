@@ -1080,6 +1080,54 @@ describe(
       });
     });
 
+    it('re-pushes to a probe that reconnected holding a version it never finished applying', async () => {
+      // **`P-153`, and it is the case `P-149` was written for and could not reach.** A link that
+      // drops mid-push leaves the probe with chunk one and a `#configVersion` it stamped on that
+      // first message. It reconnects, presents that version, the fingerprint matches, and the
+      // core answers `config-unchanged` — so the sensors outside chunk one are never scanned
+      // again, while the probe keeps delivering results for the ones it kept and every health
+      // signal reads green. `P-149`'s ack comparison cannot see it: the acks for the messages
+      // that were lost never arrive.
+      //
+      // The heartbeat can. `ProbeHealthReport.scheduled` is the wheel's own count and its
+      // declaration in the protocol says it is "compared against what the core assigned".
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 3_000 }, (_, at) => sensor(at + 1));
+
+      await withProbe(source, async (probe) => {
+        await probe.waitFor(
+          () => probe.received.filter((m) => m.type === 'config-delta').length === 2,
+        );
+        // Every message acked, so nothing is outstanding — the state a probe is in once a push
+        // has completed, and the state it *claims* to be in after a partial one.
+        const set = probe.received.find((m) => m.type === 'config-set');
+        assert.ok(set?.type === 'config-set');
+        for (const scheduled of [1_000, 2_000, 3_000]) {
+          probe.send({ type: 'config-ack', version: set.version, scheduled });
+        }
+        probe.send({ type: 'heartbeat', seq: 1, sentAt: new Date().toISOString() });
+        await probe.waitFor((m) => m.type === 'heartbeat-ack');
+        probe.received.length = 0;
+
+        // Now it reports what a probe that lost most of a push really has.
+        probe.send({
+          type: 'heartbeat',
+          seq: 2,
+          sentAt: new Date().toISOString(),
+          health: { scheduled: 1_000 },
+        });
+
+        const again = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(again.type === 'config-set');
+        assert.equal(
+          probe.received.filter((m) => m.type === 'config-set' || m.type === 'config-delta')
+            .length >= 1,
+          true,
+          'the whole set is sent again rather than a delta against a state it does not have',
+        );
+      });
+    });
+
     it('pushes again when the probe acknowledges a different number of sensors', async () => {
       // **`P-149`.** A full push is one `config-set` plus N-1 deltas at the same version, and the
       // probe stamps itself as holding that version on the *first* one — so a link that drops

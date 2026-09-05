@@ -754,6 +754,23 @@ describe(
         1,
         'the alarm should still stand: this build cannot judge the trigger, so it changed nothing',
       );
+
+      // **And it must not stay due** (`P-152`). `P-114` stopped the reaction deleting these rows
+      // and left no path able to do anything with them: the sweep reads the same settings and
+      // bails *above* the stale-alarm clear, so a row whose next_due_at is past came back from
+      // `due` on every pass — and the scheduler clamps an immediately-due row to its 25 ms floor.
+      // Forty sweeps a second, two queries and a warn line each, for ever.
+      assert.equal(await sweep(at(200)), 0, 'nothing fires for a trigger this build cannot read');
+      const [parked] = await standing();
+      assert.ok(parked, 'the alarm is still there to have been parked');
+      assert.equal(parked.nextDueAt, null, 'it is parked, so the sweep stops finding it');
+      assert.equal(parked.suppressed, true, 'and waiting to be resumed if it becomes readable');
+      assert.equal(await sweep(at(300)), 0);
+      assert.equal(
+        (await standing()).length,
+        1,
+        'still standing: the outage it is about has not been forgotten',
+      );
     });
 
     it('does not overwrite an acknowledgement that lands while the sweep is deciding', async () => {

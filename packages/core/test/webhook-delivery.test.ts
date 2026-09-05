@@ -498,6 +498,30 @@ describe('the webhook transport', () => {
 
   // ── timeouts ───────────────────────────────────────────────────────────────────────────
 
+  it('survives a header name the http client refuses, instead of crashing the core later', async () => {
+    // **`P-151`, a regression `P-143` introduced.** The deadline timer has to be armed before the
+    // request so a `send()` that blocks is still bounded — but `http.request` throws
+    // *synchronously* from its own constructor for a header name that is not a token, and the
+    // timer captured `request` as a `const` in its temporal dead zone. The promise rejected as an
+    // ordinary retryable failure, and `timeoutMs` later the timer fired
+    // `ReferenceError: Cannot access 'request' before initialization` — from a timer, so it
+    // reached `uncaughtException` in the lifecycle and took the whole core down. Every retry
+    // re-armed it.
+    //
+    // Both halves are asserted: the send fails cleanly, and nothing throws once the deadline has
+    // passed. Without the fix the second half does not fail this assertion — it kills the test
+    // process, which is exactly what it did to ms-core.
+    const result = await transport().send(
+      message({
+        settings: { url: url(), timeoutMs: 150, secretHeaders: { 'X Api Key': 'nope' } },
+      }),
+    );
+    assert.ok(!result.ok, 'a header the client refuses is a delivery failure');
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(true, 'the deadline passed and nothing threw from the timer');
+  });
+
   it('gives up on an endpoint that trickles, which an idle timeout never would', async () => {
     // **`P-143`.** `request.setTimeout` fires when the socket has been *quiet* for that long, so
     // an endpoint that sends one byte every so often resets it for ever — and the deadline across

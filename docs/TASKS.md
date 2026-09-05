@@ -10342,6 +10342,49 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       single ack was also the last one and the loop could not appear. The new test replays what a
       real probe sends: six messages, six acks, and nothing may come back. Mutation 1/1.
 
+- [x] **P-151 — the webhook hard timeout could crash the core from a timer**
+      `P-142` armed a hard timeout *before* building the request, so a `send()` that blocks or
+      throws is still bounded. But it closed over a `const` that `http.request` never got to
+      initialise: that constructor throws **synchronously** for a header name it will not accept,
+      and `x-ms-subject` carries a rendered subject with whatever characters a sensor name has.
+      The executor unwound, the promise rejected as an ordinary retryable failure — and the timer
+      stayed armed against a binding in its temporal dead zone. Two hundred milliseconds later it
+      fired `ReferenceError: Cannot access 'request' before initialization` from a timer callback,
+      which has no catcher: it reaches `uncaughtException` and takes the whole core down. Every
+      retry re-armed it.
+
+      The handle is now a `let` initialised to `undefined` and the timer destroys it optionally,
+      so a throw before the assignment leaves the timer with nothing to do. Tests: 1 new — a
+      delivery with a space in a secret header name, then a wait past the timeout, which crashed
+      the process before. Mutation 1/1.
+
+- [x] **P-152 — an unreadable trigger left its alarm spinning the scheduler**
+      `P-114` stopped the sweep deleting a standing alarm whose trigger this build cannot parse —
+      correctly: an outage that is still happening is not something to forget because a newer
+      build wrote a settings shape we do not know. But bailing out left the row exactly as it was,
+      with `next_due_at` in the past, so `due` returned it on the next pass and every pass after
+      that. The scheduler clamps an immediately-due row to its 25 ms floor: forty sweeps a second,
+      two queries and a warning line each, for as long as the alarm stands.
+
+      The sweep now *parks* the alarm instead — `next_due_at = null`, `suppressed = true`, the
+      state it already has for "standing, but not owed anything right now" — through the same
+      `advance` write, and parked rows are not counted as fired. It stops being due, keeps its
+      history, and the reaction resumes it if the trigger becomes readable again. Tests: extends
+      `P-114`'s own test, which asserted the alarm survived and never asked what happened next.
+      Mutation 2/2.
+
+- [x] **P-153 — a probe that reconnects mid-push is never reconciled**
+      `P-149` acts on the count disagreement a `config-ack` reports, and `P-150` made it wait for
+      the last ack of a chunked push. Neither covers the case the probe reports on its *heartbeat*:
+      a probe that dropped halfway through applying a set reconnects presenting the version it was
+      given, the fingerprint matches, the core answers `config-unchanged`, and no ack is ever
+      exchanged — so the only place that compares counts never runs. The probe keeps scanning the
+      fraction it kept, delivery looks healthy, and the rest are frozen.
+
+      Heartbeats carry `scheduled`, and it was only ever displayed. It is now compared against
+      what the session was sent, once no push is outstanding, and a mismatch forces a full push.
+      Tests: 1 new — 3,000 sensors fully acked, then a heartbeat claiming 1,000. Mutation 1/1.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

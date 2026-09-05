@@ -576,6 +576,20 @@ export class ProbeEndpoint {
           // claim about a probe this core has not spoken to yet.
           if (message.health !== undefined) session.health = message.health;
           connection.send({ type: 'heartbeat-ack', seq: message.seq });
+          // **The heartbeat is where an interrupted push is actually caught** (`P-153`).
+          // `P-149` compares the count carried by a `config-ack`, which only arrives on a live
+          // session where every message of the push was received — precisely not the case it was
+          // written for. When the link drops mid-push the acks never come, the session dies, and
+          // the reconnect presents a version whose fingerprint matches, so the core answers
+          // `config-unchanged` and the sensors outside chunk one are never scanned again. The
+          // probe keeps delivering results for the ones it kept, so the delivery watch and Probe
+          // Health both read green.
+          //
+          // `ProbeHealthReport.scheduled` is the wheel's own count, and its declaration in the
+          // protocol says "Compared against what the core assigned" — it was compared with
+          // nothing. Comparing it here bounds the damage by one heartbeat instead of for ever,
+          // and needs no protocol change.
+          this.#reconcileScheduled(session, logger);
           return session;
         case 'results':
           this.#queueResults(message, connection, logger, session);
@@ -1049,6 +1063,25 @@ export class ProbeEndpoint {
    * Never awaited by the message loop: a database round trip must not delay the heartbeat that
    * keeps the connection from being declared idle.
    */
+  /**
+   * Re-pushes when the probe's own sensor count disagrees with what it was sent (`P-153`).
+   *
+   * Only once the push has been fully acknowledged — mid-push the two disagree by design, which
+   * is `P-150` — and only when the probe has told us a count at all. An older probe that sends no
+   * health report is left alone rather than pushed at on every heartbeat.
+   */
+  #reconcileScheduled(session: ProbeSession, logger: Logger): void {
+    const scheduled = session.health?.scheduled;
+    if (scheduled === undefined) return;
+    if (session.sentVersion === null || session.configAcksOutstanding > 0) return;
+    if (scheduled === session.sentSensors.length) return;
+    logger.warn(
+      { scheduled, sent: session.sentSensors.length, version: session.sentVersion },
+      'probe reports a different number of scheduled sensors than it was sent; pushing again',
+    );
+    this.#queueConfig(session, logger, undefined, true);
+  }
+
   /**
    * @param force Send even when the fingerprint says the probe is current (`P-150`). Used by the
    *   ack handler, which has just been told the probe's *contents* disagree with the version it
