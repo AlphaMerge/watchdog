@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import type { CoreHealthService } from '../../health/core-health.js';
 import type { ProbeHealthService } from '../../health/probe-health.js';
 import { toHttpError } from '../errors.js';
+import { READS } from '../authorization.js';
 
 export interface HealthRoutesOptions {
   /**
@@ -41,6 +42,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
   app.get(
     '/core-health',
     {
+      config: READS,
       schema: {
         tags: ['health'],
         summary: 'How the core itself is doing, right now',
@@ -92,6 +94,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
   app.get<{ Params: { id: number } }>(
     '/probes/:id/health',
     {
+      config: READS,
       schema: {
         tags: ['health'],
         summary: 'How one probe is doing, right now',

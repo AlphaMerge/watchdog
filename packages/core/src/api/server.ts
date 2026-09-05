@@ -15,6 +15,7 @@ import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
+import { READS, registerAuthorization, type RouteAccess } from './authorization.js';
 import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
@@ -46,7 +47,6 @@ import type { DeliveryHealthReader } from '../notifications/health.js';
 import type { CoreHealthService } from '../health/core-health.js';
 import type { ProbeHealthService } from '../health/probe-health.js';
 import type { MetricsExporter } from '../metrics/exporter.js';
-import { AuthError } from '../auth/errors.js';
 import { healthRoutes } from './routes/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
@@ -221,6 +221,8 @@ export class ApiServer {
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #undeclared: string[] = [];
+  /** Routes that declared no `access`, which makes `build` throw (`A-11`). */
+  readonly #unauthorized: string[] = [];
   /**
    * Routes exempted from the response-schema guard, and why each one is.
    *
@@ -231,9 +233,17 @@ export class ApiServer {
    * decisions, and a boolean would have collapsed them into one.
    */
   readonly #unfiltered: { route: string; why: string }[] = [];
-  readonly #routes: { method: string; url: string }[] = [];
+  readonly #routes: { method: string; url: string; access: RouteAccess; changes: boolean }[] = [];
   /** Non-null while registering routes that are exempt, holding the reason. */
   #exempting: string | null = null;
+  /**
+   * The authorisation stamped onto routes a plugin registers for us (`A-11`).
+   *
+   * `fastify-static` registers its own route, so there is nowhere to write a `config` on it. The
+   * declaration is made here instead, next to the registration it covers, rather than letting
+   * the plugin's route fall through the guard as an unnamed exception.
+   */
+  #exemptAccess: RouteAccess | null = null;
 
   constructor(options: ApiServerOptions) {
     this.#config = options.config;
@@ -286,6 +296,17 @@ export class ApiServer {
       // Bounded to the registration that sets it: the static plugin serves bytes off disk and
       // `/metrics` serves a text format, and `fast-json-stringify` has nothing to filter in
       // either. Everything else must declare its responses.
+      // **Who may call it, checked before any exemption** (`A-11`). The response-schema guard
+      // has two justified exemptions — bytes off disk, and a text format that is not JSON —
+      // and neither of them is a reason for nobody to have decided who may call the route. A
+      // route that says nothing stops the build, exactly as a missing response schema does,
+      // because the failure it hides is silent and total.
+      if (this.#exemptAccess !== null && route.config?.access === undefined) {
+        route.config = { ...route.config, access: this.#exemptAccess };
+      }
+      if (route.config?.access === undefined) {
+        this.#unauthorized.push(`${String(route.method)} ${route.url}`);
+      }
       if (this.#exempting !== null) {
         this.#unfiltered.push({
           route: `${String(route.method)} ${route.url}`,
@@ -297,8 +318,12 @@ export class ApiServer {
       if (schema?.response === undefined) {
         this.#undeclared.push(`${String(route.method)} ${route.url}`);
       }
+      const access = route.config?.access;
+      if (access === undefined) return;
+      // A route says so when it changes nothing; everything else is assumed to.
+      const changes = route.config?.changes ?? true;
       for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
-        this.#routes.push({ method, url: route.url });
+        this.#routes.push({ method, url: route.url, access, changes });
       }
     });
   }
@@ -318,8 +343,18 @@ export class ApiServer {
    * Exposed so `A-10` can sweep *all* of them for a credential rather than a list somebody
    * maintains by hand — a hand-maintained list is exactly the thing that goes stale the day a
    * route is added, which is the day the test was supposed to catch it.
+   *
+   * **Each carries the authorisation it declared** (`A-11`), so the sweep can assert the bar a
+   * route set *and* that the bar is enforced. Reading the declaration back is what lets the test
+   * fail on a route nobody has written yet: a new `POST` that declares `read` is caught by the
+   * shape of its own declaration, without anybody adding it to a list.
    */
-  get routes(): readonly { method: string; url: string }[] {
+  get routes(): readonly {
+    method: string;
+    url: string;
+    access: RouteAccess;
+    changes: boolean;
+  }[] {
     return this.#routes;
   }
 
@@ -364,6 +399,13 @@ export class ApiServer {
         allowedOrigins: this.#config.allowedOrigins,
       });
       registerRateLimit(this.#app, { logger: this.#logger });
+      // **After authentication, before every route** (`A-11`). Authentication answers who this
+      // is; this answers whether they may. Both are global hooks for the same reason: a check
+      // wired per route is a check the next route forgets.
+      registerAuthorization(this.#app, {
+        access: this.#auth.access,
+        required: this.#auth.required,
+      });
     }
 
     // Before the routes, because a route declared `websocket: true` needs the plugin in place.
@@ -449,6 +491,9 @@ export class ApiServer {
           // Built here rather than taken as an option: it holds no state and wraps the service
           // it is given, so there is nothing for a caller to configure or get wrong (`D-09`).
           bulk: new BulkService({ objects: service, logger: this.#logger }),
+          // The bulk route resolves a right per id in the selection; every other object route
+          // is guarded by the global hook from its path (`A-11`).
+          ...(this.#auth === undefined ? {} : { access: this.#auth.access }),
         });
         await scope.register(historyRoutes, { history: this.#history });
         if (this.#queries !== undefined && this.#probeConfig !== undefined) {
@@ -550,10 +595,13 @@ export class ApiServer {
     if (this.#metrics !== undefined) {
       const metrics = this.#metrics;
       this.#exempting = 'the Prometheus text format, which is not JSON to filter';
-      const authRequired = this.#auth?.required ?? false;
       this.#app.get(
         '/metrics',
         {
+          // Read, and a token scoped to read is enough: a scraper never writes. Declared like
+          // every other route now rather than checked inline in the handler (`A-11`) — the
+          // inline check was correct and was also the only one in the installation.
+          config: READS,
           schema: {
             tags: ['meta'],
             summary: 'Prometheus scrape endpoint — text format, not JSON',
@@ -566,13 +614,7 @@ export class ApiServer {
               'because an empty body would be recorded as every series vanishing at once.',
           },
         },
-        async (request, reply) => {
-          if (authRequired && request.principal === undefined) {
-            throw new AuthError(
-              'AUTH_REQUIRED',
-              'this request needs an API token; Prometheus sends one as a bearer token',
-            );
-          }
+        async (_request, reply) => {
           const exporter = metrics();
           if (exporter === undefined) {
             // 503 in the scraper's own terms: an empty body would be recorded as "every series
@@ -596,6 +638,7 @@ export class ApiServer {
     this.#app.get(
       '/api/v1/openapi.json',
       {
+        config: READS,
         schema: {
           tags: ['meta'],
           summary: 'This API, as an OpenAPI 3 document',
@@ -611,6 +654,10 @@ export class ApiServer {
     if (this.#config.webRoot !== '') {
       const root = resolve(this.#config.webRoot);
       this.#exempting = 'bytes off disk, with no JSON to filter';
+      // **Public, and it has to be**: the login form is served from these bytes, so a shell that
+      // needed a session could never be used to get one. It carries the client bundle and
+      // nothing else — every datum it displays comes from an API route that is guarded.
+      this.#exemptAccess = { kind: 'public' };
       await this.#app.register(fastifyStatic, {
         root,
         prefix: '/',
@@ -626,11 +673,13 @@ export class ApiServer {
         },
       });
       this.#exempting = null;
+      this.#exemptAccess = null;
       this.#logger.info({ webRoot: root, routes: this.unfilteredRoutes }, 'serving the web UI');
     }
 
     await this.#app.ready();
     this.#assertEveryRouteDeclaresItsResponses();
+    this.#assertEveryRouteDeclaresItsAccess();
   }
 
   async start(): Promise<AddressInfo> {
@@ -654,6 +703,21 @@ export class ApiServer {
     if (this.#undeclared.length > 0) {
       throw new Error(
         `these routes have no response schema, so their bodies are not filtered: ${this.#undeclared.join(', ')}`,
+      );
+    }
+  }
+
+  /**
+   * A route that declares no `access` is a route nobody decided the authorisation for (`A-11`).
+   *
+   * Refusing to start rather than defaulting either way. Defaulting to open is how every
+   * mutating route in this installation came to be callable by a read-only account; defaulting
+   * to closed would hide the omission behind a 403 that looks like a permissions problem.
+   */
+  #assertEveryRouteDeclaresItsAccess(): void {
+    if (this.#unauthorized.length > 0) {
+      throw new Error(
+        `these routes declare no authorisation, so nobody decided who may call them: ${this.#unauthorized.join(', ')}`,
       );
     }
   }

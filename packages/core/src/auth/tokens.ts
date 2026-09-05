@@ -43,6 +43,7 @@ export interface TokenPrincipal {
   login: string;
   role: AccountRole;
   mustChangePassword: boolean;
+  mayAcknowledge: boolean;
   tokenId: number;
   /** The token's own ceiling, to be applied on top of the account's. */
   scope: AccessRight;
@@ -132,11 +133,12 @@ export class TokenService {
       login: string;
       role: string;
       must_change_password: boolean;
+      may_acknowledge: boolean;
       scope: AccessRight;
       last_used_at: Date | null;
     }>(
       `SELECT t.id::text AS id, t.user_id::text AS user_id, a.login, a.role,
-              a.must_change_password, t.scope, t.last_used_at
+              a.must_change_password, a.may_acknowledge, t.scope, t.last_used_at
        FROM api_token t JOIN user_account a ON a.id = t.user_id
        WHERE t.token_hash = $1
          AND t.revoked_at IS NULL
@@ -161,6 +163,7 @@ export class TokenService {
       login: row.login,
       role: row.role as AccountRole,
       mustChangePassword: row.must_change_password,
+      mayAcknowledge: row.may_acknowledge,
       tokenId: Number(row.id),
       scope: row.scope,
     };

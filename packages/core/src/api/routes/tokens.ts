@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { TokenService } from '../../auth/tokens.js';
 import type { RequestPrincipal } from '../authentication.js';
+import { SELF } from '../authorization.js';
 
 export interface TokenRoutesOptions {
   tokens: TokenService;
@@ -58,6 +59,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
   app.get<{ Querystring: { includeRevoked?: string } }>(
     '/auth/tokens',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'The API tokens this account holds',
@@ -88,6 +90,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
   }>(
     '/auth/tokens',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Issue an API token',
@@ -148,6 +151,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
   app.delete<{ Params: { id: number } }>(
     '/auth/tokens/:id',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Revoke one of this account’s tokens',

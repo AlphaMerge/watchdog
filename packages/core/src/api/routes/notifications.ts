@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../db/pool.js';
 import type { DeliveryHealthReader } from '../../notifications/health.js';
 import { NotificationLogReader } from '../../notifications/log.js';
+import { READS } from '../authorization.js';
 
 export interface NotificationRoutesOptions {
   db: Database;
@@ -152,6 +153,7 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
   app.get(
     '/notification-health',
     {
+      config: READS,
       schema: {
         tags: ['notifications'],
         summary: 'Whether notifications are actually being delivered',
@@ -183,6 +185,7 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
   app.get<{ Querystring: LogQuery }>(
     '/notification-requests',
     {
+      config: READS,
       schema: {
         tags: ['notifications'],
         summary: 'What happened to each notification',

@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { ALARM_STATES, type AlarmService, type AlarmSort } from '../../state/alarms.js';
 import type { SensorState } from '../../state/tables.js';
+import { READS } from '../authorization.js';
 
 export interface AlarmRouteOptions {
   alarms: AlarmService;
@@ -98,6 +99,7 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
   app.get<{ Querystring: AlarmQueryString }>(
     '/alarms',
     {
+      config: READS,
       schema: {
         tags: ['state'],
         summary: 'Every sensor that is currently in an alarm state, worst first',

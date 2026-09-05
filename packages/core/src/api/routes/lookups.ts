@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { LookupCatalogue } from '../../lookups/catalogue.js';
 import { ObjectError } from '../../objects/errors.js';
+import { READS } from '../authorization.js';
 
 export interface LookupRouteOptions {
   lookups: LookupCatalogue;
@@ -23,6 +24,7 @@ export function lookupRoutes(app: FastifyInstance, options: LookupRouteOptions):
   app.get(
     '/lookups',
     {
+      config: READS,
       schema: {
         tags: ['lookups'],
         summary: 'List the lookups this installation has loaded',
@@ -49,6 +51,7 @@ export function lookupRoutes(app: FastifyInstance, options: LookupRouteOptions):
   app.get<{ Params: { id: string } }>(
     '/lookups/:id',
     {
+      config: READS,
       schema: {
         tags: ['lookups'],
         summary: 'One lookup, with every entry',

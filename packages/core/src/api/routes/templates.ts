@@ -12,6 +12,7 @@ import {
   SUMMARISATION_MODES,
 } from '../../notifications/summarisation.js';
 import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
+import { READS, WRITES, computesOn, onBodyObject, onQueryObject } from '../authorization.js';
 
 export interface TemplateRouteOptions {
   templates: TemplateService;
@@ -274,6 +275,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get(
     '/notification-methods',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'The delivery methods this build understands',
@@ -306,6 +308,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get(
     '/summarisation-modes',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'How eagerly a template may send during a storm',
@@ -334,6 +337,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get(
     '/notification-placeholders',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'The placeholders a template’s subject and body may use',
@@ -358,6 +362,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get(
     '/templates',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'Every notification template',
@@ -377,6 +382,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get<{ Params: { id: number } }>(
     '/templates/:id',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'One template',
@@ -390,6 +396,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get<{ Params: { id: number } }>(
     '/templates/:id/used-by',
     {
+      config: READS,
       schema: {
         tags: ['templates'],
         summary: 'Which triggers name this template',
@@ -410,6 +417,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.get<{ Params: { id: number }; Querystring: { sensorId: number } }>(
     '/templates/:id/preview',
     {
+      // Read on the sensor the preview renders against, for the same reason as the draft one.
+      config: onQueryObject('read', 'sensorId'),
       schema: {
         tags: ['templates'],
         summary: 'What this template would say about one sensor, right now',
@@ -434,6 +443,10 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.post<{ Body: { template: TemplateInput; sensorId: number } }>(
     '/templates/preview',
     {
+      // Renders an unsaved draft against one sensor: nothing is sent and nothing is written, so
+      // the bar is read — but read *on that sensor*, because the rendering puts the sensor's own
+      // facts into the text.
+      config: computesOn(onBodyObject('read', 'sensorId')),
       schema: {
         tags: ['templates'],
         summary: 'What an unsaved draft would say about one sensor',
@@ -462,6 +475,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
     app.post<{ Params: { id: number }; Body: { sensorId?: number } }>(
       '/templates/:id/test',
       {
+        config: WRITES,
         schema: {
           tags: ['templates'],
           summary: 'Send a test notification through this template',
@@ -495,6 +509,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.post<{ Body: TemplateInput }>(
     '/templates',
     {
+      config: WRITES,
       schema: {
         tags: ['templates'],
         summary: 'Create a template',
@@ -511,6 +526,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.put<{ Params: { id: number }; Body: TemplateInput }>(
     '/templates/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['templates'],
         summary: 'Replace a template',
@@ -529,6 +545,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
   app.delete<{ Params: { id: number } }>(
     '/templates/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['templates'],
         summary: 'Remove a template',

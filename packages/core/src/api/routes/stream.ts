@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { describeError } from '@ms/shared';
 import type { Database } from '../../db/pool.js';
 import type { StateBroadcaster, StateEvent, StateSnapshot } from '../../state/stream.js';
+import { READS } from '../authorization.js';
 
 export interface StreamRouteOptions {
   db: Database;
@@ -100,6 +101,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
   app.get(
     '/stream',
     {
+      config: READS,
       websocket: true,
       schema: {
         tags: ['stream'],

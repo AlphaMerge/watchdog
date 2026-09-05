@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import type { ScheduleInput, ScheduleService } from '../../schedules/service.js';
+import { READS, WRITES } from '../authorization.js';
 
 export interface ScheduleRouteOptions {
   schedules: ScheduleService;
@@ -30,6 +31,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
   app.get(
     '/schedules',
     {
+      config: READS,
       schema: {
         tags: ['schedules'],
         summary: 'Every schedule, with what it means right now',
@@ -52,6 +54,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
   app.get<{ Params: { id: number } }>(
     '/schedules/:id',
     {
+      config: READS,
       schema: {
         tags: ['schedules'],
         summary: 'One schedule',
@@ -65,6 +68,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
   app.post<{ Body: ScheduleInput }>(
     '/schedules',
     {
+      config: WRITES,
       schema: {
         tags: ['schedules'],
         summary: 'Create a schedule',
@@ -85,6 +89,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
   app.put<{ Params: { id: number }; Body: ScheduleInput }>(
     '/schedules/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['schedules'],
         summary: 'Replace a schedule',
@@ -103,6 +108,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
   app.delete<{ Params: { id: number } }>(
     '/schedules/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['schedules'],
         summary: 'Delete a schedule',

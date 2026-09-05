@@ -9,7 +9,11 @@ import { LoginThrottle } from '../src/auth/throttle.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
+import { TriggerService } from '../src/triggers/service.js';
+import { TemplateService } from '../src/notifications/templates.js';
+import { MessageContextLoader } from '../src/notifications/context.js';
+import { ScheduleService } from '../src/schedules/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -78,6 +82,22 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       db,
       audit: new AuditRepository(),
       catalogue: testCatalogue(),
+      // **The library services are registered here on purpose** (`A-11`). Without them the
+      // mutating sweep below covers only the object routes, and "no write is open to a
+      // read-only account" would be a claim about a third of the API — which is how a build
+      // where a read-only account could delete every trigger passed this file for a fortnight.
+      triggers: new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+      templates: new TemplateService({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+        contexts: new MessageContextLoader({
+          settings: harness.resolver,
+          publicUrl: 'https://monitoring.example.test',
+          siteName: 'matrix',
+        }),
+      }),
+      schedules: new ScheduleService({ db, audit: new DatabaseAuditSink(), logger: silent }),
       auth: {
         accounts,
         sessions,
@@ -207,6 +227,223 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     }
   });
 
+  describe('no route that changes anything is open to an account that may not', () => {
+    /**
+     * The half `A-10` never had, and the reason `A-11` exists.
+     *
+     * The sweep above filters to `GET`. A sweep of reads cannot notice that *no write in the
+     * installation was guarded* — which is what it could not notice for the whole of Phase 9:
+     * `AccessService` was called by one route, and that route only reported the answer. Every
+     * mutating route was open to any authenticated principal, and the matrix passed throughout
+     * because it asserted the resolver against itself.
+     *
+     * So this asks two different questions, and neither of them consults a list:
+     *
+     *   1. **Does every mutating route declare a bar above `read`?** Read off the route's own
+     *      declaration, so a new `POST` that declares `READS` fails here on the day it is
+     *      written rather than on the day somebody notices.
+     *   2. **Is that bar actually enforced?** Every one of them is called as a read-only
+     *      account, which must be refused by all of them.
+     */
+    const fillWrite = (url: string): string =>
+      url
+        .replaceAll(':id', String(sensorId))
+        .replaceAll(':sensorId', String(sensorId))
+        .replaceAll(':objectId', String(sensorId))
+        .replaceAll(':kind', 'snmp')
+        .replaceAll(':key', 'scan.intervalSeconds')
+        .replaceAll(':groupId', String(teamId))
+        .replaceAll(':userId', String(userIds.get('readonly') ?? 0))
+        .replaceAll(':templateId', '1')
+        .replaceAll(':gid', 'none')
+        .replaceAll('*', '');
+
+    /**
+     * Routes that change something the caller owns rather than the monitored estate.
+     *
+     * **Named by prefix, and the list is two entries long on purpose.** Logging in, changing
+     * your own password and enrolling in MFA must work for a read-only account — refusing them
+     * would make the role unusable — so they are the one place a mutating route may sit below
+     * `write`. They declare `self` or `public`, which is what this filter reads.
+     */
+    const isSelfService = (route: { access: { kind: string } }): boolean =>
+      route.access.kind === 'self' || route.access.kind === 'public';
+
+    /**
+     * A `POST` that computes and stores nothing — a preview over a pasted document, a plan over
+     * a fingerprint. Declared `changes: false` in the route's own source rather than listed
+     * here, so the exception is reviewed where it is made and this test never needs updating.
+     */
+    const isCompute = (route: { changes: boolean }): boolean => !route.changes;
+
+    const mutating = (): {
+      method: string;
+      url: string;
+      access: { kind: string };
+      changes: boolean;
+    }[] =>
+      server.routes.filter(
+        (route) => route.method !== 'GET' && !isSelfService(route) && !isCompute(route),
+      );
+
+    /**
+     * A body that names an object for the routes whose subject is in the body.
+     *
+     * `POST /objects` asks for `write` on the *parent* it names, so a request that names no
+     * parent has no object to be refused about and answers 400 — honest, and unsweepable. Naming
+     * one the account can see turns the answer into the 403 this is trying to prove. The extra
+     * fields cost nothing: authorisation now runs before validation, so a body only has to be
+     * parseable to reach the guard.
+     */
+    const payload = { parentId: sensorId, sensorId, objectId: sensorId, ids: [sensorId] };
+
+    it('has mutating routes to sweep, so a silent zero is not a pass', () => {
+      assert.ok(mutating().length > 25, `only ${String(mutating().length)} mutating routes found`);
+    });
+
+    it('every one of them declares a bar above read', () => {
+      const weak = mutating()
+        .filter((route) => !isCompute(route))
+        .filter((route) => {
+          const access = route.access as { kind: string; needed?: AccessRight };
+          if (access.kind === 'read') return true;
+          if (access.kind === 'object') return access.needed === 'read';
+          return false;
+        })
+        .map((route) => `${route.method} ${route.url}`);
+      assert.deepEqual(weak, [], 'these routes change something but ask only for read');
+    });
+
+    it('refuses every one of them to a read-only account', async () => {
+      // Granted `read` on the whole branch first: the refusal has to come from the *bar*, not
+      // from the account having no grant at all. Without this the sweep would pass on a system
+      // where object rights were the only check and the role ceiling did nothing.
+      await db.query('DELETE FROM object_access');
+      await access.grant(probeId, teamId, 'read', 'matrix');
+
+      const allowed: string[] = [];
+      for (const route of mutating()) {
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: fillWrite(route.url),
+          headers: asRole('readonly'),
+          payload,
+        });
+        // **401 or 403, and nothing else counts.** Accepting any 4xx is how this sweep passed a
+        // mutation that let a read-only account write everything: the empty payload failed
+        // schema validation first and answered 400, so the guard was never exercised. That is
+        // also why authorisation moved to `preValidation` — refusing before validating makes
+        // the refusal the *first* answer, which is the only version a sweep can prove.
+        if (response.statusCode !== 401 && response.statusCode !== 403) {
+          allowed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
+        }
+      }
+      assert.deepEqual(allowed, [], 'a read-only account was not refused by these');
+    });
+
+    it('refuses them to a read-only account that may acknowledge, except acknowledging', async () => {
+      // `may_acknowledge` is the one documented exception (`A-04`, migration 034). It was stored,
+      // defaulted to false and read by nothing: every principal could acknowledge, and no
+      // principal needed the flag. Both halves are asserted here — the flag opens exactly one
+      // door, and opens no others.
+      await db.query('DELETE FROM object_access');
+      await access.grant(probeId, teamId, 'read', 'matrix');
+      const id = userIds.get('readonly') ?? 0;
+      const acknowledge = async (): Promise<number> =>
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/v1/objects/${String(sensorId)}/acknowledge`,
+            headers: asRole('readonly'),
+            payload: {},
+          })
+        ).statusCode;
+
+      // **Both halves, in one test.** "It is not 403 with the flag set" passes on a build where
+      // nothing checks the flag at all — which is the build this was written against. The pair
+      // is what carries the claim: refused without it, allowed with it.
+      await db.query('UPDATE user_account SET may_acknowledge = false WHERE id = $1', [id]);
+      assert.equal(await acknowledge(), 403, 'a read-only account acknowledged without the opt-in');
+      await db.query('UPDATE user_account SET may_acknowledge = true WHERE id = $1', [id]);
+      assert.notEqual(await acknowledge(), 403, 'the acknowledge opt-in did not open its own door');
+
+      const allowed: string[] = [];
+      for (const route of mutating()) {
+        if (route.access.kind === 'acknowledge') continue;
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: fillWrite(route.url),
+          headers: asRole('readonly'),
+          payload,
+        });
+        if (response.statusCode !== 401 && response.statusCode !== 403) {
+          allowed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
+        }
+      }
+      assert.deepEqual(allowed, [], 'may_acknowledge opened doors other than acknowledging');
+      await db.query('UPDATE user_account SET may_acknowledge = false WHERE id = $1', [id]);
+    });
+
+    it('refuses only the ids in a bulk selection the account may not change', async () => {
+      // **A bulk request names its objects in the body, so one bar for the whole request cannot
+      // express it.** The route asks for `write`, which a read-write account has as a role — and
+      // before `A-11` that was the entire check, so an account with no grant anywhere could
+      // select the tree and delete it. The ids are partitioned instead, and the refused ones come
+      // back as ordinary failed outcomes: a selection made in a tree view routinely includes
+      // something the operator cannot touch, and failing the whole request would be unusable.
+      await db.query('DELETE FROM object_access');
+      await access.grant(deviceId, teamId, 'write', 'matrix');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/objects/bulk',
+        headers: asRole('readwrite'),
+        payload: { ids: [sensorId, probeId], operation: 'pause', minutes: 5 },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json<{
+        requested: number;
+        failed: number;
+        outcomes: { objectId: number; ok: boolean; code?: string }[];
+      }>();
+      assert.equal(body.requested, 2, 'both ids should be reported, not only the allowed one');
+      const probe = body.outcomes.find((one) => one.objectId === probeId);
+      const sensor = body.outcomes.find((one) => one.objectId === sensorId);
+      assert.ok(probe, 'the refused id should still be reported');
+      assert.ok(sensor, 'the allowed id should be reported');
+      assert.equal(probe.ok, false, 'the probe is above the grant and should have been refused');
+      assert.equal(probe.code, 'AUTH_FORBIDDEN');
+      assert.equal(sensor.ok, true, 'the sensor inherits write from the device and should apply');
+    });
+
+    it('refuses the same routes to a read-scoped token held by an administrator', async () => {
+      // **The token scope, which was captured and never enforced** (`A-06`). It was threaded
+      // into `resolveFor` — correctly — and `resolveFor` was called by no route, so a token
+      // scoped to `read` performed every write in the installation. Held by an administrator
+      // here on purpose: the account's own role must not be what refuses this.
+      const tokens = new TokenService({ db, logger: silent });
+      const issued = await tokens.issue(
+        { userId: userIds.get('admin') ?? 0, role: 'admin' },
+        { name: 'sweep-read', scope: 'read' },
+      );
+      const headers = { authorization: `Bearer ${issued.secret}` };
+
+      const allowed: string[] = [];
+      for (const route of mutating()) {
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: fillWrite(route.url),
+          headers,
+          payload,
+        });
+        if (response.statusCode !== 401 && response.statusCode !== 403) {
+          allowed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
+        }
+      }
+      assert.deepEqual(allowed, [], 'a read-scoped token was not refused by these');
+    });
+  });
+
   describe('no route leaks a credential to a read-only user', () => {
     /**
      * Fills a route template with ids that exist, so the request reaches a handler rather than a
@@ -234,9 +471,15 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // Swept rather than listed: a hand-maintained list of "routes that might leak" goes stale
       // the day somebody adds a route, which is the day it was meant to catch something.
       const readonly = asRole('readonly');
+      // **The matrix above leaves an explicit `none` on the device.** Without clearing it this
+      // account resolves `none` on the sensor, every object route answers 403, and the sweep
+      // passes because a refusal carries no secret — which is a vacuous green of exactly the
+      // kind the count below now refuses.
+      await db.query('DELETE FROM object_access');
       await access.grant(probeId, teamId, 'read', 'matrix');
 
       const leaked: string[] = [];
+      let answered = 0;
       for (const route of server.routes) {
         if (route.method !== 'GET') continue;
         const response = await app.inject({
@@ -244,9 +487,14 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
           url: fill(route.url),
           headers: readonly,
         });
+        if (response.statusCode === 200) answered += 1;
         if (response.body.includes(PLANTED_SECRET)) leaked.push(`${route.method} ${route.url}`);
       }
 
+      assert.ok(
+        answered > 20,
+        `only ${String(answered)} GET routes answered 200; a sweep of refusals proves nothing`,
+      );
       assert.deepEqual(leaked, [], 'these routes returned a credential to a read-only account');
     });
 
@@ -255,6 +503,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // write-only *to everyone*, redacted at `ObjectService.#redact`, so being an administrator
       // does not help. A test that only checked the read-only case would pass on a system where
       // the answer was a role check rather than a boundary.
+      await db.query('DELETE FROM object_access');
       await access.grant(probeId, teamId, 'full', 'matrix');
 
       for (const role of ['readwrite', 'admin']) {
@@ -276,6 +525,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // Redacted, not omitted. An operator has to be able to see that a community string *is*
       // configured — a form that cannot distinguish "unset" from "set and hidden" makes somebody
       // retype a secret they did not need to.
+      await db.query('DELETE FROM object_access');
       await access.grant(probeId, teamId, 'read', 'matrix');
       const response = await app.inject({
         method: 'GET',
@@ -289,6 +539,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     });
 
     it('does not leak it through the history routes the criterion names', async () => {
+      await db.query('DELETE FROM object_access');
       await access.grant(probeId, teamId, 'read', 'matrix');
       for (const url of [
         `/api/v1/sensors/${String(sensorId)}/history?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z`,

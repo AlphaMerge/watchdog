@@ -130,6 +130,7 @@ export function registerAuthentication(app: FastifyInstance, options: Authentica
           login: principal.login,
           role: principal.role,
           mustChangePassword: principal.mustChangePassword,
+          mayAcknowledge: principal.mayAcknowledge,
           // A token session id is not a session: nothing may end it through /auth/logout.
           sessionId: '',
           tokenId: principal.tokenId,

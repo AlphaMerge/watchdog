@@ -1,7 +1,7 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`, which the
 // generated OpenAPI document carries into the API reference (H-07).
 import '@fastify/swagger';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import { actorFor } from '../authentication.js';
 import type { ObjectService } from '../../objects/service.js';
@@ -29,6 +29,47 @@ import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
+import { READS, WRITES, onBodyObject, onObject, toAcknowledge } from '../authorization.js';
+import { atLeast, type AccessService } from '../../auth/access.js';
+
+/** An outcome for an id the caller may not change, in the shape the route already returns. */
+interface RefusedOutcome {
+  objectId: number;
+  ok: false;
+  problem: string;
+  code: string;
+}
+
+/**
+ * Splits a bulk selection into the ids this principal may write and the ones it may not.
+ *
+ * Batched: `resolveManyFor` is one query for the whole selection, because a bulk request is
+ * exactly the shape that turns a per-object walk into six hundred round trips.
+ */
+async function partitionByRight(
+  access: AccessService | undefined,
+  request: FastifyRequest,
+  ids: readonly number[],
+): Promise<{ allowed: number[]; refused: RefusedOutcome[] }> {
+  const principal = request.principal;
+  if (access === undefined || principal === undefined) return { allowed: [...ids], refused: [] };
+  const rights = await access.resolveManyFor(principal, ids);
+  const allowed: number[] = [];
+  const refused: RefusedOutcome[] = [];
+  for (const id of ids) {
+    if (atLeast(rights.get(id) ?? 'none', 'write')) {
+      allowed.push(id);
+      continue;
+    }
+    refused.push({
+      objectId: id,
+      ok: false,
+      problem: 'this account may not change that object',
+      code: 'AUTH_FORBIDDEN',
+    });
+  }
+  return { allowed, refused };
+}
 
 export interface ObjectRoutesOptions {
   service: ObjectService;
@@ -40,6 +81,17 @@ export interface ObjectRoutesOptions {
    * invalidate the caches even when no row changed.
    */
   buildVersion: string;
+  /**
+   * Present whenever authentication is on, and the bulk route is why (`A-11`).
+   *
+   * Every other object route names its object in the path, so the global guard resolves the
+   * right before the handler runs. A bulk request names its objects in the body — a list of
+   * them — and one bar for the whole request cannot express "this account may pause four of
+   * these six". So the ids are partitioned here, and the ones it may not touch come back as
+   * ordinary failed outcomes rather than failing the request: a selection made in a tree view
+   * routinely includes something the operator cannot see.
+   */
+  access?: AccessService;
 }
 
 interface ListQuery {
@@ -212,7 +264,7 @@ export async function objectRoutes(
   app: FastifyInstance,
   options: ObjectRoutesOptions,
 ): Promise<void> {
-  const { service, buildVersion, bulk } = options;
+  const { service, buildVersion, bulk, access } = options;
 
   const sendDetail = async (
     reply: FastifyReply,
@@ -244,6 +296,7 @@ export async function objectRoutes(
   app.get<{ Querystring: ListQuery }>(
     '/objects',
     {
+      config: READS,
       schema: {
         tags: ['objects'],
         querystring: listQuery,
@@ -314,6 +367,7 @@ export async function objectRoutes(
   app.get<{ Querystring: { include?: string } }>(
     '/objects/root',
     {
+      config: READS,
       schema: {
         tags: ['objects'],
         querystring: {
@@ -334,6 +388,7 @@ export async function objectRoutes(
   app.get(
     '/setting-definitions',
     {
+      config: READS,
       schema: {
         tags: ['settings'],
         response: {
@@ -377,6 +432,7 @@ export async function objectRoutes(
   app.post<{ Body: CreateObjectInput }>(
     '/objects',
     {
+      config: onBodyObject('write', 'parentId'),
       schema: {
         tags: ['objects'],
         body: { $ref: 'ms:createObject' },
@@ -397,6 +453,7 @@ export async function objectRoutes(
   app.post<{ Body: TreePlanInput }>(
     '/objects/tree',
     {
+      config: WRITES,
       schema: {
         tags: ['objects'],
         summary: 'Create a whole subtree in one request',
@@ -428,6 +485,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number }; Querystring: { include?: string } }>(
     '/objects/:id',
     {
+      config: onObject('read'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -471,6 +529,7 @@ export async function objectRoutes(
   app.patch<{ Params: { id: number }; Body: UpdateObjectInput }>(
     '/objects/:id',
     {
+      config: onObject('write'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -490,6 +549,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number }; Querystring: { expectedDescendants?: number } }>(
     '/objects/:id',
     {
+      config: onObject('write'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -541,6 +601,7 @@ export async function objectRoutes(
   app.post<{ Params: { id: number }; Body: { move: SiblingMove } }>(
     '/objects/:id/order',
     {
+      config: onObject('write'),
       schema: {
         tags: ['objects'],
         description:
@@ -574,6 +635,7 @@ export async function objectRoutes(
   app.post<{ Params: { id: number }; Body: { targetParentId: number } }>(
     '/objects/:id/move',
     {
+      config: onObject('write'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -605,6 +667,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/clone',
     {
+      config: onObject('write'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -646,6 +709,7 @@ export async function objectRoutes(
   }>(
     '/objects/bulk',
     {
+      config: WRITES,
       schema: {
         tags: ['objects'],
         description:
@@ -734,9 +798,18 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      await reply.send(
-        await bulk.apply(actorFor(request), request.body.ids, operationFrom(request.body)),
-      );
+      const requested = request.body.ids;
+      const { allowed, refused } = await partitionByRight(access, request, requested);
+      const applied =
+        allowed.length === 0
+          ? { requested: 0, succeeded: 0, failed: 0, duplicates: 0, outcomes: [] }
+          : await bulk.apply(actorFor(request), allowed, operationFrom(request.body));
+      await reply.send({
+        ...applied,
+        requested: requested.length,
+        failed: applied.failed + refused.length,
+        outcomes: [...applied.outcomes, ...refused],
+      });
     },
   );
 
@@ -752,6 +825,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/tree',
     {
+      config: onObject('read'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -791,6 +865,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number } }>(
     '/objects/:id/counts',
     {
+      config: onObject('read'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -814,6 +889,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number } }>(
     '/objects/:id/ancestors',
     {
+      config: onObject('read'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -836,6 +912,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number } }>(
     '/objects/:id/channels',
     {
+      config: onObject('read'),
       schema: {
         tags: ['channels'],
         params: idParams,
@@ -872,6 +949,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/channels/:key',
     {
+      config: onObject('write'),
       schema: {
         tags: ['channels'],
         description:
@@ -929,6 +1007,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/pause',
     {
+      config: onObject('write'),
       schema: {
         tags: ['state'],
         description:
@@ -972,6 +1051,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number } }>(
     '/objects/:id/pause',
     {
+      config: onObject('write'),
       schema: {
         tags: ['state'],
         description:
@@ -997,6 +1077,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number } }>(
     '/objects/:id/pause',
     {
+      config: onObject('read'),
       schema: {
         tags: ['state'],
         description:
@@ -1021,6 +1102,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/acknowledge',
     {
+      config: toAcknowledge(),
       schema: {
         tags: ['state'],
         description:
@@ -1055,6 +1137,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number } }>(
     '/objects/:id/acknowledge',
     {
+      config: toAcknowledge(),
       schema: {
         tags: ['state'],
         description:
@@ -1076,6 +1159,7 @@ export async function objectRoutes(
   app.post<{ Params: { id: number }; Body: { message?: string } }>(
     '/objects/:id/simulate-error',
     {
+      config: onObject('write'),
       schema: {
         tags: ['state'],
         description:
@@ -1110,6 +1194,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number } }>(
     '/objects/:id/simulate-error',
     {
+      config: onObject('write'),
       schema: {
         tags: ['state'],
         description:
@@ -1137,6 +1222,7 @@ export async function objectRoutes(
   }>(
     '/objects/:id/dependency',
     {
+      config: onObject('write'),
       schema: {
         tags: ['dependencies'],
         description:
@@ -1180,6 +1266,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number }; Querystring: { asChildOf?: number } }>(
     '/objects/:id/settings',
     {
+      config: onObject('read'),
       schema: {
         tags: ['settings'],
         params: idParams,
@@ -1221,6 +1308,7 @@ export async function objectRoutes(
   app.put<{ Params: { id: number; key: string }; Body: { value: unknown } }>(
     '/objects/:id/settings/:key',
     {
+      config: onObject('write'),
       schema: {
         tags: ['settings'],
         params: settingKeyParams,
@@ -1254,6 +1342,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number; key: string } }>(
     '/objects/:id/settings/:key',
     {
+      config: onObject('write'),
       schema: {
         tags: ['settings'],
         params: settingKeyParams,
@@ -1299,6 +1388,7 @@ export async function objectRoutes(
   app.get<{ Params: { id: number }; Querystring: { effective?: string } }>(
     '/objects/:id/credentials',
     {
+      config: onObject('read'),
       schema: {
         tags: ['credentials'],
         params: idParams,
@@ -1329,6 +1419,7 @@ export async function objectRoutes(
   app.get(
     '/credential-kinds',
     {
+      config: READS,
       schema: {
         tags: ['credentials'],
         description:
@@ -1372,6 +1463,7 @@ export async function objectRoutes(
   app.put<{ Params: { id: number; kind: string }; Body: { values: Record<string, unknown> } }>(
     '/objects/:id/credentials/:kind',
     {
+      config: onObject('write'),
       schema: {
         tags: ['credentials'],
         description:
@@ -1408,6 +1500,7 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number; kind: string } }>(
     '/objects/:id/credentials/:kind',
     {
+      config: onObject('write'),
       schema: {
         tags: ['credentials'],
         description:

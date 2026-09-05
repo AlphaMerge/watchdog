@@ -2,6 +2,7 @@
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { HistoryService } from '../../timeseries/history.js';
+import { onObject } from '../authorization.js';
 import {
   ALLOWED_RESOLUTIONS,
   FORCED_AVERAGING_FROM_DAYS,
@@ -56,6 +57,7 @@ export async function historyRoutes(
   app.get<{ Params: { id: number } }>(
     '/sensors/:id/values',
     {
+      config: onObject('read'),
       schema: {
         tags: ['sensors'],
         description:
@@ -74,6 +76,7 @@ export async function historyRoutes(
   app.get<{ Params: { id: number }; Querystring: HistoryQuery }>(
     '/sensors/:id/history',
     {
+      config: onObject('read'),
       schema: {
         tags: ['sensors'],
         description:

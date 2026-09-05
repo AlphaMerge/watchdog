@@ -4,6 +4,7 @@ import type { AccessRight, AccessService } from '../../auth/access.js';
 import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import { actorFor, requireRole } from '../authentication.js';
+import { ADMIN, READS } from '../authorization.js';
 
 export interface AccessRoutesOptions {
   access: AccessService;
@@ -52,6 +53,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.get<{ Params: { id: number } }>(
     '/objects/:id/access',
     {
+      config: ADMIN,
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],
@@ -76,6 +78,11 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.get<{ Params: { id: number }; Querystring: { userId?: number } }>(
     '/objects/:id/access/effective',
     {
+      // **Read, not `read` on the object.** "What may I do here?" has to be answerable when the
+      // answer is "nothing" — refusing it would make a UI unable to tell a hidden object from a
+      // broken request, and the reply carries no fact about the object beyond the right itself.
+      // Asking about *another* account is still an administrator's question, guarded below.
+      config: READS,
       schema: {
         tags: ['access'],
         summary: 'What an account may actually do with this object',
@@ -164,6 +171,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/objects/:id/access/:groupId',
     {
+      config: ADMIN,
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],
@@ -212,6 +220,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.delete<{ Params: { id: number; groupId: number } }>(
     '/objects/:id/access/:groupId',
     {
+      config: ADMIN,
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],

@@ -5,6 +5,7 @@ import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import type { DiscoveryService } from '../../discovery/service.js';
+import { COMPUTES, READS, WRITES } from '../authorization.js';
 
 export interface DeviceTemplateRouteOptions {
   templates: DeviceTemplateCatalogue;
@@ -41,6 +42,7 @@ export function deviceTemplateRoutes(
   app.get(
     '/device-templates',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'Every device template, and anything that was refused',
@@ -93,6 +95,7 @@ export function deviceTemplateRoutes(
   app.get(
     '/device-templates/:templateId',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'One template, in full',
@@ -120,6 +123,8 @@ export function deviceTemplateRoutes(
   app.post(
     '/device-templates/plan',
     {
+      // Answers what a fingerprint would produce. Creates nothing.
+      config: COMPUTES,
       schema: {
         tags: ['discovery'],
         summary: 'What a fingerprint would produce',
@@ -188,6 +193,7 @@ export function deviceTemplateRoutes(
     app.get(
       '/discovery/:id/plan',
       {
+        config: READS,
         schema: {
           tags: ['discovery'],
           summary: 'What a run’s hosts would produce',
@@ -267,6 +273,7 @@ export function deviceTemplateRoutes(
     app.post(
       '/objects/:id/as-template',
       {
+        config: WRITES,
         schema: {
           tags: ['discovery'],
           summary: 'A template file, from a device already set up',

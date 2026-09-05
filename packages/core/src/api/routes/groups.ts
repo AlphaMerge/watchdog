@@ -2,6 +2,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { GroupService } from '../../auth/groups.js';
 import { requireRole } from '../authentication.js';
+import { ADMIN } from '../authorization.js';
 
 export interface GroupRoutesOptions {
   groups: GroupService;
@@ -69,6 +70,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.get(
     '/groups',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -89,6 +91,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.post<{ Body: { name: string; description?: string; isAdmin?: boolean } }>(
     '/groups',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -118,6 +121,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   }>(
     '/groups/:id',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -144,6 +148,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.delete<{ Params: { id: number } }>(
     '/groups/:id',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -165,6 +170,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.get<{ Params: { id: number } }>(
     '/groups/:id/members',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -200,6 +206,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.put<{ Params: { id: number; userId: number }; Body: { primary?: boolean } }>(
     '/groups/:id/members/:userId',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -241,6 +248,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.delete<{ Params: { id: number; userId: number } }>(
     '/groups/:id/members/:userId',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -274,6 +282,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.get<{ Params: { id: number } }>(
     '/accounts/:id/groups',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -295,6 +304,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.put<{ Params: { id: number; groupId: number } }>(
     '/accounts/:id/primary-group/:groupId',
     {
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],

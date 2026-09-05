@@ -5,6 +5,7 @@ import type { Database } from '../../db/pool.js';
 import { readSensorState } from '../../state/runtime.js';
 import { PAUSE_SOURCES } from '../../state/tables.js';
 import { notFound } from '../../objects/errors.js';
+import { onObject } from '../authorization.js';
 
 export interface StateRoutesOptions {
   db: Database;
@@ -33,6 +34,7 @@ export function stateRoutes(app: FastifyInstance, options: StateRoutesOptions): 
   app.get<{ Params: { id: number } }>(
     '/sensors/:id/state',
     {
+      config: onObject('read'),
       schema: {
         tags: ['sensors'],
         description:

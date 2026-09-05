@@ -13,6 +13,7 @@ import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
 import type { RediscoveryService } from '../../discovery/rediscovery.js';
+import { COMPUTES, READS, WRITES, onObject } from '../authorization.js';
 
 export interface DiscoveryRouteOptions {
   discovery: DiscoveryService;
@@ -88,6 +89,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.post(
     '/discovery/preview',
     {
+      // Parses a range and estimates it. No scan is started and nothing is written.
+      config: COMPUTES,
       schema: {
         tags: ['discovery'],
         summary: 'What a range means, and what each level would cost',
@@ -179,6 +182,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.post(
     '/discovery',
     {
+      config: WRITES,
       schema: {
         tags: ['discovery'],
         summary: 'Start a discovery run',
@@ -255,6 +259,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'A run and how far it has got',
@@ -273,6 +278,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/summary',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'What a run did — scanned, found, created, errors',
@@ -414,6 +420,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/hosts',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'The addresses a run found alive',
@@ -464,6 +471,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.post(
     '/discovery/:id/cancel',
     {
+      config: WRITES,
       schema: {
         tags: ['discovery'],
         summary: 'Stop a run',
@@ -491,6 +499,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.post(
       '/discovery/:id/provision',
       {
+        config: WRITES,
         schema: {
           tags: ['discovery'],
           summary: 'Create the devices and sensors this run found',
@@ -559,6 +568,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/problems',
     {
+      config: READS,
       schema: {
         tags: ['discovery'],
         summary: 'What a run could not create, and why',
@@ -592,6 +602,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/objects/:id/discovery',
     {
+      config: onObject('read'),
       schema: {
         tags: ['discovery'],
         summary: 'What this group has been discovering, newest first',
@@ -669,6 +680,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.get(
       '/discovery/schedules',
       {
+        config: READS,
         schema: {
           tags: ['discovery'],
           summary: 'Rediscovery schedules',
@@ -701,6 +713,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.post(
       '/discovery/schedules',
       {
+        config: WRITES,
         schema: {
           tags: ['discovery'],
           summary: 'Create a rediscovery schedule',
@@ -779,6 +792,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.post(
       '/discovery/schedules/:id/enabled',
       {
+        config: WRITES,
         schema: {
           tags: ['discovery'],
           summary: 'Turn a schedule on or off',
@@ -815,6 +829,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.delete(
       '/discovery/schedules/:id',
       {
+        config: WRITES,
         schema: {
           tags: ['discovery'],
           summary: 'Delete a schedule',

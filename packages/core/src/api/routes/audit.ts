@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { AUDIT_CATEGORIES, type AuditRepository } from '../../audit/store.js';
 import type { Database } from '../../db/pool.js';
+import { ADMIN, onObject } from '../authorization.js';
 
 export interface AuditRoutesOptions {
   db: Database;
@@ -102,6 +103,7 @@ export async function auditRoutes(
   app.get<{ Params: { id: number }; Querystring: AuditQueryString }>(
     '/objects/:id/audit',
     {
+      config: onObject('read'),
       schema: {
         tags: ['audit'],
         description:
@@ -140,6 +142,7 @@ export async function auditRoutes(
   app.get<{ Querystring: LogQueryString }>(
     '/audit',
     {
+      config: ADMIN,
       schema: {
         tags: ['audit'],
         description:

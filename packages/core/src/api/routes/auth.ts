@@ -7,6 +7,7 @@ import type { SessionService } from '../../auth/sessions.js';
 import type { LoginThrottle } from '../../auth/throttle.js';
 import type { TotpService } from '../../auth/totp.js';
 import { SESSION_COOKIE, sessionTokenFrom } from '../authentication.js';
+import { PUBLIC, READS, SELF } from '../authorization.js';
 
 export interface AuthRoutesOptions {
   accounts: AccountService;
@@ -96,6 +97,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post<{ Body: { login: string; password: string; code?: string } }>(
     '/auth/login',
     {
+      config: PUBLIC,
       schema: {
         tags: ['auth'],
         summary: 'Exchange a login and password for a session',
@@ -202,6 +204,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post(
     '/auth/logout',
     {
+      config: PUBLIC,
       schema: {
         tags: ['auth'],
         summary: 'End the current session',
@@ -224,6 +227,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.get(
     '/auth/me',
     {
+      config: READS,
       schema: {
         tags: ['auth'],
         summary: 'Who this session belongs to',
@@ -249,6 +253,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.get(
     '/auth/mfa',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Whether this account has, or needs, a second factor',
@@ -286,6 +291,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post(
     '/auth/mfa/enrol',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Begin enrolment',
@@ -318,6 +324,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post<{ Body: { code: string } }>(
     '/auth/mfa/confirm',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Confirm enrolment with a code, and receive recovery codes',
@@ -353,6 +360,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post<{ Body: { password: string } }>(
     '/auth/mfa/disable',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Turn off multi-factor authentication',
@@ -385,6 +393,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post(
     '/auth/mfa/recovery-codes',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Issue a fresh set of recovery codes',
@@ -411,6 +420,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post<{ Body: { currentPassword: string; newPassword: string } }>(
     '/auth/password',
     {
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Change your own password',

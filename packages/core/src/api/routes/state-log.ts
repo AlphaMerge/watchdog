@@ -3,6 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { SensorState, SensorStateCause } from '../../state/tables.js';
+import { READS } from '../authorization.js';
 import {
   StateLogError,
   STATE_LOG_CAUSES,
@@ -123,6 +124,7 @@ export function stateLogRoutes(app: FastifyInstance, options: StateLogRoutesOpti
   app.get<{ Querystring: LogQueryString }>(
     '/state-log',
     {
+      config: READS,
       schema: {
         tags: ['state'],
         summary: 'Every state change, newest first',

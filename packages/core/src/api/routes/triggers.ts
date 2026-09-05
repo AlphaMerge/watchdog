@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import { triggerKinds } from '../../triggers/definition.js';
 import type { TriggerInput, TriggerService } from '../../triggers/service.js';
+import { READS, WRITES, onObject } from '../authorization.js';
 
 export interface TriggerRouteOptions {
   triggers: TriggerService;
@@ -96,6 +97,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.get(
     '/trigger-kinds',
     {
+      config: READS,
       schema: {
         tags: ['triggers'],
         summary: 'The kinds of trigger this build understands',
@@ -126,6 +128,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.get<{ Params: { id: number } }>(
     '/objects/:id/triggers',
     {
+      config: onObject('read'),
       schema: {
         tags: ['triggers'],
         summary: 'Every trigger in effect on an object, its own first',
@@ -162,6 +165,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.post<{ Params: { id: number }; Body: TriggerInput }>(
     '/objects/:id/triggers',
     {
+      config: onObject('write'),
       schema: {
         tags: ['triggers'],
         summary: 'Add a trigger to an object',
@@ -183,6 +187,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.put<{ Params: { id: number }; Body: TriggerInput }>(
     '/triggers/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['triggers'],
         summary: 'Replace a trigger',
@@ -200,6 +205,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.delete<{ Params: { id: number } }>(
     '/triggers/:id',
     {
+      config: WRITES,
       schema: {
         tags: ['triggers'],
         summary: 'Remove a trigger',

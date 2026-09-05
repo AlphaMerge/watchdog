@@ -1,6 +1,7 @@
 import { SensorTypeError, type SensorCatalogue } from '@ms/sensors';
 import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
+import { COMPUTES, READS } from '../authorization.js';
 
 export interface SensorTypeRouteOptions {
   catalogue: SensorCatalogue;
@@ -127,6 +128,7 @@ export function sensorTypeRoutes(app: FastifyInstance, options: SensorTypeRouteO
   app.get(
     '/sensor-types',
     {
+      config: READS,
       schema: {
         tags: ['sensor-types'],
         summary: 'List the registered sensor types',
@@ -145,6 +147,9 @@ export function sensorTypeRoutes(app: FastifyInstance, options: SensorTypeRouteO
   }>(
     '/sensor-types/:id/preview',
     {
+      // Nothing is fetched and nothing is stored — the document is in the request. A POST only
+      // because a pasted response does not fit in a URL.
+      config: COMPUTES,
       schema: {
         tags: ['sensor-types'],
         summary: 'Run this type’s mapping language over a pasted response',

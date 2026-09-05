@@ -320,6 +320,28 @@ export class AccessService {
     return result;
   }
 
+  /**
+   * `resolveMany`, with the role and token ceilings applied (`A-04`, `A-06`).
+   *
+   * The batched twin of `resolveFor`, and it exists for the bulk route: a selection of six
+   * hundred objects must not be six hundred walks, and it must not be *unchecked* either —
+   * which is what it was. `resolveMany` answers what the groups grant, which is never the
+   * question an authorisation check is asking.
+   */
+  async resolveManyFor(
+    principal: { userId: number; role: AccountRole; scope?: AccessRight },
+    objectIds: readonly number[],
+    q: Queryable = this.#db,
+  ): Promise<Map<number, AccessRight>> {
+    const granted = await this.resolveMany(principal.userId, objectIds, q);
+    const capped = new Map<number, AccessRight>();
+    for (const [id, right] of granted) {
+      const afterRole = cappedBy(principal.role, right);
+      capped.set(id, principal.scope === undefined ? afterRole : lower(afterRole, principal.scope));
+    }
+    return capped;
+  }
+
   /** Every grant sitting directly on this object. */
   async grantsOn(
     objectId: number,

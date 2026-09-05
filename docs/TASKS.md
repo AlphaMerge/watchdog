@@ -9895,6 +9895,62 @@ because each is a decision rather than a defect:
       its value.
 
       Tests: 12 matrix rows over HTTP plus 6 credential-boundary tests.
+- [x] **A-11 — Every route declares who may call it** · L · A-03…A-06, A-10 · Authorisation
+      declared per route and enforced in one hook; a route that declares nothing stops the build.
+
+      **What was wrong: nothing enforced any of it.** `AccessService` — the resolver carrying
+      `A-03`'s three rules, `A-04`'s role ceiling and `A-06`'s token scope — was called by exactly
+      one route in the installation, and that route only *reported* the answer. Every mutating
+      route was open to any authenticated principal. A read-only account could delete every
+      trigger, template and schedule; a token issued with `scope: 'read'` performed every write;
+      `POST /templates/:id/test`, which really sends, was callable by anybody with a session; and
+      `may_acknowledge` — stored, defaulted to false, documented in migration 034 as the one
+      exception a read-only account gets — was read by no code at all, so every principal could
+      acknowledge and the flag did nothing.
+
+      **Why A-10 could not see it, which is the part worth keeping.** The file is named for this
+      criterion. Its matrix asserts twelve combinations of role, group and position — through
+      `GET /objects/:id/access/effective`, the *reporting* endpoint, so it asserted the resolver
+      against itself and would have passed on a build with no enforcement anywhere. Its route
+      sweep filters to `GET`. A sweep of reads cannot notice that no write is guarded.
+
+      **The fix is declarative, and the guard is the build.** Each route carries
+      `config: { access }` — `PUBLIC`, `READS`, `WRITES`, `ADMIN`, `SELF`, or a right on the
+      object named by a path, body or query parameter — and one `preValidation` hook enforces it.
+      A route that declares nothing does not fall open and does not fall closed: `ApiServer.build`
+      throws with its name, the same enforcement the response-schema guard already had, for the
+      same reason. 119 routes now declare a bar.
+
+      **`preValidation`, not `preHandler`, and the reason is provable.** Fastify validates the
+      body first, so a caller who may not touch a route at all was answered 400 for a malformed
+      body rather than 403 — which meant the sweep below could not tell a guard from a schema,
+      and a mutation that let a read-only account write everything passed it. Refusing before
+      validating is also the better order on its own terms.
+
+      **The sweep now has the half it never had**, and it consults no list. Every non-GET route
+      is called as a read-only account and must answer 401 or 403 — and separately, every one of
+      them must *declare* a bar above read, read off its own declaration, so a new `POST` that
+      declares `READS` fails on the day it is written. The one honest exception, a `POST` that is
+      a read because its input will not fit in a URL, says so in its own source with
+      `changes: false` rather than being listed here. The token scope gets its own sweep with a
+      read-scoped token held by an administrator, so the account's role cannot be what refuses it.
+
+      **The matrix harness registers the library services now.** It did not, so triggers,
+      templates and schedules were not in any sweep — the routes G01 named were literally absent
+      from the test that was supposed to cover them. With them registered a mutation widening the
+      role table fails three tests instead of none.
+
+      **Bulk is partitioned rather than barred.** A bulk request names its objects in the body, so
+      one bar for the whole request cannot express "may pause four of these six". The ids are
+      split by `resolveManyFor` — one query, not one walk per id — and the refused ones come back
+      as ordinary failed outcomes, because a selection made in a tree view routinely includes
+      something the operator cannot touch.
+
+      Tests: 12 new in `access-matrix.test.ts` — the mutating sweep, the declaration-shape check,
+      the read-scoped token, both halves of `may_acknowledge`, and the bulk partition — plus four
+      existing ones repaired: they granted rights without clearing the matrix's leftover `none`,
+      so they were asserting against a wall of 403s that no credential could leak through.
+      Mutation 4/4.
 
 ## Phase 10 — Hardening and release
 

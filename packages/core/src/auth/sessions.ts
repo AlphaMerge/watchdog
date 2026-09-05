@@ -37,6 +37,14 @@ export interface Principal {
   role: AccountRole;
   mustChangePassword: boolean;
   sessionId: string;
+  /**
+   * Whether this account may acknowledge alarms regardless of its role (`A-04`, migration 034).
+   *
+   * Carried on the principal rather than fetched at the acknowledgement route, for the same
+   * reason the role is: one query per request, and an authorisation check that needs a second
+   * round trip is one somebody will be tempted to skip.
+   */
+  mayAcknowledge: boolean;
 }
 
 export interface SessionServiceOptions {
@@ -109,6 +117,7 @@ export class SessionService {
       login: string;
       role: string;
       must_change_password: boolean;
+      may_acknowledge: boolean;
       disabled: boolean;
     }>(
       `UPDATE user_session s
@@ -122,7 +131,7 @@ export class SessionService {
          AND s.created_at + $4::interval > $2
          AND a.disabled = false
        RETURNING s.id, s.user_id::text AS user_id, a.login, a.role, a.must_change_password,
-                 a.disabled`,
+                 a.may_acknowledge, a.disabled`,
       [
         sessionIdFor(token),
         now,
@@ -138,6 +147,7 @@ export class SessionService {
       login: row.login,
       role: row.role as AccountRole,
       mustChangePassword: row.must_change_password,
+      mayAcknowledge: row.may_acknowledge,
       sessionId: row.id,
     };
   }
