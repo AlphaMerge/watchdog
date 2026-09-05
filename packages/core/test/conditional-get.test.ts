@@ -167,6 +167,29 @@ describe(
       assert.equal(second.body.credentials?.length, 1);
     });
 
+    it('does not serve 304 after a credential is revoked', async () => {
+      // **`P-92`, and the direction the case above does not cover.** The trigger that bumps the
+      // owner's version fired on INSERT and UPDATE only, so a revocation moved no version and
+      // the chain digest was unchanged. A client holding the previous ETag got a 304 and went on
+      // rendering — and acting on — a credential that had been taken away. Which is exactly what
+      // the route's comment says the chain digest is for.
+      await db.query(
+        `INSERT INTO credential_set (object_id, kind, public_params, secret, key_id)
+         VALUES ($1, 'snmp', '{"community":"public"}'::jsonb, '\\x00'::bytea, 'k1')`,
+        [groupId],
+      );
+      const first = await get(deviceId, { include: 'credentials' });
+      assert.equal(first.body.credentials?.length, 1, 'inherited from the group');
+
+      await db.query("DELETE FROM credential_set WHERE object_id = $1 AND kind = 'snmp'", [
+        groupId,
+      ]);
+
+      const second = await get(deviceId, { include: 'credentials', ifNoneMatch: first.etag });
+      assert.equal(second.status, 200, 'a revocation is a change the client has to see');
+      assert.equal(second.body.credentials?.length, 0);
+    });
+
     it('does not serve 304 after an ancestor is re-parented, even with no version any higher', async () => {
       // The case that rules out "the maximum version along the chain" as a validator. Versions
       // are per-object counters, so a move can change every inherited value while leaving the

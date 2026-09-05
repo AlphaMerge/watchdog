@@ -254,11 +254,32 @@ export class ProbeReachability {
     for (const id of sensorIds) this.#unreachable.delete(id);
     if (sensorIds.length === 0) return 0;
 
-    const moved = await this.#db.tx((q) =>
-      this.#states.reevaluate(q, sensorIds, this.#now(), {
-        message: 'the probe carrying this sensor is answering again',
-      }),
-    );
+    // The mirror of `lost`'s rollback, and it was missing (`P-90`). The overlay is dropped
+    // before the write, so a rejected transaction left the database holding `unknown`/`probe`
+    // for every sensor while this process believed the probe was fine: `offlineReason` returns
+    // undefined, the sweep's `held === 'silence'` branch can never fire again, and the retry
+    // path is gone — the same way `P-77`'s shadow set lost it. The recovery transition is then
+    // a permanent hole in the history uptime is computed from.
+    //
+    // Not rethrown, for the reason `lost` gives: the rejection would otherwise escape
+    // `resumed()` into `ProbeDeliveryWatch.settle()`, which documents itself as never throwing,
+    // and every probe after this one in the pass would be skipped.
+    let moved: number;
+    try {
+      moved = await this.#db.tx((q) =>
+        this.#states.reevaluate(q, sensorIds, this.#now(), {
+          message: 'the probe carrying this sensor is answering again',
+        }),
+      );
+    } catch (error) {
+      this.#byProbe.set(probeObjectId, entry);
+      for (const id of sensorIds) this.#unreachable.add(id);
+      this.#logger.error(
+        { probeObjectId, sensors: sensorIds.length, err: describeError(error) },
+        'could not clear a returning probe’s sensors; leaving them marked so the next pass retries',
+      );
+      return 0;
+    }
     this.#logger.info(
       { probeObjectId, sensors: sensorIds.length, moved },
       'a probe came back; its sensors returned to their last reading',

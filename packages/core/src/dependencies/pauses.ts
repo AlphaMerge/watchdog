@@ -233,13 +233,25 @@ export class DependencyPauses {
   }
 
   /** Rounds of `applyPauses` until nothing moves. One round propagates one level. */
-  async #settle(q: Queryable, now: Date): Promise<DependencyRecompute> {
+  /**
+   * Holds sensors that were just created under a master that is already holding (`P-93`).
+   *
+   * The same rule as `#settle`, asked about a named set rather than about every sensor. A brand
+   * new sensor is nobody's master, so this cannot cascade outward and does not need to: the
+   * only thing that can change is whether these sensors are held, and by whom.
+   */
+  async holdNew(q: Queryable, sensorIds: readonly number[], now: Date): Promise<number> {
+    if (sensorIds.length === 0) return 0;
+    return (await this.#settle(q, now, sensorIds)).moved;
+  }
+
+  async #settle(q: Queryable, now: Date, only?: readonly number[]): Promise<DependencyRecompute> {
     let moved = 0;
     let transitions = 0;
     let rounds = 0;
 
     for (; rounds < this.#maxRounds; rounds += 1) {
-      const changes = await this.#repo.applyPauses(q, now);
+      const changes = await this.#repo.applyPauses(q, now, only);
       if (changes.length === 0) break;
       moved += changes.length;
 

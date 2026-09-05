@@ -15,6 +15,9 @@ import { silentLogger } from './support/database.js';
  */
 
 function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } = {}) {
+  // Mutable, so one instance can succeed at marking a probe lost and then fail at clearing it —
+  // which is the only way to reach `#online`'s rollback at all.
+  const failing = { now: options.txFails === true };
   const reevaluated: number[][] = [];
   const db = {
     query: () =>
@@ -25,7 +28,7 @@ function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } =
     // pass by testing this stub rather than the rollback.
     tx: async <T>(fn: (q: unknown) => Promise<T>): Promise<T> => {
       const result = await fn({ query: () => Promise.resolve([]) });
-      if (options.txFails === true) throw new Error('deadlock detected');
+      if (failing.now) throw new Error('deadlock detected');
       return result;
     },
   } as unknown as Database;
@@ -40,7 +43,7 @@ function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } =
       },
     },
   });
-  return { service, reevaluated };
+  return { service, reevaluated, failing };
 }
 
 describe('what reachability records', () => {
@@ -65,6 +68,32 @@ describe('what reachability records', () => {
     const retry = reachabilityOver();
     assert.equal(await retry.service.lost(7, 'silence'), 3);
     assert.equal(retry.service.offlineReason(7), 'silence');
+  });
+
+  it('does not hold a probe cleared when the write that clears it failed', async () => {
+    // **`P-90`: the same defect, in the mirror method, left behind by `P-80`.** `#online` drops
+    // the overlay before the write and never put it back — so a rejected transaction left the
+    // database holding `unknown`/`probe` for every sensor while this process believed the probe
+    // was fine. `offlineReason` then answers undefined, the sweep's `held === 'silence'` branch
+    // can never fire again, and the recovery transition is a permanent hole in the history.
+    const { service, failing } = reachabilityOver();
+
+    assert.equal(await service.lost(7, 'silence'), 3);
+    assert.equal(service.offlineReason(7), 'silence');
+
+    failing.now = true;
+    assert.equal(await service.resumed(7), 0, 'nothing moved, and it says so rather than throwing');
+    assert.equal(
+      service.offlineReason(7),
+      'silence',
+      'still held, because the clearing never landed',
+    );
+    assert.equal(service.stats().sensorsUnknown, 3, 'and its sensors are still marked');
+
+    // Which is the point: the next sweep retries instead of deciding it is done.
+    failing.now = false;
+    assert.equal(await service.resumed(7), 3);
+    assert.equal(service.offlineReason(7), undefined);
   });
 
   it('counts a probe that is connected but silent apart from one that is not connected', async () => {

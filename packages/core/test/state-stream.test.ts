@@ -368,6 +368,36 @@ describe(
       assert.equal(slow.stats.subscribers, 0, 'and is detached');
     });
 
+    it('never rejects, because a rejection here shuts the core down', async () => {
+      // **`P-91`.** This runs as an `afterCommit` hook, and `Database.tx`'s hook loop
+      // try/catches only the *synchronous* call — so a rejection from the ancestry query, which
+      // runs on the pool outside any transaction, escaped to `unhandledRejection`, whose
+      // lifecycle handler logs fatal and shuts ms-core down. A pool timeout under ingestion
+      // load, or a Postgres failover, therefore stopped the monitoring at the moment the
+      // database was unhealthy and monitoring mattered most — over a broadcast whose
+      // transaction had already committed and whose failure costs a repaint, not a fact.
+      const seen = recorder();
+      const broken = new StateBroadcaster({ logger: silent });
+      broken.subscribe(seen.subscriber, null);
+
+      const failing = {
+        query: () => Promise.reject(new Error('connection terminated unexpectedly')),
+      } as unknown as typeof db;
+
+      const sent = await broken.publish(failing, [
+        {
+          sensorId,
+          state: 'down',
+          previousState: 'up',
+          cause: 'probe',
+          message: 'no ICMP reply',
+          at: new Date(),
+        },
+      ]);
+      assert.equal(sent, 0, 'nothing went out, and it says so rather than throwing');
+      assert.equal(seen.events.length, 0);
+    });
+
     it('leaves a subscriber that keeps up alone, whatever the volume', async () => {
       // The other half. A limit expressed as “bytes it has not delivered” must not fire on a
       // client that is delivering — the old shape counted events, and this is the reading of it

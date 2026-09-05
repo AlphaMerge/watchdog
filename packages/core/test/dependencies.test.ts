@@ -300,6 +300,34 @@ describe(
       assert.ok(message.includes('Down'), message);
     });
 
+    it('holds a sensor created while the master is already Down', async () => {
+      // **`P-93`.** `object.created` was skipped on the grounds that such a sensor "is picked up
+      // by the next state change of that master or by the next sweep". There is no dependency
+      // sweep — `sweepPauses` calls only `releaseElapsed`, which does nothing unless a
+      // `dependency_clear_at` is due — and the master emits no further transitions while it
+      // stays Down, because `react` runs on what a *result batch* produced and a master sitting
+      // at Down produces none.
+      //
+      // So the new sensor scanned right through the outage, failed, went Down and armed its own
+      // alarm: one outage, two alarms, out of the exact topology the dependency exists to
+      // collapse. A template application, a clone or a rediscovery reaches this the same way an
+      // operator does.
+      await masterForDevice();
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+
+      const late = await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'Late arrival',
+        sensorType: 'icmp.ping',
+      });
+
+      const runtime = await runtimeOf(late.id);
+      assert.equal(runtime.dependency, true, 'held, like every other sensor under this master');
+      assert.equal(runtime.state, 'paused');
+    });
+
     it('releases them when the master is deleted, rather than holding them for ever', async () => {
       // **`P-88`.** `DependencySync` reacts to `object.deleted` for exactly this reason — a
       // stale flag "would pause them for ever with no object left to point at" — but the audit

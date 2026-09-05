@@ -192,7 +192,11 @@ export class DependencyRepository {
     return byMaster;
   }
 
-  async applyPauses(q: Queryable, now: Date): Promise<DependencyFlagChange[]> {
+  async applyPauses(
+    q: Queryable,
+    now: Date,
+    only?: readonly number[],
+  ): Promise<DependencyFlagChange[]> {
     const rows = await q.query<{ object_id: string; paused: boolean; master_id: string | null }>(
       `
       WITH RECURSIVE assigned AS (
@@ -233,6 +237,11 @@ export class DependencyRepository {
         FROM object o
         LEFT JOIN assigned a ON a.node = o.id
         WHERE o.kind = 'sensor'
+          -- Restricted to a named set when the caller has one (P-93): a create knows exactly
+          -- which sensors it made, and discovery makes them in thousands, so answering for
+          -- those rather than settling the whole tree is the difference between one indexed
+          -- lookup per batch and a walk over every sensor in the installation.
+          AND ($3::bigint[] IS NULL OR o.id = ANY($3::bigint[]))
       )
       UPDATE sensor_runtime r
       SET paused_by_dependency = want.paused
@@ -242,7 +251,7 @@ export class DependencyRepository {
       RETURNING r.object_id::text AS object_id, want.paused,
                 want.master_id::text AS master_id
       `,
-      [now, DEPENDENCY_MASTER_ID.key],
+      [now, DEPENDENCY_MASTER_ID.key, only === undefined ? null : [...only]],
     );
     return rows.map((row) => ({
       sensorId: Number(row.object_id),

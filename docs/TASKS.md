@@ -6154,6 +6154,72 @@ because each is a decision rather than a defect:
       `protocol` channel already says so with its own lookup. That case short-circuits to
       `too-old` and this rule stays quiet about it.
 
+- [x] **P-90 — The rollback `P-80` added to `lost` was never added to its mirror** · S · R-05 ·
+      Finding 11. `#online` drops the `#byProbe` entry and every `#unreachable` id *before* the
+      transaction that writes the recovery, and nothing put them back when it rejected — the exact
+      shape `P-80` fixed one method above, comment and all.
+
+      A rejected transaction then left the database holding `unknown`/`probe` for all 300 sensors
+      while the process believed the probe was fine: `offlineReason` answers undefined, the
+      sweep's `held === 'silence'` branch can never fire again, and the retry path is gone the way
+      `P-77`'s shadow set lost it. The recovery transition is a permanent hole in the history, and
+      the sensors read Unknown until each one's next result. The rejection also escaped `resumed`
+      into `ProbeDeliveryWatch.settle`, which documents itself as never throwing, skipping every
+      probe after it in the pass.
+
+      Rolled back and swallowed now, for the reason `lost` gives. The test needed a stub that can
+      succeed once and fail once, which is the only way to reach this path at all.
+
+- [x] **P-91 — A rejected state broadcast shut the whole core down** · S · U-02 · Finding 12.
+      `publishStates` is an `afterCommit` hook, and `Database.tx`'s hook loop try/catches only the
+      *synchronous* call. `StateBroadcaster.publish` queries the pool outside any transaction, so
+      a rejection from that query escaped to `unhandledRejection`, whose lifecycle handler logs
+      fatal and calls `shutdown({kind:'error'})`.
+
+      A pool timeout under ingestion load, or a Postgres failover, therefore stopped ms-core — at
+      the moment the database is unhealthy and monitoring matters most — over a broadcast whose
+      transaction had already committed and whose failure costs a repaint, not a fact.
+
+      **The guarantee went into `publish` rather than into the caller's `.catch`.** There is
+      nothing a caller could usefully do with the error, and a second hook added later would have
+      to remember. `publish` now cannot reject, and a test says so.
+
+- [x] **P-92 — Revoking a credential did not invalidate the ETag** · S · S-06, D-04 · Finding 13.
+      `credential_set_touch_owner` fired `AFTER INSERT OR UPDATE` only. Every sibling trigger that
+      guards inherited content includes DELETE, and `object_setting`'s carries the comment
+      explaining why.
+
+      `CredentialVault.clear` is a plain DELETE and nothing else writes to `object`, so no version
+      moved and `chainValidator`'s digest was unchanged. A client holding the previous ETag got a
+      304 and went on rendering — and acting on — a credential that had been taken away. The
+      route's own comment says the chain digest exists so that "a 304 there would hide a revoked
+      credential"; it did exactly that. Only a client that never sends `If-None-Match`, or an
+      unrelated change that happened to bump a version in the chain, ever saw the revocation.
+
+      Migration 041 redefines the trigger. `object_touch_owner` already handled `TG_OP = 'DELETE'`
+      through `OLD.object_id`, so there was nothing else to write. The existing test covered the
+      INSERT direction only, which is why this survived.
+
+- [x] **P-93 — A sensor created under a Down master was never held, and the stated fallback did
+      not exist** · S · M-11 · Finding 6. `invalidates` skipped `object.created`, justified by the
+      claim that such a sensor "is picked up by the next state change of that master or by the
+      next sweep". Neither is true. There is no periodic dependency recompute anywhere — the only
+      dependency work in `sweepPauses` is `releaseElapsed`, which returns `NOTHING` unless a
+      `dependency_clear_at` is due — and the next state change of the master does not arrive while
+      it stays Down, because `react` runs on the transitions a *result batch* produced and a
+      master sitting at Down produces none.
+
+      So the new sensor stayed in the probe configuration, scanned through the outage, failed,
+      went Down and armed its own alarm: one outage, two alarms, out of the exact topology the
+      dependency exists to collapse, for the whole duration. A device-template application, a
+      clone or a rediscovery reaches it the same way an operator does.
+
+      **The original objection was right and is what shaped the fix.** Discovery creates sensors in
+      thousands and a recompute walks every sensor, so a create resolves the flag for the created
+      sensors *only* — `applyPauses` gained an optional id filter, and a create costs one indexed
+      query over its own batch rather than a settle over the tree. A brand-new sensor is nobody's
+      master, so nothing can cascade outward from it.
+
 - [x] **P-85 — The channel verdict was the one fact the machine read and never stored** · M · M-04,
       M-08 · From the state-machine review panel, finding 1 of 29. `sensor_runtime` held every
       input §2 reads except §2.2's answer, under a comment saying so deliberately: "a limit

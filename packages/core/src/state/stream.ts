@@ -1,4 +1,4 @@
-import type { Logger } from '@ms/shared';
+import { describeError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { ObjectId } from '../objects/types.js';
 import type { SensorState, SensorStateCause } from './tables.js';
@@ -174,6 +174,18 @@ export class StateBroadcaster {
    *
    * Reads the ancestry of the sensors involved, and only then, because that read is the whole
    * cost of the feature and an installation nobody is watching must not pay it.
+   *
+   * **This never rejects** (`P-91`). It is the body of an `afterCommit` hook, and
+   * `Database.tx`'s hook loop try/catches only the *synchronous* call — so a rejection from the
+   * `#ancestryOf` query, which runs on the pool outside any transaction, escaped to
+   * `unhandledRejection`, whose lifecycle handler logs fatal and shuts ms-core down. A pool
+   * timeout under ingestion load, or a Postgres failover, therefore stopped the monitoring at
+   * the moment the database was unhealthy and monitoring mattered most — over a broadcast whose
+   * transaction had already committed and whose failure costs a repaint, not a fact.
+   *
+   * The guarantee lives here rather than in the caller's `.catch` because there is nothing a
+   * caller could usefully do with the error, and a second hook added later would have to
+   * remember. What it costs is the live stream being behind until the next change.
    */
   async publish(
     q: Queryable,
@@ -192,10 +204,19 @@ export class StateBroadcaster {
       return 0;
     }
 
-    const ancestry = await this.#ancestryOf(
-      q,
-      changes.map((change) => change.sensorId),
-    );
+    let ancestry: Map<ObjectId, { name: string; path: ObjectId[] }>;
+    try {
+      ancestry = await this.#ancestryOf(
+        q,
+        changes.map((change) => change.sensorId),
+      );
+    } catch (error) {
+      this.#logger.error(
+        { states: changes.length, err: describeError(error) },
+        'could not read the ancestry of committed state changes; the live stream is behind',
+      );
+      return 0;
+    }
 
     let sent = 0;
     for (const change of changes) {

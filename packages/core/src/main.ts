@@ -306,6 +306,10 @@ async function serve(): Promise<void> {
   // path having to remember.
   const stream = new StateBroadcaster({ logger });
   const publishStates: CommittedStates = (committed) => {
+    // Floating on purpose, and safe because `publish` never rejects — see the guarantee on it
+    // (`P-91`). This runs from `afterCommit`, whose hook loop try/catches only the synchronous
+    // call, so a rejection here would reach `unhandledRejection` and shut the core down over a
+    // repaint.
     void stream.publish(db, committed);
   };
   // Read through a closure because `R-05` needs this service to build and this service needs

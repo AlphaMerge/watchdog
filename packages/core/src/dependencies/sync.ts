@@ -17,9 +17,19 @@ export interface DependencySyncOptions {
  * it inherits a different one. It rides the audit sink for the reason `M-09`'s does: the sink is
  * already inside every mutation's transaction, so a new mutation path cannot forget.
  *
- * `object.created` is excluded on the same grounds as `M-09` and with the same bound: discovery
- * creates sensors in thousands, a recompute walks every sensor, and a sensor created under a
- * held master is picked up by the next state change of that master or by the next sweep.
+ * `object.created` is handled, but not by a recompute (`P-93`). It used to be skipped on the
+ * grounds that "a sensor created under a held master is picked up by the next state change of
+ * that master or by the next sweep", and neither was true. There is no periodic dependency
+ * recompute anywhere — `sweepPauses` calls only `releaseElapsed`, which does nothing unless a
+ * `dependency_clear_at` is due — and the next state change of the master does not arrive while
+ * it stays Down, because `react` runs on the transitions a *result batch* produced and a master
+ * sitting at Down produces none. So the new sensor scanned through the outage, failed, went
+ * Down and armed its own alarm: one outage, two alarms, out of the exact topology the
+ * dependency exists to collapse, for as long as the master stayed Down.
+ *
+ * The original objection stands and is what shapes the fix: discovery creates sensors in
+ * thousands and a recompute walks every sensor. So a create resolves the flag for *the created
+ * sensors only*, which is one indexed query over that batch rather than a settle over the tree.
  */
 export class DependencySync implements AuditSink {
   readonly #pauses: DependencyPauses;
@@ -36,6 +46,21 @@ export class DependencySync implements AuditSink {
     mutations: readonly Mutation[],
     at: Date,
   ): Promise<void> {
+    // Created sensors are held or not held on their own, without a walk over every other
+    // sensor — see the note on `object.created` above.
+    const created = mutations.flatMap((mutation) =>
+      mutation.action === 'object.created' && mutation.kind === 'sensor' ? [mutation.objectId] : [],
+    );
+    if (created.length > 0) {
+      const held = await this.#pauses.holdNew(q, created, at);
+      if (held > 0) {
+        this.#logger.info(
+          { created: created.length, held },
+          'new sensors arrived under a held master',
+        );
+      }
+    }
+
     if (!mutations.some(invalidates)) return;
     const result = await this.#pauses.recompute(q, at);
     if (result.moved > 0) {
