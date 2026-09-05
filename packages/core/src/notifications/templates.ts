@@ -11,6 +11,7 @@ import {
   placeholderNames,
   render,
   unknownPlaceholdersIn,
+  unknownPlaceholdersInSettings,
   type MessageContext,
 } from './placeholders.js';
 import {
@@ -587,8 +588,18 @@ export class TemplateService {
     // `N-06`: unknown placeholders are reported, never silently blanked. This is the moment
     // somebody is looking at the text and can fix it — a message that quietly loses
     // `%lastvlaue` reads perfectly, says nothing, and nobody finds out until it matters.
+    // **And every string in the method's own settings** (`P-121`). A program template's arguments
+    // carry placeholders like any other content and were substituted at send time with the result
+    // of `substitute` thrown away — so an unknown name was neither refused here nor reported
+    // there, and the program was handed the literal text `%lastvlaue` as an argument. Same for a
+    // webhook URL and a chat card's fields: anywhere an operator can type a placeholder, this is
+    // still the one moment somebody is looking at the text and can fix it.
     const unknown = [
-      ...new Set([...unknownPlaceholdersIn(subject), ...unknownPlaceholdersIn(body)]),
+      ...new Set([
+        ...unknownPlaceholdersIn(subject),
+        ...unknownPlaceholdersIn(body),
+        ...unknownPlaceholdersInSettings(settings, method.placeholderFields),
+      ]),
     ];
     if (unknown.length > 0) {
       throw new MethodError(

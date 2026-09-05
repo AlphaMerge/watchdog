@@ -6,6 +6,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { Logger, ProgramConfig } from '@ms/shared';
 import { ProgramTransport } from '../src/notifications/delivery/program.js';
+import { MAX_SECRET_ARGS, MAX_VISIBLE_ARGS } from '../src/notifications/methods.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { messageContext } from './support/messages.js';
 import { silent } from './support/tree.js';
@@ -147,6 +148,23 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
         }),
       );
       assert.equal(await readFile(join(dir, 'record.txt'), 'utf8'), '--to|ops|--token|s3cret|');
+    });
+
+    it('still passes the secret arguments when the visible ones fill the schema', async () => {
+      // **Two numbers for one limit** (`P-120`). The schema allows 32 visible and 8 secret; the
+      // transport capped the concatenation at 32, so a template using its full complement of
+      // visible arguments had every secret one silently dropped. The program ran, exited non-zero
+      // for want of a credential nobody had removed, and the delivery was recorded as a failure
+      // with nothing anywhere to say why. The cap is derived from the schema now.
+      await script('many.sh', `printf '%s|' "$@" > ${join(dir, 'record.txt')}`);
+      const visible = Array.from({ length: MAX_VISIBLE_ARGS }, (_, i) => `v${String(i)}`);
+      const secret = Array.from({ length: MAX_SECRET_ARGS }, (_, i) => `s${String(i)}`);
+      await transport().send(
+        message({ settings: { path: 'many.sh', args: visible, secretArgs: secret } }),
+      );
+      const passed = (await readFile(join(dir, 'record.txt'), 'utf8')).split('|').slice(0, -1);
+      assert.equal(passed.length, visible.length + secret.length);
+      assert.deepEqual(passed.slice(-MAX_SECRET_ARGS), secret, 'the secret ones were dropped');
     });
 
     it('hands the message body over on stdin', async () => {

@@ -106,7 +106,17 @@ describe('header sanitisation', () => {
 
 describe('the email transport', () => {
   /** A stand-in relay. Records what it was asked to send, and fails on demand. */
-  function stub(failures: Record<string, { code?: number; message: string } | undefined> = {}) {
+  function stub(
+    failures: Record<string, { code?: number; message: string } | undefined> = {},
+    /**
+     * Addresses the relay accepts the message for and then refuses (`P-119`).
+     *
+     * `sendMail` **resolves** for a partial send and reports the refusals in `rejected`, which is
+     * the case this stub could not express before — so every test here was about a relay that
+     * either took everything or threw.
+     */
+    rejected: readonly string[] = [],
+  ) {
     const sent: { relay: string; mail: Record<string, unknown> }[] = [];
     const build = (built: SmtpRelay): never =>
       ({
@@ -121,7 +131,7 @@ describe('the email transport', () => {
             return Promise.reject(error);
           }
           sent.push({ relay: name, mail });
-          return Promise.resolve({ messageId: `<${name}>` });
+          return Promise.resolve({ messageId: `<${name}>`, rejected: [...rejected] });
         },
         close: () => undefined,
       }) as never;
@@ -231,6 +241,50 @@ describe('the email transport', () => {
     await transport.send(message({ settings: { format: 'html' }, body: '<b>down</b>' }));
     assert.equal(sent.at(0)?.mail['html'], '<b>down</b>');
     assert.equal(sent.at(0)?.mail['text'], undefined);
+  });
+
+  it('asks for HTML escaping only when the template is HTML', () => {
+    // The transport declared no escaping at all (`P-118`). Asserted here rather than through a
+    // rendered body because the escaping belongs to substitution — only substitution knows which
+    // characters came from a value and which the operator typed as syntax — and this is the half
+    // that was missing.
+    const transport = new EmailTransport({ config: smtp(), logger: silent, build: stub().build });
+    assert.equal(transport.bodyEscaping({ format: 'html' }), 'html');
+    assert.equal(transport.bodyEscaping({ format: 'text' }), 'none');
+    assert.equal(transport.bodyEscaping({}), 'none', 'a plain email has no syntax to break out of');
+  });
+
+  it('fails when the relay rejected every recipient', async () => {
+    // **`sendMail` resolves for a partial send**, and the rejections were thrown away — so an
+    // alarm that reached nobody on the list was recorded `delivered`, counted as a success on
+    // Delivery Health, and never retried. The one place an operator would look said it went out.
+    const { build } = stub({}, ['ops@example.test']);
+    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const result = await transport.send(message());
+    assert.ok(!result.ok);
+    assert.match(result.error, /rejected every recipient/);
+    assert.equal(
+      result.retryable,
+      false,
+      'a rejection at RCPT TO is the relay\u2019s permanent answer about that address',
+    );
+  });
+
+  it('still counts a partial send as delivered, and says who missed it', async () => {
+    // Somebody got it, so it is delivered. Saying nothing about the rest is how a rota gap
+    // survives for months.
+    const { build } = stub({}, ['gone@example.test']);
+    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const result = await transport.send(
+      message({
+        recipients: [
+          { kind: 'address', value: 'ops@example.test' },
+          { kind: 'address', value: 'gone@example.test' },
+        ],
+      }),
+    );
+    assert.ok(result.ok);
+    assert.match(result.detail, /rejected gone@example\.test/);
   });
 
   it('honours a template’s sender override', async () => {

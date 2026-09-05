@@ -6,6 +6,7 @@ import {
   render,
   substitute,
   unknownPlaceholdersIn,
+  unknownPlaceholdersInSettings,
   type MessageContext,
 } from '../src/notifications/placeholders.js';
 
@@ -253,5 +254,84 @@ describe('rendering a template', () => {
       body: '',
       unknown: [],
     });
+  });
+});
+
+describe('escaping a value into an HTML email', () => {
+  it('escapes the five characters that can leave a text position', () => {
+    // `P-118`. The email transport declared no escaping at all, so `html: message.body` put
+    // probe-controlled text straight into a document: a device named after a tag lost a piece of
+    // its email, and a hostile response to a `rest.custom` sensor wrote whatever it liked into
+    // the inbox of everybody on the notification list.
+    const rendered = render(
+      { subject: 'Down', body: '<p>%lastmessage</p>' },
+      context({ message: `<script>alert("x")</script> & it's` }),
+      'html',
+    );
+    assert.equal(
+      rendered.body,
+      '<p>&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; it&#39;s</p>',
+    );
+  });
+
+  it('leaves the operator\u2019s own markup alone', () => {
+    // Per substituted value, like every other escaping here, and the whole reason an HTML format
+    // is worth having: a template that wraps the message in its own tags keeps them.
+    const rendered = render(
+      { subject: 'Down', body: '<b>alarm</b>: %lastmessage' },
+      context({ message: 'plain' }),
+      'html',
+    );
+    assert.equal(rendered.body, '<b>alarm</b>: plain');
+  });
+
+  it('does not escape the subject, which is a header and not a document', () => {
+    const rendered = render(
+      { subject: '%sensor <down>', body: '' },
+      context({ sensorName: 'a & b' }),
+      'html',
+    );
+    assert.equal(rendered.subject, 'a & b <down>');
+  });
+});
+
+describe('placeholders in a method\u2019s own settings', () => {
+  it('finds an unknown name in a program argument', () => {
+    // `P-121`. A program template\u2019s arguments carry placeholders like any other content and
+    // were substituted at send with the result thrown away, so an unknown name was neither
+    // refused at save nor reported at send: the program was handed the literal text
+    // `%lastvlaue` and failed for a reason nothing in the system could explain.
+    assert.deepEqual(
+      unknownPlaceholdersInSettings({ args: ['--msg', '%lastvlaue'] }, ['args', 'secretArgs']),
+      ['lastvlaue'],
+    );
+  });
+
+  it('says nothing about a template that is correct, and never looks at a URL', () => {
+    // **The URL is deliberately not a placeholder field.** A percent-encoded path — `%AF` in an
+    // encoded segment — is indistinguishable from a placeholder called `af`, so validating every
+    // string in a settings document would refuse templates that are perfectly correct. Only the
+    // fields where an operator is invited to write a placeholder are checked.
+    assert.deepEqual(
+      unknownPlaceholdersInSettings(
+        {
+          url: 'https://hooks.example.test/path/%AF/%nosuchthing',
+          args: ['%lastmessage', '%sensor'],
+          timeoutMs: 30_000,
+        },
+        ['args', 'secretArgs'],
+      ),
+      [],
+    );
+  });
+
+  it('deduplicates the same unknown name across two settings', () => {
+    assert.deepEqual(
+      unknownPlaceholdersInSettings({ args: ['%nope'], secretArgs: ['%nope'] }, [
+        'args',
+        'secretArgs',
+      ]),
+      ['nope'],
+    );
   });
 });

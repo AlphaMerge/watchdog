@@ -2,6 +2,19 @@ import { Ajv, type ValidateFunction } from 'ajv';
 import { AppError } from '@ms/shared';
 
 /**
+ * How many arguments a program template may carry, split the way the form shows them.
+ *
+ * **Named rather than written twice** (`P-120`). The schema allowed 32 visible plus 8 secret
+ * while the transport capped the concatenation at 32, so a template using its full complement of
+ * visible arguments had every secret one silently dropped — the program ran, exited non-zero for
+ * want of a credential nobody removed, and the notification was recorded as a failed delivery
+ * with no hint why. Two numbers for one limit is how that happens; the transport derives its cap
+ * from these now.
+ */
+export const MAX_VISIBLE_ARGS = 32;
+export const MAX_SECRET_ARGS = 8;
+
+/**
  * How a notification is delivered (`N-05`).
  *
  * Declared the way sensor types and trigger kinds are declared, and for the same reasons: the
@@ -33,6 +46,18 @@ export interface NotificationMethod {
    * would drift the first time a method is added.
    */
   readonly summarisable: boolean;
+  /**
+   * Settings fields whose strings carry `N-06` placeholders (`P-121`).
+   *
+   * **Declared rather than "every string in the document"**, and the difference is a URL. A
+   * webhook endpoint is percent-encoded, and `%AF` in an encoded path is indistinguishable from a
+   * placeholder called `af` — so validating every string would refuse templates that are correct.
+   * These are the fields where an operator is invited to write one, so these are the fields where
+   * a name this build does not know is a mistake worth refusing at the moment somebody can fix it.
+   *
+   * Empty for a method whose settings are all switches and endpoints.
+   */
+  readonly placeholderFields: readonly string[];
   /** One line an operator reads on the template list, built from the settings. */
   describe(settings: Record<string, unknown>): string;
 }
@@ -60,6 +85,8 @@ export const EMAIL_METHOD: NotificationMethod = {
   description: 'Sends the subject and body to the template’s recipients through the SMTP relay.',
   usesRecipients: true,
   summarisable: true,
+  // Nothing but a format switch and a sender address; the message itself is the subject and body.
+  placeholderFields: [],
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -93,6 +120,8 @@ export const WEBHOOK_METHOD: NotificationMethod = {
   description: 'Posts the message to a URL. Covers most integrations that are not Slack or Teams.',
   usesRecipients: false,
   summarisable: false,
+  // Deliberately not the URL: a percent-encoded path is indistinguishable from a placeholder.
+  placeholderFields: [],
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -139,6 +168,7 @@ function chatMethod(
     description: `Posts the message to a ${service} incoming webhook.`,
     usesRecipients: false,
     summarisable: false,
+    placeholderFields: [],
     settingsSchema: {
       type: 'object',
       additionalProperties: false,
@@ -197,6 +227,8 @@ export const PROGRAM_METHOD: NotificationMethod = {
   description: 'Runs a program or script, sandboxed and timed out, with the message as arguments.',
   usesRecipients: false,
   summarisable: false,
+  // The arguments are content: an operator writes `--message %lastmessage` and means it.
+  placeholderFields: ['args', 'secretArgs'],
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -211,7 +243,7 @@ export const PROGRAM_METHOD: NotificationMethod = {
       path: { type: 'string', minLength: 1, maxLength: 1000 },
       args: {
         type: 'array',
-        maxItems: 32,
+        maxItems: MAX_VISIBLE_ARGS,
         items: { type: 'string', maxLength: 2000 },
         default: [],
       },
@@ -226,7 +258,7 @@ export const PROGRAM_METHOD: NotificationMethod = {
       secretArgs: {
         type: 'array',
         writeOnly: true,
-        maxItems: 8,
+        maxItems: MAX_SECRET_ARGS,
         items: { type: 'string', maxLength: 2000 },
         default: [],
       },

@@ -7,6 +7,7 @@ import {
   type DeliveryTransport,
   type OutgoingMessage,
 } from './transport.js';
+import type { Escaping } from '../placeholders.js';
 
 export interface EmailTransportOptions {
   config: SmtpConfig;
@@ -139,6 +140,17 @@ export class EmailTransport implements DeliveryTransport {
     return { to };
   }
 
+  /**
+   * HTML when the template says so, and nothing otherwise (`P-118`).
+   *
+   * The email transport declared no escaping at all, so `html: message.body` put probe-controlled
+   * text straight into a document. A plain-text email needs none: there is no syntax in it to
+   * break out of.
+   */
+  bodyEscaping(settings: Readonly<Record<string, unknown>>): Escaping {
+    return settings['format'] === 'html' ? 'html' : 'none';
+  }
+
   async #sendVia(
     relay: SmtpRelay,
     name: string,
@@ -170,12 +182,41 @@ export class EmailTransport implements DeliveryTransport {
         },
       });
       // Narrowed rather than trusted: `@types/nodemailer` lags the runtime (see
-      // `buildTransport`), so what comes back is `any` as far as the checker is concerned, and
-      // the message id is only ever used to write a log line.
+      // `buildTransport`), so what comes back is `any` as far as the checker is concerned.
+      const envelope = sent as { messageId?: unknown; rejected?: unknown } | null;
       const messageId =
-        typeof sent === 'object' && sent !== null && 'messageId' in sent
-          ? String(sent.messageId)
+        typeof envelope === 'object' && envelope !== null && 'messageId' in envelope
+          ? String(envelope.messageId)
           : 'sent';
+
+      // **A relay that accepts the message and rejects a recipient reports both, and the
+      // rejection was thrown away** (`P-119`). `sendMail` resolves for a partial send, so an
+      // alarm that reached nobody on the list — every address unknown at the relay — was recorded
+      // `delivered`, counted as a success on Delivery Health, and never retried. The one place an
+      // operator would look says the notification went out.
+      const rejected = Array.isArray(envelope?.rejected)
+        ? envelope.rejected.map((one) => String(one))
+        : [];
+      if (rejected.length > 0 && rejected.length >= to.length) {
+        return {
+          ok: false,
+          // Not retryable: a rejection at RCPT TO is the relay's permanent answer about that
+          // address, and retrying ten times changes nothing except how long the operator waits
+          // to find out. It is in the log with the addresses, which is what they can act on.
+          retryable: false,
+          error: `${name} rejected every recipient: ${rejected.join(', ')}`,
+        };
+      }
+      if (rejected.length > 0) {
+        // Sent, and short. Recorded as delivered because somebody did get it, and said out loud
+        // because "delivered" for a message half the list never saw is how a rota gap survives
+        // for months.
+        this.#logger.warn(
+          { relay: name, rejected, requestId: message.requestId, sensorId: message.sensorId },
+          'the relay rejected some recipients',
+        );
+        return { ok: true, detail: `${name}: ${messageId}; rejected ${rejected.join(', ')}` };
+      }
       return { ok: true, detail: `${name}: ${messageId}` };
     } catch (error: unknown) {
       return { ok: false, ...classify(error) };

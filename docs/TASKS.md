@@ -10022,6 +10022,48 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `notification-engine.test.ts` including a two-transaction test for the lock, and the resume
       poke. Mutation 7/7.
 
+- [x] **P-118 — An HTML email inserted probe-controlled values with no escaping**
+      The email transport declared no `bodyEscaping` at all, so `html: message.body` put whatever
+      a device reported straight into a document. A sensor named after a tag lost a piece of its
+      email; a hostile response to a `rest.custom` sensor wrote whatever it liked into the inbox
+      of everybody on the notification list. The escaping machinery was already there and already
+      right — `json`, `form` and `mrkdwn` all escape per *substituted value*, so the operator's
+      own syntax survives — and email was simply not using it. An `html` escaping was added and
+      the transport asks for it when the template's format is HTML.
+
+- [x] **P-119 — A part-rejected email was recorded as delivered**
+      `sendMail` resolves for a partial send and names the refusals in `rejected`, which was
+      thrown away. An alarm that reached nobody on the list — every address unknown at the relay —
+      was recorded `delivered`, counted as a success on Delivery Health and never retried; the one
+      place an operator would look said it went out. Every recipient rejected is now a permanent
+      failure naming them (retrying a RCPT TO rejection ten times changes nothing but how long the
+      operator waits to find out), and a partial send is still delivered — somebody got it — with
+      the missed addresses in the detail and a warning in the log.
+
+- [x] **P-120 — A program template silently dropped its secret arguments**
+      Two numbers for one limit: the schema allowed 32 visible arguments plus 8 secret, and the
+      transport capped the concatenation at 32. A template using its full complement of visible
+      arguments had every secret one dropped — so the program ran, exited non-zero for want of a
+      credential nobody had removed, and the notification was recorded as a failed delivery with
+      nothing anywhere to say why. The two schema limits are named constants now and the cap is
+      derived from them.
+
+- [x] **P-121 — Placeholders in a method's settings were substituted but never validated**
+      A program template's arguments carry `N-06` placeholders like any other content, and
+      `substitute`'s report of the ones it did not know was discarded — so a typo was neither
+      refused at save, where the subject and body have been refused since `N-06`, nor reported at
+      send. The program was handed the literal text `%lastvlaue` as an argument and failed for a
+      reason nothing in the system could explain.
+
+      **The fields are declared by the method rather than swept for.** A percent-encoded webhook
+      URL is indistinguishable from a placeholder — `%AF` in an encoded segment is a name called
+      `af` — so validating every string in a settings document would refuse templates that are
+      perfectly correct. `placeholderFields` names the places an operator is invited to write one.
+
+      Tests: 10 new — 3 on the HTML escaping, 1 on the transport's choice of it, 2 on partial
+      rejection, 1 on the full argument complement reaching the program, and 3 on the settings
+      walk including the encoded-URL case. Mutation 5/5.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

@@ -144,6 +144,7 @@ describe('notification methods', () => {
             description: '',
             usesRecipients: false,
             summarisable: false,
+            placeholderFields: [],
             settingsSchema: {
               type: 'object',
               oneOf: [{ properties: { token: { type: 'string', writeOnly: true } } }],
@@ -164,6 +165,7 @@ describe('notification methods', () => {
         description: '',
         usesRecipients: false,
         summarisable: false,
+        placeholderFields: [],
         settingsSchema: {
           type: 'object',
           properties: { token: { type: 'string', writeOnly: true } },

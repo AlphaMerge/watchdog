@@ -338,6 +338,39 @@ describe(
         );
       });
 
+      it('refuses an unknown placeholder in a program argument too', async () => {
+        // **`P-121`.** A program template's arguments carry placeholders like any other content
+        // and were substituted at send with the result of `substitute` thrown away — so an
+        // unknown name was neither refused here nor reported there, and the program was handed
+        // the literal text `%lastvlaue` as an argument. Refused at the one moment somebody is
+        // looking at it, which is the same rule the subject and body already had.
+        await assert.rejects(
+          templates.create(testActor, {
+            name: 'program-with-a-typo',
+            method: 'program',
+            settings: { path: 'notify.sh', args: ['--message', '%lastvlaue'] },
+            subject: 'x',
+            body: 'y',
+          }),
+          (error: unknown) =>
+            /placeholders this build does not know/.test((error as Error).message),
+        );
+      });
+
+      it('accepts a webhook URL that merely looks like one', async () => {
+        // The reason the fields are declared rather than swept: a percent-encoded path segment is
+        // indistinguishable from a placeholder, and refusing a correct template would be worse
+        // than the hole this closed.
+        const created = await templates.create(testActor, {
+          name: 'encoded-url',
+          method: 'webhook',
+          settings: { url: 'https://hooks.example.test/a%AFb', verb: 'POST' },
+          subject: 'x',
+          body: 'y',
+        });
+        assert.ok(created.id > 0);
+      });
+
       it('refuses a sensor that is not there', async () => {
         await assert.rejects(templates.previewDraft(draft, 999_999), (error: unknown) =>
           /no sensor 999999/.test((error as Error).message),

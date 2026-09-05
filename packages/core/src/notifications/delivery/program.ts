@@ -7,7 +7,7 @@ import {
   type ProgramConfig,
   type ProgramRun,
 } from '@ms/shared';
-import { PROGRAM_METHOD } from '../methods.js';
+import { MAX_SECRET_ARGS, MAX_VISIBLE_ARGS, PROGRAM_METHOD } from '../methods.js';
 import { substitute, type Escaping, type MessageContext } from '../placeholders.js';
 import type { DeliveryResult, DeliveryTransport, OutgoingMessage } from './transport.js';
 
@@ -17,7 +17,14 @@ export interface ProgramTransportOptions {
 }
 
 /** What the program is told, beyond its arguments. */
-const MAX_ARGS = 32;
+/**
+ * Every argument the schema allows, visible and secret together.
+ *
+ * Derived rather than restated (`P-120`): the cap used to be 32 against a schema that allowed 40,
+ * so a template with a full set of visible arguments lost all eight of its secret ones — and the
+ * program ran anyway, failing for want of a credential that was configured and never passed.
+ */
+const MAX_ARGS = MAX_VISIBLE_ARGS + MAX_SECRET_ARGS;
 
 /**
  * Execute-program delivery (`N-10`, `CAPABILITIES.MD §5.2`).

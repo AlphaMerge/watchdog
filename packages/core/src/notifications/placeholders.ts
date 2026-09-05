@@ -188,7 +188,7 @@ const TOKEN = /%(%|[A-Za-z]+)/g;
  * The escaping belongs to substitution rather than to the transport, because only substitution
  * knows which characters came from a *value* and which the operator typed as syntax.
  */
-export type Escaping = 'none' | 'json' | 'form' | 'mrkdwn';
+export type Escaping = 'none' | 'json' | 'form' | 'mrkdwn' | 'html';
 
 function escapeWith(escaping: Escaping, value: string): string {
   switch (escaping) {
@@ -201,6 +201,23 @@ function escapeWith(escaping: Escaping, value: string): string {
       return JSON.stringify(value).slice(1, -1);
     case 'form':
       return encodeURIComponent(value);
+    case 'html':
+      // **An HTML email is a document, and a probe writes part of it** (`P-118`). A device named
+      // after a tag, or a check reporting `unexpected </p> in body`, produced an email with a
+      // piece missing; a hostile response to a `rest.custom` sensor produced whatever it liked in
+      // the inbox of everybody on the notification list. The five characters `escapeHtml` covers
+      // are the ones that can leave a text position, and quotes are in the set because a value
+      // that reaches an attribute would otherwise close it.
+      //
+      // Per substituted value, like every other escaping here: the operator's own markup in the
+      // template is theirs and survives untouched, which is the whole reason an HTML format
+      // exists.
+      return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     case 'mrkdwn':
       // Slack's three reserved characters, and only these three — its own documentation names
       // them. `<` opens a link, so a probe reporting `<html> not expected` would otherwise
@@ -269,6 +286,37 @@ export function unknownPlaceholdersIn(text: string): string[] {
     if (name === undefined || name === '%') continue;
     if (!PLACEHOLDERS.has(name.toLowerCase())) unknown.add(name.toLowerCase());
   }
+  return [...unknown];
+}
+
+/**
+ * The unknown placeholder names in every string a method's settings carry (`P-121`).
+ *
+ * Only the fields the method *declares* carry them, because a percent-encoded webhook URL is
+ * indistinguishable from a placeholder and refusing one would be worse than the hole this closes.
+ * Within a declared field it walks strings, arrays and nested objects: a program's `args` is an
+ * array, and a card's fields are an object.
+ */
+export function unknownPlaceholdersInSettings(
+  settings: Record<string, unknown>,
+  fields: readonly string[],
+): string[] {
+  const unknown = new Set<string>();
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 10) return;
+    if (typeof value === 'string') {
+      for (const name of unknownPlaceholdersIn(value)) unknown.add(name);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const one of value) walk(one, depth + 1);
+      return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      for (const one of Object.values(value)) walk(one, depth + 1);
+    }
+  };
+  for (const field of fields) walk(settings[field], 0);
   return [...unknown];
 }
 
