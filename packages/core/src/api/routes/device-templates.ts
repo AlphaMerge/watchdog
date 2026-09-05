@@ -5,7 +5,7 @@ import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import type { DiscoveryService } from '../../discovery/service.js';
-import { COMPUTES, READS, WRITES } from '../authorization.js';
+import { COMPUTES, READS, computesOn, onObject } from '../authorization.js';
 
 export interface DeviceTemplateRouteOptions {
   templates: DeviceTemplateCatalogue;
@@ -273,7 +273,12 @@ export function deviceTemplateRoutes(
     app.post(
       '/objects/:id/as-template',
       {
-        config: WRITES,
+        // **A read of one device, priced as one** (`R12`). It stores nothing — the operator
+        // saves the returned document themselves — but it returns every sensor on that device
+        // with its name, type and parameters, which is exactly what `GET /objects/:id/tree` is
+        // guarded for. Declaring `WRITES` served that read to any account with the role,
+        // including for devices the same account is refused sight of.
+        config: computesOn(onObject('read')),
         schema: {
           tags: ['discovery'],
           summary: 'A template file, from a device already set up',

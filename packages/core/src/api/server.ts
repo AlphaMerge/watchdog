@@ -492,8 +492,13 @@ export class ApiServer {
           // it is given, so there is nothing for a caller to configure or get wrong (`D-09`).
           bulk: new BulkService({ objects: service, logger: this.#logger }),
           // The bulk route resolves a right per id in the selection; every other object route
-          // is guarded by the global hook from its path (`A-11`).
-          ...(this.#auth === undefined ? {} : { access: this.#auth.access }),
+          // is guarded by the global hook from its path (`A-11`). It is handed the same
+          // `required` flag the hook reads, because a per-object check that stays on while the
+          // hook stands down refuses ids that every other route in the installation allows
+          // (`R10`).
+          ...(this.#auth === undefined
+            ? {}
+            : { access: this.#auth.access, authorizing: this.#auth.required }),
         });
         await scope.register(historyRoutes, { history: this.#history });
         if (this.#queries !== undefined && this.#probeConfig !== undefined) {

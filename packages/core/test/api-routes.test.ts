@@ -53,7 +53,13 @@ describe(
       scratch = await createScratchDatabase('api');
       h = await buildHarness(scratch.db);
       server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: true,
+        },
         logger: silent,
         version: '9.9.9',
         service: h.service,
@@ -783,7 +789,13 @@ describe(
       // not filtered by fast-json-stringify, so it returns whatever the handler produced. A
       // guard that has never been seen to fire is not a guard.
       const rogue = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: true,
+        },
         logger: silent,
         version: '9.9.9',
         service: h.service,

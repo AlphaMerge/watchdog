@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import { triggerKinds } from '../../triggers/definition.js';
 import type { TriggerInput, TriggerService } from '../../triggers/service.js';
-import { READS, WRITES, onObject } from '../authorization.js';
+import { READS, onDerivedObject, onObject } from '../authorization.js';
 
 export interface TriggerRouteOptions {
   triggers: TriggerService;
@@ -187,7 +187,13 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.put<{ Params: { id: number }; Body: TriggerInput }>(
     '/triggers/:id',
     {
-      config: WRITES,
+      // **The object, not the role** (`R09`). A trigger is addressed by its own id here, so the
+      // only bar that can be read off the path is `readwrite` — which would let any account
+      // with that role rewrite every trigger in the installation, including on objects it is
+      // refused sight of. The right that matters is on the object the trigger is defined on.
+      config: onDerivedObject('write', 'this trigger', (request) =>
+        triggers.objectOf((request.params as { id: number }).id),
+      ),
       schema: {
         tags: ['triggers'],
         summary: 'Replace a trigger',
@@ -205,7 +211,11 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
   app.delete<{ Params: { id: number } }>(
     '/triggers/:id',
     {
-      config: WRITES,
+      // The same bar as replacing it, for the same reason (`R09`) — and deleting a trigger is
+      // how alarming for a sensor stops without anything looking wrong.
+      config: onDerivedObject('write', 'this trigger', (request) =>
+        triggers.objectOf((request.params as { id: number }).id),
+      ),
       schema: {
         tags: ['triggers'],
         summary: 'Remove a trigger',

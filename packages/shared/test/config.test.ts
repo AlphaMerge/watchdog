@@ -32,6 +32,12 @@ describe('loadConfig', () => {
     assert.equal(config.service.logLevel, 'info');
     assert.equal(config.service.shutdownTimeoutMs, 20_000);
     assert.equal(config.api.port, 8080);
+    // **The default is the enforcing one, and an existing config file has no such key** (`R11`).
+    // The `A-11` authorisation layer was written, tested, and left switched off in the only
+    // production wiring for two tickets — with a comment saying it would be flipped when `A-03`
+    // landed, which it did. It is a key now, and the default is what every installation that
+    // does not mention it gets, so this is the assertion that carries the fix.
+    assert.equal(config.api.requireAuthentication, true);
     assert.equal(config.database.port, 5432);
     assert.equal(config.probeEndpoint.port, 23560);
     assert.equal(sources.file, null);

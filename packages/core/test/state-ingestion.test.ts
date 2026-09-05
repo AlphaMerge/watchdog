@@ -87,7 +87,13 @@ describe(
       probeId = probe.id;
 
       const server = new ApiServer({
-        config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: true,
+        },
         logger: silent,
         version: '9.9.9',
         service: harness.service,

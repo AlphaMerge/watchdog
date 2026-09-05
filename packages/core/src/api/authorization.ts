@@ -55,7 +55,47 @@ export type RouteAccess =
    * `param` names the route parameter holding the object id, because it is `:id` on
    * `/objects/:id` and `:objectId` on the routes that hang something off an object.
    */
-  | { kind: 'object'; needed: AccessRight; param?: string; from?: 'params' | 'body' | 'query' }
+  | {
+      kind: 'object';
+      needed: AccessRight;
+      param?: string;
+      from?: 'params' | 'body' | 'query';
+      /**
+       * Absent means "not this request", not "refuse it".
+       *
+       * Only ever true for a body field a route's own schema makes optional — `targetParentId`
+       * on a clone, which defaults to cloning in place. A required field that is missing is
+       * still a refusal, because the alternative is a guard that a caller turns off by omission.
+       */
+      optional?: boolean;
+    }
+  /**
+   * A right on an object this request does not name, found by asking (`P-154`).
+   *
+   * `PUT /triggers/:id` is about the object the trigger is defined on, and nothing in the path
+   * or the body says which one that is. Without this the only honest bar such a route can
+   * declare is the role, which is how "a read-only account could delete every trigger" became
+   * "any account with `readwrite` could delete every trigger" instead of being fixed.
+   *
+   * Resolving to null means the row does not exist: the hook allows the request through so the
+   * handler answers its own 404. A guard that answered 403 for a missing id would turn every
+   * route into an existence oracle.
+   */
+  | {
+      kind: 'derived';
+      needed: AccessRight;
+      /** What is being looked up, for the refusal's context. */
+      what: string;
+      of: (request: FastifyRequest) => Promise<number | null>;
+    }
+  /**
+   * Every one of these, in order.
+   *
+   * A move or a clone is two questions — may this caller take the object, and may they put it
+   * there — and answering only the first is how an object gets dropped into a subtree the
+   * caller was explicitly denied.
+   */
+  | { kind: 'every'; of: readonly RouteAccess[] }
   /**
    * Acknowledging an alarm (`A-04`, migration 034).
    *
@@ -115,18 +155,25 @@ export interface AuthorizationOptions {
  * **The body is a real source, not a convenience.** Creating an object names its parent in the
  * body, and the right that matters is `write` on that parent — an account that may not write to
  * a probe must not be able to hang a device off it. Reading the id from the body is the only way
- * to ask that question, and the body has already been schema-validated by the time a
- * `preHandler` runs.
+ * to ask that question.
+ *
+ * **The body here is parsed, not validated** (`G04`). This hook runs at `preValidation`, on
+ * purpose, so that a caller who may not touch a route at all is refused before being told what
+ * shape it wants — which means the value is whatever the caller sent, and not what the route's
+ * schema promises. So it is coerced here and anything that is not an object id is refused,
+ * rather than trusted because a schema that has not run yet says it is an integer.
  */
 function objectIdFor(
   request: FastifyRequest,
   param: string,
   from: 'params' | 'body' | 'query',
-): number {
+  optional: boolean,
+): number | undefined {
   const source = (
     from === 'body' ? request.body : from === 'query' ? request.query : request.params
   ) as Record<string, unknown> | undefined;
   const raw = source?.[param];
+  if (optional && (raw === undefined || raw === null)) return undefined;
   const id = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isInteger(id)) {
     // Not a 403: the route matched but its id is unusable, so there is no object to have a right
@@ -170,72 +217,106 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
       throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
     }
 
-    if (declared.kind === 'self') {
-      // A session, not a token. `tokenId` is how a token principal is told apart from a session
-      // one — the scope cannot do it, because a `full` token is exactly the dangerous case.
-      if (principal.tokenId !== undefined) {
-        throw new AuthError('AUTH_FORBIDDEN', 'an API token may not change its own account', {
-          scope: principal.scope ?? '',
-        });
-      }
+    await enforce(options.access, request, principal, declared);
+  });
+}
+
+/**
+ * One declaration, checked. Separate from the hook so `every` can recurse into it.
+ */
+async function enforce(
+  access: AccessService,
+  request: FastifyRequest,
+  principal: NonNullable<FastifyRequest['principal']>,
+  declared: RouteAccess,
+): Promise<void> {
+  if (declared.kind === 'public') return;
+
+  if (declared.kind === 'every') {
+    // In order, and the first refusal wins: the source of a move is checked before its
+    // destination, so a caller who may not touch the object at all learns nothing about where
+    // they tried to put it.
+    for (const one of declared.of) await enforce(access, request, principal, one);
+    return;
+  }
+
+  if (declared.kind === 'self') {
+    // A session, not a token. `tokenId` is how a token principal is told apart from a session
+    // one — the scope cannot do it, because a `full` token is exactly the dangerous case.
+    if (principal.tokenId !== undefined) {
+      throw new AuthError('AUTH_FORBIDDEN', 'an API token may not change its own account', {
+        scope: principal.scope ?? '',
+      });
+    }
+    return;
+  }
+
+  if (declared.kind === 'derived') {
+    const objectId = await declared.of(request);
+    // Null is "there is no such row", which is the handler's 404 to answer and not the guard's
+    // 403 — see the declaration.
+    if (objectId === null) return;
+    const resolved = await access.resolveFor(principal, objectId);
+    if (atLeast(resolved.right, declared.needed)) return;
+    // Named, because "this action needs write on that object" is unhelpful for a route whose
+    // path holds no object id: the operator has to be told *which* object the id they sent
+    // turned out to be about.
+    throw new AuthError(
+      'AUTH_FORBIDDEN',
+      `this action needs ${declared.needed} on the object that ${declared.what} belongs to`,
+      { objectId, held: resolved.right, needed: declared.needed, via: declared.what },
+    );
+  }
+
+  if (declared.kind === 'object' || declared.kind === 'acknowledge') {
+    const param = declared.param ?? 'id';
+    const objectId = objectIdFor(
+      request,
+      param,
+      declared.kind === 'object' ? (declared.from ?? 'params') : 'params',
+      declared.kind === 'object' && declared.optional === true,
+    );
+    if (objectId === undefined) return;
+
+    if (declared.kind === 'object') {
+      await access.requireFor(principal, objectId, declared.needed);
       return;
     }
 
-    if (declared.kind === 'object' || declared.kind === 'acknowledge') {
-      const param = declared.param ?? 'id';
-      const objectId = objectIdFor(
-        request,
-        param,
-        declared.kind === 'object' ? (declared.from ?? 'params') : 'params',
-      );
+    // Acknowledgement: `write` is the ordinary path, and the opt-in is the exception. Asked in
+    // that order so an account that may write is never refused for want of a flag that is
+    // meaningless for it.
+    const resolved = await access.resolveFor(principal, objectId);
+    if (atLeast(resolved.right, 'write')) return;
+    if (principal.mayAcknowledge && atLeast(resolved.right, 'read')) return;
+    throw new AuthError(
+      'AUTH_FORBIDDEN',
+      'acknowledging needs write on that object, or an account allowed to acknowledge',
+      {
+        objectId,
+        held: resolved.right,
+        mayAcknowledge: String(principal.mayAcknowledge),
+      },
+    );
+  }
 
-      if (declared.kind === 'object') {
-        await options.access.requireFor(principal, objectId, declared.needed);
-        return;
-      }
-
-      // Acknowledgement: `write` is the ordinary path, and the opt-in is the exception. Asked in
-      // that order so an account that may write is never refused for want of a flag that is
-      // meaningless for it.
-      const resolved = await options.access.resolveFor(principal, objectId);
-      if (atLeast(resolved.right, 'write')) return;
-      if (principal.mayAcknowledge && atLeast(resolved.right, 'read')) return;
-      throw new AuthError(
-        'AUTH_FORBIDDEN',
-        'acknowledging needs write on that object, or an account allowed to acknowledge',
-        {
-          objectId,
-          held: resolved.right,
-          mayAcknowledge: String(principal.mayAcknowledge),
-        },
-      );
-    }
-
-    const needed = declared.kind;
-    if (!ROLES[needed].includes(principal.role)) {
-      throw new AuthError(
-        'AUTH_FORBIDDEN',
-        `this action needs one of: ${ROLES[needed].join(', ')}`,
-        {
-          role: principal.role,
-          needed,
-        },
-      );
-    }
-    // **The token scope is a second ceiling and is checked even where there is no object.** This
-    // is the half `A-06` never got: the scope was captured onto the principal and threaded into
-    // `resolveFor`, so it applied to per-object rights and to nothing else — and since no route
-    // asked for a per-object right, it applied to nothing at all.
-    if (
-      principal.scope !== undefined &&
-      lower(principal.scope, SCOPES[needed]) !== SCOPES[needed]
-    ) {
-      throw new AuthError('AUTH_FORBIDDEN', `this token may only ${principal.scope}`, {
-        scope: principal.scope,
-        needed: SCOPES[needed],
-      });
-    }
-  });
+  const needed = declared.kind;
+  if (!ROLES[needed].includes(principal.role)) {
+    throw new AuthError('AUTH_FORBIDDEN', `this action needs one of: ${ROLES[needed].join(', ')}`, {
+      role: principal.role,
+      needed,
+    });
+  }
+  // **The token scope is a second ceiling and is checked even where there is no object.** This
+  // is the half `A-06` never got: the scope was captured onto the principal and threaded into
+  // `resolveFor`, so it applied to per-object rights and to nothing else — and since no route
+  // asked for a per-object right, it applied to nothing at all.
+  if (principal.scope !== undefined && lower(principal.scope, SCOPES[needed]) !== SCOPES[needed]) {
+    throw new AuthError('AUTH_FORBIDDEN', `this token may only ${principal.scope}`, {
+      scope: principal.scope,
+      needed: SCOPES[needed],
+    });
+  }
 }
 
 /**
@@ -261,9 +342,51 @@ export function onObject(needed: AccessRight, param = 'id'): { access: RouteAcce
   return { access: { kind: 'object', needed, param } };
 }
 
-/** A right on the object named by a field of the request body — the parent of a creation. */
-export function onBodyObject(needed: AccessRight, param: string): { access: RouteAccess } {
-  return { access: { kind: 'object', needed, param, from: 'body' } };
+/**
+ * A right on the object named by a field of the request body — the parent of a creation.
+ *
+ * `optional` is for a field the route's own schema makes optional, and nothing else: a clone
+ * with no `targetParentId` clones in place, so there is no second object to have a right on.
+ */
+export function onBodyObject(
+  needed: AccessRight,
+  param: string,
+  opts: { optional?: boolean } = {},
+): { access: RouteAccess } {
+  return {
+    access: {
+      kind: 'object',
+      needed,
+      param,
+      from: 'body',
+      ...(opts.optional === true ? { optional: true } : {}),
+    },
+  };
+}
+
+/**
+ * Every one of these bars, in the order given (`P-154`).
+ *
+ * The shape a move or a clone needs: `write` on what is being taken, and `write` on where it is
+ * going. Checking only the first lets an operator drop a device — and everything it will go on
+ * to alarm about — into a branch of the tree they were denied.
+ */
+export function every(...declared: readonly { access: RouteAccess }[]): { access: RouteAccess } {
+  return { access: { kind: 'every', of: declared.map((one) => one.access) } };
+}
+
+/**
+ * A right on an object this request does not name, looked up by the route (`P-154`).
+ *
+ * For the routes addressed by something that *belongs* to an object rather than by the object:
+ * `/triggers/:id` is a trigger id, and the right that matters is on the object it is defined on.
+ */
+export function onDerivedObject(
+  needed: AccessRight,
+  what: string,
+  of: (request: FastifyRequest) => Promise<number | null>,
+): { access: RouteAccess } {
+  return { access: { kind: 'derived', needed, what, of } };
 }
 
 /** A right on the object named by a query parameter — the sensor a preview renders against. */

@@ -15,13 +15,21 @@ import { TemplateService } from '../src/notifications/templates.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import { ScheduleService } from '../src/schedules/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
+import { DiscoveryService } from '../src/discovery/service.js';
+import { RediscoveryService } from '../src/discovery/rediscovery.js';
+import { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
+import { ProbeRegistry } from '../src/probes/registry.js';
+import { ProbeQueryService } from '../src/probes/queries.js';
+import { ProbeConfigService } from '../src/probes/config.js';
+import { InheritanceResolver } from '../src/settings/inheritance.js';
+import { NotificationTester } from '../src/notifications/test-send.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -52,11 +60,20 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
   let server: ApiServer;
   let access: AccessService;
   let groups: GroupService;
+  let harness: Harness;
+  let discovery: DiscoveryService;
+  let triggers: TriggerService;
+  let rediscovery: RediscoveryService;
 
   let probeId = 0;
   let deviceId = 0;
   let sensorId = 0;
+  let groupId = 0;
   let teamId = 0;
+  /** Real rows for the routes addressed by something that belongs to an object (`R07`). */
+  let triggerId = 0;
+  let runId = 0;
+  let scheduleId = 0;
 
   /** login → cookie, for each account in the matrix. */
   const cookies = new Map<string, string>();
@@ -65,7 +82,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
   before(async () => {
     scratch = await createScratchDatabase('accessmatrix');
     db = scratch.db;
-    const harness = await buildHarness(db);
+    harness = await buildHarness(db);
 
     const accounts = new AccountService({ db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
@@ -73,8 +90,37 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     access = new AccessService({ db, logger: silent });
     groups = new GroupService({ db, logger: silent });
 
+    discovery = new DiscoveryService({
+      db,
+      logger: silent,
+      dispatch: () => ({ kind: 'sent' }),
+    });
+    const probeQueries = new ProbeQueryService({
+      logger: silent,
+      sender: { sendQuery: () => ({ kind: 'offline' as const }) },
+    });
+    triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
+    rediscovery = new RediscoveryService({
+      db,
+      logger: silent,
+      discovery,
+      windowFor: () => Promise.resolve(null),
+      provision: () => Promise.resolve(),
+    });
+    const messageContexts = new MessageContextLoader({
+      settings: harness.resolver,
+      publicUrl: 'https://monitoring.example.test',
+      siteName: 'matrix',
+    });
+
     server = new ApiServer({
-      config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+      config: {
+        host: '127.0.0.1',
+        port: 0,
+        webRoot: '',
+        allowedOrigins: [],
+        requireAuthentication: true,
+      },
       logger: silent,
       version: '9.9.9',
       service: harness.service,
@@ -86,18 +132,49 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // mutating sweep below covers only the object routes, and "no write is open to a
       // read-only account" would be a claim about a third of the API — which is how a build
       // where a read-only account could delete every trigger passed this file for a fortnight.
-      triggers: new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+      triggers,
       templates: new TemplateService({
         db,
         audit: new DatabaseAuditSink(),
         logger: silent,
-        contexts: new MessageContextLoader({
-          settings: harness.resolver,
-          publicUrl: 'https://monitoring.example.test',
-          siteName: 'matrix',
-        }),
+        contexts: messageContexts,
       }),
       schedules: new ScheduleService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+      // **And every other module that registers a route** (`R07`). `ApiServer` registers each
+      // group behind an `if (this.#X !== undefined)`, so a service the harness does not pass is
+      // a set of routes `server.routes` never lists and the sweeps below never call. Thirteen
+      // mutating routes were invisible that way — including `POST /templates/:id/test`, the
+      // route the ticket singles out by name as the one that "really sent for anybody with a
+      // session". A sweep that cannot see the route it is cited for is not evidence.
+      discovery,
+      provision: () =>
+        Promise.resolve({
+          devicesCreated: 0,
+          matched: 0,
+          sensorsCreated: 0,
+          sensorsSkipped: 0,
+          mastersSet: 0,
+          problems: [],
+          devices: [],
+        }),
+      rediscovery,
+      deviceTemplates: new DeviceTemplateCatalogue(() => true),
+      probeRegistry: new ProbeRegistry({ db, logger: silent, enrolmentKeys: ['matrix-key'] }),
+      queries: probeQueries,
+      probeConfig: new ProbeConfigService({
+        db,
+        resolver: new InheritanceResolver({ db, logger: silent }),
+      }),
+      tester: new NotificationTester({
+        db,
+        logger: silent,
+        contexts: messageContexts,
+        // No transport at all: the point of registering the tester is that the *route* exists to
+        // be swept. A send that reached this far would fail for want of a transport, which is a
+        // 400 — and this file only ever asserts that the guard answered first.
+        transports: [],
+        audit: new DatabaseAuditSink(),
+      }),
       auth: {
         accounts,
         sessions,
@@ -134,6 +211,35 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       params: { community: PLANTED_SECRET, port: 161 },
     });
     sensorId = sensor.id;
+    const group = await harness.service.create(testActor, {
+      kind: 'group',
+      parentId: probe.id,
+      name: 'matrix-group',
+    });
+    groupId = group.id;
+
+    // **Real rows, so the derived guards are actually exercised** (`R07`). A route addressed by
+    // a trigger, a run or a rediscovery schedule resolves its object by looking the row up, and
+    // a row that does not exist is deliberately allowed through for the handler's own 404 — so
+    // sweeping these with a made-up id proves nothing about the guard. These are the ids the
+    // sweep fills in.
+    triggerId = (
+      await triggers.create(testActor, sensorId, {
+        kind: 'state',
+        settings: { state: 'down' },
+        enabled: true,
+      })
+    ).id;
+    runId = (await discovery.start({ groupId, probeId, range: '10.9.9.0/30' })).id;
+    scheduleId = (
+      await rediscovery.create({
+        groupId,
+        probeId,
+        name: 'matrix-rediscovery',
+        range: '10.9.9.0/30',
+        cadence: 'daily',
+      })
+    ).id;
 
     teamId = (await groups.create({ name: 'Team' })).id;
 
@@ -245,9 +351,28 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
      *   2. **Is that bar actually enforced?** Every one of them is called as a read-only
      *      account, which must be refused by all of them.
      */
+    /**
+     * What `:id` means on this route.
+     *
+     * **A derived guard is only proved by a row that exists** (`R07`). `/triggers/:id` and the
+     * discovery routes resolve their object by looking the id up, and a lookup that finds
+     * nothing is allowed through on purpose so the handler can answer its own 404 — which is
+     * indistinguishable, from outside, from a route with no guard at all. Filling these with
+     * the real rows created above is what makes the refusal the first answer.
+     */
+    const idFor = (url: string): number => {
+      // `server.routes` records the registered url, prefix and all, so this matches on the path
+      // below `/api/v1` rather than on the whole thing.
+      const path = url.replace('/api/v1', '');
+      if (path.startsWith('/triggers/')) return triggerId;
+      if (path.startsWith('/discovery/schedules/')) return scheduleId;
+      if (path.startsWith('/discovery/:id')) return runId;
+      return sensorId;
+    };
+
     const fillWrite = (url: string): string =>
       url
-        .replaceAll(':id', String(sensorId))
+        .replaceAll(':id', String(idFor(url)))
         .replaceAll(':sensorId', String(sensorId))
         .replaceAll(':objectId', String(sensorId))
         .replaceAll(':kind', 'snmp')
@@ -276,6 +401,25 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
      */
     const isCompute = (route: { changes: boolean }): boolean => !route.changes;
 
+    /**
+     * Routes whose subject is not in the object tree, so there is no per-object right to hold.
+     *
+     * **Three entries, each for a stated reason, and the list is the whole point.** The
+     * grantless sweep below asks "was this refused to an account holding nothing", and the
+     * answer for a route about a *library* object is legitimately no: a notification template
+     * and a schedule belong to the installation, not to a probe or a device, and `write` is the
+     * bar their own tickets set. `POST /objects/bulk` is the third: it answers 200 and reports
+     * the refusals per id in its body, which is what `D-09` requires of it and what the
+     * dedicated test two below asserts.
+     *
+     * Anything else appearing here is a route that names an object and does not resolve a right
+     * on it — which is exactly what this sweep exists to find, so the exemption is by url and
+     * never by "it was failing".
+     */
+    const isRoleGoverned = (route: { url: string }): boolean =>
+      /^\/api\/v1\/(templates|schedules)(\/|$)/.test(route.url) ||
+      route.url === '/api/v1/objects/bulk';
+
     const mutating = (): {
       method: string;
       url: string;
@@ -295,10 +439,46 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
      * fields cost nothing: authorisation now runs before validation, so a body only has to be
      * parseable to reach the guard.
      */
-    const payload = { parentId: sensorId, sensorId, objectId: sensorId, ids: [sensorId] };
+    const payload = {
+      parentId: sensorId,
+      sensorId,
+      objectId: sensorId,
+      ids: [sensorId],
+      // A discovery run and a rediscovery schedule name the group they provision into, and that
+      // group is the object the guard resolves (`G05`). Without it the answer is the honest
+      // 400 for a request that names no object, which proves nothing either way.
+      groupId,
+    };
 
     it('has mutating routes to sweep, so a silent zero is not a pass', () => {
-      assert.ok(mutating().length > 25, `only ${String(mutating().length)} mutating routes found`);
+      // **The floor is close to the real number on purpose** (`R07`). At 25 it could not
+      // notice that nine route modules were missing from the harness — thirteen mutating
+      // routes, including the one the ticket cites by name. A floor far below the truth is a
+      // guard against nothing.
+      const found = mutating().length;
+      assert.ok(found > 45, `only ${String(found)} mutating routes found`);
+
+      // **And the routes an absent module takes with it, by name.** A count is the wrong guard
+      // for this: nine modules were missing and the sweep still counted twenty-nine routes,
+      // comfortably over its floor. The absence is in *this file's* wiring rather than in any
+      // route's source, so nothing in the source can declare it and a list is the honest
+      // answer — one entry per optional service `ApiServer` registers behind an `if`.
+      // Against every registered route, not only the mutating ones: `as-template` and the
+      // check-now query declare `changes: false`, and their module going missing is exactly
+      // what this is watching for.
+      const swept = new Set(server.routes.map((route) => `${route.method} ${route.url}`));
+      const missing = [
+        'POST /api/v1/templates/:id/test',
+        'POST /api/v1/discovery',
+        'POST /api/v1/discovery/:id/provision',
+        'POST /api/v1/discovery/schedules',
+        'POST /api/v1/objects/:id/as-template',
+        'POST /api/v1/sensors/:id/check',
+        'POST /api/v1/probes/:gid/approve',
+        'PUT /api/v1/triggers/:id',
+        'POST /api/v1/schedules',
+      ].filter((route) => !swept.has(route));
+      assert.deepEqual(missing, [], 'these routes are not being swept — is a service unwired?');
     });
 
     it('every one of them declares a bar above read', () => {
@@ -339,6 +519,41 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         }
       }
       assert.deepEqual(allowed, [], 'a read-only account was not refused by these');
+    });
+
+    it('refuses every one of them to a readwrite account that was granted nothing', async () => {
+      // **The pass both existing sweeps were structurally blind to** (`R08`, `R09`, `G05`).
+      // A read-only account and a read-scoped token are both stopped at the role/scope gate,
+      // which every mutating route clears by declaring `write` — so a bar that is *too coarse*
+      // answers 403 to them and looks identical to a correct one. `readwrite` with no
+      // `object_access` row anywhere is the principal that tells them apart: it passes the role
+      // gate and holds `none` on every object, so anything it gets through was never guarded on
+      // an object at all.
+      //
+      // What it found the day it was written: `POST /objects/tree` created a subtree under any
+      // parent, `POST /objects/:id/move` and `/clone` relocated into any destination, `PUT` and
+      // `DELETE /triggers/:id` edited every trigger in the installation, and `POST /discovery`
+      // provisioned devices into any group.
+      await db.query('DELETE FROM object_access');
+
+      const allowed: string[] = [];
+      for (const route of mutating()) {
+        if (isRoleGoverned(route)) continue;
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: fillWrite(route.url),
+          headers: asRole('readwrite'),
+          payload,
+        });
+        if (response.statusCode !== 401 && response.statusCode !== 403) {
+          allowed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
+        }
+      }
+      assert.deepEqual(
+        allowed,
+        [],
+        'these routes were open to an account holding no right on any object',
+      );
     });
 
     it('refuses them to a read-only account that may acknowledge, except acknowledging', async () => {
@@ -414,6 +629,172 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       assert.equal(probe.ok, false, 'the probe is above the grant and should have been refused');
       assert.equal(probe.code, 'AUTH_FORBIDDEN');
       assert.equal(sensor.ok, true, 'the sensor inherits write from the device and should apply');
+    });
+
+    it('collapses a repeated id the same way whether or not the account may write it', async () => {
+      // **The report must not depend on the caller's rights** (`G07`). The service collapses the
+      // ids it is handed, so collapsing only on the allowed side made the same selection answer
+      // `duplicates: 1` with one outcome row for an object the account may write, and
+      // `duplicates: 0` with two identical failure rows for one it may not. The route's own
+      // description promises "repeated ids are collapsed and counted" without qualification.
+      await db.query('DELETE FROM object_access');
+      await access.grant(deviceId, teamId, 'write', 'matrix');
+
+      const send = async (id: number) =>
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/v1/objects/bulk',
+            headers: asRole('readwrite'),
+            payload: { ids: [id, id], operation: 'pause', minutes: 5 },
+          })
+        ).json<{ requested: number; duplicates: number; outcomes: unknown[] }>();
+
+      const mayWrite = await send(sensorId);
+      const mayNot = await send(probeId);
+      assert.deepEqual(
+        {
+          requested: mayNot.requested,
+          duplicates: mayNot.duplicates,
+          rows: mayNot.outcomes.length,
+        },
+        {
+          requested: mayWrite.requested,
+          duplicates: mayWrite.duplicates,
+          rows: mayWrite.outcomes.length,
+        },
+        'the refused half reported the duplicate differently from the allowed half',
+      );
+      assert.equal(mayNot.duplicates, 1);
+      assert.equal(mayNot.outcomes.length, 1, 'one object should be one outcome row');
+    });
+
+    it('will not build a device template out of a device the account may not read', async () => {
+      // **A read of one device, priced as one** (`R12`). `POST /objects/:id/as-template` returns
+      // every sensor on the named device — names, types and the parameters an operator set — as
+      // a template document. It stores nothing, so it is rightly `changes: false` and the
+      // mutating sweeps skip it; it was also declared `WRITES`, a role check, while every other
+      // route that reads one object's contents was given `onObject('read')` in the same commit.
+      await db.query('DELETE FROM object_access');
+
+      const refused = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(deviceId)}/as-template`,
+        headers: asRole('readwrite'),
+        payload: { id: 'matrix-template', name: 'Matrix' },
+      });
+      assert.equal(refused.statusCode, 403, 'a device it may not read was served as a template');
+      assert.ok(
+        !refused.body.includes(PLANTED_SECRET),
+        'and the refusal must not carry the secret either',
+      );
+
+      await access.grant(deviceId, teamId, 'read', 'matrix');
+      const allowed = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(deviceId)}/as-template`,
+        headers: asRole('readwrite'),
+        payload: { id: 'matrix-template', name: 'Matrix' },
+      });
+      assert.equal(allowed.statusCode, 200, 'read on the device should be enough to describe it');
+    });
+
+    it('refuses a clone into a parent the account may not write, not only a source it may', async () => {
+      // **Both ends of a relocation** (`G06`). `write` on the source was the whole check, so an
+      // operator holding one device could clone it — and everything it goes on to alarm about —
+      // into a branch they were explicitly denied, or move it out of the branch whose owners
+      // could see it.
+      await db.query('DELETE FROM object_access');
+      await access.grant(deviceId, teamId, 'write', 'matrix');
+
+      for (const operation of ['clone', 'move'] as const) {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(sensorId)}/${operation}`,
+          headers: asRole('readwrite'),
+          payload: { targetParentId: groupId },
+        });
+        assert.equal(
+          response.statusCode,
+          403,
+          `${operation} into a group outside the grant should be refused`,
+        );
+      }
+
+      // And the destination it *may* write is still allowed, so the bar is the destination and
+      // not a blanket refusal.
+      const allowed = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(sensorId)}/clone`,
+        headers: asRole('readwrite'),
+        payload: { targetParentId: deviceId },
+      });
+      assert.equal(allowed.statusCode, 201, 'a clone inside the grant should still work');
+    });
+
+    it('applies a bulk selection normally when the authorisation layer is switched off', async () => {
+      // **The one check that does not live in the hook, and so did not stand down with it**
+      // (`R10`). Every other bar in `A-11` is the `preValidation` hook, which returns early when
+      // `auth.required` is false. The bulk partition is a call in a handler, and it was gated
+      // only on whether an `AccessService` was passed — which it always is. `AccessService`
+      // treats a role as a ceiling and never as a grant, so on an installation with the layer
+      // off, an ordinary `readwrite` account in the built-in `Users` group had every single id
+      // in a selection refused, while `POST /objects/:id/pause` on any one of those ids
+      // succeeded. Forty sensors selected, forty refusals, and nothing anywhere saying why.
+      await db.query('DELETE FROM object_access');
+      const open = new ApiServer({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: false,
+        },
+        logger: silent,
+        version: '9.9.9',
+        service: harness.service,
+        history: new HistoryService({ db, logger: silent }),
+        db,
+        audit: new AuditRepository(),
+        catalogue: testCatalogue(),
+        auth: {
+          accounts: new AccountService({ db, logger: silent }),
+          sessions: new SessionService({ db, logger: silent }),
+          throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
+          groups,
+          access,
+          tokens: new TokenService({ db, logger: silent }),
+          totp: new TotpService({ db, logger: silent }),
+          required: false,
+        },
+      });
+      await open.build('9.9.9', harness.service);
+      try {
+        const login = await open.app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/login',
+          payload: { login: 'readwrite', password: 'correct-horse-battery' },
+        });
+        assert.equal(login.statusCode, 200);
+        const cookie = String(login.headers['set-cookie']).split(';')[0] ?? '';
+
+        const response = await open.app.inject({
+          method: 'POST',
+          url: '/api/v1/objects/bulk',
+          headers: { cookie },
+          payload: { ids: [sensorId], operation: 'pause', minutes: 5 },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json<{ succeeded: number; outcomes: { ok: boolean }[] }>();
+        assert.equal(
+          body.succeeded,
+          1,
+          'the bulk route refused an id every other route in this installation allows',
+        );
+        assert.equal(body.outcomes[0]?.ok, true);
+      } finally {
+        await open.app.close();
+      }
     });
 
     it('refuses the same routes to a read-scoped token held by an administrator', async () => {

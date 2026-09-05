@@ -333,6 +333,23 @@ export interface CoreConfig {
      * same-origin writes, which is what a direct install wants.
      */
     allowedOrigins: string[];
+    /**
+     * Whether the API refuses a request that does not reach the bar its route declares
+     * (`A-11`, `R11`).
+     *
+     * **On by default, and there is no third state.** The authorisation layer was written,
+     * tested and left switched off for the whole of `A-03` and `A-04`, because turning it on
+     * before there were per-object rights would have meant an installation where every account
+     * saw everything. Those rights exist now, so the honest default is the enforcing one — and
+     * an installation that starts with no accounts gets an administrator with a generated
+     * password written to `<dataDir>/first-admin-password`, so nobody is locked out by it.
+     *
+     * False is for one situation: a single-operator install behind something else that does the
+     * authenticating. Setting it means every authenticated principal may do everything —
+     * including delete every trigger and send a test notification for real — so it belongs in a
+     * configuration file, where an operator chose it, rather than in a constant.
+     */
+    requireAuthentication: boolean;
   };
   /** What a notification needs to know about this installation (`N-06`). */
   notifications: {
@@ -690,7 +707,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as CoreConfig['api'],
       additionalProperties: false,
-      required: ['host', 'port', 'webRoot', 'allowedOrigins'],
+      required: ['host', 'port', 'webRoot', 'allowedOrigins', 'requireAuthentication'],
       properties: {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
         port: { type: 'integer', minimum: 1, maximum: 65_535, default: 8080 },
@@ -698,6 +715,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // Not validated by pattern here: what makes an entry usable is that it parses to the
         // origin a browser would send, and `registerCsrfGuard` says so by name at startup.
         allowedOrigins: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
+        requireAuthentication: { type: 'boolean', default: true },
       },
     },
     notifications: {

@@ -12,7 +12,7 @@ import {
   SUMMARISATION_MODES,
 } from '../../notifications/summarisation.js';
 import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
-import { READS, WRITES, computesOn, onBodyObject, onQueryObject } from '../authorization.js';
+import { READS, WRITES, computesOn, every, onBodyObject, onQueryObject } from '../authorization.js';
 
 export interface TemplateRouteOptions {
   templates: TemplateService;
@@ -475,7 +475,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
     app.post<{ Params: { id: number }; Body: { sensorId?: number } }>(
       '/templates/:id/test',
       {
-        config: WRITES,
+        // A template is a library object with no place in the tree, so `write` is the honest
+        // bar for editing one — but this route renders against a *sensor* the caller names, and
+        // that sensor is in the tree. Optional because rendering against the example sensor
+        // names nothing to have a right on (`R07`).
+        config: every(WRITES, onBodyObject('read', 'sensorId', { optional: true })),
         schema: {
           tags: ['templates'],
           summary: 'Send a test notification through this template',

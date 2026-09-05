@@ -29,7 +29,7 @@ import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
-import { READS, WRITES, onBodyObject, onObject, toAcknowledge } from '../authorization.js';
+import { READS, WRITES, every, onBodyObject, onObject, toAcknowledge } from '../authorization.js';
 import { atLeast, type AccessService } from '../../auth/access.js';
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
@@ -48,11 +48,14 @@ interface RefusedOutcome {
  */
 async function partitionByRight(
   access: AccessService | undefined,
+  authorizing: boolean,
   request: FastifyRequest,
   ids: readonly number[],
 ): Promise<{ allowed: number[]; refused: RefusedOutcome[] }> {
   const principal = request.principal;
-  if (access === undefined || principal === undefined) return { allowed: [...ids], refused: [] };
+  if (!authorizing || access === undefined || principal === undefined) {
+    return { allowed: [...ids], refused: [] };
+  }
   const rights = await access.resolveManyFor(principal, ids);
   const allowed: number[] = [];
   const refused: RefusedOutcome[] = [];
@@ -92,6 +95,17 @@ export interface ObjectRoutesOptions {
    * routinely includes something the operator cannot see.
    */
   access?: AccessService;
+  /**
+   * Whether the authorisation layer is switched on for this installation (`R10`).
+   *
+   * **The partition has to ask, because it is the one check that does not live in the hook.**
+   * Every other bar in `A-11` stands down when `auth.required` is false; this one is a call in a
+   * handler, so without the flag it kept resolving per-object rights in an installation where
+   * nothing else did — and `AccessService` treats a role as a ceiling, never a grant, so a
+   * perfectly ordinary `readwrite` account with no `object_access` row was refused *every* id in
+   * a bulk selection while the single-object route beside it succeeded for the same object.
+   */
+  authorizing?: boolean;
 }
 
 interface ListQuery {
@@ -265,6 +279,7 @@ export async function objectRoutes(
   options: ObjectRoutesOptions,
 ): Promise<void> {
   const { service, buildVersion, bulk, access } = options;
+  const authorizing = options.authorizing ?? false;
 
   const sendDetail = async (
     reply: FastifyReply,
@@ -453,7 +468,10 @@ export async function objectRoutes(
   app.post<{ Body: TreePlanInput }>(
     '/objects/tree',
     {
-      config: WRITES,
+      // The same bar `POST /objects` carries, for the same reason and on the same field: this
+      // route creates the identical objects under the identical `parentId`, only more of them
+      // (`G05`).
+      config: onBodyObject('write', 'parentId'),
       schema: {
         tags: ['objects'],
         summary: 'Create a whole subtree in one request',
@@ -635,7 +653,10 @@ export async function objectRoutes(
   app.post<{ Params: { id: number }; Body: { targetParentId: number } }>(
     '/objects/:id/move',
     {
-      config: onObject('write'),
+      // **Both ends** (`G06`). Taking the object needs `write` on it; putting it somewhere needs
+      // `write` there. Checking only the source lets an operator relocate a device into a branch
+      // they were denied — and out of the branch whose owners could see it.
+      config: every(onObject('write'), onBodyObject('write', 'targetParentId')),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -667,7 +688,9 @@ export async function objectRoutes(
   }>(
     '/objects/:id/clone',
     {
-      config: onObject('write'),
+      // Both ends, and the destination is optional because a clone with no `targetParentId`
+      // copies in place — where the source right has already been resolved (`G06`).
+      config: every(onObject('write'), onBodyObject('write', 'targetParentId', { optional: true })),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -709,7 +732,9 @@ export async function objectRoutes(
   }>(
     '/objects/bulk',
     {
-      config: WRITES,
+      // The ids are partitioned per object in the handler; the destination of a `move` or a
+      // `clone` is one object for the whole request, so it is a bar like any other (`G06`).
+      config: every(WRITES, onBodyObject('write', 'targetParentId', { optional: true })),
       schema: {
         tags: ['objects'],
         description:
@@ -798,15 +823,24 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      const requested = request.body.ids;
-      const { allowed, refused } = await partitionByRight(access, request, requested);
+      // **Duplicates are collapsed before the partition, not after it** (`G07`). `BulkService`
+      // collapses the ids it is handed, so collapsing only on the allowed side made the report
+      // depend on the caller's rights: the same selection answered `duplicates: 1` with one
+      // outcome row for an object the account may write, and `duplicates: 0` with two identical
+      // failure rows for one it may not. The route's own description promises neither.
+      const sent = request.body.ids;
+      const unique = [...new Set(sent)];
+      const { allowed, refused } = await partitionByRight(access, authorizing, request, unique);
       const applied =
         allowed.length === 0
-          ? { requested: 0, succeeded: 0, failed: 0, duplicates: 0, outcomes: [] }
+          ? { succeeded: 0, failed: 0, outcomes: [] }
           : await bulk.apply(actorFor(request), allowed, operationFrom(request.body));
       await reply.send({
         ...applied,
-        requested: requested.length,
+        // `requested` is the selection after collapsing, which is what `BulkReport` documents
+        // and what the outcome rows count.
+        requested: unique.length,
+        duplicates: sent.length - unique.length,
         failed: applied.failed + refused.length,
         outcomes: [...applied.outcomes, ...refused],
       });

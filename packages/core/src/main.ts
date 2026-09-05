@@ -837,11 +837,17 @@ async function serve(): Promise<void> {
       access: objectAccess,
       tokens: apiTokens,
       totp: mfa,
-      // **Off until `A-03` lands, and that is deliberate.** Turning the guard on before there
-      // are per-object rights would mean an installation where every account sees everything —
-      // a worse answer than the honest one, which is that authentication exists and is not yet
-      // load-bearing. The `A-04` work is what flips this.
-      required: false,
+      // **`A-03` and `A-04` have landed, so this is on** (`R11`). It was `false` here for as
+      // long as there were no per-object rights to enforce — turning the guard on then would
+      // have meant an installation where every account saw everything, which is worse than the
+      // honest answer that authentication exists and is not yet load-bearing. Both of those
+      // tickets are done and this very file reads `may_acknowledge` off the principal, so the
+      // flag was the last thing holding the layer inert in the only wiring that ships.
+      //
+      // Now a configuration key, defaulting to on, because "off" is a real answer for an
+      // install behind something else that authenticates — but it has to be an operator's
+      // sentence in a file rather than a constant nobody revisits.
+      required: config.api.requireAuthentication,
     },
     triggers,
     templates,

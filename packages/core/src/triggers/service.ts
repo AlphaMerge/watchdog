@@ -66,6 +66,18 @@ export class TriggerService {
     return triggers.map((trigger) => this.#view(trigger, trigger.inherited, trigger.definedOn));
   }
 
+  /**
+   * The object a trigger is defined on, or null if there is no such trigger (`P-154`).
+   *
+   * Exists for the authorisation guard: `/triggers/:id` is addressed by the trigger, and the
+   * right that decides whether a caller may replace or delete it is the one on the object whose
+   * alarms it governs. Null rather than a throw, because "no such trigger" is the handler's 404
+   * and a guard that answered 403 to it would be an existence oracle.
+   */
+  async objectOf(id: number): Promise<ObjectId | null> {
+    return (await this.#repo.get(this.#db, id))?.objectId ?? null;
+  }
+
   async create(actor: Actor, objectId: ObjectId, input: TriggerInput): Promise<TriggerView> {
     const write = this.#parse(input);
     const now = new Date();

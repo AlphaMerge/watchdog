@@ -9946,7 +9946,7 @@ because each is a decision rather than a defect:
       as ordinary failed outcomes, because a selection made in a tree view routinely includes
       something the operator cannot touch.
 
-      Tests: 12 new in `access-matrix.test.ts` — the mutating sweep, the declaration-shape check,
+      Tests: 6 new in `access-matrix.test.ts` — the mutating sweep, the declaration-shape check,
       the read-scoped token, both halves of `may_acknowledge`, and the bulk partition — plus four
       existing ones repaired: they granted rights without clearing the matrix's leftover `none`,
       so they were asserting against a wall of 403s that no credential could leak through.
@@ -10384,6 +10384,96 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       Heartbeats carry `scheduled`, and it was only ever displayed. It is now compared against
       what the session was sent, once no push is outstanding, and a mismatch forces a full push.
       Tests: 1 new — 3,000 sensors fully acked, then a heartbeat claiming 1,000. Mutation 1/1.
+
+- [x] **P-154 — the authorisation layer was switched off in the only wiring that ships**
+      **`A-11` was written, tested and inert.** `registerAuthorization` returns at its second
+      line when `auth.required` is false, and `main.ts` — the one place `ApiServerOptions.auth`
+      is built outside tests — set it to `false`, under a comment saying it would be flipped
+      "when `A-03` lands". `A-03` and `A-04` both landed; the same file reads `may_acknowledge`
+      off the principal. So every sentence the `A-11` entry states as fixed was still true of
+      `ms-core` as shipped, and the sweep that proves otherwise builds its own app with
+      `required: true`.
+
+      It is a configuration key now — `api.requireAuthentication`, **defaulting to on**, so an
+      installation that has never heard of it gets the enforcing behaviour on upgrade. Off is a
+      real answer for an install behind something else that authenticates, and it has to be an
+      operator's sentence in a file rather than a constant nobody revisits.
+      `ensureFirstAdministrator` already creates an account with a generated password in
+      `<dataDir>/first-admin-password`, so a fresh install is not locked out by the flip.
+      **`dev/core.json` sets it to `false`**: the web UI has no login screen yet, and a dev
+      stack nobody can open is not a dev stack.
+
+      Five more holes in the same layer, all of them found by one new sweep and none of them
+      visible to the two that existed:
+
+      - **`/objects/tree` and `/discovery` create under a parent nobody checked.** The rule
+        `onBodyObject` was written for — "an account that may not write to a probe must not be
+        able to hang a device off it" — was applied to `POST /objects` and to nothing else.
+        `POST /objects/tree` takes the same `parentId` and creates up to five thousand objects
+        under it; `POST /discovery` and `POST /discovery/schedules` name the group they
+        provision devices into. All four are `onBodyObject('write', …)` now, and the routes
+        addressed by a run or a schedule resolve the group from the row.
+      - **`PUT` and `DELETE /triggers/:id` asked only for the role.** A trigger is addressed by
+        its own id, so the only bar readable from the path was `readwrite` — and a grantless
+        `readwrite` account could delete every trigger in the installation, including on
+        objects it is refused sight of, which is how alarming stops with nothing looking wrong.
+      - **`move` and `clone` checked the source and not the destination.** Both take a
+        `targetParentId`; neither the hook nor `ObjectService` ever resolved a right on it, so
+        an operator holding one device could clone it — and everything it goes on to alarm
+        about — into a branch they were explicitly denied.
+      - **`POST /objects/:id/as-template` served one device's whole sensor set** — names, types
+        and parameters — under a role check, for a device the same account is refused by
+        `GET /objects/:id/tree`.
+      - **The bulk partition was the one check that did not stand down with the layer.** It
+        gated on whether an `AccessService` was passed, which it always is, so with
+        authorisation off an ordinary `readwrite` account had *every* id in a selection refused
+        while the single-object route beside it succeeded for the same object.
+
+      Two new declaration shapes carry this: `every(…)`, for a route with more than one
+      question to answer, and `onDerivedObject`, for a route addressed by something that
+      belongs to an object rather than by the object. A derived lookup that finds nothing is
+      allowed through for the handler's own 404 — a guard that answered 403 to a missing id
+      would be an existence oracle.
+
+      Tests: 5 new in `access-matrix.test.ts` and 1 in `config.test.ts`. Mutation 7/7.
+
+- [x] **P-155 — the access-matrix sweep could not see a third of the API**
+      `A-11` added `triggers`, `templates` and `schedules` to the harness with a comment saying
+      that without them the sweep "would be a claim about a third of the API". Nine more
+      services were still missing — `tester`, `discovery`, `provision`, `rediscovery`,
+      `probeRegistry`, `deviceTemplates`, `queries`, `probeConfig`, `stream` — and `ApiServer`
+      registers each group behind an `if (this.#X !== undefined)`, so their routes were absent
+      from `server.routes` and from every sweep. **Including `POST /templates/:id/test`, the
+      route the ticket singles out by name as the one that "really sent for anybody with a
+      session".** A sweep that cannot call the route it is cited for is not evidence, and its
+      floor of 25 mutating routes was so far below the real 48 that nothing noticed.
+
+      Three things were wrong with the harness and all three are fixed. Every optional service
+      is registered. The floor is close to the real number, and beside it is a list naming the
+      routes an absent module takes with it — a count could not catch one missing service, and
+      the absence is in the harness rather than in any route's source, so nothing in the source
+      can declare it. And the routes addressed by a trigger, a run or a rediscovery schedule
+      are filled with **real rows**, because a derived guard on an id that does not exist
+      answers 404 and looks exactly like no guard at all.
+
+      **The sweeps were also blind by construction.** Both passes used a principal stopped at
+      the role gate — a read-only account and a read-scoped token — so a bar that is too
+      *coarse* refuses them and looks identical to a correct one. The new pass uses `readwrite`
+      with no `object_access` row anywhere: it clears every role gate and holds `none` on every
+      object, so anything it gets through was never guarded on an object. It found all five
+      holes in `P-154` the day it was written.
+
+      The `A-11` entry's own claim of "12 new tests" was six; corrected to six.
+
+- [x] **P-156 — the bulk report counted duplicates differently depending on the caller**
+      `partitionByRight` iterated the raw id array, so duplicates were collapsed on the allowed
+      side — `BulkService` does it — and not on the refused side. The same selection answered
+      `requested: 2, duplicates: 1` with one outcome row for an object the account may write,
+      and `requested: 2, duplicates: 0` with two identical failure rows for one it may not. The
+      route's own description promises "repeated ids are collapsed and counted, never applied
+      twice" with no qualification, and `BulkReport.requested` is documented as the count after
+      collapsing while the route was overwriting it with the raw one. Collapsed once, before
+      the partition, and `duplicates` derived there. Tests: 1 new. Mutation 1/1.
 
 ## Phase 10 — Hardening and release
 
