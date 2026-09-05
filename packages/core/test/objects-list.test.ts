@@ -55,6 +55,33 @@ describe(
         })
       ).id;
 
+      // **Tags on different levels of one chain** (`P-102`). Every other fixture here puts the
+      // tags being ANDed on the *same* object, which is the one arrangement the old filter could
+      // match — so nothing noticed that a filter spread across a chain returned nothing at all.
+      const paris = (
+        await h.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: 'Paris DC',
+          tags: ['paris'],
+        })
+      ).id;
+      const parisSwitch = (
+        await h.service.create(testActor, {
+          kind: 'device',
+          parentId: paris,
+          name: 'switch-07',
+          host: '10.3.0.1',
+          tags: ['production'],
+        })
+      ).id;
+      await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: parisSwitch,
+        name: 'Paris ping',
+        sensorType: 'icmp.ping',
+      });
+
       const berlinSwitch = (
         await h.service.create(testActor, {
           kind: 'device',
@@ -115,6 +142,29 @@ describe(
       assert.equal((await list({ tags: ['berlin', 'munich'] })).length, 0);
     });
 
+    it('matches tags spread across the inheritance chain, not only ones on the same object', async () => {
+      // **`P-102`.** The walk's base case demanded every tag at once — one object had to carry
+      // all of them before the descent started — so an AND-filter whose tags sit at different
+      // levels matched nothing. `Berlin DC` carries both of its tags itself, which is why the
+      // case above stayed green.
+      //
+      // The effective-tag rule everything else uses is the union of an object's own tags with
+      // its ancestors': `MessageContextLoader` computes exactly that for `%tags`, so a
+      // notification about the Paris sensor interpolates "paris, production" while a search for
+      // those two tags could not find the sensor it is about. `repository.ts` says a filter that
+      // quietly under-reports is worse than one that errors, which is what this was.
+      const both = await list({ tags: ['paris', 'production'] });
+      assert.deepEqual(
+        both.map((item) => item.name).sort(),
+        ['Paris ping', 'switch-07'],
+        'the device carries production itself and paris from its group; the sensor both',
+      );
+
+      // The group is not in it: it carries `paris` and not `production`, and inheritance goes
+      // down. A filter that returned it would be over-reporting, which is the other failure.
+      assert.ok(!both.some((item) => item.name === 'Paris DC'));
+    });
+
     it('treats _ in a name search as a literal, not a wildcard', async () => {
       // Without escaping, "switch_01" would also match "switchX01".
       const underscore = await list({ q: 'switch_01' });
@@ -137,8 +187,8 @@ describe(
 
     it('filters by kind', async () => {
       const devices = await list({ kinds: ['device'] });
-      assert.deepEqual(devices.map((i) => i.name).sort(), ['switchX01', 'switch_01']);
-      assert.equal((await list({ kinds: ['device', 'sensor'] })).length, 3);
+      assert.deepEqual(devices.map((i) => i.name).sort(), ['switch-07', 'switchX01', 'switch_01']);
+      assert.equal((await list({ kinds: ['device', 'sensor'] })).length, 5);
     });
 
     it('filters devices by host, case-folded', async () => {

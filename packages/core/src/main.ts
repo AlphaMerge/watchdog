@@ -16,6 +16,7 @@ import { runMigrateCommand, type MigrateAction } from './commands/migrate.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/store.js';
 import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
+import { ReachabilitySync } from './probes/reachability-sync.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import {
@@ -353,6 +354,12 @@ async function serve(): Promise<void> {
     states,
   });
   const dependencySync = new DependencySync({ pauses: dependencyPauses, logger });
+  // A move onto a live probe is the obvious remediation for a dead one, and it used to leave
+  // every moved sensor reading Unknown for as long as the dead probe stayed away (`P-103`).
+  const reachabilitySync = new ReachabilitySync({
+    reachability: () => reachabilityRef,
+    logger,
+  });
 
   // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
   // may be constrained by a permission window, and what an evaluator needs is the definition
@@ -373,6 +380,7 @@ async function serve(): Promise<void> {
       cacheInvalidator,
       scheduleSync,
       dependencySync,
+      reachabilitySync,
       triggerSync,
     ]),
     sensorTypes: catalogueSensorTypeGate(catalogue),

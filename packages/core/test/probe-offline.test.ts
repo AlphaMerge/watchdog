@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { ProbeReachability } from '../src/probes/reachability.js';
+import { ReachabilitySync } from '../src/probes/reachability-sync.js';
 import { SensorStateService } from '../src/state/service.js';
 import { ALL_CLEAR } from '../src/state/limits.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
@@ -251,6 +252,90 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       'warning',
       'a probe leaving and returning is not two more failed scans',
     );
+  });
+
+  it('lets go of a sensor moved onto a live probe, which is the obvious remediation', async () => {
+    // **`P-103`.** `lost` snapshots which sensors a probe was carrying, and that snapshot
+    // outlived the topology it was taken from. Moving the device onto a working probe — what an
+    // operator does when a probe host dies — left every moved sensor still in `#unreachable`, so
+    // `#withProbeFacts` overlaid `probeReachable: false` and layer 3 answered `unknown`/`probe`
+    // for every result the *new* probe delivered. No transition was written, because the state
+    // did not change; the sensors were simply dark and unalarmable, for as long as the dead
+    // probe stayed away — permanently, if it was decommissioned, which is why it was moved.
+    //
+    // Through the audit sink, not by calling `resync` here: the defect was that nothing in
+    // production ran it, and a test that supplies the missing step tests the step after it.
+    harness.audit.also = new ReachabilitySync({
+      reachability: () => reachability,
+      logger: silentLogger,
+    });
+    try {
+      const spare = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `spare-${String(process.hrtime.bigint())}`,
+      });
+
+      await scanned();
+      await reachability.lost(probeId, 'link');
+      const [sensorId] = sensorIds;
+      assert.ok(sensorId !== undefined);
+      assert.equal((await stateOf(sensorId))?.state, 'unknown');
+
+      await harness.service.move(testActor, deviceId, spare.id, { kind: 'none' });
+
+      assert.equal(
+        (await stateOf(sensorId))?.state,
+        'up',
+        'back to what its last reading says, because its probe is answering',
+      );
+      assert.equal(reachability.stats().sensorsUnknown, 0, 'and the overlay let go of it');
+    } finally {
+      harness.audit.also = undefined;
+    }
+  });
+
+  it('takes over a sensor moved onto a probe that is already away', async () => {
+    // The mirror. A snapshot taken before the move could not see an arrival either, so a device
+    // moved *onto* a dead probe kept reading Up while nothing was scanning it.
+    harness.audit.also = new ReachabilitySync({
+      reachability: () => reachability,
+      logger: silentLogger,
+    });
+    try {
+      const spare = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `spare-${String(process.hrtime.bigint())}`,
+      });
+      const stranded = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: spare.id,
+        name: 'moves-later',
+        host: '127.0.0.2',
+      });
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: stranded.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+        params: { count: 3 },
+      });
+
+      await scanned([sensor.id]);
+      assert.equal((await stateOf(sensor.id))?.state, 'up');
+
+      await reachability.lost(probeId, 'link');
+      await harness.service.move(testActor, stranded.id, probeId, { kind: 'none' });
+
+      assert.equal(
+        (await stateOf(sensor.id))?.state,
+        'unknown',
+        'nothing is scanning it now, and saying Up would be a claim nobody can support',
+      );
+    } finally {
+      harness.audit.also = undefined;
+    }
   });
 
   it('one outage is one transition per sensor, not two', async () => {

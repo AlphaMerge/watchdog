@@ -128,6 +128,89 @@ export class ProbeReachability {
   }
 
   /**
+   * Re-derives the overlay from the tree, after the tree has changed (`P-103`).
+   *
+   * `lost` snapshots a probe's sensors once, and that snapshot outlived the topology it was
+   * taken from. A sensor moved off a dead probe onto a live one kept `probeReachable: false`
+   * for as long as the dead probe stayed away — permanently, if it was decommissioned, which is
+   * the usual reason somebody moves a device off it. Every result then short-circuited at layer
+   * 3 to `unknown`/`probe`; no transition was recorded, because the state did not change, and
+   * the sensors were dark and unalarmable while their new probe scanned them happily. Nothing in
+   * the code or `docs/state-machine.md` had a name for "a sensor whose current probe is
+   * delivering but which the core still believes is behind a lost one".
+   *
+   * The mirror case is a sensor *arriving* under a probe that is already away — by a move, a
+   * create, a clone or a discovery — which the snapshot could not see either.
+   *
+   * **Through the caller's transaction**, because the tree change it is reacting to has not
+   * committed yet. Reading on another connection would see the tree as it was before the move —
+   * which is the whole thing being corrected, and is the same mistake `P-88` found in the delete
+   * path from the other direction.
+   *
+   * **Free when nothing is offline**, which is the normal state of an installation: an empty map
+   * means there is no overlay for a topology change to invalidate. Otherwise it costs one
+   * subtree read per offline probe, on a mutation that is already walking the tree.
+   *
+   * Re-read rather than patched. Working out which sensors a move added or removed means walking
+   * the tree anyway, and a snapshot that is *recomputed* cannot drift from the tree in the way
+   * the one it replaces did.
+   */
+  async resync(q: Queryable): Promise<number> {
+    if (this.#byProbe.size === 0) return 0;
+
+    const before = new Set(this.#unreachable);
+    for (const [probeObjectId, held] of this.#byProbe) {
+      try {
+        this.#byProbe.set(probeObjectId, {
+          ...held,
+          sensorIds: await this.#sensorsUnder(probeObjectId, q),
+        });
+      } catch (error) {
+        // Leave this probe's snapshot as it was, for the reason `lost` gives: one probe the
+        // database will not answer for must not discard the overlay for the others.
+        this.#logger.error(
+          { probeObjectId, err: describeError(error) },
+          'could not re-read a lost probe’s sensors after a topology change',
+        );
+      }
+    }
+
+    this.#unreachable.clear();
+    for (const held of this.#byProbe.values()) {
+      for (const id of held.sensorIds) this.#unreachable.add(id);
+    }
+
+    // Both directions: sensors that left an offline probe go back to what their last reading
+    // says, and sensors that arrived under one become Unknown. Only the ones that actually
+    // moved across the boundary — the rest have nothing to re-decide.
+    const changed = [
+      ...[...before].filter((id) => !this.#unreachable.has(id)),
+      ...[...this.#unreachable].filter((id) => !before.has(id)),
+    ];
+    if (changed.length === 0) return 0;
+
+    try {
+      const moved = await this.#states.reevaluate(q, changed, this.#now(), {
+        message: 'the probe carrying this sensor changed',
+      });
+      this.#logger.info(
+        { sensors: changed.length, moved },
+        'the tree moved sensors across a lost probe’s boundary',
+      );
+      return moved;
+    } catch (error) {
+      // The overlay is already right; only the stored states are behind, and the next result or
+      // sweep for each sensor will settle them. Rolling the overlay back would put the stale
+      // snapshot the whole method exists to remove straight back in.
+      this.#logger.error(
+        { sensors: changed.length, err: describeError(error) },
+        'could not re-evaluate sensors after a topology change; the overlay is correct',
+      );
+      return 0;
+    }
+  }
+
+  /**
    * Why this probe's sensors are Unknown, or `undefined` if they are not.
    *
    * **So a caller can tell an edge from a level without keeping its own copy.** The delivery
@@ -294,8 +377,8 @@ export class ProbeReachability {
    * probe → group → … → device → sensor, and this runs once per probe outage rather than once
    * per anything. `S-04`'s own subtree read is the same shape.
    */
-  async #sensorsUnder(probeObjectId: number): Promise<number[]> {
-    const rows = await this.#db.query<{ id: string }>(
+  async #sensorsUnder(probeObjectId: number, q: Queryable = this.#db): Promise<number[]> {
+    const rows = await q.query<{ id: string }>(
       // The core-evaluated exclusion is a NOT IN rather than a filter applied afterwards, so a
       // probe carrying five thousand sensors and one Sensor Factory does not read the factory's
       // row only to throw it away — and so the empty-list case is one array parameter rather

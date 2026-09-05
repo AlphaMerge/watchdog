@@ -527,6 +527,12 @@ is waiting for one task to set it:
 
 Two further notes for whoever picks those up:
 
+- **The unreachable overlay is derived from the tree, not snapshotted against it** (`P-103`).
+  `lost` records which sensors a probe was carrying; a move, a create or a delete changes that
+  answer, and the overlay is re-derived inside the same transaction. Without it a sensor moved
+  off a dead probe onto a live one stayed `unknown`/`probe` for as long as the dead probe was
+  away — no transition, because the state never changed, and no alarm, because it never moved.
+
 - **A resume is a floor on staleness, not an erasure of it** (`P-97`). `last_result_at` is the
   high-water mark that makes the at-least-once protocol safe; `resumed_at` is what says nothing
   has been measured since. They were one column until `P-97`, and a resume nulled it — so every

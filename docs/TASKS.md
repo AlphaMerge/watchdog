@@ -6283,6 +6283,58 @@ because each is a decision rather than a defect:
       resolves both. The tests go through `register` for the same reason, over a JSON round-trip:
       calling `validateLookup` directly would assert on a shape the compiler says cannot exist.
 
+- [x] **P-102 — A multi-tag filter could not match tags spread across the inheritance chain** ·
+      S · D-05 · Finding 14. The recursive CTE's base case was `tags_folded(tags) @> $tags` — one
+      object had to carry **every** requested tag before the descent started. So an AND-filter
+      whose tags sit at different levels of one chain matched nothing at all: a group tagged
+      `paris`, a device under it tagged `production`, and `?tag=paris&tag=production` returning an
+      empty page.
+
+      The effective-tag rule the rest of the system uses is the union of an object's own tags with
+      its ancestors' — `MessageContextLoader.#factsOf` computes exactly that for `%tags`, under a
+      comment asserting "the object filter already resolves them that way". It did not. A
+      notification about that sensor interpolated "paris, production" while a search for those two
+      tags could not find the sensor it was about, and `repository.ts` says in as many words that
+      a filter which quietly under-reports is worse than one that errors.
+
+      One walk per tag, intersected. An object effectively carries a tag exactly when it is in the
+      subtree of something carrying it, so "carries all of them" is the intersection of those
+      subtrees — which keeps the cheap shape, each walk still starting from the few rows the GIN
+      index finds, rather than accumulating tags down a walk of the whole tree on every filtered
+      list.
+
+      The existing case passed because `Berlin DC` carries both of its tags itself. Every fixture
+      in that file put the ANDed tags on one object, which is the single arrangement the old query
+      could match.
+
+- [x] **P-103 — A sensor moved off a dead probe stayed Unknown for ever** · M · R-05 · Finding 16.
+      `lost` snapshots which sensors a probe was carrying, and the snapshot outlived the topology
+      it was taken from. Moving the device onto a working probe — which is what an operator does
+      when a probe host dies — left every moved sensor in `#unreachable`, so `#withProbeFacts`
+      overlaid `probeReachable: false` and layer 3 answered `unknown`/`probe` for every result the
+      *new* probe delivered.
+
+      No transition was recorded, because the state did not change, and the cached facts kept
+      `probeReachable: false` so every later result short-circuited the same way. The sensors were
+      dark and unable to alarm for as long as the dead probe stayed away — permanently if it was
+      decommissioned, which is the usual reason the device was moved. Neither the code nor
+      `docs/state-machine.md` had a name for "a sensor whose current probe is delivering but which
+      the core still believes is behind a lost one".
+
+      `resync` re-derives the overlay from the tree, wired to `object.moved`/`created`/`cloned`/
+      `deleted` through an audit sink. **Free when nothing is offline** — an empty map means there
+      is no overlay to invalidate — so the `object.created` objection that shaped `P-93` does not
+      apply: an installation with nothing offline pays one `Map.size` check per mutation.
+
+      **Through the caller's transaction**, which the first version got wrong: reading on its own
+      connection saw the tree as it was *before* the move, which is the whole thing being
+      corrected. That is `P-88`'s mistake from the other direction, and the test caught it
+      immediately because it went through the sink rather than calling `resync` by hand.
+
+      Both directions are pinned: a sensor leaving an offline probe goes back to what its last
+      reading says, and one arriving under an offline probe becomes Unknown — saying Up about a
+      sensor nothing is scanning is the claim `WORKFLOW.MD §12` forbids.
+
 - [ ] **P-96 — `pool-sizer`'s timer test is load-sensitive, and only under the whole-repo run** ·
       S · P-44 · Noticed while verifying `P-94`/`P-95`: `recomputes on its own timer, and stops
       when told` (`packages/probe/test/pool-sizer.test.ts:129`) failed once in a full `npm test`

@@ -313,9 +313,24 @@ export class ObjectRepository {
       // Written as "objects in the subtree of anything that carries the tag": the folded GIN
       // index finds the few tagged roots, then the walk descends from them. The alternative —
       // walking up from every candidate row — is a recursive CTE per row.
-      where.push(`o.id IN (
+      //
+      // **One walk per tag, intersected** (`P-102`). A single walk whose base case demanded
+      // every tag at once could only match a chain where one object carried all of them, so an
+      // AND-filter whose tags are spread across levels matched nothing at all: a group tagged
+      // `paris`, a device under it tagged `production`, and `?tag=paris&tag=production` returning
+      // an empty page. The effective-tag rule everything else uses is the union of an object's
+      // own tags with its ancestors' — `MessageContextLoader` computes exactly that for `%tags`,
+      // so a notification would name both tags on a sensor a search for those two tags could not
+      // find.
+      //
+      // An object effectively carries a tag exactly when it is in the subtree of something that
+      // carries it, so "carries all of them" is the intersection of those subtrees. That keeps
+      // the cheap shape — each walk still starts from the few rows the GIN index finds — rather
+      // than accumulating tags down a walk of the whole tree on every filtered list.
+      for (const tag of filter.tags) {
+        where.push(`o.id IN (
         WITH RECURSIVE tagged AS (
-          SELECT id, 0 AS depth FROM object WHERE tags_folded(tags) @> ${add(filter.tags.map((t) => t.toLowerCase()))}::text[]
+          SELECT id, 0 AS depth FROM object WHERE tags_folded(tags) @> ${add([tag.toLowerCase()])}::text[]
           UNION ALL
           SELECT c.id, tagged.depth + 1
           FROM object c JOIN tagged ON c.parent_id = tagged.id
@@ -323,6 +338,7 @@ export class ObjectRepository {
         )
         SELECT id FROM tagged
       )`);
+      }
     }
     if (filter.q !== undefined && filter.q !== '') {
       where.push(`o.name ILIKE ${add(`%${escapeLike(filter.q)}%`)}`);
