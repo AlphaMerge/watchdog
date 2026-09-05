@@ -579,6 +579,30 @@ export class ProbeEndpoint {
               { acked: message.version, sent: session.sentVersion },
               'probe acknowledged a configuration version the core did not send',
             );
+          } else if (message.scheduled !== session.sentSensors.length) {
+            // **The count the ack carries, acted on rather than logged** (`P-149`). A full push
+            // is one `config-set` plus N-1 deltas at the same version, and the probe stamps
+            // itself as holding that version on the *first* one — so a link that drops mid-push
+            // leaves it with a fraction of its sensors and a version that says it is current. It
+            // reconnects, presents that version, the fingerprint matches, and the core answers
+            // `config-unchanged`. Nothing ever re-pushes: `pushAllConfigs` short-circuits on an
+            // unchanged fingerprint, and the probe keeps delivering results for the sensors it
+            // did keep, so `delivery.ts` reads it as healthy. The rest are never scanned again.
+            //
+            // The disagreement was already on the wire — `#applyConfig`'s own comment says the
+            // core logs it — and logging it was all that happened. Re-pushing is the answer: the
+            // probe asked for it by telling us a number that cannot be right.
+            logger.warn(
+              {
+                version: message.version,
+                scheduled: message.scheduled,
+                sent: session.sentSensors.length,
+              },
+              'probe scheduled a different number of sensors than it was sent; pushing again',
+            );
+            // Cleared first, so the push below cannot decide the fingerprint is unchanged.
+            session.sentVersion = null;
+            this.#queueConfig(session, logger);
           } else {
             logger.info(
               { version: message.version, scheduled: message.scheduled },
@@ -1115,12 +1139,31 @@ export class ProbeEndpoint {
           !(delta.upserted.length >= assignments.sensors.length && assignments.sensors.length > 0);
 
         if (delta !== null && worthADelta) {
-          session.connection.send({ type: 'config-delta', version: assignments.version, ...delta });
+          // **Chunked, like the full push, and for the same reason** (`P-148`). `config-delta`
+          // caps *both* `upserted` and `removed` at 5,000, and `assignmentsFor` filters out every
+          // paused sensor — so pausing a probe or a group above it on a probe carrying more than
+          // that produced one message with an oversized `removed`, which the probe's own decoder
+          // rejects and which kills the connection. The pause an operator is told takes effect
+          // immediately instead took a reconnect cycle, with a protocol violation in both logs,
+          // for every large pause and every resume. `worthADelta` never saved it: it weighs the
+          // *upserts* against a resend and has no opinion about removals.
+          const upserts = chunked(delta.upserted, CONFIG_CHUNK_SENSORS);
+          const removals = chunked(delta.removed, CONFIG_CHUNK_SENSORS);
+          const messages = Math.max(upserts.length, removals.length, 1);
+          for (let index = 0; index < messages; index += 1) {
+            session.connection.send({
+              type: 'config-delta',
+              version: assignments.version,
+              upserted: [...(upserts[index] ?? [])],
+              removed: [...(removals[index] ?? [])],
+            });
+          }
           logger.info(
             {
               version: assignments.version,
               upserted: delta.upserted.length,
               removed: delta.removed.length,
+              ...(messages === 1 ? {} : { messages }),
             },
             'sent a configuration delta',
           );

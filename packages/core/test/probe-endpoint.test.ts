@@ -990,6 +990,79 @@ describe(
       });
     });
 
+    it('splits a delta too large for one message, which a large pause produces', async () => {
+      // **`P-148`.** `config-delta` caps *both* `upserted` and `removed` at 5,000, and the delta
+      // branch had no chunking at all. `assignmentsFor` filters out every paused sensor, so
+      // pausing a probe object — or any group above it — on a probe carrying more than that
+      // produced one message whose `removed` array the probe's own decoder rejects, and a
+      // protocol violation destroys the socket. The pause an operator is told takes effect
+      // immediately instead took a reconnect cycle, every time, in both directions.
+      // `worthADelta` never saved it: it weighs the *upserts* against a resend and has no
+      // opinion about removals.
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 5_047 }, (_, at) => sensor(at + 1));
+
+      await withProbe(source, async (probe, endpoint) => {
+        await probe.waitFor(
+          (m) =>
+            m.type === 'config-delta' &&
+            probe.received.filter((r) => r.type === 'config-delta').length >= 5,
+        );
+        probe.received.length = 0;
+
+        // Everything paused: the assignment set goes to empty, and the delta is 5,047 removals.
+        source.sensors = [];
+        assert.ok(source.claimed !== null);
+        endpoint.pushConfig(source.claimed);
+
+        await probe.waitFor((m) => {
+          const removed = probe.received.flatMap((r) =>
+            r.type === 'config-delta' ? r.removed : [],
+          );
+          return m.type === 'config-delta' && removed.length === 5_047;
+        });
+
+        for (const message of probe.received) {
+          if (message.type !== 'config-delta') continue;
+          assert.ok(
+            message.removed.length <= 5_000,
+            `a delta carried ${String(message.removed.length)} removals, which the schema refuses`,
+          );
+          assert.ok(message.upserted.length <= 5_000);
+        }
+      });
+    });
+
+    it('pushes again when the probe acknowledges a different number of sensors', async () => {
+      // **`P-149`.** A full push is one `config-set` plus N-1 deltas at the same version, and the
+      // probe stamps itself as holding that version on the *first* one — so a link that drops
+      // mid-push leaves it with a fraction of its sensors and a version that says it is current.
+      // It reconnects, presents that version, the fingerprint matches, and the core answers
+      // `config-unchanged`. Nothing ever re-pushes: `pushAllConfigs` short-circuits on an
+      // unchanged fingerprint, and the probe keeps delivering results for the sensors it did
+      // keep, so the delivery watch reads it as healthy. The rest are never scanned again.
+      //
+      // The disagreement was already on the wire and already discarded: `config-ack` carries the
+      // count the probe actually scheduled, and the core logged it. Acting on it needs no
+      // protocol change — the probe asked for the push by telling us a number that cannot be
+      // right.
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2), sensor(3)];
+
+      await withProbe(source, async (probe) => {
+        const set = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(set.type === 'config-set');
+        probe.received.length = 0;
+
+        // What a probe that lost the rest of a push reports: current version, fewer sensors.
+        probe.send({ type: 'config-ack', version: set.version, scheduled: 1 });
+
+        const again = await probe.waitFor((m) => m.type === 'config-set');
+        assert.ok(again.type === 'config-set');
+        assert.equal(again.sensors.length, 3, 'the whole set, again');
+      });
+    });
+
     it('sends nothing but a confirmation when the probe is already current', async () => {
       // The reconnect-after-a-blip case, and the whole reason the handshake carries a
       // fingerprint: re-sending five thousand unchanged assignments is pure waste.

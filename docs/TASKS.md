@@ -10292,6 +10292,33 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       Tests: 5 new. Mutation 5/5.
 
+- [x] **P-148 — `config-delta` was not chunked, so a large pause killed the connection**
+      `config-set` is chunked at 1,000 sensors precisely because the schema caps it at 5,000 —
+      that is what `P-?`'s 426-closures wedge was about — and the delta branch had no chunking at
+      all, against a schema that caps **both** `upserted` and `removed` at 5,000.
+      `assignmentsFor` filters out every paused sensor, so pausing a probe object, or any group
+      above it, on a probe carrying more than that produced one message the probe's own decoder
+      rejects, and a protocol violation destroys the socket. The pause an operator is told takes
+      effect immediately instead took a reconnect cycle, in both directions, every time.
+      `worthADelta` never saved it: it weighs the *upserts* against a resend and has no opinion
+      about removals.
+
+- [x] **P-149 — An interrupted chunked push left a probe confidently scanning a fraction**
+      A full push is one `config-set` plus N-1 deltas at the same version, and the probe stamps
+      itself as holding that version on the *first* one — `config-set` is authoritative, so chunk
+      one drops every sensor outside it and chunks two onwards put them back. A link that drops in
+      between leaves the probe with a fraction of its sensors and a version that says it is
+      current. It reconnects, presents that version, the fingerprint matches, and the core answers
+      `config-unchanged`. Nothing ever re-pushes — `pushAllConfigs` short-circuits on an unchanged
+      fingerprint — and the probe keeps delivering results for what it kept, so the delivery watch
+      reads it as healthy. The rest are never scanned again, and their rows sit frozen.
+
+      The disagreement was already on the wire and already discarded: `config-ack` carries the
+      count the probe actually scheduled, and `#applyConfig`'s own comment says the core logs any
+      disagreement — logging it was all that happened. Acting on it needs no protocol change.
+
+      Tests: 3 new. Mutation 3/3.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
