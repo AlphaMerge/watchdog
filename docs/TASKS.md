@@ -9952,6 +9952,76 @@ because each is a decision rather than a defect:
       so they were asserting against a wall of 403s that no credential could leak through.
       Mutation 4/4.
 
+### Panel round two — notifications, schedules, triggers
+
+Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
+claims, each put to three skeptics briefed to refute it; a completeness critic then named five
+areas nobody had looked at and those were run and verified at the same bar. 27 + 18 confirmed.
+
+- [x] **P-112 — A pending alarm was destroyed by any state change, restarting its latency**
+      `chain.ts` tested `phase === 'pending'` before the `P-105` rule and answered `cancel`, so a
+      probe blip — `down -> unknown` — deleted the alarm, and the reconnect armed a fresh one from
+      the sensor's new `since`. A target down continuously behind a link flapping every three
+      minutes never reached its five-minute latency: no notification, ever, and a notification
+      queue that reads clean. The comment justified sending nothing, which is right; it never
+      justified re-reading `since`. `P-105` had fixed the same shape for `notified` only.
+
+      Now the only paths that cancel a pending alarm are the ones where the alarm is genuinely
+      over — a recovery, or a pause — and everything else suspends, so the return picks the
+      latency up where it stopped. Also fixed here: **a trigger retargeted onto the state the
+      sensor is already in** now arms in the same reaction instead of cancelling and stopping.
+      Reactions are driven by transitions, and a sensor Down for a week has none coming, so the
+      retargeted trigger was inert and looked identical to a working one.
+
+- [x] **P-113 — A trigger configured for `up` notified once per sensor, ever**
+      `up` is an offered trigger state, and for an alarm armed on it the recovery branch is
+      unreachable: `isRecovery` is true only for `up`, so leaving `up` suspended the alarm and the
+      return matched `stillStanding` and took `resume` — and a resumed `notified` phase with no
+      escalation and no repeat has nothing left to send. The operator who asked to be told when
+      sensors come back was told once and then never again, silently, with the alarm row flipping
+      suppressed true and false and nothing anywhere saying why. `endsAlarm` now takes the state
+      the alarm is *about*: suspension is for an ongoing problem whose escalation must survive a
+      blip, and there is no ongoing problem to escalate about a healthy sensor.
+
+- [x] **P-114 — An unreadable trigger had its standing alarm deleted rather than skipped**
+      The engine claims each trigger out of an orphan map and deletes whatever is left. It read
+      the settings *before* claiming, so a trigger this build cannot parse — a downgrade, or a
+      shape written by a newer build — logged a warning and then lost its alarm to the orphan
+      sweep, cancelling an outage that was still happening on the strength of not understanding
+      it. Claimed first now: this build cannot judge it, so it changes nothing.
+
+- [x] **P-115 — Changing a trigger's kind orphaned the alarm and blocked the pair for ever**
+      `PUT /triggers/:id` is whole-document and does not refuse a change of `kind`, so a standing
+      threshold alarm can find itself under a state trigger. Its `state` is null, the engine's view
+      collapses, and `reconcile` can only answer `idle` or `arm` — neither of which clears a row —
+      while the trigger has already been claimed out of the orphan sweep. The row was unreachable
+      by every clearing path: the state arm was swallowed by `ON CONFLICT DO NOTHING` while the
+      counters reported it armed, so that (sensor, trigger) pair could never notify again, and the
+      sweep re-read a `next_due_at` in the past at the scheduler's floor of 25 ms — forty times a
+      second, for ever, each one logging that the settings were unreadable. The row is cleared now,
+      and **the writes were reordered so clears land before arms**: `ON CONFLICT DO NOTHING` means
+      a pair that is both cleared and armed in one reaction would otherwise have its insert
+      swallowed by the row it is replacing and then lose that row to the delete.
+
+- [x] **P-116 — The sweep erased an acknowledgement that landed while it was deciding**
+      `due` read without a lock and `advance` wrote back blind, so an acknowledgement committing
+      between the two halves was overwritten by the sweep's own `suppressed = false` and the
+      escalation went out to everybody the operator had just told they were handling it. Both
+      readers take the row lock now — `FOR UPDATE OF a SKIP LOCKED` on the sweep so two sweeps
+      divide the work rather than queue, and `FOR UPDATE OF a` on the reaction's read, because
+      they are the only two writers of the table and both are read-modify-write.
+
+- [x] **P-117 — A resumed chain did not wake the scheduler**
+      Only an arm poked it, on the reasoning that a reaction which cleared alarms has made the next
+      due time later and never sooner. True of a clear; not true of a resume. A probe blip suspends
+      the chain leaving nothing due, and the reconnect gives it back the escalation it had already
+      earned, due at once — which the scheduler then slept straight past until the next unrelated
+      event, however far away that was.
+
+      Tests: 15 new — 9 in `notification-chain.test.ts` over the three chain rules, 5 in
+      `notification-engine.test.ts` including a two-transaction test for the lock, and the resume
+      poke. Mutation 7/7.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

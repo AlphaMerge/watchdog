@@ -682,6 +682,168 @@ describe(
       assert.deepEqual(await queued(), []);
     });
 
+    // ---------------------------------------------------------------------------------------
+    // A trigger edited under a standing alarm (`P-114`, `P-115`).
+    // ---------------------------------------------------------------------------------------
+
+    it('re-arms the pair when a trigger\u2019s kind is changed under a standing alarm', async () => {
+      // **`PUT /triggers/:id` is whole-document and does not refuse a change of `kind`**, so a
+      // standing threshold alarm can find itself under a state trigger. Its `state` is null, the
+      // engine\u2019s view of it collapses, and `reconcile` can only answer `idle` or `arm` \u2014 neither
+      // of which clears a row. The row became unreachable by every clearing path while the
+      // trigger had already been claimed out of the orphan sweep, so the state arm was swallowed
+      // by `ON CONFLICT` and that pair could never notify again, for the life of the sensor.
+      const trigger = await triggers.create(testActor, deviceId, {
+        kind: 'threshold',
+        settings: {
+          channelKey: 'latency',
+          condition: 'above',
+          value: 1,
+          triggerTemplateId: INITIAL,
+        },
+      });
+      // A threshold alarm standing on that trigger, written directly: reaching it through a
+      // reading would test the threshold path, and the defect is about the row, not how it got
+      // there.
+      await db.query(
+        `INSERT INTO notification_alarm
+           (sensor_id, trigger_id, kind, state, channel_key, observed, since, phase, next_due_at)
+         VALUES ($1, $2, 'threshold', NULL, 'latency', 42, $3, 'notified', $3)`,
+        [sensorId, trigger.id, T0],
+      );
+
+      await triggers.update(testActor, trigger.id, {
+        kind: 'state',
+        settings: { state: 'down', initialTemplateId: INITIAL },
+      });
+      await scan([sensorId], false, at(60));
+      await scan([sensorId], false, at(120));
+
+      const armed = await standing();
+      assert.equal(armed.length, 1, 'the orphaned threshold row should be gone, not still there');
+      assert.equal(
+        armed[0]?.phase,
+        'pending',
+        'and the state alarm should have armed in its place',
+      );
+      assert.equal(await sweep(at(121)), 1, 'so the pair can notify again');
+    });
+
+    it('leaves a standing alarm alone when this build cannot read its trigger', async () => {
+      // **Skipped, not cancelled.** Anything still unclaimed at the end of a sensor is treated as
+      // an orphan and deleted \u2014 a trigger deleted, disabled, or moved out from under. A trigger
+      // whose settings this build cannot parse is none of those: it is a trigger this build
+      // cannot judge, and deleting the alarm for an outage that is still happening on the
+      // strength of not understanding it is the worst available answer. A downgrade, or a
+      // settings shape written by a newer build, is exactly when it happens.
+      const trigger = await downTrigger(deviceId);
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(60));
+      assert.equal((await standing()).length, 1);
+
+      // Settings this build cannot read: `state` is not one of the states it knows.
+      await db.query(
+        `UPDATE notification_trigger SET settings = jsonb_set(settings, '{state}', '"molten"')
+         WHERE id = $1`,
+        [trigger],
+      );
+
+      await scan([sensorId], false, at(120));
+      assert.equal(
+        (await standing()).length,
+        1,
+        'the alarm should still stand: this build cannot judge the trigger, so it changed nothing',
+      );
+    });
+
+    it('does not overwrite an acknowledgement that lands while the sweep is deciding', async () => {
+      // **The sweep is a read-modify-write with nothing between the halves.** It reads the due
+      // rows, decides what each owes from what it read, and writes that decision back blind. An
+      // acknowledgement committing in between — `react`, inside the ingestion transaction, setting
+      // `suppressed` — was overwritten by the sweep's own `suppressed = false`, and the escalation
+      // went to everybody the operator had just told they were handling it.
+      //
+      // Reproduced with two real transactions rather than a mocked clock: the defect is a lock
+      // that was not taken, and only a second connection can show that it now is.
+      await downTrigger(deviceId, { escalationLatencySeconds: 300, escalationTemplateId: INITIAL });
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(60));
+      await sweep(at(61));
+
+      const before = await standing();
+      assert.equal(before.length, 1, 'an alarm should be standing, in the notified phase');
+
+      // Collected rather than assigned to a nullable: the second transaction has to be started
+      // from inside the first, and a `let` narrowed to `null` by its initialiser cannot be
+      // awaited afterwards without the compiler objecting to the check that guards it.
+      const acknowledging: Promise<number>[] = [];
+      await db.tx(async (sweeping) => {
+        const due = await alarms.due(sweeping, at(400), 10);
+        assert.equal(due.length, 1, 'the escalation should have fallen due');
+        const row = due[0];
+        assert.ok(row !== undefined);
+
+        // A second connection acknowledges. With the row locked it waits for this transaction;
+        // without the lock it commits immediately and the write below erases it.
+        acknowledging.push(
+          db.tx((other) =>
+            alarms.advance(other, [
+              { id: row.id, phase: 'notified', nextDueAt: null, repeats: 0, suppressed: true },
+            ]),
+          ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        await alarms.advance(sweeping, [
+          { id: row.id, phase: 'escalated', nextDueAt: at(700), repeats: 0, suppressed: false },
+        ]);
+      });
+      await Promise.all(acknowledging);
+
+      const after = await standing();
+      assert.equal(
+        after[0]?.suppressed,
+        true,
+        'the acknowledgement should be the last word, not the sweep\u2019s stale view of the row',
+      );
+    });
+
+    it('pokes the scheduler when a reaction resumes a chain, not only when it arms one', async () => {
+      // **A resume can set a due time sooner than the one the scheduler is already sleeping for**
+      // (`P-117`). Only an arm used to poke it, on the reasoning that a reaction which cleared
+      // alarms has made the next due time later and never sooner — true of a clear, and not true
+      // of a resume. A probe blip suspends the chain and leaves nothing due; the reconnect gives
+      // it back the escalation it had already earned, due at once, and the scheduler slept
+      // straight past it until the next unrelated event, however far away that happened to be.
+      let pokes = 0;
+      const poked = new AlarmEngine({
+        logger: silent,
+        alarms,
+        onArmed: () => {
+          pokes += 1;
+        },
+      });
+      await downTrigger(deviceId, { escalationLatencySeconds: 60, escalationTemplateId: INITIAL });
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(60));
+
+      // Suspended: the sensor left the state without recovering.
+      await db.query(`UPDATE sensor_runtime SET state = 'unknown' WHERE object_id = $1`, [
+        sensorId,
+      ]);
+      await db.tx((q) => poked.react(q, [sensorId], at(120)));
+      const beforeResume = pokes;
+
+      // And back. The chain resumes, with a due time this reaction has just created.
+      await db.query(`UPDATE sensor_runtime SET state = 'down', since = $2 WHERE object_id = $1`, [
+        sensorId,
+        at(180),
+      ]);
+      const result = await db.tx((q) => poked.react(q, [sensorId], at(180)));
+      assert.equal(result.resumed, 1, 'the chain should have resumed');
+      assert.ok(pokes > beforeResume, 'and the scheduler should have been told its sleep is stale');
+    });
+
     it('bounds one sweep and comes straight back for the rest', async () => {
       const bounded = new AlarmEngine({ logger: silent, maxPerSweep: 1 });
       await downTrigger(h.rootId);

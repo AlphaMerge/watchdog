@@ -206,19 +206,25 @@ export class AlarmEngine {
         const out = { arm, advance, clear, requests, result };
 
         if (trigger.kind === STATE_TRIGGER.id) {
+          const alarm = alarms.get(trigger.id) ?? null;
+          // **Claimed before the settings are read** (`P-114`). Anything still in this map at the
+          // end of the sensor is treated as an orphan and deleted; a trigger this build cannot
+          // parse is not an orphan, it is a trigger this build cannot judge. Skipping while
+          // leaving the row claimed means a downgrade — or a settings shape written by a newer
+          // build — logs a warning and changes nothing, rather than silently cancelling the
+          // standing alarm for an outage that is still happening.
+          alarms.delete(trigger.id);
           const settings = readSettings(trigger, this.#logger);
           if (settings === null) continue;
-          const alarm = alarms.get(trigger.id) ?? null;
-          alarms.delete(trigger.id);
           this.#apply(sensor, trigger, alarm, settings, now, out);
           continue;
         }
 
         if (trigger.kind === THRESHOLD_TRIGGER.id) {
-          const settings = readThreshold(trigger, this.#logger);
-          if (settings === null) continue;
           const alarm = alarms.get(trigger.id) ?? null;
           alarms.delete(trigger.id);
+          const settings = readThreshold(trigger, this.#logger);
+          if (settings === null) continue;
           // `undefined` from the map is "no reading", which is not zero (`CLAUDE.md`). And a
           // sensor whose last check failed, or that nobody is scanning, has no current value
           // whatever the hypertable still holds for it — see `readingsAreCurrent`.
@@ -240,13 +246,22 @@ export class AlarmEngine {
     result.queued = await this.#alarms.queue(q, requests);
     this.#queued += result.queued;
     this.#untemplated += requests.length - result.queued;
-    await this.#alarms.arm(q, arm);
     await this.#alarms.advance(q, advance);
+    // **Cleared before armed, and the order is load-bearing** (`P-112`, `P-115`). `arm` is
+    // `ON CONFLICT (sensor_id, trigger_id) DO NOTHING`, so a pair that is both cleared and armed
+    // in one reaction — a trigger retargeted onto the state the sensor is already in, or one
+    // whose kind changed under a standing alarm — would have its insert swallowed by the row it
+    // is replacing and then lose that row to the delete. Arming into the hole the clear leaves
+    // is the only order that survives both.
     await this.#alarms.clear(q, clear);
-    // Only when something was armed: a reaction that cleared alarms has made the next due time
-    // later, never sooner, and a scheduler already asleep for longer than it needs is not a
-    // problem worth a query.
-    if (arm.length > 0) this.#onArmed?.();
+    await this.#alarms.arm(q, arm);
+    // **Armed or resumed** (`P-117`). A reaction that only cleared alarms has made the next due
+    // time later, never sooner, and a scheduler asleep for longer than it needs is not worth a
+    // query. A resume is the other case: an acknowledgement lapsing, or a sensor returning to the
+    // state after a probe blip, gives an alarm a due time that can be sooner than anything the
+    // scheduler is currently sleeping for — and it would then sleep straight past it, delaying an
+    // escalation by however long the next unrelated event happened to be away.
+    if (arm.length > 0 || result.resumed > 0) this.#onArmed?.();
     if (result.queued > 0) this.#onQueued?.();
     return result;
   }
@@ -408,6 +423,18 @@ export class AlarmEngine {
             repeats: alarm.repeats,
             suppressed: alarm.suppressed,
           };
+    // **A row of the other kind under this trigger is cleared here** (`P-115`). `PUT /triggers/:id`
+    // is whole-document and does not refuse a change of `kind`, so a standing threshold alarm can
+    // find itself under a state trigger. Its `state` is null, so `view` collapses and `reconcile`
+    // can only answer `idle` or `arm` — neither of which clears a row — while the trigger has
+    // already been claimed out of the orphan map. The row became unreachable by every clearing
+    // path: the state arm was swallowed by `ON CONFLICT`, so that pair could never notify again,
+    // and the sweep re-read a `next_due_at` in the past forty times a second for ever.
+    if (alarm !== null && view === null) {
+      out.clear.push(alarm.id);
+      out.result.cleared += 1;
+    }
+
     const decision = reconcile(view, sensor.state, sensor.since, settings, now);
 
     switch (decision.kind) {
@@ -474,6 +501,26 @@ export class AlarmEngine {
         if (alarm === null) return;
         out.clear.push(alarm.id);
         out.result.cleared += 1;
+        return;
+
+      case 'retarget':
+        // Both writes, in one reaction: the old row goes and the new chain starts from the state
+        // the sensor is already in. `clear` runs before `arm`, which is what makes that possible.
+        if (alarm !== null) {
+          out.clear.push(alarm.id);
+          out.result.cleared += 1;
+        }
+        out.arm.push({
+          sensorId: sensor.sensorId,
+          triggerId: trigger.id,
+          kind: 'state',
+          state: settings.state,
+          channelKey: null,
+          observed: null,
+          since: sensor.since,
+          nextDueAt: decision.nextDueAt,
+        });
+        out.result.armed += 1;
         return;
     }
   }

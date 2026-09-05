@@ -68,7 +68,15 @@ export type Reconciliation =
   /** Returned to Up: the alarm is over, and somebody who was told should be told that. */
   | { readonly kind: 'recover' }
   /** The alarm is over and nobody is owed a word about it. */
-  | { readonly kind: 'cancel' };
+  | { readonly kind: 'cancel' }
+  /**
+   * The trigger was retargeted onto the state the sensor is already in.
+   *
+   * One verdict rather than a cancel that the next reaction happens to follow with an arm,
+   * because there may not be a next reaction: reactions are driven by state transitions, and a
+   * sensor that has been Down for a week has none coming.
+   */
+  | { readonly kind: 'retarget'; readonly nextDueAt: Date | null };
 
 /** What falling due decided: the message owed, and where the chain goes next. */
 export interface Firing {
@@ -122,9 +130,10 @@ export function isRecovery(current: SensorState): boolean {
 /**
  * Whether leaving the armed state ends the alarm outright, rather than suspending it.
  *
- * Only a pause (`P-105`). An operator switching monitoring off is a decision that the outage is
- * not being watched any more — `docs/state-machine.md` §3 — so there is nothing left to escalate
- * and nothing to say when it comes back; the sensor resumes to Unknown and awaits a fresh scan.
+ * A pause (`P-105`), or an alarm that was about the sensor being Up (`P-113`). An operator
+ * switching monitoring off is a decision that the outage is not being watched any more —
+ * `docs/state-machine.md` §3 — so there is nothing left to escalate and nothing to say when it
+ * comes back; the sensor resumes to Unknown and awaits a fresh scan.
  *
  * **Everything else suspends instead**, which is the fix for two separate holes. Leaving `down`
  * for `warning` used to delete the alarm, so the later `warning -> up` found nothing to recover
@@ -135,8 +144,17 @@ export function isRecovery(current: SensorState): boolean {
  * escalation deadline reset, so a probe flapping every twenty minutes never escalated at all and
  * paged once per flap per sensor. `CLAUDE.md`: one outage, one alarm.
  */
-export function endsAlarm(current: SensorState): boolean {
-  return current === 'paused';
+export function endsAlarm(current: SensorState, armed: SensorState): boolean {
+  if (current === 'paused') return true;
+  // **An alarm about the sensor being Up ends when it stops being Up** (`P-113`). Suspending is
+  // right for an alarm about a *problem*: the escalation chain of an ongoing outage must survive
+  // a probe blip. There is no ongoing problem to escalate about a healthy sensor, and every
+  // return to Up is its own event — so suspending one turns "tell me when it comes back" into
+  // "tell me the first time it ever comes back". Traced: the alarm suppresses on the way down,
+  // and the return matches `stillStanding`, so it takes `resume` rather than `arm` — and a
+  // resumed `notified` phase with no escalation and no repeat has `nextDueAt: null` and queues
+  // nothing. The trigger notifies once per sensor and then never again, silently, for ever.
+  return isRecovery(armed);
 }
 
 /**
@@ -241,15 +259,35 @@ export function reconcile(
 
   // The trigger was edited to watch a different state. The old alarm is about something nobody
   // is watching any more; standing it down silently is right, because nothing has recovered.
-  if (alarm.state !== settings.state) return { kind: 'cancel' };
+  //
+  // **But the retarget arms in the same breath when the sensor is already in the new state**
+  // (`P-112`). Cancelling and stopping there leaves the trigger inert until the sensor next
+  // changes state — which for a sensor that has been Down for a week is never, so an operator
+  // who retargets a trigger onto the state in front of them gets silence and no way to tell it
+  // from a working one.
+  if (alarm.state !== settings.state) {
+    return current === settings.state
+      ? { kind: 'retarget', nextDueAt: initialDueAt(since, settings) }
+      : { kind: 'cancel' };
+  }
 
   if (!stillStanding(alarm.state, current)) {
-    // Sent nothing yet? Then nobody knows there was an alarm, and a recovery notification would
-    // be the first anyone heard of it. This is the blip: it produces no notification at all.
-    if (alarm.phase === 'pending') return { kind: 'cancel' };
-    if (isRecovery(current)) return { kind: 'recover' };
-    // An operator switched monitoring off. Nothing to escalate, nothing to announce.
-    if (endsAlarm(current)) return { kind: 'cancel' };
+    // An operator switched monitoring off, or the alarm was about being Up and it no longer is.
+    // Nothing to escalate, nothing to announce.
+    if (endsAlarm(current, alarm.state)) return { kind: 'cancel' };
+    if (isRecovery(current)) {
+      // Sent nothing yet? Then nobody knows there was an alarm, and a recovery notification
+      // would be the first anyone heard of it. This is the blip: no notification at all.
+      //
+      // **And this is the only place `pending` may cancel** (`P-112`). It used to short-circuit
+      // the whole branch, so a pending alarm was destroyed by `down -> unknown` on a probe blip
+      // and by `down -> warning` — and the return to Down re-armed from the sensor's *new*
+      // `since`, starting a brand-new initial latency. A target down continuously for hours
+      // behind a link that flaps every three minutes never reached its five-minute latency and
+      // never produced a single notification. The comment above justifies sending nothing; it
+      // never justified re-reading `since`. P-105 fixed the same shape for `notified` only.
+      return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
+    }
     // **Neither recovered nor stood down, so the obligation survives** (`P-105`). The sensor has
     // left the state that was paged about without coming back to normal — flaky rather than
     // fixed, or Unknown because its probe went. Suspending keeps three things true: nobody is

@@ -446,3 +446,101 @@ describe('firing a due alarm', () => {
     assert.equal(current.repeats, 5);
   });
 });
+
+// -------------------------------------------------------------------------------------------
+// The three holes the notifications panel found in this file (`P-112`, `P-113`).
+// -------------------------------------------------------------------------------------------
+
+describe('an alarm that has not notified yet', () => {
+  const latency = settings({ initialLatencySeconds: 300 });
+
+  it('survives the sensor going Unknown, rather than restarting its latency', () => {
+    // **The probe blip.** A pending alarm used to be deleted whenever the sensor left the armed
+    // state, whatever it left for — so a WAN link that drops for a minute destroyed the alarm,
+    // and the reconnect armed a *fresh* one from the sensor's new `since`. A target down
+    // continuously behind a link that flaps every three minutes never reached its five-minute
+    // latency, so nobody was ever paged and the queue looked clean throughout.
+    const pending = alarm({ phase: 'pending', nextDueAt: at(300) });
+    assert.deepEqual(reconcile(pending, 'unknown', at(180), latency, at(180)), {
+      kind: 'suppress',
+    });
+  });
+
+  it('survives the sensor going to Warning as well', () => {
+    const pending = alarm({ phase: 'pending', nextDueAt: at(300) });
+    assert.deepEqual(reconcile(pending, 'warning', at(180), latency, at(180)), {
+      kind: 'suppress',
+    });
+  });
+
+  it('picks its latency up where it stopped when the state comes back', () => {
+    // The point of surviving: the chain resumes against the *alarm's* since, so the five minutes
+    // the outage has already served still count.
+    const suppressed = alarm({ phase: 'pending', nextDueAt: null, suppressed: true });
+    assert.deepEqual(reconcile(suppressed, 'down', at(240), latency, at(240)), {
+      kind: 'resume',
+      nextDueAt: at(300),
+    });
+  });
+
+  it('still says nothing when the sensor simply recovers', () => {
+    // The half that was right: nobody was told there was a problem, so "it is fixed" would be
+    // the first anybody heard of it.
+    const pending = alarm({ phase: 'pending', nextDueAt: at(300) });
+    assert.deepEqual(reconcile(pending, 'up', at(120), latency, at(120)), { kind: 'cancel' });
+  });
+
+  it('still ends outright when an operator pauses the sensor', () => {
+    const pending = alarm({ phase: 'pending', nextDueAt: at(300) });
+    assert.deepEqual(reconcile(pending, 'paused', at(120), latency, at(120)), { kind: 'cancel' });
+  });
+});
+
+describe('a trigger configured for Up', () => {
+  const up = settings({ state: 'up' });
+
+  it('ends its alarm when the sensor stops being Up', () => {
+    // **Otherwise it notifies once per sensor, ever.** `isRecovery` is true only for `up`, so an
+    // up-alarm can never take the `recover` branch; suspending it instead meant the return to Up
+    // matched `stillStanding` and took `resume`, and a resumed `notified` phase with no
+    // escalation and no repeat has nothing left to send. The operator who asked to be told when
+    // things come back was told once and then never again, with nothing in the UI to say why.
+    const standing = alarm({ state: 'up', phase: 'notified', nextDueAt: null });
+    assert.deepEqual(reconcile(standing, 'down', at(60), up, at(60)), { kind: 'cancel' });
+  });
+
+  it('so the next return to Up arms and notifies again', () => {
+    assert.deepEqual(reconcile(null, 'up', at(600), up, at(600)), {
+      kind: 'arm',
+      nextDueAt: at(600),
+    });
+  });
+
+  it('does not change how an alarm about a problem behaves', () => {
+    // The rule is about the state the alarm is *about*, not the state the sensor is in. A Down
+    // alarm going Unknown still suspends, which is `P-105`.
+    const standing = alarm({ state: 'down', phase: 'notified' });
+    assert.deepEqual(reconcile(standing, 'unknown', at(60), settings(), at(60)), {
+      kind: 'suppress',
+    });
+  });
+});
+
+describe('a trigger retargeted onto another state', () => {
+  it('arms straight away when the sensor is already in the new state', () => {
+    // **Cancelling and stopping there leaves the trigger inert.** Reactions are driven by state
+    // transitions, and a sensor that has been Down for a week has none coming — so an operator
+    // who points a trigger at the state in front of them gets silence, indistinguishable from a
+    // trigger that is working.
+    const standing = alarm({ state: 'warning', phase: 'notified' });
+    assert.deepEqual(reconcile(standing, 'down', at(60), settings(), at(60)), {
+      kind: 'retarget',
+      nextDueAt: at(60),
+    });
+  });
+
+  it('still just cancels when the sensor is in neither state', () => {
+    const standing = alarm({ state: 'warning', phase: 'notified' });
+    assert.deepEqual(reconcile(standing, 'up', at(60), settings(), at(60)), { kind: 'cancel' });
+  });
+});

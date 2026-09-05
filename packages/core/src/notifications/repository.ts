@@ -210,14 +210,22 @@ export class AlarmRepository {
     return out;
   }
 
-  /** The alarms standing for a batch of sensors, keyed by sensor. */
+  /**
+   * The alarms standing for a batch of sensors, keyed by sensor.
+   *
+   * **Locked, like the sweep's read** (`P-116`). Reaction and sweep are the only two writers of
+   * this table and both decide from a row and then write it back, so an unlocked read is a
+   * read-modify-write with nothing between the halves. Taking the row lock here makes the pair
+   * serialise: whichever gets there first is decided against the row the other one leaves.
+   */
   async alarmsFor(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, AlarmRow[]>> {
     const out = new Map<number, AlarmRow[]>();
     if (sensorIds.length === 0) return out;
     const rows = await q.query<AlarmRowShape>(
       `SELECT ${ALARM_COLUMNS} FROM notification_alarm a
        WHERE a.sensor_id = ANY($1::bigint[])
-       ORDER BY a.sensor_id, a.trigger_id`,
+       ORDER BY a.sensor_id, a.trigger_id
+       FOR UPDATE OF a`,
       [sensorIds],
     );
     for (const row of rows) {
@@ -251,7 +259,14 @@ export class AlarmRepository {
        JOIN sensor_runtime r ON r.object_id = a.sensor_id
        WHERE a.next_due_at IS NOT NULL AND a.next_due_at <= $1
        ORDER BY a.next_due_at, a.id
-       LIMIT $2`,
+       LIMIT $2
+       -- Locked, and only the alarm rows (P-116). The sweep decides what an alarm owes from the
+       -- row it read and then writes that decision back, blind. An acknowledgement landing in
+       -- between -- react suppressing the alarm inside the ingestion transaction -- was
+       -- overwritten by suppressed = false, and the escalation went out to everybody the operator
+       -- had just told they were handling it. OF a, so a busy trigger row cannot block a sweep;
+       -- SKIP LOCKED, so two sweeps divide the work instead of queueing behind each other.
+       FOR UPDATE OF a SKIP LOCKED`,
       [now, limit],
     );
     return rows.map((row) => ({
