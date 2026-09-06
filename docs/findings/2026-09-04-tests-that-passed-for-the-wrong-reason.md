@@ -650,6 +650,48 @@ Worth noting what it cost to find: nine review lenses, and the one that found it
 whose entire instruction was to verify premises the commit rests on against code the commit did
 not touch. That instruction exists because of entry 30 and entry 33. It has now paid three times.
 
+## The inverse: a test that failed for a reason unrelated to its subject
+
+**`ssh2`'s key generator, not the SSH sensors (2026-09-06).**
+
+Everything above is a test that stayed green while its subject was broken. This is the mirror
+image, and it earns a section because it costs the same thing in the end: a suite that goes red at
+random teaches people to re-run rather than read, and then the next real failure is re-run too.
+
+`packages/simulators/src/ssh-server.ts` generated a fresh ed25519 host key on every
+`TestSshServer.start()`. Roughly one key in 256 comes out of `ssh2.utils.generateKeyPairSync` with
+a 31-byte public key inside the OpenSSH blob — a leading zero byte trimmed where the format keeps
+it — and `new ssh2.Server({ hostKeys: [key] })` throws `Cannot parse privateKey: Malformed OpenSSH
+private key` on it. The `before` hook throws, and every test in `ssh-sensors.test.ts` fails at
+once, each one named for an SSH sensor that was never reached.
+
+**Measured**, on an idle machine: 26 unparseable keys in 6,000 (0.43%, against 1/256 = 0.39% for
+"the first byte of the public key is zero"). Reconstructing the old `start()` exactly — generate,
+then construct the server — threw 16 times in 3,000.
+
+**The report was right about the cause and wrong about the trigger, and the wrong half is the
+interesting one.** It arrived as load-dependent: red under `npm test --workspaces`, green 26/26
+running that file alone. It is not load-dependent. It is a coin, flipped once per key, and the
+sweep that measured it had the machine to itself. A whole-workspace run makes three draws — one
+host key per SSH test file, plus one client key pair in `ssh-session.test.ts` — so it goes red
+about 1.3% of the time. `ssh-sensors.test.ts` alone makes one draw: about 1 run in 230. Twenty-six
+green single-file runs is what a 1-in-230 event looks like every time anybody has the patience to
+try it, and it was read as a control.
+
+That also disqualifies the evidence anyone reaches for first. Five consecutive green whole-workspace
+runs after the change prove close to nothing: five runs *before* it would have been green 94% of
+the time. What the fix rests on instead is that `start()` no longer calls the generator at all —
+the host key is a committed constant, flagged in place as a fixture with no security value — so the
+throw is gone by construction rather than by luck. The one caller that still wants a fresh key,
+`keyPair()` for the key-authentication test, now generates until `ssh2.utils.parseKey` accepts one.
+
+**Exposed by:** generating 3,000 keys and parsing each. Nothing in the suite could have found it.
+At three draws a run its own signal is one red in seventy-odd, which is indistinguishable from the
+flakiness it was being blamed on.
+
+**What it needed:** measuring the rate instead of re-running until green. The re-run is what let it
+survive — it works, every time, and it is precisely what a 1-in-70 failure trains everybody to do.
+
 ## What actually found them
 
 

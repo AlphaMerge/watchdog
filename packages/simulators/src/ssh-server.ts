@@ -39,6 +39,30 @@ export interface CommandResult {
   readonly bulkBytes?: number;
 }
 
+/**
+ * The host key every simulated server presents, unless a test hands `start()` another one.
+ *
+ * **A fixture, not a secret.** It is checked into the repository in plain text, it protects
+ * nothing, and no real host has ever presented it — it has exactly the standing of the password
+ * `'monitor'` a few lines below. Nothing outside this file should ever see it.
+ *
+ * It is a constant because `ssh2.utils.generateKeyPairSync('ed25519')` is not reliable. Roughly
+ * one key in 256 comes back with a 31-byte public key inside the OpenSSH blob — a leading zero
+ * byte trimmed where the format wants it kept — and `new ssh2.Server` then throws
+ * `Cannot parse privateKey: Malformed OpenSSH private key`. Generating one per `start()` made
+ * that a 1-in-256 throw *per server started*, which a whole-workspace run loses often enough to
+ * redden every SSH suite for a reason that has nothing to do with SSH. Measured at 10 bad keys
+ * in 3,000: `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`.
+ */
+const SIMULATOR_HOST_KEY = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACBofyri6ZKOGNkNqE/h3uJbL42tQUzwC6taWDnnylbQbQAA
+AIhdCfPoXQnz6AAAAAtzc2gtZWQyNTUxOQAAACBofyri6ZKOGNkNqE/h3uJbL42t
+QUzwC6taWDnnylbQbQAAAEAsKSM2JV6B10rca+MOmWSiJARTGMh5PfGrIeBvBja0
+kmh/KuLpko4Y2Q2oT+He4lsvja1BTPALq1pYOefKVtBtAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+`;
+
 export class TestSshServer {
   readonly #server: Server;
   /**
@@ -64,7 +88,7 @@ export class TestSshServer {
   }
 
   static async start(hostKey?: string): Promise<TestSshServer> {
-    const key = hostKey ?? ssh2.utils.generateKeyPairSync('ed25519').private;
+    const key = hostKey ?? SIMULATOR_HOST_KEY;
     const server = new ssh2.Server({ hostKeys: [key] });
     const instance = new TestSshServer(server);
 
@@ -185,7 +209,20 @@ export class TestSshServer {
   }
 }
 
-/** A throwaway key pair, for the key-authentication tests. */
+/**
+ * A throwaway key pair, for the key-authentication tests.
+ *
+ * Sifted rather than trusted, for the reason `SIMULATOR_HOST_KEY` is a constant: about one
+ * ed25519 key in 256 comes out of `ssh2` unparseable, and a client key that will not parse fails
+ * the test as a refused login — a key-generation bug wearing authentication's name. Fresh per
+ * call because these tests want a key nothing else has seen; valid because it is checked here.
+ */
 export function keyPair(): { private: string; public: string } {
-  return ssh2.utils.generateKeyPairSync('ed25519');
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const pair = ssh2.utils.generateKeyPairSync('ed25519');
+    if (!(ssh2.utils.parseKey(pair.private) instanceof Error)) return pair;
+  }
+  // Sixteen in a row at 1-in-256 each is not bad luck; it is `ssh2` behaving differently from
+  // what this function assumes, and saying so beats handing the caller a key that will not parse.
+  throw new Error('ssh2 returned 16 unparseable ed25519 key pairs in a row');
 }
