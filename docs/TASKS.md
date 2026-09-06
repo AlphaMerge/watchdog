@@ -11040,6 +11040,32 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       happens once, after its normal latency, by which time a drain has usually said whether the
       outage is still real. Tests: 1 new. Mutation 1/1.
 
+- [x] **P-182 — the simulator's SSH host key was malformed one time in 256**
+      Raised as a report rather than picked from the backlog, and there was no ticket for it.
+      `TestSshServer.start()` generated a fresh ed25519 host key per server. About one key in 256
+      comes out of `ssh2.utils.generateKeyPairSync` with a 31-byte public key inside the OpenSSH
+      blob — a leading zero byte trimmed where the format keeps it — and `new ssh2.Server` throws
+      `Cannot parse privateKey: Malformed OpenSSH private key`. The `before` hook throws and every
+      test in `ssh-sensors.test.ts` fails at once, each named for an SSH sensor never reached.
+
+      **Measured on an idle machine: 26 unparseable in 6,000** (0.43%, against 1/256 = 0.39% for
+      "the first byte of the public key is zero"); the old `start()` reconstructed exactly threw 16
+      times in 3,000. The report came in as load-dependent — red under `npm test --workspaces`,
+      green 26/26 running the file alone — and it is not. It is a coin flipped once per key, and
+      the sweep that measured it had the machine to itself. A whole-workspace run makes three
+      draws, one host key per SSH test file plus one `keyPair()` in `ssh-session.test.ts`, so it
+      reddens about 1.3% of the time; `ssh-sensors.test.ts` alone makes one draw, about 1 run in
+      230. Twenty-six green single-file runs is what a 1-in-230 event looks like every time anybody
+      has the patience to try it.
+
+      `start()` defaults to a committed constant now, flagged in place as a fixture with no
+      security value, so the throw is gone by construction rather than by luck. `keyPair()` still
+      generates fresh — those tests want a key nothing else has seen — but sifts with `parseKey`
+      and gives up loudly after sixteen. Five green whole-workspace runs, and they are **not** the
+      evidence: five runs before this would have been green 94% of the time. Recorded in
+      `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` as that document's
+      inverse — a test that failed for a reason unrelated to its subject.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory
