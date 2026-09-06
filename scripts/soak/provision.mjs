@@ -66,8 +66,16 @@ if (args.has('remove')) {
   // refusing anything that is not a leaf. Counting first is the point of that: a soak tree that
   // had grown or shrunk since this script last looked is a tree somebody should look at, not one
   // to delete on a wildcard.
-  const tree = await call('GET', `/objects/${String(existing.id)}/tree`);
-  const descendants = (tree.items ?? []).length - 1;
+  //
+  // **`/counts`, not a page of `/tree`.** `/tree` is paginated and answers `{ items, truncated }`;
+  // counting its items gave 999 for a 5,250-object soak tree, so `--teardown` asked to delete a
+  // number the core knew was wrong and was refused — every time, for any tree past the page cap,
+  // which is every tree this harness makes. The route's own documentation names the mistake:
+  // counting a page of `/tree` "gives the right answer for a small installation and a quietly
+  // wrong one for a large installation". Here the guard turned quietly-wrong into loudly-refused,
+  // which is the guard working; the count was still wrong (`U-20`).
+  const counts = await call('GET', `/objects/${String(existing.id)}/counts`);
+  const descendants = Number(counts.objects?.total ?? 1) - 1;
   await call(
     'DELETE',
     `/objects/${String(existing.id)}?expectedDescendants=${String(descendants)}`,

@@ -19,6 +19,8 @@ matches() {
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+. "${repo_root}/scripts/lib/api-auth.sh"
 
 # **Ubuntu is named in the exit criterion, so it is a target here** (`PLAN.md` Phase 10: "a clean
 # install on Ubuntu and on Windows Server"). Proving Debian and *assuming* Ubuntu would be
@@ -115,8 +117,24 @@ for svc in ms-core ms-probe; do
   fi
 done
 
+# **A credential, because the thing under test ships with authentication on.** The example
+# `core.json` does not set `api.requireAuthentication`, so it defaults to on, and every assertion
+# below was written before that default existed — they answered 401 and reported the API as
+# broken (`U-20`). Minting the token is itself a check worth having: it exercises the bootstrap
+# password, the login route and token issue on a packaged build.
+echo "==> issuing an API token from the generated bootstrap password"
+docker cp "${repo_root}/scripts/smoke/api-token.sh" "${container}:/tmp/api-token.sh"
+if MS_TOKEN="$(docker exec "${container}" bash /tmp/api-token.sh)"; then
+  export MS_TOKEN
+  echo "    POST /api/v1/auth/tokens: issued"
+else
+  echo "    POST /api/v1/auth/tokens: FAILED — no token, the assertions below cannot run" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+
 echo "==> asserting the API answers"
-if docker exec "${container}" curl -sf http://127.0.0.1:8080/api/v1/objects/root >/dev/null; then
+if ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/objects/root >/dev/null; then
   echo "    GET /api/v1/objects/root: ok"
 else
   echo "    GET /api/v1/objects/root: FAILED" >&2
@@ -128,7 +146,7 @@ echo "==> asserting the shipped catalogue has sensor types in it"
 # @ms/sensors is a separate workspace package staged and symlinked by package.sh. If that goes
 # wrong the core still starts and still answers — it just refuses to create any sensor, which is
 # a failure nobody would notice until an operator tried.
-if matches 'icmp.ping' docker exec "${container}" curl -sf http://127.0.0.1:8080/api/v1/sensor-types; then
+if matches 'icmp.ping' ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/sensor-types; then
   echo "    GET /api/v1/sensor-types: icmp.ping present"
 else
   echo "    GET /api/v1/sensor-types: FAILED — the shipped catalogue is empty" >&2
@@ -173,7 +191,7 @@ echo "==> asserting the state machine is wired into the packaged build"
 # proves migration 008 applied and M-02's read side shipped. An unregistered route answers
 # ROUTE_NOT_FOUND; a registered one looks for the object and answers OBJECT_NOT_FOUND. The
 # difference is the whole assertion.
-state_code="$(docker exec "${container}" curl -s http://127.0.0.1:8080/api/v1/sensors/999999/state \
+state_code="$(ms_docker_curl "${container}" -s http://127.0.0.1:8080/api/v1/sensors/999999/state \
   | sed -n 's/.*"code":"\([A-Z_]*\)".*/\1/p')"
 if [ "${state_code}" = "OBJECT_NOT_FOUND" ]; then
   echo "    GET /api/v1/sensors/:id/state: registered"

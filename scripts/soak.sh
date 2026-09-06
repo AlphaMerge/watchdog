@@ -15,9 +15,14 @@
 # at locally; nothing here assumes that, and `MS_API` points it at any other. It writes into
 # `docs/findings/` because a performance claim without a measurement committed to the repo is not
 # a claim this project makes.
+#
+# `MS_TOKEN` authenticates it, and is needed unless the installation has
+# `api.requireAuthentication` off. For the dev stack:  eval "$(scripts/dev-token.sh)"
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/api-auth.sh"
 API="${MS_API:-http://127.0.0.1:8080/api/v1}"
 PG_CONTAINER="${MS_PG_CONTAINER:-monitoring-system-dev-postgres-1}"
 
@@ -47,11 +52,11 @@ if [ "${teardown}" -eq 1 ]; then
 fi
 
 command -v node >/dev/null 2>&1 || { echo "error: Node.js is required" >&2; exit 1; }
-curl -sf "${API}/objects/root" >/dev/null || {
-  echo "error: no installation answering at ${API}" >&2
-  echo "       start one:  scripts/dev-services.sh start" >&2
-  exit 1
-}
+# **Not `curl -sf`, which cannot tell a refusal from a silence.** With
+# `api.requireAuthentication` on — the default — an unauthenticated probe answers 401, and this
+# gate used to report "no installation answering" about an installation that was answering
+# perfectly well, sending whoever ran it to restart a service that was already up (`U-20`).
+ms_api_require "${API}" || exit 1
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out="${repo_root}/docs/findings/soak-${stamp}.jsonl"

@@ -28,6 +28,8 @@ matches() {
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+. "${repo_root}/scripts/lib/api-auth.sh"
 origin=ms-smoke-backup-origin
 target=ms-smoke-backup-target
 image=ms-smoke:bookworm
@@ -88,10 +90,16 @@ install_into() {
   docker exec "${name}" bash /tmp/configure-core.sh >/dev/null
 }
 
+# **One token, minted from the origin, used on both hosts** (`U-20`). The shipped `core.json`
+# does not set `api.requireAuthentication`, so it defaults to on and every call below needs a
+# credential. The target does not need one of its own: by the time anything here asks it a
+# question it is running on the origin's restored database, accounts and all — which is a
+# property of the restore worth leaning on, since a token that stopped working across it would
+# mean the accounts had not come back.
 api() {
   local name="$1"
   shift
-  docker exec "${name}" curl -sf "$@"
+  ms_docker_curl "${name}" -sf "$@"
 }
 
 # ── the installation that is about to be lost ────────────────────────────────────────────────
@@ -101,9 +109,15 @@ boot "${origin}"
 install_into "${origin}"
 docker exec "${origin}" systemctl start ms-core
 for _ in $(seq 1 30); do
-  api "${origin}" http://127.0.0.1:8080/api/v1/objects/root >/dev/null 2>&1 && break
+  # Unauthenticated on purpose: this is a readiness wait, and a 401 is as good an answer as a
+  # 200 for "the API is listening". The token cannot be minted until it is.
+  docker exec "${origin}" curl -s -o /dev/null http://127.0.0.1:8080/api/v1/objects/root 2>/dev/null && break
   sleep 1
 done
+
+docker cp "${repo_root}/scripts/smoke/api-token.sh" "${origin}:/tmp/api-token.sh"
+MS_TOKEN="$(docker exec "${origin}" bash /tmp/api-token.sh)"
+export MS_TOKEN
 
 echo "==> creating something worth losing"
 probe_id="$(api "${origin}" -X POST http://127.0.0.1:8080/api/v1/objects \

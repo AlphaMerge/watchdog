@@ -161,12 +161,30 @@ CSRF guard would refuse it. `dev/core.json` lists both spellings of the dev serv
 `api.allowedOrigins`, which is the same key an install behind a reverse proxy on a different
 hostname needs, for the same reason (`A-11`).
 
+### Talking to the API by hand
+
+`dev/core.json` runs with `api.requireAuthentication` on, which is what a stock install does, so
+the calls below need a credential. One command mints one:
+
+```bash
+eval "$(scripts/dev-token.sh)"
+```
+
+That logs in with the password the core generated on its first boot — `dev/data/first-admin-password`
+— issues a full-scope API token from that session, and exports it as `MS_TOKEN` in the current
+shell. `scripts/soak.sh` and the smoke harnesses read the same variable, and
+`scripts/lib/api-auth.sh` is the one place that turns it into a header.
+
+The UI at :5173 asks for that same password, and makes you replace it before it shows you
+anything else (`U-17`). Once you have, `dev-token.sh` cannot log in any more and says so — issue
+a token from the UI instead.
+
 ### Making it actually scan something
 
 A probe branch has to be claimed by the probe that connects, or it is told to scan nothing:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/api/v1/objects/2 -H 'content-type: application/json' -H "if-match: $(curl -sSI http://127.0.0.1:8080/api/v1/objects/2 | grep -i ^etag: | tr -d '\r' | cut -d' ' -f2)" -d '{"kind":"probe","gid":"dev-local-probe"}'
+curl -X PATCH http://127.0.0.1:8080/api/v1/objects/2 -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -H "if-match: $(curl -sSI -H "authorization: Bearer $MS_TOKEN" http://127.0.0.1:8080/api/v1/objects/2 | grep -i ^etag: | tr -d '\r' | cut -d' ' -f2)" -d '{"kind":"probe","gid":"dev-local-probe"}'
 ```
 
 `dev-local-probe` is the GID in `dev/probe.json`. `R-01` replaces claiming a branch by hand with
@@ -199,7 +217,7 @@ paused can be resumed, and the refusal names the one that can. A resumed sensor 
 until its next scan, never the state it had before.
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/v1/objects/7/pause -H 'content-type: application/json' -d '{"minutes":15,"message":"swapping a PSU"}'
+curl -X POST http://127.0.0.1:8080/api/v1/objects/7/pause -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -d '{"minutes":15,"message":"swapping a PSU"}'
 ```
 
 Before any of that, a reading is scaled by the channel's factors and passed through its spike
@@ -220,7 +238,7 @@ sample, with no two-step rule, because a disk that is 99% full is 99% full. Edit
 effect on the next scan, not the next restart.
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/api/v1/objects/8/channels/rtt -H 'content-type: application/json' -d '{"limits":{"upperWarning":50,"upperError":200}}'
+curl -X PATCH http://127.0.0.1:8080/api/v1/objects/8/channels/rtt -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -d '{"limits":{"upperWarning":50,"upperError":200}}'
 ```
 
 ## Configuration

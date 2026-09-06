@@ -15,6 +15,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+. "${repo_root}/scripts/lib/api-auth.sh"
 core_box=ms-smoke-core
 probe_box=ms-smoke-probe
 network=ms-smoke-net
@@ -194,7 +196,13 @@ else
 fi
 
 echo "==> asserting it is waiting for approval, under the name it was enrolled with"
-probes_json="$(docker exec "${core_box}" curl -sf http://127.0.0.1:8080/api/v1/probes || true)"
+# Authenticated: the shipped `core.json` leaves `api.requireAuthentication` at its default,
+# which is on, and an unauthenticated read here answered 401 and reported the probe missing from
+# a queue it was sitting in (`U-20`).
+docker cp "${repo_root}/scripts/smoke/api-token.sh" "${core_box}:/tmp/api-token.sh"
+MS_TOKEN="$(docker exec "${core_box}" bash /tmp/api-token.sh)"
+export MS_TOKEN
+probes_json="$(ms_docker_curl "${core_box}" -sf http://127.0.0.1:8080/api/v1/probes || true)"
 case "${probes_json}" in
   *'"displayName":"web-dc2"'*) echo "    enrolled name reached the queue: ok" ;;
   *) note_failure "the probe is not in the queue as web-dc2: ${probes_json}" ;;

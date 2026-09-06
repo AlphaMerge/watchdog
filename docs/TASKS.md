@@ -3609,7 +3609,7 @@ because each is a decision rather than a defect:
       consecutive failures, ask `GET /auth/session` and let the answer decide between "offline"
       and "logged out".
 
-- [ ] **U-20 — run the dev stack with authentication on** · S · U-17 · `dev/core.json` has
+- [x] **U-20 — run the dev stack with authentication on** · S · U-17 · `dev/core.json` has
       `requireAuthentication: false`, so the one configuration development never exercises is the
       one production ships. Turning it on needs two things first: `scripts/soak.sh:50` gates on an
       unauthenticated `curl "${API}/objects/root"` and must honour the `MS_TOKEN` that
@@ -3617,6 +3617,55 @@ because each is a decision rather than a defect:
       commands for claiming the probe branch, pausing an object and setting channel limits need
       to say where the session comes from (`dev/data/first-admin-password`, written inside the
       container). Check `scripts/dev-e2e.sh` and the smoke scripts at the same time.
+
+      **U-20 outcome.** `dev/core.json` runs with `requireAuthentication` on. One credential
+      mechanism — a bearer token in `MS_TOKEN`, which `scripts/soak/*.mjs` already read — and one
+      place that turns it into a header, `scripts/lib/api-auth.sh`. `scripts/dev-token.sh` mints
+      one for the dev stack from the generated bootstrap password; `scripts/smoke/api-token.sh`
+      does the same inside a smoke container, where a cookie jar on the host would be no use.
+
+      **The gate's diagnosis was the actual defect, not the missing header.** `curl -sf` cannot
+      tell a refusal from a silence, so the soak harness reported "no installation answering" about
+      an installation that was answering perfectly well, and sent whoever ran it to restart a
+      service that was already up. `ms_api_probe` distinguishes ok / unauthenticated / forbidden /
+      unreachable and each gets its own sentence, including which command mints the token.
+
+      **The smoke harnesses were broken before this ticket, not by it.** `deploy/examples/core.json`
+      does not set `api.requireAuthentication`, so a packaged install defaults to on, and
+      `smoke-install.sh` asserted anonymous access on three routes, `smoke-restore.sh` on eight
+      through its `api` helper, and `smoke-enrol.sh` on one — all answering 401 and reporting the
+      thing under test as broken. All now authenticate. `smoke-restore.sh` uses the *origin's*
+      token on both hosts, which is sound and worth saying: by the time anything questions the
+      target it is running on the origin's restored database, accounts included, so a token that
+      stopped working across the restore would itself be a finding. `scripts/dev-e2e.sh` calls no
+      API and needed nothing.
+
+      **Two things found by running it.** `ms_curl` first built its `-H` arguments in an array;
+      macOS ships bash 3.2, where expanding an empty array under `set -u` is an unbound-variable
+      error rather than nothing — and it failed inside a `$(…)` the caller had guarded with
+      `|| true`, so the symptom was an empty status code and a confident report that nothing was
+      listening. Exactly the misdiagnosis the file exists to remove, reintroduced by the fix.
+      Two branches now, no arrays.
+
+      And `--teardown` could never have worked on a tree this harness makes: it counted
+      `(await GET /objects/:id/tree).items.length - 1` for `expectedDescendants`, but `/tree` is
+      paginated and answers `{ items, truncated }`. For the 5,250-object soak tree in the dev
+      database it computed **999**, and the core refused with "now holds 5250 other objects, not
+      999". The `/counts` route exists for exactly this and its own documentation names the
+      mistake — counting a page of `/tree` "gives the right answer for a small installation and a
+      quietly wrong one for a large installation". It reads `/counts` now: 5251 total, 5250
+      descendants, the number the core said it wanted. Verified by computing it, not by deleting
+      anything.
+
+      **Not run here:** the three smoke harnesses themselves, which build a release tarball and
+      boot systemd containers. The part that could be wrong — login, token issue, the header — is
+      verified against a real core; the `docker exec` plumbing is a substitution. `shellcheck`
+      is clean at warning level across all seven scripts.
+
+      **A foot-gun worth knowing about:** the dev database's 5,000-sensor load *is* a soak tree
+      named `Soak`, so `scripts/soak.sh --teardown` deletes the working fixture. The
+      `expectedDescendants` guard is the only thing between that and a bad afternoon, and it is
+      now the *only* thing, because the count it is checked against is correct.
 
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
