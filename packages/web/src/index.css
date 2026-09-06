@@ -315,13 +315,28 @@
  * rather than a repeated trio of utilities because it appears on every card header, every stat
  * and every field group — three utilities copied forty times is three utilities that will
  * disagree by the fiftieth.
+ *
+ * **In `@layer components`, so a utility beside it wins (`U-18`).** Unlayered CSS beats every
+ * layered rule regardless of specificity or order, and Tailwind's utilities live in
+ * `@layer utilities` — so while this rule sat outside a layer, `class="ms-label text-down-fg"`
+ * silently rendered muted grey and `hover:text-text` did nothing at all. Nothing failed: the
+ * declaration was written, accepted, and discarded. It reached WCAG territory on a filled accent
+ * button (about 1.5:1) before anybody noticed, and by then eight call sites were asking for a
+ * colour or a hover they were not getting.
+ *
+ * The layer is the whole fix. A call site that names no colour still gets the muted one, because
+ * the layer still applies; a call site that names one now gets what it asked for. The chart rules
+ * below stay unlayered on purpose — they override uPlot's own stylesheet, which is imported from
+ * a component and is itself unlayered, so putting them in a layer would make them lose.
  */
-.ms-label {
-  font-size: 0.6875rem;
-  line-height: 1.45;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ms-text-muted);
+@layer components {
+  .ms-label {
+    font-size: 0.6875rem;
+    line-height: 1.45;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ms-text-muted);
+  }
 }
 
 /*

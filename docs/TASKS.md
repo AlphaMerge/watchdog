@@ -3618,7 +3618,7 @@ because each is a decision rather than a defect:
       to say where the session comes from (`dev/data/first-admin-password`, written inside the
       container). Check `scripts/dev-e2e.sh` and the smoke scripts at the same time.
 
-- [ ] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
+- [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
       text utility on the same element — those live in `@layer utilities`, and unlayered CSS wins.
       `class="ms-label text-accent-contrast"` renders muted grey, and on a filled accent button
@@ -3634,6 +3634,36 @@ because each is a decision rather than a defect:
       existing labels look like, so it wants looking at rather than assuming. Whichever way, the
       thing worth having is that a colour utility written next to it either works or fails to
       compile, rather than being quietly discarded.
+
+      **U-18 outcome.** `.ms-label` moved into `@layer components`. That is the whole fix: a call
+      site naming no colour still gets the muted one, because the layer still applies, and a call
+      site naming one now gets what it asked for. Eight call sites were asking for something they
+      were not getting — the masthead's `text-text`, the error panel's `text-down-fg` on its
+      label and its "Try again" button, four `hover:text-text` states that did nothing at all, and
+      the theme toggle's `aria-pressed:text-accent`, which is the one this ticket was written
+      about.
+
+      **The chart rules stay unlayered, and that is the half worth guarding.** `.ms-chart*`
+      overrides `uplot/dist/uPlot.min.css`, which is imported from a component and is itself
+      unlayered — layering ours would make it lose, and the chart would quietly take uPlot's
+      palette instead of the app's. So the fix is not "move the custom CSS into a layer": it is
+      one rule in, and a test that asserts the other rules stay out. Mutations 2/2, one in each
+      direction.
+
+      **Measured, and smaller than the ticket claimed.** On the surviving call sites the muted
+      colour already met AA in both themes, so this is a correctness fix rather than a contrast
+      one — declarations written, accepted and discarded. Against the running app: the error
+      panel's label goes 6.15 → 6.61 in dark and 4.80 → 5.53 in light; the masthead 6.37 → 14.86
+      and 5.56 → 16.67; the pressed toggle 6.37 → 5.86 and 5.56 → 5.62, which is *lower* in dark
+      and still well clear of 4.5. The one genuine failure — about 1.5:1, `ms-label
+      text-accent-contrast` on a filled accent button — was fixed in `U-17` by spelling that
+      button the way the other nine primary buttons are spelled, and this ticket does not depend
+      on it. What is fixed here is the class of bug: the next colour utility written beside
+      `ms-label` works, and there is no reason muted would have kept passing on the next
+      background someone puts it on.
+
+      The container `div` added in `U-17` carried `ms-label` and no label text; removed, because
+      it would have uppercased whatever was added to it next.
 
 ## Phase 6 — Sensor breadth
 

@@ -130,7 +130,9 @@ export function Layout(): React.JSX.Element {
             theme, not pressed", and both halves have to be read together to work out that
             pressing it turns the lights *off*. One name, one state.
           */}
-          <div className="ms-label ml-auto flex flex-wrap items-center gap-3">
+          {/* No `ms-label` on the container: each child that is a label carries it, and putting
+              it here would uppercase whatever is added next. */}
+          <div className="ml-auto flex flex-wrap items-center gap-3">
             <Account />
             <button
               type="button"
