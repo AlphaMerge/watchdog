@@ -110,8 +110,20 @@ export interface AuthenticationOptions {
   publicPaths?: readonly string[];
 }
 
-/** Login, logout and the app shell itself: refusing these would make logging in impossible. */
-const ALWAYS_PUBLIC = ['/api/v1/auth/login', '/api/v1/auth/logout', '/api/v1/health'];
+/**
+ * Login, logout and the app shell itself: refusing these would make logging in impossible.
+ *
+ * `/auth/session` is here for the same reason and is easy to miss: it is the route a client
+ * asks *whether this installation needs a login at all*, so guarding it behind a session makes
+ * it answer only the callers who already know. A route's own `config: PUBLIC` does not reach
+ * this hook — this list is the hook's, and the two have to agree.
+ */
+const ALWAYS_PUBLIC = [
+  '/api/v1/auth/login',
+  '/api/v1/auth/logout',
+  '/api/v1/auth/session',
+  '/api/v1/health',
+];
 
 export function registerAuthentication(app: FastifyInstance, options: AuthenticationOptions): void {
   const publicPaths = new Set([...ALWAYS_PUBLIC, ...(options.publicPaths ?? [])]);

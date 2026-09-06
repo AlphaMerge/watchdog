@@ -533,6 +533,9 @@ export class ApiServer {
             sessions: auth.sessions,
             throttle: auth.throttle,
             totp: auth.totp,
+            // The same flag `registerAuthentication` enforces, so `GET /auth/session` reports
+            // what is actually in force rather than a second copy of it.
+            requireAuthentication: auth.required,
             logger: this.#logger,
           });
           await scope.register(groupRoutes, { groups: auth.groups });

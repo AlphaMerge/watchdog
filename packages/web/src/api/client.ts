@@ -66,6 +66,38 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * What to do when the core says a request needed a session it did not have (`U-17`).
+ *
+ * **The filter is the code, not the status, and the difference is the whole login form.**
+ * `POST /auth/login` answers 401 three ways — a password that was not accepted, a second factor
+ * the account needs, a code that was wrong — and every one of those is the login form doing its
+ * job, not a session going away. Routing them here would send somebody mistyping their password
+ * back to the page they are already looking at, and clear the fields on the way. `AUTH_REQUIRED`
+ * is the one code the authentication hook raises, and it means exactly one thing.
+ *
+ * A single listener rather than a set: there is one session in a tab, and a second subscriber
+ * would be a second thing deciding what "logged out" looks like.
+ */
+let sessionLost: (() => void) | undefined;
+
+export function onSessionLost(listener: (() => void) | undefined): void {
+  sessionLost = listener;
+}
+
+/** Every refusal is built here, so neither verb can forget to report a lost session. */
+function refusal(status: number, statusText: string, body: ErrorBody): ApiError {
+  const error = new ApiError(
+    status,
+    body.error?.code ?? 'HTTP_ERROR',
+    body.error?.message ?? `${String(status)} ${statusText}`,
+    body.error?.correlationId,
+    body.error?.details,
+  );
+  if (error.status === 401 && error.code === 'AUTH_REQUIRED') sessionLost?.();
+  return error;
+}
+
 interface ErrorBody {
   error?: {
     code?: string;
@@ -90,13 +122,7 @@ export async function request<T>(path: string, signal?: AbortSignal): Promise<T>
 
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
-    throw new ApiError(
-      response.status,
-      body.error?.code ?? 'HTTP_ERROR',
-      body.error?.message ?? `${String(response.status)} ${response.statusText}`,
-      body.error?.correlationId,
-      body.error?.details,
-    );
+    throw refusal(response.status, response.statusText, body);
   }
   return (await response.json()) as T;
 }
@@ -132,13 +158,7 @@ export async function send<T>(
 
   if (!response.ok) {
     const failed = (await response.json().catch(() => ({}))) as ErrorBody;
-    throw new ApiError(
-      response.status,
-      failed.error?.code ?? 'HTTP_ERROR',
-      failed.error?.message ?? `${String(response.status)} ${response.statusText}`,
-      failed.error?.correlationId,
-      failed.error?.details,
-    );
+    throw refusal(response.status, response.statusText, failed);
   }
   // A 204 has no body to parse, and asking for one would turn a success into an error.
   if (response.status === 204) return undefined as T;

@@ -827,18 +827,10 @@ async function serve(): Promise<void> {
   // generated password, printed once where the operator installing this will see it, and flagged
   // to be replaced at the first login. Does nothing at all once any account exists.
   // **Said out loud, because the alternative is an operator staring at an empty page** (`P-172`).
-  // With authorisation on, every `/api/` call needs a session — and the bundled web UI has no
-  // login view yet, so an install that serves it gets a page that loads and then fails every
-  // request it makes, with nothing anywhere connecting the two facts. The API itself is usable
-  // from the first boot with the generated administrator password below.
-  if (config.api.requireAuthentication && config.api.webRoot !== '') {
-    logger.warn(
-      { webRoot: config.api.webRoot },
-      'the web UI is being served and authentication is required, but this build of the UI ' +
-        'cannot log in — use the API, or set api.requireAuthentication to false for a ' +
-        'single-operator install',
-    );
-  }
+  // `P-172` warned here that serving the web UI with authentication on gave an operator a page
+  // that loaded and then failed every request it made. `U-17` is why that warning is gone: the
+  // UI asks `GET /auth/session` before anything else and renders a login form when the answer
+  // says it needs one. The generated administrator password below is what they log in with.
 
   const firstAdmin = await accounts.ensureFirstAdministrator();
   if (firstAdmin !== null) {

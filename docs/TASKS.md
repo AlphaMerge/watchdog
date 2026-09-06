@@ -3506,7 +3506,7 @@ because each is a decision rather than a defect:
       component. Types moved where they were a moved function's argument (`ChartSeries`,
       `TabDefinition`, `RangeId`), since a type-only import back would have been a cycle.
 
-- [ ] **U-17 — A login view, so the UI can be used with authorisation on** · M · A-01, A-11 ·
+- [x] **U-17 — A login view, so the UI can be used with authorisation on** · M · A-01, A-11 ·
       `packages/web` has no login route, no password field and no 401 handling. With
       `api.requireAuthentication` on — the default since `P-154` — the bundle loads and then every
       API call it makes is refused, with nothing on the page saying why. The core warns about the
@@ -3518,6 +3518,67 @@ because each is a decision rather than a defect:
       already serves. Until it lands, an operator running the bundled UI must set
       `api.requireAuthentication` to false — which means an API that needs no principal at all,
       so it belongs behind something else that authenticates.
+
+      **U-17 outcome.** A login form, a forced change-password form, logout, and the second
+      factor `A-07` already serves. The interesting part was not the form.
+
+      **"Nobody is logged in" and "a login is needed" are two facts, and no route said the
+      second.** `GET /auth/me` refuses an anonymous caller with 401 — and with
+      `api.requireAuthentication` off, that same 401 comes back to a caller who may use the
+      entire rest of the API. A client that read only the status has to choose between demanding
+      a login the core does not want and rendering an application whose every request will be
+      refused; those are the two halves of this ticket, one of them the bug it was written for
+      and the other the bug a naive fix introduces. So `GET /auth/session` — public, 200 to
+      anybody, `{ requireAuthentication, authenticated, principal? }` — is the first call the
+      browser makes. **Adding it took two edits, not one**: the authentication hook refuses from
+      its own `ALWAYS_PUBLIC` list before a route's `config: PUBLIC` is ever consulted, so a
+      route declaring itself public and nothing else answers 401 to the callers it exists for.
+      Mutation: removing the path from that list turns the guarded-anonymous case red.
+
+      **The 401 interceptor filters on the code, not the status.** `POST /auth/login` answers 401
+      three ways — password not accepted, second factor needed, code wrong — and every one of
+      those is the login form working, not a session going away. `AUTH_REQUIRED` is the one code
+      the guard raises. That rule has to be asserted at the client, not through the application:
+      the provider separately ignores a lost session unless it was signed in, so a listener
+      firing on every 401 renders identically in every screen the app can reach. Two overlapping
+      guards, one testable path — the shape of entry 32 in the wrong-reason findings, caught
+      this time by mutating.
+
+      **`mustChangePassword` is a flag nothing on the core enforces.** No route refuses a request
+      because of it. If the client does not act, the generated password in `first-admin-password`
+      stays a live credential for the life of the installation — so the form is forced, and the
+      only thing that takes it down is the core saying the flag is gone. The client asks again
+      rather than assuming, because the flag lives on the account.
+
+      `MFA_REQUIRED` arrives for two different situations and only `details.enrolled` separates
+      them: "now type a code", and "a group requires a factor this account has never enrolled",
+      which is a lockout, because enrolling needs the session being refused. The form names an
+      administrator instead of offering a field with nothing to type into.
+
+      `P-172`'s startup warning is gone — it said this build of the UI could not log in.
+      `dev/core.json` now runs with `requireAuthentication` on, so development exercises the
+      configuration production ships rather than the one path the new code never takes.
+
+      Tests: 29 new across four files, 5 new on the core route. Mutations 9/9. Verified live
+      against the dev core and in the browser at 320px, in both themes — which is where the one
+      real defect turned up: see `U-18`.
+
+- [ ] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
+      The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
+      text utility on the same element — those live in `@layer utilities`, and unlayered CSS wins.
+      `class="ms-label text-accent-contrast"` renders muted grey, and on a filled accent button
+      that measures about 1.5:1 against WCAG 1.4.3's 4.5:1. Found by looking at the rendered
+      login button, not by any test.
+
+      `U-17`'s own two buttons are fixed — they use the primary-button spelling the other nine
+      call sites use, which does not include `ms-label`. **What is still there is the general
+      case**: the header's theme toggle carries `aria-pressed:border-accent aria-pressed:text-accent`
+      and the ink half of that has never applied, and nothing stops the next one. Either
+      `.ms-label` drops its colour and every call site states one, or it moves into
+      `@layer components` so utilities win — the second is one line and changes what forty
+      existing labels look like, so it wants looking at rather than assuming. Whichever way, the
+      thing worth having is that a colour utility written next to it either works or fails to
+      compile, rather than being quietly discarded.
 
 ## Phase 6 — Sensor breadth
 
@@ -10780,6 +10841,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       proxy that forwards to one. What changes is that the core now says so at startup when
       `webRoot` is set and this is on, because the silent version of that is an operator staring
       at an empty tree. `U-17` is the login view.
+
+      **The warning is gone as of `U-17`**, which is what it was waiting for: the UI asks
+      `GET /auth/session` before anything else and puts up a login form when the answer says one
+      is needed. A warning that outlives the condition it describes is worse than no warning.
 
 - [x] **P-173 — the sweep exemption swallowed the route the ticket was written for**
       `P-155`'s grantless sweep skipped `^/api/v1/(templates|schedules)(/|$)` as "routes whose

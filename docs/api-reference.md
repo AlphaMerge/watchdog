@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-121 routes.
+122 routes.
 
 ## Conventions
 
@@ -138,6 +138,14 @@ Idempotent, and public: logging out with a session that has already expired is t
 Who this session belongs to
 
 **200** { userId, login, role, mustChangePassword }
+
+### `GET /api/v1/auth/session`
+
+Whether this installation needs a login, and whether this caller has one
+
+Public, and the first call a browser client makes (`U-17`). `GET /auth/me` cannot answer this: it refuses an anonymous caller with 401, and a 401 from it means both "log in" and "this installation does not need you to" — with `api.requireAuthentication` off, an anonymous caller may use the whole API and still gets that 401 from this one route. A client unable to tell those apart has to choose between demanding a login the core does not want and rendering an application whose every request will be refused. Nothing is disclosed that an unauthenticated request does not already reveal by being answered or refused.
+
+**200** { requireAuthentication, authenticated, principal }
 
 ### `GET /api/v1/auth/mfa`
 

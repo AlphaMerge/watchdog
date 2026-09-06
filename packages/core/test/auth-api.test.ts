@@ -346,6 +346,88 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   });
 
   /**
+   * The one route a browser can ask before it has anything to ask with (`U-17`).
+   *
+   * **`GET /auth/me` cannot answer this, and that is why this route exists.** It refuses an
+   * anonymous caller with 401, and that 401 means two different things: with the guard on, "log
+   * in"; with the guard off, "you did not need to, and the rest of the API will serve you
+   * anyway". A client that cannot tell them apart has to choose between demanding a login the
+   * core does not want and rendering an application whose every request will be refused.
+   */
+  describe('asking what this installation needs', () => {
+    it('answers an anonymous caller rather than refusing one, with the guard on', async () => {
+      // The route declaring itself public is not enough on its own: the authentication hook
+      // runs before any route and refuses from its own list. Both have to say so.
+      const response = await guarded.inject({ method: 'GET', url: '/api/v1/auth/session' });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), { requireAuthentication: true, authenticated: false });
+    });
+
+    it('says a login is optional when the guard is off', async () => {
+      const response = await app.inject({ method: 'GET', url: '/api/v1/auth/session' });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), { requireAuthentication: false, authenticated: false });
+    });
+
+    it('names the principal when the caller has one', async () => {
+      const session = await login(guarded, { login: 'ops', password: 'correct-horse-battery' });
+      const response = await guarded.inject({
+        method: 'GET',
+        url: '/api/v1/auth/session',
+        headers: { cookie: cookieFrom(session.headers['set-cookie']) },
+      });
+
+      assert.equal(response.statusCode, 200);
+      const body = response.json<{
+        authenticated: boolean;
+        principal: { login: string; role: string; mustChangePassword: boolean };
+      }>();
+      assert.equal(body.authenticated, true);
+      assert.equal(body.principal.login, 'ops');
+      assert.equal(body.principal.role, 'readwrite');
+      assert.equal(body.principal.mustChangePassword, false);
+    });
+
+    it('reports the password flag the core itself never enforces', async () => {
+      // Nothing on the core refuses a request because `must_change_password` is set. If the
+      // client does not act on it, the generated password stays live for the life of the
+      // installation — so this route is the only place that flag is ever heard.
+      await accounts.create({
+        login: 'fresh',
+        password: 'generated-for-them',
+        role: 'readwrite',
+        mustChangePassword: true,
+      });
+      const session = await login(guarded, { login: 'fresh', password: 'generated-for-them' });
+      const response = await guarded.inject({
+        method: 'GET',
+        url: '/api/v1/auth/session',
+        headers: { cookie: cookieFrom(session.headers['set-cookie']) },
+      });
+
+      assert.equal(
+        response.json<{ principal: { mustChangePassword: boolean } }>().principal
+          .mustChangePassword,
+        true,
+      );
+    });
+
+    it('never carries a session token, only what is in it', async () => {
+      const session = await login(guarded, { login: 'ops', password: 'correct-horse-battery' });
+      const cookie = cookieFrom(session.headers['set-cookie']);
+      const token = decodeURIComponent(cookie.split('=')[1] ?? '');
+      const response = await guarded.inject({
+        method: 'GET',
+        url: '/api/v1/auth/session',
+        headers: { cookie },
+      });
+
+      assert.ok(token.length > 20);
+      assert.equal(response.body.includes(token), false);
+    });
+  });
+
+  /**
    * That the configured origins reach the guard (`A-11`).
    *
    * `hardening.test.ts` proves what the guard does with a list; what it cannot prove is that

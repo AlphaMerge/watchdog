@@ -15,6 +15,12 @@ export interface AuthRoutesOptions {
   throttle: LoginThrottle;
   /** Absent means this build has no second factor. */
   totp?: TotpService;
+  /**
+   * What `api.requireAuthentication` is set to, reported by `GET /auth/session` and used
+   * nowhere else here. The hook that *enforces* it lives in `authentication.ts`; this is the
+   * same fact told to a client, so a UI can know whether to ask for a login before it has one.
+   */
+  requireAuthentication: boolean;
   logger: Logger;
 }
 
@@ -45,7 +51,7 @@ const principalSchema = {
  * rather than replacing it.
  */
 export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): void {
-  const { accounts, sessions, throttle, totp, logger } = options;
+  const { accounts, sessions, throttle, totp, requireAuthentication, logger } = options;
 
   /**
    * **`Secure` is decided per request rather than configured**, because guessing it wrong is bad
@@ -244,6 +250,57 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
         login: principal.login,
         role: principal.role,
         mustChangePassword: principal.mustChangePassword,
+      };
+    },
+  );
+
+  app.get(
+    '/auth/session',
+    {
+      config: PUBLIC,
+      schema: {
+        tags: ['auth'],
+        summary: 'Whether this installation needs a login, and whether this caller has one',
+        description:
+          'Public, and the first call a browser client makes (`U-17`). `GET /auth/me` cannot ' +
+          'answer this: it refuses an anonymous caller with 401, and a 401 from it means both ' +
+          '"log in" and "this installation does not need you to" — with ' +
+          '`api.requireAuthentication` off, an anonymous caller may use the whole API and still ' +
+          'gets that 401 from this one route. A client unable to tell those apart has to choose ' +
+          'between demanding a login the core does not want and rendering an application whose ' +
+          'every request will be refused. Nothing is disclosed that an unauthenticated request ' +
+          'does not already reveal by being answered or refused.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['requireAuthentication', 'authenticated'],
+            properties: {
+              requireAuthentication: {
+                type: 'boolean',
+                description: 'Whether `/api/` routes are refused without a principal.',
+              },
+              authenticated: { type: 'boolean' },
+              principal: principalSchema,
+            },
+          },
+        },
+      },
+    },
+    (request: FastifyRequest) => {
+      const principal = request.principal;
+      if (principal === undefined) {
+        return { requireAuthentication, authenticated: false };
+      }
+      return {
+        requireAuthentication,
+        authenticated: true,
+        principal: {
+          userId: principal.userId,
+          login: principal.login,
+          role: principal.role,
+          mustChangePassword: principal.mustChangePassword,
+        },
       };
     },
   );

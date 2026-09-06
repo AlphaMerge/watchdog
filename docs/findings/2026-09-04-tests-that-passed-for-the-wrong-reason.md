@@ -590,6 +590,29 @@ audited for *what it enables* and never for *whether it is reachable*. The outsi
 checked that `session.protocolVersion` is set before the gate reads it, which is a question about
 correctness given a connection. Nobody asked whether the connection happens.
 
+### 34. Two guards over one path, and the test that could only see the outer one (`U-17`, found by mutating before it shipped)
+
+The API client reports a lost session on `AUTH_REQUIRED` and deliberately not on every 401,
+because a login itself answers 401 three ways and each of those is the form working. The session
+provider *separately* ignores the report unless it was already signed in.
+
+Both rules are right and they overlap on every path the application can reach. A login form is
+only ever shown to a browser that is already anonymous — so a listener firing on all three of the
+login's own 401s is swallowed by the provider's guard and renders identically. **Widening the
+client's filter to `status === 401` left every screen-level test green**, including the four that
+drive the login form through a refused code and assert what stays on screen.
+
+Caught by mutating rather than by reading, and the fix is where the assertion lives: the rule
+belongs to the client, so it is asserted at the client — `onSessionLost` with a stub `fetch`, no
+component in sight. That mutation then fails, and only that test sees it.
+
+Two things are worth separating. The mutation was run because running one is the standing habit,
+not because this looked suspicious; nothing about the code said "the outer guard is hiding me".
+And the structural tell is visible in advance once named: **when two independent guards protect
+the same path, a test that exercises the path can only ever measure their conjunction.** That is
+entry 7 again — a subject that cannot express the property — arriving as redundancy rather than
+as a missing seam.
+
 ## What actually found them
 
 
@@ -737,7 +760,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Thirty-three now, and the twenty-four added later are the ones that settle the argument.** The first
+**Thirty-four now, and the twenty-five added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

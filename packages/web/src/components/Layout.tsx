@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
+import { useSession } from '../auth/session';
 import { useTheme } from '../theme/useTheme';
 
 const NAV = [
@@ -12,6 +13,67 @@ const NAV = [
   { to: '/templates', label: 'Templates', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
 ];
+
+/**
+ * Who is signed in, and the two things they can do about it (`U-17`).
+ *
+ * **The role is shown next to the login and is not decoration.** Most of what this UI refuses is
+ * refused by role, and "why is that button not there" is answered by the word `readonly` sitting
+ * beside the name — without it the answer is a support conversation.
+ */
+function Account(): React.JSX.Element | null {
+  const { session, signOut, askToSignIn } = useSession();
+
+  if (session.kind === 'anonymous') {
+    // Only reachable with `api.requireAuthentication` off — otherwise the login form is the
+    // page. Offered rather than hidden because an anonymous operator's changes are audited as
+    // `anonymous`, and somebody may want their name on them.
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          askToSignIn(true);
+        }}
+        className="ms-label border border-control px-2.5 py-1 hover:text-text"
+      >
+        Log in
+      </button>
+    );
+  }
+
+  if (session.kind !== 'signed-in') return null;
+
+  return (
+    <>
+      {/*
+        Marked with a rule in the accent when it is the current page, the same way the section
+        links above are — and for a second reason here: `.ms-label` sets a colour of its own and
+        is unlayered, so it beats a Tailwind text utility. A state carried by ink would simply
+        not appear.
+      */}
+      <NavLink
+        to="/password"
+        className={({ isActive }) =>
+          `ms-label border-b-2 py-1 hover:text-text ${
+            isActive ? 'border-accent' : 'border-transparent'
+          }`
+        }
+      >
+        {session.principal.login}
+        <span className="ml-1.5 normal-case">({session.principal.role})</span>
+      </NavLink>
+      <button
+        type="button"
+        onClick={() => {
+          void signOut();
+        }}
+        className="ms-label border border-control px-2.5 py-1 hover:text-text"
+      >
+        Log out
+      </button>
+    </>
+  );
+}
 
 export function Layout(): React.JSX.Element {
   const { theme, toggle } = useTheme();
@@ -68,14 +130,17 @@ export function Layout(): React.JSX.Element {
             theme, not pressed", and both halves have to be read together to work out that
             pressing it turns the lights *off*. One name, one state.
           */}
-          <button
-            type="button"
-            onClick={toggle}
-            aria-pressed={theme === 'dark'}
-            className="ms-label ml-auto border border-control px-2.5 py-1 hover:text-text aria-pressed:border-accent aria-pressed:text-accent"
-          >
-            Dark theme
-          </button>
+          <div className="ms-label ml-auto flex flex-wrap items-center gap-3">
+            <Account />
+            <button
+              type="button"
+              onClick={toggle}
+              aria-pressed={theme === 'dark'}
+              className="ms-label border border-control px-2.5 py-1 hover:text-text aria-pressed:border-accent aria-pressed:text-accent"
+            >
+              Dark theme
+            </button>
+          </div>
         </div>
       </header>
 
