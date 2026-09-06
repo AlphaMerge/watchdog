@@ -37,9 +37,37 @@ export function LoginView(): React.JSX.Element {
     else loginField.current?.select();
   }, [feedback]);
 
+  /**
+   * Every credential edit clears the refusal.
+   *
+   * **`stuck` disables the only submit control, and a disabled default button also swallows the
+   * Enter key** — so a refusal that outlived the account it was about would leave the form dead
+   * for every other account until the page was reloaded. `stuck` is a property of what was
+   * typed, so it lasts exactly as long as what was typed.
+   */
+  const edit = (set: (value: string) => void) => (value: string) => {
+    setFeedback(null);
+    set(value);
+  };
+
   const submit = (event: React.SyntheticEvent): void => {
     event.preventDefault();
     if (busy) return;
+
+    // Both fields are `minLength: 1` in the route's body schema, so an empty submit is a 400
+    // whose message is Ajv's JSON Pointer. Saying it here costs a round trip and reads like a
+    // sentence.
+    if (login === '' || password === '') {
+      setFeedback({
+        stage,
+        message: 'Type a login and a password.',
+        focus: 'login',
+        retryAfterSeconds: 0,
+        stuck: false,
+      });
+      return;
+    }
+
     setBusy(true);
     // The password is sent again with the code, because `POST /auth/login` is one exchange and
     // not two: there is no half-authenticated state on the core to hold a password between them,
@@ -94,7 +122,7 @@ export function LoginView(): React.JSX.Element {
             spellCheck={false}
             disabled={busy}
             onChange={(event) => {
-              setLogin(event.target.value);
+              edit(setLogin)(event.target.value);
             }}
           />
         </div>
@@ -111,7 +139,7 @@ export function LoginView(): React.JSX.Element {
             autoComplete="current-password"
             disabled={busy}
             onChange={(event) => {
-              setPassword(event.target.value);
+              edit(setPassword)(event.target.value);
             }}
           />
         </div>
@@ -133,7 +161,7 @@ export function LoginView(): React.JSX.Element {
               spellCheck={false}
               disabled={busy}
               onChange={(event) => {
-                setCode(event.target.value);
+                edit(setCode)(event.target.value);
               }}
             />
           </div>

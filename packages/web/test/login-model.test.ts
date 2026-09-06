@@ -12,9 +12,16 @@ import { feedbackFor, waitFor } from '../src/auth/login-model';
 describe('reading a login refusal', () => {
   it('steps to the code field when the account has a second factor enrolled', () => {
     const feedback = feedbackFor(
-      new ApiError(401, 'MFA_REQUIRED', 'this account needs a second factor', undefined, {
-        enrolled: 'true',
-      }),
+      // The sixth argument is `context` — where the core actually puts this. Passing it as
+      // `details` is what shipped, and every case in this file passed anyway.
+      new ApiError(
+        401,
+        'MFA_REQUIRED',
+        'this account needs a second factor',
+        undefined,
+        {},
+        { enrolled: 'true' },
+      ),
       'credentials',
     );
 
@@ -34,6 +41,7 @@ describe('reading a login refusal', () => {
         'a group this account belongs to requires multi-factor authentication, and it has not ' +
           'been set up yet',
         undefined,
+        {},
         { enrolled: 'false' },
       ),
       'credentials',
@@ -53,9 +61,16 @@ describe('reading a login refusal', () => {
   it('keeps whichever step the throttle interrupted', () => {
     // A throttle that dropped somebody back to the password field would make them re-pass a step
     // they had already passed, and the delay is per address — retrying costs another one.
-    const refused = new ApiError(429, 'AUTH_THROTTLED', 'too many', undefined, {
-      retryAfterSeconds: 45,
-    });
+    const refused = new ApiError(
+      429,
+      'AUTH_THROTTLED',
+      'too many',
+      undefined,
+      {},
+      {
+        retryAfterSeconds: 45,
+      },
+    );
     expect(feedbackFor(refused, 'code').stage).toBe('code');
     expect(feedbackFor(refused, 'credentials').stage).toBe('credentials');
     expect(feedbackFor(refused, 'code').retryAfterSeconds).toBe(45);
@@ -63,9 +78,16 @@ describe('reading a login refusal', () => {
   });
 
   it('reads a retry delay that crossed JSON as a string', () => {
-    const refused = new ApiError(429, 'AUTH_THROTTLED', 'too many', undefined, {
-      retryAfterSeconds: '90',
-    });
+    const refused = new ApiError(
+      429,
+      'AUTH_THROTTLED',
+      'too many',
+      undefined,
+      {},
+      {
+        retryAfterSeconds: '90',
+      },
+    );
     expect(feedbackFor(refused, 'credentials').retryAfterSeconds).toBe(90);
   });
 

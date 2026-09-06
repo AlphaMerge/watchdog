@@ -29,7 +29,15 @@ export interface LoginFeedback {
   readonly stuck: boolean;
 }
 
-/** A context value the core sends as a number, read back defensively — it crosses JSON. */
+/**
+ * A context value the core sends as a number, read back defensively — it crosses JSON.
+ *
+ * `context`, not `details`: `toHttpError` gives an `AuthError`'s values to the envelope's
+ * `context` and leaves `details` empty. Reading the wrong one is not a type error and not a
+ * crash — the lookup is `undefined`, the branch it guards is never taken, and the form is
+ * quietly wrong for ever. It shipped that way once; `auth-envelope.test.ts` pins the wire shape
+ * on the core side now, because no test in this package can see it.
+ */
 function secondsFrom(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.ceil(value);
   if (typeof value === 'string') {
@@ -55,7 +63,7 @@ export function feedbackFor(error: ApiError, stage: LoginStage): LoginFeedback {
       // **`enrolled` is what separates a step from a lockout.** Both arrive as `MFA_REQUIRED`
       // because both are "the second factor stopped this", and a client that read only the code
       // would send somebody to a field they have nothing to type into, for ever.
-      if (error.details['enrolled'] === 'true') {
+      if (error.context['enrolled'] === 'true') {
         return {
           ...base,
           stage: 'code',
@@ -91,7 +99,7 @@ export function feedbackFor(error: ApiError, stage: LoginStage): LoginFeedback {
       };
 
     case 'AUTH_THROTTLED': {
-      const seconds = secondsFrom(error.details['retryAfterSeconds']);
+      const seconds = secondsFrom(error.context['retryAfterSeconds']);
       return {
         // The stage is kept, so a throttle that lands mid-way through a second factor does not
         // throw away the step already passed.

@@ -613,6 +613,43 @@ the same path, a test that exercises the path can only ever measure their conjun
 entry 7 again — a subject that cannot express the property — arriving as redundancy rather than
 as a missing seam.
 
+### 35. A fixture in the shape the client expected, not the shape the server sends (`U-17`, found by a panel lens reading outside the diff)
+
+The login form decided between "now type a code" and "this account is locked out" by reading
+`error.details['enrolled']`. The core puts an `AuthError`'s values in `error.context` —
+`toHttpError` has two namespaces, and fills `details` only for `ObjectError`, `MethodError` and
+`TriggerError`. The lookup was always `undefined`, so **every account with a second factor was
+shown the lockout message and a disabled button**, and the throttle delay always rendered as
+"shortly".
+
+Eight tests covered exactly this, in two files, and all eight passed. Each built its own refusal:
+
+    body: { error: { code, message, details } }
+
+— the shape the client reads, and a shape no server produces. The fixture was not wrong by
+accident. It was written by the same person, in the same hour, from the same belief about the
+wire, and it therefore agreed with the code about the one thing neither of them had checked.
+
+**Three separate defences were in place and none of them could work.** TypeScript could not help:
+`ErrorDetails` has an index signature, so `details['enrolled']` type-checks against a key that is
+never present. Mutation testing could not help either — reverting the client to `details` leaves
+the tests green, because the fixture moves with it; the mutation and the assertion are the same
+belief. And the previous panel had a lens dedicated to reading outside the diff, which is what
+eventually caught this one, but only because the lens was pointed at *the other end of the wire*
+rather than at the calling code.
+
+The general rule is the one this whole document keeps arriving at from new directions: **a test
+that constructs its own fixture for a boundary cannot verify the boundary.** It verifies that the
+code agrees with the author. The only thing that pins a wire is an assertion at each end that
+neither end can satisfy alone — here, four cases in `auth-api.test.ts` asserting `context` carries
+the values and `details` stays `{}`, and the web fixtures rebuilt to match. Moving the values to
+`details` on the core now reddens three core tests; reading `details` on the client reddens six
+web ones. Before, both changes were invisible.
+
+Worth noting what it cost to find: nine review lenses, and the one that found it was the lens
+whose entire instruction was to verify premises the commit rests on against code the commit did
+not touch. That instruction exists because of entry 30 and entry 33. It has now paid three times.
+
 ## What actually found them
 
 
@@ -760,7 +797,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Thirty-four now, and the twenty-five added later are the ones that settle the argument.** The first
+**Thirty-five now, and the twenty-six added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

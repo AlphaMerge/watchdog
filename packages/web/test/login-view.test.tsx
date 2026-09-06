@@ -62,9 +62,19 @@ function stubFetch(logins: Reply[]): Call[] {
   return asked;
 }
 
-const refusal = (status: number, code: string, message: string, details = {}): Reply => ({
+/**
+ * A refusal in the shape the core actually emits.
+ *
+ * **`context`, not `details`.** `toHttpError` gives an `AuthError`'s values to the envelope's
+ * `context` and leaves `details` at `{}`. The first version of this helper put them in `details`
+ * — the shape the client happened to read — so all four MFA and throttle cases below passed
+ * against a body no server produces, and went on passing with the client reading a key that was
+ * never there. `packages/core/test/auth-api.test.ts` pins the real shape, because nothing in
+ * this package can see it.
+ */
+const refusal = (status: number, code: string, message: string, context = {}): Reply => ({
   status,
-  body: { error: { code, message, details } },
+  body: { error: { code, message, context, details: {} } },
 });
 
 const accepted: Reply = {
@@ -189,6 +199,53 @@ describe('logging in', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Log in' })).toHaveProperty('disabled', true);
     });
+  });
+
+  it('lets the operator try another account after a refusal that cannot succeed', async () => {
+    // `stuck` disables the only submit control, and a disabled default button swallows Enter
+    // too. If it outlived the account it was about, the form would be dead for every other
+    // account until the page was reloaded.
+    stubFetch([
+      refusal(
+        401,
+        'MFA_REQUIRED',
+        'a group this account belongs to requires multi-factor authentication, and it has not ' +
+          'been set up yet',
+        { enrolled: 'false' },
+      ),
+      accepted,
+    ]);
+    mount();
+
+    await type('Login', 'locked-out');
+    await type('Password', 'a-real-password');
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Log in' })).toHaveProperty('disabled', true);
+    });
+
+    await type('Login', 'ops');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Log in' })).toHaveProperty('disabled', false);
+    });
+
+    submit();
+    await screen.findByRole('link', { name: 'Skip to content' });
+  });
+
+  it('does not spend a request on an empty form, or show Ajv the operator', async () => {
+    // Both fields are minLength: 1 in the route's body schema, so this would be a 400 whose
+    // message is a JSON Pointer.
+    const asked = stubFetch([]);
+    mount();
+
+    await screen.findByLabelText('Login');
+    submit();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Type a login and a password');
+    expect(asked.some((call) => call.url === LOGIN)).toBe(false);
   });
 
   it('reports the throttle with the delay it asked for', async () => {

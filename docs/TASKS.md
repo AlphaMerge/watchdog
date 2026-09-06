@@ -3555,13 +3555,68 @@ because each is a decision rather than a defect:
       which is a lockout, because enrolling needs the session being refused. The form names an
       administrator instead of offering a field with nothing to type into.
 
-      `P-172`'s startup warning is gone — it said this build of the UI could not log in.
-      `dev/core.json` now runs with `requireAuthentication` on, so development exercises the
-      configuration production ships rather than the one path the new code never takes.
+      `P-172`'s startup warning is gone — it said this build of the UI could not log in, and the
+      `api.requireAuthentication` doc comment in `packages/shared/src/config/schema.ts` said the
+      same thing and promised the warning; both are corrected.
 
-      Tests: 29 new across four files, 5 new on the core route. Mutations 9/9. Verified live
-      against the dev core and in the browser at 320px, in both themes — which is where the one
-      real defect turned up: see `U-18`.
+      **`dev/core.json` stays at `requireAuthentication: false`.** It was flipped on, to make
+      development exercise the configuration production ships, and flipped back when the sixth
+      panel pointed out what that breaks: the three `curl` commands the README gives for driving
+      the dev core, and `scripts/soak.sh`, whose readiness gate is an unauthenticated `curl` that
+      does not honour the `MS_TOKEN` its own `.mjs` helpers accept. Turning it on is worth doing
+      and is `U-20`, with those two fixed first. The login path was verified against a dev core
+      with the flag on before it went back.
+
+      Tests: 35 new in `packages/web`, 9 on the core. Mutations 16/16. Verified live against the
+      dev core and in the browser at 320px in both themes — where the first real defect turned up
+      (`U-18`).
+
+      **The sixth panel then found a worse one, and it is the reason this entry is long.** The
+      login form read `enrolled` and `retryAfterSeconds` from `error.details`. The core puts an
+      `AuthError`'s values in `error.context`: `toHttpError` has *two* namespaces and fills
+      `details` only for `ObjectError`, `MethodError` and `TriggerError`. So the lookup was always
+      `undefined`, `=== 'true'` was always false, and **every account with a second factor got the
+      lockout message and a disabled button** — the MFA half of this ticket was unreachable in any
+      real installation, and the throttle delay always read "shortly".
+
+      Nothing failed loudly, which is the shape of it: reading the wrong namespace is not a type
+      error, the branch it guards is simply never taken. And the tests were the alibi — all eight
+      MFA and throttle cases built the refusal envelope with the data in `details`, a shape no
+      server emits, so they passed against a body that does not exist. **No test in `packages/web`
+      can see the wire**, so the shape is pinned where it lives: four cases in
+      `auth-api.test.ts` assert `context` carries `enrolled` and `retryAfterSeconds` and that
+      `details` stays empty, and one logs the enrolled account in with a recovery code so the two
+      refusals cannot both be satisfied by a core that never accepts a factor at all. Moving the
+      values to `details` on the core turns three of them red; reading `details` on the client
+      turns six web tests red. Entry 35 in the wrong-reason findings.
+
+      Also from that panel: `stuck` disabled the submit button for the life of the form and was
+      never cleared — and a disabled default button swallows Enter too, so one lockout refusal
+      killed the form for every other account until a reload. It clears on any credential edit
+      now. An empty submit went to the core and rendered Ajv's JSON Pointer at the operator. The
+      `unreachable` screen had no exit but a manual reload; it offers a retry. `/password` was
+      routable while anonymous, where `POST /auth/password` is refused whatever the flag says.
+
+- [ ] **U-19 — an expired session looks like a network blip to the state stream, for ever** · S ·
+      U-17 · `onSessionLost` fires from the fetch client, so it cannot see the WebSocket. With
+      authentication on, `GET /api/v1/stream` is guarded, and a session that goes away turns the
+      upgrade into a 401 — which `StateStream.#dropped` cannot distinguish from a dropped
+      connection, so it reconnects for ever at the 10s ceiling. An operator sitting on the tree or
+      the alarms view, making no other request, sees the live dot go offline and stay there while
+      the header still says they are signed in. The dot is honest about staleness, which is why
+      this is not urgent; what is wrong is that nothing ever resolves it, and the fix is not
+      obvious — a browser cannot read the status of a refused upgrade. Probably: after N
+      consecutive failures, ask `GET /auth/session` and let the answer decide between "offline"
+      and "logged out".
+
+- [ ] **U-20 — run the dev stack with authentication on** · S · U-17 · `dev/core.json` has
+      `requireAuthentication: false`, so the one configuration development never exercises is the
+      one production ships. Turning it on needs two things first: `scripts/soak.sh:50` gates on an
+      unauthenticated `curl "${API}/objects/root"` and must honour the `MS_TOKEN` that
+      `scripts/soak/provision.mjs` and `sample.mjs` already read, and the README's three `curl`
+      commands for claiming the probe branch, pausing an object and setting channel limits need
+      to say where the session comes from (`dev/data/first-admin-password`, written inside the
+      container). Check `scripts/dev-e2e.sh` and the smoke scripts at the same time.
 
 - [ ] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind

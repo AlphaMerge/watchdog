@@ -58,9 +58,9 @@ const signedIn = (mustChangePassword = false): Reply => ({
   },
 });
 
-function mount(): void {
+function mount(at = '/'): void {
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[at]}>
       <SessionProvider>
         <App />
       </SessionProvider>
@@ -143,6 +143,40 @@ describe('the login gate', () => {
 
     await screen.findByRole('heading', { name: 'Cannot reach the core' });
     expect(screen.queryByLabelText('Password')).toBeNull();
+  });
+
+  it('offers a retry from the unreachable screen, which is its only exit', async () => {
+    // The probe runs once. A core that was restarting when the tab opened would otherwise leave
+    // the operator on an error page until they thought to reload by hand.
+    let attempt = 0;
+    vi.stubGlobal('fetch', (url: string) => {
+      attempt += 1;
+      if (attempt === 1) return Promise.reject(new Error('connection refused'));
+      if (url === SESSION) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ requireAuthentication: true, authenticated: false }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      }
+      return new Promise<Response>(() => undefined);
+    });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+
+    await screen.findByRole('heading', { name: 'Log in' });
+  });
+
+  it('does not route an anonymous browser to a form the core will always refuse', async () => {
+    // `POST /auth/password` needs a principal whatever `api.requireAuthentication` says, so with
+    // the guard off the change-password page is reachable and cannot ever succeed.
+    stubFetch({ [SESSION]: anonymous(false) });
+    mount('/password');
+
+    await screen.findByRole('link', { name: 'Skip to content' });
+    expect(screen.queryByLabelText('Current password')).toBeNull();
   });
 });
 

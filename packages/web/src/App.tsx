@@ -25,19 +25,22 @@ import { SensorTypesView } from './routes/SensorTypesView';
  * to be logged in when the core insists on it, then the password in use has to be one they chose.
  */
 export function App(): React.JSX.Element {
-  const { session, askingToSignIn } = useSession();
+  const { session, askingToSignIn, refresh } = useSession();
 
   if (session.kind === 'unknown') {
-    // One request, on a same-origin route that touches no database. A spinner here would be
-    // spent before it drew.
+    // One request, and the page it is deciding between is a login form — a spinner in front of
+    // that reads as the application loading, which is the one thing it is not yet doing.
     return <div className="min-h-screen bg-bg" />;
   }
 
   if (session.kind === 'unreachable') {
+    // **With a retry, because this state has no other exit.** The probe runs once per `nonce`,
+    // and nothing else on this screen bumps it: a core that was restarting when the tab opened
+    // would otherwise leave the operator on an error page until they thought to reload.
     return (
       <AuthPage title="Cannot reach the core">
         <div className="mt-4">
-          <ErrorPanel error={session.error} />
+          <ErrorPanel error={session.error} retry={refresh} />
         </div>
       </AuthPage>
     );
@@ -65,7 +68,13 @@ export function App(): React.JSX.Element {
         <Route path="objects/:id" element={<ObjectDetailView />} />
         <Route path="objects/:id/add-sensor" element={<AddSensor />} />
         <Route path="sensor-types" element={<SensorTypesView />} />
-        <Route path="password" element={<PasswordView />} />
+        {/*
+          Signed in only. With `api.requireAuthentication` off an anonymous browser reaches the
+          rest of this table, and a change-password form is the one page there whose request the
+          core refuses unconditionally — `POST /auth/password` needs a principal whatever the
+          flag says. A form that cannot succeed is worse than a page that is not there.
+        */}
+        {session.kind === 'signed-in' && <Route path="password" element={<PasswordView />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

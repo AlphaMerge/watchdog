@@ -342,13 +342,15 @@ export interface CoreConfig {
      * before there were per-object rights would have meant an installation where every account
      * saw everything. Those rights exist now, so the honest default is the enforcing one.
      *
-     * **The bundled web UI cannot log in yet, and that is a real cost of this default** (`P-172`).
-     * `packages/web` has no login view, no password field and no 401 handling: with this on, an
-     * operator who installs the UI gets a page that loads and then fails every API call it makes.
-     * `ensureFirstAdministrator` writes a generated password to `<dataDir>/first-admin-password`,
-     * so the *API* is usable immediately — with curl or a token — but the UI is not. The core
-     * says so at startup when `webRoot` is set and this is on, because a silent version of that
-     * is an operator staring at an empty tree with no idea why. `U-12` is the login view.
+     * **The bundled web UI logs in as of `U-17`**, which is what made this default honest. It
+     * asks `GET /auth/session` before anything else — public, and the only route that
+     * distinguishes "nobody is logged in" from "a login is needed" — and puts up a login form
+     * when the answer says one is needed. `ensureFirstAdministrator` writes a generated password
+     * to `<dataDir>/first-admin-password`, so both the API and the UI are usable from first
+     * boot, and the UI forces that password to be replaced before anything else.
+     *
+     * `P-172` added a startup warning here for the year this was not true, and `U-17` removed
+     * it: a warning that outlives its condition is worse than none.
      *
      * The alternative was defaulting to false, and it is worse than it looks: false does not
      * mean "authenticated principals may do everything", it means the API needs no principal at

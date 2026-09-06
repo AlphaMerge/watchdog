@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import * as OTPAuth from 'otpauth';
 import { ApiServer } from '../src/api/server.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
@@ -99,13 +100,18 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   beforeEach(async () => {
     await db.query('DELETE FROM user_session');
     await db.query('DELETE FROM login_attempt');
+    await db.query('DELETE FROM user_recovery_code');
+    await db.query('DELETE FROM user_totp');
+    await db.query('DELETE FROM user_group_member');
+    await db.query('DELETE FROM user_group WHERE NOT is_builtin');
+    await db.query('UPDATE user_group SET requires_mfa = false');
     await db.query('DELETE FROM user_account');
     await accounts.create({ login: 'ops', password: 'correct-horse-battery', role: 'readwrite' });
   });
 
   const login = async (
     instance: FastifyInstance,
-    body: { login: string; password: string },
+    body: { login: string; password: string; code?: string },
     headers: Record<string, string> = {},
   ) => instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: body, headers });
 
@@ -424,6 +430,123 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
 
       assert.ok(token.length > 20);
       assert.equal(response.body.includes(token), false);
+    });
+  });
+
+  /**
+   * The shape of a refusal, as a browser reads it (`U-17`).
+   *
+   * **The envelope has two namespaces and they are not interchangeable.** `toHttpError` gives an
+   * `AuthError` its values as `context` and leaves `details` empty, while `ObjectError` and the
+   * schema errors fill `details` with `problems` and `usedBy`. Reading the wrong one is not a
+   * type error and not a crash: the lookup is `undefined`, the branch it guards is never taken,
+   * and the client is quietly wrong for ever.
+   *
+   * It shipped that way once. `packages/web` read `enrolled` from `details`, so every account
+   * with a second factor was shown "an administrator has to enrol this account" and a disabled
+   * button — and the web tests passed, because they built the fixture in the shape the client
+   * expected rather than the shape the core emits. **No test in that package can see this**,
+   * which is why the assertions are here.
+   */
+  describe('the refusal envelope a client parses', () => {
+    /** The code an authenticator app would be showing right now. */
+    const codeFor = (secret: string): string =>
+      new OTPAuth.TOTP({
+        issuer: 'MonitoringSystem',
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: OTPAuth.Secret.fromBase32(secret),
+      }).generate();
+
+    /** Puts `ops` in a group that demands a second factor. */
+    const demandMfa = async (): Promise<number> => {
+      const account = await accounts.byLogin('ops');
+      const id = account?.id ?? 0;
+      const secure = await new GroupService({ db, logger: silent }).create({
+        name: 'Change managers',
+      });
+      await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
+      await new GroupService({ db, logger: silent }).addMember(secure.id, id);
+      return id;
+    };
+
+    it('carries an MFA refusal in context, and says the account is not enrolled', async () => {
+      await demandMfa();
+      const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
+
+      assert.equal(response.statusCode, 401);
+      const body = response.json<{
+        error: { code: string; context: Record<string, unknown>; details: Record<string, unknown> };
+      }>();
+      assert.equal(body.error.code, 'MFA_REQUIRED');
+      assert.equal(body.error.context['enrolled'], 'false');
+      // And not in the other namespace. A client reading `details` here sees nothing at all,
+      // which is indistinguishable from "this account is enrolled" unless it is looking.
+      assert.deepEqual(body.error.details, {});
+    });
+
+    it('says the account IS enrolled, which is what tells a client to ask for a code', async () => {
+      const id = await demandMfa();
+      const totp = new TotpService({ db, logger: silent });
+      const { secret } = await totp.beginEnrolment(id, 'ops');
+      await totp.confirmEnrolment(id, codeFor(secret));
+
+      const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
+
+      assert.equal(response.statusCode, 401);
+      const body = response.json<{
+        error: { code: string; context: Record<string, unknown>; details: Record<string, unknown> };
+      }>();
+      assert.equal(body.error.code, 'MFA_REQUIRED');
+      assert.equal(body.error.context['enrolled'], 'true');
+      assert.deepEqual(body.error.details, {});
+    });
+
+    it('lets that account in when it presents a second factor', async () => {
+      // The other half of the same claim: `enrolled: 'true'` is a step, not a refusal, and the
+      // step completes. Without this the two cases above would both be satisfied by a core that
+      // never accepts a second factor at all.
+      //
+      // A recovery code rather than a fresh TOTP code, and for a reason worth stating: enrolment
+      // consumes the current 30-second step, and the service refuses a code from a step it has
+      // already seen — correctly, because that is replay protection. Generating another code in
+      // the same window would be testing the replay guard by accident.
+      const id = await demandMfa();
+      const totp = new TotpService({ db, logger: silent });
+      const { secret } = await totp.beginEnrolment(id, 'ops');
+      const { recoveryCodes } = await totp.confirmEnrolment(id, codeFor(secret));
+
+      const response = await login(app, {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        code: recoveryCodes[0] ?? '',
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json<{ login: string }>().login, 'ops');
+    });
+
+    it('carries the throttle delay in context, as a number', async () => {
+      const throttled = new LoginThrottle({
+        db,
+        logger: silent,
+        config: { maxPerAddress: 3 },
+        sleep: () => Promise.resolve(),
+      });
+      for (let attempt = 0; attempt < 23; attempt += 1) {
+        await throttled.record('ops', '127.0.0.1', false);
+      }
+
+      const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
+      assert.equal(response.statusCode, 429);
+      const body = response.json<{
+        error: { code: string; context: Record<string, unknown>; details: Record<string, unknown> };
+      }>();
+      assert.equal(body.error.code, 'AUTH_THROTTLED');
+      assert.equal(typeof body.error.context['retryAfterSeconds'], 'number');
+      assert.ok((body.error.context['retryAfterSeconds'] as number) > 0);
+      assert.deepEqual(body.error.details, {});
     });
   });
 

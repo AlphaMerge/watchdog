@@ -11,7 +11,7 @@
     "port": 8080,
     "webRoot": "",
     "allowedOrigins": ["http://127.0.0.1:5173", "http://localhost:5173"],
-    "requireAuthentication": true
+    "requireAuthentication": false
   },
   "database": {
     "host": "postgres",

@@ -10,6 +10,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const BASE = '/api/v1';
 
 /**
+ * The two namespaces a refusal carries, and they are not interchangeable.
+ *
+ * **The core's envelope has both `context` and `details`, and different errors fill different
+ * ones.** `toHttpError` gives an `AuthError` its values as `context` — `enrolled` on an MFA
+ * refusal, `retryAfterSeconds` on a throttled one — while `ObjectError`, `MethodError` and
+ * `TriggerError` fill `details` with `problems` and `usedBy`. A client that reads one and not the
+ * other does not fail loudly: the lookup is `undefined`, the branch it guards is simply never
+ * taken, and the form quietly does the wrong thing for ever. That is what happened to the MFA
+ * step, so both are read here and each is named for what the core calls it.
+ */
+export interface ErrorContext {
+  [key: string]: unknown;
+}
+
+/**
  * What the core says about a refusal, beyond the sentence.
  *
  * `problems` carries the JSON Pointer of each parameter a schema rejected, which is what lets a
@@ -49,6 +64,7 @@ export class ApiError extends Error {
   readonly code: string;
   readonly correlationId: string | undefined;
   readonly details: ErrorDetails;
+  readonly context: ErrorContext;
 
   constructor(
     status: number,
@@ -56,6 +72,7 @@ export class ApiError extends Error {
     message: string,
     correlationId?: string,
     details: ErrorDetails = {},
+    context: ErrorContext = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -63,6 +80,7 @@ export class ApiError extends Error {
     this.code = code;
     this.correlationId = correlationId;
     this.details = details;
+    this.context = context;
   }
 }
 
@@ -93,6 +111,7 @@ function refusal(status: number, statusText: string, body: ErrorBody): ApiError 
     body.error?.message ?? `${String(status)} ${statusText}`,
     body.error?.correlationId,
     body.error?.details,
+    body.error?.context,
   );
   if (error.status === 401 && error.code === 'AUTH_REQUIRED') sessionLost?.();
   return error;
@@ -103,6 +122,7 @@ interface ErrorBody {
     code?: string;
     message?: string;
     correlationId?: string;
+    context?: ErrorContext;
     details?: ErrorDetails;
   };
 }
