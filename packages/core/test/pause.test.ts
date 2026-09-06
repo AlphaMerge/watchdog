@@ -730,6 +730,56 @@ describe(
         }
       });
 
+      it('applies the window that opened during downtime even behind a page of older ones', async () => {
+        // **`P-176`.** `startedIn` selects every pause *currently in force*, oldest `starts_at`
+        // first, capped at the batch size — so on an installation with more long-standing pauses
+        // than one page, the boot sweep spends its page on windows that were already applied and
+        // whose flags are already on the row. The one that actually needs applying, whose
+        // `starts_at` passed while the core was down, has the newest `starts_at` and is last.
+        // `start()` awaited one page and returned; the probe endpoint opened; the local probe was
+        // handed a list that still said to scan the box being patched.
+        await makeUp(sensorId);
+        const { from, until } = nextWeek();
+
+        // Two pages' worth at a batch size of one: an older window that is already applied, and
+        // the one that opened during the restart.
+        const older = (
+          await h.service.create(testActor, {
+            kind: 'device',
+            parentId: groupId,
+            name: `older-${String(process.hrtime.bigint())}`,
+            host: '192.0.2.9',
+          })
+        ).id;
+        await h.service.pause(
+          testActor,
+          older,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'the one that came first',
+        );
+        await moveWindow(older, '-2 hours', '3 hours');
+
+        await h.service.pause(
+          testActor,
+          deviceId,
+          { kind: 'window', from: new Date(from), until: new Date(until) },
+          'quarterly patching',
+        );
+        await moveWindow(deviceId, '-1 minute', '1 hour');
+
+        const sweep = new PauseSweep({ service: h.service, logger: silent, batchSize: 1 });
+        await sweep.start();
+        try {
+          assert.equal(
+            (await runtimeOf(sensorId)).state,
+            'paused',
+            'the window behind a full page must be applied before start() returns',
+          );
+        } finally {
+          sweep.stop();
+        }
+      });
+
       it('records the window-s own message in the state history', async () => {
         await makeUp(sensorId);
         const { from, until } = nextWeek();

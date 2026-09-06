@@ -1,5 +1,6 @@
 import { connect, type TLSSocket } from 'node:tls';
 import {
+  capabilitiesFor,
   describeError,
   isProtocolCompatible,
   loadTlsMaterial,
@@ -125,6 +126,7 @@ export class CoreClient {
   #approved = false;
   /** In memory only — see the comment where it is sent. */
   #configVersion = '';
+  #coreProtocolVersion = 0;
   /** Batches offered and not yet answered. Rejected together when the link drops. */
   readonly #inFlight = new Map<string, (outcome: ResultsOutcome) => void>();
   #batchSeq = 0;
@@ -392,6 +394,10 @@ export class CoreClient {
           this.#connection?.destroy('protocol version skew');
           return;
         }
+        // Kept so the probe can gate what it *sends*: every core-side schema carries
+        // `additionalProperties: false`, so a field an older core does not know is a rejected
+        // batch rather than an ignored key (`P-169`).
+        this.#coreProtocolVersion = message.protocolVersion;
         this.#gid = message.gid;
         // Absent from a version-5 core, which had no notion of approval and trusted whatever
         // presented the key. Reading that as approved is what keeps an older core working.
@@ -631,7 +637,17 @@ export class CoreClient {
       try {
         // The core cannot tell a live batch from a replay without this, so it would have to
         // slow both alike — which is how one probe's catch-up stalls everyone's live data.
-        connection.send({ type: 'results', batchId, results: [...results], backlog });
+        connection.send({
+          type: 'results',
+          batchId,
+          results: [...results],
+          backlog,
+          // **This probe's own clock, so the core can judge a replay in one frame** (`P-169`).
+          // Gated: an older core's results schema refuses an unknown field outright.
+          ...(capabilitiesFor(this.#coreProtocolVersion).resultSendTime
+            ? { sentAt: new Date().toISOString() }
+            : {}),
+        });
       } catch (error: unknown) {
         this.#inFlight.delete(batchId);
         reject(error instanceof Error ? error : new Error(String(error)));

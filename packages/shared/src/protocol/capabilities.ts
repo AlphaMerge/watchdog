@@ -41,6 +41,29 @@ export interface ProbeCapabilities {
    * identical to a device that will not answer.
    */
   onDemandQuery: boolean;
+  /**
+   * Understands `final` on a chunked configuration push, and stamps its version only on the
+   * message that carries it (`P-168`).
+   *
+   * **Gated because the field itself is the hazard.** Every core→probe schema carries
+   * `additionalProperties: false`, so a probe that does not know `final` does not ignore it —
+   * it rejects the whole message, closes the connection on a protocol violation, reconnects and
+   * rejects it again. `P-166` added the field without a version, which wedged every probe that
+   * had not been upgraded in lockstep. Below this, the core omits it and the probe keeps the
+   * older behaviour of stamping on the first message; `P-153`'s heartbeat reconciliation is
+   * what covers those.
+   */
+  chunkedPushFinal: boolean;
+  /**
+   * Stamps each results batch with the probe's own clock at the moment it was sent (`P-169`).
+   *
+   * What makes "is this a replay?" answerable in **one** clock. The core compares `sentAt`
+   * against the newest result in the batch — both the probe's — so a probe host whose clock is
+   * wrong is judged against itself and a replay is a replay whatever the skew. Below this the
+   * core falls back to comparing the batch against its own clock, which is `P-146`'s original
+   * test and carries `P-146`'s original skew problem.
+   */
+  resultSendTime: boolean;
 }
 
 /**
@@ -57,6 +80,8 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['approval', 6],
   ['healthReporting', 7],
   ['onDemandQuery', 8],
+  ['chunkedPushFinal', 16],
+  ['resultSendTime', 16],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -67,6 +92,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   approval: 'be held for approval before it scans',
   healthReporting: 'report its own scheduler and pool health',
   onDemandQuery: 'run a check on demand',
+  chunkedPushFinal: 'be told which message completes a configuration push',
+  resultSendTime: 'say when it sent a batch, so a replay can be told from live data',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -78,6 +105,8 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     approval: has(6),
     healthReporting: has(7),
     onDemandQuery: has(8),
+    chunkedPushFinal: has(16),
+    resultSendTime: has(16),
   };
 }
 

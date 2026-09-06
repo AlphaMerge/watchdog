@@ -256,11 +256,40 @@ export class DependencyRepository {
         FROM holding h
         JOIN assigned held ON held.master_id = h.master_id AND held.node <> h.master_id
       ),
+      -- **A sensor on a master cycle is never held by one** (P-171). Carrying the ground was
+      -- half the answer: it refuses a hold a sensor is its *own* reason for, which fixes a cycle
+      -- with one member down. With *both* members down each is held by a ground that is the
+      -- other, the guard never fires, and the pair still went down -> paused -> unknown inside
+      -- one transaction with both outages erased -- which is the state two devices either end of
+      -- a WAN link reach the moment the link dies, since both fail in the same scan interval.
+      --
+      -- So the cycle is named rather than reasoned around. A node that reaches itself through
+      -- the master chain is exempt from being paused, and keeps its own state and its own alarm;
+      -- it still *holds* whatever depends on it, because a cycle member being Down is a real
+      -- outage for everything downstream. That is what "a cycle contributes nothing and holds
+      -- nobody" always claimed, applied to the members as well as to the loop.
+      --
+      -- Bounded by the master graph rather than the tree: assigned names only sensors with an
+      -- effective master, chains are short in practice, and UNION stops a loop from recurring.
+      reaches AS (
+        SELECT a.node AS from_node, a.master_id AS to_node
+        FROM assigned a
+        WHERE a.master_id IS NOT NULL AND a.master_id <> a.node
+
+        UNION
+
+        SELECT r.from_node, a.master_id
+        FROM reaches r
+        JOIN assigned a ON a.node = r.to_node
+        WHERE a.master_id IS NOT NULL AND a.master_id <> a.node
+      ),
+      cyclic AS (SELECT from_node AS node FROM reaches WHERE from_node = to_node),
       want AS (
         SELECT o.id AS sensor_id,
                a.master_id,
                (a.master_id IS NOT NULL
                 AND a.master_id <> o.id
+                AND NOT EXISTS (SELECT 1 FROM cyclic c WHERE c.node = o.id)
                 AND EXISTS (SELECT 1 FROM holding h
                              WHERE h.master_id = a.master_id AND h.ground <> o.id)) AS paused
         FROM object o

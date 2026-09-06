@@ -1222,6 +1222,11 @@ export class ProbeEndpoint {
           // immediately instead took a reconnect cycle, with a protocol violation in both logs,
           // for every large pause and every resume. `worthADelta` never saved it: it weighs the
           // *upserts* against a resend and has no opinion about removals.
+          // **Only a probe that knows the field may be sent it** (`P-168`). Every core→probe
+          // schema carries `additionalProperties: false`, so `final` reaches an older probe as a
+          // rejected message, a destroyed socket and a reconnect into the same wall — the
+          // `P-148` wedge, which `P-166` reintroduced by adding the field without a version.
+          const marksFinal = capabilitiesFor(session.protocolVersion).chunkedPushFinal;
           const upserts = chunked(delta.upserted, CONFIG_CHUNK_SENSORS);
           const removals = chunked(delta.removed, CONFIG_CHUNK_SENSORS);
           const messages = Math.max(upserts.length, removals.length, 1);
@@ -1240,7 +1245,7 @@ export class ProbeEndpoint {
               // a fingerprint that says it is current, and the reconnect was answered
               // `config-unchanged`. An operator's pause of three thousand sensors half-landed
               // and nothing anywhere disagreed.
-              final: index === messages - 1,
+              ...(marksFinal ? { final: index === messages - 1 } : {}),
             });
           }
           logger.info(
@@ -1269,13 +1274,14 @@ export class ProbeEndpoint {
         // carrying the same version. The end state is identical to one oversized message.
         const chunks = chunked(assignments.sensors, CONFIG_CHUNK_SENSORS);
         const [first = [], ...rest] = chunks;
+        const marksFinalSet = capabilitiesFor(session.protocolVersion).chunkedPushFinal;
         session.configAcksOutstanding = chunks.length;
         session.connection.send({
           type: 'config-set',
           version: assignments.version,
           sensors: [...first],
-          // The same rule for the full push, and the same reason (`R18`).
-          final: rest.length === 0,
+          // The same rule for the full push, and the same reason (`R18`), gated the same way.
+          ...(marksFinalSet ? { final: rest.length === 0 } : {}),
         });
         for (const [index, chunk] of rest.entries()) {
           session.connection.send({
@@ -1283,7 +1289,7 @@ export class ProbeEndpoint {
             version: assignments.version,
             upserted: [...chunk],
             removed: [],
-            final: index === rest.length - 1,
+            ...(marksFinalSet ? { final: index === rest.length - 1 } : {}),
           });
         }
         logger.info(

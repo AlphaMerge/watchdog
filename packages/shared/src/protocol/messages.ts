@@ -41,6 +41,13 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 16 adds `final` on a chunked configuration push and `sentAt` on a results batch
+ * (`P-168`, `P-169`) — both gated through `capabilitiesFor`, because `additionalProperties:
+ * false` sits on the *receiver's* copy of every schema and an unknown field is a rejected
+ * message rather than an ignored one. `P-166` learned that the hard way: it added `final`
+ * without a bump, and every probe not upgraded in lockstep rejected each configuration message,
+ * closed the connection and reconnected into the same wall.
+ *
  * Version 15 adds `spoolUnwritten` (`P-78`), version 14 `checksCompleting` and
  * `checksBehind` (`P-76`), version 13 the listeners'
  * throughput counters (`P-64`), version 12 the worker pool's
@@ -53,7 +60,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 /**
  * The oldest peer version this build still understands.
@@ -464,6 +471,22 @@ export type ProbeToCoreMessage =
        * precisely how a catch-up stalls everyone else's live ingestion (R-03).
        */
       backlog?: number;
+      /**
+       * When the probe sent this batch, by the probe's own clock (`P-169`).
+       *
+       * **The half that makes a replay answerable.** `CheckResult.at` is the probe's clock too,
+       * so `sentAt - max(result.at)` is a duration measured entirely on one machine: seconds for
+       * a live batch, hours for a spool drain, and correct however far the probe's clock is from
+       * the core's. Comparing the results against the *core's* now instead — `P-146`'s original
+       * test — makes a probe five minutes slow look like a permanent replay, which is `R17`.
+       *
+       * `backlog` is not a substitute and was wrongly used as one (`P-169`): it counts rows
+       * still on disk after this batch, so a busy live probe whose scan tick outruns one batch
+       * reports thousands of them. It is a pacing signal, which is what `R-03` added it for.
+       *
+       * Absent from a probe below protocol 16, and then the core falls back to its own clock.
+       */
+      sentAt?: string;
     }
   | {
       type: 'config-ack';
@@ -830,6 +853,10 @@ const probeToCoreSchema = {
         // Optional, so a version-3 probe that does not report one still validates. Absent is
         // read as "unknown", which is paced like a live batch — the behaviour before R-03.
         backlog: { type: 'integer', minimum: 0 },
+        // Shaped like the heartbeat's `sentAt` rather than with `format: 'date-time'`: this
+        // validator runs without ajv-formats, where an unknown format is silently no
+        // validation at all.
+        sentAt: { type: 'string', minLength: 1, maxLength: 64 },
         results: {
           type: 'array',
           // Bounded here as well as by the 4 MB frame cap, so a malformed peer is refused by

@@ -49,20 +49,25 @@ export interface IngestBatch {
    */
   states?: StateDecisions;
   /**
-   * Whether the probe still had results on disk after this batch (`R16`, `R17`).
+   * When the probe sent this batch, by the probe's own clock (`P-169`).
    *
-   * **The probe's own answer to "am I catching up", which is the only reliable one.** `P-146`
-   * inferred it from timestamps — a batch whose newest result is older than the catch-up grace
-   * is a replay — and a timestamp comparison across two machines' clocks is exactly as good as
-   * those clocks. A probe five minutes slow stamps *every* live result in the past, so every
-   * batch it ever sends reads as a replay and its sensors are never reconciled at all, for as
-   * long as the drift lasts, with nothing anywhere saying so.
+   * **Staleness has to be measured in one clock, and this is the one that has both hands.**
+   * `CheckResult.at` is the probe's clock, so `sentAt - max(result.at)` is a duration on a
+   * single machine: seconds for a live batch, hours for a spool drain, and right however far
+   * that machine's clock is from the core's. `P-146` compared the results against the *core's*
+   * now, which made a probe five minutes slow look like a permanent replay and stopped every
+   * alarm under it (`R17`).
    *
-   * `backlog` is already on the wire for the pacer, and it settles the question without a
-   * clock: a probe reporting zero has nothing left to replay whatever its clock says. Absent
-   * when the probe does not track it, and then the timestamp heuristic is still the fallback.
+   * `P-157` replaced that with the probe's `backlog`, which was wrong for a different reason:
+   * `backlog` is `pending - batch.length` — rows still on disk *right now* — so a live probe
+   * whose scan tick queues more than one batch reports thousands of them, and every one of its
+   * live batches was read as a replay. At 5,047 sensors and a 500-row batch that is the normal
+   * case, not an edge. `backlog` is a pacing signal and `R-03` is what added it.
+   *
+   * Absent from a probe below protocol 16, and then the core's own clock is the fallback —
+   * `P-146`'s test, with `P-146`'s skew problem, which is the best that can be done without it.
    */
-  draining?: boolean;
+  sentAt?: Date;
 }
 
 export type IngestOutcome =
@@ -285,12 +290,18 @@ export class Ingestor {
    * by nothing and nobody is paged for an outage that is still happening. One outage, zero
    * alarms.
    *
+   * **In memory, and a restart drops it** (`P-177`). That is a real hole and it is closed
+   * elsewhere rather than here: `main()` reconciles standing alarms once at boot, which arms
+   * every sensor that is Down without one — the deferred ones and anything else a crash lost.
+   * Persisting the set would put a write on the hot ingest path to solve a problem one
+   * idempotent pass at startup already solves.
+   *
    * So the ids are held here instead and folded into the first batch that is not stale, which
    * reconciles them against their current state — arming what is still Down and standing down
    * what recovered while the spool drained. Bounded by the sensor count, and cleared whole:
    * every id in it is included in that reaction.
    */
-  readonly #deferredReactions = new Set<number>();
+  readonly #deferredReactions = new Map<string, Set<number>>();
 
   readonly #queue: Queued[] = [];
   readonly #latencies: number[] = [];
@@ -424,7 +435,10 @@ export class Ingestor {
       staleRuntimeWrites: this.#staleRuntimeWrites,
       dependencyPauses: this.#dependencyPauses,
       staleReactions: this.#staleReactions,
-      deferredReactions: this.#deferredReactions.size,
+      deferredReactions: [...this.#deferredReactions.values()].reduce(
+        (n, held) => n + held.size,
+        0,
+      ),
       writes: this.#writes,
       writeMs: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       slowingDown: this.#retryHint() > 0,
@@ -507,6 +521,13 @@ export class Ingestor {
     // One baseline per channel, newest wins — the same merge rule as `runtimes`, and for the
     // same reason: two rows for one channel would let the database pick either (`P-107`).
     const counters = new Map<number, CounterSample>();
+    // **Per source, because staleness is a property of the probe and not of the write**
+    // (`P-169`). One write coalesces submissions from every connected probe, so judging the
+    // whole write as stale or live gets both answers wrong: a draining probe's replay was
+    // reconciled by the local probe's next live batch — the storm `P-146` exists to stop — and,
+    // the other way, a live probe's batch was deferred because a different probe was draining.
+    const sensorsBySource = new Map<string, Set<number>>();
+    const staleBySource = new Map<string, boolean>();
     for (const queued of taken) {
       for (const sample of queued.batch.samples) {
         times.push(sample.at);
@@ -533,30 +554,41 @@ export class Ingestor {
       }
     }
 
-    // **Is any of this a replay?** Folded across the submissions this write coalesces, because
-    // one drain among live batches makes the whole write a replay for the sensors it carries.
-    // Undefined only when *no* submission reported a backlog at all (`R17`).
-    let draining: boolean | undefined;
+    // A second pass, so every submission is judged whether or not it decided any state: the
+    // sensors it carries, and whether it is a replay.
     for (const queued of taken) {
-      const reported = queued.batch.draining;
-      if (reported === undefined) continue;
-      draining = (draining ?? false) || reported;
+      const source = queued.batch.source;
+      const mine = sensorsBySource.get(source) ?? new Set<number>();
+      for (const write of queued.batch.states?.runtimes ?? []) mine.add(write.sensorId);
+      for (const transition of queued.batch.states?.transitions ?? [])
+        mine.add(transition.sensorId);
+      sensorsBySource.set(source, mine);
+
+      // **How old these results are to the probe that took them** (`P-169`). Both timestamps are
+      // the probe's, so the comparison is immune to any skew between the two machines — which is
+      // what `R17` was about, and what `backlog` failed to answer because it counts rows on disk
+      // rather than the age of the data.
+      const newestHere = [...(queued.batch.states?.runtimes ?? [])].reduce(
+        (best, write) => Math.max(best, write.at.getTime()),
+        (queued.batch.states?.transitions ?? []).reduce(
+          (best, transition) => Math.max(best, transition.at.getTime()),
+          0,
+        ),
+      );
+      if (newestHere === 0) continue;
+      const against = queued.batch.sentAt?.getTime() ?? Date.now();
+      const isStale = against - newestHere > this.#catchUpGraceMs;
+      staleBySource.set(source, (staleBySource.get(source) ?? false) || isStale);
     }
 
-    // **From the results, not from the transitions** (`R16`). `P-146`'s own ticket text says "a
-    // batch whose newest *result* is older than the catch-up grace", and the comment beside the
-    // code said the same — but it folded over `transitions`, and during a drain most batches
-    // change no state at all. Those batches read as live and reacted, which on any installation
-    // with a threshold trigger anywhere means reacting over every sensor in the batch from
-    // hours-old runtime rows: the storm the ticket describes, one batch later. Every result in
-    // the batch has a runtime write, including the Down ones that record no reading.
-    const newestResultAt = [...runtimes.values()].reduce(
-      (best, write) => Math.max(best, write.at.getTime()),
-      transitions.reduce((best, transition) => Math.max(best, transition.at.getTime()), 0),
+    // Which sources this write may reconcile, and which it must hold back for.
+    const liveSources = [...sensorsBySource.keys()].filter(
+      (one) => staleBySource.get(one) !== true,
     );
-    const stale =
-      draining ?? (newestResultAt > 0 && Date.now() - newestResultAt > this.#catchUpGraceMs);
-    if (stale) this.#staleReactions += 1;
+    const staleSources = [...sensorsBySource.keys()].filter(
+      (one) => staleBySource.get(one) === true,
+    );
+    if (staleSources.length > 0) this.#staleReactions += 1;
 
     const startedAt = process.hrtime.bigint();
     try {
@@ -639,14 +671,30 @@ export class Ingestor {
         // The moved ids are held instead and folded in here, so the first live batch reconciles
         // them along with its own.
         //
+        // **And per source, because one write carries several probes** (`P-169`). Judging the
+        // whole write reconciled a draining probe's replayed rows on the local probe's next live
+        // batch — restoring the storm for every installation with more than one probe — and, the
+        // other way round, deferred a live probe because a different one was catching up.
+        //
         // `reactionTime` in `dependencies/pauses.ts` exists because the dependency reaction had
         // this class of bug; the alarm reaction had no equivalent.
-        if (this.#alarms !== undefined && !stale) {
-          const moved = new Set(transitions.map((transition) => transition.sensorId));
-          for (const sensorId of this.#deferredReactions) moved.add(sensorId);
-          const scanned = (await this.#alarms.reconcilesReadings(q))
-            ? [...new Set([...runtimes.keys(), ...this.#deferredReactions])]
-            : [...moved];
+        if (this.#alarms !== undefined && liveSources.length > 0) {
+          const live = new Set<number>();
+          for (const source of liveSources) {
+            for (const id of sensorsBySource.get(source) ?? []) live.add(id);
+            for (const id of this.#deferredReactions.get(source) ?? []) live.add(id);
+          }
+          const widen = await this.#alarms.reconcilesReadings(q);
+          const scanned = widen
+            ? [...live]
+            : [
+                ...new Set([
+                  ...transitions.map((t) => t.sensorId).filter((id) => live.has(id)),
+                  ...liveSources.flatMap((source) => [
+                    ...(this.#deferredReactions.get(source) ?? []),
+                  ]),
+                ]),
+              ];
           if (scanned.length > 0) await this.#alarms.react(q, scanned, new Date());
         }
         return {
@@ -658,16 +706,22 @@ export class Ingestor {
         };
       });
 
-      // **After the commit, because a rolled-back write decided nothing.** Held on a skipped
-      // batch, cleared whole on a live one — every deferred id was in that reaction's `scanned`
-      // (`R04`, `G02`). Only while there is an alarm engine to defer *to*; without one the set
-      // would grow for the life of the process and be read by nobody.
+      // **After the commit, because a rolled-back write decided nothing.** Held for a source
+      // whose batch was a replay, dropped for one whose was not — every id dropped here was in
+      // that reaction's `scanned` (`R04`, `G02`, `P-169`). Only while there is an alarm engine
+      // to defer *to*; without one the map would grow for the life of the process and be read
+      // by nobody.
       if (this.#alarms !== undefined) {
-        if (stale) {
-          for (const transition of transitions) this.#deferredReactions.add(transition.sensorId);
-        } else {
-          this.#deferredReactions.clear();
+        for (const source of staleSources) {
+          const held = this.#deferredReactions.get(source) ?? new Set();
+          for (const transition of transitions) {
+            if (sensorsBySource.get(source)?.has(transition.sensorId) === true) {
+              held.add(transition.sensorId);
+            }
+          }
+          if (held.size > 0) this.#deferredReactions.set(source, held);
         }
+        for (const source of liveSources) this.#deferredReactions.delete(source);
       }
 
       this.#record(Number(process.hrtime.bigint() - startedAt) / 1e6);

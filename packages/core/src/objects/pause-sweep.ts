@@ -16,6 +16,15 @@ export interface SweepsPauses {
   }>;
 }
 
+/**
+ * How many pages `start()` will drain before handing the rest to the timer (`P-176`).
+ *
+ * At the default batch of 200 that is 20,000 pauses in force, which is far past any real
+ * installation — the bound exists so a pathological one delays the port opening by a known
+ * amount rather than indefinitely, and it says so in the log when it is reached.
+ */
+const MAX_BOOT_PAGES = 100;
+
 export interface PauseSweepOptions {
   service: SweepsPauses;
   logger: Logger;
@@ -62,6 +71,7 @@ export class PauseSweep {
   readonly #onChanged: (() => void) | undefined;
   #timer: NodeJS.Timeout | undefined;
   #running = false;
+  #truncated = false;
   #stopped = false;
   /**
    * The end of the last pass, and the start of the next one's window of interest.
@@ -98,7 +108,28 @@ export class PauseSweep {
    */
   async start(): Promise<void> {
     if (this.#timer !== undefined || this.#stopped) return;
-    await this.sweep();
+    // **Until there is nothing left, not once** (`P-176`). One sweep is one page of at most
+    // `batchSize`, ordered oldest `starts_at` first — and `startedIn` selects every pause
+    // *currently in force*, not only the ones that need applying. On an installation with a few
+    // hundred long-standing pauses those are all no-ops that fill the page, while the one window
+    // whose `starts_at` passed during the restart has the newest `starts_at` and is therefore
+    // last. Sweeping once reconciled the pauses that needed nothing and left the one that
+    // mattered for a tick thirty seconds later, by which time the probe endpoint has opened and
+    // the local probe has been handed a list that says to scan the box being patched — which is
+    // the whole failure this await was added to close.
+    for (let page = 0; page < MAX_BOOT_PAGES; page += 1) {
+      await this.sweep();
+      if (!this.#truncated) break;
+      if (page === MAX_BOOT_PAGES - 1) {
+        // Counted rather than silent, and it bounds boot: an installation whose in-force pauses
+        // exceed this is one where something else is wrong, and blocking the port for ever is
+        // not the better answer.
+        this.#logger.warn(
+          { pages: MAX_BOOT_PAGES, batchSize: this.#batchSize },
+          'still reconciling pauses after the boot limit; the rest are left to the sweep timer',
+        );
+      }
+    }
     this.#arm();
   }
 
@@ -116,6 +147,9 @@ export class PauseSweep {
     const startedAt = new Date();
     try {
       const report = await this.#service.sweepPauses(since, this.#batchSize);
+      // Non-null exactly when the page was truncated, so this says whether there is more to do
+      // (`P-176`). Read by `start()`, which must not leave any of it for the next tick.
+      this.#truncated = report.startedThrough !== null;
       // Advanced only on success, so a failed pass is retried over the same interval rather
       // than leaving a window that opened during it unapplied for ever.
       //

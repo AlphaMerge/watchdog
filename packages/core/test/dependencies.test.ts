@@ -358,8 +358,67 @@ describe(
       );
       assert.equal(
         (await runtimeOf(snmpId)).dependency,
+        false,
+        'and neither is the other member of the cycle, which is the trade (`P-171`)',
+      );
+    });
+
+    it('keeps both outages when both members of a cycle fail together', async () => {
+      // **`P-171`, and `P-162` did not cover it.** Carrying the ground refuses a hold a sensor is
+      // its *own* reason for, which fixes a cycle with one member down. With both down, each is
+      // held by a ground that is the *other*, the guard never fires, and the pair went
+      // down → paused → unknown inside one transaction: two real outages erased, no alarm armed
+      // for either, and `sensor_state` churning every scan.
+      //
+      // That is not an exotic state. Two devices at either end of a WAN link, each watching the
+      // other, both fail in the same scan interval the moment the link dies — so one ingest
+      // batch carries both Down transitions and the settle sees them together.
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         VALUES ($1, $3, to_jsonb($2::bigint)), ($2, $3, to_jsonb($1::bigint))`,
+        [httpId, snmpId, DEPENDENCY_MASTER_ID.key],
+      );
+      await db.query(`UPDATE sensor_runtime SET state = 'up', cause = 'scan'`);
+      await setState(httpId, 'down');
+      await setState(snmpId, 'down');
+
+      await db.tx((q) => pauses.recompute(q, NOW));
+
+      assert.equal((await runtimeOf(httpId)).state, 'down', 'both outages are real');
+      assert.equal((await runtimeOf(snmpId)).state, 'down', 'and both survive the settle');
+      assert.equal((await runtimeOf(httpId)).dependency, false);
+      assert.equal((await runtimeOf(snmpId)).dependency, false);
+    });
+
+    it('still holds a dependent that is downstream of a cycle rather than in it', async () => {
+      // **The half the exemption must not cost** (`P-171`). A sensor on a master cycle is never
+      // *held* — otherwise two members failing together erase both outages — but it still
+      // *holds* whatever hangs off it, because a cycle member being Down is a real outage for
+      // everything downstream. Suppressing those is the feature working.
+      //
+      // The trade is deliberate and worth naming: an ill-formed cycle can now produce two alarms
+      // for what may be one outage, where before it produced none at all. A duplicate page is
+      // recoverable; an erased outage is not.
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         VALUES ($1, $3, to_jsonb($2::bigint)), ($2, $3, to_jsonb($1::bigint))`,
+        [httpId, snmpId, DEPENDENCY_MASTER_ID.key],
+      );
+      // A third sensor outside the cycle, pointed at one of its members.
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value) VALUES ($1, $3, to_jsonb($2::bigint))`,
+        [pingId, httpId, DEPENDENCY_MASTER_ID.key],
+      );
+      await db.query(`UPDATE sensor_runtime SET state = 'up', cause = 'scan'`);
+      await setState(httpId, 'down');
+
+      await db.tx((q) => pauses.recompute(q, NOW));
+
+      assert.equal((await runtimeOf(httpId)).state, 'down', 'the cycle member alarms');
+      assert.equal(
+        (await runtimeOf(pingId)).dependency,
         true,
-        'while the one downstream of it is suppressed, which is the whole point',
+        'and the sensor downstream of it is still suppressed',
       );
     });
 

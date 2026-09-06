@@ -340,14 +340,21 @@ export interface CoreConfig {
      * **On by default, and there is no third state.** The authorisation layer was written,
      * tested and left switched off for the whole of `A-03` and `A-04`, because turning it on
      * before there were per-object rights would have meant an installation where every account
-     * saw everything. Those rights exist now, so the honest default is the enforcing one — and
-     * an installation that starts with no accounts gets an administrator with a generated
-     * password written to `<dataDir>/first-admin-password`, so nobody is locked out by it.
+     * saw everything. Those rights exist now, so the honest default is the enforcing one.
      *
-     * False is for one situation: a single-operator install behind something else that does the
-     * authenticating. Setting it means every authenticated principal may do everything —
-     * including delete every trigger and send a test notification for real — so it belongs in a
-     * configuration file, where an operator chose it, rather than in a constant.
+     * **The bundled web UI cannot log in yet, and that is a real cost of this default** (`P-172`).
+     * `packages/web` has no login view, no password field and no 401 handling: with this on, an
+     * operator who installs the UI gets a page that loads and then fails every API call it makes.
+     * `ensureFirstAdministrator` writes a generated password to `<dataDir>/first-admin-password`,
+     * so the *API* is usable immediately — with curl or a token — but the UI is not. The core
+     * says so at startup when `webRoot` is set and this is on, because a silent version of that
+     * is an operator staring at an empty tree with no idea why. `U-12` is the login view.
+     *
+     * The alternative was defaulting to false, and it is worse than it looks: false does not
+     * mean "authenticated principals may do everything", it means the API needs no principal at
+     * all. Shipping that as the default would put an unauthenticated monitoring system behind
+     * every reverse proxy that forwards to it. So false stays a sentence an operator writes in a
+     * file — for a single-operator install, or one behind something else that authenticates.
      */
     requireAuthentication: boolean;
   };

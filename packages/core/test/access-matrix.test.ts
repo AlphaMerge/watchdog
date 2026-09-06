@@ -413,12 +413,30 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
      * dedicated test two below asserts.
      *
      * Anything else appearing here is a route that names an object and does not resolve a right
-     * on it — which is exactly what this sweep exists to find, so the exemption is by url and
+     * on it — which is exactly what this sweep exists to find, so the exemption is by name and
      * never by "it was failing".
+     *
+     * **Named one by one, because a prefix swallowed the route this file exists for** (`P-173`).
+     * The first version matched `^/api/v1/(templates|schedules)(/|$)`, which also skips
+     * `POST /templates/:id/test` — the route `P-155` cites *twice* as the one the old harness
+     * could not see, and the reason nine services were wired in. It was wired in and then
+     * exempted from the only sweep whose principal can exercise its per-object bar. A list that
+     * has to name each route is a list somebody has to justify adding to.
      */
-    const isRoleGoverned = (route: { url: string }): boolean =>
-      /^\/api\/v1\/(templates|schedules)(\/|$)/.test(route.url) ||
-      route.url === '/api/v1/objects/bulk';
+    const ROLE_GOVERNED = new Set([
+      'POST /api/v1/templates',
+      'PUT /api/v1/templates/:id',
+      'DELETE /api/v1/templates/:id',
+      'POST /api/v1/schedules',
+      'PUT /api/v1/schedules/:id',
+      'DELETE /api/v1/schedules/:id',
+      // Answers 200 and reports the refusals per id in its body, which is what `D-09` requires
+      // of it and what the dedicated test two below asserts.
+      'POST /api/v1/objects/bulk',
+    ]);
+
+    const isRoleGoverned = (route: { method: string; url: string }): boolean =>
+      ROLE_GOVERNED.has(`${route.method} ${route.url}`);
 
     const mutating = (): {
       method: string;

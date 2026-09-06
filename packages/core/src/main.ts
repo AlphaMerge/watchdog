@@ -545,6 +545,38 @@ async function serve(): Promise<void> {
     alarmScheduler.wake();
   };
   alarmScheduler.start();
+
+  // **One reconciliation at boot, because an arm can be lost across a restart** (`P-177`).
+  // `AlarmEngine.react` is state-based and idempotent: a sensor that is Down with no standing
+  // alarm gets one, and a sensor whose alarm already stands is held rather than re-armed. So a
+  // single pass over the tree repairs every way an arm can go missing while the process is not
+  // running — the ingestor's deferred reactions, which live only in memory and are dropped by a
+  // restart mid-drain (`P-157`); a crash between a state write and its reaction; anything else
+  // that decided a state and did not get to act on it.
+  //
+  // Not awaited before the port opens: it reads the current state, so running it a second later
+  // gives the same answer, and blocking the API on a full-tree pass would trade a rare missed
+  // alarm for a slow start on every boot. Failures are logged and nothing else depends on it.
+  void db
+    .query<{ id: string }>(`SELECT id::text AS id FROM object WHERE kind = 'root'`)
+    .then(async (rows) => {
+      const rootId = Number(rows[0]?.id ?? 0);
+      if (rootId === 0) return;
+      const moved = await db.tx((q) => alarms.reconcileSubtree(q, rootId, new Date()));
+      if (moved.armed > 0 || moved.cleared > 0) {
+        logger.info(
+          { armed: moved.armed, cleared: moved.cleared },
+          'reconciled standing alarms at startup',
+        );
+      }
+    })
+    .catch((error: unknown) => {
+      logger.error(
+        describeError(error),
+        'could not reconcile standing alarms at startup; a state change will still arm them',
+      );
+    });
+
   lifecycle.onShutdown({
     name: 'alarm-scheduler',
     timeoutMs: 2_000,
@@ -784,6 +816,20 @@ async function serve(): Promise<void> {
   // password is worse than one with none.** So the first administrator is created here with a
   // generated password, printed once where the operator installing this will see it, and flagged
   // to be replaced at the first login. Does nothing at all once any account exists.
+  // **Said out loud, because the alternative is an operator staring at an empty page** (`P-172`).
+  // With authorisation on, every `/api/` call needs a session — and the bundled web UI has no
+  // login view yet, so an install that serves it gets a page that loads and then fails every
+  // request it makes, with nothing anywhere connecting the two facts. The API itself is usable
+  // from the first boot with the generated administrator password below.
+  if (config.api.requireAuthentication && config.api.webRoot !== '') {
+    logger.warn(
+      { webRoot: config.api.webRoot },
+      'the web UI is being served and authentication is required, but this build of the UI ' +
+        'cannot log in — use the API, or set api.requireAuthentication to false for a ' +
+        'single-operator install',
+    );
+  }
+
   const firstAdmin = await accounts.ensureFirstAdministrator();
   if (firstAdmin !== null) {
     // **The password goes to a file, not to the log, and that is not a detail.** Every logger in

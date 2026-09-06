@@ -34,6 +34,8 @@ describe('what a protocol version can do', () => {
       approval: false,
       healthReporting: false,
       onDemandQuery: false,
+      chunkedPushFinal: false,
+      resultSendTime: false,
     });
   });
 

@@ -459,6 +459,53 @@ describe(
       assert.equal((await queued())[0]?.observed, 95);
     });
 
+    it('un-parks an alarm whose trigger became readable again, and notifies the breach', async () => {
+      // **`P-170`.** `P-152` stopped the sweep spinning on an alarm whose trigger this build
+      // cannot parse by *parking* it — `next_due_at = NULL, suppressed = true` — and its comment
+      // said the reaction resumes it when the trigger becomes readable. That is a `reconcile`
+      // branch, and a threshold alarm never goes through `reconcile`: `reconcileThreshold` has
+      // no `resume`, so the only branch a parked threshold alarm could reach was `hold`, which
+      // wrote `nextDueAt` back unchanged. Still null, never due, never notified — and when the
+      // value came back under its limit the row was cancelled and deleted, so the recovery was
+      // silent too. A disk fills, a page is owed, and neither the filling nor the emptying is
+      // ever said.
+      await loadTrigger({ latencySeconds: 300 });
+      await scan(95, T0);
+      assert.equal((await standing()).length, 1, 'armed and pending');
+
+      // The trigger's settings become unreadable to this build — a downgrade, or a row a newer
+      // build wrote — and the sweep parks the alarm rather than deleting it.
+      await db.query(
+        `UPDATE notification_trigger SET settings = jsonb_set(settings, '{condition}', '"sideways"')`,
+      );
+      assert.equal(await sweep(at(400)), 0, 'nothing fires for a trigger this build cannot read');
+      const parked = await db.query<{ next_due_at: Date | null; suppressed: boolean }>(
+        'SELECT next_due_at, suppressed FROM notification_alarm',
+      );
+      const [parkedRow] = parked;
+      assert.ok(parkedRow, 'the alarm is still there to have been parked');
+      assert.equal(parkedRow.next_due_at, null, 'parked, so the sweep stops finding it');
+      assert.equal(parkedRow.suppressed, true);
+
+      // The build is corrected. The channel is still over its limit, so the next reading is a
+      // `hold` — the only branch this row can reach.
+      await db.query(
+        `UPDATE notification_trigger SET settings = jsonb_set(settings, '{condition}', '"above"')`,
+      );
+      await scan(96, at(500));
+
+      const resumed = await db.query<{ next_due_at: Date | null; suppressed: boolean }>(
+        'SELECT next_due_at, suppressed FROM notification_alarm',
+      );
+      const [resumedRow] = resumed;
+      assert.ok(resumedRow, 'and still there to have been resumed');
+      assert.notEqual(resumedRow.next_due_at, null, 'the alarm has a deadline again');
+      assert.equal(resumedRow.suppressed, false, 'and is no longer parked');
+
+      // And it actually pages, which is the point of all of it.
+      assert.equal(await sweep(at(900)), 1, 'the breach is notified once the trigger is readable');
+    });
+
     it('reads no channel values when no threshold trigger names any', async () => {
       // `currentValues` is bounded by the keys some trigger actually names. With none it returns
       // without a statement, so an installation with only state triggers pays nothing for N-03.

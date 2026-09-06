@@ -82,6 +82,17 @@ import type {
  */
 const PAUSE_CAUSES_THIS_API_OWNS = ['user', 'parent'] as const;
 
+/**
+ * What a *move* owns, which is less (`P-174`).
+ *
+ * A move applies no manual pause: the only flag it can change is `paused_by_parent`, so `parent`
+ * is the only cause whose words are its to write. Declaring the pause API's set here let a move
+ * overwrite an operator's own reason — a sensor paused by hand for "disk replacement", under a
+ * paused group, moved out of it, reports cause `user` and the message "moved under a paused
+ * parent". `P-140`'s defect exactly, reintroduced by the fix for it.
+ */
+const PAUSE_CAUSES_A_MOVE_OWNS = ['parent'] as const;
+
 export interface ObjectServiceOptions {
   db: Database;
   repository: ObjectRepository;
@@ -1847,8 +1858,9 @@ export class ObjectService {
           // transition, with a foreign cause, carrying "moved under a paused parent" as its
           // message for a sensor that was moved *out* from under one. Without `sources`,
           // `reevaluate` reads the caller as owning every cause, which is the condition `P-94`
-          // and `P-140` both exist to remove.
-          sources: PAUSE_CAUSES_THIS_API_OWNS,
+          // and `P-140` both exist to remove. `parent` alone, because a move applies no manual
+          // pause and so owns no `user` words either (`P-174`).
+          sources: PAUSE_CAUSES_A_MOVE_OWNS,
         });
       }
 
@@ -1937,9 +1949,8 @@ export class ObjectService {
       const clonedSensors = await this.#pauses.recompute(q, cloneRoot.id, clonedAt);
       await this.#states?.reevaluate(q, clonedSensors, clonedAt, {
         message: `cloned from #${String(id)}`,
-        // Benign today — a freshly cloned sensor's schedule and dependency flags are false, so
-        // the decided cause is always one this API owns — and declared anyway, because "it
-        // happens to be unreachable" is not a property a later change preserves (`G12`).
+        // A clone *does* apply its own manual pause — that is the line above — so `user` is
+        // genuinely its to describe, and `parent` comes with the subtree it lands in (`G12`).
         sources: PAUSE_CAUSES_THIS_API_OWNS,
       });
 

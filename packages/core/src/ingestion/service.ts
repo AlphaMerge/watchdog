@@ -204,10 +204,16 @@ export class IngestionService {
       // ingestor refused would make the resent batch divide against itself.
       ...(prepared.counters.size === 0 ? {} : { counters: prepared.counters }),
       ...(decisions === undefined ? {} : { states: decisions }),
-      // The probe's own answer to "am I still catching up", which is what decides whether the
-      // alarm reaction runs on this batch or is deferred (`R16`, `R17`). Absent when the probe
-      // does not track it, and then the ingestor falls back to comparing timestamps.
-      ...(message.backlog === undefined ? {} : { draining: message.backlog > 0 }),
+      // **When the probe sent this, by its own clock** (`P-169`). What decides whether the alarm
+      // reaction runs on this batch or is held for a live one — measured against the results'
+      // own timestamps, which come from the same machine, so no skew between the two clocks can
+      // make a live probe look like it is replaying. Absent below protocol 16, and then the
+      // ingestor falls back to its own clock.
+      //
+      // `backlog` is deliberately *not* this signal (`P-169`): it counts rows still on disk, so
+      // a live probe whose scan tick outruns one batch reports thousands. It paces, which is
+      // what `R-03` added it for.
+      ...(message.sentAt === undefined ? {} : { sentAt: new Date(message.sentAt) }),
     });
     if (!outcome.accepted) {
       // Nothing committed, so the probe will offer the batch again — but the machine has

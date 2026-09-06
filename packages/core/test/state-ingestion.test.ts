@@ -65,6 +65,8 @@ describe(
     let probeId: number;
     let deviceId: number;
     let sensorId: number;
+    /** A second sensor, for the cases that need two probes' worth of work (`P-169`). */
+    let otherSensorId: number;
     let app: FastifyInstance;
 
     before(async () => {
@@ -119,6 +121,13 @@ describe(
         sensorType: 'icmp.ping',
       });
       sensorId = sensor.id;
+      const other = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: `other-${String(process.hrtime.bigint())}`,
+        sensorType: 'icmp.ping',
+      });
+      otherSensorId = other.id;
     });
 
     // -------------------------------------------------------------------------------------
@@ -176,16 +185,17 @@ describe(
       ingestor: Ingestor,
       results: readonly CheckResult[],
       batchId = 'b1',
-      backlog?: number,
+      sentAt?: Date,
+      source = 'probe-state',
     ): Promise<string> {
-      const reply = await service.acceptResults('probe-state', {
+      const reply = await service.acceptResults(source, {
         type: 'results',
         batchId,
         results: [...results],
-        // What the probe says it still has on disk. Absent by default, which is the shape a
-        // probe that does not track it sends — and the shape every test here sent before the
-        // ingestor learned to ask (`R16`, `R17`).
-        ...(backlog === undefined ? {} : { backlog }),
+        // When the probe says it sent this, by its own clock. Absent by default, which is what a
+        // probe below protocol 16 sends — and then the core falls back to its own clock
+        // (`P-169`).
+        ...(sentAt === undefined ? {} : { sentAt: sentAt.toISOString() }),
       });
       await ingestor.stop();
       return reply.type;
@@ -1084,39 +1094,70 @@ describe(
         );
       });
 
-      it('does not react to a drain batch that carries no transition at all', async () => {
-        // **`R16`.** Staleness was folded over `transitions`, not results — while the ticket's
-        // own text says "a batch whose newest *result* is older than the catch-up grace". During
-        // a drain most batches change no state, so `transitions` is empty, the batch reads as
-        // live, and on any installation with a threshold trigger anywhere `scanned` widens to
-        // every sensor in it: `react` over runtime rows written from hours-old readings, arming
-        // from a `since` six hours past. The storm the ticket describes, one batch later.
+      it('does not react to a drain batch whose sensors have already reached their final state', async () => {
+        // **`R16`, and the first version of this test could not fail.** Staleness was folded over
+        // `transitions`, not results, while the ticket's own text says "a batch whose newest
+        // *result* is older than the catch-up grace". During a drain most batches change no state
+        // at all, so `transitions` is empty, the batch reads as live, and on any installation with
+        // a threshold trigger anywhere `scanned` widens to every sensor in it: `react` over
+        // runtime rows written from hours-old readings, arming from a `since` six hours past.
+        //
+        // **The discriminating detail is that the second batch must carry no transition**, and
+        // the first attempt at this test got it wrong: `warnFor` is 1, so failure one is
+        // unknown→warning and failure two is warning→down — two transitions, not none. Both
+        // batches passed under the old rule and the new one alike. Three failures are needed
+        // before a fourth changes nothing.
         const reacted: number[][] = [];
         // `reconcilesReadings: true` is the widening case — an installation with any threshold
         // trigger — and it is the one that turns this from a no-op into the storm.
         const stub = reactionStub(reacted, true);
 
         const long = Date.now() - 6 * 60 * 60_000;
-        const first = withStubbedAlarms(stub);
-        await deliver(first.service, first.ingestor, [failure(new Date(long))], 'r16-a');
-        assert.deepEqual(reacted, [], 'the batch that carries the transition is stale');
+        const drain = withStubbedAlarms(stub);
+        // Two failures to reach Down, both hours old.
+        await deliver(
+          drain.service,
+          drain.ingestor,
+          [failure(new Date(long)), failure(new Date(long + 30_000))],
+          'r16-a',
+          // A drain sends six-hour-old results *now*: it is the gap between the two that says
+          // this is a replay, and both numbers are the probe's own clock.
+          new Date(),
+        );
+        assert.deepEqual(reacted, [], 'the batch that carries the transitions is a replay');
+        assert.equal(await stateOf(), 'down', 'and it is Down, so a third failure moves nothing');
 
-        // A second stale batch: same failing sensor, already at its final state, so no
-        // transition. Its results are still six hours old.
+        // Now the case the ticket is about: a batch that changes no state at all. The sensor is
+        // already Down, so this failure produces a runtime write and no transition.
         const second = withStubbedAlarms(stub);
-        await deliver(second.service, second.ingestor, [failure(new Date(long + 60_000))], 'r16-b');
-        assert.deepEqual(reacted, [], 'a batch with no transition is not therefore current');
+        await deliver(
+          second.service,
+          second.ingestor,
+          [failure(new Date(long + 60_000))],
+          'r16-b',
+          new Date(),
+        );
+        assert.deepEqual(
+          reacted,
+          [],
+          'a batch with no transition at all is not therefore a current one',
+        );
       });
 
-      it('believes a probe that says its spool is empty, whatever its clock says', async () => {
-        // **`R17`.** `transition.at` is the probe's own wall clock — that is the premise of
-        // `P-145` — and backward skew is deliberately unbounded, because a spool replay depends
-        // on it. So a probe host five minutes slow stamps every *live* result in the past, every
-        // batch it ever sends is judged stale, and no sensor under that probe is ever armed. It
-        // is connected, heartbeating and delivering; the UI shows sensors going Down; no
-        // notification is ever sent. The condition is permanent, not a catch-up that ends.
+      it('judges a replay by the probe-s own clock, not against the core-s', async () => {
+        // **`R17`, and `P-157` answered it with the wrong field.** `result.at` is the probe's
+        // clock — the premise of `P-145` — and backward skew is deliberately unbounded, because a
+        // spool replay depends on it. Comparing those results against the *core's* now makes a
+        // probe five minutes slow look like a permanent replay: connected, heartbeating,
+        // delivering, and no sensor under it ever armed.
         //
-        // `backlog` is already on the wire for the pacer and settles it without a clock.
+        // `P-157` replaced that with the probe's `backlog`, which is worse: `backlog` is
+        // `pending - batch.length`, so a live probe whose scan tick queues more than one batch
+        // reports thousands and every live batch read as a replay. At 5,047 sensors and a 500-row
+        // batch that is the ordinary case.
+        //
+        // `sentAt` is the probe's clock at the moment it sent, so `sentAt - newest result` is a
+        // duration on one machine and the skew cancels.
         const reacted: number[][] = [];
         const stub = reactionStub(reacted, false);
         const slow = Date.now() - 5 * 60_000;
@@ -1127,12 +1168,59 @@ describe(
           drifted.ingestor,
           [failure(new Date(slow)), failure(new Date(slow + 30_000))],
           'r17',
-          0,
+          // The probe sent it a moment after measuring it. Its clock is five minutes behind the
+          // core's, and that is exactly what must not matter.
+          new Date(slow + 31_000),
         );
         assert.deepEqual(
           reacted,
           [[sensorId]],
-          'a probe with nothing left to replay is live, however wrong its clock',
+          'a batch a probe sent seconds after measuring it is live, however wrong its clock',
+        );
+      });
+
+      it('does not let one probe-s live batch reconcile another probe-s drain', async () => {
+        // **`P-169`.** `#deferredReactions` was one process-wide set and `stale` was judged per
+        // *write*, not per source — and one write coalesces submissions from every connected
+        // probe. So the local probe, which is live by definition, emptied a draining remote's
+        // deferred set and reacted over its hours-old runtime rows: the storm `P-146` exists to
+        // prevent, restored for every installation with more than one probe.
+        const reacted: number[][] = [];
+        const stub = reactionStub(reacted, false);
+        const long = Date.now() - 6 * 60 * 60_000;
+        const { service, ingestor } = withStubbedAlarms(stub);
+
+        // The remote probe replays an outage.
+        await service.acceptResults('probe-remote', {
+          type: 'results',
+          batchId: 'multi-drain',
+          results: [failure(new Date(long)), failure(new Date(long + 30_000))],
+          sentAt: new Date().toISOString(),
+        });
+        assert.deepEqual(reacted, [], 'the replay is held');
+        assert.equal(ingestor.stats().deferredReactions, 1);
+
+        // The local probe delivers an ordinary live batch for a *different* sensor.
+        await service.acceptResults('probe-local', {
+          type: 'results',
+          batchId: 'multi-live',
+          results: [
+            { ...failure(new Date()), sensorId: otherSensorId },
+            { ...failure(new Date()), sensorId: otherSensorId },
+          ],
+          sentAt: new Date().toISOString(),
+        });
+        await ingestor.stop();
+
+        assert.deepEqual(
+          reacted.flat().filter((id) => id === sensorId),
+          [],
+          'the draining probe-s sensor was reconciled by a batch from a different probe',
+        );
+        assert.equal(
+          ingestor.stats().deferredReactions,
+          1,
+          'and it is still held, waiting for a live batch from its own probe',
         );
       });
     });

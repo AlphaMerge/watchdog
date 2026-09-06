@@ -17,6 +17,7 @@ import {
   fireThreshold,
   readingsAreCurrent,
   reconcileThreshold,
+  thresholdDueAt,
   type ChannelReading,
   type ThresholdCondition,
   type ThresholdTriggerSettings,
@@ -304,7 +305,11 @@ export class AlarmEngine {
    * Parked rather than cleared, which keeps `P-114`'s point: the alarm still stands, so the
    * outage it is about is not forgotten, and `suppressed` is what a chain waiting to be resumed
    * already means. When the trigger becomes readable — an upgrade, or the settings corrected —
-   * `reconcile` takes the `resume` branch and the chain picks up where it stopped.
+   * the reaction un-parks it and the chain picks up where it stopped: `reconcile`'s `resume`
+   * branch for a state alarm, and `#applyThreshold`'s `hold` branch for a threshold one
+   * (`P-170`). Those are two different paths and the second did not exist when this was
+   * written, which left every parked threshold alarm stranded — never due, never notified, and
+   * silently deleted when the value came back under its limit.
    *
    * **Collected separately from the firings**, because a park is not a firing: counting it as one
    * would put it on Core Health's `alarmsFired` and tell a caller that got a full sweep to come
@@ -629,20 +634,36 @@ export class AlarmEngine {
       case 'idle':
         return;
 
-      case 'hold':
+      case 'hold': {
+        if (alarm === null) return;
+        // **This is the only place a parked threshold alarm can be un-parked** (`P-170`).
+        // `#park` nulls `next_due_at` so the sweep stops finding a row whose trigger this build
+        // cannot read, and its comment says the reaction resumes it when the trigger becomes
+        // readable again. That is true of a *state* alarm, which goes through `reconcile` and
+        // its `resume` branch. `reconcileThreshold` has no such branch — it says so thirty lines
+        // below — so a parked threshold alarm reached only `hold`, which wrote `nextDueAt` back
+        // unchanged: still null, never due, never notified. The breach was silent, and so was
+        // its recovery, because by then the row was cancelled and deleted.
+        //
+        // Reaching here at all means `readThreshold` just succeeded, so the settings are
+        // readable again and the deadline can be recomputed from the alarm's own `since` —
+        // exactly what it was armed with.
+        const parked = alarm.suppressed && alarm.nextDueAt === null;
         // Not a no-op, unlike a state alarm's: the channel is still over its threshold and the
         // value has probably moved, and the row is where "what is this about to page somebody
-        // about" is answered.
-        if (alarm === null || alarm.observed === reading) return;
+        // about" is answered. A parked row is written back even when the value has not moved,
+        // because the un-parking is the point.
+        if (!parked && alarm.observed === reading) return;
         out.advance.push({
           id: alarm.id,
           phase: alarm.phase,
-          nextDueAt: alarm.nextDueAt,
+          nextDueAt: parked ? thresholdDueAt(alarm.since, settings) : alarm.nextDueAt,
           repeats: alarm.repeats,
-          suppressed: alarm.suppressed,
+          suppressed: parked ? false : alarm.suppressed,
           observed: reading,
         });
         return;
+      }
 
       case 'arm':
         out.arm.push({

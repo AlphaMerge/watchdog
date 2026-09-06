@@ -3506,6 +3506,19 @@ because each is a decision rather than a defect:
       component. Types moved where they were a moved function's argument (`ChartSeries`,
       `TabDefinition`, `RangeId`), since a type-only import back would have been a cycle.
 
+- [ ] **U-17 — A login view, so the UI can be used with authorisation on** · M · A-01, A-11 ·
+      `packages/web` has no login route, no password field and no 401 handling. With
+      `api.requireAuthentication` on — the default since `P-154` — the bundle loads and then every
+      API call it makes is refused, with nothing on the page saying why. The core warns about the
+      pairing at startup (`P-172`), which is a signpost and not a fix.
+
+      Needs: a login view posting to `POST /api/v1/auth/login`, a 401 interceptor in the API
+      client that routes to it rather than rendering an error, the "change your password at first
+      login" flow `ensureFirstAdministrator` sets up, logout, and the MFA challenge `A-07`
+      already serves. Until it lands, an operator running the bundled UI must set
+      `api.requireAuthentication` to false — which means an API that needs no principal at all,
+      so it belongs behind something else that authenticates.
+
 ## Phase 6 — Sensor breadth
 
 - [x] **U-12 — Repeating fields in the generated form** · M · U-08 · An array of objects in a
@@ -10513,7 +10526,9 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         reporting zero has nothing left to replay whatever its clock says. The timestamp test
         remains the fallback for a probe that does not report it.
 
-      Tests: 3 new in `state-ingestion.test.ts`. Mutation 3/3.
+      Tests: 3 new in `state-ingestion.test.ts`. Mutation 2/3 — and the third is the point:
+      the transitions-versus-results change was never mutated, and the test written for it could
+      not have caught the mutation anyway (`P-169`).
 
 - [x] **P-158 — the pause guard exempted the acknowledgement's own cause**
       `P-147` stopped a batch decided before a pause committed from overwriting that pause, with
@@ -10687,6 +10702,135 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         stored as `inactive` periods is *served* as `polarity: 'inactive'` beside a grid of the
         hours it does monitor, so the round trip `P-127` exists for sends exactly that pair. The
         documentation is what was wrong.
+
+- [x] **P-168 — `final` was added to the wire without a version, so every un-upgraded probe wedged**
+      `P-166` widened two core→probe schemas and left `PROTOCOL_VERSION` at 15. The doc block ten
+      lines above that constant states the rule it broke, in as many words: the bump is required
+      by `additionalProperties: false`, not by the fields themselves, because a peer that does
+      not know a field does not ignore it — it rejects the whole message with nothing to say why.
+      An older probe receiving `final` threw `ProtocolError`, destroyed the socket, reconnected
+      and received it again, for ever. Never scanning a sensor, and looking like a reconnect loop
+      rather than a version skew. **That is verbatim the `P-148` wedge `P-166` was written to
+      postmortem**, reached from the other side.
+
+      Version 16, and the field is gated through `capabilitiesFor` — the registry that exists
+      because these numbers used to be scattered as bare comparisons. Below it the core omits
+      `final` and the probe keeps stamping on the first message, which is what `P-153`'s
+      heartbeat reconciliation covers. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-169 — `backlog` does not mean what `P-157` used it for**
+      `P-157` replaced a clock comparison with the probe's `backlog`, on the reasoning that only
+      the probe knows whether it is replaying history. It does — but this is not that number.
+      `SpoolDrain` computes `backlog = pending - batch.length`: rows still on disk *right now*.
+      Every result goes through the spool, so a live probe whose scan tick outruns one batch
+      reports thousands. At the dev stack's 5,047 sensors and a 500-row batch that is not an edge
+      case, it is every tick: **the core was deferring live alarm reactions on a healthy
+      installation**, which is the failure `P-157` was fixing, inverted.
+
+      `sentAt` is the honest signal and it is new on the wire (protocol 16, gated the same way).
+      Both it and `CheckResult.at` are the probe's own clock, so `sentAt - newest result` is a
+      duration measured on one machine — seconds for a live batch, hours for a drain, right
+      however far that machine's clock is from the core's, which is what `R17` was about.
+      `backlog` goes back to pacing, which is what `R-03` added it for.
+
+      **And the deferral is per source now.** `#deferredReactions` was one process-wide set and
+      staleness was judged per *write* — but one write coalesces submissions from every connected
+      probe, so the local probe, live by definition, emptied a draining remote's set and reacted
+      over its hours-old rows. The storm `P-146` exists to prevent, restored for every
+      installation with more than one probe. Tests: 3 rewritten or new. Mutation 3/3.
+
+- [x] **P-170 — a parked threshold alarm was a one-way trip**
+      `#park` nulls `next_due_at` so the sweep stops finding an alarm whose trigger this build
+      cannot read, and its comment says the reaction resumes it when the trigger becomes readable
+      again. True of a *state* alarm, which goes through `reconcile` and its `resume` branch.
+      `reconcileThreshold` has no such branch — `#applyThreshold` says so thirty lines below the
+      park — so the only branch a parked threshold alarm could reach was `hold`, which wrote
+      `nextDueAt` back unchanged. Still null, never due, never notified; and when the value came
+      back under its limit the row was cancelled and deleted, so the recovery was silent too. A
+      disk fills, a page is owed, and neither the filling nor the emptying is ever said.
+
+      The `hold` branch un-parks it: reaching there means `readThreshold` just succeeded, so the
+      deadline is recomputed from the alarm's own `since`. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-171 — the cycle guard still erased both outages when both members were Down**
+      `P-162` made each hold carry the ground it came from and refused a hold a sensor is its own
+      reason for, which fixes a cycle with one member down. With **both** down, each is held by a
+      ground that is the *other*, the guard never fires, and the pair went down → paused →
+      unknown inside one transaction: two real outages erased, no alarm armed for either. Two
+      devices either end of a WAN link, each watching the other, reach that state the moment the
+      link dies — both fail in the same scan interval, so one batch carries both transitions.
+
+      The cycle is named now rather than reasoned around: a node that reaches itself through the
+      master chain is exempt from being paused, keeps its own state and its own alarm, and still
+      *holds* whatever hangs off it. **The trade is deliberate**: an ill-formed cycle can now
+      produce two alarms for what may be one outage, where before it produced none at all. A
+      duplicate page is recoverable; an erased outage is not. Tests: 2 new, 1 changed to assert
+      the new rule. Mutation 1/1.
+
+- [x] **P-172 — "nobody is locked out by it" was not true of the UI shipped beside it**
+      `P-154` defaulted `api.requireAuthentication` to on and justified it with the generated
+      administrator password. That makes the *API* usable from first boot; `packages/web` has no
+      login view, no password field and no 401 handling, so an install that serves the UI gets a
+      page that loads and then fails every request it makes. `dev/core.json` was set to false and
+      `deploy/examples/core.json` — the production example, with `webRoot` set — was not.
+
+      The default stays on, and the reason is worth stating: false does not mean "authenticated
+      principals may do everything", it means the API needs no principal at all, and shipping
+      that as the default would put an unauthenticated monitoring system behind every reverse
+      proxy that forwards to one. What changes is that the core now says so at startup when
+      `webRoot` is set and this is on, because the silent version of that is an operator staring
+      at an empty tree. `U-17` is the login view.
+
+- [x] **P-173 — the sweep exemption swallowed the route the ticket was written for**
+      `P-155`'s grantless sweep skipped `^/api/v1/(templates|schedules)(/|$)` as "routes whose
+      subject is not in the object tree". That prefix also matches `POST /templates/:id/test` —
+      the route `P-155` cites **twice** as the one the old harness could not see, and the reason
+      nine services were wired into it — which now carries a per-object bar on the sensor it
+      renders against. Wired in, then exempted from the only sweep whose principal can exercise
+      it. The exemptions are named one at a time now: a list somebody has to justify adding to.
+      Mutation 1/1 — deleting the bar turns the sweep red, which it did not before.
+
+- [x] **P-174 — `G12`'s fix let a move overwrite an operator's own pause reason**
+      `PAUSE_CAUSES_THIS_API_OWNS` is `['user','parent']`, the ownership set of the *pause* API,
+      which genuinely applies manual pauses. A move applies none: the only flag it can change is
+      `paused_by_parent`. Declaring `user` too meant a sensor paused by hand for "disk
+      replacement", under a paused group, moved out of it, reported cause `user` with the message
+      "moved under a paused parent" — `P-94` and `P-140`'s defect verbatim, on the caller their
+      own fix had just touched. A move owns `parent` and nothing else. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-175 — a parked notification still drove Delivery Health down through `retrying`**
+      `P-125` stopped a message waiting on purpose from counting as pending, and applied that to
+      `pending` and `oldest_pending` and to neither `retrying` nor `oldest_retrying`. A request
+      that failed once — the relay blinked — and was then held by its activation schedule left
+      `pending`, arrived in `parked`, and went on counting as retrying. `retrying > 0` forces
+      warning by itself and `oldest_retrying` drives `stalledMs` and therefore down: "a
+      notification has been undeliverable for 400 minutes", all night, about a message an
+      operator told the system to hold until morning. `P-160` widened its reach by defaulting the
+      parked set from the activation service. Both columns carry the exclusion now. Tests: 1 new.
+      Mutation 1/1.
+
+- [x] **P-176 — the boot sweep reconciled one page, and the window that mattered was last**
+      `P-161` made `PauseSweep.start()` sweep before arming. One sweep is one page of at most
+      `batchSize`, and `startedIn` selects every pause *currently in force*, oldest `starts_at`
+      first — so on an installation with a few hundred long-standing pauses the page is spent on
+      windows already applied, while the one whose `starts_at` passed during the restart has the
+      newest `starts_at` and is last. The probe endpoint then opened on flags that still said to
+      scan the box being patched, which is the whole failure the await was added to close.
+      `start()` drains until the page is not truncated, bounded at 100 pages with a warning if it
+      is reached. Tests: 1 new. Mutation 1/1.
+
+- [x] **P-177 — an arm lost to a restart was lost for good**
+      The ingestor's deferred reactions live in memory, so a core that stops mid-drain drops
+      them: the sensor is still Down, transitions in no later batch because its state does not
+      change, and is armed by nothing — the exact hole `P-157` claims to close, reopened by a
+      restart. Nothing else re-reconciled at boot.
+
+      `main()` now reconciles standing alarms once at startup, through the same
+      `reconcileSubtree` a trigger edit uses. It is state-based and idempotent — a sensor that is
+      Down without an alarm gets one, a sensor whose alarm stands is held rather than re-armed —
+      so it repairs every way an arm can be lost while the process is not running, not only the
+      deferred ones. Not awaited before the port opens: the answer is the same a second later,
+      and blocking every boot on a full-tree pass would be the wrong trade.
 
 ## Phase 10 — Hardening and release
 

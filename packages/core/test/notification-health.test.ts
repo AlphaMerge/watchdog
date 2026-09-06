@@ -425,6 +425,33 @@ describe(
       assert.equal(report.parked, 1);
     });
 
+    it('does not call a parked message that was tried once undeliverable', async () => {
+      // **`P-175`.** `P-125` stopped a message waiting on purpose from counting as pending, and
+      // applied that to `pending` and `oldest_pending` and to neither `retrying` nor
+      // `oldest_retrying`. A request that failed once — the relay blinked — and was then held by
+      // its activation schedule left `pending`, arrived in `parked`, and went on counting as
+      // retrying: `retrying > 0` forces `warning` by itself, and `oldest_retrying` drives
+      // `stalledMs` and therefore `down`, with "a notification has been undeliverable for 400
+      // minutes", all night, about a message an operator told the system to hold until morning.
+      // Core Health goes Down with it, because `main` feeds it the same reader.
+      const templateId = await template();
+      const requestId = await queue(templateId);
+      await db.query(
+        `UPDATE notification_request SET at = now() - interval '6 hours', attempts = 1
+         WHERE id = $1`,
+        [requestId],
+      );
+
+      const busy = await new DeliveryHealthReader().read(db);
+      assert.equal(busy.retrying, 1, 'ordinarily it is a message being retried, and says so');
+      assert.notEqual(busy.status, 'ok', 'which is worth a warning on its own');
+
+      const held = await new DeliveryHealthReader().read(db, new Date(), [templateId]);
+      assert.equal(held.parked, 1, 'held on purpose');
+      assert.equal(held.retrying, 0, 'so it is not also a delivery that is failing');
+      assert.equal(held.status, 'ok', 'and nothing is wrong with the relay');
+    });
+
     it('answers the same number over HTTP, where a schema was quietly deleting it', async () => {
       // **`R06` — two defects, one symptom, and no test on this route at all.**
       //

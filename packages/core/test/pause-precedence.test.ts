@@ -584,6 +584,36 @@ describe(
       );
     });
 
+    it('does not write the mover-s words over an operator-s own pause reason', async () => {
+      // **`P-174`, and `G12`'s fix is what introduced it.** The move path was given
+      // `PAUSE_CAUSES_THIS_API_OWNS`, which is `['user','parent']` — the ownership set of the
+      // *pause* API, which genuinely applies manual pauses. A move applies none: the only flag it
+      // can change is `paused_by_parent`, so `parent` is the only cause whose words are its to
+      // write. Declaring `user` too meant a move out from under a paused group overwrote the
+      // operator's own reason with "moved under a paused parent" — `P-94` and `P-140`'s defect
+      // verbatim, on the caller their fix had just touched.
+      await turnOn('manual');
+      await turnOn('parent');
+      assert.equal((await flagsOf(sensorId)).cause, 'parent', 'the nearer source reports');
+
+      const elsewhere = (
+        await h.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: `unpaused-manual-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+      await h.service.move(testActor, deviceId, elsewhere, { kind: 'none' });
+
+      const after = await flagsOf(sensorId);
+      assert.equal(after.cause, 'user', 'the operator-s own pause is what still holds it');
+      const rows = await db.query<{ message: string }>(
+        'SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1',
+        [sensorId],
+      );
+      assert.equal(rows[0]?.message, 'by hand', 'and their reason survives the move');
+    });
+
     it('reports every holder at once, so a UI can show all four', async () => {
       for (const source of PAUSE_SOURCES) await turnOn(source);
       const view = await h.service.pauseState(sensorId);

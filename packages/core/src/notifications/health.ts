@@ -147,7 +147,16 @@ export class DeliveryHealthReader {
              -- digest due at eight in the morning.
              count(*) FILTER (WHERE r.status = 'pending' AND NOT deliberate)::text AS pending,
              count(*) FILTER (WHERE r.status = 'pending' AND deliberate)::text AS parked,
-             count(*) FILTER (WHERE r.status = 'pending' AND r.attempts > 0)::text AS retrying,
+             -- **And the same exclusion, because a parked message can have been tried** (P-175).
+             -- The deliberate filter was applied to pending and to oldest_pending and to neither
+             -- of these, so a request that failed once and was then held by its activation
+             -- schedule left pending, arrived in parked -- and went on counting here. retrying
+             -- above zero forces warning on its own, and oldest_retrying drives stalledMs and
+             -- therefore down: "a notification has been undeliverable for 400 minutes", all
+             -- night, about a message an operator told the system to hold until morning. That is
+             -- P-125's pathology exactly, surviving in the two columns its fix did not touch.
+             count(*) FILTER (WHERE r.status = 'pending' AND r.attempts > 0
+                                AND NOT deliberate)::text AS retrying,
              -- **By when they were given up on, not when they fell due** (P-124). settled_at is
              -- the moment the obligation ended; at is when it began, and the default retry policy
              -- puts 45 to 90 minutes between them against a 60 minute window. A notification that
@@ -160,7 +169,8 @@ export class DeliveryHealthReader {
              min(r.at) FILTER (WHERE r.status = 'pending' AND NOT deliberate) AS oldest_pending,
              -- Attempted and still owed, which is the one that means delivery is broken rather
              -- than merely busy.
-             min(r.at) FILTER (WHERE r.status = 'pending' AND r.attempts > 0) AS oldest_retrying,
+             min(r.at) FILTER (WHERE r.status = 'pending' AND r.attempts > 0
+                                 AND NOT deliberate) AS oldest_retrying,
              max(r.delivered_at) AS last_delivered,
              (array_agg(r.last_error ORDER BY r.id DESC)
                 FILTER (WHERE r.last_error IS NOT NULL AND r.status <> 'discarded'))[1]

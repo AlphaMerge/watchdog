@@ -469,6 +469,68 @@ This is the third defect in this document caught by *starting the dev server* af
 suite, and the second in three days caught on the probe link specifically. The cost is under a
 minute.
 
+## The three the fourth panel found, in the fixes for the third
+
+A fourth panel, over the diff that fixed the third panel's 36. It confirmed 12 more. Three were
+the guards; the fourth entry here is not a test at all, and is the most useful thing on this page.
+
+### 27. A sweep exemption that swallowed the route the ticket was written for (`P-155`)
+
+Entry 22 added a grantless-`readwrite` pass — the only principal that clears the role gate — and
+exempted the library routes with a prefix: `^/api/v1/(templates|schedules)(/|$)`. That prefix also
+matches `POST /templates/:id/test`, **the route the ticket cites twice** as the one the old
+harness could not see and the reason nine services were wired in. It was wired in, given a
+per-object bar on the sensor it renders against, and then skipped by the one sweep that could
+exercise it.
+
+This is entry 23 — a guard sized by its slack — in the same file, one commit later, written by
+somebody who had just fixed entry 23. The exemptions are a list of exact `METHOD /url` strings
+now, because a prefix is a rule nobody has to justify extending.
+
+### 28. A test whose discriminating premise was false (`P-157`)
+
+The R16 test exists to prove staleness is folded over results rather than transitions, and its
+whole premise is a comment: "same failing sensor, already at its final state, so no transition".
+`warnFor` is 1, so failure one is unknown→warning and failure two is warning→down — two
+transitions, not none. Both batches carried one, so the test passed identically under the rule it
+was testing and the rule it was replacing.
+
+It was never mutated. The ticket said "Mutation 3/3" and meant two; the third change was the one
+this test covered. **A mutation count is a claim like any other, and this one was wrong in the
+direction that flatters.** Corrected in `TASKS.md`, and the test now needs three failures before a
+fourth that changes nothing.
+
+### 29. A test that passed against the bug, caught only by mutating it (`P-158`)
+
+Written for the panel's own finding and green on the first run — because the racing write and the
+row it must not overwrite both decided `down_acknowledged`. The guard keeps the existing state
+when it holds and applies the write's when it does not; with both equal, the branches are
+indistinguishable and the assertion was on a value already there. Reverting the fix left it green.
+
+Repaired by making the racing write decide something *different* — an acknowledgement that lapses,
+which the machine answers `down`. Same lesson as entry 3, and the same tool caught it. Recorded
+separately because entry 3 was a `0 === 0` anybody could see; this one needed the state machine's
+two-step rule held in mind to notice at all.
+
+### 30. A premise nobody checked, in the field the whole fix rested on (`P-157`, found by the panel's critic)
+
+Not a test — the thing under the tests. `P-157` decided "is this batch a replay?" from the probe's
+`backlog`, reasoning that only the probe knows. It does; this is not that number. `SpoolDrain`
+computes `backlog = pending - batch.length`: rows on disk *right now*. Every result goes through
+the spool, so a live probe whose scan tick outruns one batch reports thousands of them. At the dev
+stack's own 5,047 sensors and a 500-row batch, that is every tick — **the fix for "alarms are
+deferred and lost" was itself deferring every live alarm on a healthy installation.**
+
+Eight lenses reviewed that change, one of them dedicated to the ingestion path, and all eight
+audited the deferral machinery carefully. None opened `packages/probe/src/spool/drain.ts` to ask
+what the flag driving it meant. The panel's completeness critic did, and named it as the blind
+spot: every lens stayed inside `packages/core` and inside one ticket at a time.
+
+**The lesson is about scope, not diligence.** A reviewer given a diff reviews the diff. A field
+the diff *reads* is not in the diff, so its meaning is assumed — and an assumption about somebody
+else's field is exactly the kind that survives eight careful readings. The critic round exists for
+this and this is the first time it has paid for itself outright.
+
 ## What actually found them
 
 
@@ -501,7 +563,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Fifteen rules this produced
+## Eighteen rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -554,9 +616,17 @@ anything — and that structure, not more care, is what found them.
 14. **A guard with slack in it is sized by the slack.** Entry 23's floor of 25 was cleared by 29
     routes while nine modules were missing. Put the bound near the truth, and where a count cannot
     express the property, name the thing that would disappear.
-15. **Mutate a test that passed first time before believing it.** Entry 24 passed against the bug
-    because both branches of the guard produced the same row. A test written for a fix and green
-    on the first run has told you nothing until the fix is reverted.
+15. **Mutate a test that passed first time before believing it.** Entries 24 and 29 both passed
+    against the bug because both branches of the guard produced the same row. A test written for a
+    fix and green on the first run has told you nothing until the fix is reverted.
+16. **An exemption list must name its members.** Entry 27's prefix swallowed the one route the
+    ticket existed for. A pattern extends itself silently; a list of exact names is a line
+    somebody has to add and justify.
+17. **A mutation count is a claim, and belongs in the ticket only if it happened.** Entry 28 said
+    3/3 and meant 2. The unmutated one was the change whose test could not fail.
+18. **Check the meaning of a field you did not write.** Entry 30: the whole fix rested on
+    `backlog`, eight reviewers audited what it drove, and none asked what it counted. A value the
+    diff reads is not in the diff, and its meaning is the easiest thing in a review to assume.
 
 ## What is still not covered, and is said so on purpose
 

@@ -1122,6 +1122,40 @@ describe(
       });
     });
 
+    it('sends no final flag at all to a probe too old to know the field', async () => {
+      // **`P-168`.** Every core→probe schema carries `additionalProperties: false`, so an
+      // unknown field is not ignored by an older probe — `parseCoreToProbe` throws, the
+      // connection is destroyed on a protocol violation, and the probe reconnects into the same
+      // message. `P-166` added `final` without bumping `PROTOCOL_VERSION`, which wedged every
+      // probe not upgraded in lockstep: the `P-148` failure it was itself postmortem-ing.
+      //
+      // The field is gated on the capability now, so an older probe gets exactly the bytes it
+      // got before — and `P-153`'s heartbeat reconciliation is what covers the case `final`
+      // would have covered for it.
+      const source = new StubSource();
+      source.sensors = Array.from({ length: 3_500 }, (_, at) => sensor(at + 1));
+
+      await withProbe(
+        source,
+        async (probe) => {
+          await probe.waitFor(
+            () =>
+              probe.received.filter((m) => m.type === 'config-set' || m.type === 'config-delta')
+                .length === 4,
+          );
+          const push = probe.received.filter(
+            (m) => m.type === 'config-set' || m.type === 'config-delta',
+          );
+          assert.deepEqual(
+            push.map((m) => 'final' in m),
+            [false, false, false, false],
+            'an older probe must not be sent a field its schema will reject',
+          );
+        },
+        { protocolVersion: 15 },
+      );
+    });
+
     it('sends the whole set again to a probe that never saw the end of the last push', async () => {
       // **`R18`, end to end.** The rule the `final` flag encodes, stated as the fake probe's
       // behaviour and then exercised: a probe claims a version only on the message that
