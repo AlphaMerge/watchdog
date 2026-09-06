@@ -10,6 +10,7 @@ import { pino } from 'pino';
 import {
   encodeFrame,
   FrameDecoder,
+  MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   type CoreConfig,
   parseCoreToProbe,
@@ -345,7 +346,13 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
-  it('rejects a probe speaking an incompatible protocol version', async () => {
+  it('rejects a probe below the protocol floor, which is the only version that is refused', async () => {
+    // **`P-178` narrowed this to the floor.** It used to refuse a probe *above* this build too,
+    // on the reasoning that the newer end knows messages this one has never seen — which made
+    // every `PROTOCOL_VERSION` bump a lockstep fleet upgrade, with the un-upgraded end
+    // reconnecting for ever. Every feature is capability-gated on the negotiated version now, so
+    // a newer peer is served what this build speaks. Below `MIN_PROTOCOL_VERSION` there is no
+    // shared language to negotiate down to, and that is still a refusal.
     const endpoint = new ProbeEndpoint({
       config: endpointConfig(dir),
       logger: silentLogger,
@@ -355,7 +362,7 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
 
     try {
       const probe = await TestProbe.connect(dir, address.port);
-      probe.send(hello({ protocolVersion: PROTOCOL_VERSION + 1 }));
+      probe.send(hello({ protocolVersion: MIN_PROTOCOL_VERSION - 1 }));
 
       const reject = await probe.waitFor((m) => m.type === 'reject');
       assert.equal(reject.type === 'reject' ? reject.code : '', 'protocol-version');
@@ -1120,6 +1127,28 @@ describe(
           'only the message that completes the push may let the probe claim the version',
         );
       });
+    });
+
+    it('serves a probe whose build is newer than this core, at this core-s version', async () => {
+      // **`P-178`.** Version negotiation runs at both ends, so a peer ahead of this build is
+      // served rather than refused — and every capability gate reads the negotiated number, so
+      // this core never sends a field it cannot produce and the newer probe never sends one this
+      // core cannot parse. Before this, `describeSkew` called it `incompatible` and the
+      // handshake was refused, which made every bump a lockstep fleet upgrade.
+      const source = new StubSource();
+      source.sensors = [sensor(1), sensor(2)];
+
+      await withProbe(
+        source,
+        async (probe) => {
+          const set = await probe.waitFor((m) => m.type === 'config-set');
+          assert.ok(set.type === 'config-set');
+          assert.equal(set.sensors.length, 2, 'it is configured like any other probe');
+          // Negotiated to this core's version, so the field it knows about is still sent.
+          assert.equal(set.final, true, 'and gated on the pair, not on the probe alone');
+        },
+        { protocolVersion: PROTOCOL_VERSION + 4 },
+      );
     });
 
     it('sends no final flag at all to a probe too old to know the field', async () => {

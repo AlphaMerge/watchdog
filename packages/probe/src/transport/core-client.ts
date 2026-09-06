@@ -5,6 +5,7 @@ import {
   isProtocolCompatible,
   loadTlsMaterial,
   MessageConnection,
+  negotiatedVersion,
   parseCoreToProbe,
   PROTOCOL_VERSION,
   type ConnectionClose,
@@ -388,6 +389,12 @@ export class CoreClient {
   #handleMessage(message: CoreToProbeMessage): void {
     switch (message.type) {
       case 'welcome': {
+        // **Only a core below the floor gets here now** (`P-178`). This used to refuse any core
+        // *newer* than the probe, which meant bumping `PROTOCOL_VERSION` took every deployed
+        // probe offline: it destroyed the socket, reconnected a minute later, and was refused
+        // again — while the core, which had accepted the hello, opened a session, restored every
+        // sensor under it and sent a full configuration push each time round. A newer core is
+        // now negotiated down instead, and the pair speaks this probe's version.
         if (!isProtocolCompatible(message.protocolVersion)) {
           this.#fatalRejection = `core speaks protocol ${String(message.protocolVersion)}, probe speaks ${String(PROTOCOL_VERSION)}`;
           this.#logger.error({ detail: this.#fatalRejection }, 'protocol version skew');
@@ -396,8 +403,9 @@ export class CoreClient {
         }
         // Kept so the probe can gate what it *sends*: every core-side schema carries
         // `additionalProperties: false`, so a field an older core does not know is a rejected
-        // batch rather than an ignored key (`P-169`).
-        this.#coreProtocolVersion = message.protocolVersion;
+        // batch rather than an ignored key (`P-169`). Negotiated rather than taken as sent, for
+        // the reason the core negotiates too — the gate has to answer for the pair (`P-178`).
+        this.#coreProtocolVersion = negotiatedVersion(message.protocolVersion);
         this.#gid = message.gid;
         // Absent from a version-5 core, which had no notion of approval and trusted whatever
         // presented the key. Reading that as approved is what keeps an older core working.

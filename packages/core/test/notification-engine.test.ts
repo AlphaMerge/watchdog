@@ -525,6 +525,45 @@ describe(
       assert.deepEqual(await queued(), [], 'and nothing recovered, so nobody was told');
     });
 
+    it('arms a boot reconciliation from now, not from an outage hours old', async () => {
+      // **`P-181`.** `P-177` added a full-tree reconciliation at startup, to arm sensors whose
+      // alarm was lost to a restart — the ingestor's deferred reactions live in memory and a
+      // restart mid-drain drops them. But the population it targets is precisely the sensors
+      // whose `since` is as old as the outage, and `chain.reconcile` arms with
+      // `initialDueAt(since, settings)`. Every deadline computed from a six-hour-old `since` is
+      // already past, so the sweep fires the page, then the escalation, then the repeat, on
+      // consecutive passes — the `P-146` storm, produced by the pass written to repair a missed
+      // alarm, and for an outage whose recovery may still be in the probe's spool.
+      //
+      // Armed from the reaction's own clock instead: the alarm still happens, once, after its
+      // normal latency.
+      await downTrigger(deviceId, { initialLatencySeconds: 300, escalationLatencySeconds: 600 });
+      await scan([sensorId], false, T0);
+      await scan([sensorId], false, at(10));
+      assert.equal((await standing()).length, 1, 'armed by the ordinary path');
+
+      // Wipe the alarm the way a restart mid-drain loses a deferred reaction: the sensor is
+      // still Down, with a `since` back at T0, and nothing stands for it.
+      await db.query('DELETE FROM notification_alarm');
+      const bootedAt = at(6 * 60 * 60);
+
+      await db.tx((q) => engine.reconcileSubtree(q, h.rootId, bootedAt, { armFrom: 'now' }));
+
+      const [armed] = await standing();
+      assert.ok(armed, 'the lost alarm is armed again, which is what P-177 is for');
+      assert.ok(armed.nextDueAt !== null);
+      assert.ok(
+        armed.nextDueAt.getTime() >= bootedAt.getTime(),
+        'and its deadline is ahead of the reconciliation, not six hours behind it',
+      );
+      assert.equal(
+        armed.nextDueAt.getTime(),
+        bootedAt.getTime() + 300_000,
+        'exactly the initial latency, measured from boot',
+      );
+      assert.equal(await sweep(bootedAt), 0, 'so nothing fires the instant the core starts');
+    });
+
     it('stands alarms down when a subtree is fenced off from its triggers', async () => {
       // `N-16`. Fencing a subtree off is the same kind of change as deleting the trigger, for
       // the sensors below it: what was watching them no longer does, so a chain in progress is a

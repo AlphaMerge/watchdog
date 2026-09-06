@@ -4,7 +4,9 @@ import {
   capabilitiesFor,
   describeSkew,
   explainSkew,
+  isProtocolCompatible,
   missingCapabilities,
+  negotiatedVersion,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   versionFor,
@@ -126,13 +128,39 @@ describe('describing a version skew', () => {
     assert.equal(skew.kind, 'incompatible');
   });
 
-  it('refuses a peer from the future rather than guessing', () => {
-    // The newer end knows messages this build has never seen. Treating its silence about them
-    // as agreement is how a version skew becomes a data-loss bug, so the refusal says which end
-    // to upgrade.
+  it('serves a peer from the future at this build-s version, and says which end to upgrade', () => {
+    // **`P-178` reversed this, and the reason is worth keeping.** It used to be `incompatible`:
+    // the newer end knows messages this build has never seen, and treating its silence about
+    // them as agreement is how a skew becomes a data-loss bug. That held while version numbers
+    // were compared inline at each send site. Every feature is gated through `capabilitiesFor`
+    // now, and both ends gate on the *negotiated* version — so the newer end never sends the
+    // older one a field it cannot parse, and the refusal had stopped protecting anything while
+    // costing a lockstep fleet upgrade on every bump.
     const skew = describeSkew(PROTOCOL_VERSION + 1);
-    assert.equal(skew.kind, 'incompatible');
-    assert.match(explainSkew(skew), /upgrade this end/);
+    assert.equal(skew.kind, 'ahead');
+    assert.match(explainSkew(skew), /newer than this build/);
+    assert.match(explainSkew(skew), /until this end is upgraded/);
+  });
+
+  it('still refuses a peer below the floor, which is a real one', () => {
+    // The floor is not a feature gate: below `MIN_PROTOCOL_VERSION` there is no shared language
+    // to negotiate down to.
+    assert.equal(describeSkew(MIN_PROTOCOL_VERSION - 1).kind, 'incompatible');
+    assert.equal(isProtocolCompatible(MIN_PROTOCOL_VERSION - 1), false);
+    assert.equal(isProtocolCompatible(PROTOCOL_VERSION + 5), true, 'but ahead is compatible');
+  });
+
+  it('negotiates down to the older of the two versions, at both ends', () => {
+    // The number every capability gate reads. Both ends compute it independently from the
+    // other's declared version, so they arrive at the same answer with no extra round trip.
+    assert.equal(negotiatedVersion(PROTOCOL_VERSION + 3), PROTOCOL_VERSION, 'a newer peer');
+    assert.equal(negotiatedVersion(MIN_PROTOCOL_VERSION), MIN_PROTOCOL_VERSION, 'an older peer');
+    assert.equal(negotiatedVersion(PROTOCOL_VERSION), PROTOCOL_VERSION, 'the same build');
+    assert.equal(
+      negotiatedVersion(0),
+      MIN_PROTOCOL_VERSION,
+      'and nonsense floors rather than throws',
+    );
   });
 
   it('refuses a version that is not a whole number', () => {

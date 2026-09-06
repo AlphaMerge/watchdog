@@ -8,6 +8,7 @@ import {
   describeSkew,
   explainSkew,
   isProtocolCompatible,
+  negotiatedVersion,
   loadTlsMaterial,
   MessageConnection,
   parseProbeToCore,
@@ -1016,7 +1017,12 @@ export class ProbeEndpoint {
         lastHeartbeatAt: null,
       },
       pending: Promise.resolve(),
-      protocolVersion: hello.protocolVersion,
+      // **The negotiated version, not the probe's** (`P-178`). Every capability gate on this
+      // session reads this field, and what it must answer is "what can the *pair* do" — a gate
+      // that answered for the probe alone would let a newer probe be sent a field this core
+      // cannot produce, and one that answered for this core alone is how `P-166` sent `final`
+      // to a probe whose schema refused it.
+      protocolVersion: negotiatedVersion(hello.protocolVersion),
       approved,
       probeObjectId: null,
       sentVersion: null,

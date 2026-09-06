@@ -1179,6 +1179,95 @@ describe(
         );
       });
 
+      it('falls back to the core clock when a probe sends an unreadable sentAt', async () => {
+        // **`P-180`.** The wire schema is a 1-64 character string — `format: 'date-time'` is
+        // deliberately omitted, because this validator runs without ajv-formats where an unknown
+        // format is no validation at all. An unparseable value therefore reached the ingestor as
+        // an Invalid Date, which is not `undefined`, so the documented fallback could not fire:
+        // `against` was NaN, `NaN - newest > grace` is always false, and the replay guard failed
+        // open **permanently** for that peer, silently, with every counter reading zero.
+        const reacted: number[][] = [];
+        const stub = reactionStub(reacted, false);
+        const long = Date.now() - 6 * 60 * 60_000;
+        const { service, ingestor } = withStubbedAlarms(stub);
+
+        await service.acceptResults('probe-state', {
+          type: 'results',
+          batchId: 'bad-sentat',
+          results: [failure(new Date(long)), failure(new Date(long + 30_000))],
+          // Passes the schema; `new Date` cannot read it. Worth noting that the *obvious*
+          // example — '2026-09-05 14:03:11' — is not this case: V8 parses that happily as local
+          // time, which is its own hazard and a milder one, because it still yields a number the
+          // comparison can work with.
+          sentAt: 'not a timestamp',
+        });
+        await ingestor.stop();
+
+        assert.deepEqual(
+          reacted,
+          [],
+          'an unreadable timestamp must not turn a six-hour replay into a live batch',
+        );
+        assert.equal(
+          service.stats().discardedInvalidSentAt,
+          1,
+          'and it is counted, because a guard that quietly stops guarding is the worst kind',
+        );
+      });
+
+      it('does not treat a wholly duplicate re-delivery as a live batch', async () => {
+        // **`P-179`.** A batch re-sent after a lost `results-ack` is entirely duplicate, so
+        // `decide` skips every result as stale and returns no transitions and no runtimes —
+        // while the samples still reach the write. That submission registered its source as one
+        // this write carried and then recorded no staleness verdict, and "no verdict" fell
+        // through to *live*: the probe's whole deferred set was flushed and reacted over rows
+        // the drain had written hours ago, arming from a `since` six hours past. The drain's own
+        // storm, produced by its own repair — and the trigger is the modal one, because the link
+        // flap that creates a spool is exactly what loses an ack.
+        const reacted: number[][] = [];
+        const stub = reactionStub(reacted, false);
+        const long = Date.now() - 6 * 60 * 60_000;
+        const { service, ingestor } = withStubbedAlarms(stub);
+
+        // **Measured results, not failed ones**, and that detail is the test: a failed check
+        // records no channel values, so a duplicate of one carries neither samples nor states
+        // and never reaches the write at all. The batch that reaches it and decides nothing is
+        // one with readings — which is every ordinary batch a probe re-sends.
+        const drain = [
+          result({ at: new Date(long).toISOString() }),
+          result({ at: new Date(long + 30_000).toISOString() }),
+        ];
+        await service.acceptResults('probe-remote', {
+          type: 'results',
+          batchId: 'dup-1',
+          results: drain,
+          sentAt: new Date().toISOString(),
+        });
+        assert.deepEqual(reacted, [], 'the replay is held');
+        assert.equal(ingestor.stats().deferredReactions, 1);
+
+        // The identical batch again. Its readings are stored idempotently, but every result is
+        // now older than `last_result_at`, so `decide` skips all of them: samples, no states.
+        await service.acceptResults('probe-remote', {
+          type: 'results',
+          batchId: 'dup-2',
+          results: drain,
+          sentAt: new Date().toISOString(),
+        });
+        await ingestor.stop();
+
+        assert.deepEqual(
+          reacted,
+          [],
+          'a batch that decided nothing cannot be the batch that says the drain is over',
+        );
+        assert.equal(
+          ingestor.stats().deferredReactions,
+          1,
+          'and the deferral is still held for a live batch from that probe',
+        );
+      });
+
       it('does not let one probe-s live batch reconcile another probe-s drain', async () => {
         // **`P-169`.** `#deferredReactions` was one process-wide set and `stale` was judged per
         // *write*, not per source — and one write coalesces submissions from every connected

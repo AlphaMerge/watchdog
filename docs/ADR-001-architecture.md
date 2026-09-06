@@ -558,6 +558,43 @@ these numbers.
 
 ---
 
+## Decision 13 — Protocol versions negotiate down; they do not gate admission
+
+**Decision.** A core and a probe may differ in protocol version. Each end declares its own,
+each computes `negotiatedVersion` — the older of the two — independently, and **every** feature
+gate reads that number through `capabilitiesFor` rather than reading `PROTOCOL_VERSION`
+directly. A peer below `MIN_PROTOCOL_VERSION` is still refused: that is a floor, not a feature.
+A peer above this build is served what this build speaks and reported as `ahead`.
+
+**Why this reverses an earlier rule.** `isProtocolCompatible` used to refuse a peer *above* this
+build as well, with a rationale written into the source: the newer end knows messages this one
+has never seen, and treating its silence about them as agreement is how a version skew becomes a
+data-loss bug. That was correct when version numbers were compared inline at each send site,
+because nothing systematically stopped a newer end from sending an unknown field. It stopped
+being correct when `capabilitiesFor` became the single gate: the newer end now gates its own
+sends on the older end's version, so the field never goes out.
+
+**What it cost while it stood.** Every core→probe and probe→core schema carries
+`additionalProperties: false`, so an unknown field is a *rejected message*, not an ignored key —
+and the refusal happened at the welcome, which meant bumping the version was itself the outage.
+A v15 probe meeting a v16 core destroys the socket and reconnects a minute later, for ever;
+the core, which accepted the hello, opens a session, restores every sensor under that probe to
+its last reading, computes and sends a full configuration push, and is hung up on — once a
+minute, per probe, with nothing scanned. Upgrading probes first fails symmetrically at the old
+core. There was no working order, and nothing documented that adding an optional field required
+a simultaneous fleet upgrade (`P-168`, `P-178`).
+
+**What this does not change.** A new field still needs a version bump *and* a capability entry;
+that rule is what makes negotiation safe, and `P-166` is the ticket about forgetting it. What
+changes is that obeying it now costs one end at a time instead of the whole estate at once.
+
+**The cost accepted.** A newer probe connected to an older core runs with its newer features
+inert, and says so on Probe Health rather than refusing to work. That is the same trade `R-06`
+makes everywhere else: a capability the peer does not have is reported in words, never silently
+absent.
+
+---
+
 ## Summary of the stack
 
 | Layer                  | Choice                                                       |

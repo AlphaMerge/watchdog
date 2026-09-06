@@ -100,6 +100,20 @@ const DEFAULT_VALUE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
  * transaction that advanced the alarm, which is what makes "sent exactly once" reachable at all.
  * `N-05` gives the template ids meaning and `N-07` onwards deliver.
  */
+/** How a reaction should behave, for the callers that are not an ordinary state change. */
+export interface ReactionOptions {
+  /**
+   * Where the initial latency is measured from (`P-181`).
+   *
+   * Absent, or `'state'`: from the sensor's own `since`, which is what a trigger edit wants — an
+   * outage already an hour old is already past a five-minute latency. `'now'` starts the clock
+   * at this reaction, which is what a reconciliation at boot wants: there, `since` is as old as
+   * the outage, so every deadline computed from it is already past and the sweep fires the page,
+   * the escalation and the repeat on consecutive passes.
+   */
+  armFrom?: 'state' | 'now';
+}
+
 export class AlarmEngine {
   readonly #alarms: AlarmRepository;
   readonly #triggers: TriggerRepository;
@@ -165,7 +179,12 @@ export class AlarmEngine {
     return this.#alarms.anyThresholdTriggers(q, THRESHOLD_TRIGGER.id);
   }
 
-  async react(q: Queryable, sensorIds: readonly number[], now: Date): Promise<AlarmReaction> {
+  async react(
+    q: Queryable,
+    sensorIds: readonly number[],
+    now: Date,
+    options: ReactionOptions = {},
+  ): Promise<AlarmReaction> {
     if (sensorIds.length === 0) return { ...EMPTY };
     // The guard, first and cheapest. An installation that notifies nobody pays exactly this.
     if (!(await this.#alarms.anyWork(q))) return { ...EMPTY };
@@ -218,7 +237,7 @@ export class AlarmEngine {
           alarms.delete(trigger.id);
           const settings = readSettings(trigger, this.#logger);
           if (settings === null) continue;
-          this.#apply(sensor, trigger, alarm, settings, now, out);
+          this.#apply(sensor, trigger, alarm, settings, now, out, options);
           continue;
         }
 
@@ -450,7 +469,12 @@ export class AlarmEngine {
    * is already past a five-minute latency and notifies at the next sweep — which is right: the
    * operator asked to be told about sensors that are down, and it is.
    */
-  async reconcileSubtree(q: Queryable, objectId: number, now: Date): Promise<AlarmReaction> {
+  async reconcileSubtree(
+    q: Queryable,
+    objectId: number,
+    now: Date,
+    options: ReactionOptions = {},
+  ): Promise<AlarmReaction> {
     const sensors = await this.#alarms.sensorsUnder(q, objectId, this.#maxReconciled);
     if (sensors.length === this.#maxReconciled) {
       this.#logger.warn(
@@ -458,7 +482,7 @@ export class AlarmEngine {
         'trigger reconciliation hit its bound; the rest follow at their next state change',
       );
     }
-    return this.react(q, sensors, now);
+    return this.react(q, sensors, now, options);
   }
 
   /**
@@ -480,6 +504,7 @@ export class AlarmEngine {
       requests: RequestInsert[];
       result: AlarmReaction;
     },
+    options: ReactionOptions,
   ): void {
     const view: Alarm | null =
       alarm === null || alarm.state === null
@@ -504,7 +529,20 @@ export class AlarmEngine {
       out.result.cleared += 1;
     }
 
-    const decision = reconcile(view, sensor.state, sensor.since, settings, now);
+    // **What the latency is measured from** (`P-181`). Ordinarily it is the state's own
+    // beginning, so a sensor that has been Down for an hour when a trigger is created is already
+    // past its latency rather than starting a fresh five minutes — which is right for an edit,
+    // where the outage was already being watched by something.
+    //
+    // It is wrong for a reconciliation at boot. There the sensor's `since` is as old as the
+    // outage, so *every* deadline computed from it — initial, escalation, repeat — is already in
+    // the past: the sweep fires all three on consecutive passes, for an outage whose recovery
+    // may still be sitting in a probe's spool. That is the `P-146` storm, produced by the pass
+    // written to repair a missed alarm. Armed from `now` instead, the alarm still happens — the
+    // hole `P-177` closes stays closed — and it happens once, after its normal latency, by which
+    // time a drain has usually said whether the outage is still real.
+    const armFrom = options.armFrom === 'now' ? now : sensor.since;
+    const decision = reconcile(view, sensor.state, armFrom, settings, now);
 
     switch (decision.kind) {
       case 'idle':

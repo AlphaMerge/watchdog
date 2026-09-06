@@ -562,7 +562,17 @@ async function serve(): Promise<void> {
     .then(async (rows) => {
       const rootId = Number(rows[0]?.id ?? 0);
       if (rootId === 0) return;
-      const moved = await db.tx((q) => alarms.reconcileSubtree(q, rootId, new Date()));
+      // **Armed from now, not from the sensor's `since`** (`P-181`). The population this pass
+      // exists for is sensors whose outage began before the restart, so their `since` is as old
+      // as the outage — and every deadline computed from it, initial and escalation and repeat,
+      // is already past. The sweep would fire all three on consecutive passes, for an outage
+      // whose recovery may still be sitting in a probe's spool: the `P-146` storm, out of the
+      // pass written to repair a missed alarm. Starting the clock here means the alarm still
+      // happens and happens once, after its normal latency — by which time a drain has usually
+      // said whether the outage is still real.
+      const moved = await db.tx((q) =>
+        alarms.reconcileSubtree(q, rootId, new Date(), { armFrom: 'now' }),
+      );
       if (moved.armed > 0 || moved.cleared > 0) {
         logger.info(
           { armed: moved.armed, cleared: moved.cleared },

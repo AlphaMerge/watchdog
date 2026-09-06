@@ -55,6 +55,7 @@ export {
 export type { ProbeCapabilities, ProtocolSkew } from './protocol/capabilities.js';
 export {
   isProtocolCompatible,
+  negotiatedVersion,
   MIN_PROTOCOL_VERSION,
   parseCoreToProbe,
   parseProbeToCore,

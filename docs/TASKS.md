@@ -10832,6 +10832,94 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       deferred ones. Not awaited before the port opens: the answer is the same a second later,
       and blocking every boot on a full-tree pass would be the wrong trade.
 
+- [x] **P-178 — a protocol bump was a fleet-wide outage, and did not need to be**
+      `isProtocolCompatible` refused a peer *above* this build as well as below it, on stated
+      reasoning: the newer end knows messages this one has never seen, and treating its silence
+      as agreement is how a skew becomes a data-loss bug. That was right when version numbers
+      were compared inline at each send site. It stopped being right when `capabilitiesFor`
+      became the only gate — the newer end now gates its own sends on the older end's version, so
+      it cannot send a field the older one will refuse.
+
+      Meanwhile the refusal was not clean, which is what made it worth changing rather than
+      documenting. Bumping to 16 for `P-168`'s two optional fields would have taken **every
+      deployed probe offline until the fleet caught up**: the probe refuses the welcome, destroys
+      the socket and reconnects a minute later, for ever — while the core, which accepted the
+      hello, opens a session, restores every sensor under that probe to its last reading,
+      computes and sends a full configuration push, and is hung up on. Once a minute, per probe,
+      with nothing scanned. Upgrading the probes first fails symmetrically at the old core's
+      `describeSkew`. There was no working order, and nothing said so anywhere.
+
+      Both ends negotiate down now: `negotiatedVersion` is the older of the two, computed
+      independently at each end from the other's declared version, and every capability gate
+      reads that number rather than `PROTOCOL_VERSION`. A peer ahead of this build is served what
+      this build speaks and reported as `ahead` — a new skew kind, because `outdated` says the
+      *peer* is behind and here it is this end, and an operator reading "cannot run discovery"
+      about a probe newer than their core would look in the wrong place. Below
+      `MIN_PROTOCOL_VERSION` is still a refusal: that is a floor, not a feature.
+
+      **The rule `P-168` exists for is unchanged** — a new field still needs a version and a
+      capability. What changes is that obeying it now costs one end at a time. Written up as
+      **ADR-001 Decision 13**, because it reverses a rule whose rationale was stated in the
+      source and the reversal turns on a fact about the code that has since changed.
+
+      Tests: 8 new or rewritten across `capabilities.test.ts`, `messages.test.ts`,
+      `probe-endpoint.test.ts`, `probe-registry.test.ts` and `probe-health.test.ts` — five of
+      them existing tests that encoded the old policy, which is what a policy reversal should
+      look like. Mutation 2/2.
+
+- [x] **P-179 — a batch that decided nothing was read as "the drain is over"**
+      `P-169`'s per-source staleness pass registered a submission's source in `sensorsBySource`
+      *before* the `newestHere === 0` guard, and recorded a verdict in `staleBySource` after it.
+      So a submission that decided no state was a member of the write with no verdict — and
+      `liveSources` filtered on `!== true`, which reads "no verdict" as live. That flushed the
+      probe's whole deferred set and reacted over rows the drain had written hours earlier,
+      arming from a `since` six hours past.
+
+      The trigger is the modal one, not an edge: a batch re-delivered after a lost `results-ack`
+      is entirely duplicate, so `decide` skips every result and returns nothing — and a lost ack
+      is exactly what the link flap that creates a spool does. The drain's own storm, out of its
+      own repair.
+
+      Fixed twice over, because the two halves are independent: membership is recorded only for a
+      submission that decided something, and `liveSources` now requires an explicit `false`.
+      Tests: 1 new — and it pins the *behaviour*, so either half alone satisfies it; it fails
+      only against the original. **The first version of that test could not fail at all**: it
+      used failed checks, which record no channel values, so the duplicate batch carried neither
+      samples nor states and never reached the write. Mutation 1/1 (against both halves).
+
+- [x] **P-180 — the field the replay guard rests on was never validated**
+      `sentAt` is declared on the wire as a 1-64 character string, deliberately without
+      `format: 'date-time'` because the validator runs without ajv-formats — where an unknown
+      format is silently no validation at all. The consumer built a `Date` from it unchecked, so
+      an unparseable value arrived as an Invalid Date. That is not `undefined`, so the documented
+      "fall back to the core's clock" path could not fire: `against` became NaN, `NaN - newest >
+      grace` is always false, and **the replay guard failed open permanently for that peer**,
+      with nothing logged and `staleReactions` flat — indistinguishable from a healthy probe.
+
+      Parsed and checked now, with an unreadable value counted as `discardedInvalidSentAt` and
+      logged, falling back to the core's clock. Every other probe-supplied timestamp in this path
+      was already checked and counted; this was the one that was not, and it was the one the
+      whole of `P-169` rests on. Tests: 1 new. Mutation 1/1.
+
+      Worth recording for the next reader: the obvious example of a bad timestamp,
+      `2026-09-05 14:03:11`, is **not** this case — V8 parses it happily as local time. The
+      failure needs a string `Date` genuinely cannot read, which is what the test now uses.
+
+- [x] **P-181 — the boot reconciliation recreated the storm it was written to repair**
+      `P-177` added a full-tree reconciliation at startup, to arm sensors whose alarm was lost to
+      a restart. `chain.reconcile` arms with `initialDueAt(since, settings)` — armed from the
+      state's own beginning, which is right for a trigger edit: an outage already an hour old is
+      already past a five-minute latency. It is wrong at boot, and precisely for the population
+      `P-177` targets, whose `since` is as old as the outage: *every* deadline computed from it —
+      initial, escalation, repeat — is already past, so the sweep fires all three on consecutive
+      passes, for an outage whose recovery may still be sitting in a probe's spool. The `P-146`
+      storm, produced by the pass written to repair a missed alarm.
+
+      `react` and `reconcileSubtree` take a `ReactionOptions` now, and the boot pass asks for
+      `armFrom: 'now'`. The alarm still happens — the hole `P-177` closes stays closed — and it
+      happens once, after its normal latency, by which time a drain has usually said whether the
+      outage is still real. Tests: 1 new. Mutation 1/1.
+
 ## Phase 10 — Hardening and release
 
 - [x] **H-01 — 24-hour soak test** · L · P-15, T-* · 5,000 sensors for 24 hours: no memory

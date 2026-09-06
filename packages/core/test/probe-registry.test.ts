@@ -512,37 +512,41 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
    * the one refusal an operator is most likely to meet, having upgraded one end and not the
    * other, was the one refusal that left nothing behind to find. These are about the row.
    */
-  describe('a probe whose protocol this core cannot speak', () => {
+  describe('a probe below the protocol floor', () => {
+    // **The floor is the only version refused now** (`P-178`). This block used to use 99 — a
+    // version *newer* than this build — because a newer peer was refused too. Both ends negotiate
+    // down instead: a newer probe is served what this core speaks, so the only version with no
+    // shared language left is one below `MIN_PROTOCOL_VERSION`.
     it('is refused, and says which version each end speaks', async () => {
-      const decision = await registry.admit(hello({ protocolVersion: 99 }));
-      assert.equal(decision.kind, 'refused');
-      assert.equal(decision.code, 'protocol-version');
-      assert.match(decision.detail, /protocol 99/);
-    });
-
-    it('is refused when it is older than this build understands, too', async () => {
       const decision = await registry.admit(hello({ protocolVersion: 0 }));
       assert.equal(decision.kind, 'refused');
       assert.equal(decision.code, 'protocol-version');
+      assert.match(decision.detail, /protocol 0/);
     });
 
     it('updates the recorded version before refusing, for a probe already known', async () => {
       // The point of moving the check here. An operator asking "why did backup-01 stop
-      // scanning" needs the row to say 99, not the 6 it spoke the last time it managed to get
+      // scanning" needs the row to say 0, not the 6 it spoke the last time it managed to get
       // in — the stale number is the one that sends them looking in the wrong place.
       const first = await registry.admit(hello({ gid: 'known-machine', protocolVersion: 6 }));
       assert.equal(first.kind, 'pending');
 
-      const decision = await registry.admit(hello({ gid: 'known-machine', protocolVersion: 99 }));
+      const decision = await registry.admit(hello({ gid: 'known-machine', protocolVersion: 0 }));
       assert.equal(decision.kind, 'refused');
 
       const stored = await registry.get('known-machine');
-      assert.equal(stored?.protocolVersion, 99, 'the version it is actually running');
-      assert.equal(stored.skew.kind, 'incompatible');
+      assert.equal(stored?.protocolVersion, 0, 'the version it is actually running');
+      // **And its skew reads `unknown`, not `incompatible`** — because 0 is also the sentinel for
+      // "has not connected since this core started recording versions", which is what stops an
+      // upgrade putting a red mark against every carried-over row. A probe that genuinely claims
+      // 0 is therefore indistinguishable from one that has never been seen. Harmless, because
+      // the *refusal* above is what protects the system either way, and worth writing down
+      // rather than papering over: the display is ambiguous, the admission is not.
+      assert.equal(stored.skew.kind, 'unknown');
     });
 
     it('does not enrol one it has never seen, because approving it could not help', async () => {
-      await registry.admit(hello({ gid: 'stranger', protocolVersion: 99 }));
+      await registry.admit(hello({ gid: 'stranger', protocolVersion: 0 }));
       assert.equal(await registry.get('stranger'), null);
       assert.equal((await registry.list()).length, 0, 'nothing was added to the approval queue');
     });
@@ -550,10 +554,24 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('refuses it before the access key is even considered', async () => {
       // Otherwise the operator is told to check a key that was never the problem.
       const decision = await registry.admit(
-        hello({ protocolVersion: 99, accessKey: 'not-the-shared-key' }),
+        hello({ protocolVersion: 0, accessKey: 'not-the-shared-key' }),
       );
       assert.equal(decision.kind, 'refused');
       assert.equal(decision.code, 'protocol-version');
+    });
+
+    it('admits a probe newer than this build, which used to be refused', async () => {
+      // **`P-178`.** Refusing a newer peer made every `PROTOCOL_VERSION` bump a lockstep fleet
+      // upgrade: the un-upgraded end reconnected for ever while this core opened a session,
+      // restored every sensor under it and sent a full push on each attempt. Every feature is
+      // capability-gated on the negotiated version now, so the newer end cannot send this one a
+      // field it would refuse — and the pair simply speaks what this build speaks.
+      const decision = await registry.admit(hello({ gid: 'from-the-future', protocolVersion: 99 }));
+      assert.notEqual(decision.kind, 'refused', 'it is admitted like any other probe');
+
+      const stored = await registry.get('from-the-future');
+      assert.equal(stored?.protocolVersion, 99, 'and the version it really speaks is recorded');
+      assert.equal(stored.skew.kind, 'ahead', 'reported as a skew this end can fix, not a refusal');
     });
   });
 

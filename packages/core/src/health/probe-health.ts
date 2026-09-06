@@ -315,11 +315,19 @@ export function readingsFrom(reading: ProbeHealthReading): ChannelReading[] {
 }
 
 /** `null` for `unknown`, which has no lookup code and must be a gap. */
-function skewCode(kind: 'unknown' | 'current' | 'outdated' | 'incompatible'): number | null {
+function skewCode(
+  kind: 'unknown' | 'current' | 'outdated' | 'ahead' | 'incompatible',
+): number | null {
   switch (kind) {
     case 'current':
       return 0;
     case 'outdated':
+      return 1;
+    // **The same code as `outdated`, deliberately** (`P-178`). Both mean "the pair is speaking an
+    // older protocol than one of them knows", which is the fact this channel exists to surface;
+    // which *end* is behind is in the explanation beside it, and adding a fourth code would
+    // change a lookup table that operators have already mapped to states.
+    case 'ahead':
       return 1;
     case 'incompatible':
       return 2;
@@ -384,7 +392,9 @@ function describe(
   if (spool !== null && spool !== undefined && spool > 0) {
     parts.push(`${String(spool)} results spooled`);
   }
-  if (skew.kind === 'outdated') parts.push(explainSkew(skew));
+  // Both mean the pair is speaking an older protocol than one end knows, and both are worth a
+  // sentence: `outdated` says upgrade the probe, `ahead` says upgrade this core (`P-178`).
+  if (skew.kind === 'outdated' || skew.kind === 'ahead') parts.push(explainSkew(skew));
   return parts.join(', ');
 }
 

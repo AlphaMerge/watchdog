@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   isProtocolCompatible,
+  negotiatedVersion,
   MIN_PROTOCOL_VERSION,
   parseCoreToProbe,
   parseProbeToCore,
@@ -127,9 +128,16 @@ describe('protocol version negotiation', () => {
     assert.equal(isProtocolCompatible(MIN_PROTOCOL_VERSION), true);
   });
 
-  it('rejects versions outside it, in both directions', () => {
+  it('rejects below the floor, and accepts above it', () => {
+    // **`P-178` made this one-sided.** It used to refuse both directions, so bumping
+    // `PROTOCOL_VERSION` took every un-upgraded peer offline until the fleet caught up. Every
+    // feature is capability-gated on the negotiated version now, so a newer peer cannot send an
+    // older one a field it would refuse — and the pair speaks the older of the two. Below
+    // `MIN_PROTOCOL_VERSION` there is no shared language to negotiate down to, and that is still
+    // a refusal.
     assert.equal(isProtocolCompatible(MIN_PROTOCOL_VERSION - 1), false);
-    assert.equal(isProtocolCompatible(PROTOCOL_VERSION + 1), false);
+    assert.equal(isProtocolCompatible(PROTOCOL_VERSION + 1), true);
+    assert.equal(negotiatedVersion(PROTOCOL_VERSION + 1), PROTOCOL_VERSION, 'spoken at ours');
   });
 
   it('rejects nonsense rather than coercing it', () => {

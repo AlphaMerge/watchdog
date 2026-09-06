@@ -1,7 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
-import { PROTOCOL_VERSION, type CheckResult, type ProbeHealthReport } from '@ms/shared';
+import {
+  MIN_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  type CheckResult,
+  type ProbeHealthReport,
+} from '@ms/shared';
 import { ProbeHealthService, readingsFrom } from '../src/health/probe-health.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
 import type { Database } from '../src/db/pool.js';
@@ -418,11 +423,25 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['protocol'], 2);
     });
 
-    it('calls a version newer than this build incompatible rather than guessing', () => {
-      const { reading } = build(() => connected({ protocolVersion: PROTOCOL_VERSION + 1 })).read(
-        probeId,
-      );
-      assert.equal(reading['protocol'], 2);
+    it('reports a probe newer than this build as a skew, not as incompatible', () => {
+      // **`P-178` changed what this means, deliberately.** A newer peer used to be refused at the
+      // handshake, so the only honest reading was `incompatible` (2). Both ends negotiate down
+      // now — the pair speaks this core's version — so the probe is connected and working, and
+      // what an operator needs to know is that upgrading *this end* would unlock more. That is
+      // the same fact `outdated` carries, so it shares its code (1): which end is behind is in
+      // the explanation, and a fourth code would change a lookup operators have mapped to states.
+      const { reading, message } = build(() =>
+        connected({ protocolVersion: PROTOCOL_VERSION + 1 }),
+      ).read(probeId);
+      assert.equal(reading['protocol'], 1);
+      assert.match(message, /newer than this build/);
+    });
+
+    it('still calls a version below the floor incompatible', () => {
+      const { reading } = build(() =>
+        connected({ protocolVersion: MIN_PROTOCOL_VERSION - 1 }),
+      ).read(probeId);
+      assert.equal(reading['protocol'], 2, 'there is no shared language to negotiate down to');
     });
   });
 

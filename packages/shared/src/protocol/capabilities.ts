@@ -141,6 +141,16 @@ export type ProtocolSkew =
   | { kind: 'unknown' }
   | { kind: 'current'; peerVersion: number }
   | { kind: 'outdated'; peerVersion: number; ownVersion: number; missing: string[] }
+  /**
+   * The peer speaks a *newer* protocol than this build (`P-178`).
+   *
+   * Not `incompatible`, which is what it used to be: the pair simply speaks this end's version,
+   * because the newer end gates its sends on the negotiated one. Not `outdated` either — that
+   * says the peer is behind, and here it is ahead, so an operator reading "cannot run discovery"
+   * about a probe newer than their core would go looking in the wrong place. The thing to
+   * upgrade is this end, and this says so.
+   */
+  | { kind: 'ahead'; peerVersion: number; ownVersion: number }
   | { kind: 'incompatible'; peerVersion: number; ownVersion: number; reason: string };
 
 export function describeSkew(peerVersion: number): ProtocolSkew {
@@ -155,17 +165,11 @@ export function describeSkew(peerVersion: number): ProtocolSkew {
     };
   }
   if (peerVersion > PROTOCOL_VERSION) {
-    // **The newer end is the one that has to accommodate**, so a peer from the future is refused
-    // rather than guessed at. It knows messages this build has never seen, and treating its
-    // silence about them as agreement is how a version skew becomes a data-loss bug.
-    return {
-      kind: 'incompatible',
-      peerVersion,
-      ownVersion: PROTOCOL_VERSION,
-      reason:
-        `speaks protocol ${String(peerVersion)}, which is newer than this build ` +
-        `(${String(PROTOCOL_VERSION)}) — upgrade this end`,
-    };
+    // **The newer end accommodates, rather than being refused** (`P-178`). It knows messages this
+    // build has never seen and will not send them: it gates on the negotiated version, which is
+    // this build's. So the pair speaks what this end speaks, and what an operator needs to know
+    // is that upgrading *this* end would unlock more — not that their probe is broken.
+    return { kind: 'ahead', peerVersion, ownVersion: PROTOCOL_VERSION };
   }
   const missing = missingCapabilities(peerVersion);
   if (missing.length === 0) return { kind: 'current', peerVersion };
@@ -190,6 +194,12 @@ export function explainSkew(skew: ProtocolSkew): string {
       return (
         `speaks protocol ${String(skew.peerVersion)}, this build speaks ` +
         `${String(skew.ownVersion)}, so it cannot ${skew.missing.join(', nor ')}`
+      );
+    case 'ahead':
+      return (
+        `speaks protocol ${String(skew.peerVersion)}, which is newer than this build ` +
+        `(${String(skew.ownVersion)}); the pair speaks ${String(skew.ownVersion)} until this ` +
+        `end is upgraded`
       );
   }
 }

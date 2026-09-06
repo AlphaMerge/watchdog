@@ -65,6 +65,8 @@ export interface ResultStats {
   discardedOnError: number;
   /** Readings whose timestamp was not a date. */
   discardedInvalidTime: number;
+  /** Batches whose `sentAt` could not be read, so staleness fell back to the core's clock. */
+  discardedInvalidSentAt: number;
   /** Results stamped further ahead of this core's clock than `maxFutureSkewMs` (`P-99`). */
   discardedFutureTime: number;
   /** Readings for sensors that no longer exist — a spool replayed after a deletion. */
@@ -127,6 +129,7 @@ export class IngestionService {
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
   #discardedFutureTime = 0;
+  #discardedInvalidSentAt = 0;
   #discardedUnknownSensor = 0;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
@@ -155,6 +158,7 @@ export class IngestionService {
       readingsReceived: this.#readingsReceived,
       discardedOnError: this.#discardedOnError,
       discardedInvalidTime: this.#discardedInvalidTime,
+      discardedInvalidSentAt: this.#discardedInvalidSentAt,
       discardedFutureTime: this.#discardedFutureTime,
       discardedUnknownSensor: this.#discardedUnknownSensor,
       discardedReadings: this.#discardedReadings,
@@ -197,6 +201,16 @@ export class IngestionService {
       };
     }
 
+    // **Parsed and checked, not trusted** (`P-180`). The wire schema is a 1-64 character string —
+    // deliberately, because this validator runs without ajv-formats, where an unknown `format` is
+    // silently no validation at all — so an unparseable value reaches here as an Invalid Date.
+    // That is not `undefined`, so the documented "fall back to the core's clock" path could not
+    // fire: `against` became NaN, `NaN - newest > grace` is always false, and the replay guard
+    // failed open permanently for that peer, with nothing logged and both counters flat. Every
+    // other probe-supplied timestamp in this path is checked and counted; this one is the field
+    // the whole of `P-169` rests on.
+    const sentAt = this.#sentAtOf(source, message.sentAt);
+
     const outcome = await this.#ingestor.submit({
       source,
       samples,
@@ -213,7 +227,7 @@ export class IngestionService {
       // `backlog` is deliberately *not* this signal (`P-169`): it counts rows still on disk, so
       // a live probe whose scan tick outruns one batch reports thousands. It paces, which is
       // what `R-03` added it for.
-      ...(message.sentAt === undefined ? {} : { sentAt: new Date(message.sentAt) }),
+      ...(sentAt === undefined ? {} : { sentAt }),
     });
     if (!outcome.accepted) {
       // Nothing committed, so the probe will offer the batch again — but the machine has
@@ -239,6 +253,25 @@ export class IngestionService {
       storedSamples: outcome.storedSamples,
       retryAfterMs: outcome.retryAfterMs + pacing,
     };
+  }
+
+  /**
+   * The probe's send time, or undefined if it did not send a usable one (`P-180`).
+   *
+   * Undefined is the honest answer for a value that cannot be read: it puts the ingestor back on
+   * the core's own clock, which is `P-146`'s test and carries `P-146`'s skew problem — worse than
+   * the probe's clock, better than a guard that silently never fires.
+   */
+  #sentAtOf(source: string, raw: string | undefined): Date | undefined {
+    if (raw === undefined) return undefined;
+    const parsed = new Date(raw);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+    this.#discardedInvalidSentAt += 1;
+    this.#logger.warn(
+      { source, sentAt: raw },
+      'probe sent an unreadable batch timestamp; judging this batch against the core clock',
+    );
+    return undefined;
   }
 
   /** Runs the machine, or reports that it could not. Never throws. */

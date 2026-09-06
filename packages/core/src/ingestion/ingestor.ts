@@ -558,11 +558,6 @@ export class Ingestor {
     // sensors it carries, and whether it is a replay.
     for (const queued of taken) {
       const source = queued.batch.source;
-      const mine = sensorsBySource.get(source) ?? new Set<number>();
-      for (const write of queued.batch.states?.runtimes ?? []) mine.add(write.sensorId);
-      for (const transition of queued.batch.states?.transitions ?? [])
-        mine.add(transition.sensorId);
-      sensorsBySource.set(source, mine);
 
       // **How old these results are to the probe that took them** (`P-169`). Both timestamps are
       // the probe's, so the comparison is immune to any skew between the two machines — which is
@@ -575,15 +570,32 @@ export class Ingestor {
           0,
         ),
       );
+      // **A submission that decided nothing gets no verdict, and no membership** (`P-179`).
+      // It used to be registered as a source of this write before this check, and then judged
+      // neither stale nor live — and "no verdict" fell through to live, which flushed that
+      // probe's whole deferred set and reacted over rows the drain had written hours ago. The
+      // trigger is not exotic: a batch re-delivered after a lost `results-ack` is entirely
+      // duplicate, so `decide` returns no transitions and no runtimes, and a lost ack is what
+      // the link flap that created the spool does. The drain's own storm, out of its own repair.
       if (newestHere === 0) continue;
+
+      const mine = sensorsBySource.get(source) ?? new Set<number>();
+      for (const write of queued.batch.states?.runtimes ?? []) mine.add(write.sensorId);
+      for (const transition of queued.batch.states?.transitions ?? [])
+        mine.add(transition.sensorId);
+      sensorsBySource.set(source, mine);
+
       const against = queued.batch.sentAt?.getTime() ?? Date.now();
       const isStale = against - newestHere > this.#catchUpGraceMs;
       staleBySource.set(source, (staleBySource.get(source) ?? false) || isStale);
     }
 
-    // Which sources this write may reconcile, and which it must hold back for.
+    // Which sources this write may reconcile, and which it must hold back for. **An explicit
+    // `false`, never an absent verdict** (`P-179`): the two lists are built from the same keys
+    // and a source can only be in one of them, so "not stale" has to mean "judged live" rather
+    // than "not judged".
     const liveSources = [...sensorsBySource.keys()].filter(
-      (one) => staleBySource.get(one) !== true,
+      (one) => staleBySource.get(one) === false,
     );
     const staleSources = [...sensorsBySource.keys()].filter(
       (one) => staleBySource.get(one) === true,

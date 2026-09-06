@@ -48,6 +48,14 @@ import { AppError } from '../errors/app-error.js';
  * without a bump, and every probe not upgraded in lockstep rejected each configuration message,
  * closed the connection and reconnected into the same wall.
  *
+ * **A bump is no longer a fleet-wide upgrade** (`P-178`). Both ends negotiate down to the older
+ * of the two versions and every gate reads that number, so a peer ahead of this build is served
+ * what this build speaks rather than refused. Before that, bumping this constant *was* the
+ * outage: a v15 probe refused a v16 core's welcome, destroyed the socket and reconnected for
+ * ever, while the core opened a session, restored every sensor under that probe and sent a full
+ * push on each attempt. The rule the bump exists for is unchanged — a new field still needs a
+ * version and a capability — but the cost of obeying it is now one end at a time.
+ *
  * Version 15 adds `spoolUnwritten` (`P-78`), version 14 `checksCompleting` and
  * `checksBehind` (`P-76`), version 13 the listeners'
  * throughput counters (`P-64`), version 12 the worker pool's
@@ -1251,13 +1259,40 @@ export function parseCoreToProbe(value: unknown): CoreToProbeMessage {
 }
 
 /**
- * Version negotiation. Incompatibility is reported, never silently tolerated — R-06 turns this
- * into an operator-visible condition rather than a peer that misbehaves in subtle ways.
+ * Whether two peers can hold a conversation at all (`P-178`).
+ *
+ * **Only the floor, since every feature is gated by capability.** This used to refuse a peer
+ * *above* this build as well, on the reasoning that the newer end knows messages this one has
+ * never seen and treating its silence as agreement is how a skew becomes a data-loss bug. That
+ * was right when version numbers were compared inline at each send site. It is not right now:
+ * every message that is not in every version is gated through `capabilitiesFor`, and each end
+ * gates on the *negotiated* version — so the newer end never sends the older one a field it
+ * cannot parse. The refusal had stopped protecting against anything and had started costing a
+ * lockstep fleet upgrade on every bump.
+ *
+ * And the cost was not a clean refusal, which is what made it worth changing rather than
+ * documenting. A probe that refuses the welcome destroys the socket and reconnects for ever;
+ * the core meanwhile accepts the hello, opens a session, restores every sensor under that probe
+ * to its last reading, computes and sends a full configuration push, and is hung up on — once a
+ * minute, per probe, indefinitely, with nothing scanned. Bumping `PROTOCOL_VERSION` to add two
+ * optional fields would have taken every deployed probe offline until the fleet caught up
+ * (`P-168`), which is the failure the bump was made to prevent.
+ *
+ * A peer below `MIN_PROTOCOL_VERSION` is still refused: that is a genuine floor, not a feature.
  */
 export function isProtocolCompatible(peerVersion: number): boolean {
-  return (
-    Number.isInteger(peerVersion) &&
-    peerVersion >= MIN_PROTOCOL_VERSION &&
-    peerVersion <= PROTOCOL_VERSION
-  );
+  return Number.isInteger(peerVersion) && peerVersion >= MIN_PROTOCOL_VERSION;
+}
+
+/**
+ * The version two peers actually speak: the older of the two (`P-178`).
+ *
+ * Computed independently at each end from the other's declared version, so both arrive at the
+ * same number without another round trip. **Every capability gate reads this**, never
+ * `PROTOCOL_VERSION` directly — a gate that asks what *this* build can do rather than what the
+ * pair can do is how an unknown field reaches a peer whose schema will refuse it.
+ */
+export function negotiatedVersion(peerVersion: number): number {
+  if (!Number.isInteger(peerVersion)) return MIN_PROTOCOL_VERSION;
+  return Math.min(PROTOCOL_VERSION, Math.max(MIN_PROTOCOL_VERSION, peerVersion));
 }

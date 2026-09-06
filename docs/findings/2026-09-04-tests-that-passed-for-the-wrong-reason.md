@@ -531,6 +531,65 @@ the diff *reads* is not in the diff, so its meaning is assumed — and an assump
 else's field is exactly the kind that survives eight careful readings. The critic round exists for
 this and this is the first time it has paid for itself outright.
 
+## The two the fifth panel found, and the one it found in itself
+
+A fifth panel, over the diff that fixed the fourth panel's 12. It confirmed 4 — the yield across
+five rounds is 45, 36, 12, 4. Two belong here.
+
+### 31. A guard added to answer entry 30, defeated by statement order (`P-169`)
+
+The per-source deferral registered a submission's source as one this write carried, *then*
+checked whether the submission had decided anything, and recorded a staleness verdict only if it
+had. A batch that decided nothing was therefore a member with no verdict — and the filter read
+"no verdict" as live, flushing that probe's deferred set and reacting over rows the drain had
+written hours before.
+
+What makes it worth recording is the trigger: a batch re-delivered after a lost `results-ack` is
+entirely duplicate, so the state machine skips every result and returns nothing. **A lost ack is
+what the link flap that creates a spool does.** The most likely batch in a drain was the one shape
+the guard could not judge, and it defaulted to the unsafe answer.
+
+Three of eight reviewers found it independently, which is the strongest signal this document has
+recorded for a single finding.
+
+### 32. The test written for entry 31, which could not fail (`P-179`, found by mutating it)
+
+The first version delivered a batch of *failed* checks twice. A failed check records no channel
+values, so the duplicate carried neither samples nor states and never reached the write at all —
+the code path under test was not entered, and the test passed against the bug, against the fix,
+and against both halves of the fix reverted.
+
+Four mutations were needed to establish that: revert half one (green), revert half two (green),
+revert both (green — the test is inert), then rewrite it with *measured* results so the duplicate
+carries samples but no state decisions, and revert both again (red). **The mutation that matters
+is the one against the original code, and running only the single-half mutations would have
+reported a passing guard.**
+
+This is entry 24 and entry 29 for the third time, and by now the pattern is specific enough to
+name: when a fix has two independent halves, mutating each half in turn can never distinguish a
+working test from an inert one. Only reverting the whole fix can.
+
+### 33. The panel's own blind spot, named by its own critic (`P-178`)
+
+This panel had a lens dedicated to reading *outside* the diff — added because that is where the
+fourth panel's best finding came from. It did its job: it verified eight premises sound, including
+that `sentAt` really is stamped at send. And the panel still missed the largest defect in the
+change, which its completeness critic then found:
+
+> Every lens reviewed this change from the inside of a running, already-negotiated system. Eight
+> lenses examined what the new fields and gates do once both peers agree on version 16, and
+> nobody asked what the version bump itself does to a peer that is already deployed.
+
+The protocol lens got closest and stated the opposite leg correctly — "new probe + old core cannot
+occur" — then treated "old probe + new core" as a wire-shape question without checking whether
+that probe survives the handshake. It does not: `isProtocolCompatible` refused any peer above this
+build, so the bump would have taken every deployed probe offline until the fleet caught up.
+
+**The lesson is not "look outside the diff" — the panel did that.** It is that a premise can be
+audited for *what it enables* and never for *whether it is reachable*. The outside-the-diff lens
+checked that `session.protocolVersion` is set before the gate reads it, which is a question about
+correctness given a connection. Nobody asked whether the connection happens.
+
 ## What actually found them
 
 
@@ -563,7 +622,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Eighteen rules this produced
+## Twenty-one rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -627,6 +686,15 @@ anything — and that structure, not more care, is what found them.
 18. **Check the meaning of a field you did not write.** Entry 30: the whole fix rested on
     `backlog`, eight reviewers audited what it drove, and none asked what it counted. A value the
     diff reads is not in the diff, and its meaning is the easiest thing in a review to assume.
+19. **A guard must have no third answer.** Entry 31 had "stale", "live", and "never asked" — and
+    the filter folded the third into the second. When a verdict can be absent, say what absent
+    means, in the code rather than in your head.
+20. **Mutate the whole fix, not each half.** Entry 32: a fix with two independent halves passes
+    every single-half mutation whether or not the test works. Revert all of it at least once.
+21. **Ask whether the thing you are auditing is reachable, not only whether it is correct.**
+    Entry 33: a lens verified that the version gate reads a value set before it. Nobody asked
+    whether a peer that needs the gate ever gets that far. Correct-given-a-connection is not the
+    same as connected.
 
 ## What is still not covered, and is said so on purpose
 
@@ -669,7 +737,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Twenty-five now, and the sixteen added later are the ones that settle the argument.** The first
+**Thirty-three now, and the twenty-four added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The
