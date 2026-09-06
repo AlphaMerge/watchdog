@@ -70,6 +70,12 @@ declare module 'ssh2' {
       type: string,
       options?: { bits?: number },
     ): { private: string; public: string };
+    /**
+     * Declared only so `keyPair()` can sift `generateKeyPairSync`'s output — `ssh2` returns the
+     * parse failure rather than throwing it, so the union is the point, and the parsed key
+     * itself is never read here.
+     */
+    parseKey(data: string | Buffer): { type: string } | Error;
   };
 
   /**
