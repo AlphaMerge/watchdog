@@ -692,6 +692,42 @@ flakiness it was being blamed on.
 **What it needed:** measuring the rate instead of re-running until green. The re-run is what let it
 survive — it works, every time, and it is precisely what a 1-in-70 failure trains everybody to do.
 
+### 36. Six tests that could only fail for ten hours a week (`P-184`, found by the clock)
+
+The pause-precedence table drives its schedule through `recompute(q, OUTSIDE)` at a pinned Monday
+03:00, and then asserts that the operator's view agrees with the row the probe is filtered by.
+Three service paths reach the schedule at the *real* clock instead and cannot be told otherwise —
+`pauseState` computes holding live, `resume` does the same before refusing, and `ScheduleSync`
+recomputes at the mutation's own timestamp. The window was `mo:08:00-mo:18:00`: closed at the
+pinned instant, and open for ten hours of every real week.
+
+So six cases asserted that two clocks agreed, while comparing 03:00 against whatever time it
+happened to be. **They passed 94% of the time and failed 6%**, and the 6% is a contiguous block —
+Monday office hours — so a project that runs its suite on weekday mornings would have seen this
+constantly and one that runs it at night would never see it at all. This one ran at 02:00 and was
+green, ran at 10:00 on a Monday and was red, with nothing in the repository changed between.
+
+Three things worth taking from it.
+
+**The failing assertion was the one carrying the comment that named the invariant** — "the view an
+operator reads has to agree with the row a probe is filtered by, or one of them is lying about the
+same sensor". Somebody understood the property exactly and wrote a fixture that could not test it.
+That is entry 7 and entry 34 again: knowing the property is not the same as having a subject that
+can express it.
+
+**A time-dependent pass rate is invisible to every technique on this page.** Mutation testing says
+what it always says — revert the fix, watch it go red — but the mutation only reddens during the
+window. Run it at the wrong hour and a working guard reports as inert, or an inert one reports as
+working. The only reason the mutations here mean anything is that they were run on a Monday
+morning, on purpose, and the write-up says so.
+
+**The first fix was a third of a fix.** An injectable `now` on `pauseState` made the view take the
+pinned instant and the six cases pass — and left `resume` and `ScheduleSync` on the real clock, so
+the file still had two clocks and the next case to touch either path would have found them.
+Reverted in favour of a fixture whose window is closed on both clocks: a weekday that is not
+today. The tell was that the seam existed only for the test, which is usually a sign the fixture
+is what is wrong.
+
 ## What actually found them
 
 
@@ -839,7 +875,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Thirty-five now, and the twenty-six added later are the ones that settle the argument.** The first
+**Thirty-six now, and the twenty-seven added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

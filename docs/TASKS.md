@@ -3694,7 +3694,7 @@ because each is a decision rather than a defect:
       asserting `viaAdminGroup` — the right answer for the wrong reason would be a per-object
       grant. Mutation 1/1.
 
-- [ ] **P-184 — six pause-precedence tests fail on a tree that was green eight hours earlier** · M ·
+- [x] **P-184 — six pause-precedence tests fail on a tree that was green eight hours earlier** · M ·
       `packages/core/test/pause-precedence.test.ts` fails six of its twenty-nine cases, all of them
       the `schedule` source: "holds a sensor by schedule", the two combinations that report
       schedule, the resume refusal, the dependency release on a schedule edit, and the
@@ -3710,7 +3710,52 @@ because each is a decision rather than a defect:
       to creation rather than to the instant passed in would drift away from the pinned date as
       real time moves — two weeks by now. `SchedulePauses.recompute` itself takes `now` and calls
       the pure `isActiveAt`, so if that suspicion is right the drift is upstream of it, in what
-      `list` or `anyWork` returns. Not diagnosed; the evidence above is what is established.
+      `list` or `anyWork` returns.
+
+      **P-184 outcome. The drift was real and the direction was the other one.** The fixture
+      drives `recompute` and `sweep` at the pinned `OUTSIDE` — Monday 03:00 UTC — but three
+      service paths reach the schedule at the *real* clock and cannot be told otherwise:
+      `ObjectService.pauseState` computes schedule holding live, `resume` evaluates the same way
+      before deciding whether to refuse, and `ScheduleSync` recomputes at the mutation's own
+      timestamp. So the window `mo:08:00-mo:18:00` was closed at `OUTSIDE` and **open for ten
+      hours of every real week**, and during those ten hours the row said "held by schedule" while
+      every live path said "open".
+
+      **Green was the accident.** Ten hours in a hundred and sixty-eight is a 6% chance per run,
+      and the run that caught it was a Monday morning. The failing assertion is the one whose own
+      comment states the invariant — "the view an operator reads has to agree with the row a probe
+      is filtered by, or one of them is lying about the same sensor" — and for a fortnight it had
+      been asserting that agreement at two different instants.
+
+      Fixed in the fixture, not in the product: the office window is pinned to a weekday that is
+      not today, which closes it on both clocks at once, at any hour, without asking `pauseState`
+      to accept an instant it has no other reason to take. It stays closed at `OUTSIDE` whichever
+      day is chosen — either the weekday differs, or the day is Monday and 03:00 is still before
+      08:00. An injectable `now` on `pauseState` was written first and reverted: it fixed the view
+      and left `resume` and `ScheduleSync` on the real clock, which is a seam that buys a third of
+      a fix.
+
+      Mutations 2/2, both run inside the window that exposes this. Restoring the fixed Monday
+      window reproduces exactly the six original failures; a window that is always *open* fails
+      fifteen, which is what says the fixture is doing the work rather than the cases passing
+      regardless. Full suite green at 3,875 — measured on a Monday morning, which is the only time
+      that number means anything for this file.
+
+- [ ] **P-185 — the pause view and the probe's filter disagree at every window edge** · S ·
+      P-184 · Falls out of `P-184`'s diagnosis and is a property of the product, not of a test.
+      `paused_by_schedule` in `sensor_runtime` is what the probe configuration filters on and is
+      moved by the sweep; `pauseState` computes schedule holding live from the definition, because
+      it must — a group or a device carrying a schedule has no `sensor_runtime` row to read a flag
+      from. Between a window edge and the next sweep, armed at the next wall-clock minute, the two
+      disagree.
+
+      The direction that matters is the close: at 18:00 the row still says not-paused, so the
+      probe keeps scanning and an alarm can still fire, while the operator's view already reports
+      the sensor held by its maintenance window. Somebody is told the window has started while it
+      pages them. The open edge is the milder inverse — the UI says live, nothing is scanning it —
+      and both are bounded by the sweep, so this is a minute, not an outage. Worth deciding
+      deliberately rather than by accident: either the view reads the flag where there is one, or
+      the sweep is armed off the next window edge rather than off the next minute.
 
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind

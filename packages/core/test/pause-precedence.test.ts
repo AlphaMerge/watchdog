@@ -59,6 +59,29 @@ describe(
     /** Monday 03:00 UTC — outside the office-hours window used below. */
     const OUTSIDE = new Date('2026-08-24T03:00:00.000Z');
 
+    /**
+     * A closed window, on **both** clocks this file runs against (`P-184`).
+     *
+     * The fixture drives `recompute` and `sweep` at the pinned `OUTSIDE`, but three service
+     * paths reach the schedule at the *real* clock instead, and cannot be told otherwise:
+     * `pauseState` computes schedule holding live — it has to, because a group carrying a
+     * schedule has no `sensor_runtime` row to read a flag from — `resume` evaluates the same way
+     * before refusing, and `ScheduleSync` recomputes at the mutation's own timestamp.
+     *
+     * So a fixed `mo:08:00-mo:18:00` was closed at `OUTSIDE` and *open* for ten hours of every
+     * real week, and during those ten hours six of these cases failed. They had been green for a
+     * fortnight by never being run inside one: 10 hours in 168 is a 6% chance per run, and it
+     * came up on a Monday morning. Green was the accident, not red.
+     *
+     * Pinning the window to a weekday that is not today closes it on both clocks at once, at any
+     * hour, without asking the service to accept an instant it has no other reason to take. It
+     * stays closed at `OUTSIDE` whichever day is chosen: either the weekday differs, or the day
+     * is Monday and 03:00 is still before 08:00.
+     */
+    const WEEKDAYS = ['su', 'mo', 'tu', 'we', 'th', 'fr', 'sa'] as const;
+    const notToday = WEEKDAYS[(new Date().getUTCDay() + 1) % 7] ?? 'tu';
+    const CLOSED_PERIODS = `${notToday}:08:00-${notToday}:18:00`;
+
     before(async () => {
       scratch = await createScratchDatabase('precedence');
       db = scratch.db;
@@ -174,7 +197,7 @@ describe(
       closedScheduleId = (
         await schedules.create(testActor, {
           name: `office-${String(process.hrtime.bigint())}`,
-          periods: 'mo:08:00-mo:18:00',
+          periods: CLOSED_PERIODS,
         })
       ).id;
 
@@ -492,11 +515,14 @@ describe(
       await db.tx((q) => schedulePauses.recompute(q, OUTSIDE));
       assert.deepEqual((await flagsOf(sensorId)).active, ['dependency'], 'still held while open');
 
-      // Edited to a window that is closed at OUTSIDE — Monday 03:00 — rather than to one that is
-      // never open, which the validator refuses as a permanent pause dressed up as a schedule.
+      // Edited to a window that is closed on both clocks (`CLOSED_PERIODS`) rather than to one
+      // that is never open, which the validator refuses as a permanent pause dressed up as a
+      // schedule. This edit reaches `ScheduleSync`, which recomputes at the mutation's own
+      // timestamp — the real clock — so a window chosen only to be closed at `OUTSIDE` would
+      // leave the master running for ten hours a week (`P-184`).
       await schedules.update(testActor, window, {
         name: 'master-window',
-        periods: 'mo:08:00-mo:18:00',
+        periods: CLOSED_PERIODS,
       });
 
       assert.equal((await flagsOf(masterId)).state, 'paused', 'the master is switched off');
@@ -519,7 +545,7 @@ describe(
       const window = (
         await schedules.create(testActor, {
           name: `master-hours-${String(process.hrtime.bigint())}`,
-          periods: 'mo:08:00-mo:18:00',
+          periods: CLOSED_PERIODS,
         })
       ).id;
       await h.service.setSetting(testActor, masterId, SCHEDULE_ID.key, window);
