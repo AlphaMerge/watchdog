@@ -600,6 +600,25 @@ describe(
       return formatPeriods([interval]);
     }
 
+    /**
+     * Its complement: a period a long way from this moment, on both sides.
+     *
+     * The partner `aroundNow` was missing, and its absence is what `P-184` was made of — a test
+     * that wants "closed" reaches for a fixed window like `mo:08:00-mo:18:00`, which is closed
+     * at whatever instant the author had in mind and open for ten hours of every real week.
+     */
+    function farFromNow(): string {
+      const minute = weekMinuteOf(new Date(), 'UTC');
+      // Half a week away, wrapped: the furthest any moment can be from now, so neither edge of
+      // the two-hour window below can reach back to it.
+      const away = (minute + MINUTES_PER_WEEK / 2) % MINUTES_PER_WEEK;
+      const interval: WeekInterval = {
+        start: Math.max(0, away - 60),
+        end: Math.min(MINUTES_PER_WEEK, away + 60),
+      };
+      return formatPeriods([interval]);
+    }
+
     // -------------------------------------------------------------------------------------
     // Seeding.
     // -------------------------------------------------------------------------------------
@@ -922,6 +941,45 @@ describe(
       assert.ok(view.schedule.name.startsWith('Office hours'));
       assert.equal(view.schedule.definedOn, groupId, 'and where to go to change it');
       assert.equal(view.resumable, false, 'a schedule pause is not resumable by hand');
+    });
+
+    it('agrees with the row the probe is filtered by, in both window states', async () => {
+      // **The invariant `P-184` showed was never actually asserted.** The stored
+      // `paused_by_schedule` is what the probe configuration filters on and is moved by the
+      // sweep; the view computes schedule holding live from the definition, because it must —
+      // a group carrying a schedule has no `sensor_runtime` row to read a flag from. They are two
+      // clocks reading one fact, and the table in `pause-precedence.test.ts` compared them at two
+      // different instants for a fortnight without failing.
+      //
+      // Asked at the same instant they must agree, and so must the third party that matters: the
+      // list the probe is actually given. All three, both ways round.
+      const config = new ProbeConfigService({ db, resolver: h.resolver });
+      const scans = async (): Promise<boolean> =>
+        (await config.assignmentsFor(probeId)).sensors.some(
+          (sensor) => sensor.sensorId === sensorId,
+        );
+
+      const closed = (
+        await schedules.create(testActor, { name: `closed-now`, periods: farFromNow() })
+      ).id;
+      await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, closed);
+      await recompute(new Date());
+
+      const held = await h.service.pauseState(sensorId);
+      assert.equal(held.paused, true, 'the view says held');
+      assert.equal(held.source, 'schedule');
+      assert.equal((await flagsOf(sensorId)).schedule, true, 'and so does the row');
+      assert.equal(await scans(), false, 'and the probe is not told to scan it');
+
+      const open = (await schedules.create(testActor, { name: `open-now`, periods: aroundNow() }))
+        .id;
+      await h.service.setSetting(testActor, groupId, SCHEDULE_ID.key, open);
+      await recompute(new Date());
+
+      const free = await h.service.pauseState(sensorId);
+      assert.equal(free.paused, false, 'the view says free');
+      assert.equal((await flagsOf(sensorId)).schedule, false, 'and so does the row');
+      assert.equal(await scans(), true, 'and the probe is told to scan it again');
     });
 
     it('reports the parent cascade ahead of a schedule, in the order §5 evaluates them', async () => {

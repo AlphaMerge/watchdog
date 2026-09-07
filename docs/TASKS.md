@@ -3741,7 +3741,7 @@ because each is a decision rather than a defect:
       regardless. Full suite green at 3,875 — measured on a Monday morning, which is the only time
       that number means anything for this file.
 
-- [ ] **P-185 — the pause view and the probe's filter disagree at every window edge** · S ·
+- [x] **P-185 — the pause view and the probe's filter disagree at every window edge** · S ·
       P-184 · Falls out of `P-184`'s diagnosis and is a property of the product, not of a test.
       `paused_by_schedule` in `sensor_runtime` is what the probe configuration filters on and is
       moved by the sweep; `pauseState` computes schedule holding live from the definition, because
@@ -3756,6 +3756,45 @@ because each is a decision rather than a defect:
       and both are bounded by the sweep, so this is a minute, not an outage. Worth deciding
       deliberately rather than by accident: either the view reads the flag where there is one, or
       the sweep is armed off the next window edge rather than off the next minute.
+
+      **P-185 outcome. The premise was wrong by three orders of magnitude, and both proposed fixes
+      were wrong with it.** The sweep is not armed on the minute: `#arm` computes
+      `MINUTE - (now % MINUTE) + 50`, so it fires fifty milliseconds *past* every wall-clock
+      minute — and schedules have minute resolution, so every possible boundary is acted on
+      within 50 ms of itself. The method's own comment says exactly this: "a boundary at 09:00:00
+      is acted on at 09:00:00 and not at 08:59:59.998". I filed a ticket about a sixty-second
+      exposure without reading the twenty lines that set it, and then proposed arming off the next
+      window edge — which the class comment above rejects, with a better argument than mine: a
+      deadline computed an hour ago is an hour wrong the moment a country changes its clocks, and
+      the transitions that matter most are the ones nobody is awake for.
+
+      So no product change. What was genuinely missing is that **nothing asserted the agreement at
+      all** — which is what `P-184` had just demonstrated, since the one assertion that claimed to
+      was comparing two clocks. `schedules.test.ts` now asserts all three parties at one instant,
+      in both window states: the view says held, the row says held, and the probe is not given the
+      sensor — then the same three the other way round. Mutations 2/2: a view that stops reporting
+      schedule holding fails it, and a "closed" window that quietly covers the present fails it.
+
+      It also adds `farFromNow()`, the missing complement of the `aroundNow()` helper that was
+      already in that file. Its absence is what `P-184` was made of: a test that wants "closed"
+      reaches for a fixed window like `mo:08:00-mo:18:00`, which is closed at whatever instant the
+      author had in mind and open for ten hours of every real week.
+
+      The residual exposure is 50 ms plus the sweep's own duration, and **that second term is not
+      measured** — see `P-186`. It is the only loop in this system that runs every minute in every
+      installation with schedules and has no budget.
+
+- [ ] **P-186 — the schedule sweep has no measured budget** · S · P-185 · Every installation with
+      a schedule runs `ScheduleSweep.sweep` once a minute, for ever, and nothing measures it. The
+      perf suite has budgets for ingestion, rollups, history, clone and tree build; this is the
+      one periodic loop without one. It matters twice: it is the term that bounds how long the
+      pause view and the probe's configuration can disagree after a window edge (`P-185`), and a
+      sweep that grows with the sensor count is a minute-by-minute cost on exactly the large
+      installations `P-15` sizes for. `recompute` opens with a `LIMIT 1` that returns nothing when
+      no schedule is assigned, so the floor is already known to be near zero — what is unknown is
+      the shape above it. Wants a `test:perf` case at the 5,000-sensor scale with every sensor
+      under a schedule, run on a quiet machine with `ms-server` stopped, and the number in
+      `docs/findings/`.
 
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
