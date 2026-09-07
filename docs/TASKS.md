@@ -3809,11 +3809,11 @@ because each is a decision rather than a defect:
       reaches for a fixed window like `mo:08:00-mo:18:00`, which is closed at whatever instant the
       author had in mind and open for ten hours of every real week.
 
-      The residual exposure is 50 ms plus the sweep's own duration, and **that second term is not
-      measured** — see `P-186`. It is the only loop in this system that runs every minute in every
-      installation with schedules and has no budget.
+      The residual exposure is 50 ms plus the sweep's own duration. **`P-186` measured that second
+      term**: 73.5 ms for five thousand sensors moving at once, so the disagreement is about
+      **125 ms**, twice a day — three orders of magnitude from the minute this ticket claimed.
 
-- [ ] **P-186 — the schedule sweep has no measured budget** · S · P-185 · Every installation with
+- [x] **P-186 — the schedule sweep has no measured budget** · S · P-185 · Every installation with
       a schedule runs `ScheduleSweep.sweep` once a minute, for ever, and nothing measures it. The
       perf suite has budgets for ingestion, rollups, history, clone and tree build; this is the
       one periodic loop without one. It matters twice: it is the term that bounds how long the
@@ -3824,6 +3824,39 @@ because each is a decision rather than a defect:
       the shape above it. Wants a `test:perf` case at the 5,000-sensor scale with every sensor
       under a schedule, run on a quiet machine with `ms-server` stopped, and the number in
       `docs/findings/`.
+
+      **P-186 outcome.** Measured at the v1 target, in a tree of the shape an installation has,
+      with the schedule assigned at the probe so the inheritance walk runs the full depth:
+      `docs/findings/2026-09-07-schedule-sweep-budget.md`.
+
+      | pass | median | samples | budget |
+      | --- | --- | --- | --- |
+      | no schedule assigned | **0.8 ms** | 2.4, 0.8, 0.8 | 50 ms |
+      | a window closing, 5,000 moving | **73.5 ms** | 247.2, 73.5, 66.0 | 1,000 ms |
+      | an ordinary minute | **10.4 ms** | 11.6, 10.4, 10.0 | 600 ms |
+
+      **The always-paid cost is 10.4 ms a minute at five thousand sensors — a duty cycle of
+      0.017%.** An installation that does not use schedules cannot tell the feature exists: 0.8 ms
+      is `anyWork`'s `LIMIT 1` returning nothing. What makes the steady state cheap is that
+      `applyPauses` writes only where the flag differs, so the walk runs, the answer is discarded,
+      no `sensor_state` row is written and no probe is pushed to.
+
+      **It also finishes `P-185` with a number instead of an argument.** That ticket claimed the
+      pause view and the probe's filter could disagree for up to a minute after a window edge; the
+      arming answered half of it (50 ms past the minute, and boundaries have minute resolution) and
+      this is the other half. The disagreement is 50 ms + 73.5 ms ≈ **125 ms**, twice a day.
+
+      Three samples of each rather than one, because the machine was not exclusively mine —
+      `ms-server` and the Vite container were stopped per `CLAUDE.md` and the rest were idle under
+      2.2%, but two containers from unrelated work were up. The first pass of each case is visibly
+      dearer (cold buffers, an unplanned query) and is reported rather than averaged away, because
+      that cost is paid once per process start and not once a minute.
+
+      Budgets are set at roughly ten times the measured value, so a change that makes this
+      materially worse fails rather than drifts. What is **not** measured is the shape above five
+      thousand: the walk should be about linear in the sensor count, but that is an expectation,
+      and an installation an order of magnitude larger is `P-15`'s question to re-measure rather
+      than to extrapolate.
 
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
