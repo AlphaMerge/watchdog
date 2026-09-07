@@ -3667,6 +3667,51 @@ because each is a decision rather than a defect:
       `expectedDescendants` guard is the only thing between that and a bad afternoon, and it is
       now the *only* thing, because the count it is checked against is correct.
 
+- [x] **P-183 — the first administrator could not administer anything** · S · U-20, A-03 ·
+      `ensureFirstAdministrator` creates the bootstrap account with `role: 'admin'` and put it in
+      no group. **`role` is an account-level ceiling, not a right on any object.**
+      `AccessService.resolve` grants `full` on everything only through membership of a group with
+      `is_admin`, and otherwise falls through to per-object grants — of which a brand new
+      installation has none. So the only account on a fresh box passed every role bar and was
+      refused by **all 32 object-scoped route declarations**, across eight files and including 23
+      in `objects.ts`: reading an object, the tree, a sensor's state, history, triggers,
+      credentials, discovery, templates. A fresh install was unusable by the account it creates
+      for you, through the UI or otherwise.
+
+      **It was invisible because nothing anybody used was fresh.** Migration `032` backfills every
+      account that already exists into a group — "Administrators by role, everybody else by
+      default" — so every database that upgraded into user groups has a working administrator, and
+      only a database created *after* `032` does not. The dev database is one of the former: its
+      `admin` is in `Administrators [is_admin]`, which is why the same request that answers
+      `AUTH_FORBIDDEN` on a fresh box answers `OBJECT_NOT_FOUND` there. Two environments, one of
+      them the one we ship, and the divergence is exactly the thing under test.
+
+      Found by `F-08`'s install smoke test, which builds the only fresh installation this project
+      makes — and which could not see it either until `U-20` gave it a credential to be refused
+      with. It had been asserting `GET /sensors/999999/state` answers `OBJECT_NOT_FOUND`; it
+      answered `AUTH_FORBIDDEN`, and that assertion is sound again now rather than needing to be
+      weakened. Tests: 1 new in `accounts.test.ts`, resolving `full` on an arbitrary object id and
+      asserting `viaAdminGroup` — the right answer for the wrong reason would be a per-object
+      grant. Mutation 1/1.
+
+- [ ] **P-184 — six pause-precedence tests fail on a tree that was green eight hours earlier** · M ·
+      `packages/core/test/pause-precedence.test.ts` fails six of its twenty-nine cases, all of them
+      the `schedule` source: "holds a sensor by schedule", the two combinations that report
+      schedule, the resume refusal, the dependency release on a schedule edit, and the
+      all-four-holders report. **Deterministic, not flaky** — six of six on every run, in isolation
+      and in the full suite.
+
+      **Nothing in the repository changed between green and red.** The full suite passed on this
+      same core source at about 02:00 on 2026-09-07 and failed at about 10:00; `git stash` confirms
+      the failures are present on `5568fc8` without any local edit. So the variable is time or the
+      environment, not the code, which makes this a test that was passing for a reason nobody
+      stated. The suspicion to start from: the fixture pins `OUTSIDE = 2026-08-24T03:00:00.000Z`
+      and creates its schedule *now*, so anything in the schedule path that is evaluated relative
+      to creation rather than to the instant passed in would drift away from the pinned date as
+      real time moves — two weeks by now. `SchedulePauses.recompute` itself takes `now` and calls
+      the pure `isActiveAt`, so if that suspicion is right the drift is upstream of it, in what
+      `list` or `anyWork` returns. Not diagnosed; the evidence above is what is established.
+
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
       text utility on the same element — those live in `@layer utilities`, and unlayered CSS wins.

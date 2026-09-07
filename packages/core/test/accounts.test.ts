@@ -5,6 +5,7 @@ import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { LoginThrottle } from '../src/auth/throttle.js';
+import { AccessService } from '../src/auth/access.js';
 import { sessionIdFor } from '../src/auth/passwords.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -160,6 +161,31 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       const account = await accounts.byLogin('admin');
       assert.equal(account?.role, 'admin');
       assert.equal(account.mustChangePassword, true, 'and it does not survive the first login');
+    });
+
+    it('can actually administer the installation it was created for', async () => {
+      // **`role: 'admin'` is not a right on any object.** `AccessService` grants `full` on
+      // everything through membership of a group with `is_admin`, and otherwise falls through to
+      // per-object grants — of which a brand new installation has none. Without the membership
+      // the only account on a fresh box passes every role bar and is refused by all 32
+      // object-scoped routes, which is most of the API.
+      //
+      // Invisible for as long as it existed, because migration 032 backfills every account that
+      // already exists into a group: an upgraded database has a working administrator and only a
+      // database created after 032 does not. The install smoke test builds one of those, and
+      // found this the first time it had a credential to be refused with (`U-20`).
+      await accounts.ensureFirstAdministrator();
+      const account = await accounts.byLogin('admin');
+      assert.ok(account !== null, 'the bootstrap account exists');
+
+      const access = new AccessService({ db, logger: silentLogger });
+      const resolved = await access.resolve(account.id, 999_999);
+      assert.equal(resolved.right, 'full');
+      assert.equal(
+        resolved.viaAdminGroup,
+        true,
+        'and by being an administrator, not by a grant on one object',
+      );
     });
 
     it('does nothing at all once any account exists', async () => {

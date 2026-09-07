@@ -310,19 +310,44 @@ export class AccountService {
    * service log where the operator installing it can see it, never stored in plaintext, and
    * flagged `must_change_password` so it does not survive the first login. Returning null means
    * accounts already exist and nothing was touched — this runs at every start-up.
+   *
+   * **It joins the Administrators group, and without that a fresh installation is unusable.**
+   * `role: 'admin'` is the account-level ceiling; it is not a right on any object.
+   * `AccessService.resolve` grants `full` on everything only through membership of a group with
+   * `is_admin`, and otherwise falls through to per-object grants — of which a brand new
+   * installation has none. So the only account on the box passed every role bar and was refused
+   * by all 32 object-scoped routes, which is most of the API: reading an object, the tree, a
+   * sensor's state, history, triggers, credentials, discovery.
+   *
+   * It was invisible for as long as it existed because no environment that anybody used was
+   * *fresh*. Migration `032` backfills every account that already exists into a group —
+   * "Administrators by role, everybody else by default" — so every database that upgraded into
+   * user groups has an administrator that works, and only a database created after `032` does
+   * not. `F-08`'s install smoke test is the one thing that builds one of those, and it could not
+   * see this either until `U-20` gave it a credential to be refused with.
    */
   async ensureFirstAdministrator(
     login = 'admin',
   ): Promise<{ login: string; password: string } | null> {
     if ((await this.count()) > 0) return null;
     const password = randomBytes(18).toString('base64url');
-    await this.create({
+    const account = await this.create({
       login,
       password,
       role: 'admin',
       displayName: 'Administrator',
       mustChangePassword: true,
     });
+
+    // The builtin group, by its flags rather than by its name: a name is a label an operator may
+    // change, and this has to find the group that actually confers administration.
+    await this.#db.query(
+      `INSERT INTO user_group_member (group_id, user_id, is_primary)
+       SELECT g.id, $1, true FROM user_group g WHERE g.is_builtin AND g.is_admin
+       ON CONFLICT DO NOTHING`,
+      [account.id],
+    );
+
     return { login, password };
   }
 }
