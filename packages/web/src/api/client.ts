@@ -103,6 +103,30 @@ export function onSessionLost(listener: (() => void) | undefined): void {
   sessionLost = listener;
 }
 
+/**
+ * Asks the core whether this browser still has a session, and reports it if not (`U-19`).
+ *
+ * **For the WebSocket, which cannot answer the question itself.** With authentication on, an
+ * upgrade with no session is refused with a perfectly good `401 AUTH_REQUIRED` — and the browser
+ * `WebSocket` API deliberately hides it: the page gets `onerror` and a 1006 close with no status,
+ * exactly what a pulled cable produces. So a stream whose session has gone reconnects for ever,
+ * at the ceiling of its backoff, while the header still says the operator is signed in.
+ *
+ * `GET /auth/session` is public and always answers, which is what makes it the right thing to
+ * ask. A failure here is *not* an answer — an unreachable core is what the reconnect loop is
+ * already handling, and treating it as a lost session would put a login form in front of somebody
+ * whose network blinked.
+ */
+export async function confirmSession(): Promise<void> {
+  let reply: { authenticated?: boolean };
+  try {
+    reply = await request<{ authenticated?: boolean }>('/auth/session');
+  } catch {
+    return;
+  }
+  if (reply.authenticated !== true) sessionLost?.();
+}
+
 /** Every refusal is built here, so neither verb can forget to report a lost session. */
 function refusal(status: number, statusText: string, body: ErrorBody): ApiError {
   const error = new ApiError(

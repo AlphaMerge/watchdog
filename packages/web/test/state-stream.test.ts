@@ -46,7 +46,7 @@ class FakeSocket implements SocketLike {
 }
 
 /** A stream whose sockets and timers the test owns. */
-function harness(retryMs: readonly number[] = [10, 20]) {
+function harness(retryMs: readonly number[] = [10, 20], onStuck?: () => void) {
   const sockets: FakeSocket[] = [];
   const timers: { fn: () => void; ms: number }[] = [];
   const stream = new StateStream({
@@ -59,6 +59,7 @@ function harness(retryMs: readonly number[] = [10, 20]) {
     retryMs,
     schedule: (fn, ms) => timers.push({ fn, ms }),
     cancel: () => undefined,
+    ...(onStuck === undefined ? {} : { onStuck }),
   });
   const latest = (): FakeSocket => {
     const socket = sockets.at(-1);
@@ -377,5 +378,89 @@ describe('the live state stream', () => {
     latest().drop();
     expect(timers.length).toBe(0);
     expect(latest().closed).toBe(true);
+  });
+});
+
+/**
+ * Telling a refused upgrade from a pulled cable (`U-19`).
+ *
+ * The stream cannot: with authentication on, an upgrade with no session is refused with a
+ * perfectly good `401 AUTH_REQUIRED`, and the browser `WebSocket` API hides it — the page gets a
+ * 1006 close and nothing else, exactly what a dead network produces. So it reconnects for ever
+ * while the header still says the operator is signed in. `onStuck` is the hook that lets somebody
+ * who *can* ask, ask; what is asserted here is only when it fires.
+ */
+describe('a stream that stays down', () => {
+  /** Drops the current socket and lets the reconnect timer run, leaving a fresh socket down. */
+  function failAgain(h: ReturnType<typeof harness>): void {
+    h.latest().drop();
+    h.fire();
+  }
+
+  it('says nothing about the early failures, because that is what a blip looks like', () => {
+    // A lid closing, a wifi roam, a core restarting. Asking after one of those spends a request
+    // on every one of them, for a question whose answer is almost always "yes, still signed in".
+    let asked = 0;
+    const h = harness([10, 20, 30], () => {
+      asked += 1;
+    });
+    h.stream.subscribe(null);
+    h.latest().open();
+
+    failAgain(h);
+    expect(asked).toBe(0);
+    failAgain(h);
+    expect(asked).toBe(0);
+  });
+
+  it('asks once the backoff has reached its ceiling', () => {
+    let asked = 0;
+    const h = harness([10, 20, 30], () => {
+      asked += 1;
+    });
+    h.stream.subscribe(null);
+    h.latest().open();
+
+    failAgain(h);
+    failAgain(h);
+    h.latest().drop();
+    expect(asked).toBe(1);
+  });
+
+  it('keeps asking while it stays down, because a session can expire mid-outage', () => {
+    // The outage that started as a network problem is exactly the one long enough for a session
+    // to lapse during it. Asking once at the ceiling and never again would leave that tab
+    // reconnecting for ever after the answer had changed.
+    let asked = 0;
+    const h = harness([10, 20, 30], () => {
+      asked += 1;
+    });
+    h.stream.subscribe(null);
+    h.latest().open();
+
+    failAgain(h);
+    failAgain(h);
+    failAgain(h);
+    failAgain(h);
+    expect(asked).toBe(2);
+  });
+
+  it('stops asking once it reconnects, because the streak is the thing it counts', () => {
+    let asked = 0;
+    const h = harness([10, 20, 30], () => {
+      asked += 1;
+    });
+    h.stream.subscribe(null);
+    h.latest().open();
+
+    failAgain(h);
+    failAgain(h);
+    failAgain(h);
+    expect(asked).toBe(1);
+
+    // A successful handshake resets the ladder, so the next failure is an early rung again.
+    h.latest().open();
+    h.latest().drop();
+    expect(asked).toBe(1);
   });
 });

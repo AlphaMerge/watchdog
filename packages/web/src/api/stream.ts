@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { confirmSession } from './client';
 import type { SensorState } from './types';
 
 /** One sensor's state, as the stream last reported it. */
@@ -41,6 +42,16 @@ export interface StateStreamOptions {
   retryMs?: readonly number[];
   schedule?: (fn: () => void, ms: number) => number;
   cancel?: (handle: number) => void;
+  /**
+   * Called once the failures have gone on long enough that this is not a blip (`U-19`).
+   *
+   * The stream cannot tell a refused upgrade from a pulled cable — the browser hides the status
+   * of a failed handshake, so a 401 and a dead network arrive identically as a 1006 close. This
+   * is the hook that lets somebody who *can* ask, ask: the default binding checks whether the
+   * session is still there. Kept as a callback rather than a fetch of its own so this class stays
+   * framework-free and drivable without a server.
+   */
+  onStuck?: () => void;
 }
 
 const DEFAULT_RETRY_MS = [500, 1_000, 2_000, 5_000, 10_000] as const;
@@ -98,6 +109,7 @@ export class StateStream {
   readonly #retryMs: readonly number[];
   readonly #schedule: (fn: () => void, ms: number) => number;
   readonly #cancel: (handle: number) => void;
+  readonly #onStuck: (() => void) | undefined;
 
   readonly #listeners = new Set<() => void>();
   #states: ReadonlyMap<number, LiveState> = new Map();
@@ -128,6 +140,7 @@ export class StateStream {
       ((handle) => {
         clearTimeout(handle);
       });
+    this.#onStuck = options.onStuck;
   }
 
   get status(): StreamStatus {
@@ -223,6 +236,13 @@ export class StateStream {
     const wait = this.#retryMs[Math.min(this.#attempt, this.#retryMs.length - 1)] ?? 10_000;
     this.#attempt += 1;
     this.#reconnects += 1;
+    // **From the ceiling onwards, not on the first failure.** The early rungs of the ladder are
+    // what a blip looks like — a laptop lid, a wifi roam, a core restarting — and asking after
+    // one of those would spend a request on every one of them. By the ceiling the stream has
+    // been failing for the whole ladder, which is long enough that "is my session still there"
+    // is a question worth a public GET. It repeats while stuck, because a session can expire
+    // during an outage that started as a network problem.
+    if (this.#attempt >= this.#retryMs.length) this.#onStuck?.();
     this.#timer = this.#schedule(() => {
       this.#timer = undefined;
       this.#connect();
@@ -333,7 +353,17 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
   const url = options?.url;
   const open = options?.open;
   const stream = useMemo(
-    () => new StateStream({ url: url ?? streamUrl(), ...(open === undefined ? {} : { open }) }),
+    () =>
+      new StateStream({
+        url: url ?? streamUrl(),
+        ...(open === undefined ? {} : { open }),
+        // The binding the class deliberately does not make for itself. `confirmSession` reports
+        // a lost session through the same listener a 401 on any other request goes through, so
+        // the gate that puts the login form up needs to know nothing about sockets.
+        onStuck: () => {
+          void confirmSession();
+        },
+      }),
     [url, open],
   );
 

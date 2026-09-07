@@ -3597,7 +3597,7 @@ because each is a decision rather than a defect:
       `unreachable` screen had no exit but a manual reload; it offers a retry. `/password` was
       routable while anonymous, where `POST /auth/password` is refused whatever the flag says.
 
-- [ ] **U-19 — an expired session looks like a network blip to the state stream, for ever** · S ·
+- [x] **U-19 — an expired session looks like a network blip to the state stream, for ever** · S ·
       U-17 · `onSessionLost` fires from the fetch client, so it cannot see the WebSocket. With
       authentication on, `GET /api/v1/stream` is guarded, and a session that goes away turns the
       upgrade into a 401 — which `StateStream.#dropped` cannot distinguish from a dropped
@@ -3608,6 +3608,35 @@ because each is a decision rather than a defect:
       obvious — a browser cannot read the status of a refused upgrade. Probably: after N
       consecutive failures, ask `GET /auth/session` and let the answer decide between "offline"
       and "logged out".
+
+      **U-19 outcome. The premise checked out this time**, which is worth saying after `P-185`:
+      an unauthenticated upgrade to `/api/v1/stream` really is refused with a clean
+      `401 AUTH_REQUIRED` — measured with `curl`, headers and envelope — and the browser
+      `WebSocket` API really does hide it, handing the page a 1006 close indistinguishable from a
+      pulled cable.
+
+      So the client asks the one route that can answer. `StateStream` gains `onStuck`, called from
+      the ceiling of its backoff onwards rather than on the first failure: the early rungs are what
+      a lid closing, a wifi roam or a core restart look like, and asking after one of those spends
+      a request on every one of them. It repeats while stuck, because the outage long enough to
+      matter is exactly the one a session can expire during. `confirmSession` in the API client
+      does the asking and reports through the same listener a 401 on any other request uses, so the
+      gate that puts the login form up knows nothing about sockets. **An unreachable core is not an
+      answer** — that is what the reconnect loop is already handling, and reading silence as
+      "logged out" would put a login form in front of somebody whose network blinked.
+
+      The class keeps its callback rather than growing a `fetch`, so it stays framework-free and
+      drivable without a server — which is what let the whole thing be verified against the real
+      one. Vite serves the source modules, so a browser console can import `StateStream` and
+      `confirmSession` and point them at the live core with no config change and no restart: six
+      reconnects in five seconds, the first `onStuck` at **1,154 ms** — after the ladder, not on
+      the early failures — four calls, four lost sessions reported. At the production ladder
+      (`[500, 1000, 2000, 5000, 10000]`) that is one public GET about fifteen seconds into an
+      outage and one per ten seconds after.
+
+      Tests: 7 new, 4 on the stream's timing and 3 on what `confirmSession` does with each of the
+      three answers. Mutations 5/5 — asking on every failure, asking exactly once, never resetting
+      the streak, treating an unreachable core as logged out, and never reporting at all.
 
 - [x] **U-20 — run the dev stack with authentication on** · S · U-17 · `dev/core.json` has
       `requireAuthentication: false`, so the one configuration development never exercises is the

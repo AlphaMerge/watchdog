@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
-import { onSessionLost, request, send } from '../src/api/client';
+import { confirmSession, onSessionLost, request, send } from '../src/api/client';
 
 /**
  * What stands in front of the application, and when (`U-17`).
@@ -287,6 +287,63 @@ describe('what counts as a lost session', () => {
     await send('POST', '/objects/root/pause').catch(() => undefined);
 
     expect(lost).toBe(2);
+  });
+
+  it('reports a session the WebSocket could only guess at', async () => {
+    // The stream cannot see why its upgrade failed — the browser hides the status of a refused
+    // handshake — so it asks this instead. A core that says nobody is authenticated is the
+    // answer the socket could not get.
+    let lost = 0;
+    onSessionLost(() => {
+      lost += 1;
+    });
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ requireAuthentication: true, authenticated: false }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+
+    await confirmSession();
+    expect(lost).toBe(1);
+  });
+
+  it('says nothing when the session is still there', async () => {
+    let lost = 0;
+    onSessionLost(() => {
+      lost += 1;
+    });
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            requireAuthentication: true,
+            authenticated: true,
+            principal: { userId: 1, login: 'admin', role: 'admin', mustChangePassword: false },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    await confirmSession();
+    expect(lost).toBe(0);
+  });
+
+  it('treats an unreachable core as no answer, not as a lost session', async () => {
+    // The case this is most likely to meet: the stream is down *because* the core is down, and
+    // the reconnect loop is already handling that. Reading silence as "logged out" would put a
+    // login form in front of somebody whose network blinked.
+    let lost = 0;
+    onSessionLost(() => {
+      lost += 1;
+    });
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('connection refused')));
+
+    await confirmSession();
+    expect(lost).toBe(0);
   });
 
   it('says nothing about the three ways a login itself answers 401', async () => {
