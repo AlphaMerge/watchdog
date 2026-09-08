@@ -4055,10 +4055,20 @@ because each is a decision rather than a defect:
       machine for as long as the file existed and failed on every run of the only environment
       that disagreed.
 
-      **What this unblocks is `H-06`.** On the operator's instruction the workflow is enabled
-      again and now carries `workflow_dispatch`, so it can be run on demand rather than only on a
-      push — wanting the Windows answer is not the same as wanting a twelve-minute run every
-      time. The `windows-install` job it gates is the half of `H-06` that has never run: install the MSI with `msiexec /qn`,
+      **What this unblocks is `H-06` — but something else blocks it now, and it is not ours.**
+      On the operator's instruction the workflow was enabled again and given `workflow_dispatch`,
+      so it can be run on demand rather than only on a push. The first dispatch failed in four
+      seconds with no steps at all, and the check-run annotation says why:
+
+      > The job was not started because recent account payments have failed or your spending limit
+      > needs to be increased.
+
+      **So `H-06` is blocked on GitHub billing, not on hardware and no longer on a red test.**
+      That is very likely why the workflow was disabled in the first place — the last runs before
+      it went quiet are failures followed by cancellations, which is what running out of minutes
+      looks like from the inside. Worth knowing before anybody plans around `windows-latest`: it
+      bills at twice the Linux rate. Until the account is settled, the `windows-install` job it
+      gates is the half of `H-06` that has never run: install the MSI with `msiexec /qn`,
       assert both services registered, both firewall rules exist, an upgrade keeps an edited
       configuration, and an uninstall leaves ProgramData alone.
 
