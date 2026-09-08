@@ -3916,6 +3916,54 @@ because each is a decision rather than a defect:
       something" from an empty tree is the operator path, and restoring the fixture automatically
       would put the environment straight back to being unlike a new one.
 
+- [ ] **P-189 — approving a connected probe does not start it scanning** · M · R-01, P-187 ·
+      The first thing an operator does after installing is approve the probe waiting in the queue.
+      Nothing happens. It keeps sitting there, scanning nothing, until something makes it
+      reconnect.
+
+      `ProbeEndpoint` sets `session.approved` **once, at admission**:
+
+          // **An unapproved probe is sent nothing**, which is the whole of what approval means
+          if (session.approved) this.#queueConfig(session, logger, hello.configVersion ?? '');
+
+      A probe that connected while pending has `session.approved === false` for the life of that
+      session, and `ProbeRegistry.approve` writes `probe_registration`, writes `probe_config`, logs
+      "a probe was approved" and tells the live session nothing. `ConfigChangeNotifier` rides the
+      audit sink, so later object mutations do flush — to a session that is still marked
+      unapproved.
+
+      **The API reference promises the opposite**, in the approve route's own description: "A probe
+      that is already connected starts scanning without reconnecting." That sentence is not
+      implemented.
+
+      Measured on a fresh install (`P-187`'s reset, which is how this was found): probe pending,
+      `POST /probes/dev-local-probe/approve` answers `status=approved objectId=2`, then five
+      thousand sensors created under it — and eleven minutes later the probe had logged nothing
+      since its handshake and `sample` was empty. Restarting it: `probe applied its
+      configuration`, `scheduled: 5000`, readings within seconds.
+
+      Two ways to make it true, and they are not equivalent. **Implement the promise** — on
+      approval, find the live session, re-evaluate it and queue its configuration. Note what else
+      is bound to the handshake before choosing this: the probe's own key is issued "at its next
+      handshake, not here", so a session that never re-handshakes also never gets its key, and
+      `hasOwnKey` stays false. **Or close the session on approval** and let the probe reconnect on
+      its own retry, which it does in seconds — cruder, one line, and it makes the documented
+      sentence true in effect while keeping the key issue on the handshake where the design put it.
+      The second looks right; the first is what the sentence literally says.
+
+- [ ] **P-190 — the README's "making it scan something" documents a flow that R-01 replaced** · S ·
+      P-189 · It tells the reader to claim a branch with
+      `PATCH /objects/2 {"kind":"probe","gid":"dev-local-probe"}`, and says so under a note that
+      "`R-01` replaces claiming a branch by hand with an enrolment flow; until then this is how".
+      `R-01` has landed: there is a queue, and `POST /probes/{gid}/approve` binds the identity to
+      an object.
+
+      **On a fresh install the documented command cannot work**, because there is no object 2 —
+      the tree is one root, and the probe arrives `pending` with `objectId: null`. The real path is
+      create a probe object under the root, then approve the GID onto it. This went unnoticed for
+      the same reason `P-183` did: every environment anybody used already had the object the
+      instruction assumes.
+
 - [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
       `Soak`, finds an existing one and leaves it alone, and that is what the 5,047 sensors in
