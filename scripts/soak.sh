@@ -4,7 +4,7 @@
 #     ./scripts/soak.sh                       # 5,000 sensors, 24 hours
 #     ./scripts/soak.sh --hours 2             # a shorter window, same harness
 #     ./scripts/soak.sh --report FILE         # analyse a run that has already happened
-#     ./scripts/soak.sh --teardown            # remove the soak tree
+#     ./scripts/soak.sh --teardown            # remove the soak tree (asks first)
 #
 # Provisions the load, samples the installation's own health sensors once a minute, checks the
 # rollups against the samples they were built from every fifteen, and reports a verdict on the
@@ -30,6 +30,7 @@ hours=24
 sensors=5000
 report_only=''
 teardown=0
+assume_yes=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -37,6 +38,9 @@ while [ "$#" -gt 0 ]; do
     --sensors)  sensors="$2"; shift ;;
     --report)   report_only="$2"; shift ;;
     --teardown) teardown=1 ;;
+    # Passed through to the teardown, which asks before deleting (`P-188`). A run with no
+    # terminal to ask on refuses without it.
+    --yes)      assume_yes=1 ;;
     -h|--help)  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -47,11 +51,20 @@ if [ -n "${report_only}" ]; then
   exec node "${repo_root}/scripts/soak/report.mjs" "${report_only}"
 fi
 
+command -v node >/dev/null 2>&1 || { echo "error: Node.js is required" >&2; exit 1; }
+
+# **The teardown needs the API too, so it goes through the same gate.** It used to `exec` above
+# this, which meant the one subcommand that deletes things was also the one that reported a
+# missing credential as a stack trace from `fetch` (`P-188`). `--report` stays above: it reads a
+# file and needs nothing.
 if [ "${teardown}" -eq 1 ]; then
+  ms_api_require "${API}" || exit 1
+  if [ "${assume_yes}" -eq 1 ]; then
+    exec node "${repo_root}/scripts/soak/provision.mjs" --remove --yes --api "${API}"
+  fi
   exec node "${repo_root}/scripts/soak/provision.mjs" --remove --api "${API}"
 fi
 
-command -v node >/dev/null 2>&1 || { echo "error: Node.js is required" >&2; exit 1; }
 # **Not `curl -sf`, which cannot tell a refusal from a silence.** With
 # `api.requireAuthentication` on — the default — an unauthenticated probe answers 401, and this
 # gate used to report "no installation answering" about an installation that was answering

@@ -3879,7 +3879,7 @@ because each is a decision rather than a defect:
       vault key and `first-admin-password`, so "fresh" means those too. Not urgent, and worth
       doing before the next thing that only reproduces on a virgin database.
 
-- [ ] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
+- [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
       `Soak`, finds an existing one and leaves it alone, and that is what the 5,047 sensors in
       `dev/` have been all along. `--teardown` removes it.
@@ -3896,6 +3896,37 @@ because each is a decision rather than a defect:
       type the number to confirm" costs one call it already makes. Worth considering alongside:
       the dev fixture and a harness's scratch tree sharing a name is the underlying reason this is
       even a question.
+
+      **P-188 outcome.** `--remove` prints what it is about to delete — the object, its name, and
+      the breakdown from `/objects/:id/counts`, which it already fetches for `expectedDescendants`
+      — and then asks. `--yes` (or `MS_ASSUME_YES=1`) for a script; a typed `y` for a person; and
+      a **refusal** when there is no terminal to ask on and no flag, because a non-interactive run
+      that nobody has been asked about is exactly the case this exists for. `soak.sh --teardown`
+      passes `--yes` through.
+
+      The guard lives in `provision.mjs`, not in the shell wrapper, so calling the script directly
+      is protected too — the danger is in the thing that sends the `DELETE`.
+
+      **Two defects found by running it rather than reading it.** `--teardown` `exec`ed *above*
+      `ms_api_require`, so the one subcommand that deletes things was also the one that reported a
+      missing credential as a `fetch` stack trace; it goes through the gate now, while `--report`
+      stays above it because it reads a file and needs nothing. And **Ctrl+D at the prompt threw
+      an unhandled `AbortError`** — `readline.question` rejects on EOF rather than returning an
+      empty answer — so an operator who hit it got a stack trace instead of a decision. EOF is a
+      no, the same as every other answer that is not `y`.
+
+      Verified against a stub core that records whether the `DELETE` ever arrives, in all four
+      paths: no terminal and no flag refuses with zero `DELETE`s; `--yes` sends one; a real
+      pseudo-terminal answering `n` leaves it alone; answering `y` removes it. The live dev tree
+      was never a target — 5,051 sensors and one `Soak` root before and after.
+
+      **Not fixed, and deliberately:** the name collision underneath all this. The dev fixture and
+      a harness's scratch tree are the same object because `provision.mjs` finds an existing
+      `Soak` and leaves it alone, which is the behaviour that makes the harness idempotent and
+      also the behaviour that made a working fixture out of a scratch tree. Renaming would orphan
+      the tree every dev stack is carrying. **Also not fixed:** there is no test. `scripts/` has no
+      harness and inventing one is bigger than this ticket, so the guard is verified and not
+      guarded — a regression here would be silent.
 
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind

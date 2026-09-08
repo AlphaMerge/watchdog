@@ -2,7 +2,7 @@
 // Provision the soak tree (TASKS.md H-01).
 //
 //     node scripts/soak/provision.mjs [--sensors 5000] [--api http://127.0.0.1:8080/api/v1]
-//     node scripts/soak/provision.mjs --remove
+//     node scripts/soak/provision.mjs --remove [--yes]
 //
 // Builds `Soak/` under the local probe: devices carrying `port.tcp` sensors pointed at a port
 // that is already listening on the probe's own host.
@@ -15,7 +15,8 @@
 //
 // Created through `POST /objects/tree` (`P-19`), which is all-or-nothing: a half-provisioned soak
 // tree would quietly change what the numbers mean.
-import { argv, env, exit, stdout } from 'node:process';
+import { createInterface } from 'node:readline/promises';
+import { argv, env, exit, stdin, stdout } from 'node:process';
 
 const args = new Map();
 for (let at = 2; at < argv.length; at += 1) {
@@ -56,6 +57,34 @@ async function findRoot() {
   return (listing.items ?? []).find((one) => one.name === ROOT_NAME);
 }
 
+/**
+ * Whether to go ahead with a delete this script cannot undo.
+ *
+ * `--yes` for a script or a CI job, a typed `y` for a person, and a **refusal** when neither is
+ * available: a non-interactive run with no flag is somebody who has not been asked, and deleting
+ * on their behalf is the failure mode this exists to prevent.
+ */
+async function confirmed() {
+  if (args.has('yes') || env.MS_ASSUME_YES === '1') return true;
+  if (!stdin.isTTY) {
+    stdout.write('refusing: nothing to ask on, and no --yes. Pass --yes if you mean it.\n');
+    return false;
+  }
+  const rl = createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = await rl.question('remove it? [y/N] ');
+    return answer.trim().toLowerCase() === 'y';
+  } catch {
+    // Ctrl+D rejects the question rather than returning an empty answer, and an unhandled
+    // rejection here is a stack trace where the operator expected a decision. **EOF is a no**,
+    // which is the same reading every other answer that is not `y` gets.
+    stdout.write('\n');
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
 if (args.has('remove')) {
   const existing = await findRoot();
   if (existing === undefined) {
@@ -76,6 +105,35 @@ if (args.has('remove')) {
   // which is the guard working; the count was still wrong (`U-20`).
   const counts = await call('GET', `/objects/${String(existing.id)}/counts`);
   const descendants = Number(counts.objects?.total ?? 1) - 1;
+
+  // **Shown and confirmed, because on a development box this tree is not scratch** (`P-188`).
+  // The 5,000-sensor load a `dev/` stack has been carrying for weeks *is* a soak tree: this
+  // script names its root `Soak`, finds an existing one and leaves it alone, so the fixture
+  // somebody works against every day and the tree a harness made are the same object.
+  //
+  // Until `U-20` this could not delete it — the count came from a capped page of `/tree`, so the
+  // core refused every time. That refusal was the only thing between an idle `--teardown` and an
+  // afternoon rebuilding the fixture, and it was refusing for the wrong reason, so correcting the
+  // count removed the protection as a side effect. Nobody chose that; this is choosing.
+  const shape = counts.objects ?? {};
+  const breakdown = ['probe', 'group', 'device', 'sensor']
+    .map((kind) => ({ kind, n: Number(shape[kind] ?? 0) }))
+    // Kinds it does not hold are not information: a list ending "0 probes" reads as a thing to
+    // check rather than as nothing to worry about.
+    .filter((one) => one.n > 0)
+    .map((one) => `${String(one.n)} ${one.kind}${one.n === 1 ? '' : 's'}`)
+    .join(', ');
+  stdout.write(
+    `about to remove object ${String(existing.id)} (${String(existing.name)}) ` +
+      `and everything under it:\n` +
+      `  ${String(descendants)} descendants — ${breakdown}\n`,
+  );
+
+  if (!(await confirmed())) {
+    stdout.write('left alone\n');
+    exit(1);
+  }
+
   await call(
     'DELETE',
     `/objects/${String(existing.id)}?expectedDescendants=${String(descendants)}`,
