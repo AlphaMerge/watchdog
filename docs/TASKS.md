@@ -4007,11 +4007,20 @@ because each is a decision rather than a defect:
       its key and its first configuration. Without that sentence the reader watches a probe
       disconnect immediately after they approve it and reasonably concludes they broke something.
 
-      Verified verbatim rather than by eye — `GET /probes` and the object create were run exactly
-      as written (the throwaway object deleted afterwards, tree unchanged at 5,000 sensors and one
-      probe), and the approve was run against a genuinely fresh install earlier in the session,
-      which is where the whole defect came from. `objectId: 2` is not a guess: on a new
-      installation the root is 1 and the probe object is the next thing that exists.
+      **Walked end to end on a fresh install, using nothing but what the page says.**
+      `scripts/dev-reset.sh` (`P-187`) back to empty, then the four commands extracted from the
+      README itself rather than typed from memory: the token minted from the bootstrap password;
+      `GET /probes` answering with one entry, `pending`, `objectId: null`; the object create
+      returning **`id: 2`**, which is why the page can state that number rather than hedge; and
+      the approve answering `status=approved objectId=2`. The `P-189` sequence — approved,
+      connection closed, reconnecting, key issued, connected — all landed inside the same second,
+      so "about a second later" is conservative.
+
+      Then the last sentence of the section, which needed a sensor to be true of: a device and one
+      `icmp.ping` under the new probe object, first reading in about twenty seconds, sensor `up`
+      with `4/4 replies, avg 0.056 ms`. The documented path takes an empty installation to a
+      scanning one, which is the only claim that matters here and the one that could not be made
+      before `P-187` existed.
 
 - [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
