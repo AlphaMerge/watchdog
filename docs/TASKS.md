@@ -3985,7 +3985,7 @@ because each is a decision rather than a defect:
       tests beside it. Tests: 4 new. Mutations 2/2 — approve not telling the connection, and
       pending sessions not being indexed.
 
-- [ ] **P-190 — the README's "making it scan something" documents a flow that R-01 replaced** · S ·
+- [x] **P-190 — the README's "making it scan something" documents a flow that R-01 replaced** · S ·
       P-189 · It tells the reader to claim a branch with
       `PATCH /objects/2 {"kind":"probe","gid":"dev-local-probe"}`, and says so under a note that
       "`R-01` replaces claiming a branch by hand with an enrolment flow; until then this is how".
@@ -3997,6 +3997,21 @@ because each is a decision rather than a defect:
       create a probe object under the root, then approve the GID onto it. This went unnoticed for
       the same reason `P-183` did: every environment anybody used already had the object the
       instruction assumes.
+
+      **P-190 outcome.** The section documents the enrolment flow: list the queue, create an
+      object for the probe to own, approve it onto that object. Three commands where there was
+      one, and the one it replaces could not work on the installation it was written for.
+
+      It also says what happens next, because `P-189` changed it: the probe's connection is closed
+      as it is approved and it comes back about a second later, through the handshake that issues
+      its key and its first configuration. Without that sentence the reader watches a probe
+      disconnect immediately after they approve it and reasonably concludes they broke something.
+
+      Verified verbatim rather than by eye — `GET /probes` and the object create were run exactly
+      as written (the throwaway object deleted afterwards, tree unchanged at 5,000 sensors and one
+      probe), and the approve was run against a genuinely fresh install earlier in the session,
+      which is where the whole defect came from. `objectId: 2` is not a guess: on a new
+      installation the root is 1 and the probe object is the next thing that exists.
 
 - [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root

@@ -203,17 +203,32 @@ a token from the UI instead.
 
 ### Making it actually scan something
 
-A probe branch has to be claimed by the probe that connects, or it is told to scan nothing:
+A probe connects on its own and then waits: it is in the queue, `pending`, scanning nothing until
+somebody says which part of the tree is its own. That is `R-01`'s enrolment flow, and it is two
+calls.
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/api/v1/objects/2 -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -H "if-match: $(curl -sSI -H "authorization: Bearer $MS_TOKEN" http://127.0.0.1:8080/api/v1/objects/2 | grep -i ^etag: | tr -d '\r' | cut -d' ' -f2)" -d '{"kind":"probe","gid":"dev-local-probe"}'
+curl -s http://127.0.0.1:8080/api/v1/probes -H "authorization: Bearer $MS_TOKEN"
 ```
 
-`dev-local-probe` is the GID in `dev/probe.json`. `R-01` replaces claiming a branch by hand with
-an enrolment flow; until then this is how a probe is told which subtree is its own.
+`dev-local-probe` is the GID in `dev/probe.json`, and on a new installation it is the only thing
+in the list. Give it an object to own, then approve it onto that object:
 
-With that done, the core pushes the branch's sensors, the probe schedules them and checks start
-running. `MS_LOG_LEVEL=debug npm run dev:services` shows each one finishing — they are logged at
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/objects -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -d '{"kind":"probe","parentId":1,"name":"Development local probe"}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/probes/dev-local-probe/approve -H "authorization: Bearer $MS_TOKEN" -H 'content-type: application/json' -d '{"objectId":2,"local":true}'
+```
+
+`objectId` is the `id` the first call answered with — 2 on a new installation, where the root is
+1 and nothing else exists yet. `local` marks the probe that runs beside this core, which is what
+stops it being deleted like a remote one.
+
+The probe's connection is closed as it is approved, and it comes back about a second later
+through the handshake that issues both its key and its first configuration (`P-189`). With that
+done, the core pushes the branch's sensors, the probe schedules them and checks start running. `MS_LOG_LEVEL=debug npm run dev:services` shows each one finishing — they are logged at
 debug because at five thousand sensors a minute an info line per check is the whole journal.
 
 Results are written to `dev/data/spool` before anything else touches them and drained to the core
