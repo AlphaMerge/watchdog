@@ -1,0 +1,489 @@
+=============================================================================
+THE FIRST RUN THAT SKIPPED NOTHING.
+
+Every knob set, both workspaces reporting `skipped 0`, exit 0:
+
+  MS_BENCH_MINUTES=60  MS_SOAK_MINUTES=60  MS_SOAK_FRACTION=1
+  MS_BENCH_SWEEP=1     MS_PING_SWEEP=1     MS_BENCH_FILL=1
+
+14:34:40 to 17:00:23 local, 2 h 25 m. Conditions recorded by the run itself
+(P-192): load 0.23 per CPU, delivered CPU 1.03x the reference machine, nothing
+else on the shared PostgreSQL. `ms-server` and the Vite container stopped
+throughout, and left stopped when it was suggested they come back up mid-run --
+which is what cost the P-15 figure on 2026-09-08's earlier attempt.
+
+An ordinary `test:perf` measures scaled-down proxies of three criteria and
+skips three more cases outright. This is what the real ones say.
+
+-----------------------------------------------------------------------------
+1. THE ARCHITECTURE GATE REPRODUCES
+-----------------------------------------------------------------------------
+
+P-15's sustained hour, against what PLAN.md has recorded since 2026-08-26:
+
+                          recorded      today
+  checks dispatched       300,095       300,000
+  checks completed        300,095       300,000
+  refused                 0             0
+  p95 dispatch jitter     216 ms        206 ms     (budget 1,000 ms)
+
+  full line: 3600s, pool 64, 300000 of 300000, 0 refused
+             jitter p50 3 ms, p95 206 ms, p99 212 ms
+             (wheel p95 7 ms, wait p95 202 ms), rss +619 MB at 64 workers
+
+Two years of scheduling in one hour, and the wheel contributes 7 ms of the
+206. The rest is waiting for a worker, which is the pool's business and what
+the sweep below is about.
+
+-----------------------------------------------------------------------------
+2. THE RECONNECT SOAK'S FULL HOUR
+-----------------------------------------------------------------------------
+
+  5,000 sensors at 60 s, disconnected for 60 min:
+    spooled     300,000 readings, 61.7 MB in 8 segments, 519 ms to write
+    projected   62 MB an hour at 216 bytes a reading, 3.0% of the 2 GiB default
+    replayed    1,498 ms in 150 batches, 200,260 readings/s
+    integrity   lost 0, duplicated 0, corrupt 0
+                caught up 2,403x faster than the outage
+
+-----------------------------------------------------------------------------
+3. THE POOL SWEEP SAYS WHY THE DEFAULT IS 64
+-----------------------------------------------------------------------------
+
+  pool     jitter p95     rss
+     7       15,890 ms    +41 MB
+    16        3,175 ms   +117 MB
+    64          206 ms   +619 MB
+
+Two orders of magnitude across the curve, and it is why `P-30` called the
+shipped default wrong by a factor of sixteen.
+
+-----------------------------------------------------------------------------
+4. THE ICMP SWEEP ANSWERS THE QUESTION P-15 RAISED
+-----------------------------------------------------------------------------
+
+`P-15` met an ICMP shortfall by asking for a 250-slot pool. The curve says
+whether that was necessary or merely one way out -- every slot costs a worker
+and about 6 MB:
+
+  in flight   default   with -i 0.2   gain
+     16        5/s        25/s        4.9x
+     32       10/s        50/s        4.9x
+     64       20/s        98/s        4.9x
+    128       40/s       179/s        4.5x
+    256       75/s       310/s        4.1x
+
+The interval flag buys ~4.9x and costs nothing; going 64 -> 256 in flight buys
+3.75x and costs 192 workers. `P-07` shipped the flag, and this is the
+measurement that says it was the better lever.
+
+-----------------------------------------------------------------------------
+5. AND ONE RESULT THAT IS ABOUT THE SUITE, NOT THE CODE
+-----------------------------------------------------------------------------
+
+  serial       29.7 s   [29.7, 32.2, 27.8]   spread 4.4 s    1% spare
+  8 in flight   8.0 s   [ 8.0, 11.5,  7.1]   spread 4.4 s   73% spare
+  bulk          2.4 s   [ 2.3,  2.4,  2.5]   spread 0.2 s   92% spare
+
+The serial build passed on its median and **one of its three samples went over
+the 30 s budget**. The same measurement read 20.9 to 25.7 s across four runs
+earlier the same day, on the same commit.
+
+What differs is what ran before it. This run put the replay soak at 100% and an
+hour of heavy writing through the same PostgreSQL ahead of the tree build.
+`P-193` found this measurement was not independent of the other cases in its
+own file; this says it is not independent of the other files either.
+
+**The two hour-long soaks in the same run landing exactly on their records is
+the evidence that this is ordering and not a regression.** A machine slow
+enough to add 5 s to the tree build would not have returned p95 206 ms against
+a recorded 216.
+
+Bulk moved 0.2 s across the same three samples. As on 2026-09-08's earlier
+runs, the noise is proportional to the round-trips, and only the serial case
+has many.
+
+The fill sweep replicated `P-194` cleanly -- no fill effect, no trend either
+direction, 24 to 29 s at every level:
+
+  already there     bulk up  bulk down  serial up  serial down
+  0 objects           2.3 s      2.4 s     24.3 s       26.9 s
+  5,000 objects       6.9 s      7.0 s     28.4 s       29.4 s
+  10,000 objects      1.7 s      2.7 s     24.1 s       24.3 s
+  20,000 objects      1.7 s      1.8 s     25.3 s       24.2 s
+
+-----------------------------------------------------------------------------
+WHAT TO DO WITH IT
+-----------------------------------------------------------------------------
+
+Nothing to a budget. The gate reproduces, the soaks are clean, and the two
+sweeps confirm the two defaults they were taken to choose.
+
+The tree build's 1% margin here is a measurement artefact of running it after
+two hours of database work, and reading it as anything else would be the third
+time in one day that someone drew a conclusion about the code from a number
+that was about the harness. What it does say is that this case cannot be
+compared across runs with different suites in front of it -- which the test now
+prints in its own output, and which is worth one line in any future write-up
+that quotes it.
+
+Raw output follows.
+=============================================================================
+
+started 2026-09-08T14:34:40 IDT
+MS_BENCH_MINUTES=60 MS_SOAK_MINUTES=60 MS_SOAK_FRACTION=1 MS_BENCH_SWEEP=1 MS_PING_SWEEP=1 MS_BENCH_FILL=1
+ Container monitoring-system-dev-toolchain-run-d6e836f2313a Creating 
+ Container monitoring-system-dev-toolchain-run-d6e836f2313a Created 
+
+> monitoring-system@0.1.0 test:perf
+> node scripts/perf-conditions.mjs && npm run test:perf --workspaces --if-present
+
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   1.88 / 1.32 / 0.89  over 8 CPUs  (0.23 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  delivered CPU  276 ms for a fixed loop  (1.03x the reference machine's 267 ms)
+                 a load average cannot see a host starving this VM; this can
+  database       nothing else is connected
+  ----------------------------------------------------------------
+
+
+> @ms/core@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/core@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+
+    measured: cloned 221 objects in 53.9 ms using 16 statements
+▶ clone performance
+  ✔ issues a number of statements proportional to depth, not to object count (854.853709ms)
+✔ clone performance (1402.744542ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, a seven-level chain with a setting and a credential at each level:
+      full render     6.97 ms   2863 bytes
+      304             1.59 ms      0 bytes  (4.4x cheaper)
+▶ conditional GET performance
+  ✔ answers a repeat read for a fraction of the cost of rendering it (470.062542ms)
+✔ conditional GET performance (1347.689792ms)
+
+    measured, 40 days of one-minute readings on 3 channels (172,800 raw rows):
+      hourly buckets, 40 days, same answer either way:
+        from sample_1h    23 ms
+        from sample       71 ms   (3.1x, reading 60x the rows)
+      end to end:
+      1 hour  from sample_1h   21 ms   960 buckets from    960 rows/channel
+      1 day   from sample_1d    3 ms    40 buckets from     40 rows/channel
+      45 min  from sample_5m   37 ms  1248 buckets from 11,520 rows/channel
+      44 min  from sample      74 ms  1277 buckets from 57,600 rows/channel   <- no tier divides 44 minutes
+▶ historic query performance
+  ✔ answers a long range from a rollup tier rather than from raw (246.914084ms)
+      stitched 2 sources           21 ms   960 buckets   <- a day of tail read from raw
+  ✔ costs no more to stitch an answer from several sources (23.980208ms)
+✔ historic query performance (2601.534584ms)
+
+    measured, 100000 readings per run, target 100,000 samples/min and p99 under 100 ms:
+       1000 rows/write    3,581,186 samples/min  p99   20.5 ms  100 writes   <- shipped default
+       2000 rows/write    3,768,488 samples/min  p99   32.5 ms   50 writes
+       5000 rows/write    3,818,933 samples/min  p99   68.7 ms   20 writes
+▶ ingestion performance
+  ✔ sustains 100,000 samples a minute with a p99 write inside 100 ms (4908.110669ms)
+
+    measured, 30000 readings through the full path:
+      throughput 2,694,085 samples/minute
+      channels   100 created once, then 300 resolved from cache with no query at all
+  ✔ costs almost nothing extra to go through the wire format and channel resolution (956.877875ms)
+
+    measured, 100 sensors x 100 scans, 30000 readings:
+      no states    2,723,990 samples/min  p99   14.5 ms      0 transitions written
+      steady       2,406,220 samples/min  p99   31.9 ms    100 transitions written
+      state machine costs 11.7% of throughput
+      flapping   every sensor changing state on every scan: p99 write 24.4 ms, 1900 transitions in 20 writes
+                 (266 ms per batch end to end, of which 250 ms is the flush timer — one probe offering one batch at a time never fills a write)
+  ✔ carries the state machine for a bounded, measured cost (7319.085503ms)
+✔ ingestion performance (13798.611674ms)
+
+  2000 sensors, one inherited state trigger
+    first failure (nothing armed): 91 ms
+    arming 2000 chains:      154 ms
+    holding them (worst of 3):    76 ms
+    cancelling all of them:       101 ms
+    timers: 2 idle, 2 with 2000 pending, 2 after
+
+▶ notification timer cost
+  ✔ arms, holds and cancels 2000 chains with one timer (634.11925ms)
+    firing 4000 due steps:         201 ms
+
+  ✔ fires 2000 due chains in one sweep (442.735625ms)
+✔ notification timer cost (8869.139795ms)
+
+    measured, two probes each replaying 300,000 readings (100% of an hour at the v1 target, set MS_SOAK_FRACTION=1 for all of it) while another reports live:
+      live, quiet     p50  257.1 ms   p99  265.1 ms   40 batches
+      live, replaying p50  256.5 ms   p99  271.7 ms   300 batches   -> 1.03x, budget 3x
+      replay          p50   17.5 ms   p99   47.3 ms   600 batches, cleared in 89.3 s
+      pacing          the replaying probe was asked to wait up to 50 ms; the live one 0 ms
+▶ replay under load
+  ✔ keeps storing live readings promptly while a probe empties an hour of backlog (99586.775837ms)
+  ✔ lets one probe catch up at full speed, because one is not a fairness problem (1.047583ms)
+  ✔ lets a probe that has caught up rejoin the fast path on its very next batch (506.353417ms)
+✔ replay under load (101549.253213ms)
+
+    measured, 15000 channels at 60s (the v1 target):
+      generated  300000 raw readings in 1089 ms
+      raw -> 5m  620 ms for 4 buckets (155 ms per 5-minute bucket, budget 300,000 ms)
+      5m  -> 1h  145 ms for 15000 buckets
+      1h  -> 1d  138 ms for 15000 buckets
+      on disk    raw 103.1 B/row, 5m 116.5 B/row
+▶ rollup performance at the v1 target
+  ✔ rolls up a full five-minute bucket for 15,000 channels well inside its period (2025.673293ms)
+
+    measured, 300 channels x 1440 readings (one day per channel, the production chunk shape):
+      compressed 40.0 MB -> 4.0 MB (10.1x) in 128 ms
+      graph read against compressed chunks 1.0 ms
+  ✔ compresses a day of readings per channel by an order of magnitude (1572.574876ms)
+✔ rollup performance at the v1 target (3905.79696ms)
+
+    built 5,000 sensors in 18.7 s (setup, not measured)
+
+    measured (P-186):
+      no schedule at all        1.0 ms         0 moved     98% spare  [2.5, 1.0, 0.7]
+      a window closing         85.4 ms     5,000 moved     91% spare  [287.0, 85.4, 67.0]
+      an ordinary minute        9.6 ms         0 moved     98% spare  [9.6, 9.6, 9.2]
+▶ the schedule sweep at five thousand sensors
+  ✔ measures a sweep at every scale the loop actually meets (583.024292ms)
+✔ the schedule sweep at five thousand sensors (19584.589593ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19), 3 samples:
+      bulk             2.4 s     2,043 objects/s   92% spare  [2.3, 2.4, 2.5] spread 0.2 s
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s, 3 samples each into its own
+    empty database (P-193 — they used to share one, so only bulk started from empty):
+      serial          29.7 s       168 objects/s    1% spare  [29.7, 32.2, 27.8] spread 4.4 s
+      8 in flight      8.0 s       628 objects/s   73% spare  [8.0, 11.5, 7.1] spread 4.4 s
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+      The spread above is WITHIN one run and understates the uncertainty. Four quiet
+      runs on 2026-09-08 put the serial median at 20.9, 22.0, 23.2 and 25.7 s — a
+      fifth of the number — while bulk moved 0.1 s and eight-in-flight 0.7 s. The
+      noise scales with the round-trips, so only serial has much (P-194). Do not read
+      a change smaller than a couple of seconds here as a change in the code.
+
+    measured (P-194), the same 5,000-object build into a database already holding,
+    ascending then descending so warm-up and fill can be told apart:
+      already there     bulk up  bulk down  serial up  serial down
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (18.713ms)
+  ✔ creates a 5,000-object tree through the API inside its budget (0.637333ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      0 objects           2.3 s      2.4 s     24.3 s       26.9 s
+      5,000 objects       6.9 s      7.0 s     28.4 s       29.4 s
+      10,000 objects      1.7 s      2.7 s     24.1 s       24.3 s
+      20,000 objects      1.7 s      1.8 s     25.3 s       24.2 s
+      A fill effect is a trend down each column that both columns agree on.
+      Warm-up is "down" beating "up" at every fill, whatever the fill.
+  ✔ measures how the cost grows as the installation fills up (P-194) (341410.175406ms)
+✔ tree build performance (470481.843966ms)
+ℹ tests 18
+ℹ suites 9
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 628884.744996
+
+> @ms/probe@0.1.0 pretest:perf
+> tsc -b
+
+
+> @ms/probe@0.1.0 test:perf
+> node --test --test-concurrency=1 "dist/test/perf/*.test.js"
+
+    before P-07 (count 4, -w 5)         49422 ms     20 targets/s   1.19 ms CPU each  4000/4000 replies
+▶ ICMP throughput (P-07)
+  ✔ measures what shipped before, which is the number the ADR was worried about (49425.811481ms)
+    shipped now (count 4, -i 0.2, -W)   10080 ms     99 targets/s   0.99 ms CPU each  4000/4000 replies
+  ✔ measures what ships now, which needs no privileges and no dependency (10081.846171ms)
+    blackholed, before P-07             20057 ms     10 targets/s   1.10 ms CPU each  0/1000 replies
+    blackholed, ships now               10532 ms     19 targets/s   1.01 ms CPU each  0/800 replies
+  ✔ measures a target that answers nothing, both ways (30590.122139ms)
+      16 in flight   default    5/s   -i 0.2   25/s   (4.9x)
+      32 in flight   default   10/s   -i 0.2   50/s   (4.9x)
+      64 in flight   default   20/s   -i 0.2   98/s   (4.9x)
+     128 in flight   default   40/s   -i 0.2  179/s   (4.5x)
+     256 in flight   default   75/s   -i 0.2  310/s   (4.1x)
+    measured on 8 cores, 1000 targets, 64 in flight
+  ✔ sweeps concurrency, which is the other lever and the one P-15 reached for (231600.951647ms)
+  ✔ reports the cores it measured on, because the number is meaningless without them (0.926541ms)
+✔ ICMP throughput (P-07) (321702.270105ms)
+
+    measured, 20 checks in a process each (serial):
+      start-up overhead  p50 22.7 ms  p95 27 ms  max 27 ms
+▶ process runner start-up cost
+  ✔ costs a bounded and measured overhead per check (548.14025ms)
+    with the real catalogue (icmp.ping, 10 checks): start-up overhead p50 27.6 ms
+  ✔ costs more with the real catalogue than with a one-file registry, and says how much (2910.861001ms)
+    8 checks at a concurrency of 4: 64 ms total, 8 ms each
+  ✔ overlaps start-ups at the default concurrency (64.820333ms)
+✔ process runner start-up cost (3524.776668ms)
+
+    measured, 5000 sensors at 60 s disconnected for 60 min (set MS_SOAK_MINUTES=60 for the criterion's full hour):
+      spooled       300,000 readings, 61.7 MB in 8 segments, 519 ms to write
+      an hour     62 MB projected at 216 bytes a reading, against a 2 GiB shipped default (3.0% of it)
+      replayed    1498 ms in 150 batches, 200,260 readings/s
+      lost 0, duplicated 0, corrupt 0; caught up 2403x faster than the outage
+▶ a disconnect long enough to matter
+  ✔ spools an hour of readings, survives a restart, and replays every one exactly once (2092.992376ms)
+  ✔ keeps its place when the connection drops again mid-replay (61.655959ms)
+✔ a disconnect long enough to matter (2155.63871ms)
+▶ scheduler benchmark (P-15)
+  ✔ has the cores the criterion is stated for (0.551625ms)
+
+    shipped default (64): 3600s, pool 64, 300000 checks completed of 300000 dispatched, 0 refused
+  ✔ sustains 5,000 sensors with a pool sized for the work in flight (3602061.74531ms)
+
+    old default (7): 90s, pool 7, 4044 checks completed of 7536 dispatched, 3492 refused
+  ✔ shows what the old core-count default did with the same load (91480.694291ms)
+
+    demand-driven (4 -> 64): 3600s, pool 64, 300000 checks completed of 300000 dispatched, 0 refused
+  ✔ reaches the same jitter starting from four workers as from forty-eight (3601825.6696ms)
+
+    small, fixed 48: 15s, pool 48, 13 checks completed of 13 dispatched, 0 refused
+
+    small, demand-driven: 15s, pool 4, 13 checks completed of 13 dispatched, 0 refused
+  ✔ costs a small installation a fraction of what a fixed pool reserves (33089.006974ms)
+
+    sweep pool 7: 30s, pool 7, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 16: 30s, pool 16, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 24: 30s, pool 24, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 32: 30s, pool 32, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 48: 30s, pool 48, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 64: 30s, pool 64, 2536 checks completed of 2536 dispatched, 0 refused
+
+    sweep pool 128: 30s, pool 128, 2630 checks completed of 2630 dispatched, 0 refused
+
+    sweep pool 256: 30s, pool 256, 2705 checks completed of 2705 dispatched, 0 refused
+  ✔ sweeps pool sizes, which is how the default was chosen (254472.013118ms)
+
+    icmp.ping as it ships (64): 90s, pool 64, 7536 checks completed of 7536 dispatched, 0 refused
+  ✔ shows what the sensor type we actually ship costs the pool (93428.605501ms)
+
+    before P-07, 3 s checks: 90s, pool 256, 7876 checks completed of 7876 dispatched, 0 refused
+
+    measured: 5000 sensors at 60s, 200 ms checks, 8 cores, 60 minutes per run
+    dispatch jitter is due -> check started; the budget is p95 under 1000 ms
+      shipped default (64)        200 ms check  pool  64       jitter p50     3 ms  p95    206 ms  p99    212 ms  (wheel p95 7 ms, wait p95 202 ms)  rss + 619 MB at 64 workers  refused 0
+      old default (7)             200 ms check  pool   7       jitter p50 18942 ms  p95  29150 ms  p99  29290 ms  (wheel p95 12 ms, wait p95 29147 ms)  rss +  30 MB at  7 workers  refused 3492
+      demand-driven (4 -> 64)     200 ms check  pool  64       jitter p50     7 ms  p95    215 ms  p99    220 ms  (wheel p95 12 ms, wait p95 208 ms)  rss +  15 MB at  4 workers  refused 0
+      small, fixed 48             200 ms check  pool  48       jitter p50     7 ms  p95     12 ms  p99     12 ms  (wheel p95 12 ms, wait p95 0 ms)  rss + 217 MB at 48 workers  refused 0
+      small, demand-driven        200 ms check  pool  48->  4  jitter p50     5 ms  p95     12 ms  p99     12 ms  (wheel p95 12 ms, wait p95 0 ms)  rss +  16 MB at  4 workers  refused 0
+      sweep pool 7                200 ms check  pool   7       jitter p50     8 ms  p95  15890 ms  p99  17672 ms  (wheel p95 9 ms, wait p95 15887 ms)  rss +  41 MB at  7 workers  refused 0
+      sweep pool 16               200 ms check  pool  16       jitter p50  1268 ms  p95   3175 ms  p99   3410 ms  (wheel p95 9 ms, wait p95 3166 ms)  rss + 117 MB at 16 workers  refused 0
+      sweep pool 24               200 ms check  pool  24       jitter p50   215 ms  p95    625 ms  p99    630 ms  (wheel p95 10 ms, wait p95 619 ms)  rss + 157 MB at 24 workers  refused 0
+      sweep pool 32               200 ms check  pool  32       jitter p50   209 ms  p95    424 ms  p99    430 ms  (wheel p95 11 ms, wait p95 416 ms)  rss + 198 MB at 32 workers  refused 0
+      sweep pool 48               200 ms check  pool  48       jitter p50    11 ms  p95    221 ms  p99    228 ms  (wheel p95 12 ms, wait p95 211 ms)  rss + 312 MB at 48 workers  refused 0
+      sweep pool 64               200 ms check  pool  64       jitter p50     4 ms  p95    212 ms  p99    214 ms  (wheel p95 10 ms, wait p95 208 ms)  rss + 383 MB at 64 workers  refused 0
+      sweep pool 128              200 ms check  pool 128       jitter p50     6 ms  p95     12 ms  p99    207 ms  (wheel p95 12 ms, wait p95 0 ms)  rss + 873 MB at 128 workers  refused 0
+      sweep pool 256              200 ms check  pool 256       jitter p50     7 ms  p95    226 ms  p99    226 ms  (wheel p95 226 ms, wait p95 0 ms)  rss +1763 MB at 256 workers  refused 0
+      icmp.ping as it ships (64)  600 ms check  pool  64       jitter p50    11 ms  p95    615 ms  p99    665 ms  (wheel p95 11 ms, wait p95 609 ms)  rss + 300 MB at 64 workers  refused 0
+      before P-07, 3 s checks    3000 ms check  pool 256       jitter p50  1310 ms  p95   3187 ms  p99   3226 ms  (wheel p95 16 ms, wait p95 3182 ms)  rss +1814 MB at 256 workers  refused 0
+  ✔ shows what it cost before P-07 made the check cheaper (106463.55163ms)
+✔ scheduler benchmark (P-15) (7782827.002714ms)
+  sizing pass over 5000 assignments: median 0.45 ms, worst 0.92 ms (budget 50 ms)
+▶ one sizing pass at the v1 target (P-48)
+  ✔ sums 5000 assignments in well under a tick (294.411417ms)
+✔ one sizing pass at the v1 target (P-48) (295.190167ms)
+ℹ tests 19
+ℹ suites 5
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8111772.734114
+exit=0
+finished 2026-09-08T17:00:23 IDT
