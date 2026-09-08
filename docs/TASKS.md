@@ -4063,6 +4063,10 @@ because each is a decision rather than a defect:
       > The job was not started because recent account payments have failed or your spending limit
       > needs to be increased.
 
+      **The workflow is disabled again**, at the operator's word, once that came back — an
+      enabled workflow that cannot start a job only turns every push red. `workflow_dispatch`
+      stays in the file, so re-enabling is one command the moment the account is settled.
+
       **So `H-06` is blocked on GitHub billing, not on hardware and no longer on a red test.**
       That is very likely why the workflow was disabled in the first place — the last runs before
       it went quiet are failures followed by cancellations, which is what running out of minutes
