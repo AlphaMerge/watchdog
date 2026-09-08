@@ -728,6 +728,47 @@ Reverted in favour of a fixture whose window is closed on both clocks: a weekday
 today. The tell was that the seam existed only for the test, which is usually a sign the fixture
 is what is wrong.
 
+### 37. Three tests that held a negative hostage to a positive (`P-195`, found by reading CI's only failure)
+
+`http-ssrf.test.ts` asserts, in three places, that the target guard did **not** refuse. It did that
+by requiring the request to reject for some other reason — nothing is listening on
+`10.255.255.1`, `no-such-host.invalid` will not resolve, `169.254.169.254` is unreachable — and
+then checking the rejection was not a refusal.
+
+Every one of those is a fact about the environment rather than about the code. On the one class of
+machine where the last is false, the shape inverts: **GitHub's runners are Azure VMs, where
+169.254.169.254 is the live instance-metadata service and answers immediately.** The request
+succeeded, nothing rejected, and `assert.rejects` reported `Missing expected rejection` — a failure
+message describing the guard as broken at the moment the guard was most correct, because standing
+aside under policy `none` is exactly what it is for.
+
+It was the **sole** failing test in every CI run before the workflow was disabled, and it took the
+whole pipeline with it: the install-smoke and Windows jobs both `need` the build.
+
+Three things worth taking from it.
+
+**A test that asserts a negative needs a subject that can produce a positive.** `assert.rejects`
+can only express "this failed, and here is what the failure was", so a case whose actual claim is
+"the guard was silent" has to borrow someone else's failure to say anything at all. The replacement
+is a helper returning the refusal or `undefined` — which says nothing about whether the request
+succeeded, because these cases were never about that.
+
+**The same guard was tested correctly ten metres away.** `webhook-delivery.test.ts` covers the
+identical policy through the pure predicate with injected resolution — `refuses('none',
+'169.254.169.254') === null`, no socket, no environment — and has never been red. Two tests of one
+rule, and only the one that reached the network could be wrong about the network.
+
+**And the test was performing the attack it documents.** Under `none` the guard steps aside by
+design, so naming the metadata address there meant every cloud machine running the file genuinely
+queried its own IMDS — deliberately, in a file whose entire subject is not doing that. Nobody read
+the response, so nothing leaked; it is still the one request this code exists to prevent, issued on
+purpose and unremarked for as long as the file existed.
+
+**An audit for the same shape elsewhere found none.** Every `assert.rejects`/`assert.throws`
+predicate in the workspace — 966 of them — was scanned for one that asserts only a negative about
+the error; after this fix there are zero. The other tests holding hardcoded addresses hold them as
+data, not as connection targets.
+
 ## What actually found them
 
 

@@ -4048,6 +4048,15 @@ because each is a decision rather than a defect:
       (refused by default, reached under `none`), and it is nobody's credential endpoint. The
       cases that assert *refusal* keep the famous address, because those never send anything.
 
+      **Catalogued as entry 37** in `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`,
+      with the audit that followed it: all 966 `assert.rejects`/`assert.throws` predicates in the
+      workspace were scanned for one asserting only a negative about the error, and after this fix
+      there are none. The other tests holding hardcoded addresses hold them as data rather than as
+      connection targets. **And the same policy is tested correctly ten metres away** —
+      `webhook-delivery.test.ts` covers it through the pure predicate with injected resolution, no
+      socket, and has never been red. Two tests of one rule; only the one that reached the network
+      could be wrong about the network.
+
       **Mutation 1/1, and it says why this survived.** A new case points the guard at a local
       server that answers 200; restoring the old "a call that succeeds is a refusal" behaviour
       reddens that case **and only that case**. The other seven cannot see the bug, because every
