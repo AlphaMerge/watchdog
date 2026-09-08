@@ -4022,6 +4022,45 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [x] **P-195 — the one test that turned CI red, and could only fail where it mattered** · S ·
+      A-09, H-06 · `refuses nothing at all under \`none\`` in `http-ssrf.test.ts` is the **sole**
+      failure in every CI run before the workflow was disabled — three checked, same single test
+      each time, and it takes the whole pipeline down with it because `install smoke test` and
+      `remote probe enrolment` both depend on the build job.
+
+      `AssertionError: Missing expected rejection`, in 5.5 ms. **GitHub's runners are Azure VMs,
+      where 169.254.169.254 is the live instance-metadata service and answers immediately.** The
+      test asked for a request to it under policy `none` and required a rejection, so a request
+      that succeeded read as a broken guard — when the guard had done exactly the right thing by
+      standing aside.
+
+      **The shape was the defect, and three tests shared it.** Each checks that the guard did
+      *not* fire, and each did so by requiring the request to fail for some unrelated reason —
+      holding a negative hostage to a positive. Everywhere the address is unreachable that works
+      by accident; on the one class of machine where it answers, it inverts. Replaced with a
+      `refusalFrom` helper that returns the refusal message or `undefined`, and says nothing about
+      whether the request then succeeded, which is the thing these cases were never about.
+
+      **And the test was making the request it exists to prevent.** Under `none` the guard steps
+      aside by design, so naming 169.254.169.254 there meant every cloud machine that ran this
+      file really did query its own metadata service — on purpose, in a file whose entire subject
+      is not doing that. It uses 169.254.1.1 now: link-local too, so it makes the same point
+      (refused by default, reached under `none`), and it is nobody's credential endpoint. The
+      cases that assert *refusal* keep the famous address, because those never send anything.
+
+      **Mutation 1/1, and it says why this survived.** A new case points the guard at a local
+      server that answers 200; restoring the old "a call that succeeds is a refusal" behaviour
+      reddens that case **and only that case**. The other seven cannot see the bug, because every
+      one of them reaches something unreachable — which is why it passed on every developer
+      machine for as long as the file existed and failed on every run of the only environment
+      that disagreed.
+
+      **What this unblocks is `H-06`.** CI is disabled deliberately and stays that way until the
+      operator says otherwise, but the reason it was red is now fixed, and the `windows-install`
+      job it gates is the half of `H-06` that has never run: install the MSI with `msiexec /qn`,
+      assert both services registered, both firewall rules exist, an upgrade keeps an edited
+      configuration, and an uninstall leaves ProgramData alone.
+
 - [x] **P-194 — creating objects does not get slower as the installation fills up** · S · P-193, P-19 · Left behind by `P-193`, which found it by accident while
       removing it as a confound. The same 5,000-object serial build costs
 

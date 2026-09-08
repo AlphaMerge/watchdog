@@ -1,5 +1,7 @@
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { after, describe, it } from 'node:test';
 import type { TargetPolicy } from '@ms/shared';
 import { fetchHttp, type HttpRequestOptions } from '../src/support/http/request.js';
 
@@ -18,13 +20,13 @@ import { fetchHttp, type HttpRequestOptions } from '../src/support/http/request.
  */
 
 describe('an HTTP sensor’s target policy', () => {
-  const request = (host: string, policy?: TargetPolicy) => {
+  const request = (host: string, policy?: TargetPolicy, port = 80) => {
     // Built as a typed value rather than spread in: under `exactOptionalPropertyTypes` a
     // conditional spread widens the property to include `undefined`, which the option's own
     // type deliberately does not accept.
     const options: HttpRequestOptions = {
       host,
-      port: 80,
+      port,
       scheme: 'http',
       path: '/',
       method: 'GET',
@@ -40,6 +42,30 @@ describe('an HTTP sensor’s target policy', () => {
       policy === undefined ? options : { ...options, targetPolicy: policy },
       AbortSignal.timeout(2_000),
     );
+  };
+
+  /**
+   * The guard's refusal message if it refused, and `undefined` otherwise — whether the request
+   * then failed on its own or succeeded.
+   *
+   * **Written this way because `assert.rejects` cannot express what these cases assert.** Three
+   * of them check that the guard did *not* fire, and did it by requiring the request to fail for
+   * some other reason. That holds a negative hostage to an unrelated positive: on a machine where
+   * the address happens to answer, the call resolves, nothing rejects, and the test reports the
+   * guard as broken when the guard was right.
+   *
+   * It is not hypothetical. `refuses nothing at all under \`none\`` failed on every CI run with
+   * `Missing expected rejection` in 5.5 ms — because GitHub's runners are Azure VMs, where
+   * 169.254.169.254 is the live instance-metadata service and answers immediately.
+   */
+  const refusalFrom = async (call: () => Promise<unknown>): Promise<string | undefined> => {
+    try {
+      await call();
+      return undefined;
+    } catch (error) {
+      const message = (error as Error).message;
+      return /refusing to request/.test(message) ? message : undefined;
+    }
   };
 
   it('refuses the cloud metadata address by default', async () => {
@@ -68,15 +94,9 @@ describe('an HTTP sensor’s target policy', () => {
   });
 
   it('allows a private address, because that is the job', async () => {
-    // The request itself will fail — nothing is listening — but it must fail as a *connection*
-    // rather than as a refusal, which is what distinguishes the guard from a broken sensor.
-    await assert.rejects(
-      () => request('10.255.255.1'),
-      (error: unknown) => {
-        assert.equal(/refusing to request/.test((error as Error).message), false);
-        return true;
-      },
-    );
+    // Whether the connection then succeeds is not this test's business — nothing is listening
+    // here, but a machine that had something listening must not turn this red.
+    assert.equal(await refusalFrom(() => request('10.255.255.1')), undefined);
   });
 
   it('refuses a private address under the stricter policy', async () => {
@@ -84,24 +104,37 @@ describe('an HTTP sensor’s target policy', () => {
   });
 
   it('refuses nothing at all under `none`', async () => {
-    await assert.rejects(
-      () => request('169.254.169.254', 'none'),
-      (error: unknown) => {
-        assert.equal(/refusing to request/.test((error as Error).message), false);
-        return true;
-      },
-    );
+    // **Not the metadata address, deliberately.** Under `none` the guard steps aside, so naming
+    // 169.254.169.254 here means the test really does send a request to the instance-metadata
+    // service on any cloud machine that runs it — the exact request this whole file exists to
+    // prevent, issued on purpose. 169.254.1.1 is link-local too, so it makes the same point:
+    // refused by default, and reached under `none`.
+    assert.notEqual(await refusalFrom(() => request('169.254.1.1')), undefined);
+    assert.equal(await refusalFrom(() => request('169.254.1.1', 'none')), undefined);
+  });
+
+  it('does not read a target that answers as a refusal', async () => {
+    // **The regression guard for the defect the helper above exists for.** Every other case here
+    // reaches something unreachable, so a test that confused "no refusal" with "some failure"
+    // passed on a developer machine for as long as this file existed. This one answers 200, which
+    // is the case CI met and nothing local did.
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('ok');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    after(() => {
+      server.close();
+    });
+    const { port } = server.address() as AddressInfo;
+
+    assert.equal(await refusalFrom(() => request('127.0.0.1', undefined, port)), undefined);
+    assert.equal(await refusalFrom(() => request('127.0.0.1', 'none', port)), undefined);
   });
 
   it('leaves a name that will not resolve to the request’s own error', async () => {
     // Not this guard's business. Reporting it here would replace a diagnosis the caller already
     // produces with a worse one.
-    await assert.rejects(
-      () => request('no-such-host.invalid'),
-      (error: unknown) => {
-        assert.equal(/refusing to request/.test((error as Error).message), false);
-        return true;
-      },
-    );
+    assert.equal(await refusalFrom(() => request('no-such-host.invalid')), undefined);
   });
 });
