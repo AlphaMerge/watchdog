@@ -4022,6 +4022,43 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [ ] **P-194 — creating objects gets slower as the installation fills up, and nobody knows the
+      curve** · S · P-193, P-19 · Left behind by `P-193`, which found it by accident while
+      removing it as a confound. The same 5,000-object serial build costs
+
+      | into a database holding | serial | 8 in flight |
+      | --- | --- | --- |
+      | nothing | 20.9 s | 6.5 s |
+      | 5,000 objects | 27.9 s | — |
+      | 10,000 objects | — | 8.5 s |
+
+      about a third more the second time. **Two points, taken from two different runs**, so the
+      shape of the curve is unknown — whether it is linear in row count, a step where a plan
+      flips, or something that flattens. Nothing here should be read as a measured law.
+
+      **The decisive experiment is cheap and comes first: build the BULK tree into a populated
+      database.** Every bulk number ever taken started from empty, so the one comparison that
+      separates the two candidate explanations has never been made. Bulk writes the same 5,000
+      rows in one request; serial writes them in 5,000. If bulk into a populated database also
+      costs a third more, the cost is per-row — indexes, audit rows, dead tuples, the planner —
+      and the request path is innocent. If bulk stays flat, it is per-request, and the suspects
+      are the things every create pays and a tree insert pays once: `lockTreeShared`, the
+      `anyActive` probe, the parent `SELECT`, and `M-08`'s ancestor walk. That is 2.2 s per
+      sample against 20.9 s for the serial equivalent, so measure it before measuring anything
+      else.
+
+      **Why this is not urgent.** The headroom on the budgeted case is 30%, not the 7% it looked
+      like before `P-193`; the v1 target is 5,000 sensors and the first 5,000 are the ones the
+      criterion is about; and `P-19`'s bulk path does the same work in 2.2 s, so anyone who meets
+      this at scale has a fix already shipped. It matters for the operator who grows past the v1
+      target one device at a time, and it is the sort of thing `H-09`'s field test would surface
+      as "provisioning got slow" without anyone knowing why.
+
+      **What must not happen is a budget moved to accommodate it.** The tree build measures a
+      first install into an empty database, which is what `PLAN.md`'s criterion describes. If the
+      curve turns out to matter, it wants its own measurement at a stated fill level — not a
+      wider budget on the existing one, which would hide both.
+
 - [x] **P-193 — the serial tree build was not drifting; its test was measuring two things** · M · P-19, P-192 ·
       Three quiet runs: **25.2 s (2026-08-29), 26.0 s (2026-09-07), 27.9 s (2026-09-08)** against
       an unmoved 30 s budget — margin 16% → 13% → **7%**. Monotonic, and the last of the three is
