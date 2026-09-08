@@ -165,17 +165,37 @@ list — and verified that `date_bin` reproduces `time_bucket` exactly
 
 All four exit criteria are met and measured:
 
-- **Create a 5,000-object tree via the API in under 30 seconds** — **currently 27.6 seconds**
-  over real HTTP with a serial client, 9.0 s with eight in flight, and **2.6 s in one request**
-  via `P-19`'s bulk route. The serial number is the one to watch and it has moved: 24.0 s, then
-  21.0 after `S-16` narrowed what a create reads about its parent, then **28.8 once Phase 3 made
-  every create write a `sensor_runtime` row (`M-02`) and check for a paused ancestor (`M-08`)**.
-  That left about 4% margin, which a loaded machine spends, and is how `P-29` came to be filed
-  and fixed — a create read the object back before its channels existed and then re-read the
-  version to patch it, so reading once after the writes took it from 11 database round trips to
-  10. **The criterion is met with the margin it has, not comfortably**: this path is round-trip
-  bound (63.6% idle under a profiler), so the remaining lever is fewer round trips, or fewer
-  requests, rather than faster SQL (`docs/findings/2026-09-03-perf-budgets.md`).
+- **Create a 5,000-object tree via the API in under 30 seconds** — **20.9 to 25.7 seconds**
+  over real HTTP with a serial client across four runs, 6.5 to 7.2 s with eight in flight, and
+  **2.2 s in one request** via `P-19`'s bulk route.
+
+  **These numbers replace the ones this document carried until 2026-09-08, and the correction is
+  larger than the drift it corrects.** The serial figure was quoted at 27.6 s with "about 4%
+  margin", read as a criterion met but not comfortably. `P-193` found the test building all three
+  variants in **one** scratch database in declaration order: bulk started from empty, serial from
+  the 5,000 objects bulk had just written, and the concurrent pass from 10,000. Give each its own
+  empty database — which is what the criterion describes, a first install — and the serial build
+  is a fifth cheaper. The margin is roughly a quarter, not 4%.
+
+  **The history this document told is also partly the test's.** It read 24.0 s, then 21.0 after
+  `S-16` narrowed what a create reads about its parent, then 28.8 "once Phase 3 made every create
+  write a `sensor_runtime` row (`M-02`) and check for a paused ancestor (`M-08`)". That step
+  arrived in the same change that put the bulk case in front of the serial one. `M-02`'s row is
+  genuinely written and genuinely costs something, but how much of the step was Phase 3 and how
+  much was the fixture is **not** established, and `P-194` retracted the attempt to size it: the
+  same build measured four times on a quiet machine spans 4.8 s on its own, which is wider than
+  most of the effects anybody has tried to read out of it.
+
+  **What survives unchanged is the diagnosis.** This path is round-trip bound — 63.6% idle under a
+  profiler — and it is the reason the noise is what it is: bulk moves 0.1 s between runs, eight in
+  flight 0.7 s, serial 4.8 s, in proportion to the requests each pays. So the lever is still fewer
+  round trips or fewer requests rather than faster SQL, which is what `P-19`'s bulk route is and
+  what `P-29` was (a create read the object back before its channels existed and then re-read the
+  version to patch it; reading once after the writes took it from 11 database round trips to 10).
+  **Do not read a change of less than about two seconds here as a change in the code** — the test
+  now prints that range in its own output (`docs/findings/2026-09-08-tree-build-fill-and-noise.txt`,
+  `docs/findings/2026-09-08-tree-build-was-two-measurements.txt`,
+  `docs/findings/2026-09-03-perf-budgets.md`).
 - **Ingest 100,000 samples/minute, p99 write under 100 ms** — measured at **3,621,280
   samples/minute with a p99 write of 22.1 ms**, and 2.5M/minute through the full wire path
   including channel resolution.
@@ -247,7 +267,7 @@ worker pool cannot hit the target, we change course here — not in Phase 8.
 | P-16 toolchain `ping` | done | `dev/toolchain/Dockerfile`; the base image had no `ping`, so the default ICMP path could not be tested |
 | P-15 5,000-sensor benchmark | done | **Go.** One sustained hour: 300,095 checks dispatched, 300,095 completed, 0 refused, p95 dispatch jitter 216 ms against the 1,000 ms budget. It also found the shipped pool default wrong by a factor of sixteen (`docs/findings/2026-08-26-scheduler-benchmark.md`) |
 | P-18 demand-driven pool sizing | done | `P-15`'s 48 was right for the v1 target and expensive for everything else — a default that gets changed by whoever notices and quietly kept by everyone who does not. `workerPoolSize` is a ceiling now; the pool starts at 4 and grows while checks are actually waiting. **The ramp costs one millisecond at the p95** (217 ms against 218), because the delay is spent once on the first tranche and never reaches the percentile the gate is stated at; at fifty sensors the pool never grows at all — 4 workers and 16 MB against 48 and 263 MB. The policy is asymmetric because the mistakes are: growing late loses measurements, shrinking late loses six megabytes (`docs/findings/2026-08-29-pool-sizing.md`) |
-| P-19 bulk provisioning path | done | `POST /objects/tree`: nodes name their parent by `ref`, so a caller describes a subtree rather than sorting one. **10.3x the serial path** — 2.8 s against 28.8 s for the same 5,000 objects over the same HTTP, 91% spare against the budget where serial had 4%. What it stops paying is not the inserts (`S-16` settled that) but the costs that are really per *request*: a transaction and its commit, the tree lock, the pause probe, and a `SELECT` of a parent whose kind the caller already knew — eight statements for 4,999 objects against roughly fifteen thousand. Same validation, same triggers, same channels, same audit entries, asserted by creating one sensor each way and comparing the stored rows. All-or-nothing, because a half-provisioned device is worse than a failed one (`docs/findings/2026-08-29-bulk-tree-create.md`) |
+| P-19 bulk provisioning path | done | `POST /objects/tree`: nodes name their parent by `ref`, so a caller describes a subtree rather than sorting one. **10.3x the serial path** — 2.8 s against 28.8 s for the same 5,000 objects over the same HTTP, 91% spare against the budget where serial had 4%. (Both serial figures here measure a build into a database already holding this route's own 5,000 objects; `P-193` separated them, and from empty the ratio is nearer 10x on 20.9 s. The conclusion is unchanged and the cause is the same one.) What it stops paying is not the inserts (`S-16` settled that) but the costs that are really per *request*: a transaction and its commit, the tree lock, the pause probe, and a `SELECT` of a parent whose kind the caller already knew — eight statements for 4,999 objects against roughly fifteen thousand. Same validation, same triggers, same channels, same audit entries, asserted by creating one sensor each way and comparing the stored rows. All-or-nothing, because a half-provisioned device is worse than a failed one (`docs/findings/2026-08-29-bulk-tree-create.md`) |
 | P-03 child-process runner | done | `ProcessRunner` beside `CheckPool`, same submit/callback contract, one spool sink. **The justification is narrower than "if a check can hang"**: a worker is terminable and has its own heap limit, so hanging and leaking are survivable there — a *hard crash* is not, and a segfault in a native module takes the whole probe down. That, and running as a different OS user, is what a thread cannot offer. One process per check rather than a pool, because not amortising is the feature: nothing survives from one check to the next. Measured at ~21 ms of start-up, the whole catalogue costing 1.3 ms more than a one-file registry — the rule about heavy imports living inside `execute`, showing up as a number (`docs/findings/2026-08-27-process-runner-startup.md`) |
 | P-12 Core Health sensor | done | `CLAUDE.md`'s "the system monitors itself" rule, as a sensor: sixteen channels, every one a number some earlier ticket added a `stats()` for, through `acceptResults` so it has history, limits and alarms like any other. **It cannot report the one failure `WORKFLOW.MD §13` names** — a sensor's reading is a row, and an unavailable database is exactly when there is nowhere to write one — so `GET /api/v1/core-health` answers live and needs almost none of the database. The channels that climb *before* that point are the useful half. Primary is the ingestion queue rather than an opaque health score. Mutation 12/12 |
 | P-13 Probe Health sensor, and P-04's numbers on it | done | **Evaluated by the core, because a probe cannot report its own absence** — `R-05` made a lost probe one alarm rather than a thousand, and this is the sensor that alarm comes from, so a sensor running *on* the probe would fall silent at the only moment that matters. Two halves: what the core knows (link, heartbeat age, protocol skew) and what the probe sent while it could (scheduler lag, pool, spool, protocol 7). It found a real bug in `R-05` before it was written: every sensor under a lost probe was marked Unknown, core-evaluated ones included — already wrong for `core.factory`, and disabling for this. Mutation 14/14 |
