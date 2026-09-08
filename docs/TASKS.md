@@ -3858,6 +3858,45 @@ because each is a decision rather than a defect:
       and an installation an order of magnitude larger is `P-15`'s question to re-measure rather
       than to extrapolate.
 
+- [ ] **P-187 — the dev database is not shaped like a fresh install, in the way that hides
+      bugs** · S · P-183 · `dev/data`'s `admin` sits in the `Administrators` group, and it is
+      there because it predates migration `032` — which backfills every account that already
+      exists, "Administrators by role, everybody else by default". `ensureFirstAdministrator`,
+      which runs *after* migrations on a fresh install, joined no group at all until `P-183`.
+
+      **That is the exact divergence that hid `P-183` for as long as it existed.** Every
+      environment anybody used had been upgraded into user groups; the only fresh installation
+      this project makes is the one `smoke-install.sh` builds in a container, and it could not see
+      the defect either until `U-20` gave it a credential to be refused with. A development
+      database that has been migrated forward for weeks is not the thing we ship, and the ways it
+      differs are invisible precisely because nobody chose them.
+
+      What would help is being able to get a *fresh* one cheaply and routinely — a documented
+      teardown-and-rebuild for `dev/`, so the shipped first-boot path is exercised by ordinary
+      work rather than only by a smoke test somebody remembers to run. Note the constraint before
+      designing it: `docker compose down -v` deletes the dev Postgres volume, which is the whole
+      point here but is also how somebody loses a fixture they wanted; and `dev/data` holds the
+      vault key and `first-admin-password`, so "fresh" means those too. Not urgent, and worth
+      doing before the next thing that only reproduces on a virgin database.
+
+- [ ] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
+      U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
+      `Soak`, finds an existing one and leaves it alone, and that is what the 5,047 sensors in
+      `dev/` have been all along. `--teardown` removes it.
+
+      **Until `U-20` it could not.** It counted `expectedDescendants` from a page of `/tree`,
+      which is capped, so it asked to delete 999 of 5,250 and the core refused every time. That
+      refusal was the only thing standing between an idle `--teardown` and an afternoon rebuilding
+      the fixture — and it was refusing for the wrong reason, so fixing the count removed the
+      guard as a side effect. Nobody decided that; it fell out.
+
+      Wants a deliberate answer rather than the accidental one it had. The cheapest is for
+      `--teardown` to say what it is about to remove and require a confirmation — the core already
+      returns exact counts through `/objects/:id/counts`, so "5,251 objects, 5,000 of them sensors:
+      type the number to confirm" costs one call it already makes. Worth considering alongside:
+      the dev fixture and a harness's scratch tree sharing a name is the underlying reason this is
+      even a question.
+
 - [x] **U-18 — `.ms-label` silently overrides every colour utility beside it** · S · U-17 ·
       The class sets `color: var(--ms-text-muted)` and is unlayered, so it beats any Tailwind
       text utility on the same element — those live in `@layer utilities`, and unlayered CSS wins.
