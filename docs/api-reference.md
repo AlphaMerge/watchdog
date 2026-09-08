@@ -1028,7 +1028,7 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 
 Approve a probe onto a branch of the tree
 
-Binds this identity to a probe object. The probe is issued a key of its own at its **next handshake**, not here: approving a machine that is switched off is an ordinary thing to do, and a key delivered in a welcome it never received would lock it out. Nobody ever sees that key — it goes straight to the probe over the authenticated link, so it never passes through a clipboard or a support ticket. A probe that is already connected starts scanning without reconnecting.
+Binds this identity to a probe object. The probe is issued a key of its own at its **next handshake**, not here: approving a machine that is switched off is an ordinary thing to do, and a key delivered in a welcome it never received would lock it out. Nobody ever sees that key — it goes straight to the probe over the authenticated link, so it never passes through a clipboard or a support ticket. A probe that is already connected has its connection closed and comes back on its own retry — about a second — because the handshake is where both the key and the first configuration are issued. It said "starts scanning without reconnecting" until `P-189`, which was not implemented: the session’s approval is fixed at admission, so a probe approved after it connected sat there scanning nothing.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

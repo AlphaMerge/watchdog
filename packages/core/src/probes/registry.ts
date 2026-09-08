@@ -58,6 +58,7 @@ export interface ProbeRegistration {
   protocolVersion: number;
   lastAddress: string;
   allowFrom: string[];
+
   /**
    * Whether this probe has **used** a key of its own. Never the key itself.
    *
@@ -97,6 +98,16 @@ interface Db {
   query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
 }
 
+/**
+ * Just enough of `ProbeEndpoint` for a decision to reach a connection that is already open.
+ *
+ * A narrow interface rather than the endpoint itself, like every other collaborator here: the
+ * registry decides things about probes and must not acquire a transport to do it.
+ */
+export interface ProbeConnections {
+  disconnect(gid: string, reason: string): boolean;
+}
+
 export interface ProbeRegistryOptions {
   db: Db;
   logger: Logger;
@@ -123,6 +134,7 @@ export interface ProbeHello {
 export class ProbeRegistry {
   readonly #db: Db;
   readonly #logger: Logger;
+  #connections: ProbeConnections | undefined;
   readonly #enrolmentKeys: readonly string[];
   readonly #enrolFrom: readonly string[];
   readonly #now: () => Date;
@@ -133,6 +145,18 @@ export class ProbeRegistry {
     this.#enrolmentKeys = options.enrolmentKeys;
     this.#enrolFrom = options.enrolFrom ?? [];
     this.#now = options.now ?? ((): Date => new Date());
+  }
+
+  /**
+   * Where a decision goes once it has been made (`P-189`).
+   *
+   * Late-bound, because the endpoint is built long after this — the same shape as
+   * `ConfigChangeNotifier.attach`. Absent is a legitimate state and means nothing is listening:
+   * a test that only cares what the rows say, and every path that decides about a probe which is
+   * not connected.
+   */
+  attach(connections: ProbeConnections): void {
+    this.#connections = connections;
   }
 
   /**
@@ -383,6 +407,12 @@ export class ProbeRegistry {
     );
 
     this.#logger.info({ gid, objectId, local: options.local ?? false }, 'a probe was approved');
+    // **The decision has to reach the connection** (`P-189`). `session.approved` is fixed at
+    // admission, so a probe that connected while pending stays marked unapproved for the life of
+    // that session: it was sent nothing, and it went on being sent nothing after somebody
+    // approved it. Closing it brings it back in about a second, through the handshake that
+    // issues its key and its configuration.
+    this.#connections?.disconnect(gid, 'approved; reconnect for a key and a configuration');
     const row = rows[0];
     if (row === undefined)
       throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);

@@ -407,6 +407,16 @@ export class ProbeEndpoint {
    * sockets that nothing in it points at. `Server.close()` waits for every one of them.
    */
   readonly #sockets = new Set<Socket>();
+  /**
+   * Sessions that said hello and were not approved, by gid.
+   *
+   * **`#sessions` deliberately holds approved ones only, and that left a decision with nothing to
+   * act on** (`P-189`). `session.approved` is set once, at admission; approving afterwards wrote
+   * two rows and told the live connection nothing, so the probe an operator had just admitted sat
+   * there scanning nothing until something else made it reconnect. This is the index that lets
+   * `disconnect` find it.
+   */
+  readonly #pending = new Map<string, ProbeSession>();
   #server: Server | undefined;
 
   constructor(options: ProbeEndpointOptions) {
@@ -969,7 +979,14 @@ export class ProbeEndpoint {
         existing.connection.destroy('superseded by a newer connection');
         this.#sessions.delete(decision.gid);
       }
-      this.#sessions.set(decision.gid, session);
+      // Approved or not, the gid has to reach this connection: an unapproved session is exactly
+      // the one a decision is about (`P-189`).
+      if (session.approved) {
+        this.#pending.delete(decision.gid);
+        this.#sessions.set(decision.gid, session);
+      } else if (decision.gid !== '') {
+        this.#pending.set(decision.gid, session);
+      }
 
       this.#welcome(
         session,
@@ -999,6 +1016,31 @@ export class ProbeEndpoint {
   }
 
   /** The session object, before anyone has decided whether it may do anything. */
+  /**
+   * Closes whatever connection this gid has open, so a decision about it takes effect (`P-189`).
+   *
+   * **Closing rather than reviving the session in place, and the reason is where the key lives.**
+   * A probe is issued its own key in the *welcome*, at its next handshake — approving a machine
+   * that is switched off has to work, so the key cannot be handed out at the moment of approval.
+   * Flipping `approved` on a live session and pushing it a configuration would therefore leave a
+   * scanning probe that never received the key its next reconnect will be asked for. Forcing the
+   * handshake is what issues both.
+   *
+   * The probe comes back on its own retry — 500 ms in development, a second in the shipped
+   * configuration — so "approve it and it starts scanning" is true to within about a second,
+   * rather than true only after somebody restarts something.
+   *
+   * Returns whether anything was actually open, which is the difference between a decision about
+   * a connected probe and one about a machine that is switched off.
+   */
+  disconnect(gid: string, reason: string): boolean {
+    const session = this.#sessions.get(gid) ?? this.#pending.get(gid);
+    if (session === undefined) return false;
+    this.#logger.info({ gid, reason }, 'closing a probe connection so a decision reaches it');
+    session.connection.destroy(reason);
+    return true;
+  }
+
   #openSession(
     gid: string,
     hello: Extract<ProbeToCoreMessage, { type: 'hello' }>,
@@ -1383,6 +1425,11 @@ export class ProbeEndpoint {
   #handleClose(close: ConnectionClose, session: ProbeSession | undefined, logger: Logger): void {
     if (session !== undefined && this.#sessions.get(session.info.gid) === session) {
       this.#sessions.delete(session.info.gid);
+    }
+    // Both maps, and by identity: a gid whose newer connection has already replaced this one
+    // must not have its live entry removed by the old one's close.
+    if (session !== undefined && this.#pending.get(session.info.gid) === session) {
+      this.#pending.delete(session.info.gid);
     }
     // A run this probe was doing goes back to `queued`, not `failed`: a probe that dropped is
     // coming back, and its sweep is a cursor away from continuing. Marking it failed would make

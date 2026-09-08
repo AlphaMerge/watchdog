@@ -65,6 +65,41 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     ...over,
   });
 
+  describe('a decision reaching a connection', () => {
+    it('closes the probe’s connection when it is approved', async () => {
+      // **`P-189`.** The rows are only half of a decision. `session.approved` is fixed at
+      // admission, so approving a probe that connected while pending changed nothing it could
+      // observe — it kept scanning nothing until something else made it reconnect.
+      const closed: { gid: string; reason: string }[] = [];
+      registry.attach({
+        disconnect: (gid, reason) => {
+          closed.push({ gid, reason });
+          return true;
+        },
+      });
+
+      await registry.admit(hello({ gid: 'reconnecting-probe' }));
+      await registry.approve('reconnecting-probe', probeId);
+
+      assert.equal(closed.length, 1);
+      const only = closed[0];
+      assert.ok(only !== undefined);
+      assert.equal(only.gid, 'reconnecting-probe');
+      // The reason reaches the probe's log, which is where somebody wondering why it dropped
+      // will look.
+      assert.match(only.reason, /reconnect/);
+    });
+
+    it('decides perfectly well with nothing attached', async () => {
+      // Absent is a legitimate state: every test that only cares what the rows say, and every
+      // deployment before the endpoint exists.
+      const detached = new ProbeRegistry({ db, logger: silentLogger, enrolmentKeys: [] });
+      await detached.admit(hello({ gid: 'unwatched-probe', accessKey: '' }));
+      const approved = await detached.approve('unwatched-probe', probeId);
+      assert.equal(approved.status, 'approved');
+    });
+  });
+
   describe('a probe nobody has seen', () => {
     it('is recorded and given nothing', async () => {
       const decision = await registry.admit(hello());

@@ -116,7 +116,11 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
           'ordinary thing to do, and a key delivered in a welcome it never received would lock ' +
           'it out. Nobody ever sees that key — it goes straight to the probe over the ' +
           'authenticated link, so it never passes through a clipboard or a support ticket. A ' +
-          'probe that is already connected starts scanning without reconnecting.',
+          'probe that is already connected has its connection closed and comes back on its own ' +
+          'retry — about a second — because the handshake is where both the key and the first ' +
+          'configuration are issued. It said "starts scanning without reconnecting" until ' +
+          '`P-189`, which was not implemented: the session\u2019s approval is fixed at ' +
+          'admission, so a probe approved after it connected sat there scanning nothing.',
         params: gidParams,
         body: {
           type: 'object',

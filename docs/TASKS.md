@@ -3916,7 +3916,7 @@ because each is a decision rather than a defect:
       something" from an empty tree is the operator path, and restoring the fixture automatically
       would put the environment straight back to being unlike a new one.
 
-- [ ] **P-189 — approving a connected probe does not start it scanning** · M · R-01, P-187 ·
+- [x] **P-189 — approving a connected probe does not start it scanning** · M · R-01, P-187 ·
       The first thing an operator does after installing is approve the probe waiting in the queue.
       Nothing happens. It keeps sitting there, scanning nothing, until something makes it
       reconnect.
@@ -3950,6 +3950,40 @@ because each is a decision rather than a defect:
       its own retry, which it does in seconds — cruder, one line, and it makes the documented
       sentence true in effect while keeping the key issue on the handshake where the design put it.
       The second looks right; the first is what the sentence literally says.
+
+      **P-189 outcome. Closed the session, and the key settled it.** The endpoint now indexes
+      pending sessions by gid — `#sessions` deliberately holds approved ones only, which is why a
+      decision had nothing to act on — and `ProbeRegistry.approve` calls `disconnect(gid)` through
+      a narrow `ProbeConnections` interface, late-bound from `main.ts` the way
+      `ConfigChangeNotifier.attach` already is.
+
+      **Reviving the session in place would have left the probe scanning without a key**, which is
+      the argument that decided it. A key is issued only when a probe presents the *enrolment*
+      key, in the welcome — `approve` nulls the stored hash precisely so the next handshake
+      re-issues one (`P-37`). Flipping `approved` on a live session and pushing it a configuration
+      skips the welcome, so the probe would have been scanning happily on a credential the core
+      had just invalidated, and would have been refused whenever it did eventually reconnect.
+
+      Measured on the dev stack: approve at `08:20:25.081`, then `a probe was approved` →
+      `closing a probe connection so a decision reaches it` → `link to core closed` →
+      `reconnecting to core` → reconnected at `08:20:26.222`, **1.1 seconds**, with
+      `issued this probe a key of its own` on the core and `issuedKey: true` on the probe, and
+      `scheduled: 5000` behind it. `hasOwnKey` stays false for one more handshake, which is `P-37`
+      working as designed: issuing repeats until the probe comes back *using* the key.
+
+      The approve route's description said "A probe that is already connected starts scanning
+      without reconnecting", which was not implemented. It now says what happens and why, and
+      names this ticket — a sentence that was wrong for long enough to be quoted in a bug report
+      is worth marking rather than quietly correcting.
+
+      **An existing test claims this property and does not test it.** `probe-endpoint.test.ts`
+      has "reaches a probe that was enrolled after it had already connected", whose comment reads
+      "If the session only resolved its branch at the handshake, approving it would do nothing
+      until someone restarted the probe" — exactly this defect. It drives an *already approved*
+      session whose branch is claimed later, which is a different property, and it passed
+      throughout. Left in place, because what it tests is worth testing; the real case is two new
+      tests beside it. Tests: 4 new. Mutations 2/2 — approve not telling the connection, and
+      pending sessions not being indexed.
 
 - [ ] **P-190 — the README's "making it scan something" documents a flow that R-01 replaced** · S ·
       P-189 · It tells the reader to claim a branch with

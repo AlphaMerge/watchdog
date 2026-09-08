@@ -1020,6 +1020,8 @@ async function serve(): Promise<void> {
   });
   probeEndpointRef = probeEndpoint;
   configNotifier.attach(probeEndpoint);
+  // So approving or re-pointing a probe reaches the connection it already has (`P-189`).
+  probeRegistry.attach(probeEndpoint);
   await probeEndpoint.start();
   lifecycle.onShutdown({
     name: 'config-push',

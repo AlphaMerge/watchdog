@@ -563,6 +563,78 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('lets a decision reach a probe that connected before anybody made one', async () => {
+    // **`P-189`.** `session.approved` is fixed at admission and `#sessions` holds approved
+    // sessions only, so a probe that connected while pending was a live socket nothing pointed
+    // at: approving it wrote two rows, logged, and told that connection nothing. The probe sat
+    // there scanning nothing until something else made it reconnect — which on a fresh install
+    // is the very first thing an operator does.
+    //
+    // The endpoint closes it instead, and the probe comes back on its own retry through the
+    // handshake that issues both its key and its configuration. What is asserted here is only
+    // that the connection can be found and closed; that a reconnect then scans is the ordinary
+    // approved path every other test in this file drives.
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(null),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+      registry: { admit: () => Promise.resolve({ kind: 'pending' as const, gid: 'waiting' }) },
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello({ gid: 'waiting' }));
+      await probe.waitFor((m) => m.type === 'welcome');
+      assert.deepEqual(
+        probe.received.filter((m) => m.type.startsWith('config-')),
+        [],
+        'an unapproved probe is sent nothing, which is what approval is for',
+      );
+
+      assert.equal(
+        endpoint.disconnect('waiting', 'approved'),
+        true,
+        'the pending connection is reachable by gid',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(
+        endpoint.disconnect('waiting', 'again'),
+        false,
+        'and it is not left behind in the index once it has gone',
+      );
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('says so when a decision is about a probe that is not connected', async () => {
+    // Approving a machine that is switched off is an ordinary thing to do, and the registry uses
+    // the answer to tell "we closed a connection" from "there was nothing to close".
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(null),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+    });
+    await endpoint.start();
+    try {
+      assert.equal(endpoint.disconnect('nobody-here', 'approved'), false);
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
   it('shuts down while a probe is wedged, rather than waiting for a FIN that never comes', async () => {
     // **`Server.close()` waits for every open connection, and `stop()` only *asks* them to go.**
     // A session is `end()`ed, not destroyed, so a probe that has stopped reading keeps its half
