@@ -161,6 +161,28 @@ CSRF guard would refuse it. `dev/core.json` lists both spellings of the dev serv
 `api.allowedOrigins`, which is the same key an install behind a reverse proxy on a different
 hostname needs, for the same reason (`A-11`).
 
+### Starting again from nothing
+
+```bash
+scripts/dev-reset.sh
+```
+
+Drops the `monitoring` database and removes the three things a fresh install has none of — the
+vault key, the generated password and the probe's spool — then starts the core so it migrates and
+bootstraps. It names what it will destroy and asks first; `--yes` for a script.
+
+**Worth doing occasionally, and not only when something is broken.** A development database that
+has been migrated forward for weeks is not the thing we ship, and the ways it differs are
+invisible precisely because nobody chose them. `P-183` is the example: the bootstrap administrator
+was created in no group, so on a genuinely new installation the only account was refused by every
+object-scoped route — and every environment anybody used had been _upgraded_ into user groups by a
+migration whose backfill quietly fixed it. It survived for as long as it did because nothing
+anybody ran was new.
+
+Nothing under `dev/data` is touched beyond those three, and no other database is — including the
+`ms_test_*` scratch ones the suites make. The 5,000-sensor load is reproducible afterwards with
+`scripts/soak.sh --sensors 5000`.
+
 ### Talking to the API by hand
 
 `dev/core.json` runs with `api.requireAuthentication` on, which is what a stock install does, so

@@ -3858,7 +3858,7 @@ because each is a decision rather than a defect:
       and an installation an order of magnitude larger is `P-15`'s question to re-measure rather
       than to extrapolate.
 
-- [ ] **P-187 — the dev database is not shaped like a fresh install, in the way that hides
+- [x] **P-187 — the dev database is not shaped like a fresh install, in the way that hides
       bugs** · S · P-183 · `dev/data`'s `admin` sits in the `Administrators` group, and it is
       there because it predates migration `032` — which backfills every account that already
       exists, "Administrators by role, everybody else by default". `ensureFirstAdministrator`,
@@ -3878,6 +3878,43 @@ because each is a decision rather than a defect:
       point here but is also how somebody loses a fixture they wanted; and `dev/data` holds the
       vault key and `first-admin-password`, so "fresh" means those too. Not urgent, and worth
       doing before the next thing that only reproduces on a virgin database.
+
+      **P-187 outcome.** `scripts/dev-reset.sh`. It drops the `monitoring` database and removes the
+      three things a fresh install has none of — the vault key, the generated password and the
+      probe's spool — then starts the core so it migrates and bootstraps.
+
+      **Surgical, not a directory wipe**, and that is the design constraint: `dev/data` is also
+      where somebody's own notes and scratch files live — `api.txt`, `smoke-api.sh`, `spike/`,
+      `test-logs/` — so the state is named one item at a time and everything else is left. It does
+      not touch the container, its volume, or any other database, including the `ms_test_*`
+      scratch ones the suites make. `docker compose down -v` would have been the obvious mechanism
+      and is the wrong one twice over: it takes the whole volume, and it is the command that loses
+      a fixture somebody wanted.
+
+      It names what it will destroy and then asks — `--yes` for a script, a typed `y` for a
+      person, a refusal when there is no terminal to ask on — which is `P-188`'s pattern applied to
+      the other destructive thing in `scripts/`.
+
+      **`CREATE DATABASE` inherits `timescaledb` from `template1`**, which is where the image's own
+      initialisation puts it and is why a plain `CREATE DATABASE` works for the scratch databases
+      in `test/support/database.ts`. Migration `003` checks for the extension and cannot install
+      it, so the reset checks too rather than trusting it: if the image ever stops seeding
+      `template1`, the failure is a sentence at the point the assumption was made instead of a
+      migration abort three steps later.
+
+      **Run for real, which is what it was for.** The dev database was 5,051 sensors migrated
+      forward for weeks; it is now one root object, no samples, one account — and that account
+      reads `admin | admin | Administrators [is_admin]`, which is `P-183`'s fix confirmed on a
+      virgin database rather than in a smoke container. `GET /objects/root` answers 200 and
+      `GET /sensors/999999/state` answers `OBJECT_NOT_FOUND` rather than `AUTH_FORBIDDEN` — the
+      exact discriminator `smoke-install.sh` uses, now true in development too. `dev-token.sh`
+      works again, because the bootstrap password is new. All thirteen unrelated files under
+      `dev/data` survived.
+
+      The 5,000-sensor load is reproducible with `scripts/soak.sh --sensors 5000`, and the tree is
+      deliberately **not** rebuilt by the reset: walking the README's "Making it actually scan
+      something" from an empty tree is the operator path, and restoring the fixture automatically
+      would put the environment straight back to being unlike a new one.
 
 - [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
