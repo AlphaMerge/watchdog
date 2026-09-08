@@ -14,6 +14,21 @@ import process from 'node:process';
 /** Above this, the machine has work of its own and the budgets are not measuring only us. */
 const BUSY_PER_CPU = 0.5;
 
+/**
+ * A fixed CPU-bound loop, because a load average cannot see the thing that bit us hardest.
+ *
+ * The container reports the load of tasks *runnable inside it*. When the host is starving the
+ * VM, nothing inside is runnable-and-waiting, so the load average stays near zero while the
+ * work takes half again as long: measured 2026-09-08, the VM read 1.29 while macOS read 25.50.
+ * This loop measures what actually arrives -- delivered CPU rather than offered load.
+ *
+ * The reference is this project's development machine with the host quiet; other hardware will
+ * read differently, which is why nothing warns until it is twice as slow. The number is worth
+ * recording even when it is fine, because two findings files are only comparable if the machine
+ * was giving them the same thing.
+ */
+const CALIBRATION_REFERENCE_MS = 267;
+
 const w = (line) => process.stdout.write(`${line}\n`);
 
 function load() {
@@ -58,6 +73,19 @@ async function competitors() {
   }
 }
 
+/** Fixed work, no allocation, no I/O: whatever this costs is what the CPU is giving us. */
+function calibrate() {
+  const spin = () => {
+    const startedAt = process.hrtime.bigint();
+    let x = 0;
+    for (let i = 0; i < 3e8; i += 1) x += i % 7;
+    // Returned so the loop cannot be optimised away, and ignored by the caller.
+    return { ms: Number(process.hrtime.bigint() - startedAt) / 1e6, x };
+  };
+  spin();
+  return Math.min(spin().ms, spin().ms);
+}
+
 const warnings = [];
 
 w('');
@@ -74,6 +102,21 @@ if (perCpu > BUSY_PER_CPU) {
   warnings.push(
     `the machine has work of its own: ${perCpu.toFixed(2)} per CPU against ` +
       `${String(BUSY_PER_CPU)}. The budgets below measure it as well as us.`,
+  );
+}
+
+const calibrationMs = calibrate();
+w(
+  `  delivered CPU  ${calibrationMs.toFixed(0)} ms for a fixed loop` +
+    `  (${(calibrationMs / CALIBRATION_REFERENCE_MS).toFixed(2)}x the reference machine's ` +
+    `${String(CALIBRATION_REFERENCE_MS)} ms)`,
+);
+w('                 a load average cannot see a host starving this VM; this can');
+if (calibrationMs > CALIBRATION_REFERENCE_MS * 2) {
+  warnings.push(
+    `fixed work took ${calibrationMs.toFixed(0)} ms against a reference ` +
+      `${String(CALIBRATION_REFERENCE_MS)} ms. Either this is different hardware, or something\n` +
+      '     outside this container is taking the CPU. Check the host, not just the container.',
   );
 }
 

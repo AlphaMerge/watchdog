@@ -13,10 +13,19 @@ because they no longer build on top of a previous variant's rows. All three
 used to share one scratch database in declaration order, so bulk started from
 empty, serial from 5,000 objects and the concurrent pass from 10,000.
 
+CORRECTED LATER THE SAME DAY BY P-194: the seven seconds are not established.
+The same measurement repeated four times on a quiet machine spans 20.9 to
+25.7 s on its own, so a single 20.9 against a single 27.9 sizes nothing, and
+P-194's fill sweep finds no effect of database size at all up to 20,000
+objects. See 2026-09-08-tree-build-fill-and-noise.txt. What stands below is
+the structural half, which was never a measurement: the variants shared one
+database and were not comparable with each other.
+
 Two conclusions.
 
-There is no per-request regression. The seven seconds were 5,000 rows. The
-reasoning in this morning's file is withdrawn there.
+There is no per-request regression -- but the seven seconds are not a
+measured quantity, see the correction above. The reasoning in this morning's
+file is withdrawn there.
 
 And the variance was never the problem: 0.6 s of spread over three samples. A
 median would not have found this. The samples are worth their 55 seconds for

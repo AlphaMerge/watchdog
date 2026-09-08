@@ -1,0 +1,368 @@
+=============================================================================
+P-194 asked whether creating objects gets slower as the installation fills up.
+
+ANSWER: no effect is detectable, and the question was smaller than the noise.
+
+-----------------------------------------------------------------------------
+1. THE FILL SWEEP
+-----------------------------------------------------------------------------
+
+The same 5,000-object build into a database already holding N objects, run
+ascending then descending so warm-up and fill can be told apart. Quiet
+machine, conditions recorded by the run (P-192):
+
+  already there     bulk up  bulk down  serial up  serial down
+  0 objects           2.3 s      2.1 s     21.9 s       22.0 s
+  5,000 objects       6.5 s      6.2 s     27.0 s       22.7 s
+  10,000 objects      2.7 s      6.1 s     25.0 s       21.4 s
+  20,000 objects      1.6 s      1.6 s     20.9 s       20.6 s
+
+A fill effect would be a trend both directions agree on. There is none. The
+fastest point for BOTH paths is 20,000 objects already present -- the most
+filled -- and the two directions disagree at 10,000 (bulk 2.7 s up, 6.1 s
+down). Whatever moves these numbers, it is not how full the database is.
+
+An earlier sweep ran ascending only and produced a tidy-looking curve going
+the wrong way (1.00x, 2.97x, 1.29x, 0.72x). That was ordering: the prefill
+that creates the fill also warms the process, so more fill means more warm-up
+immediately before the measurement. Sweeping both directions is what showed
+it up.
+
+-----------------------------------------------------------------------------
+2. WHY THE QUESTION WAS UNANSWERABLE AS ASKED
+-----------------------------------------------------------------------------
+
+Four runs on 2026-09-08, all on a quiet machine, all with conditions recorded,
+same code, same commit:
+
+  serial, 3-sample median   20.9    22.0    23.2    25.7 s
+  within-run spread          0.6     1.1     3.3     0.8 s
+  bulk                       2.2     2.2     2.3     2.2 s
+  8 in flight                6.5     7.2     6.7     7.1 s
+
+The serial median moves 4.8 s across runs -- a fifth of the number -- while
+bulk moves 0.1 s and eight-in-flight 0.7 s. The noise is proportional to the
+round-trips: 5,000 sequential HTTP requests accumulate scheduling jitter that
+one request does not.
+
+So P-194's premise -- "about a third more into a populated database" -- came
+from two points in two different runs, and a third of a build is inside the
+scatter of the same build measured four times.
+
+**The within-run spread understates the uncertainty badly.** One of these runs
+reported 0.6 s of spread on a number whose true run-to-run range is 4.8 s. A
+median over three samples in one process is precise about the wrong thing.
+
+-----------------------------------------------------------------------------
+3. WHAT THIS RETRACTS
+-----------------------------------------------------------------------------
+
+P-193 concluded that serial-into-empty (20.9 s) against serial-after-bulk
+(27.9 s) showed "the seven seconds were 5,000 rows, not the per-request path".
+The direction may well be right -- the populated readings do sit high -- but
+the magnitude is not established: a single 20.9 against a single 27.9, when
+the same measurement spans 20.9 to 25.7 unaided, is not seven seconds of
+anything. That number is withdrawn; the structural point it rested on (the
+variants used to share one database and were not comparable) stands, because
+that was a fact about the code, not a measurement.
+
+-----------------------------------------------------------------------------
+4. WHAT TO DO WITH IT
+-----------------------------------------------------------------------------
+
+Nothing, for now, and deliberately. The budget is 30 s, the mean is around
+23 s, and the run-to-run scatter is a couple of seconds. That is thinner than
+it looks on any single run and wider than it looks on any single sample, and
+the honest summary is that this case cannot resolve changes smaller than about
+two seconds. The test now prints that in its own output so the next reader
+does not have to find this file first.
+
+The sweep is committed behind `MS_BENCH_FILL=1`, off by default: three minutes,
+and the answer only changes when the write path does.
+
+Raw output of both sweeps and the four runs follows.
+=============================================================================
+
+### ascending-then-descending sweep
+ Container monitoring-system-dev-toolchain-run-4ad2390a0edc Creating 
+ Container monitoring-system-dev-toolchain-run-4ad2390a0edc Created 
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   0.62 / 0.83 / 1.28  over 8 CPUs  (0.08 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  database       nothing else is connected
+  ----------------------------------------------------------------
+
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19), 3 samples:
+      bulk             2.2 s     2,227 objects/s   93% spare  [2.4, 2.2, 2.2] spread 0.2 s
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s, 3 samples each into its own
+    empty database (P-193 — they used to share one, so only bulk started from empty):
+      serial          25.7 s       195 objects/s   14% spare  [25.7, 26.0, 25.1] spread 0.8 s
+      8 in flight      7.1 s       706 objects/s   76% spare  [7.1, 7.3, 7.0] spread 0.3 s
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+
+    measured (P-194), the same 5,000-object build into a database already holding,
+    ascending then descending so warm-up and fill can be told apart:
+      already there     bulk up  bulk down  serial up  serial down
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (18.487667ms)
+  ✔ creates a 5,000-object tree through the API inside its budget (0.435292ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      0 objects           2.3 s      2.1 s     21.9 s       22.0 s
+      5,000 objects       6.5 s      6.2 s     27.0 s       22.7 s
+      10,000 objects      2.7 s      6.1 s     25.0 s       21.4 s
+      20,000 objects      1.6 s      1.6 s     20.9 s       20.6 s
+      A fill effect is a trend down each column that both columns agree on.
+      Warm-up is "down" beating "up" at every fill, whatever the fill.
+  ✔ measures how the cost grows as the installation fills up (P-194) (319260.924688ms)
+✔ tree build performance (429664.923238ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 430391.66328
+exit=0
+
+### ascending-only sweep (superseded, kept for the ordering artefact)
+ Container monitoring-system-dev-toolchain-run-30941e3c7abc Creating 
+ Container monitoring-system-dev-toolchain-run-30941e3c7abc Created 
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   0.37 / 0.67 / 1.45  over 8 CPUs  (0.05 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  database       nothing else is connected
+  ----------------------------------------------------------------
+
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19), 3 samples:
+      bulk             2.2 s     2,296 objects/s   93% spare  [2.4, 2.2, 2.2] spread 0.2 s
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s, 3 samples each into its own
+    empty database (P-193 — they used to share one, so only bulk started from empty):
+      serial          22.0 s       227 objects/s   27% spare  [22.4, 22.0, 21.3] spread 1.1 s
+      8 in flight      7.2 s       691 objects/s   76% spare  [7.2, 7.2, 6.7] spread 0.6 s
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+
+    measured (P-194), the same 5,000-object build into a database already holding:
+      already there        bulk    serial   bulk x  serial x
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (28.789666ms)
+  ✔ creates a 5,000-object tree through the API inside its budget (0.425875ms)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      0 objects           2.2 s    26.2 s    1.00x     1.00x
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      5,000 objects       6.6 s    27.1 s    2.97x     1.03x
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      10,000 objects      2.9 s    21.3 s    1.29x     0.81x
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+      20,000 objects      1.6 s    20.6 s    0.72x     0.79x
+      the two multipliers are the answer: together it is per row, apart it is
+      per request — see P-194 and the finding it points at
+  ✔ measures how the cost grows as the installation fills up (P-194) (162901.519198ms)
+✔ tree build performance (261337.191244ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 262052.482786
+exit=0
+
+### fourth run, host verified quiet by the calibration loop
+host at start:  2.95 8.91 9.24
+ Container monitoring-system-dev-toolchain-run-d1743a599667 Creating 
+ Container monitoring-system-dev-toolchain-run-d1743a599667 Created 
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   0.49 / 0.77 / 1.10  over 8 CPUs  (0.06 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  delivered CPU  280 ms for a fixed loop  (1.05x the reference machine's 267 ms)
+                 a load average cannot see a host starving this VM; this can
+  database       nothing else is connected
+  ----------------------------------------------------------------
+
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/tag" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+strict mode: use allowUnionTypes to allow union type keyword at "#/properties/effective" (strictTypes)
+
+    measured, the same 5,000 objects in **one** request (P-19), 3 samples:
+      bulk             2.3 s     2,131 objects/s   92% spare  [2.3, 2.4, 2.1] spread 0.3 s
+
+    measured, 5,000 objects over HTTP (1 probe, 100 groups, 1,300 devices, the rest sensors), budget 30 s, 3 samples each into its own
+    empty database (P-193 — they used to share one, so only bulk started from empty):
+      serial          23.2 s       215 objects/s   23% spare  [25.6, 23.2, 22.3] spread 3.3 s
+      8 in flight      6.7 s       750 objects/s   78% spare  [7.3, 6.4, 6.7] spread 0.8 s
+      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row
+      (M-02) and a guard against a paused ancestor (M-08) — see P-19
+▶ tree build performance
+  ✔ creates the same tree in one request, which is what P-19 is for (17.255709ms)
+  ✔ creates a 5,000-object tree through the API inside its budget (0.3165ms)
+  ﹣ measures how the cost grows as the installation fills up (P-194) (0.209417ms) # set MS_BENCH_FILL=1 to run the fill-level sweep
+✔ tree build performance (103086.638672ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 103902.086005
+exit=0
+host at end:  3.03 7.17 8.51

@@ -4022,8 +4022,7 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
-- [ ] **P-194 — creating objects gets slower as the installation fills up, and nobody knows the
-      curve** · S · P-193, P-19 · Left behind by `P-193`, which found it by accident while
+- [x] **P-194 — creating objects does not get slower as the installation fills up** · S · P-193, P-19 · Left behind by `P-193`, which found it by accident while
       removing it as a confound. The same 5,000-object serial build costs
 
       | into a database holding | serial | 8 in flight |
@@ -4058,6 +4057,52 @@ because each is a decision rather than a defect:
       first install into an empty database, which is what `PLAN.md`'s criterion describes. If the
       curve turns out to matter, it wants its own measurement at a stated fill level — not a
       wider budget on the existing one, which would hide both.
+
+      **P-194 outcome: there is no effect, and the question was smaller than the noise.**
+      `docs/findings/2026-09-08-tree-build-fill-and-noise.txt`. The sweep is committed behind
+      `MS_BENCH_FILL=1` — off by default, three minutes, and the answer only moves when the write
+      path does.
+
+      | already there | bulk up | bulk down | serial up | serial down |
+      | --- | --- | --- | --- | --- |
+      | 0 | 2.3 s | 2.1 s | 21.9 s | 22.0 s |
+      | 5,000 | 6.5 s | 6.2 s | 27.0 s | 22.7 s |
+      | 10,000 | 2.7 s | 6.1 s | 25.0 s | 21.4 s |
+      | 20,000 | 1.6 s | 1.6 s | 20.9 s | 20.6 s |
+
+      A fill effect is a trend both directions agree on. There is none: the **fastest** point for
+      both paths is 20,000 objects already present, and the two directions disagree outright at
+      10,000. **The first attempt swept ascending only and produced a tidy curve going the wrong
+      way**, because the prefill that creates the fill also warms the process — more fill meant
+      more warm-up immediately before the measurement. Sweeping both directions is what caught it.
+
+      **And the premise could not have been tested the way it was stated.** Four runs the same
+      day, quiet machine, conditions recorded, one commit:
+
+      | | run 1 | run 2 | run 3 | run 4 |
+      | --- | --- | --- | --- | --- |
+      | serial, 3-sample median | 20.9 s | 22.0 s | 23.2 s | 25.7 s |
+      | within-run spread | 0.6 s | 1.1 s | 3.3 s | 0.8 s |
+      | bulk | 2.2 s | 2.2 s | 2.3 s | 2.2 s |
+      | 8 in flight | 6.5 s | 7.2 s | 6.7 s | 7.1 s |
+
+      The serial median moves 4.8 s across runs — a fifth of it — while bulk moves 0.1 s. **The
+      noise is proportional to the round-trips**: 5,000 sequential requests accumulate scheduling
+      jitter that one request does not. "About a third more" is inside the scatter of the same
+      build measured four times.
+
+      **This retracts a number from `P-193`.** That ticket read serial-into-empty (20.9 s) against
+      serial-after-bulk (27.9 s) as "the seven seconds were 5,000 rows". The direction may hold —
+      the populated readings do sit high — but a single 20.9 against a single 27.9, when the same
+      measurement spans 20.9 to 25.7 unaided, establishes no magnitude. The structural finding
+      behind it stands, because that was a fact about the code rather than a measurement: the
+      variants really did share one database and really were not comparable.
+
+      **The lasting fix is the one that costs nothing.** A within-run spread of 0.6 s on a number
+      whose real range is 4.8 s is precise about the wrong thing, and it is what invited two
+      over-readings in one day. The test now prints the across-run range in its own output, so the
+      next reader meets the uncertainty where the numbers are rather than in a findings file they
+      would have to know to look for.
 
 - [x] **P-193 — the serial tree build was not drifting; its test was measuring two things** · M · P-19, P-192 ·
       Three quiet runs: **25.2 s (2026-08-29), 26.0 s (2026-09-07), 27.9 s (2026-09-08)** against
@@ -4108,7 +4153,14 @@ because each is a decision rather than a defect:
 
       Against 27.9 s, 8.5 s and 2.3 s in the same morning's run. Bulk is unchanged because bulk
       always did start from empty; the other two moved because they no longer carry a previous
-      test's rows. **The seven seconds were 5,000 rows, not the per-request path.**
+      test's rows. ~~**The seven seconds were 5,000 rows, not the per-request path.**~~
+
+      **Corrected the same day by `P-194`: the seven seconds are not established.** The same
+      measurement, repeated four times on a quiet machine, spans 20.9 to 25.7 s on its own, so a
+      single 20.9 against a single 27.9 does not size the effect — and `P-194`'s fill sweep finds
+      no effect of database size at all up to 20,000 objects. What survives is the structural
+      half, which was never a measurement: the three variants shared one database and were not
+      comparable with each other.
 
       **So the reasoning in `2026-09-08-perf-budgets-clean-run.txt` is withdrawn**, and the file
       says so above the section rather than quietly losing it. "Both variants that pay 5,000

@@ -190,8 +190,12 @@ describe(
     }
 
     /** Builds the plan level by level; within a level the requests are independent. */
-    async function build(base: string, rootId: number, concurrency: number): Promise<number> {
-      const label = 'probe';
+    async function build(
+      base: string,
+      rootId: number,
+      concurrency: number,
+      label = 'probe',
+    ): Promise<number> {
       const ids = new Map<string, number>();
       const probeId = await create(base, { kind: 'probe', name: `probe-${label}` }, rootId);
       ids.set(`probe-${label}`, probeId);
@@ -218,26 +222,49 @@ describe(
     }
 
     /** The same plan, as one `POST /objects/tree` body. */
-    function bulkBody(probeId: number): Record<string, unknown> {
-      const nodes = plan('probe-probe').map((item) => ({
+    function bulkBody(probeId: number, label = 'probe'): Record<string, unknown> {
+      const nodes = plan(`probe-${label}`).map((item) => ({
         ...item.body,
         ref: item.key,
         // The probe is the request's own `parentId`; everything else names a node in the body.
-        ...(item.parentKey === 'probe-probe' ? {} : { parentRef: item.parentKey }),
+        ...(item.parentKey === `probe-${label}` ? {} : { parentRef: item.parentKey }),
       }));
       return { parentId: probeId, nodes };
     }
 
+    /** One `POST /objects/tree` of 5,000 objects, timed. */
+    async function bulkBuild(base: string, rootId: number, label = 'probe'): Promise<number> {
+      const probeId = await create(base, { kind: 'probe', name: `probe-${label}` }, rootId);
+      const body = bulkBody(probeId, label);
+
+      const startedAt = process.hrtime.bigint();
+      const response = await fetch(`${base}/objects/tree`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      assert.equal(response.status, 201, text.slice(0, 500));
+      assert.equal(
+        (JSON.parse(text) as { count: number }).count,
+        TARGET_OBJECTS - 1,
+        'every node but the probe',
+      );
+      return ms;
+    }
+
     /** How many objects hang off the probe this build made. */
-    async function treeSize(db: Database): Promise<number> {
+    async function treeSize(db: Database, label = 'probe'): Promise<number> {
       const rows = await db.query<{ count: string }>(
         `SELECT count(*) AS count FROM object
          WHERE id IN (
            WITH RECURSIVE t AS (
-             SELECT id FROM object WHERE name = 'probe-probe'
+             SELECT id FROM object WHERE name = $1
              UNION ALL SELECT c.id FROM object c JOIN t ON c.parent_id = t.id
            ) SELECT id FROM t
          )`,
+        [`probe-${label}`],
       );
       return Number(rows[0]?.count);
     }
@@ -245,21 +272,7 @@ describe(
     async function oneBulk(): Promise<{ ms: number; objects: number; channels: number }> {
       const f = await fixture();
       try {
-        const probeId = await create(f.base, { kind: 'probe', name: 'probe-probe' }, f.rootId);
-        const body = bulkBody(probeId);
-
-        const startedAt = process.hrtime.bigint();
-        const response = await fetch(`${f.base}/objects/tree`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const text = await response.text();
-        const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
-        assert.equal(response.status, 201, text.slice(0, 500));
-
-        const result = JSON.parse(text) as { count: number };
-        assert.equal(result.count, TARGET_OBJECTS - 1, 'every node but the probe');
+        const ms = await bulkBuild(f.base, f.rootId);
 
         // The channels too: a bulk path that wrote the objects and forgot what makes a sensor
         // useful would be faster and worthless.
@@ -367,12 +380,104 @@ describe(
       );
       process.stdout.write(
         `      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row\n` +
-          `      (M-02) and a guard against a paused ancestor (M-08) — see P-19\n`,
+          `      (M-02) and a guard against a paused ancestor (M-08) — see P-19\n` +
+          `      The spread above is WITHIN one run and understates the uncertainty. Four quiet\n` +
+          `      runs on 2026-09-08 put the serial median at 20.9, 22.0, 23.2 and 25.7 s — a\n` +
+          `      fifth of the number — while bulk moved 0.1 s and eight-in-flight 0.7 s. The\n` +
+          `      noise scales with the round-trips, so only serial has much (P-194). Do not read\n` +
+          `      a change smaller than a couple of seconds here as a change in the code.\n`,
       );
 
       assert.ok(
         serialMs < BUDGET_MS,
         `a serial build took ${(serialMs / 1_000).toFixed(1)} s against a ${String(BUDGET_MS / 1_000)} s budget`,
+      );
+    });
+
+    /**
+     * `P-194`: creating objects gets slower as the installation fills up, and the shape of that
+     * was unknown — two points from two different runs.
+     *
+     * **The question this settles is which cost it is.** Both paths write the same 5,000 rows;
+     * only one of them pays 5,000 requests, 5,000 transactions and 5,000 tree locks to do it. If
+     * bulk slows down at the same rate as serial, the cost is per row — indexes, audit rows, dead
+     * tuples, the planner — and the request path is innocent. If bulk stays flat while serial
+     * climbs, it is per request.
+     *
+     * One sample per point rather than three: `P-193` measured the spread of these builds at
+     * 0.6 s on 20.9 s, which is far below the third-of-a-build effect being looked for, and four
+     * fill levels times two paths is already three minutes.
+     */
+    it('measures how the cost grows as the installation fills up (P-194)', async (t) => {
+      // Off by default: three minutes, and the answer only changes when the write path does.
+      if (process.env['MS_BENCH_FILL'] !== '1') {
+        t.skip('set MS_BENCH_FILL=1 to run the fill-level sweep');
+        return;
+      }
+
+      /** Trees of 5,000 already in the database before the measured build starts. */
+      const FILLS = [0, 1, 2, 4];
+
+      const measure = async (
+        trees: number,
+        run: (base: string, rootId: number) => Promise<number>,
+      ): Promise<number> => {
+        const f = await fixture();
+        try {
+          // Filled through the bulk path because it is ten times faster and `P-19` asserts the
+          // rows it writes are the rows the serial path writes — the fill is state, not a
+          // measurement, and how it got there must not matter.
+          for (let tree = 0; tree < trees; tree += 1) {
+            await bulkBuild(f.base, f.rootId, `fill${String(tree)}`);
+          }
+          return await run(f.base, f.rootId);
+        } finally {
+          await f.close();
+        }
+      };
+
+      process.stdout.write(
+        '\n    measured (P-194), the same 5,000-object build into a database already holding,\n' +
+          '    ascending then descending so warm-up and fill can be told apart:\n' +
+          `      ${'already there'.padEnd(16)}${'bulk up'.padStart(9)}${'bulk down'.padStart(11)}` +
+          `${'serial up'.padStart(11)}${'serial down'.padStart(13)}\n`,
+      );
+
+      // Every point twice, once on the way up and once on the way down. Warm-up is monotonic in
+      // *time*; a fill effect is monotonic in *fill*. Measuring each fill at two very different
+      // points in the run is what separates them — the first attempt at this swept upwards only,
+      // and produced a curve that went the wrong way because later is simply faster.
+      const up = new Map<number, { bulk: number; serial: number }>();
+      const down = new Map<number, { bulk: number; serial: number }>();
+
+      for (const [pass, into] of [
+        [FILLS, up],
+        [[...FILLS].reverse(), down],
+      ] as const) {
+        for (const trees of pass) {
+          const bulk = await measure(trees, (base, rootId) => bulkBuild(base, rootId));
+          const serial = await measure(trees, (base, rootId) => build(base, rootId, 1));
+          into.set(trees, { bulk, serial });
+        }
+      }
+
+      const secs = (ms: number | undefined, width: number): string =>
+        `${((ms ?? 0) / 1_000).toFixed(1)} s`.padStart(width);
+
+      for (const trees of FILLS) {
+        process.stdout.write(
+          `      ${`${(trees * TARGET_OBJECTS).toLocaleString('en-GB')} objects`.padEnd(16)}` +
+            secs(up.get(trees)?.bulk, 9) +
+            secs(down.get(trees)?.bulk, 11) +
+            secs(up.get(trees)?.serial, 11) +
+            secs(down.get(trees)?.serial, 13) +
+            '\n',
+        );
+      }
+
+      process.stdout.write(
+        '      A fill effect is a trend down each column that both columns agree on.\n' +
+          '      Warm-up is "down" beating "up" at every fill, whatever the fill.\n',
       );
     });
   },
