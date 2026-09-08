@@ -145,6 +145,26 @@ subsystem with a queue, a pool or a connection adds a metric to one of them.
   measurement of anything, and four false failures on an ordinary run teach everyone to stop
   reading the output. Run `test:perf` on a quiet machine — stop `ms-server` first — and put
   the numbers in `docs/findings/`. CI runs the unit suites only (`P-21`).
+- **`test:perf` records the conditions it ran under, and they are the container's** — load per
+  CPU, delivered CPU for a fixed loop, and every other client on the shared PostgreSQL, printed
+  at the top of the run so they land in the findings file with the numbers (`P-192`). It warns
+  and never blocks. Read them: a host can starve the VM while the VM's own load average reads
+  near zero, and `ms-server` on the same database is the one competitor that certainly reaches
+  the suite.
+- **A default `test:perf` run does not measure three of the criteria — it measures scaled-down
+  proxies of them**, so that the suite can live in a coffee break. The full runs are what the
+  committed findings record, and the numbers below are what to set when re-taking one:
+
+  | Set | Default | The criterion |
+  | --- | --- | --- |
+  | `MS_BENCH_MINUTES=60` | 1.5 minutes | `P-15`'s sustained hour at 5,000 sensors |
+  | `MS_SOAK_MINUTES=60` | 1 minute | the reconnect soak's full hour |
+  | `MS_SOAK_FRACTION=1` | 5% of an hour | the replay soak at the v1 target |
+
+  Three more cases are skipped outright and print how to run them — `MS_BENCH_FILL=1` (tree
+  build against a filling database, `P-194`), `MS_BENCH_SWEEP=1` (pool sizes, how the default
+  was chosen), `MS_PING_SWEEP=1` (ICMP concurrency, with `MS_PING_TARGETS` and
+  `MS_PING_CONCURRENCY` to shape it). A green run with those skipped is not a claim about them.
 
 ## Things that have already been decided — don't relitigate without an ADR
 
