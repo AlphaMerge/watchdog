@@ -127,11 +127,7 @@ export interface AuthenticationOptions {
  * wants it — and it is a decision to take rather than a line to leave lying here implying it was
  * already taken.
  */
-export const ALWAYS_PUBLIC = [
-  '/api/v1/auth/login',
-  '/api/v1/auth/logout',
-  '/api/v1/auth/session',
-];
+export const ALWAYS_PUBLIC = ['/api/v1/auth/login', '/api/v1/auth/logout', '/api/v1/auth/session'];
 
 export function registerAuthentication(app: FastifyInstance, options: AuthenticationOptions): void {
   const publicPaths = new Set([...ALWAYS_PUBLIC, ...(options.publicPaths ?? [])]);

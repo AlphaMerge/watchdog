@@ -79,6 +79,32 @@ describe('build hygiene', () => {
 
     assert.deepEqual(problems, [], problems.join('\n  '));
   });
+
+  /**
+   * `P-192`: the root `test:perf` prints the conditions the budgets are measured under, because
+   * the findings files were recording the host's load while the tests ran in a container that
+   * disagreed with it by a factor of twenty.
+   *
+   * That only keeps working while the script is still invoked, and dropping it from the chain
+   * fails silently in the worst way available: the run still passes, the numbers still look like
+   * numbers, and the one line saying what they were measured against is gone.
+   */
+  it('takes the conditions before it measures anything', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const manifest = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+
+    const script = manifest.scripts?.['test:perf'];
+    assert.ok(script, 'the root package has no test:perf script');
+    assert.match(
+      script,
+      /scripts\/perf-conditions\.mjs/,
+      `the root test:perf no longer records the run's conditions: ${script}`,
+    );
+
+    await readFile(join(repoRoot, 'scripts', 'perf-conditions.mjs'), 'utf8');
+  });
 });
 
 /** Walks compiled output, reporting any `.js` with no matching `.ts` beside its source. */

@@ -4,7 +4,11 @@ is filed only so the numbers are not lost. Do not compare it to
 2026-09-07-perf-budgets-clean-run.txt as if the two were like for like, and
 do not adjust a budget on the strength of anything below.
 
-Conditions at the start of the run (2026-09-08):
+READ THE CORRECTION FURTHER DOWN BEFORE THE CONDITIONS: they were taken on the
+host, and the tests run in the Docker VM, which reported a twentieth of the
+host's load at the same moment.
+
+Conditions at the start of the run (2026-09-08), as recorded from the host:
   - foreign container `whatsbot-runner-fixed` at 30.60% CPU
   - load averages 19.78 / 20.24 / 20.38 on an 8-core host
   - CLAUDE.md asks for a quiet machine with `ms-server` stopped. It was
@@ -54,6 +58,33 @@ Side by side, this run vs. the clean 2026-09-07 run:
   spool disconnect          147   ms   vs 141   ms
   P-15 pass                 404    s   vs 508    s   (stack restarted mid-run)
   sizing pass, median         0.41 ms   vs   0.41 ms
+
+CORRECTION, added the same day (P-192). The conditions recorded above are the
+HOST's, and the tests do not run on the host. They run inside the Docker
+toolchain container, and at the moment this correction was written the two
+disagreed by a factor of twenty: macOS reported a load average of 25.50 while
+the VM the tests run in reported 1.29 across the same eight CPUs.
+
+So `whatsbot-runner-fixed at 30.60%` -- a third of one core out of eight, from
+inside the VM -- is not evidence of a contended test, and the load averages
+near 20 are not either. This file records a busy Mac. It does not establish
+that any of that busyness reached the measurement, which leaves the tree-build
+failure unexplained rather than explained by contention.
+
+One thing IS established, and narrowed. `ms-server` shares the VM and the
+PostgreSQL instance with the suite, so it is the one contender that certainly
+reaches it. Container start time puts it at 12:13:22 local, against a run
+window of 12:08:07 to 12:18:35 -- five minutes in. Working from the case
+durations in order, the tree build ran at roughly 12:10 and finished before
+`ms-server` came up; P-15, at 404 s, ran with it up for most of its length.
+The note above that the restart contaminates P-15 in particular is therefore
+right, and it does not extend to the tree build.
+
+Nothing here changes the conclusion: the run cannot distinguish noise from a
+regression, no budget moves, and a clean re-run is owed. What changes is why.
+It is not that the machine was too busy to measure -- it is that nobody
+recorded the conditions that govern the measurement. `P-192` makes
+`npm run test:perf` print them itself.
 
 Raw output follows.
 =============================================================================

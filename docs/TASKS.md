@@ -4022,6 +4022,102 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [ ] **P-193 — the serial tree build is drifting, and its test cannot tell** · M · P-19, P-192 ·
+      Three quiet runs: **25.2 s (2026-08-29), 26.0 s (2026-09-07), 27.9 s (2026-09-08)** against
+      an unmoved 30 s budget — margin 16% → 13% → **7%**. Monotonic, and the last of the three is
+      the only one whose quietness was recorded rather than asserted (`P-192`).
+
+      **The 2026-09-08 run isolates it.** That machine was quieter than 2026-09-07's and eleven of
+      thirteen cases came in faster — clone −13%, conditional GET −19%, history −10%, process
+      runner −8%. The two that rose were the serial build (+7%) and the eight-in-flight build
+      (+21%). The bulk path, same 5,000 objects in one request, *fell* 4%.
+
+      **That split is the lead.** Both variants that pay 5,000 HTTP requests and 5,000
+      transactions got slower; the one that pays a single request got faster. Whatever is drifting
+      is in the per-request path, not the inserts — consistent with `S-16`'s finding that the
+      remaining per-object write work is genuinely needed, and inconsistent with blaming the
+      writes. Nothing committed in between obviously explains it: `P-189` touched the probe
+      endpoint, which no object create goes near, and `P-191` shortened `ALWAYS_PUBLIC` from four
+      entries to three, which every request consults but in the wrong direction.
+
+      **First, make the trend measurable — the test cannot currently support the claim above.**
+      It does one serial build and one concurrent build and reports each as a single sample, so
+      its run-to-run variance has never been measured and a three-point trend of unreplicated
+      numbers is suggestive at best. `P-186` already established the shape for this on the
+      schedule sweep: take several samples, report the median and the range, assert on the median.
+      Do that here before drawing any conclusion from the three numbers above, and before anybody
+      goes regression-hunting on what may be noise.
+
+      **Then, and only then, the two real questions.** Whether the per-request path has genuinely
+      slowed and what did it; and whether a 7% margin is a budget worth keeping in this shape at
+      all, given `P-19` shipped a bulk path that does the same work with 92% spare and the serial
+      case exists to prove the criterion is met "without anyone having to be clever". Moving the
+      budget is not on the table until the first question is answered — a budget widened because a
+      test is noisy is a budget that means nothing.
+
+- [x] **P-192 — the perf suite records the wrong machine's conditions** · S · P-21, P-19 · The
+      budgets run inside the Docker toolchain container, and the only conditions anybody has ever
+      written down are the *host's*: a macOS load average and `docker stats` percentages, read by
+      hand and pasted into a findings file afterwards. Those are not the numbers that govern the
+      measurement. Measured 2026-09-08, at the same moment: the host reported load **25.50**, the
+      VM the tests actually run in reported **1.29** on 8 CPUs.
+
+      So `docs/findings/2026-09-08-perf-budgets-under-contention.txt` documents a busy machine
+      without establishing that the busyness ever reached the test, and cannot say what did. Its
+      one failure — the serial tree build, 30.7 s against a 30 s budget, 26.0 s on the quiet run
+      the day before — is left unexplained rather than explained.
+
+      **This is the third time somebody has re-derived the conditions after the fact.** `P-19`
+      did it on 2026-08-28 (four failures at 32-36 s, re-measured at 25.2 s with the stack
+      stopped). `P-21` did it for the case it could fix — 1,300 unit tests sharing the database —
+      and scoped the rest out in as many words: what contends is the suite, "not whatever else the
+      operator has open". This is that remainder, and it has now cost a run.
+
+      **The signal is available from inside the container and needs no Docker socket.** Verified:
+      `os.loadavg()` and `os.cpus().length` give the VM's own load, and `pg_stat_activity` on the
+      shared database, as the `monitoring` role, names the competitors —
+
+      | datname | application_name | state | n |
+      | --- | --- | --- | --- |
+      | monitoring | ms-core | idle | 2 |
+      | monitoring | ms-core | active | 1 |
+
+      — which is exactly the precondition `CLAUDE.md` states in prose ("stop `ms-server` first")
+      and nothing checks. It also catches the case prose cannot: a second developer, or a parallel
+      session, on the same database.
+
+      Print those at the top of `npm run test:perf`, so they land in the findings file with the
+      numbers instead of being reconstructed from memory beside them. **Warn, never block** — "run
+      it anyway" is a legitimate thing to want, and a gate that refuses is a gate people route
+      around.
+
+      Not a budget change. The serial tree build's margin is `P-19`'s business and `P-19` has
+      already answered it: the fix is the bulk path, which does the same 5,000 objects in 2.4 s
+      with 92% spare, and the serial case stays because the criterion should be met without anyone
+      having to be clever.
+
+      **P-192 outcome.** `scripts/perf-conditions.mjs`, first thing in the root `test:perf`, so
+      the conditions are in the run's own output rather than beside it in somebody's memory. It
+      prints the container's load average per CPU and, from `pg_stat_activity`, names every other
+      client backend on the shared PostgreSQL — cluster-wide rather than filtered to one database,
+      because the suite builds scratch databases and a backend on `monitoring` competes with them
+      for the same CPU, I/O and buffers.
+
+      **It warns and never blocks**, and all three branches are verified to exit 0: quiet, busy,
+      and no database reachable. A gate that refuses to measure is a gate people route around, and
+      "run it anyway" is a legitimate thing to want — the run it produces just needs to say so.
+
+      **The wiring is asserted, because dropping it fails in the worst way available**: the run
+      still passes, the numbers still look like numbers, and the one line saying what they were
+      measured against is silently gone. `build-hygiene` — which runs on every push — fails if the
+      root `test:perf` stops naming the script or the script stops existing. Mutations 2/2 redden
+      it.
+
+      **First use, the same day, found something.** `docs/findings/2026-09-08-perf-budgets-clean-run.txt`
+      is the first run whose quietness is recorded rather than asserted, and against it the serial
+      tree build reads 27.9 s where 2026-09-07 read 26.0 s — on a machine that was *quieter*, with
+      eleven of thirteen other cases faster. That is `P-193`.
+
 - [x] **P-191 — an authentication exemption for a route that does not exist** · S · U-17, P-187 ·
       `ALWAYS_PUBLIC` in `authentication.ts` listed `/api/v1/health`. There has never been such a
       route: the health endpoints are `/core-health`, `/probes/:id/health` and
