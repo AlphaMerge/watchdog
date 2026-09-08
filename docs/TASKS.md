@@ -4022,6 +4022,29 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [x] **P-191 — an authentication exemption for a route that does not exist** · S · U-17, P-187 ·
+      `ALWAYS_PUBLIC` in `authentication.ts` listed `/api/v1/health`. There has never been such a
+      route: the health endpoints are `/core-health`, `/probes/:id/health` and
+      `/notification-health`, all behind `READS`. The entry exempted nothing, which is why nothing
+      ever failed — **and a dead line in the list of paths that skip authentication reads, to the
+      next person, as evidence that an unauthenticated liveness endpoint exists.** Whether this
+      installation should have one is a real question, and a load balancer or a systemd unit
+      generally wants it; leaving the line here implied the decision had already been taken.
+
+      Removed, and the list is exported so a test can assert every entry is a route the server
+      actually registered. **This list fails silently in both directions** — an entry matching
+      nothing is invisible, and a missing entry is invisible until somebody cannot log in — which
+      is exactly the shape that deserves a guard rather than care. Mutation 1/1: putting the dead
+      entry back reddens it.
+
+      **Found by accident, and it had a second victim.** `scripts/dev-reset.sh` used that path as
+      its readiness probe, so `curl -sf` never succeeded, `break` never fired, and every reset sat
+      out the full sixty seconds looking like a slow migration — measured: `exit 22` against the
+      old path, `exit 0` against `/auth/session`, which is public and answers 200 to anybody.
+      Mine, from `P-187`, and it "worked" only because a minute is long enough for the core to
+      come up regardless. **A readiness probe that never succeeds is indistinguishable from one
+      that is merely patient**, which is why it survived four resets without being noticed.
+
 - [x] **P-188 — `soak.sh --teardown` will now delete the dev stack's working fixture** · S ·
       U-20 · The dev database's 5,000-sensor load *is* a soak tree: `provision.mjs` names its root
       `Soak`, finds an existing one and leaves it alone, and that is what the 5,047 sensors in

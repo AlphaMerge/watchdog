@@ -107,8 +107,12 @@ fi
 echo "==> starting ms-server, which will migrate and bootstrap"
 "${repo_root}/scripts/dev-services.sh" start >/dev/null
 
+# **`/auth/session`, because it exists.** This probed `/api/v1/health` for its first day, and
+# there is no such route — `curl -sf` never succeeded, `break` never fired, and every reset sat
+# out the full sixty seconds looking like a slow migration. `/auth/session` is public, answers
+# 200 to anybody, and a 200 from it means the API is serving.
 for _ in $(seq 1 60); do
-  if curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then break; fi
+  if curl -sf http://127.0.0.1:8080/api/v1/auth/session >/dev/null 2>&1; then break; fi
   sleep 1
 done
 

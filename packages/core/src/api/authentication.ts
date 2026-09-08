@@ -117,12 +117,20 @@ export interface AuthenticationOptions {
  * asks *whether this installation needs a login at all*, so guarding it behind a session makes
  * it answer only the callers who already know. A route's own `config: PUBLIC` does not reach
  * this hook — this list is the hook's, and the two have to agree.
+ *
+ * **Exported so a test can check every entry is a route that exists.** It carried
+ * `/api/v1/health` for months, and there has never been such a route — the health endpoints are
+ * `/core-health`, `/probes/:id/health` and `/notification-health`, all of them behind `READS`.
+ * It exempted nothing, which is why nothing noticed; what it did do was read, to anyone opening
+ * this file, as evidence that an unauthenticated liveness endpoint exists. Whether this
+ * installation should have one is a real question — a load balancer or a systemd unit generally
+ * wants it — and it is a decision to take rather than a line to leave lying here implying it was
+ * already taken.
  */
-const ALWAYS_PUBLIC = [
+export const ALWAYS_PUBLIC = [
   '/api/v1/auth/login',
   '/api/v1/auth/logout',
   '/api/v1/auth/session',
-  '/api/v1/health',
 ];
 
 export function registerAuthentication(app: FastifyInstance, options: AuthenticationOptions): void {

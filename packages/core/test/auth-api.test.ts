@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import * as OTPAuth from 'otpauth';
 import { ApiServer } from '../src/api/server.js';
+import { ALWAYS_PUBLIC } from '../src/api/authentication.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { LoginThrottle } from '../src/auth/throttle.js';
@@ -38,6 +39,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   let accounts: AccountService;
   let app: FastifyInstance;
   let guarded: FastifyInstance;
+  /** The servers behind those apps, for the one assertion that reads the route table. */
+  const built: ApiServer[] = [];
   let proxied: FastifyInstance;
 
   before(async () => {
@@ -85,6 +88,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         },
       });
       await server.build('9.9.9', harness.service);
+      built.push(server);
       return server.app;
     };
 
@@ -431,6 +435,21 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       assert.ok(token.length > 20);
       assert.equal(response.body.includes(token), false);
     });
+  });
+
+  it('exempts only paths that are actually routes', () => {
+    // **`ALWAYS_PUBLIC` carried `/api/v1/health` for months and there has never been such a
+    // route.** It exempted nothing, so nothing failed — and a dead entry in the list of paths
+    // that skip authentication reads, to the next person, as evidence that an unauthenticated
+    // liveness endpoint exists. The failure mode of this list is silence in both directions: an
+    // entry that matches nothing is invisible, and so is a missing entry until somebody cannot
+    // log in.
+    const server = built[0];
+    assert.ok(server !== undefined);
+    const registered = new Set(server.routes.map((route) => route.url));
+    for (const path of ALWAYS_PUBLIC) {
+      assert.ok(registered.has(path), `${path} is exempted from authentication and is not a route`);
+    }
   });
 
   /**
