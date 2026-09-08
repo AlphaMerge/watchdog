@@ -11,6 +11,12 @@ output below (`P-192`):
 
 -----------------------------------------------------------------------------
 THE ONE THING WORTH READING: the serial tree build is drifting.
+
+  ** WITHDRAWN THE SAME DAY. See the P-193 correction below before reading
+     this section: the drift is this test measuring two different things, and
+     the serial build's real figure is 20.9 s with 30% spare, not 27.9 s
+     with 7%. The section is left standing because the reasoning in it is
+     what the correction is correcting. **
 -----------------------------------------------------------------------------
 
   2026-08-29   25.2 s   16% spare     quietness asserted by hand
@@ -76,6 +82,46 @@ close is decided by whatever else the machine is doing, which is what `P-19`
 said in 2026-08-28 and what `P-192` now makes visible in the output.
 
 No budget has been moved.
+
+-----------------------------------------------------------------------------
+CORRECTION, same day (P-193). There is no per-request regression. The
+"drift" above is this test measuring two different things.
+-----------------------------------------------------------------------------
+
+All three variants ran in ONE scratch database, in declaration order, so:
+
+  bulk         built into an empty database
+  serial       built into a database already holding 5,000 objects
+  8 in flight  built into one holding 10,000
+
+Give each variant its own empty database and the serial build reads
+**20.9 s, samples [21.5, 20.8, 20.9], spread 0.6 s, 30% spare** -- against the
+27.9 s above. The eight-in-flight build reads 6.5 s against 8.5 s. Bulk reads
+2.2 s against 2.3 s, unchanged, because bulk always did start from empty.
+
+So the ~7 s was the bulk test's 5,000 rows, not the per-request path. The
+inference drawn above -- "both variants that pay 5,000 requests got slower, the
+one that pays one got faster, therefore the per-request path is drifting" --
+compared variants that differed in two ways and attributed it to one. It is
+withdrawn.
+
+Two further things follow.
+
+The spread across three samples is 0.6 s. These were never noisy measurements;
+the problem was a confound, and one that a median would not have found either.
+
+And 20.9 s is where `S-16` left this: the test's own footnote says "baseline
+after S-16 was 21.0 s". The erosion to 28.8 s that `P-19` recorded on
+2026-08-29 and attributed to Phase 3's per-object costs arrived in the same
+change that added the bulk case in front of the serial one. Some of that
+erosion is real -- `M-02`'s `sensor_runtime` row is genuinely written -- but
+the step from 21.0 s to 28.8 s is mostly P-19's test measuring a different
+starting state, not P-19's feature costing anything.
+
+What remains, and is worth knowing: a second 5,000-object tree built into an
+install that already holds 5,000 costs about a third more than the first. That
+is a scaling question about the per-request path, not a regression, and nobody
+has to answer it at 7% of budget any more -- the headroom is 30%.
 
 Raw output follows.
 =============================================================================

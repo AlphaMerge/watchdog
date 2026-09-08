@@ -4022,7 +4022,7 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
-- [ ] **P-193 — the serial tree build is drifting, and its test cannot tell** · M · P-19, P-192 ·
+- [x] **P-193 — the serial tree build was not drifting; its test was measuring two things** · M · P-19, P-192 ·
       Three quiet runs: **25.2 s (2026-08-29), 26.0 s (2026-09-07), 27.9 s (2026-09-08)** against
       an unmoved 30 s budget — margin 16% → 13% → **7%**. Monotonic, and the last of the three is
       the only one whose quietness was recorded rather than asserted (`P-192`).
@@ -4054,6 +4054,49 @@ because each is a decision rather than a defect:
       case exists to prove the criterion is met "without anyone having to be clever". Moving the
       budget is not on the table until the first question is answered — a budget widened because a
       test is noisy is a budget that means nothing.
+
+      **P-193 outcome, and the ticket's own premise was wrong.** There is no per-request
+      regression. All three variants ran in **one** scratch database in declaration order, so bulk
+      built into an empty one, serial into a database already holding bulk's 5,000 objects, and
+      the concurrent pass into 10,000. Give each its own empty database and the numbers are:
+
+      | | median | samples | spread | against the 30 s budget |
+      | --- | --- | --- | --- | --- |
+      | serial | **20.9 s** | 21.5, 20.8, 20.9 | 0.6 s | **30% spare** |
+      | 8 in flight | 6.5 s | 6.7, 6.5, 6.4 | 0.3 s | 78% spare |
+      | bulk | 2.2 s | 2.3, 2.2, 2.2 | 0.1 s | 93% spare |
+
+      Measured on a machine whose quietness the run recorded rather than asserted (`P-192`):
+      `docs/findings/2026-09-08-tree-build-was-two-measurements.txt`.
+
+      Against 27.9 s, 8.5 s and 2.3 s in the same morning's run. Bulk is unchanged because bulk
+      always did start from empty; the other two moved because they no longer carry a previous
+      test's rows. **The seven seconds were 5,000 rows, not the per-request path.**
+
+      **So the reasoning in `2026-09-08-perf-budgets-clean-run.txt` is withdrawn**, and the file
+      says so above the section rather than quietly losing it. "Both variants that pay 5,000
+      requests got slower, the one that pays one got faster, therefore the per-request path is
+      drifting" compared variants differing in two ways and blamed one of them. The caveat was
+      written down and then not applied.
+
+      **The sampling this ticket asked for was still worth adding, and it also proves the
+      opposite of what the ticket assumed.** The spread over three samples is 0.6 s. These were
+      never noisy measurements — a median would not have found this, and would have made a
+      confounded number look more trustworthy. The samples earn their 55 seconds by bounding the
+      variance, not by smoothing it.
+
+      **And it puts `P-19`'s erosion in a different light.** The footnote this test prints says
+      the baseline after `S-16` was 21.0 s; measured from empty it is 20.9 s. The step to 28.8 s
+      that `P-19` recorded on 2026-08-29 and read as Phase 3 eroding the margin arrived in the
+      same change that put the bulk case in front of the serial one. `M-02`'s `sensor_runtime`
+      row is genuinely written and genuinely costs something, but most of that step was the test
+      changing what it measured. **Nobody was clever enough to notice for ten days**, and the
+      thing that surfaced it was giving each sample a clean database — not any of the analysis
+      built on top of the confounded numbers, including two of mine today.
+
+      **What is actually left is a scaling question, not a regression.** A second 5,000-object
+      tree built into an installation that already holds 5,000 costs about a third more than the
+      first. That is worth knowing and it is not urgent: the headroom is 30%, not 7%.
 
 - [x] **P-192 — the perf suite records the wrong machine's conditions** · S · P-21, P-19 · The
       budgets run inside the Docker toolchain container, and the only conditions anybody has ever
