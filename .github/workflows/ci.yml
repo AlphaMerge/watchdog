@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run it on demand. `windows-install` is the only place H-06's MSI is ever installed, and
+  # wanting that answer is not the same as wanting a twelve-minute run on every push.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

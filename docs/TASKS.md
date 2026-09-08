@@ -4055,9 +4055,10 @@ because each is a decision rather than a defect:
       machine for as long as the file existed and failed on every run of the only environment
       that disagreed.
 
-      **What this unblocks is `H-06`.** CI is disabled deliberately and stays that way until the
-      operator says otherwise, but the reason it was red is now fixed, and the `windows-install`
-      job it gates is the half of `H-06` that has never run: install the MSI with `msiexec /qn`,
+      **What this unblocks is `H-06`.** On the operator's instruction the workflow is enabled
+      again and now carries `workflow_dispatch`, so it can be run on demand rather than only on a
+      push — wanting the Windows answer is not the same as wanting a twelve-minute run every
+      time. The `windows-install` job it gates is the half of `H-06` that has never run: install the MSI with `msiexec /qn`,
       assert both services registered, both firewall rules exist, an upgrade keeps an edited
       configuration, and an uninstall leaves ProgramData alone.
 
