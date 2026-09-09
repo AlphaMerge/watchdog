@@ -674,3 +674,22 @@ export interface DeviceTemplateProblem {
   source: string;
   problems: string[];
 }
+
+/** A map, as `GET /maps` and `GET /maps/:id` return it (`G-01`). */
+export interface MapSummary {
+  id: number;
+  name: string;
+  description: string;
+  priority: number;
+  /** The canvas document. Read with `readCanvas` — it is `jsonb` and only the core validates it. */
+  layout: Record<string, unknown>;
+  /**
+   * What `If-Match` has to carry on the next save.
+   *
+   * A designer is a thing two people open at once, and the core refuses a `PATCH` without it
+   * rather than letting the second save quietly discard the first (`G-01`).
+   */
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}

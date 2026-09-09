@@ -12,6 +12,7 @@ const NAV = [
   { to: '/discovery', label: 'Discovery', end: false },
   { to: '/templates', label: 'Templates', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
+  { to: '/maps', label: 'Maps', end: false },
 ];
 
 /**

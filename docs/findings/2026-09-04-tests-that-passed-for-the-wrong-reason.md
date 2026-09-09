@@ -831,6 +831,34 @@ mechanism substitutes for counting the distinct values in the fixture.
 It is also the second entry in a row found by a mutation surviving rather than by a test failing,
 which is the case for running them on new tests and not only on new code.
 
+### 40. One undo step, asserted by an end state that both worlds share (`G-03`, found by the mutation surviving — a third time)
+
+The designer's drag has to record **one** undo entry for a whole gesture: a pointer move produces
+a `draft` that changes the canvas without touching the history, and `record` at the end pushes a
+single entry for the whole drag. Fifty entries for one drag is not undo, it is a replay.
+
+The component test dragged a tile across four cells, pressed Ctrl+Z once, and asserted the tile was
+back where it started. It passes when every pointer move commits its own entry — because the entry
+pushed when the drag *ends* is the origin either way. The correct code has a stack of one whose
+single entry is home; the mutant has a stack of five whose *last* entry is also home. One undo
+returns the tile in both, and the difference only appears on the second one.
+
+The fix is one line: after the undo, assert there is nothing left to undo (the Undo button is
+disabled). That statement is false in the mutant and true in the original, which is what the case
+was always trying to say.
+
+**The shape, and it is not the same as entries 38 and 39.** Those were fixtures made of one thing
+repeated. This is an assertion about an *end state* that is reachable by both the right and the
+wrong path — the wrong path takes four extra steps to get there and the test only looks at where it
+arrived. Stated so it is checkable: **when the property under test is "how many", asserting the
+value after one step is not asserting it. Assert the count, or assert that the next step does
+nothing.**
+
+The undo stack was tested properly one level down — `canvas-model.test.ts` asserts `line.past` has
+exactly one entry after a simulated drag — and that test kills a mutation of `record`. What it
+cannot see is the component wiring `draft` where it should, which is the one thing the component
+test existed to cover.
+
 ## What actually found them
 
 

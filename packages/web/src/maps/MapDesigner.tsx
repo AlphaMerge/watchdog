@@ -1,0 +1,442 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '../api/client';
+import { ErrorPanel } from '../components/Panels';
+import { ObjectPicker } from './ObjectPicker';
+import {
+  CELL,
+  COLUMNS,
+  KIND_LABELS,
+  ROWS,
+  WIDGET_KINDS,
+  addTile,
+  canRedo,
+  canUndo,
+  canvasCommand,
+  change,
+  describeBox,
+  draft,
+  firstFreeBox,
+  gestureBox,
+  keepSelection,
+  moveTile,
+  nextTileId,
+  placeTile,
+  record,
+  redo,
+  removeTile,
+  resizeTile,
+  sameCanvas,
+  timeline,
+  tileById,
+  undo,
+  type Box,
+  type Canvas,
+  type Gesture,
+  type Tile,
+  type WidgetKind,
+} from './canvas';
+
+/**
+ * The designer canvas (`G-03`).
+ *
+ * **Every pointer gesture has a key, because 2.1.1 has no exception for canvases.** Drag, resize
+ * and delete are all reachable from the keyboard — Tab reaches a tile, arrows move it, Shift and
+ * an arrow resizes it, Delete removes it, Ctrl or Cmd with Z steps back. `U-11` found the tree
+ * claiming a keyboard interface it did not have; a designer that can only be driven with a mouse
+ * is the same failure with a bigger surface.
+ *
+ * **A tab stop per tile, deliberately, and against `U-11`'s own lesson.** The tree's 15,000 stops
+ * were on a *navigation* surface where Tab was a wrong turn; here every tile is a thing being
+ * edited, Tab is how a keyboard reaches the one it wants, and the ceiling is 200. A roving tab
+ * stop would need arrow keys to change the selection — and arrows are how a tile moves.
+ *
+ * **What the toolbar does, the keyboard does, and both go through `canvasCommand`.** One decision
+ * table rather than two, so an Undo button and Ctrl+Z cannot drift apart.
+ */
+
+export interface MapDesignerProps {
+  readonly initial: Canvas;
+  /** Saves, and answers with the version to send with the next one. Rejects with an `ApiError`. */
+  readonly save: (canvas: Canvas) => Promise<void>;
+  /** Read-only until somebody makes an edit that the core then refuses (see the note on `403`). */
+  readonly disabled?: boolean;
+}
+
+export function MapDesigner({
+  initial,
+  save,
+  disabled = false,
+}: MapDesignerProps): React.JSX.Element {
+  const [line, setLine] = useState(() => timeline(initial));
+  const [selected, setSelected] = useState<string | null>(null);
+  const [gesture, setGesture] = useState<Gesture | null>(null);
+  const [kind, setKind] = useState<WidgetKind>('status');
+  const [target, setTarget] = useState<{ id: number; name: string } | null>(null);
+  const [saved, setSaved] = useState<Canvas>(initial);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<ApiError | null>(null);
+  /**
+   * What the live region is saying.
+   *
+   * **Repeating the same sentence does not re-announce it**, and that is the right answer here:
+   * the message carries the position, so an identical one means the tile did not move — arrowing
+   * into the edge of the canvas, usually. Silence is what "nothing happened" sounds like.
+   */
+  const [said, setSaid] = useState('');
+
+  /** Where the drag has got to. Read on pointer-up, which is a frame ahead of the last render. */
+  const dragged = useRef<Box | null>(null);
+  const canvas = line.present;
+  const dirty = !sameCanvas(canvas, saved);
+
+  const announce = useCallback((text: string): void => {
+    setSaid(text);
+  }, []);
+
+  // The selection has to survive the canvas changing underneath it: undoing an addition leaves
+  // it naming a tile that is gone, and every toolbar button would then silently do nothing.
+  useEffect(() => {
+    setSelected((was) => keepSelection(canvas, was));
+  }, [canvas]);
+
+  const apply = useCallback(
+    (next: Canvas, say: string): void => {
+      setLine((was) => change(was, next));
+      announce(say);
+    },
+    [announce],
+  );
+
+  const nameOf = (tile: Tile): string =>
+    tile.title === '' ? `${KIND_LABELS[tile.kind]} of #${String(tile.objectId)}` : tile.title;
+
+  /* ------------------------------------------------------------ the toolbar */
+
+  const add = (): void => {
+    if (target === null) return;
+    const id = nextTileId(canvas);
+    const tile: Tile = {
+      id,
+      kind,
+      objectId: target.id,
+      title: target.name,
+      box: firstFreeBox(canvas),
+    };
+    const next = addTile(canvas, tile);
+    if (next === canvas) {
+      announce('This map is full — 200 widgets is the most the core will draw.');
+      return;
+    }
+    apply(next, `${target.name} added at ${describeBox(tile.box)}`);
+    setSelected(id);
+  };
+
+  const remove = (id: string): void => {
+    const tile = tileById(canvas, id);
+    apply(removeTile(canvas, id), `${tile === undefined ? 'Widget' : nameOf(tile)} removed`);
+  };
+
+  const stepBack = (): void => {
+    if (!canUndo(line)) return;
+    setLine(undo);
+    announce('Undone');
+  };
+
+  const stepForward = (): void => {
+    if (!canRedo(line)) return;
+    setLine(redo);
+    announce('Redone');
+  };
+
+  /* ------------------------------------------------------------- the keyboard */
+
+  const onKeyDown = (event: React.KeyboardEvent): void => {
+    const command = canvasCommand(event, selected !== null);
+    if (command.kind === 'none') return;
+    if (disabled && command.kind !== 'cancel') return;
+    event.preventDefault();
+
+    // Escape during a drag puts the tile back where it was picked up — the one gesture a pointer
+    // has no button for, and the reason a half-finished drag is not a trap.
+    if (command.kind === 'cancel') {
+      if (gesture !== null) {
+        setLine((was) => draft(was, gesture.before));
+        setGesture(null);
+        announce('Move abandoned');
+      }
+      return;
+    }
+    if (command.kind === 'undo') {
+      stepBack();
+      return;
+    }
+    if (command.kind === 'redo') {
+      stepForward();
+      return;
+    }
+    if (selected === null) return;
+    if (command.kind === 'delete') {
+      remove(selected);
+      return;
+    }
+
+    const next =
+      command.kind === 'move'
+        ? moveTile(canvas, selected, command.dx, command.dy)
+        : resizeTile(canvas, selected, command.dw, command.dh);
+    const tile = tileById(next, selected);
+    if (tile === undefined || next === canvas) return;
+    apply(next, `${nameOf(tile)} at ${describeBox(tile.box)}`);
+  };
+
+  /* -------------------------------------------------------------- the pointer */
+
+  const begin = (event: React.PointerEvent, tile: Tile, mode: 'move' | 'resize'): void => {
+    if (disabled || event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelected(tile.id);
+    setGesture({
+      id: tile.id,
+      mode,
+      origin: tile.box,
+      from: { x: event.clientX, y: event.clientY },
+      before: canvas,
+    });
+  };
+
+  const during = (event: React.PointerEvent): void => {
+    if (gesture === null) return;
+    const box = gestureBox(gesture, { x: event.clientX, y: event.clientY });
+    dragged.current = box;
+    setLine((was) => draft(was, placeTile(was.present, gesture.id, box)));
+  };
+
+  const end = (): void => {
+    if (gesture === null) return;
+    setLine((was) => record(was, gesture.before));
+    const tile = tileById(canvas, gesture.id);
+    // The box from the last pointer move rather than the one on screen: React has not
+    // necessarily re-rendered since, and announcing the previous cell is worse than not
+    // announcing at all.
+    const box = dragged.current ?? tile?.box ?? null;
+    if (tile !== undefined && box !== null) announce(`${nameOf(tile)} at ${describeBox(box)}`);
+    dragged.current = null;
+    setGesture(null);
+  };
+
+  /* ----------------------------------------------------------------- saving */
+
+  const onSave = (): void => {
+    setSaving(true);
+    setFailure(null);
+    const attempt = canvas;
+    save(attempt)
+      .then(() => {
+        setSaved(attempt);
+        announce('Saved');
+      })
+      .catch((error: unknown) => {
+        // **The canvas is not rolled back.** A refused save is the one moment somebody's
+        // afternoon is only in this tab; throwing it away to show a tidy error would be the
+        // exact loss `If-Match` exists to prevent.
+        setFailure(
+          error instanceof ApiError
+            ? error
+            : new ApiError(0, 'UNREACHABLE', 'the core is not reachable', undefined),
+        );
+      })
+      .finally(() => {
+        setSaving(false);
+      });
+  };
+
+  const selectedTile = tileById(canvas, selected);
+
+  const grid = useMemo(
+    () => ({
+      width: COLUMNS * CELL,
+      height: ROWS * CELL,
+      backgroundImage:
+        'linear-gradient(to right, var(--ms-border) 1px, transparent 1px),' +
+        'linear-gradient(to bottom, var(--ms-border) 1px, transparent 1px)',
+      backgroundSize: `${String(CELL)}px ${String(CELL)}px`,
+    }),
+    [],
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+        <label className="text-xs text-text-muted">
+          <span className="ms-label block">Widget</span>
+          <select
+            value={kind}
+            onChange={(event) => {
+              setKind(event.target.value as WidgetKind);
+            }}
+            className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+          >
+            {WIDGET_KINDS.map((one) => (
+              <option key={one} value={one}>
+                {KIND_LABELS[one]}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <ObjectPicker
+          kind={kind}
+          value={target}
+          onPick={(picked) => {
+            setTarget(picked);
+          }}
+        />
+
+        <button
+          type="button"
+          onClick={add}
+          disabled={target === null || disabled}
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+        >
+          Add widget
+        </button>
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={stepBack}
+            disabled={!canUndo(line)}
+            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={stepForward}
+            disabled={!canRedo(line)}
+            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Redo
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (selected !== null) remove(selected);
+            }}
+            disabled={selected === null || disabled}
+            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Remove
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={!dirty || saving || disabled}
+            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      {failure !== null && (
+        <div className="space-y-2">
+          <ErrorPanel error={failure} />
+          {failure.code === 'MAP_CHANGED' && (
+            <p className="text-sm text-text-muted">
+              Somebody else saved this map while it was open. Nothing here has been thrown away —
+              open the map again in another tab to see what changed before saving over it.
+            </p>
+          )}
+        </div>
+      )}
+
+      <p className="text-xs text-text-muted">
+        Tab reaches a widget. Arrow keys move it, Shift and an arrow resizes it, Delete removes it,
+        and Ctrl or Cmd with Z steps back.
+      </p>
+
+      <div className="overflow-x-auto border border-border">
+        <div
+          role="group"
+          aria-label="Map canvas"
+          onKeyDown={onKeyDown}
+          className="relative bg-bg"
+          style={grid}
+        >
+          {canvas.tiles.map((tile) => (
+            <button
+              key={tile.id}
+              type="button"
+              aria-pressed={tile.id === selected}
+              aria-label={`${nameOf(tile)}, ${KIND_LABELS[tile.kind]}, ${describeBox(tile.box)}`}
+              onFocus={() => {
+                setSelected(tile.id);
+              }}
+              onPointerDown={(event) => {
+                begin(event, tile, 'move');
+              }}
+              onPointerMove={during}
+              onPointerUp={end}
+              onPointerCancel={end}
+              className={`absolute overflow-hidden px-2 py-1 text-left ${
+                tile.id === selected
+                  ? 'border-2 border-accent bg-surface'
+                  : 'border border-control bg-surface'
+              }`}
+              style={{
+                left: tile.box.x * CELL,
+                top: tile.box.y * CELL,
+                width: tile.box.w * CELL,
+                height: tile.box.h * CELL,
+                touchAction: 'none',
+              }}
+            >
+              <span className="ms-label block truncate">{KIND_LABELS[tile.kind]}</span>
+              <span className="mt-0.5 block truncate text-sm text-text">{nameOf(tile)}</span>
+            </button>
+          ))}
+
+          {/*
+            A pointer affordance and nothing else — `aria-hidden`, no tab stop, no role. Resizing
+            has a keyboard path already (Shift and an arrow), and a focusable handle whose Enter
+            key does nothing is a control that lies about being one.
+          */}
+          {selectedTile !== undefined && !disabled && (
+            <div
+              aria-hidden="true"
+              onPointerDown={(event) => {
+                begin(event, selectedTile, 'resize');
+              }}
+              onPointerMove={during}
+              onPointerUp={end}
+              onPointerCancel={end}
+              className="absolute cursor-se-resize border border-accent bg-accent"
+              style={{
+                left: (selectedTile.box.x + selectedTile.box.w) * CELL - 10,
+                top: (selectedTile.box.y + selectedTile.box.h) * CELL - 10,
+                width: 10,
+                height: 10,
+                touchAction: 'none',
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      {/*
+        Every edit is announced here, because the canvas is the one view where the result of a
+        key press is a position rather than a piece of text — there is nothing for a screen
+        reader to read unless the position is said out loud.
+      */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {said}
+      </p>
+
+      <p className="text-xs text-text-muted">
+        {String(canvas.tiles.length)} widget{canvas.tiles.length === 1 ? '' : 's'}
+        {dirty ? ' · unsaved changes' : ' · saved'}
+      </p>
+    </div>
+  );
+}

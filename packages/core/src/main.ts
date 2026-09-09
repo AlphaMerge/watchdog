@@ -91,6 +91,8 @@ import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
 import { AccessService } from './auth/access.js';
+import { MapRepository } from './maps/repository.js';
+import { MapService } from './maps/service.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -822,6 +824,13 @@ async function serve(): Promise<void> {
   const mfa = new TotpService({ db, logger });
   const loginThrottle = new LoginThrottle({ db, logger });
 
+  // **The maps API, which `G-01` wrote and nothing mounted.** `ApiServer` takes the service as an
+  // option and simply does not register the routes without it — a build with no maps has no maps
+  // API, which is a different statement from having no maps. That was the right shape and the
+  // wrong wiring: until here, the only caller passing one was a test, so every route `G-01`
+  // shipped answered 404 in the service somebody actually runs.
+  const maps = new MapService({ db, repository: new MapRepository(), logger });
+
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
   // generated password, printed once where the operator installing this will see it, and flagged
@@ -903,6 +912,7 @@ async function serve(): Promise<void> {
       // sentence in a file rather than a constant nobody revisits.
       required: config.api.requireAuthentication,
     },
+    maps,
     triggers,
     templates,
     deliveryHealth,

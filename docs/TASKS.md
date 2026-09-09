@@ -12678,7 +12678,17 @@ the state machine and `U-` is the Phase 5 UI.
       both.
 
       **Landed 2026-09-09.** `widgets.ts` reads a `jsonb` layout into `Widget`s and `resolver.ts`
-      fills them: one object lookup, one access resolution, one history read for the whole canvas.
+      fills them: one object lookup and one access resolution for the whole canvas, whatever the
+      widget count.
+
+      **Correcting this row, written the same day.** It first said "one history read for the whole
+      canvas", and that is not true: `#data` calls `latestForSensor` once per table widget and runs
+      the sensor-list subtree query once per list widget, sequentially. The object lookup and the
+      access resolution are one pass and are the two the test counts; the per-widget reads are not,
+      and forty table widgets are roughly a hundred and twenty round trips. Found by `G-03` looking
+      for the route that would serve this, which is why that route is `G-10` and not part of the
+      designer — exposing an N+1 as an endpoint is a worse thing to ship than not having the
+      endpoint yet.
 
       **The audience is a choice at the call site, not an absent principal.** `MapAudience` is a
       discriminated union — `{ kind: 'viewer', viewer, holdsFull }` or `{ kind: 'public' }` — so
@@ -12716,9 +12726,76 @@ the state machine and `U-` is the Phase 5 UI.
       entry 38, four hours earlier, in a different subsystem: a fixture where every actor is the
       same actor. 15 tests; the full suite is green at 3,709.
 
-- [ ] **G-03 — The designer canvas** · L · G-02 · Drag, drop, resize, snap, undo. Keyboard-operable
+- [x] **G-03 — The designer canvas** · L · G-02 · Drag, drop, resize, snap, undo. Keyboard-operable
       throughout, per `U-11` — a designer that can only be used with a mouse fails the same WCAG
       criteria the tree did, and for the same reason.
+
+      **Landed 2026-09-09.** `maps/canvas.ts` is the geometry, the undo stack and the keyboard,
+      decided without a DOM; `MapDesigner.tsx` is the surface; `/maps` lists and creates and
+      `/maps/:id` opens one.
+
+      **The first thing this ticket found had nothing to do with the canvas: `G-01`'s routes were
+      never mounted.** `ApiServer` takes `maps` as an option and declines to register the routes
+      without one — the right shape, so that a build without maps has no maps API rather than an
+      empty one — and the only caller passing a service was a test. Every route `G-01` shipped
+      answered 404 in the binary anybody actually runs. One line in `main.ts`.
+
+      **Every pointer gesture has a key, because 2.1.1 has no exception for a canvas.** Tab reaches
+      a widget, arrows move it, Shift and an arrow resizes it, Delete removes it, Ctrl or Cmd with
+      Z steps back and Escape abandons a drag in progress. One decision table — `canvasCommand` —
+      serves both the keyboard and the toolbar, so Undo and Ctrl+Z cannot drift apart. Each edit is
+      announced in a live region: on a canvas the result of a key press is a *position*, and there
+      is nothing for a screen reader to read unless the position is said out loud.
+
+      **A tab stop per tile, which is `U-11`'s own lesson deliberately reversed.** The tree's
+      15,000 stops were on a navigation surface where Tab was a wrong turn; here every tile is a
+      thing being edited, the ceiling is 200, and a roving tab stop would need arrow keys to change
+      the selection — which is what moves a tile.
+
+      **A drag is one undo entry, not one per frame**, which is why `draft` (canvas only) and
+      `record` (one entry for the gesture) are separate calls; and a drag that ends where it began
+      records nothing, because an undo button that visibly does nothing reads as broken. The
+      dragged box is computed from the origin every frame rather than accumulated, so the rounding
+      happens once per drag instead of once per pointer move — the classic snapping drift, and
+      invisible to a test that moves the pointer once.
+
+      **Overlap is allowed, and refused in exactly one place.** A map is a picture: a label over a
+      background, a legend across a group box. What is refused is a *new* tile landing on top of
+      the last one, because that looks like the Add button did nothing.
+
+      **The object picker is a search, not a dropdown**, for the same reason the tree is virtual: a
+      `<select>` holding the first two hundred of 5,000 sensors is a control that quietly cannot
+      reach most of the estate.
+
+      **A refused save keeps the work.** `If-Match` carries the version; a `MAP_CHANGED` answer
+      leaves the canvas exactly as it is and says somebody else saved, because that is the one
+      moment an afternoon exists only in this tab.
+
+      Two things deliberately left: the API does not tell a client what right it holds on a map, so
+      the designer offers editing to everybody and surfaces the core's 403 if it comes — adding a
+      `right` to the map response is a `G-01` change and belongs with `G-06`'s sharing work; and
+      nothing here resolves widget data, which is `G-10`.
+
+      **`fit` was wrong and a test caught it**: it capped the width against the tile's own x, which
+      is right for a resize handle and wrong for a document that put the tile at column 999 — where
+      x is the thing that is broken. A tile written off-canvas came back 2 units wide.
+
+      **Mutations 8/8** — truncating the pointer distance, dropping the no-op guard on `record`,
+      swapping move and resize on Shift, putting the accelerators behind the selection check, the
+      old `fit`, a selection that survives its tile, an unbounded history, and recording every
+      pointer move. The last one **survived**: "one Ctrl+Z puts the tile back" is true whether the
+      drag recorded one step or five, because the entry pushed at the end of the drag is the origin
+      either way. Asserting that nothing is left to undo kills it — entry 40 of
+      `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`. 59 tests; the web
+      workspace went 357 to 416, and the backend suite is unchanged and green at 3,709 — this
+      ticket adds no backend logic beyond the one line in `main.ts`.
+
+      **Not verified in a browser.** The dev core requires authentication and reaching the designer
+      means logging in, which is a credential this session does not enter. The keyboard, the drag,
+      the undo stack and the save are covered by the 59 tests above, including a real `PointerEvent`
+      — jsdom ships none, so `fireEvent.pointerDown` builds a bare `Event`, every property the
+      handler reads arrives `undefined`, and the drag case silently exercised nothing until a
+      `MouseEvent` subclass was put in its place.
 
 - [ ] **G-04 — Live graphs on a map** · M · G-02, U-05 · The uPlot charts the sensor detail page
       already draws, at a size somebody chose, updating from the same WebSocket stream rather than
@@ -12776,6 +12853,23 @@ the state machine and `U-` is the Phase 5 UI.
 - [ ] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
       five-star maps surface in Home. Small, and last, because it is a presentation rule over
       whatever `G-01` decides a map is.
+
+- [ ] **G-10 — Serving a resolved map, in one pass for real** · M · G-02 · The route that hands a
+      client a map with its widgets filled in, and the batching that has to exist before it can be
+      one. `G-02`'s resolver is one pass for the two things it counts — the object lookup and the
+      access resolution — and an N+1 for the rest: `latestForSensor` runs per table widget (three
+      queries each, in its own transaction) and the subtree query runs per sensor-list widget, all
+      sequentially. At the 200-widget ceiling that is a single request costing several hundred
+      round trips, which is why the endpoint is here rather than in `G-03`.
+
+      Wants a `latestForSensors(ids)` on `HistoryService` — the store's `latestValues` already
+      takes many channel ids, and the awkward half is the lookback, which is a multiple of *each*
+      sensor's own interval — and one recursive query over every list widget's root at once. Both
+      are measurable: put the query count for a forty-widget map in `docs/findings/`, the way
+      `P-15` did for the scheduler, rather than asserting it got better.
+
+      `G-04`, `G-06` and `G-07` all need this route. `G-03` deliberately does not: a designer edits
+      the document and shows the tiles it holds, which needs no resolution at all.
 
 ## Backlog — v2 candidates
 
