@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
+import { coreHealth, probeHealth } from '@ms/sensors';
 
 /**
  * `tsc -b` is incremental and never deletes output for a source file that has gone away.
@@ -461,6 +462,84 @@ describe('the probe health protocol', () => {
       `the probe sends these and the core reads none of them — give each a channel in ` +
         `packages/sensors/src/types/probe-health.ts and map it in packages/core/src/health/` +
         `probe-health.ts, or delete it from the protocol:\n  ${unread.join('\n  ')}`,
+    );
+  });
+});
+
+/**
+ * The field-test runbook names channels; it must name ones that exist (`H-09`, `S-11`'s lesson).
+ *
+ * `docs/runbook-field-test.md` is the procedure for the Phase 10 exit criterion — a week of
+ * unattended running on hardware nobody has yet — and its whole reason for existing is that a
+ * test designed at the moment it is run is a test run badly. So it names channels, and says of
+ * each whether the channel carries a declared limit, because that decides whether a *state*
+ * trigger will ever see it or whether an operator has to write a threshold themselves.
+ *
+ * **Both halves of that are claims about code, in a document nothing was checking.** The table
+ * said all seven channels ship with declared limits; `probesDown` does not and never did, so a
+ * reader following the runbook would have set up delivery for an alarm that cannot fire — the
+ * exact failure the runbook exists to prevent, on the week nobody is watching. Renaming a channel
+ * would do it the other way round.
+ *
+ * This is `S-11`'s rule applied to a second document: when a document depends on a list, assert
+ * the list rather than trusting the person who wrote it down.
+ */
+describe('the field-test runbook', () => {
+  const SENSORS = new Map([
+    ['Core Health', coreHealth],
+    ['Probe Health', probeHealth],
+  ]);
+
+  /** `| \`key\` | Core Health | yes |` — the three columns this test can check. */
+  const ROW =
+    /^\|\s*`([a-zA-Z]+)`\s*\|\s*(Core Health|Probe Health)\s*\|\s*\*{0,2}(yes|no)\*{0,2}\s*\|/gm;
+
+  it('names channels that exist, on the sensor it says, with the limits it claims', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const runbook = await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8');
+
+    const rows = [...runbook.matchAll(ROW)].map(([, key, sensor, limit]) => ({
+      key: key ?? '',
+      sensor: sensor ?? '',
+      claimsLimit: limit === 'yes',
+    }));
+    // A regex that matched nothing would make every assertion below vacuous — the table is seven
+    // rows and the failure mode is somebody reformatting it, not emptying it.
+    assert.ok(rows.length >= 7, `parsed ${String(rows.length)} rows from the runbook's table`);
+
+    const wrong: string[] = [];
+    for (const row of rows) {
+      const type = SENSORS.get(row.sensor);
+      assert.ok(type, `no sensor type for "${row.sensor}"`);
+      const channel = type.channels({}).find((each) => each.key === row.key);
+      if (channel === undefined) {
+        wrong.push(`${row.key}: not a channel on ${row.sensor}`);
+        continue;
+      }
+      // A *bound*, not merely a `limits` object. The catalogue refuses a declaration with no
+      // bound, so this is belt and braces — but the claim the runbook makes is "a state trigger
+      // will see this", and only a bound makes that true.
+      const limits = channel.limits;
+      const hasLimit =
+        limits !== undefined &&
+        (limits.upperError !== undefined ||
+          limits.upperWarning !== undefined ||
+          limits.lowerWarning !== undefined ||
+          limits.lowerError !== undefined);
+      if (hasLimit !== row.claimsLimit) {
+        wrong.push(
+          `${row.key}: the runbook says "${row.claimsLimit ? 'yes' : 'no'}" and the channel ` +
+            `${hasLimit ? 'has' : 'has no'} declared limit`,
+        );
+      }
+    }
+
+    assert.deepEqual(
+      wrong,
+      [],
+      'docs/runbook-field-test.md describes channels that are not what it says they are. A ' +
+        "channel with no declared limit never moves its sensor's state, so a state trigger on " +
+        `it delivers nothing:\n  ${wrong.join('\n  ')}`,
     );
   });
 });

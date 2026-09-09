@@ -29,6 +29,14 @@ that gets run badly or not at all.
 **What this runbook adds is what those cannot reach**: Windows Server, real devices that answer
 in ways a simulator does not, and a week of unattended running.
 
+> **Say which build you are testing, and mean it.** This runbook was written when `main` was v1
+> plus `H-06`. It is not any more: flow monitoring (Phase 11) and maps (Phase 12) have landed on
+> the same branch, there is no v1 tag, and a build cut from `main` today carries a UDP listener
+> and a public share-link surface that the Phase 10 exit criterion never contemplated. Either cut
+> the release candidate from a commit you can name and field-test *that*, or accept the v2
+> subsystems into the test and read the extra section in step 3. Field-testing "whatever `main`
+> was that morning" is how a week produces a result nobody can attribute.
+
 ---
 
 ## Before you start
@@ -89,20 +97,61 @@ have**, which is exactly why it is step 2 and not an afterthought.
 ## 3. Set the alarms that make "without intervention" observable
 
 The point of a week unattended is that nothing needs doing — which you can only claim if
-something was watching. Set notification triggers on:
+something was watching.
 
-| Channel | Sensor | Why |
-| --- | --- | --- |
-| `evictedChunks` | Core Health | above zero means data was dropped early to stay on disk |
-| `spoolStalled` | Probe Health | the link is up and results are not moving (`P-27`) |
-| `spoolDropped` | Probe Health | results lost because the spool filled |
-| `alarmOverdue` | Core Health | the alarm sweep stopped; everything downstream is stale |
-| `notifyOldest` | Core Health | notifications queued and undelivered |
-| `probesDown` | Core Health | a probe is not connected |
-| `sessionOverflows` | Probe Health | SNMP or SSH sessions opened past the pool bound (`P-36`) — sustained, this is a probe heading for `EMFILE`, and a week is long enough to get there |
+**There are two kinds of trigger and the difference decides how many you create.** A *state*
+trigger is attached to a sensor and fires when that sensor enters a state; a *threshold* trigger
+is attached to a channel and carries its own value, without changing the sensor's state (`M-04`).
+A channel with a declared limit already moves its sensor's state, so a state trigger picks it up;
+a channel without one never will, whatever it reads.
 
-These all ship with declared limits (`S-18`), so the thresholds are already right; what you are
-adding is delivery.
+| Channel | Sensor | Declared limit? | Why it matters |
+| --- | --- | --- | --- |
+| `evictedChunks` | Core Health | yes | above zero means data was dropped early to stay on disk |
+| `spoolStalled` | Probe Health | yes | the link is up and results are not moving (`P-27`) |
+| `spoolDropped` | Probe Health | yes | results lost because the spool filled |
+| `alarmOverdue` | Core Health | yes | the alarm sweep stopped; everything downstream is stale |
+| `notifyOldest` | Core Health | yes | notifications queued and undelivered |
+| `sessionOverflows` | Probe Health | yes | SNMP or SSH sessions opened past the pool bound (`P-36`) — sustained, this is a probe heading for `EMFILE`, and a week is long enough to get there |
+| `probesDown` | Core Health | **no** | a probe is not connected |
+
+**So six of the seven need no threshold at all.** Their limits ship declared (`S-18`), which means
+Core Health and Probe Health already go Down or Warning on their own; one *state* trigger on each
+of those two sensors — Down and Warning, with a template that names the channel — delivers all six.
+What you are adding is delivery, not thresholds.
+
+**`probesDown` is the exception, and it is deliberate.** It carries no limit because a probe that
+is gone already alarms on its own Probe Health sensor, through the `ms.probe.link` lookup: that
+sensor goes Down, and a second alarm here for the same outage is what `CLAUDE.md` forbids. So the
+row above is the installation-wide *number* an operator reads, not a second alarm — and a state
+trigger on each probe's own health sensor is what tells you. If you want the aggregate anyway, it
+takes a threshold trigger with an explicit value, because nothing else will make it fire:
+
+```json
+{ "kind": "threshold", "settings": { "channelKey": "probesDown", "condition": "above", "value": 0 } }
+```
+
+`POST /api/v1/objects/<core-health-id>/triggers`. Take the same care with any channel you add to
+this list yourself: check `docs/sensor-reference.md` for whether it has a limit before assuming a
+state trigger will ever see it.
+
+### If the build carries flow monitoring (Phase 11)
+
+Adding a `flow.netflow` sensor starts the probe's collector, and five counters on Probe Health
+come with it: `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed` and `flowUndecodable`.
+**None of them has a declared limit**, so none of them will ever move a sensor's state — they need
+threshold triggers or they are numbers nobody reads.
+
+`flowMissed` is the one to set, and it is the reason this section exists rather than a sentence.
+It counts what did *not* arrive, read out of the exporter's own running sequence, because UDP
+drops silently and there is no other evidence — without it, a collector losing a third of its
+flows to a saturated link looks exactly like a quiet network. A week of real traffic against a
+real exporter is the first thing this project has ever run that could show that, and a simulator
+never will.
+
+`flowUndecodable` is worth one too: NetFlow v9 and IPFIX records are undecodable until their
+template arrives, so a steady non-zero count is an exporter whose templates are not reaching us —
+which looks like silence and is not.
 
 **`sessionOverflows` matters more here than anywhere else**, and it is why it was worth adding
 before the field test rather than after. A hundred real devices with SNMP and SSH credentials is
@@ -112,12 +161,19 @@ past their bound rather than fail a check — the right trade, and one nothing c
 
 ## 4. Run for a week, and record
 
-Take a reading at the start, at 24 h, and at the end:
+Take a reading at the start, at 24 h, and at the end. **The API needs a token** — every route
+but the public map prefix does — so make one first, from a signed-in session, and keep it for the
+week:
 
 ```bash
-curl -s localhost:8080/api/v1/sensors/<core-health-id>/values
-curl -s localhost:8080/api/v1/sensors/<probe-health-id>/values
+# POST /api/v1/auth/tokens {"name":"field-test","scope":"read"} → { token, secret }
+export MS_TOKEN=<secret>          # shown once, at creation, and never readable again
+curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/sensors/<core-health-id>/values
+curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/sensors/<probe-health-id>/values
 ```
+
+A `read` scope is enough for everything in this section, and is what a token that lives on a
+laptop for a week should have.
 
 The numbers that decide the criterion:
 

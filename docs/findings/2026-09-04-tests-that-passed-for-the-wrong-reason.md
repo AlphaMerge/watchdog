@@ -924,6 +924,36 @@ stripping is load-bearing — the migrations explain at length why they *don't* 
 `add_compression_policy` — so it was mutation-tested from both sides: the name in a comment is not
 reported, the same name in SQL is.
 
+### 43. The guard for entry 42's failure mode, with entry 42's failure mode (`H-09`, found by mutating the side I had not thought to mutate)
+
+`docs/runbook-field-test.md` tells whoever runs the week-long field test which channels to alarm
+on, and says of each whether it carries a declared limit — which decides whether a *state* trigger
+will ever see it, or whether the operator has to write a threshold themselves. The table said all
+seven ship with declared limits. `probesDown` does not and never did, so anybody following the
+runbook would have set up delivery for an alarm that cannot fire, on the one week nobody is
+watching. Same shape as entry 42, one day later, in a second document: a claim about code, in
+prose, that nothing checked.
+
+So it got a test — the rule entry 42 produced, applied. The test parses the table and, for each
+row, asserts the channel exists on the sensor named and that the limit column matches the code.
+Three mutations from the document's side killed it: a wrong limit column, a channel that does not
+exist, a table reformatted past the regex. It was written, mutated, and believed.
+
+**Then the fourth mutation, from the code's side, did not kill it.** Removing the bound from
+`evictedChunks` left `limits: {}` behind, and the test asked `channel.limits !== undefined` — an
+object, not a bound. A channel that reads as configured and does nothing is precisely what the
+runbook's column is *for*, and the guard for it accepted one. The run went red anyway, on the
+generated-reference tests, which is how it nearly passed for the wrong reason twice: the suite
+said "2 failed" and neither was this.
+
+**The shape, and it is the one thing entry 42's rule does not say.** Asserting the list is not
+enough if the predicate is weaker than the claim. "Has a `limits` key" and "has a bound that will
+move a state" are different statements, and mutating the document only ever exercised the first
+half of the comparison — the half I wrote the test around. **Mutate from both sides of an
+equality: a test comparing A to B is two tests, and passing one of them is not passing the other.**
+
+The fix is four `!== undefined` checks and a comment saying why an object is not a bound.
+
 ## What actually found them
 
 
@@ -1071,7 +1101,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Forty-two now, and the thirty-three added later are the ones that settle the argument.** The first
+**Forty-three now, and the thirty-four added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

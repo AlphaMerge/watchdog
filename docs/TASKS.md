@@ -12388,6 +12388,23 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       triggers on (all of which have declared limits from `S-18`, so only delivery needs adding),
       what to record at start / 24 h / end, and what counts as a failure.
 
+      **The runbook was audited against the code on 2026-09-09, and it was wrong in three
+      places.** It said the seven channels in step 3 all ship with declared limits, so "what you
+      are adding is delivery" — `probesDown` carries none and never did, and a state trigger on a
+      channel with no limit delivers nothing, which is an alarm that cannot fire on the one week
+      nobody is watching. It gave a bare `curl` for the readings, which answers 401: every route
+      but the public map prefix needs a token. And it was written when `main` was v1 plus `H-06`,
+      which it no longer is — flow monitoring and maps have landed on the same branch, there is no
+      v1 tag, and a build cut today carries a UDP listener the Phase 10 criterion never
+      contemplated.
+
+      All three are fixed, and the falsifiable half is now a test: `build-hygiene.test.ts` parses
+      step 3's table and fails if a channel does not exist on the sensor named or if the limit
+      column disagrees with the code. Four mutations, all caught — though **the fourth one caught
+      the guard itself first**, which is catalogue entry 43: it asked whether a `limits` object
+      existed rather than whether a bound did, so a channel that reads as configured and does
+      nothing would have satisfied it.
+
       **Step 2 of that runbook is "restart everything, once, before you start counting", and it
       is there because of `P-28`.** A probe at the v1 target could never reconnect — the core sent
       a configuration too large for one message and the probe looped, 426 closures in three
