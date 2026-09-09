@@ -48,6 +48,25 @@ export interface MapBackground {
   readonly uploadedBy: string;
 }
 
+/**
+ * A share link, as anybody managing one sees it (`G-06`).
+ *
+ * **No token, and there cannot be one.** Only its hash is stored, so the URL is returned once at
+ * creation and is unrecoverable afterwards — which is the property that keeps a database backup
+ * from being a set of working share links.
+ */
+export interface MapShare {
+  readonly id: number;
+  readonly label: string;
+  /** The first few characters, so a list is readable. Never enough to use. */
+  readonly prefix: string;
+  readonly expiresAt: Date;
+  readonly lastUsedAt: Date | null;
+  readonly revokedAt: Date | null;
+  readonly createdAt: Date;
+  readonly createdBy: string;
+}
+
 export interface MapGrant {
   readonly groupId: number;
   readonly groupName: string;
@@ -336,4 +355,105 @@ export class MapRepository {
     );
     return rows.length > 0;
   }
+
+  /* --------------------------------------------------------------- shares */
+
+  async shares(q: Queryable, mapId: number): Promise<MapShare[]> {
+    const rows = await q.query<RawShare>(
+      `SELECT id::text AS id, label, prefix, expires_at, last_used_at, revoked_at,
+              created_at, created_by
+       FROM map_share WHERE map_id = $1 ORDER BY created_at DESC`,
+      [mapId],
+    );
+    return rows.map(toShare);
+  }
+
+  async createShare(
+    q: Queryable,
+    mapId: number,
+    share: {
+      label: string;
+      tokenHash: string;
+      prefix: string;
+      expiresAt: Date;
+      createdBy: string;
+    },
+  ): Promise<MapShare> {
+    const rows = await q.query<RawShare>(
+      `INSERT INTO map_share (map_id, label, token_hash, prefix, expires_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id::text AS id, label, prefix, expires_at, last_used_at, revoked_at,
+                 created_at, created_by`,
+      [mapId, share.label, share.tokenHash, share.prefix, share.expiresAt, share.createdBy],
+    );
+    const row = rows[0];
+    /* c8 ignore next -- an INSERT ... RETURNING either throws or returns its row */
+    if (row === undefined) throw new Error('the share link was not created');
+    return toShare(row);
+  }
+
+  async revokeShare(q: Queryable, mapId: number, shareId: number, by: string): Promise<boolean> {
+    const rows = await q.query<{ id: string }>(
+      `UPDATE map_share SET revoked_at = now(), revoked_by = $3
+       WHERE map_id = $1 AND id = $2 AND revoked_at IS NULL
+       RETURNING id::text AS id`,
+      [mapId, shareId, by],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * The map a live token opens, or nothing.
+   *
+   * **Expiry and revocation are in the `WHERE` clause**, not checked by the caller afterwards.
+   * A row that comes back is a link that works; there is no second step somebody can forget, and
+   * no window where a revoked token resolves because two queries disagreed.
+   */
+  async shareByToken(
+    q: Queryable,
+    tokenHash: string,
+  ): Promise<{ shareId: number; mapId: number; lastUsedAt: Date | null } | undefined> {
+    const rows = await q.query<{ id: string; map_id: string; last_used_at: Date | null }>(
+      `SELECT id::text AS id, map_id::text AS map_id, last_used_at
+       FROM map_share
+       WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()`,
+      [tokenHash],
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return { shareId: Number(row.id), mapId: Number(row.map_id), lastUsedAt: row.last_used_at };
+  }
+
+  /** At most one write a minute per link, whatever a wall display's polling interval is. */
+  async touchShare(q: Queryable, shareId: number): Promise<void> {
+    await q.query(
+      `UPDATE map_share SET last_used_at = now()
+       WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`,
+      [shareId],
+    );
+  }
+}
+
+interface RawShare {
+  id: string;
+  label: string;
+  prefix: string;
+  expires_at: Date;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+  created_by: string;
+}
+
+function toShare(row: RawShare): MapShare {
+  return {
+    id: Number(row.id),
+    label: row.label,
+    prefix: row.prefix,
+    expiresAt: row.expires_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+  };
 }

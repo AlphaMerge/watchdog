@@ -5,6 +5,7 @@ import type { MapSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { MapDesigner } from '../maps/MapDesigner';
+import { MapSharePanel } from '../maps/MapSharePanel';
 import { readCanvas, writeLayout, type Canvas } from '../maps/canvas';
 
 /**
@@ -59,8 +60,17 @@ function Designer({ map }: { readonly map: MapSummary }): React.JSX.Element {
   };
 
   return (
-    <Card title={map.description === '' ? 'Canvas' : map.description}>
-      <MapDesigner mapId={map.id} initial={readCanvas(map.layout)} save={save} />
-    </Card>
+    <>
+      <Card title={map.description === '' ? 'Canvas' : map.description}>
+        <MapDesigner mapId={map.id} initial={readCanvas(map.layout)} save={save} />
+      </Card>
+      {/*
+        Below the canvas, not in the toolbar: publishing a map to people with no account is a
+        decision somebody takes once, not a control they reach for while arranging widgets.
+      */}
+      <Card title="Sharing">
+        <MapSharePanel mapId={map.id} />
+      </Card>
+    </>
   );
 }

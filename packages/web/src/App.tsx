@@ -10,6 +10,7 @@ import { AddSensor } from './routes/AddSensor';
 import { LogsView } from './routes/LogsView';
 import { MapDesignView } from './routes/MapDesignView';
 import { MapView } from './routes/MapView';
+import { SharedMapView } from './routes/SharedMapView';
 import { MapsView } from './routes/MapsView';
 import { Overview } from './routes/Overview';
 import { PasswordView } from './routes/PasswordView';
@@ -29,6 +30,22 @@ import { SensorTypesView } from './routes/SensorTypesView';
  */
 export function App(): React.JSX.Element {
   const { session, askingToSignIn, refresh } = useSession();
+
+  /**
+   * **A shared map is rendered before any of the three stand-ins** (`G-06`).
+   *
+   * The whole point of a share link is that the person holding it has no account, so a page that
+   * waited for the session probe would show them a login form for a system they cannot log into.
+   * Read from `location` rather than through the router because the router is below this: the
+   * three gates replace the application, and this has to be decided before them.
+   */
+  if (window.location.pathname.startsWith('/shared/')) {
+    return (
+      <Routes>
+        <Route path="/shared/:token" element={<SharedMapView />} />
+      </Routes>
+    );
+  }
 
   if (session.kind === 'unknown') {
     // One request, and the page it is deciding between is a login form — a spinner in front of

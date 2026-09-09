@@ -85,6 +85,30 @@ together are a phishing kit, unless the sandbox is non-negotiable. It is.
 - No script in a custom widget can read live data. A widget that wants live data uses one of the
   built-in widget types, which is the intended path anyway.
 
+## Amendments, 2026-09-09 (`G-06`, on building it)
+
+Two things this decision said turned out to be slightly wrong in the letter, and both are recorded
+here rather than quietly diverged from.
+
+**"`GET /public/maps/:token` is the only unauthenticated route" — there are two, and the second one
+serves the map's background image.** `G-05` had not happened when this was written and a map could
+not have a background. Serving it needs the same token, resolves the same map, and returns bytes
+the map author put there; the alternative was a data URI inside the JSON, which would put two
+megabytes of base64 into every poll of a wall display. **The rule that survives is the one that
+matters**: the public surface is a *token-scoped namespace*, `/api/v1/public/`, and every route in
+it takes a share token and reaches nothing the token does not already open. That prefix is what
+the authentication hook exempts, so "what can a stranger reach?" is answered by reading one file.
+
+**The path is `/api/v1/public/maps/:token`, and the page a person is given is `/shared/:token`.**
+The API lives under the versioned prefix with everything else, because that is where the
+authentication hook can exempt exactly one namespace; the human-facing URL has to be a route the
+app shell serves, and the two cannot be the same string.
+
+**One thing this decision did not anticipate, decided the same way it would have been:** a shared
+map's *graph* widgets show their channels' current readings rather than a chart. Drawing history
+would mean an unauthenticated range query per graph tile, which is precisely the work the fourth
+consequence above asks to be bounded. A viewer who needs the history signs in.
+
 ## Decision 3 — Geographical maps are deferred, not designed here
 
 `G-08` needs map tiles, and every way of getting them argues with `CLAUDE.md`'s third hard

@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-134 routes.
+139 routes.
 
 ## Conventions
 
@@ -849,6 +849,50 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 
 **200** { map, widgets, connectors, problems }
 
+### `GET /api/v1/maps/{id}/shares`
+
+The public share links on this map
+
+Needs full access: a share link is a grant to everybody, and `full` is the right that decides a map’s audience. The tokens themselves are not here and cannot be — only their hashes are stored, so a URL is shown once when it is made.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { items }
+
+### `POST /api/v1/maps/{id}/shares`
+
+Make a public share link
+
+Answers with the URL’s token **once**. Only its hash is stored, so it cannot be shown again — which is what keeps a database backup from being a set of working share links. An expiry is required (`ADR-002`): a link without one is a permanent unauthenticated route nobody remembers creating.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `label` | string | **required** |
+| `expiresAt` | string | **required** |
+
+**201** { share, token }
+
+### `DELETE /api/v1/maps/{id}/shares/{shareId}`
+
+Revoke a share link
+
+The link stops working immediately. The row stays, revoked, so the record of what existed outlives the decision to stop it.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `shareId` | path | string | **required** |
+
+**204**
+
 ### `GET /api/v1/maps/{id}/background`
 
 The background image behind a map
@@ -926,6 +970,30 @@ Take a group’s access away
 | `groupId` | path | string | **required** |
 
 **204**
+
+### `GET /api/v1/public/maps/{token}`
+
+A shared map, with no session at all
+
+The map a share token opens, with every widget resolved. Expired, revoked and never-existed tokens all answer 404 in the same words: telling them apart would say which guesses were once real links. Rate limited per address and per token.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `token` | path | string | **required** |
+
+**200** { name, description, widgets, connectors, problems, hasBackground }
+
+### `GET /api/v1/public/maps/{token}/background`
+
+The background image behind a shared map
+
+The same bytes and the same ETag as the authenticated route serves.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `token` | path | string | **required** |
+
+**200**
 
 ## meta
 

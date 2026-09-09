@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useApi } from '../api/client';
 import { useStateStream } from '../api/stream';
 import type { LiveState, StateStreamOptions } from '../api/stream';
 import type {
   HistorySeries,
+  ResolvedConnector,
   ResolvedMap,
   ResolvedWidget,
   ResolvedWidgetData,
@@ -16,7 +17,9 @@ import type { ChartSeries } from '../charts/time-series-model';
 import { formatValue } from '../routes/detail/model';
 import { CELL, COLUMNS, ROWS, connectorLine, rangeLabel } from './canvas';
 import { historyPathFor } from './graph';
+import { useClock } from './clock';
 import { MapBackgroundImage } from './MapBackgroundImage';
+import { backgroundUrl } from './background';
 
 /**
  * A map as it is looked at, rather than as it is edited (`G-04`).
@@ -52,6 +55,43 @@ export function MapBoard({
   const tick = useClock(REFRESH_MS);
 
   return (
+    <MapCanvas
+      view={view}
+      states={states}
+      tick={tick}
+      graphs="chart"
+      backgroundSrc={backgroundUrl(view.map.id)}
+    />
+  );
+}
+
+/**
+ * The drawing half, with nothing in it that needs a session (`G-06`).
+ *
+ * **Split out so the public page is the same canvas.** A shared map that rendered through a second
+ * component would drift from this one the first time a widget kind was added, and the two would
+ * disagree about what a map looks like — which is the one thing the person who made the link
+ * cannot check.
+ *
+ * What the wrappers differ in is what they can *reach*: the authenticated board opens a state
+ * stream and lets a graph fetch its history; `G-06`'s public page has neither, so it passes no
+ * states and asks for the current readings instead of a chart.
+ */
+export function MapCanvas({
+  view,
+  states,
+  tick,
+  graphs,
+  backgroundSrc,
+}: {
+  readonly view: { widgets: ResolvedWidget[]; connectors: ResolvedConnector[] };
+  readonly states: ReadonlyMap<number, LiveState>;
+  readonly tick: number;
+  /** `values` is what a tile can draw with no access to the history route. */
+  readonly graphs: 'chart' | 'values';
+  readonly backgroundSrc: string | null;
+}): React.JSX.Element {
+  return (
     <div className="overflow-x-auto border border-border">
       <div
         className="relative bg-bg"
@@ -59,7 +99,7 @@ export function MapBoard({
         aria-label="Map"
         role="group"
       >
-        <MapBackgroundImage mapId={view.map.id} />
+        {backgroundSrc !== null && <MapBackgroundImage src={backgroundSrc} />}
 
         <Connectors view={view} />
 
@@ -74,7 +114,7 @@ export function MapBoard({
               height: widget.box.h * CELL,
             }}
           >
-            <Tile widget={widget} states={states} tick={tick} />
+            <Tile widget={widget} states={states} tick={tick} graphs={graphs} />
           </div>
         ))}
       </div>
@@ -82,33 +122,16 @@ export function MapBoard({
   );
 }
 
-/**
- * A counter that steps on an interval.
- *
- * Deliberately not a timestamp: a value that changes on every render would restart every request
- * it feeds, and the point of this is that all of them move together, once a minute.
- */
-function useClock(everyMs: number): number {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const handle = setInterval(() => {
-      setTick((was) => was + 1);
-    }, everyMs);
-    return () => {
-      clearInterval(handle);
-    };
-  }, [everyMs]);
-  return tick;
-}
-
 function Tile({
   widget,
   states,
   tick,
+  graphs,
 }: {
   readonly widget: ResolvedWidget;
   readonly states: ReadonlyMap<number, LiveState>;
   readonly tick: number;
+  readonly graphs: 'chart' | 'values';
 }): React.JSX.Element {
   if (widget.state === 'invalid') {
     return (
@@ -139,7 +162,7 @@ function Tile({
     );
   }
 
-  return <Drawn widget={widget} data={widget.data} states={states} tick={tick} />;
+  return <Drawn widget={widget} data={widget.data} states={states} tick={tick} graphs={graphs} />;
 }
 
 function Drawn({
@@ -147,11 +170,13 @@ function Drawn({
   data,
   states,
   tick,
+  graphs,
 }: {
   readonly widget: ResolvedWidget;
   readonly data: ResolvedWidgetData;
   readonly states: ReadonlyMap<number, LiveState>;
   readonly tick: number;
+  readonly graphs: 'chart' | 'values';
 }): React.JSX.Element {
   const title = widget.title === '' ? data.name : widget.title;
 
@@ -199,6 +224,28 @@ function Drawn({
                 <td className="truncate pr-2 text-text-muted">{channel.name}</td>
                 <td className="text-right tabular-nums text-text">
                   {/* A gap is a dash, never a zero: the sensor recorded nothing. */}
+                  {channel.value === null ? '—' : formatValue(channel.value, channel.unit, null)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Frame>
+    );
+  }
+
+  if (graphs === 'values') {
+    // **A shared map shows the readings, not the history**, and the reason is `ADR-002`'s fourth
+    // consequence: a range query per graph tile is the one thing an unauthenticated caller could
+    // use to make the core work, and the resolver already carries the current values.
+    return (
+      <Frame title={`${title} · now`}>
+        <table className="w-full text-xs">
+          <tbody>
+            {data.channels.map((channel) => (
+              <tr key={channel.key}>
+                <td className="truncate pr-2 text-text-muted">{channel.name}</td>
+                <td className="text-right tabular-nums text-text">
                   {channel.value === null ? '—' : formatValue(channel.value, channel.unit, null)}
                 </td>
               </tr>
@@ -328,7 +375,11 @@ function GraphTile({
  * the visually-hidden list is what a screen reader actually reads — "Router to Switch". Rendering
  * only one of them would mean either a picture nobody can read or a list nobody can see.
  */
-function Connectors({ view }: { readonly view: ResolvedMap }): React.JSX.Element | null {
+function Connectors({
+  view,
+}: {
+  readonly view: { widgets: ResolvedWidget[]; connectors: ResolvedConnector[] };
+}): React.JSX.Element | null {
   if (view.connectors.length === 0) return null;
   const boxes = new Map(view.widgets.map((widget) => [widget.id, widget]));
   const named = (id: string): string => {

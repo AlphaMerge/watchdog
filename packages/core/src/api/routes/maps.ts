@@ -3,7 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { AccessRight } from '../../auth/access.js';
-import type { MapLayout, MapRow } from '../../maps/repository.js';
+import type { MapLayout, MapRow, MapShare } from '../../maps/repository.js';
 import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
 import { MapError } from '../../maps/errors.js';
@@ -93,6 +93,32 @@ const backgroundResponse = {
  */
 const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'];
 
+const shareResponse = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'id',
+    'label',
+    'prefix',
+    'expiresAt',
+    'lastUsedAt',
+    'revokedAt',
+    'createdAt',
+    'createdBy',
+  ],
+  properties: {
+    id: { type: 'integer' },
+    label: { type: 'string' },
+    /** Never enough to use — the token itself is stored only as a hash. */
+    prefix: { type: 'string' },
+    expiresAt: { type: 'string', format: 'date-time' },
+    lastUsedAt: { type: ['string', 'null'], format: 'date-time' },
+    revokedAt: { type: ['string', 'null'], format: 'date-time' },
+    createdAt: { type: 'string', format: 'date-time' },
+    createdBy: { type: 'string' },
+  },
+} as const;
+
 const mapBody = {
   type: 'object',
   additionalProperties: false,
@@ -104,6 +130,19 @@ const mapBody = {
     layout: { type: 'object', additionalProperties: true },
   },
 } as const;
+
+function serialiseShare(share: MapShare): Record<string, unknown> {
+  return {
+    id: share.id,
+    label: share.label,
+    prefix: share.prefix,
+    expiresAt: share.expiresAt.toISOString(),
+    lastUsedAt: share.lastUsedAt?.toISOString() ?? null,
+    revokedAt: share.revokedAt?.toISOString() ?? null,
+    createdAt: share.createdAt.toISOString(),
+    createdBy: share.createdBy,
+  };
+}
 
 function serialise(map: MapRow): Record<string, unknown> {
   return {
@@ -296,6 +335,104 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         request.principal?.login ?? '',
       );
       return serialise(updated);
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    '/maps/:id/shares',
+    {
+      config: READS,
+      schema: {
+        tags: ['maps'],
+        summary: 'The public share links on this map',
+        description:
+          'Needs full access: a share link is a grant to everybody, and `full` is the right ' +
+          'that decides a map’s audience. The tokens themselves are not here and cannot be — ' +
+          'only their hashes are stored, so a URL is shown once when it is made.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: shareResponse } },
+          },
+        },
+      },
+    },
+    async (request) => ({
+      items: (await maps.shares(viewerOf(request), Number(request.params.id))).map(serialiseShare),
+    }),
+  );
+
+  app.post<{ Params: { id: string }; Body: { label: string; expiresAt: string } }>(
+    '/maps/:id/shares',
+    {
+      config: READS,
+      schema: {
+        tags: ['maps'],
+        summary: 'Make a public share link',
+        description:
+          'Answers with the URL’s token **once**. Only its hash is stored, so it cannot be ' +
+          'shown again — which is what keeps a database backup from being a set of working ' +
+          'share links. An expiry is required (`ADR-002`): a link without one is a permanent ' +
+          'unauthenticated route nobody remembers creating.',
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['label', 'expiresAt'],
+          properties: {
+            label: { type: 'string', minLength: 1, maxLength: 100 },
+            expiresAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        response: {
+          201: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['share', 'token'],
+            properties: { share: shareResponse, token: { type: 'string' } },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const expiresAt = new Date(request.body.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        throw new MapError('MAP_INVALID', 'expiresAt must be a date', {
+          context: { phase: 'share' },
+        });
+      }
+      const made = await maps.createShare(
+        viewerOf(request),
+        Number(request.params.id),
+        { label: request.body.label, expiresAt },
+        request.principal?.login ?? '',
+      );
+      return reply.code(201).send({ share: serialiseShare(made.share), token: made.token });
+    },
+  );
+
+  app.delete<{ Params: { id: string; shareId: string } }>(
+    '/maps/:id/shares/:shareId',
+    {
+      config: READS,
+      schema: {
+        tags: ['maps'],
+        summary: 'Revoke a share link',
+        description:
+          'The link stops working immediately. The row stays, revoked, so the record of what ' +
+          'existed outlives the decision to stop it.',
+        response: { 204: { type: 'null' } },
+      },
+    },
+    async (request, reply) => {
+      await maps.revokeShare(
+        viewerOf(request),
+        Number(request.params.id),
+        Number(request.params.shareId),
+        request.principal?.login ?? '',
+      );
+      return reply.code(204).send();
     },
   );
 

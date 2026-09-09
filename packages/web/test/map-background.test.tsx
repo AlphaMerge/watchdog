@@ -114,7 +114,7 @@ describe('drawing one', () => {
   it('renders nothing at all once the request fails', () => {
     // Most maps have no background. Asking "is there one?" before asking for it would be two
     // requests on every map to save one 404 on the ones without.
-    const { container } = render(<MapBackgroundImage mapId={4} />);
+    const { container } = render(<MapBackgroundImage src={backgroundUrl(4)} />);
     const image = container.querySelector('img');
     expect(image).not.toBeNull();
     fireEvent.error(image as HTMLImageElement);
@@ -122,7 +122,7 @@ describe('drawing one', () => {
   });
 
   it('is decoration, so it announces nothing', () => {
-    const { container } = render(<MapBackgroundImage mapId={4} />);
+    const { container } = render(<MapBackgroundImage src={backgroundUrl(4)} />);
     const image = container.querySelector('img');
     expect(image?.getAttribute('alt')).toBe('');
     expect(image?.getAttribute('aria-hidden')).toBe('true');

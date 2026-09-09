@@ -762,3 +762,26 @@ export interface ResolvedMap {
   /** Widgets whose document could not be read at all, kept rather than dropped. */
   problems: { id: string; problem: string }[];
 }
+
+/** A public share link on a map (`G-06`). The token is not here and cannot be. */
+export interface MapShare {
+  id: number;
+  label: string;
+  /** The first characters of the token, so a list is readable. Never enough to use. */
+  prefix: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  createdBy: string;
+}
+
+/** What `GET /public/maps/:token` answers — no map id, no version, no access rules. */
+export interface SharedMap {
+  name: string;
+  description?: string;
+  widgets: ResolvedWidget[];
+  connectors: ResolvedConnector[];
+  problems: { id: string; problem: string }[];
+  hasBackground: boolean;
+}

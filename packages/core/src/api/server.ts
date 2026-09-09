@@ -38,6 +38,12 @@ import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
+import {
+  PUBLIC_MAP_PREFIX,
+  publicMapBackgroundRoute,
+  publicMapRoutes,
+} from './routes/public-maps.js';
+import { ShareRateLimit } from '../maps/shares.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { deviceTemplateRoutes } from './routes/device-templates.js';
@@ -218,6 +224,8 @@ export class ApiServer {
   readonly #lookups: LookupCatalogue;
   readonly #maps: MapService | undefined;
   readonly #mapResolver: MapResolver | undefined;
+  /** Per share link, because the global limiter already bounds per address (`G-06`). */
+  readonly #shareLimit = new ShareRateLimit();
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -410,6 +418,12 @@ export class ApiServer {
         tokens: this.#auth.tokens,
         logger: this.#logger,
         required: this.#auth.required,
+        // **The one unauthenticated namespace** (`G-06`, `ADR-002`). A prefix rather than an
+        // exact path because a share token lives in the URL; narrow enough that the whole public
+        // surface is one file and one prefix.
+        ...(this.#maps !== undefined && this.#mapResolver !== undefined
+          ? { publicPrefixes: [PUBLIC_MAP_PREFIX] }
+          : {}),
       });
       registerCsrfGuard(this.#app, {
         logger: this.#logger,
@@ -541,6 +555,21 @@ export class ApiServer {
           this.#exempting = 'a stored image, with no JSON to filter';
           mapBackgroundRoute(scope, { maps: this.#maps });
           this.#exempting = null;
+
+          // The public surface (`G-06`). Registered only when there is a resolver to fill the
+          // widgets in: a share link answering with an empty canvas is worse than one that does
+          // not exist.
+          if (this.#mapResolver !== undefined) {
+            const shared = {
+              maps: this.#maps,
+              resolver: this.#mapResolver,
+              limit: this.#shareLimit,
+            };
+            publicMapRoutes(scope, shared);
+            this.#exempting = 'a stored image, with no JSON to filter';
+            publicMapBackgroundRoute(scope, shared);
+            this.#exempting = null;
+          }
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { CELL, COLUMNS, ROWS } from './canvas';
-import { backgroundUrl } from './background';
 
 /**
  * The floor plan behind the widgets (`G-05`).
@@ -18,24 +17,27 @@ import { backgroundUrl } from './background';
  * announcing "floor plan" before forty tiles is noise in front of the content.
  */
 export function MapBackgroundImage({
-  mapId,
-  nonce = 0,
+  src,
 }: {
-  readonly mapId: number;
-  readonly nonce?: number;
+  /**
+   * Where the image is. Built by the caller because there are two of them: the authenticated
+   * route keyed by map id, and `G-06`'s public one keyed by a share token.
+   */
+  readonly src: string;
 }): React.JSX.Element | null {
   const [broken, setBroken] = useState(false);
 
-  // A new nonce means a new upload: whatever failed before is not what is there now.
+  // A new URL means a new upload, or a different map: whatever failed before is not what is
+  // there now.
   useEffect(() => {
     setBroken(false);
-  }, [nonce]);
+  }, [src]);
 
   if (broken) return null;
 
   return (
     <img
-      src={backgroundUrl(mapId, nonce)}
+      src={src}
       alt=""
       aria-hidden="true"
       onError={() => {

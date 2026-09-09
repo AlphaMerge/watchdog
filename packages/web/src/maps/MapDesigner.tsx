@@ -4,6 +4,7 @@ import { ErrorPanel } from '../components/Panels';
 import { ObjectPicker } from './ObjectPicker';
 import { MapBackgroundControl } from './MapBackgroundControl';
 import { MapBackgroundImage } from './MapBackgroundImage';
+import { backgroundUrl } from './background';
 import { ConnectorLayer } from './ConnectorLayer';
 import {
   CELL,
@@ -437,7 +438,9 @@ export function MapDesigner({
           className="relative bg-bg"
           style={grid}
         >
-          {mapId !== undefined && <MapBackgroundImage mapId={mapId} nonce={backgroundNonce} />}
+          {mapId !== undefined && (
+            <MapBackgroundImage src={backgroundUrl(mapId, backgroundNonce)} />
+          )}
 
           <ConnectorLayer canvas={canvas} />
 

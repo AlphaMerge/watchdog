@@ -428,10 +428,223 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       assert.equal(response.statusCode, 413);
     });
 
-    it('is the only route exempt from the response-schema rule', () => {
-      // The guard that would otherwise be quietly widened: `mapBackgroundRoute` is registered on
-      // its own so the exemption covers the one route that answers bytes, not the eight beside it.
-      assert.deepEqual(built.unfilteredRoutes, ['GET /api/v1/maps/:id/background']);
+    it('shares the response-schema exemption with nothing but the other image route', () => {
+      // **The guard that would otherwise be quietly widened.** Each byte-serving route is
+      // registered on its own so the exemption covers it and not the routes beside it — and this
+      // list is the only place that stays honest about how many there are. Two, both images.
+      assert.deepEqual(built.unfilteredRoutes, [
+        'GET /api/v1/maps/:id/background',
+        'GET /api/v1/public/maps/:token/background',
+      ]);
+    });
+  });
+
+  describe('public share links', () => {
+    const inDays = (days: number): string => new Date(Date.now() + days * 86_400_000).toISOString();
+
+    const makeShare = async (id: number, label: string, expiresAt = inDays(7), cookie = author) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(cookie),
+        payload: { label, expiresAt },
+      });
+
+    /** The whole point: no cookie, no header, nothing. */
+    const open = async (token: string) =>
+      app.inject({ method: 'GET', url: `/api/v1/public/maps/${token}` });
+
+    it('opens the map for somebody with no session at all', async () => {
+      const id = await makeMap('shared-publicly', [
+        { id: 'w1', kind: 'status', objectId: sensorId, title: 'The sensor' },
+      ]);
+      const made = await makeShare(id, 'NOC wall display');
+      assert.equal(made.statusCode, 201, made.body);
+      const token = made.json<{ token: string }>().token;
+
+      const response = await open(token);
+      assert.equal(response.statusCode, 200, response.body);
+      const body = response.json<{
+        name: string;
+        widgets: { state: string; data?: { name: string } }[];
+        hasBackground: boolean;
+      }>();
+      assert.equal(body.name, 'shared-publicly');
+      const drawn = body.widgets[0];
+      assert.ok(drawn);
+      assert.equal(drawn.state, 'ok');
+      assert.equal(drawn.data?.name, 'api-sensor');
+      assert.equal(body.hasBackground, false);
+    });
+
+    it('hands over the token once and never again', async () => {
+      // Only the hash is stored, so this is a property rather than a policy: there is nothing to
+      // show. It is also what keeps a database backup from being a set of working links.
+      const id = await makeMap('once-only', []);
+      const token = (await makeShare(id, 'once')).json<{ token: string }>().token;
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(author),
+      });
+      assert.equal(listed.statusCode, 200);
+      assert.equal(listed.body.includes(token), false, 'the token is not in the listing');
+      const items = listed.json<{ items: { label: string; prefix: string }[] }>().items;
+      const only = items[0];
+      assert.ok(only);
+      assert.equal(only.label, 'once');
+      assert.ok(token.startsWith(only.prefix), 'the prefix is only a prefix');
+    });
+
+    it('records that a link has been used, so somebody can decide about it', async () => {
+      // The question a person asks before revoking one is "is anything still using this?", and a
+      // list of links with no answer to it is a list nobody can act on.
+      const id = await makeMap('used-once', []);
+      const token = (await makeShare(id, 'watched')).json<{ token: string }>().token;
+
+      const before = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(author),
+      });
+      assert.equal(
+        before.json<{ items: { lastUsedAt: string | null }[] }>().items[0]?.lastUsedAt,
+        null,
+      );
+
+      assert.equal((await open(token)).statusCode, 200);
+
+      const after = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(author),
+      });
+      assert.notEqual(
+        after.json<{ items: { lastUsedAt: string | null }[] }>().items[0]?.lastUsedAt,
+        null,
+      );
+    });
+
+    it('stops working the moment it is revoked', async () => {
+      const id = await makeMap('revocable', []);
+      const token = (await makeShare(id, 'temporary')).json<{ token: string }>().token;
+      assert.equal((await open(token)).statusCode, 200);
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(author),
+      });
+      const shareId = listed.json<{ items: { id: number }[] }>().items[0]?.id ?? 0;
+      const revoked = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/maps/${String(id)}/shares/${String(shareId)}`,
+        headers: as(author),
+      });
+      assert.equal(revoked.statusCode, 204);
+      assert.equal((await open(token)).statusCode, 404);
+    });
+
+    it('refuses an expired link, in the same words as one that never existed', async () => {
+      // **Deliberately indistinguishable.** Telling "expired" from "never existed" tells a
+      // guesser which of their attempts was once a real link, which is the only useful signal
+      // this route could give them.
+      const id = await makeMap('expiring', []);
+      const token = (await makeShare(id, 'brief')).json<{ token: string }>().token;
+      await db.query(`UPDATE map_share SET expires_at = now() - interval '1 hour'`);
+
+      const expired = await open(token);
+      const invented = await open('this-token-was-never-issued-and-is-long-enough');
+      assert.equal(expired.statusCode, 404);
+      assert.equal(invented.statusCode, 404);
+      assert.equal(
+        expired.json<{ error: { message: string } }>().error.message,
+        invented.json<{ error: { message: string } }>().error.message,
+      );
+    });
+
+    it('refuses an expiry in the past, and one a lifetime away', async () => {
+      const id = await makeMap('bad-expiries', []);
+      const past = await makeShare(id, 'yesterday', inDays(-1));
+      assert.equal(past.statusCode, 400);
+      assert.match(past.json<{ error: { message: string } }>().error.message, /in the past/);
+
+      const forever = await makeShare(id, 'forever', inDays(400));
+      assert.equal(forever.statusCode, 400);
+      assert.match(forever.json<{ error: { message: string } }>().error.message, /at most a year/);
+    });
+
+    it('needs full access, not write', async () => {
+      // A share link is a grant to everybody, and `full` is the right that decides a map's
+      // audience. Somebody who may move a widget may not publish the map to the world.
+      const id = await makeMap('write-is-not-enough', []);
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/maps/${String(id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'write' },
+      });
+
+      const refused = await makeShare(id, 'not allowed', inDays(1), reader);
+      assert.equal(refused.statusCode, 403);
+      assert.equal(refused.json<{ error: { code: string } }>().error.code, 'MAP_FORBIDDEN');
+
+      const listing = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/shares`,
+        headers: as(reader),
+      });
+      assert.equal(listing.statusCode, 403);
+    });
+
+    it('serves the background behind a shared map, and nothing else', async () => {
+      const id = await makeMap('shared-with-a-plan', []);
+      const png = Buffer.alloc(24);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+      png.writeUInt32BE(13, 8);
+      png.write('IHDR', 12, 'latin1');
+      png.writeUInt32BE(300, 16);
+      png.writeUInt32BE(200, 20);
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: { ...as(author), 'content-type': 'image/png' },
+        payload: png,
+      });
+      const token = (await makeShare(id, 'with plan')).json<{ token: string }>().token;
+
+      assert.equal((await open(token)).json<{ hasBackground: boolean }>().hasBackground, true);
+      const image = await app.inject({
+        method: 'GET',
+        url: `/api/v1/public/maps/${token}/background`,
+      });
+      assert.equal(image.statusCode, 200);
+      assert.equal(image.headers['content-type'], 'image/png');
+      assert.equal(image.headers['content-security-policy'], "default-src 'none'");
+      assert.deepEqual(image.rawPayload, png);
+    });
+
+    it('bounds how much one link may ask for', async () => {
+      // `ADR-002`'s fourth consequence. The address is bounded globally; this is the bucket that
+      // notices a link posted somewhere public and hit from a thousand addresses.
+      const id = await makeMap('rate-limited', []);
+      const token = (await makeShare(id, 'busy')).json<{ token: string }>().token;
+
+      let refusedAt = 0;
+      for (let i = 1; i <= 70 && refusedAt === 0; i += 1) {
+        if ((await open(token)).statusCode !== 200) refusedAt = i;
+      }
+      assert.ok(refusedAt > 0, 'the limit is reached');
+      assert.ok(refusedAt <= 61, `refused at ${String(refusedAt)}, which is past the window`);
+    });
+
+    it('leaves every other route needing a session', async () => {
+      // The public prefix is a namespace, not a hole: nothing outside it became reachable.
+      const anonymous = await app.inject({ method: 'GET', url: '/api/v1/maps' });
+      assert.equal(anonymous.statusCode, 401);
+      const object = await app.inject({ method: 'GET', url: '/api/v1/objects/root' });
+      assert.equal(object.statusCode, 401);
     });
   });
 });

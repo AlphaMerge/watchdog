@@ -12921,7 +12921,7 @@ the state machine and `U-` is the Phase 5 UI.
       a colour or a dash pattern in the document is a thing every later renderer has to keep
       honouring.
 
-- [ ] **G-06 — Public share URLs** · M · G-02 · **Decided 2026-09-09: build it, token-gated —
+- [x] **G-06 — Public share URLs** · M · G-02 · **Decided 2026-09-09: build it, token-gated —
       `ADR-002` Decision 1.** A per-map bearer token, revocable, with a mandatory expiry, on one
       unauthenticated route that serves that map's widgets and nothing else: no object id, no tree
       walk, no drill-through, no object API. The blast radius of a leaked link is exactly what the
@@ -12936,6 +12936,69 @@ the state machine and `U-` is the Phase 5 UI.
       code: decide whether this exists at all, and if it does, whether the link is a bearer token
       with an expiry and a revocation list, whether it is per-map, and what it may show. Write it
       down as an ADR; `A-11` is the precedent for treating an access decision that way.
+
+      **Landed 2026-09-09.** `GET /api/v1/public/maps/:token` serves a map to somebody with no
+      session; `/shared/:token` is the page they open. Migration 046 stores the links, and the
+      whole public surface is one file — `api/routes/public-maps.ts` — under one path prefix.
+
+      **The token is stored as a SHA-256 and nowhere else**, the same as `api_token`. The
+      consequence is that the URL is shown once and can never be shown again, which is a property
+      rather than an inconvenience: a link that can be re-read from the system is a link that
+      leaks with a database backup. The sharing panel says so at the moment it shows the URL,
+      because somebody who loses it will otherwise hunt for a button that cannot exist.
+
+      **An expiry is required and bounded at both ends.** In the past is a link that never works,
+      which reads as a bug; past a year is the permanent unauthenticated route `ADR-002` refuses to
+      allow. `expires_at` is `NOT NULL` here where `api_token`'s is nullable, and that difference
+      is the decision: an API token at least belongs to an account somebody can be asked about.
+
+      **Expired, revoked and never-existed are one answer, in one wording.** Telling them apart
+      would tell a guesser which of their attempts was once a real link, which is the only useful
+      signal this route could give them. Revocation and expiry are in the `WHERE` clause rather
+      than checked afterwards, so a row that comes back *is* a link that works — no second step
+      anybody can forget, and no window where two queries disagree.
+
+      **Making, listing and revoking need `full`, not `write`.** `write` moves a widget; `full`
+      decides a map's audience, and a public link is the largest audience there is.
+
+      **Rate limited per link, and only per link.** The global limiter already bounds every
+      unauthenticated caller by address, so a second per-address bucket here would be a second
+      policy to keep in step with the first. What that limiter cannot see is the *link*: a URL
+      posted somewhere public is hit from a thousand addresses, each comfortably within its own
+      budget. The bucket map is bounded and evicts the oldest window, because the caller chooses
+      the keys — an unbounded map of counters is a memory leak with a remote control.
+
+      **Every method on `MapService` is either viewer-gated or token-gated.** Serving a shared
+      map's background could have taken a map id one query more cheaply; it takes the token
+      instead, because a `backgroundOfShared(mapId)` is a method that hands an operator's uploaded
+      image to anybody who can call it, and the invariant is worth more than the query.
+
+      **`ADR-002` has two amendments, written rather than diverged from.** There are two public
+      routes, not one — the second serves the map's background, which did not exist when the ADR
+      was written, and the alternative was two megabytes of base64 in every poll. And the paths
+      differ: the API is `/api/v1/public/maps/:token`, where the authentication hook can exempt
+      exactly one namespace, while the page a person is given is `/shared/:token`, which the app
+      shell has to serve. The rule that survives is the one that mattered: the public surface is a
+      token-scoped namespace, and reading one file answers "what can a stranger reach?".
+
+      **A shared map's graphs show current readings rather than history**, for the ADR's own fourth
+      reason: an unauthenticated range query per graph tile is exactly the work that has to be
+      bounded. The page shares the *same canvas component* as the signed-in board — a second
+      renderer would drift the first time a widget kind was added, and the person who made the link
+      is the one person who cannot see what a stranger sees.
+
+      **Mutations 8/8, and the ninth is a finding rather than a defect.** Killed: a revoked link
+      still opening, an expired one still opening, `write` being enough to publish, no ceiling on
+      the expiry, the token stored as itself, a rate limit that never refuses, an exemption
+      narrowed to an exact path, and `last_used_at` never written. The one that *survived* widened
+      the exemption to every path under `/api/` — and every route still answered 401, because
+      authentication and authorization are separate hooks and the second refuses an anonymous
+      caller on anything not marked `PUBLIC`. The path exemption cannot open a route on its own.
+      That is the defence in depth working, and it is worth knowing that a test asserting "still
+      needs a session" cannot see the difference.
+
+      7 unit tests for the token and the limiter, 10 API tests, 9 in the browser; the web workspace
+      goes 445 to 454 and the backend 3,748 to 3,765.
 
 - [ ] **G-07 — Custom HTML widgets** · M · G-02 · **Decided 2026-09-09: sandboxed iframe —
       `ADR-002` Decision 2.** `<iframe sandbox srcdoc>` with no `allow-same-origin` and a

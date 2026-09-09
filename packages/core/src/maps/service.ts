@@ -5,7 +5,15 @@ import type { AccountRole } from '../auth/accounts.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
 import { createHash } from 'node:crypto';
 import { readImage } from './images.js';
-import type { MapBackground, MapGrant, MapLayout, MapRepository, MapRow } from './repository.js';
+import { mintShareToken, shareTokenHash } from './shares.js';
+import type {
+  MapBackground,
+  MapGrant,
+  MapLayout,
+  MapRepository,
+  MapRow,
+  MapShare,
+} from './repository.js';
 
 /**
  * Everything about a map that decides something (`G-01`).
@@ -32,6 +40,9 @@ export interface MapServiceOptions {
 
 const MAX_NAME = 100;
 const MAX_DESCRIPTION = 1000;
+const MAX_SHARE_LABEL = 100;
+/** A year. Long enough for a wall display, short enough that somebody revisits the decision. */
+const MAX_SHARE_MS = 365 * 24 * 60 * 60 * 1000;
 
 export class MapService {
   readonly #db: Database;
@@ -228,6 +239,152 @@ export class MapService {
       await this.#repository.remove(tx, id);
       this.#logger.info({ mapId: id, actor }, 'map deleted');
     });
+  }
+
+  /* --------------------------------------------------------------- shares */
+
+  /**
+   * The share links on a map. **`full`, because a link is a grant to everybody.**
+   *
+   * The same right that decides who else may see the map decides who may publish it to people
+   * with no account at all — `write` moves a widget, `full` decides the audience, and a public
+   * link is the largest audience there is.
+   */
+  async shares(viewer: MapViewer, id: number): Promise<MapShare[]> {
+    return this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'full', tx);
+      return this.#repository.shares(tx, id);
+    });
+  }
+
+  /**
+   * Mints one, and returns the URL's secret **exactly once**.
+   *
+   * Only the hash is stored, so this return value is the only time the token exists anywhere this
+   * system can produce it. That is a property rather than an inconvenience: a link that can be
+   * re-read from the database is a link that leaks with a backup.
+   */
+  async createShare(
+    viewer: MapViewer,
+    id: number,
+    request: { label: string; expiresAt: Date },
+    actor: string,
+  ): Promise<{ share: MapShare; token: string }> {
+    const label = request.label.trim();
+    if (label === '' || label.length > MAX_SHARE_LABEL) {
+      throw new MapError('MAP_INVALID', 'a share link needs a label of 1 to 100 characters', {
+        context: { mapId: id, phase: 'share' },
+      });
+    }
+    // **Both ends bounded.** In the past it is a link that never works, which reads as a bug; too
+    // far ahead it is the permanent unauthenticated route `ADR-002` refuses to allow.
+    const now = new Date();
+    if (request.expiresAt <= now) {
+      throw new MapError('MAP_INVALID', 'a share link cannot expire in the past', {
+        context: { mapId: id, phase: 'share' },
+      });
+    }
+    if (request.expiresAt.getTime() - now.getTime() > MAX_SHARE_MS) {
+      throw new MapError('MAP_INVALID', 'a share link may last at most a year', {
+        context: { mapId: id, phase: 'share' },
+      });
+    }
+
+    const minted = mintShareToken();
+    return this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'full', tx);
+      // Checked rather than caught, the same way `create` checks a map name: a unique violation
+      // inside a transaction aborts it, and every statement after that fails for the wrong reason.
+      const clash = await tx.query<{ id: string }>(
+        `SELECT id FROM map_share
+         WHERE map_id = $1 AND lower(label) = lower($2) AND revoked_at IS NULL`,
+        [id, label],
+      );
+      if (clash.length > 0) {
+        throw new MapError('MAP_NAME_TAKEN', `this map already has a link called ${label}`, {
+          context: { mapId: id, phase: 'share' },
+        });
+      }
+
+      const share = await this.#repository.createShare(tx, id, {
+        label,
+        tokenHash: minted.tokenHash,
+        prefix: minted.prefix,
+        expiresAt: request.expiresAt,
+        createdBy: actor,
+      });
+      // The label and the expiry, never the token: a share link in the journal is a share link in
+      // whatever ships the journal somewhere else.
+      this.#logger.info(
+        { mapId: id, actor, label, expiresAt: request.expiresAt.toISOString() },
+        'map share link created',
+      );
+      return { share, token: minted.token };
+    });
+  }
+
+  async revokeShare(viewer: MapViewer, id: number, shareId: number, actor: string): Promise<void> {
+    await this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'full', tx);
+      const revoked = await this.#repository.revokeShare(tx, id, shareId, actor);
+      if (!revoked) {
+        throw new MapError(
+          'MAP_NOT_FOUND',
+          `map ${String(id)} has no live link ${String(shareId)}`,
+          {
+            context: { mapId: id, phase: 'share' },
+          },
+        );
+      }
+      this.#logger.info({ mapId: id, actor, shareId }, 'map share link revoked');
+    });
+  }
+
+  /**
+   * What a presented token opens — **the one method here that takes no viewer**.
+   *
+   * `ADR-002` Decision 1: the token *is* the authorisation, and it authorises exactly one map's
+   * already-chosen widgets. Nothing else in this service can be reached without a `MapViewer`,
+   * and that asymmetry is deliberate: the public surface is one function, and it is this one.
+   *
+   * Expiry and revocation are decided by the query, so a row coming back is a link that works.
+   */
+  async openShare(token: string): Promise<{ mapId: number; map: MapRow } | undefined> {
+    if (token.length < 16 || token.length > 100) return undefined;
+    return this.#db.tx(async (tx) => {
+      const found = await this.#repository.shareByToken(tx, shareTokenHash(token));
+      if (found === undefined) return undefined;
+      const map = await this.#repository.find(tx, found.mapId);
+      // The map is gone but the row is not: impossible through the foreign key, and cheap to be
+      // sure of rather than to reason about.
+      /* c8 ignore next */
+      if (map === undefined) return undefined;
+      await this.#repository.touchShare(tx, found.shareId);
+      return { mapId: found.mapId, map };
+    });
+  }
+
+  /**
+   * The background behind a shared map, and its bytes.
+   *
+   * **Keyed by the token, not by a map id, and that is the invariant worth keeping.** Every method
+   * on this service is either viewer-gated or token-gated; none of them takes a bare map id and
+   * trusts the caller to have checked something first. A `backgroundOfShared(mapId)` would have
+   * been one query cheaper and would have been a method that returns an operator's uploaded image
+   * to anybody who can call it — exactly the shape of mistake this file exists to prevent.
+   *
+   * The extra lookup is an indexed hit on a hash, on a route a wall display calls once per open.
+   */
+  async sharedBackground(token: string): Promise<MapBackground | undefined> {
+    const opened = await this.openShare(token);
+    if (opened === undefined) return undefined;
+    return this.#db.tx((tx) => this.#repository.background(tx, opened.mapId));
+  }
+
+  async sharedBackgroundBytes(token: string): Promise<Buffer | undefined> {
+    const opened = await this.openShare(token);
+    if (opened === undefined) return undefined;
+    return this.#db.tx((tx) => this.#repository.backgroundBytes(tx, opened.mapId));
   }
 
   /* ---------------------------------------------------------- backgrounds */

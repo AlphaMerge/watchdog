@@ -108,6 +108,16 @@ export interface AuthenticationOptions {
   required: boolean;
   /** Paths that never need a session, whatever `required` says. */
   publicPaths?: readonly string[];
+  /**
+   * Path *prefixes* that never need a session (`G-06`).
+   *
+   * **A blunter instrument than `publicPaths`, and it exists for exactly one reason**: a share
+   * link carries its token in the path, so there is no fixed string to match. It is therefore
+   * kept to a namespace whose only inhabitants are unauthenticated routes — `/api/v1/public/` —
+   * which makes "what can a stranger reach?" answerable by reading the route table for one
+   * prefix, rather than by trusting that no exact path was added to a list.
+   */
+  publicPrefixes?: readonly string[];
 }
 
 /**
@@ -131,6 +141,7 @@ export const ALWAYS_PUBLIC = ['/api/v1/auth/login', '/api/v1/auth/logout', '/api
 
 export function registerAuthentication(app: FastifyInstance, options: AuthenticationOptions): void {
   const publicPaths = new Set([...ALWAYS_PUBLIC, ...(options.publicPaths ?? [])]);
+  const publicPrefixes = options.publicPrefixes ?? [];
 
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     // **The bearer token is tried first, and a request may present only one credential.** A
@@ -171,6 +182,7 @@ export function registerAuthentication(app: FastifyInstance, options: Authentica
     const path = request.url.split('?')[0] ?? '';
     if (!path.startsWith('/api/')) return;
     if (publicPaths.has(path)) return;
+    if (publicPrefixes.some((prefix) => path.startsWith(prefix))) return;
 
     // Thrown rather than replied, so it goes through the one error envelope every other failure
     // uses and a client never has to parse two shapes.
