@@ -42,7 +42,12 @@ services:
   # compression, retention policies (CLAUDE.md constraint 4).
   # ---------------------------------------------------------------------------------------
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    # **Pinned, because `latest-pg17` is a moving tag and it moved.** CI on a local runner pulled
+    # 2.30.0 the day it was released while the developer's container was still 2.29.2 from the
+    # same line of this file — and a query-plan test passed for one and failed for the other
+    # (`P-198`). Bump it deliberately, so an upgrade is a commit somebody reviewed rather than
+    # whichever image a machine happened to pull.
+    image: timescale/timescaledb:2.30.0-pg17
     # Docker gives a container 64 MB of /dev/shm, and PostgreSQL puts parallel workers' shared
     # memory there. A `drop_chunks` over a hypertable with a day of readings in it exhausts that
     # and fails with "No space left on device" — which reads like a disk problem and is not one.

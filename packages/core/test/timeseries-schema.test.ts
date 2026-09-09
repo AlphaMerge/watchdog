@@ -216,8 +216,18 @@ describe(
       `);
       await scratch.db.query('ANALYZE sensor_state');
 
+      // **`ANALYZE`, because TimescaleDB will not say what it has not done yet.** From 2.30.0 the
+      // plan is wrapped in `Custom Scan (DeferredChunkAppend)`, which defers chunk exclusion to
+      // execution time and prints no children at all under a plain `EXPLAIN` — so the assertion
+      // below saw a four-line plan with no scan named in it and failed, on a query whose plan had
+      // not changed. Running it is what expands the node; `Order: "time" DESC` on the wrapper is
+      // the ordered append, and the `Index Scan` this looks for is the child underneath it.
+      //
+      // Found when CI first ran on a local runner against 2.30.0 while the developer's stack was
+      // still on 2.29.2 — the same moving `latest-pg17` tag, two versions (`P-198`). The image is
+      // pinned now, and this reads through the wrapper either way.
       const plan = await scratch.db.query<{ 'QUERY PLAN': string }>(
-        `EXPLAIN (COSTS OFF)
+        `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
          SELECT state FROM sensor_state WHERE sensor_id = 12 ORDER BY time DESC LIMIT 1`,
       );
       const text = plan.map((r) => r['QUERY PLAN']).join('\n');
