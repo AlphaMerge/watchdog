@@ -167,6 +167,7 @@ export class ProbeHealthService {
       flowRejected: health?.flowRejected ?? null,
       flowMalformed: health?.flowMalformed ?? null,
       flowMissed: health?.flowMissed ?? null,
+      flowUndecodable: health?.flowUndecodable ?? null,
       // Null, not 0, when the probe sends nothing: a build with no child-process runner has
       // nothing to say here, and a confident zero cannot be told from one that is idle.
       childSlots: health?.childSlots ?? null,

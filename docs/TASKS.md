@@ -12474,7 +12474,60 @@ analysis". `F-` is Phase 0.
       custom key shadowing a built-in, and the dropped-flows guard never firing. 25 tests; the
       full suite is green at 3,621.
 
-- [ ] **B-05 — sFlow** · L · B-02 · A different protocol wearing a similar name: sampled packet
+- [x] **B-06 — one record shape, and the dialects actually wired to the socket** · M · B-03 ·
+      **`B-03` shipped a decoder nothing calls.** `decodeFlowSets` is exported, has 26 tests and is
+      reachable from `@ms/sensors/flow` — and `receiver.ts` still calls `decodeNetflowV5` and
+      nothing else, so a real v9 or IPFIX exporter has every datagram refused as an unsupported
+      version. The decoder is correct and unreachable, which is `P-61` again: the numbers were all
+      right and they arrived nowhere. Found while starting `B-05`, by asking what the socket
+      actually dispatches on.
+
+      **The reason it needs a ticket rather than a one-line fix is that the three dialects do not
+      produce the same thing.** v5 yields typed records, v9 and IPFIX yield `Map<elementId,
+      Buffer>` of raw IANA elements, and `B-05`'s sFlow will yield parsed packet headers. Wiring
+      them in as they are would put a per-dialect branch in the listener *and* another in the
+      sensor, and the third one would be written by whoever adds `B-05`.
+
+      So: normalise at the decoder boundary. One `FlowRecord` — addresses, ports, protocol,
+      packets, octets, interfaces — that every dialect produces, and one `FlowMessage` carrying the
+      exporter's sequence, what that sequence counts, and the undecodable count. The listener and
+      the sensor then know nothing about dialects, which is the arrangement `T-06` already
+      established for listeners and this subsystem quietly abandoned.
+
+      **`samplingRate` belongs on the record, not the dialect.** v5 has a sampling interval in its
+      header and sFlow is sampled by definition; a record that does not say what it stands for is a
+      record somebody will read as an exact byte count.
+
+      **B-06 outcome.** `FlowRecord` and `FlowMessage` in `record.ts`, `decodeFlowDatagram`
+      dispatching on the version, and the receiver holding the `TemplateCache` — on the receiver
+      rather than per datagram, because a cache built per message learns a template and forgets it
+      before the data set three bytes later can use it.
+
+      **Two things fell out that were wrong before and are not mutations of new code.**
+
+      The **sequence arithmetic was one rule for three dialects**, which `B-03` had already
+      established could not be right: v5 counts exported flows, IPFIX counts data records, and v9
+      counts *packets* — one per datagram. `B-02`'s `missed` advanced by the record count in every
+      case, so a healthy v9 exporter would have read as losing every flow but one, every datagram,
+      for ever. Keyed per exporter *and* per meaning now, because one device can send both.
+
+      And **`samplingRate` was nowhere**. A 1-in-100 sampled exporter's `octets` are a hundredth of
+      the traffic; summing them unscaled under-reports by exactly N, silently, on the busy links
+      somebody is watching. It is on every record, `1` where nothing samples — and an interval of
+      zero reads as one, not as zero, because "not sampling" means a packet stands for itself.
+      v9/IPFIX report sampling through an options template, which is a lookup this does not do
+      yet; that limitation is written where the field is set rather than left to be discovered.
+
+      **`undecodable` reaches Probe Health**, which `B-03`'s own ticket asked for and `B-03` did
+      not do — through all five places again, ending at `flowUndecodable`.
+
+      **Mutations 5/5, and one survived first.** "Elements read at a fixed 4-byte width" passed
+      every test, because the 4-and-8-byte case exercises the `BigInt` branch at 8 and nothing
+      touched the integer read at any other width. IPFIX §6.2 permits any reduced size and 6-byte
+      counters ship. Covered at 2, 3, 5 and 6 bytes, plus a 64-bit value past 2^53, and the
+      mutation dies. Full suite green at 3,638.
+
+- [ ] **B-05 — sFlow** · L · B-02, B-06 · A different protocol wearing a similar name: sampled packet
       headers and interface counters in XDR, not flow records. It shares the listener and shares
       nothing else, which is why it is last and its own ticket rather than a variant of `B-01`.
 

@@ -292,6 +292,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'flowUndecodable',
+    name: 'ms_probe_flows_undecodable_total',
+    help: 'Flow records this collector had no template for, almost always one not yet sent.',
+    counter: true,
+  },
+  {
     key: 'scheduled',
     name: 'ms_probe_sensors_scheduled',
     help: 'Sensors this probe currently has on its wheel.',

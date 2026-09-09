@@ -171,6 +171,9 @@ export class ProbeHealthReporter {
             // The one an operator acts on: everything else counts what arrived, and this counts
             // what did not.
             flowMissed: flows.missed,
+            // `B-03`: records whose template has not arrived. Ordinary for seconds after a
+            // restart; permanent when an exporter's template interval exceeds its data one.
+            flowUndecodable: flows.undecodable,
           }),
       ...(spool === undefined
         ? {}

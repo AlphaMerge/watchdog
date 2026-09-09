@@ -1,5 +1,8 @@
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { FlowDecodeError, decodeNetflowV5, type NetflowV5Datagram } from './netflow5.js';
+import { FlowDecodeError, NETFLOW_V5, decodeNetflowV5 } from './netflow5.js';
+import { IPFIX, NETFLOW_V9, decodeFlowSets } from './netflow9.js';
+import { fromFlowSets, fromNetflowV5, type FlowMessage } from './record.js';
+import { TemplateCache, type TemplateCacheOptions } from './templates.js';
 
 /**
  * The socket a flow collector listens on (`B-02`).
@@ -17,12 +20,21 @@ import { FlowDecodeError, decodeNetflowV5, type NetflowV5Datagram } from './netf
  *
  * **A decode failure is a counted event, never a throw across the socket.** A single misconfigured
  * exporter sends for ever, and an exception escaping a `message` handler takes the probe with it.
+ *
+ * **It dispatches on the version, which `B-03` shipped a decoder for and nothing called.** The
+ * templated dialects were correct, tested and unreachable — `P-61` again — because this handler
+ * decoded v5 and refused everything else. Every dialect now arrives as one normalised
+ * `FlowMessage` (`B-06`), so nothing above here knows which format it came in.
+ *
+ * **The template cache lives on the receiver, not on a message.** v9 and IPFIX are stateful across
+ * datagrams by design; a cache built per datagram would learn a template and forget it before the
+ * data set three bytes later could use it.
  */
 
 export interface ReceivedFlow {
   /** The exporter's address. Never resolved — a reverse lookup per datagram is a second flood. */
   readonly source: string;
-  readonly datagram: NetflowV5Datagram;
+  readonly message: FlowMessage;
 }
 
 export interface FlowReceiverOptions {
@@ -37,18 +49,55 @@ export interface FlowReceiverOptions {
    * "this exporter is set to v9" apart from "this is not NetFlow at all" (`B-01`).
    */
   readonly onMalformed: (message: string, reason?: FlowDecodeError['reason']) => void;
+  /** Bounds and expiry for the templates v9 and IPFIX carry out of band. */
+  readonly templates?: TemplateCacheOptions;
 }
 
 export interface FlowReceiver {
   close(): Promise<void>;
+  /** The templates learnt so far, for Probe Health and for a test. */
+  templates(): { held: number; redefined: number; expired: number; evicted: number };
+}
+
+/**
+ * Reads one datagram, whichever dialect it is.
+ *
+ * Exported so the dispatch is testable without a socket — it is the part with a decision in it,
+ * and the socket around it has none.
+ */
+export function decodeFlowDatagram(
+  datagram: Buffer,
+  exporter: string,
+  cache: TemplateCache,
+): FlowMessage {
+  if (datagram.length < 2) {
+    throw new FlowDecodeError(
+      { kind: 'too-short', got: datagram.length, need: 2 },
+      `a flow datagram of ${String(datagram.length)} bytes cannot hold a version`,
+    );
+  }
+
+  const version = datagram.readUInt16BE(0);
+  if (version === NETFLOW_V5) return fromNetflowV5(decodeNetflowV5(datagram));
+  if (version === NETFLOW_V9 || version === IPFIX) {
+    return fromFlowSets(decodeFlowSets(datagram, exporter, cache));
+  }
+  throw new FlowDecodeError(
+    { kind: 'unsupported-version', version },
+    `NetFlow version ${String(version)} is not one this collector reads (5, 9 or 10)`,
+  );
 }
 
 export async function openFlowReceiver(options: FlowReceiverOptions): Promise<FlowReceiver> {
   const socket: UdpSocket = createSocket({ type: options.ipVersion, reuseAddr: true });
+  const cache = new TemplateCache(options.templates ?? {});
 
   socket.on('message', (datagram, sender) => {
     try {
-      options.onFlow({ source: sender.address, datagram: decodeNetflowV5(datagram) });
+      options.onFlow({
+        source: sender.address,
+        message: decodeFlowDatagram(datagram, sender.address, cache),
+      });
     } catch (error) {
       if (error instanceof FlowDecodeError) {
         options.onMalformed(error.message, error.reason);
@@ -79,5 +128,6 @@ export async function openFlowReceiver(options: FlowReceiverOptions): Promise<Fl
           resolve();
         });
       }),
+    templates: () => cache.stats(),
   };
 }

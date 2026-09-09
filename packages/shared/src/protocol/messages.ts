@@ -402,6 +402,8 @@ export interface ProbeHealthReport {
    * export looks exactly like a quiet network.
    */
   flowMissed?: number;
+  /** Flow records this collector had no template for (`B-03`). */
+  flowUndecodable?: number;
   /**
    * Whether this probe is getting back the checks it dispatches (`P-76`): 1 yes, 0 no.
    *
@@ -779,6 +781,7 @@ const PROBE_HEALTH_SCHEMA = {
     flowRejected: { type: 'integer', minimum: 0 },
     flowMalformed: { type: 'integer', minimum: 0 },
     flowMissed: { type: 'integer', minimum: 0 },
+    flowUndecodable: { type: 'integer', minimum: 0 },
     checksCompleting: { type: 'integer', minimum: 0, maximum: 1 },
     checksBehind: { type: 'integer', minimum: 0 },
     checksOutstanding: { type: 'integer', minimum: 0 },

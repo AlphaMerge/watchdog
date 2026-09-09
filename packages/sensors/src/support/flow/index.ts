@@ -24,7 +24,9 @@ export type {
   TemplateField,
   TemplateKey,
 } from './templates.js';
-export { openFlowReceiver } from './receiver.js';
+export { decodeFlowDatagram, openFlowReceiver } from './receiver.js';
+export { fromFlowSets, fromNetflowV5 } from './record.js';
+export type { FlowDialect, FlowMessage, FlowRecord } from './record.js';
 export type { FlowReceiver, FlowReceiverOptions, ReceivedFlow } from './receiver.js';
 export type {
   FlowDecodeFailure,

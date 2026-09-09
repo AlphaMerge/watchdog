@@ -201,6 +201,12 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   { key: 'flowMissed', name: 'Flows missed', unit: 'flows', counter: { bits: 64 } },
+  {
+    key: 'flowUndecodable',
+    name: 'Flow records with no template',
+    unit: 'records',
+    counter: { bits: 64 },
+  },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
   // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
   // worker, with their own much smaller ceiling — so the pool channels above say nothing at all

@@ -28,6 +28,7 @@ function fakeReceiver(options: FlowReceiverOptions) {
       closed += 1;
       return Promise.resolve();
     },
+    templates: () => ({ held: 0, redefined: 0, expired: 0, evicted: 0 }),
   };
 }
 
@@ -48,42 +49,39 @@ async function listener(bufferSize = 8, exporters: string[] = []): Promise<FlowL
   return instance;
 }
 
-/** A datagram of `count` flows from `source`, starting at `flowSequence`. */
-function datagram(source: string, flowSequence: number, count: number): ReceivedFlow {
+/**
+ * A message of `count` flows from `source`, starting at `sequence`.
+ *
+ * Normalised (`B-06`), so this fixture says nothing about which dialect it arrived in — which is
+ * the point of the shape: the listener no longer knows either. `counts` is what the exporter's
+ * sequence advances by, and it differs between dialects.
+ */
+function datagram(
+  source: string,
+  sequence: number,
+  count: number,
+  counts: 'packets' | 'data-records' | 'flows' = 'flows',
+): ReceivedFlow {
   return {
     source,
-    datagram: {
-      header: {
-        version: 5,
-        count,
-        sysUptimeMs: 3_600_000,
-        unixSecs: 1_700_000_000,
-        unixNsecs: 0,
-        flowSequence,
-        engineType: 0,
-        engineId: 0,
-        samplingMode: 'none',
-        samplingInterval: 0,
-      },
+    message: {
+      dialect: 'netflow5',
+      sequence,
+      sequenceCounts: counts,
+      undecodable: 0,
+      sysUptimeMs: 3_600_000,
+      unixSecs: 1_700_000_000,
       records: Array.from({ length: count }, (_, i) => ({
         srcAddr: '10.0.0.1',
         dstAddr: '10.0.0.2',
-        nextHop: '0.0.0.0',
-        inputIf: 1,
-        outputIf: 2,
-        packets: 1,
-        octets: 64,
-        firstMs: 0,
-        lastMs: 0,
         srcPort: 1_000 + i,
         dstPort: 443,
-        tcpFlags: 0,
         protocol: 6,
-        tos: 0,
-        srcAs: 0,
-        dstAs: 0,
-        srcMask: 24,
-        dstMask: 24,
+        packets: 1,
+        octets: 64,
+        inputIf: 1,
+        outputIf: 2,
+        samplingRate: 1,
       })),
     },
   };
@@ -183,6 +181,36 @@ describe('the flow listener', () => {
       deliver(datagram('192.0.2.1', 5, 5)); // A: 5..9, unbroken for A
       deliver(datagram('198.51.100.9', 905, 5)); // B: 905..909, unbroken for B
       assert.equal(flow.stats().missed, 0);
+    });
+
+    it('advances by one per datagram for v9, whose sequence counts packets', async () => {
+      // **The arithmetic that differs by dialect** (`B-03`, wired by `B-06`). v9's sequence
+      // counts exported *packets* — one per datagram — where v5 counts flows and IPFIX counts
+      // data records. One arithmetic for all three reports a healthy v9 exporter as losing every
+      // flow but one, every datagram, for ever.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 5, 'packets'));
+      deliver(datagram('192.0.2.1', 1, 5, 'packets'));
+      deliver(datagram('192.0.2.1', 2, 5, 'packets'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('keeps v9 and IPFIX sequences apart even from the same address', async () => {
+      // An exporter can send both; their counters are unrelated and interleaving them would
+      // invent losses in whichever arrived second.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 2, 'packets'));
+      deliver(datagram('192.0.2.1', 500, 2, 'data-records'));
+      deliver(datagram('192.0.2.1', 1, 2, 'packets'));
+      deliver(datagram('192.0.2.1', 502, 2, 'data-records'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('counts records this collector had no template for', async () => {
+      const flow = await listener();
+      const message = datagram('192.0.2.1', 0, 1);
+      deliver({ ...message, message: { ...message.message, undecodable: 3 } });
+      assert.equal(flow.stats().undecodable, 3);
     });
 
     it('resyncs on a sequence that goes backwards, rather than reporting billions lost', async () => {

@@ -1035,6 +1035,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `flowRejected` | Flows rejected | flows | 64-bit counter → rate |
 | `flowMalformed` | Flow datagrams malformed | datagrams | 64-bit counter → rate |
 | `flowMissed` | Flows missed | flows | 64-bit counter → rate |
+| `flowUndecodable` | Flow records with no template | records | 64-bit counter → rate |
 | `scheduled` | Sensors scheduled | sensors | — |
 | `childSlots` | Child process slots | processes | — |
 | `childBusy` | Child processes running | processes | — |

@@ -61,6 +61,14 @@ export interface FlowListenerStats {
    * have unrelated sequences and comparing across them would invent losses that never happened.
    */
   readonly missed: number;
+  /**
+   * Records whose template this collector has not learnt yet (`B-03`).
+   *
+   * Ordinary for a few seconds after a restart and expected to fall to zero. It stays above zero
+   * when an exporter's template refresh interval is longer than its data interval, which is a
+   * fault on the device and invisible without this.
+   */
+  readonly undecodable: number;
   readonly buffered: number;
   readonly cursors: number;
   readonly overwritten: number;
@@ -78,6 +86,7 @@ export class FlowListener {
   #rejected = 0;
   #malformed = 0;
   #missed = 0;
+  #undecodable = 0;
 
   constructor(options: FlowListenerOptions) {
     this.#options = options;
@@ -151,6 +160,7 @@ export class FlowListener {
       rejected: this.#rejected,
       malformed: this.#malformed,
       missed: this.#missed,
+      undecodable: this.#undecodable,
       buffered: this.#ring.buffered,
       cursors: this.#ring.cursors,
       overwritten: this.#ring.overwritten,
@@ -165,8 +175,14 @@ export class FlowListener {
       return;
     }
 
-    const { header, records } = received.datagram;
-    this.#countSequenceGap(received.source, header.flowSequence, header.count);
+    const { records, sequence, dialect, sysUptimeMs, unixSecs, undecodable } = received.message;
+    this.#countSequenceGap(
+      received.source,
+      sequence,
+      records.length,
+      received.message.sequenceCounts,
+    );
+    this.#undecodable += undecodable;
 
     const at = this.#now().toISOString();
     for (const record of records) {
@@ -174,7 +190,7 @@ export class FlowListener {
       const notification: ReceivedNotification = {
         // The probe's clock, not the exporter's. An exporter whose NTP has failed would otherwise
         // put its flows outside every window a sensor looks at; its own stamps are kept in
-        // `detail` for anyone who wants them, and `flowWindow` is how they are read.
+        // `detail` for anyone who wants them.
         at,
         source: received.source,
         text:
@@ -183,32 +199,27 @@ export class FlowListener {
         detail: {
           srcAddr: record.srcAddr,
           dstAddr: record.dstAddr,
-          nextHop: record.nextHop,
-          inputIf: record.inputIf,
-          outputIf: record.outputIf,
-          packets: record.packets,
-          octets: record.octets,
-          firstMs: record.firstMs,
-          lastMs: record.lastMs,
           srcPort: record.srcPort,
           dstPort: record.dstPort,
-          tcpFlags: record.tcpFlags,
           protocol: record.protocol,
-          tos: record.tos,
-          srcAs: record.srcAs,
-          dstAs: record.dstAs,
-          srcMask: record.srcMask,
-          dstMask: record.dstMask,
-          // The header half, carried per record so a sensor reading one notification can do the
-          // uptime-to-wall-clock arithmetic without holding the datagram it came from.
-          sysUptimeMs: header.sysUptimeMs,
-          unixSecs: header.unixSecs,
-          unixNsecs: header.unixNsecs,
-          flowSequence: header.flowSequence,
-          engineType: header.engineType,
-          engineId: header.engineId,
-          samplingMode: header.samplingMode,
-          samplingInterval: header.samplingInterval,
+          packets: record.packets,
+          octets: record.octets,
+          inputIf: record.inputIf,
+          outputIf: record.outputIf,
+          // **What one sampled packet stands for.** A sensor that summed `octets` without it
+          // would under-report a sampled exporter by whatever N is, silently.
+          samplingRate: record.samplingRate,
+          dialect,
+          ...(record.nextHop === undefined ? {} : { nextHop: record.nextHop }),
+          ...(record.tos === undefined ? {} : { tos: record.tos }),
+          ...(record.tcpFlags === undefined ? {} : { tcpFlags: record.tcpFlags }),
+          ...(record.srcAs === undefined ? {} : { srcAs: record.srcAs }),
+          ...(record.dstAs === undefined ? {} : { dstAs: record.dstAs }),
+          ...(record.srcMask === undefined ? {} : { srcMask: record.srcMask }),
+          ...(record.dstMask === undefined ? {} : { dstMask: record.dstMask }),
+          ...(sysUptimeMs === undefined ? {} : { sysUptimeMs }),
+          ...(unixSecs === undefined ? {} : { unixSecs }),
+          flowSequence: sequence,
         },
       };
       this.#ring.push(notification);
@@ -226,9 +237,19 @@ export class FlowListener {
    * began again, and counting the difference would report billions of missing flows. Resynced
    * silently, because it is not an error and the operator's evidence of a reboot is `sysUptime`.
    */
-  #countSequenceGap(source: string, sequence: number, count: number): void {
-    const expected = this.#expected.get(source);
+  #countSequenceGap(
+    source: string,
+    sequence: number,
+    records: number,
+    counts: 'packets' | 'data-records' | 'flows',
+  ): void {
+    // **What the sequence advances by is not the same in every dialect** (`B-03`): v5 counts
+    // exported flows, IPFIX counts data records, and v9 counts *packets* — one per datagram. A
+    // single arithmetic for all three reports a healthy v9 exporter as losing every flow but one.
+    const advance = counts === 'packets' ? 1 : records;
+    const key = `${source}|${counts}`;
+    const expected = this.#expected.get(key);
     if (expected !== undefined && sequence > expected) this.#missed += sequence - expected;
-    this.#expected.set(source, (sequence + count) >>> 0);
+    this.#expected.set(key, (sequence + advance) >>> 0);
   }
 }
