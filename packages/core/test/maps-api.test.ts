@@ -75,6 +75,9 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       catalogue: testCatalogue(),
       maps: new MapService({ db, repository: new MapRepository(), logger: silent }),
       mapResolver: new MapResolver({ db, access, history }),
+      // An installation that has a tile source, so the geo cases can tell "not configured" apart
+      // from "configured and deliberately withheld" (`ADR-004` Decisions 1 and 4).
+      mapTiles: { urlTemplate: 'https://tiles.example/{z}/{x}/{y}.png', attribution: '© Somebody' },
       auth: {
         accounts,
         sessions,
@@ -645,6 +648,101 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       assert.equal(anonymous.statusCode, 401);
       const object = await app.inject({ method: 'GET', url: '/api/v1/objects/root' });
       assert.equal(object.statusCode, 401);
+    });
+  });
+
+  /**
+   * Geographical maps over the wire (`G-08`, `ADR-004`).
+   *
+   * The projection is arithmetic and lives in the browser; what only exists here is which of the
+   * two things a viewer is handed — the map's home view, and whether this installation's tile
+   * source is named to them at all.
+   */
+  describe('a geographical map', () => {
+    const makeGeoMap = async (name: string, layout: unknown): Promise<number> => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/maps',
+        headers: as(author),
+        payload: { name, layout },
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      return response.json<{ id: number }>().id;
+    };
+
+    const BERLIN = { lat: 52.52, lon: 13.405, zoom: 6 };
+
+    it("carries the home view and the operator's tile source", async () => {
+      const id = await makeGeoMap('geographical', {
+        geo: BERLIN,
+        widgets: [{ id: 'w1', kind: 'status', objectId: sensorId, at: { lat: 52.5, lon: 13.4 } }],
+      });
+      const response = await view(id, author);
+      assert.equal(response.statusCode, 200, response.body);
+      const body = response.json<{
+        geo: { lat: number; lon: number; zoom: number; publicTiles: boolean } | null;
+        tiles: { urlTemplate: string; attribution: string } | null;
+        widgets: { at?: { lat: number; lon: number } }[];
+      }>();
+      assert.deepEqual(body.geo, { ...BERLIN, publicTiles: false });
+      assert.equal(body.tiles?.urlTemplate, 'https://tiles.example/{z}/{x}/{y}.png');
+      // The widget's own coordinate reaches the renderer, or every pin lands in the same place.
+      assert.deepEqual(body.widgets[0]?.at, { lat: 52.5, lon: 13.4 });
+    });
+
+    it('is a plain canvas when the document has no `geo` at all', async () => {
+      const id = await makeGeoMap('flat', { widgets: [] });
+      const body = (await view(id, author)).json<{ geo: unknown; tiles: unknown }>();
+      assert.equal(body.geo, null);
+      // No home view, so nothing to draw tiles under — naming the provider here would be an
+      // origin in the content policy and a request nobody asked for.
+      assert.equal(body.tiles, null);
+    });
+
+    it('refuses a centre that is not a coordinate, rather than opening at the pole', async () => {
+      // The designer treats such a document as a plain canvas, and the two readers have to agree
+      // about what a document *is* — a map that is flat in the editor must not be geographical
+      // in the viewer.
+      const id = await makeGeoMap('typo', { geo: { lat: 200, lon: 0, zoom: 4 }, widgets: [] });
+      assert.equal((await view(id, author)).json<{ geo: unknown }>().geo, null);
+    });
+
+    it('keeps the tile source off a share link until the author opts in', async () => {
+      // `ADR-004` Decision 4. A stranger's browser fetching tiles tells the provider that this
+      // installation exists and which places it watches, and the person who made the link cannot
+      // see that happen — so the default is the quiet one.
+      const quiet = await makeGeoMap('quiet', { geo: BERLIN, widgets: [] });
+      const loud = await makeGeoMap('loud', {
+        geo: { ...BERLIN, publicTiles: true },
+        widgets: [],
+      });
+
+      const tokenFor = async (id: number): Promise<string> => {
+        const made = await app.inject({
+          method: 'POST',
+          url: `/api/v1/maps/${String(id)}/shares`,
+          headers: as(author),
+          payload: {
+            label: 'wall',
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+          },
+        });
+        assert.equal(made.statusCode, 201, made.body);
+        return made.json<{ token: string }>().token;
+      };
+
+      const shared = async (token: string) =>
+        (await app.inject({ method: 'GET', url: `/api/v1/public/maps/${token}` })).json<{
+          geo: { publicTiles: boolean } | null;
+          tiles: unknown;
+        }>();
+
+      const off = await shared(await tokenFor(quiet));
+      assert.equal(off.geo?.publicTiles, false, 'the map is still geographical');
+      assert.equal(off.tiles, null, 'and the provider is not named to a stranger');
+
+      const on = await shared(await tokenFor(loud));
+      assert.equal(on.tiles !== null, true, 'the opt-in is what turns it on');
     });
   });
 });

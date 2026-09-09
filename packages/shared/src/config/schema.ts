@@ -360,6 +360,26 @@ export interface CoreConfig {
      */
     requireAuthentication: boolean;
   };
+  /**
+   * Where a geographical map's tiles come from (`G-08`, `ADR-004`).
+   *
+   * **Empty by default, and the product ships no tiles and no provider.** Bundling a world is
+   * tens of megabytes for a view that cannot show a street; a default provider accepts somebody
+   * else's terms on behalf of every operator who installs this. An operator who wants a street
+   * map chooses a source, accepts its terms and pastes its URL — and one who does not gets a map
+   * drawn over the background image instead of a map that will not load.
+   */
+  maps: {
+    /** `https://tiles.example.org/{z}/{x}/{y}.png`. All three placeholders, or it is ignored. */
+    tileUrl: string;
+    /**
+     * The credit the provider requires, drawn on every map that uses it.
+     *
+     * Not optional in spirit: every tile service asks for attribution, and removing it is an
+     * operator breaking somebody's terms using our software.
+     */
+    tileAttribution: string;
+  };
   /** What a notification needs to know about this installation (`N-06`). */
   notifications: {
     /**
@@ -725,6 +745,19 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // origin a browser would send, and `registerCsrfGuard` says so by name at startup.
         allowedOrigins: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
         requireAuthentication: { type: 'boolean', default: true },
+      },
+    },
+    maps: {
+      type: 'object',
+      default: {} as CoreConfig['maps'],
+      additionalProperties: false,
+      required: ['tileUrl', 'tileAttribution'],
+      properties: {
+        // Not pattern-validated here: what makes a template usable is that it carries `{z}`,
+        // `{x}` and `{y}` and parses to an origin, and the renderer says so by refusing to draw
+        // rather than by failing to start.
+        tileUrl: { type: 'string', default: '' },
+        tileAttribution: { type: 'string', default: '' },
       },
     },
     notifications: {

@@ -83,6 +83,8 @@ export interface Tile {
    * weaker second defence that invites somebody to lean on it (`ADR-002` Decision 2).
    */
   readonly html: string;
+  /** Where on the ground this tile sits (`G-08`), or `null` for one placed by its box. */
+  readonly at: { readonly lat: number; readonly lon: number } | null;
 }
 
 /**
@@ -98,12 +100,22 @@ export interface Connector {
   readonly to: string;
 }
 
+/** A map's geographical block (`G-08`): where it opens, and the `ADR-004` Decision 4 opt-in. */
+export interface MapGeo {
+  readonly lat: number;
+  readonly lon: number;
+  readonly zoom: number;
+  readonly publicTiles: boolean;
+}
+
 export interface Canvas {
   readonly tiles: readonly Tile[];
   readonly connectors: readonly Connector[];
+  /** `null` when this map is not geographical, which is every map until somebody says otherwise. */
+  readonly geo: MapGeo | null;
 }
 
-export const EMPTY: Canvas = { tiles: [], connectors: [] };
+export const EMPTY: Canvas = { tiles: [], connectors: [], geo: null };
 
 /** How wide the canvas is, in grid units. Fixed, so a map made on a laptop fits a wall display. */
 export const COLUMNS = 32;
@@ -256,6 +268,25 @@ export function retimeTile(canvas: Canvas, id: string, rangeMinutes: number): Ca
   return replace(canvas, id, (tile) => ({ ...tile, rangeMinutes }));
 }
 
+/** Pins a tile to a place, or takes it off the ground and back onto the grid with `null`. */
+export function placeAt(
+  canvas: Canvas,
+  id: string,
+  at: { lat: number; lon: number } | null,
+): Canvas {
+  if (at !== null && (!inLatitude(at.lat) || !inLongitude(at.lon))) return canvas;
+  return replace(canvas, id, (tile) => ({ ...tile, at }));
+}
+
+/** A map's home view. `null` makes it an ordinary canvas again without losing the widgets. */
+export function setGeo(canvas: Canvas, geo: MapGeo | null): Canvas {
+  if (geo !== null && (!inLatitude(geo.lat) || !inLongitude(geo.lon))) return canvas;
+  return { ...canvas, geo };
+}
+
+const inLatitude = (lat: number): boolean => Number.isFinite(lat) && lat >= -90 && lat <= 90;
+const inLongitude = (lon: number): boolean => Number.isFinite(lon) && lon >= -180 && lon <= 180;
+
 /** Truncated rather than refused, the same as the core does when it reads one back. */
 export function rewriteHtml(canvas: Canvas, id: string, html: string): Canvas {
   return replace(canvas, id, (tile) => ({ ...tile, html: html.slice(0, MAX_HTML) }));
@@ -272,6 +303,7 @@ export function removeTile(canvas: Canvas, id: string): Canvas {
   const tiles = canvas.tiles.filter((tile) => tile.id !== id);
   if (tiles.length === canvas.tiles.length) return canvas;
   return {
+    ...canvas,
     tiles,
     connectors: canvas.connectors.filter((line) => line.from !== id && line.to !== id),
   };
@@ -366,6 +398,8 @@ export function sameBox(a: Box, b: Box): boolean {
 export function sameCanvas(a: Canvas, b: Canvas): boolean {
   if (a === b) return true;
   if (a.tiles.length !== b.tiles.length) return false;
+  if (a.geo?.lat !== b.geo?.lat || a.geo?.lon !== b.geo?.lon) return false;
+  if (a.geo?.zoom !== b.geo?.zoom || a.geo?.publicTiles !== b.geo?.publicTiles) return false;
   if (a.connectors.length !== b.connectors.length) return false;
   const linesAgree = a.connectors.every((line, index) => {
     const other = b.connectors[index];
@@ -387,6 +421,8 @@ export function sameCanvas(a: Canvas, b: Canvas): boolean {
       tile.title === other.title &&
       tile.rangeMinutes === other.rangeMinutes &&
       tile.html === other.html &&
+      tile.at?.lat === other.at?.lat &&
+      tile.at?.lon === other.at?.lon &&
       sameBox(tile.box, other.box)
     );
   });
@@ -614,6 +650,7 @@ export function readCanvas(layout: unknown): Canvas {
       title: typeof entry['title'] === 'string' ? entry['title'] : '',
       rangeMinutes: whole(entry['rangeMinutes'], DEFAULT_RANGE_MINUTES),
       html: typeof entry['html'] === 'string' ? entry['html'].slice(0, MAX_HTML) : '',
+      at: readAt(entry['at']),
       box: fit({
         x: whole(box['x'], 0),
         y: whole(box['y'], 0),
@@ -642,14 +679,43 @@ export function readCanvas(layout: unknown): Canvas {
     connectors.push({ id, from, to });
   }
 
-  return { tiles, connectors };
+  return { tiles, connectors, geo: readGeo(layout) };
+}
+
+function readAt(raw: unknown): { lat: number; lon: number } | null {
+  if (!isRecord(raw)) return null;
+  const lat = raw['lat'];
+  const lon = raw['lon'];
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+  // Out of range is a typo rather than a place, and clamping would put a widget somewhere real
+  // and wrong — the same rule the core applies when it reads the document back.
+  return inLatitude(lat) && inLongitude(lon) ? { lat, lon } : null;
+}
+
+function readGeo(layout: unknown): MapGeo | null {
+  const raw = isRecord(layout) && isRecord(layout['geo']) ? layout['geo'] : null;
+  if (raw === null) return null;
+  const lat = raw['lat'];
+  const lon = raw['lon'];
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+  if (!inLatitude(lat) || !inLongitude(lon)) return null;
+  return {
+    lat,
+    lon,
+    zoom: whole(raw['zoom'], 3),
+    publicTiles: raw['publicTiles'] === true,
+  };
 }
 
 export function writeLayout(canvas: Canvas): {
   widgets: Record<string, unknown>[];
   connectors: Connector[];
+  geo?: MapGeo;
 } {
   return {
+    // Absent rather than null when the map is not geographical: a `geo` key holding nothing is a
+    // key the next reader has to decide about.
+    ...(canvas.geo === null ? {} : { geo: canvas.geo }),
     connectors: [...canvas.connectors],
     widgets: canvas.tiles.map((tile) => ({
       id: tile.id,
@@ -658,6 +724,7 @@ export function writeLayout(canvas: Canvas): {
       title: tile.title,
       rangeMinutes: tile.rangeMinutes,
       html: tile.html,
+      ...(tile.at === null ? {} : { at: tile.at }),
       box: tile.box,
     })),
   };

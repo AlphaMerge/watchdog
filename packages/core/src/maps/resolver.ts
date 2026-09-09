@@ -2,6 +2,7 @@ import type { Database, Queryable } from '../db/pool.js';
 import type { AccessService } from '../auth/access.js';
 import { atLeast } from '../auth/access.js';
 import type { HistoryService, SensorValues } from '../timeseries/history.js';
+import { readGeoView, type GeoView } from './geo.js';
 import type { MapViewer } from './service.js';
 import {
   readConnectors,
@@ -60,6 +61,8 @@ const SENSORS_PER_LIST = 100;
 
 export interface ResolvedMap {
   readonly widgets: readonly ResolvedWidget[];
+  /** The map's home view, or `null` when it is not geographical (`G-08`). */
+  readonly geo: GeoView | null;
   /** The lines between them (`G-05`). Geometry is the client's; which tiles is the document's. */
   readonly connectors: readonly Connector[];
   /** Widgets and connectors whose document could not be read, kept rather than dropped. */
@@ -95,9 +98,10 @@ export class MapResolver {
     // Read against the widgets, because a connector's endpoints are widget ids and a line to a
     // tile that is not on the canvas is a problem rather than a line.
     const lines = readConnectors(layout, widgets);
+    const geo = readGeoView(layout);
     const allProblems = [...problems, ...lines.problems];
     if (widgets.length === 0) {
-      return { widgets: [], connectors: lines.connectors, problems: allProblems };
+      return { widgets: [], connectors: lines.connectors, geo, problems: allProblems };
     }
 
     // Only the widgets that name one. A `html` tile draws whatever an operator typed and needs
@@ -141,6 +145,7 @@ export class MapResolver {
           id: widget.id,
           kind: widget.kind,
           box: widget.box,
+          ...(widget.at === null ? {} : { at: widget.at }),
           title: widget.title,
           state: 'ok',
           data: { kind: 'html', html: widget.html },
@@ -161,13 +166,14 @@ export class MapResolver {
         id: widget.id,
         kind: widget.kind,
         box: widget.box,
+        ...(widget.at === null ? {} : { at: widget.at }),
         title: widget.title,
         state: 'ok',
         data: this.#data(widget, object, lists, latest),
       });
     }
 
-    return { widgets: resolved, connectors: lines.connectors, problems: allProblems };
+    return { widgets: resolved, connectors: lines.connectors, geo, problems: allProblems };
   }
 
   /**

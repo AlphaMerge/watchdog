@@ -12712,12 +12712,14 @@ and a map is none of those; `§9` grants access to "tree, libraries, maps and re
 which makes it a first-class entity with its own storage, its own API and its own RBAC surface.
 That is why `G-01` exists before any pixel does.
 
-**Three of these were gated on a decision rather than on effort. Two are now settled** in
-`ADR-002`, written before any code because each changes the widget model: public share links exist
-as per-map revocable bearer tokens with an expiry, and custom HTML runs in a sandboxed iframe.
-`G-08` stays gated, because a tile provider would put a network dependency into a product whose
-whole architecture is "one service an operator installs". None of the three should be built merely
-because it is on a capability list.
+**Three of these were gated on a decision rather than on effort, and all three are now settled.**
+`ADR-002` was written before any code because two of them change the widget model: public share
+links exist as per-map revocable bearer tokens with an expiry, and custom HTML runs in a sandboxed
+iframe. The third, geographical maps, is `ADR-004`: the product ships no tiles and no default
+provider, takes a URL template an operator configures, and draws the widgets over the `G-05`
+background when there is none — so a tile provider is an operator's choice rather than a network
+dependency in a product whose whole architecture is "one service an operator installs". None of
+the three was built merely because it is on a capability list.
 
 **The tickets use the `G-` prefix** for the graphical views `CAPABILITIES.MD §6` describes. `M-` is
 the state machine and `U-` is the Phase 5 UI.
@@ -13194,7 +13196,7 @@ the state machine and `U-` is the Phase 5 UI.
       5 core tests and 8 in the browser; the web workspace goes 454 to 462 and the backend 3,765 to
       3,770.
 
-- [ ] **G-08 — Geographical maps** · L · G-02 · **Still gated, and `ADR-002` Decision 3 says only
+- [x] **G-08 — Geographical maps** · L · G-02 · **Still gated, and `ADR-002` Decision 3 says only
       what the eventual answer must satisfy**: whatever is chosen degrades to a plain background
       when no provider is configured, so an air-gapped installation gets a map without tiles rather
       than a map that does not load. Deciding it properly wants its own ADR and is not on the path
@@ -13214,6 +13216,38 @@ the state machine and `U-` is the Phase 5 UI.
       accepted**, and it carries two open modelling questions the ADR deliberately left to `G-08`:
       whether a map's extent is per map or per viewer, and whether geo widgets share a canvas with
       box-positioned ones or a geo map is a different kind of map.
+
+      **Landed 2026-09-09, and both open questions were answered by noticing the same thing.** The
+      extent is **per map**: where a map opens is part of what its author arranged, so a wall
+      display comes back to the same place after a reboot rather than to wherever a passer-by left
+      it — panning is local to a browser and nothing persists it. And there is **one kind of map**,
+      with widgets that may carry a coordinate: a geographical map needs box-positioned widgets
+      anyway — a legend, a status list, a note — so the tile layer is a property of the map exactly
+      as `G-05`'s background is, and a widget without a coordinate keeps its box on a geo map.
+      Turning the map geographical and back again therefore loses nothing.
+
+      **The projection is ours, and that is the whole argument for not taking a library.**
+      `packages/web/src/maps/geo.ts` is two formulae, their inverses, and a loop that says which
+      tiles cover a rectangle. Its tests assert properties rather than magic numbers — the round
+      trip, the corners of the world, the direction each axis runs, that the grid covers every
+      corner of the viewport and never asks for a tile outside the world, and that the tile count
+      follows the screen rather than the coordinate, so a caller cannot make it expensive by
+      panning. A library would have brought several hundred kilobytes, its own event model and its
+      own theming for one screen, and would still have had to be taught `ADR-004` Decision 2.
+
+      **The defect this ticket found was in itself, between its two readers.** The core clamped an
+      out-of-range centre while the designer refused it, so a document the editor treats as a plain
+      canvas would have come back from the view route as a geographical map opening at the pole —
+      and the core's own comment claimed the designer applied "the same rule". Both now refuse a
+      centre that is not a coordinate; zoom stays clamped, because a scale is not a place. The
+      view route also stopped naming the installation's tile source on a map that has none to draw
+      under, which is one fewer thing said to a client that cannot use it.
+
+      Nine mutations were applied and all nine were caught: centring a pinned widget, an unpinned
+      one keeping its box, the `{y}` placeholder, the world clamp on the tile grid, the provider's
+      attribution, the designer's default for the share opt-in, clamping instead of refusing a
+      centre, the widget coordinate's range guard, and the `ADR-004` Decision 4 gate on both the
+      opt-in's reading and the public route's use of it.
 
 - [x] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
       five-star maps surface in Home. Small, and last, because it is a presentation rule over

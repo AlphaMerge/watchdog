@@ -1,3 +1,4 @@
+import { readCoordinate } from './geo.js';
 /**
  * What a widget is, and what resolving one can produce (`G-02`).
  *
@@ -7,7 +8,7 @@
  * that saved something odd should not take a wall display down with it.
  */
 
-/** The kinds resolved today. Geo is `G-08`. */
+/** Every kind the resolver knows. */
 export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph', 'html'] as const;
 
 /**
@@ -49,6 +50,14 @@ export interface Widget {
    */
   readonly html: string;
   /**
+   * Where on the ground this widget sits (`G-08`), or `null` for one placed by its box.
+   *
+   * A widget may carry both: the coordinate wins on a geographical map and the box is what it
+   * falls back to, which is what lets the same document be opened by a renderer with no tile
+   * source configured (`ADR-004` Decision 2).
+   */
+  readonly at: { readonly lat: number; readonly lon: number } | null;
+  /**
    * How far back a `graph` widget draws (`G-04`). Ignored by every other kind.
    *
    * **Per widget, unlike the sensor page's one range control for the whole tab.** A map is built
@@ -74,6 +83,8 @@ export type ResolvedWidget =
       readonly id: string;
       readonly kind: WidgetKind;
       readonly box: WidgetBox;
+      /** Present when the widget is placed on the ground rather than on the grid (`G-08`). */
+      readonly at?: { readonly lat: number; readonly lon: number };
       readonly title: string;
       readonly state: 'ok';
       readonly data: WidgetData;
@@ -82,6 +93,8 @@ export type ResolvedWidget =
       readonly id: string;
       readonly kind: WidgetKind;
       readonly box: WidgetBox;
+      /** Present when the widget is placed on the ground rather than on the grid (`G-08`). */
+      readonly at?: { readonly lat: number; readonly lon: number };
       readonly title: string;
       readonly state: 'unavailable';
       readonly reason?: UnavailableReason;
@@ -90,6 +103,8 @@ export type ResolvedWidget =
       readonly id: string;
       readonly kind: WidgetKind;
       readonly box: WidgetBox;
+      /** Present when the widget is placed on the ground rather than on the grid (`G-08`). */
+      readonly at?: { readonly lat: number; readonly lon: number };
       readonly title: string;
       readonly state: 'invalid';
       readonly problem: string;
@@ -216,6 +231,7 @@ export function readWidget(raw: unknown, index: number): Widget | { problem: str
     // what somebody typed is a better answer than a map that will not open. The layout as a
     // whole is bounded again by the request body limit.
     html: typeof raw['html'] === 'string' ? raw['html'].slice(0, MAX_HTML) : '',
+    at: readCoordinate(raw['at']),
     // Clamped rather than refused: a range somebody typed badly is a tile drawn over a strange
     // period, not a map that will not open — and an unbounded one is a query anybody can ask.
     rangeMinutes: Math.min(Math.max(MIN_RANGE_MINUTES, range), MAX_RANGE_MINUTES),

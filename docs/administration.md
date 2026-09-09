@@ -228,3 +228,44 @@ hostname, and not a wildcard. A bad value is refused at startup, not at the firs
 
 Set `notifications.publicUrl` to the same origin, or alarm emails will link to an address nobody
 receiving them can open.
+
+## Map tiles
+
+A map can place its widgets on a map of the world, and this installation draws no street map until
+you give it one. That is deliberate (`ADR-004`): bundling a world is tens of megabytes for a view
+that cannot show a street, and shipping a default provider would accept somebody else's terms on
+behalf of every operator who installs this. A map with no tile source configured still works — it
+draws its widgets over the background image the map's author uploaded, which is what an air-gapped
+NOC gets.
+
+To use one, choose a provider, accept its terms, and configure the template and the credit it asks
+for:
+
+```json
+{
+  "maps": {
+    "tileUrl": "https://tiles.example.org/{z}/{x}/{y}.png",
+    "tileAttribution": "© OpenStreetMap contributors"
+  }
+}
+```
+
+All three placeholders are required; a template missing one asks the provider for the same tile at
+every position, which draws a broken map and is a request pattern that gets an installation
+blocked. The attribution is drawn on every map that uses the tiles, and it is not optional in
+spirit: every tile service asks for it, and removing it is you breaking somebody's terms using our
+software.
+
+The tiles are fetched by each **viewer's browser**, not by the core, so every browser that opens a
+geographical map talks to the provider directly. Two consequences:
+
+- The content security policy is widened to exactly the one origin your template names. Change the
+  provider and restart; nothing else is allowed to load images.
+- **A public share link draws no tiles unless the map's author opts in**, per map, in the designer.
+  A stranger opening a link would otherwise tell your provider that this installation exists and
+  which places it watches — and with a keyed provider, hand over the key — none of which is visible
+  to the person who made the link.
+
+Where a map opens is saved with the map by its author. Panning and zooming are local to a browser
+and are not saved, so a wall display comes back to the same place after a reboot rather than to
+wherever somebody left it.

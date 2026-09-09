@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { send, useApi } from '../api/client';
-import type { MapSummary } from '../api/types';
+import type { MapSummary, ResolvedMap } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { MapDesigner } from '../maps/MapDesigner';
@@ -20,6 +20,14 @@ import { readCanvas, writeLayout, type Canvas } from '../maps/canvas';
 export function MapDesignView(): React.JSX.Element {
   const { id } = useParams();
   const map = useApi<MapSummary>(id === undefined ? null : `/maps/${id}`);
+  /**
+   * Only to know whether a tile source exists (`G-08`).
+   *
+   * The designer says something different when none is configured — that the map will draw over
+   * its background image rather than over a street map — and the honest place to learn that is
+   * the route that would serve the tiles.
+   */
+  const view = useApi<ResolvedMap>(id === undefined ? null : `/maps/${id}/view`);
 
   return (
     <div className="space-y-4">
@@ -36,7 +44,13 @@ export function MapDesignView(): React.JSX.Element {
       </div>
       {map.status === 'loading' && <Loading what="the map" />}
       {map.status === 'error' && <ErrorPanel error={map.error} retry={map.reload} />}
-      {map.status === 'ready' && <Designer key={map.data.id} map={map.data} />}
+      {map.status === 'ready' && (
+        <Designer
+          key={map.data.id}
+          map={map.data}
+          tilesConfigured={view.status === 'ready' && view.data.tiles !== null}
+        />
+      )}
     </div>
   );
 }
@@ -47,7 +61,13 @@ export function MapDesignView(): React.JSX.Element {
  * A `key` off the version would throw the undo history and the selection away every time
  * somebody pressed Save, which is the moment they are least expecting to lose anything.
  */
-function Designer({ map }: { readonly map: MapSummary }): React.JSX.Element {
+function Designer({
+  map,
+  tilesConfigured,
+}: {
+  readonly map: MapSummary;
+  readonly tilesConfigured: boolean;
+}): React.JSX.Element {
   const version = useRef(map.version);
 
   const save = async (canvas: Canvas): Promise<void> => {
@@ -74,7 +94,12 @@ function Designer({ map }: { readonly map: MapSummary }): React.JSX.Element {
         />
       </Card>
       <Card title={map.description === '' ? 'Canvas' : map.description}>
-        <MapDesigner mapId={map.id} initial={readCanvas(map.layout)} save={save} />
+        <MapDesigner
+          mapId={map.id}
+          tilesConfigured={tilesConfigured}
+          initial={readCanvas(map.layout)}
+          save={save}
+        />
       </Card>
       {/*
         Below the canvas, not in the toolbar: publishing a map to people with no account is a

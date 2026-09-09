@@ -20,12 +20,26 @@ import { AuthError } from '../auth/errors.js';
  * inline styles — which is why the UI ships a stylesheet rather than style attributes. The rest
  * are cheap: they turn off browser behaviours this application never wants.
  */
+/**
+ * The policy, with whatever image origins configuration adds (`G-08`, `ADR-004`).
+ *
+ * **The first thing here that depends on configuration**, and it is worth saying why that is
+ * acceptable: a map tile provider is an origin an operator chose and pasted, `img-src` is the one
+ * directive it needs, and the widening is exactly one host rather than a wildcard. Everything else
+ * stays `'self'` — a tile source may serve images and nothing else.
+ */
+function policy(imageOrigins: readonly string[]): string {
+  const images = ["'self'", 'data:', ...imageOrigins].join(' ');
+  return (
+    `default-src 'self'; img-src ${images}; object-src 'none'; base-uri 'none'; ` +
+    "frame-ancestors 'none'; form-action 'self'"
+  );
+}
+
 const HEADERS: Readonly<Record<string, string>> = {
   // Scripts, styles and connections from this origin only. `img-src` allows data: because
   // uPlot renders to canvas and exports PNGs from it.
-  'content-security-policy':
-    "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; " +
-    "frame-ancestors 'none'; form-action 'self'",
+  'content-security-policy': policy([]),
   // No sniffing: a JSON response that a browser decides is HTML is an XSS in an API.
   'x-content-type-options': 'nosniff',
   // `frame-ancestors 'none'` above covers modern browsers; this covers the rest.
@@ -46,9 +60,17 @@ const HEADERS: Readonly<Record<string, string>> = {
  */
 const HSTS = 'max-age=31536000; includeSubDomains';
 
-export function registerSecurityHeaders(app: FastifyInstance): void {
+export function registerSecurityHeaders(
+  app: FastifyInstance,
+  options: { imageOrigins?: readonly string[] } = {},
+): void {
+  const headers: Readonly<Record<string, string>> =
+    options.imageOrigins === undefined || options.imageOrigins.length === 0
+      ? HEADERS
+      : { ...HEADERS, 'content-security-policy': policy(options.imageOrigins) };
+
   app.addHook('onSend', (request: FastifyRequest, reply: FastifyReply, payload, done) => {
-    for (const [name, value] of Object.entries(HEADERS)) {
+    for (const [name, value] of Object.entries(headers)) {
       // **A route that has already set one of these keeps it** — and every one of these headers
       // is a floor rather than a ceiling, so the only way a route can differ is by being
       // stricter. `G-05` serves an operator's uploaded image under `default-src 'none'`, which

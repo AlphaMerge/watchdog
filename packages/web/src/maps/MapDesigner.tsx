@@ -3,6 +3,7 @@ import { ApiError } from '../api/client';
 import { ErrorPanel } from '../components/Panels';
 import { ObjectPicker } from './ObjectPicker';
 import { MapBackgroundControl } from './MapBackgroundControl';
+import { MapGeoPanel } from './MapGeoPanel';
 import { MapBackgroundImage } from './MapBackgroundImage';
 import { backgroundUrl } from './background';
 import { ConnectorLayer } from './ConnectorLayer';
@@ -70,6 +71,8 @@ import {
 export interface MapDesignerProps {
   /** Which map this is, for the background upload. Absent in tests that only drive the canvas. */
   readonly mapId?: number;
+  /** Whether this installation has a tile source at all (`G-08`, `ADR-004` Decision 1). */
+  readonly tilesConfigured?: boolean;
   readonly initial: Canvas;
   /** Saves, and answers with the version to send with the next one. Rejects with an `ApiError`. */
   readonly save: (canvas: Canvas) => Promise<void>;
@@ -79,6 +82,7 @@ export interface MapDesignerProps {
 
 export function MapDesigner({
   mapId,
+  tilesConfigured = false,
   initial,
   save,
   disabled = false,
@@ -157,6 +161,10 @@ export function MapDesigner({
       title: named ? target.name : KIND_LABELS[kind],
       rangeMinutes: DEFAULT_RANGE_MINUTES,
       html: '',
+      // On the grid until somebody pins it: a new tile on a geographical map lands where there is
+      // room, which is somewhere the author can see, rather than at a coordinate they did not
+      // choose.
+      at: null,
       box: firstFreeBox(canvas),
     };
     const next = addTile(canvas, tile);
@@ -601,6 +609,14 @@ export function MapDesigner({
           </ul>
         </div>
       )}
+
+      <MapGeoPanel
+        canvas={canvas}
+        selected={selectedTile}
+        disabled={disabled}
+        tilesConfigured={tilesConfigured}
+        onChange={apply}
+      />
 
       {mapId !== undefined && (
         <MapBackgroundControl

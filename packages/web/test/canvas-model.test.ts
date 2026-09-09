@@ -61,12 +61,13 @@ function tile(id: string, box: Partial<Box> = {}): Tile {
     title: id,
     rangeMinutes: DEFAULT_RANGE_MINUTES,
     html: '',
+    at: null,
     box: { x: 0, y: 0, w: 4, h: 3, ...box },
   };
 }
 
 function canvas(...tiles: Tile[]): Canvas {
-  return { tiles, connectors: [] };
+  return { tiles, connectors: [], geo: null };
 }
 
 function press(key: string, held: Partial<KeyPress> = {}): KeyPress {

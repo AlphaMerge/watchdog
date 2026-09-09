@@ -33,6 +33,8 @@ export interface MapRouteOptions {
    * empty one.
    */
   resolver?: MapResolver;
+  /** What an operator configured, if anything (`G-08`, `ADR-004` Decision 1). */
+  tiles?: { urlTemplate: string; attribution: string };
 }
 
 interface MapBody {
@@ -159,6 +161,7 @@ function serialise(map: MapRow): Record<string, unknown> {
 
 export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void {
   const { maps, resolver } = options;
+  const tiles = options.tiles ?? { urlTemplate: '', attribution: '' };
 
   /** The viewer, or a refusal. Every route needs one; `G-06` is the only caller that will not. */
   const viewerOf = (request: {
@@ -259,6 +262,26 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
                     properties: { id: { type: 'string' }, problem: { type: 'string' } },
                   },
                 },
+                geo: {
+                  type: ['object', 'null'],
+                  additionalProperties: false,
+                  required: ['lat', 'lon', 'zoom', 'publicTiles'],
+                  properties: {
+                    lat: { type: 'number' },
+                    lon: { type: 'number' },
+                    zoom: { type: 'integer' },
+                    publicTiles: { type: 'boolean' },
+                  },
+                },
+                tiles: {
+                  type: ['object', 'null'],
+                  additionalProperties: false,
+                  required: ['urlTemplate', 'attribution'],
+                  properties: {
+                    urlTemplate: { type: 'string' },
+                    attribution: { type: 'string' },
+                  },
+                },
               },
             },
           },
@@ -278,6 +301,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
           map: serialise(map),
           widgets: resolved.widgets,
           connectors: resolved.connectors,
+          geo: resolved.geo,
+          // A signed-in viewer gets whatever the operator configured; `ADR-004` Decision 4 is
+          // about the *public* route, where the viewer is a stranger. Absent on a map that is
+          // not geographical, because the tile source travels with the thing it draws under —
+          // a plain canvas has nothing to put tiles behind.
+          tiles: resolved.geo === null || tiles.urlTemplate === '' ? null : tiles,
           problems: resolved.problems,
         };
       },

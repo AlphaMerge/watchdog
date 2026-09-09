@@ -76,6 +76,18 @@ export function SharedMapView(): React.JSX.Element {
               backgroundSrc={
                 view.data.hasBackground && token !== undefined ? sharedBackgroundUrl(token) : null
               }
+              geo={
+                view.data.geo === null
+                  ? null
+                  : {
+                      lat: view.data.geo.lat,
+                      lon: view.data.geo.lon,
+                      zoom: view.data.geo.zoom,
+                    }
+              }
+              // Null unless this map's author opted in (`ADR-004` Decision 4). The core decides
+              // it; this page only draws what it was given, so there is one place the rule lives.
+              tiles={view.data.tiles}
             />
           </>
         )}

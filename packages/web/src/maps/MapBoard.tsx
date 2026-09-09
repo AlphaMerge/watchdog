@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api/client';
 import { useStateStream } from '../api/stream';
 import type { LiveState, StateStreamOptions } from '../api/stream';
@@ -9,6 +9,7 @@ import type {
   ResolvedWidget,
   ResolvedWidgetData,
   SensorState,
+  TileSource,
 } from '../api/types';
 import { StatusBadge } from '../components/StatusBadge';
 import { groupByUnit } from '../charts/groups';
@@ -19,6 +20,8 @@ import { CELL, COLUMNS, ROWS, connectorLine, rangeLabel } from './canvas';
 import { historyPathFor } from './graph';
 import { useClock } from './clock';
 import { MapBackgroundImage } from './MapBackgroundImage';
+import { GeoLayer } from './GeoLayer';
+import { screenPosition, type GeoView } from './geo';
 import { backgroundUrl } from './background';
 
 /**
@@ -53,6 +56,16 @@ export function MapBoard({
   // a subtree would silently stop updating the tiles that pointed outside it.
   const { states } = useStateStream(null, stream);
   const tick = useClock(REFRESH_MS);
+  /**
+   * Where this browser is looking.
+   *
+   * Starts at the map's saved home view and moves as somebody pans. Deliberately not written
+   * back: the extent is the author's decision (`ADR-004`), and a wall display has to come back to
+   * the same place after a reboot rather than to wherever a passer-by left it.
+   */
+  const [looking, setLooking] = useState<GeoView | null>(
+    view.geo === null ? null : { lat: view.geo.lat, lon: view.geo.lon, zoom: view.geo.zoom },
+  );
 
   return (
     <MapCanvas
@@ -61,6 +74,9 @@ export function MapBoard({
       tick={tick}
       graphs="chart"
       backgroundSrc={backgroundUrl(view.map.id)}
+      geo={looking}
+      tiles={view.tiles}
+      onGeoView={setLooking}
     />
   );
 }
@@ -83,6 +99,9 @@ export function MapCanvas({
   tick,
   graphs,
   backgroundSrc,
+  geo,
+  tiles,
+  onGeoView,
 }: {
   readonly view: { widgets: ResolvedWidget[]; connectors: ResolvedConnector[] };
   readonly states: ReadonlyMap<number, LiveState>;
@@ -90,16 +109,33 @@ export function MapCanvas({
   /** `values` is what a tile can draw with no access to the history route. */
   readonly graphs: 'chart' | 'values';
   readonly backgroundSrc: string | null;
+  /** Where the map is looking, when it is geographical (`G-08`). */
+  readonly geo?: GeoView | null;
+  /** What an operator configured. `null` draws no tiles, which is a map rather than an error. */
+  readonly tiles?: TileSource | null;
+  readonly onGeoView?: (view: GeoView) => void;
 }): React.JSX.Element {
+  const size = { width: COLUMNS * CELL, height: ROWS * CELL };
+
   return (
     <div className="overflow-x-auto border border-border">
-      <div
-        className="relative bg-bg"
-        style={{ width: COLUMNS * CELL, height: ROWS * CELL }}
-        aria-label="Map"
-        role="group"
-      >
+      <div className="relative bg-bg" style={size} aria-label="Map" role="group">
+        {/*
+          The background image is drawn under the tiles, not instead of them: a map with no tile
+          source configured shows the picture an operator uploaded, which is `ADR-004` Decision 2
+          and the reason this feature works air-gapped.
+        */}
         {backgroundSrc !== null && <MapBackgroundImage src={backgroundSrc} />}
+
+        {geo != null && tiles != null && (
+          <GeoLayer
+            view={geo}
+            size={size}
+            template={tiles.urlTemplate}
+            attribution={tiles.attribution}
+            {...(onGeoView === undefined ? {} : { onView: onGeoView })}
+          />
+        )}
 
         <Connectors view={view} />
 
@@ -107,12 +143,7 @@ export function MapCanvas({
           <div
             key={widget.id}
             className="absolute overflow-hidden border border-border bg-surface"
-            style={{
-              left: widget.box.x * CELL,
-              top: widget.box.y * CELL,
-              width: widget.box.w * CELL,
-              height: widget.box.h * CELL,
-            }}
+            style={placementOf(widget, geo ?? null, size)}
           >
             <Tile widget={widget} states={states} tick={tick} graphs={graphs} />
           </div>
@@ -120,6 +151,31 @@ export function MapCanvas({
       </div>
     </div>
   );
+}
+
+/**
+ * Where a widget goes: on the ground, or on the grid.
+ *
+ * **A widget may carry both, and the coordinate only wins on a geographical map.** That is what
+ * lets one document open in a renderer with no tile source — and it is also why a legend or a
+ * note, which have no place on the ground, keep working on a geo map: they simply carry no
+ * coordinate (`ADR-004`, second open question).
+ *
+ * The coordinate is the widget's *centre*, because a pin marks a place rather than starting at
+ * one; the size still comes from the box.
+ */
+function placementOf(
+  widget: ResolvedWidget,
+  geo: GeoView | null,
+  size: { width: number; height: number },
+): React.CSSProperties {
+  const width = widget.box.w * CELL;
+  const height = widget.box.h * CELL;
+  if (geo === null || widget.at === undefined) {
+    return { left: widget.box.x * CELL, top: widget.box.y * CELL, width, height };
+  }
+  const at = screenPosition(widget.at, geo, size);
+  return { left: at.x - width / 2, top: at.y - height / 2, width, height };
 }
 
 function Tile({

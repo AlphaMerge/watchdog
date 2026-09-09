@@ -12,7 +12,7 @@ the same one the API answers on.
 
 ## The views
 
-Seven sections, in the order the header lists them.
+Eight sections, in the order the header lists them.
 
 | View             | Path             | The question it answers                                          |
 | ---------------- | ---------------- | ---------------------------------------------------------------- |
@@ -23,6 +23,7 @@ Seven sections, in the order the header lists them.
 | **Discovery**    | `/discovery`     | What is on this network, and what would scanning it cost?         |
 | **Templates**    | `/templates`     | What does a notification say, and to whom?                        |
 | **Sensor types** | `/sensor-types`  | What can this installation measure?                               |
+| **Maps**         | `/maps`          | What did somebody arrange to be looked at, and where?             |
 
 Alarms sits second, ahead of the tree, deliberately: [`WORKFLOW.MD §7`](WORKFLOW.MD) calls it the
 operator's home screen, and the thing somebody opens this product to look at belongs near the
@@ -115,6 +116,27 @@ is generated from. Useful for checking that a new type's schema says what its au
 The full reference, including channels and defaults, is
 [sensor-reference.md](sensor-reference.md).
 
+### Maps
+
+A map is a canvas somebody arranged: status icons, live graphs, data tables, sensor lists,
+connector lines, custom HTML and a background image, on a grid or on a map of the world. It is not
+a tree object — it has its own storage, its own API and its own access by group — so a map you may
+not read is absent from the list rather than refused.
+
+- **The designer and the view are separate pages.** `/maps/:id` is what a map looks like; the
+  designer is behind write access, and it drags, undoes and redoes on the keyboard as well as the
+  pointer.
+- **A widget whose object is gone leaves a tile saying so**, not a hole. Whether it says *why* —
+  deleted, or merely invisible to you — depends on your rights on the map.
+- **A public share link** is a per-map bearer token with an expiry, revocable, handed over once
+  and stored only as a hash. A shared map draws the current readings rather than history.
+- **Five-star maps surface in the Home menu.** Priority is set on the map itself.
+- **Geographical maps need a tile source, and this installation may not have one.** With none
+  configured the widgets are drawn over the background image instead — the designer says so where
+  somebody is arranging one, because the fix is an administrator's
+  ([administration.md](administration.md)). Panning is local to your browser: where a map opens is
+  its author's decision, so a wall display comes back to the same place after a reboot.
+
 ## The object detail page
 
 `/objects/:id` — and for a sensor, this is *the* page. Six tabs, and **the tab lives in the URL**,
@@ -173,12 +195,12 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
 
 ## What is not here
 
-The drag-and-drop **map and dashboard designer** — status icons and live graphs arranged on a
-canvas, publishable by URL — is `[V2]` and is not built. So are **reports** and geographical
-maps. See [`CAPABILITIES.MD §6`](CAPABILITIES.MD) for the full list and its markers; the v2
-candidates are in [TASKS.md](TASKS.md).
+**Reports** are `[V2]` and are not built. The map and dashboard designer was also `[V2]` and is
+now built — see the Maps section above. See [`CAPABILITIES.MD §6`](CAPABILITIES.MD) for the full
+list and its markers; the remaining v2 candidates are in [TASKS.md](TASKS.md).
 
-For v1, the Overview and the Alarms view are what a wall display would show.
+For an installation that has no maps arranged yet, the Overview and the Alarms view are what a
+wall display would show.
 
 ## Related
 

@@ -30,6 +30,8 @@ export interface PublicMapRouteOptions {
   maps: MapService;
   resolver: MapResolver;
   limit: ShareRateLimit;
+  /** Served to a stranger only when the map opted in (`ADR-004` Decision 4). */
+  tiles?: { urlTemplate: string; attribution: string };
 }
 
 /**
@@ -55,6 +57,7 @@ const forbidden = (): MapError =>
 
 export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOptions): void {
   const { maps, resolver, limit } = options;
+  const tiles = options.tiles ?? { urlTemplate: '', attribution: '' };
 
   /**
    * Bounded per link, before any database work.
@@ -111,6 +114,23 @@ export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOpt
               },
               /** So the page knows whether to ask for the image at all. */
               hasBackground: { type: 'boolean' },
+              geo: {
+                type: ['object', 'null'],
+                additionalProperties: false,
+                required: ['lat', 'lon', 'zoom', 'publicTiles'],
+                properties: {
+                  lat: { type: 'number' },
+                  lon: { type: 'number' },
+                  zoom: { type: 'integer' },
+                  publicTiles: { type: 'boolean' },
+                },
+              },
+              tiles: {
+                type: ['object', 'null'],
+                additionalProperties: false,
+                required: ['urlTemplate', 'attribution'],
+                properties: { urlTemplate: { type: 'string' }, attribution: { type: 'string' } },
+              },
             },
           },
         },
@@ -133,11 +153,17 @@ export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOpt
       // a principal (`G-02`).
       const resolved = await resolver.resolve(opened.map.layout, { kind: 'public' });
       const background = await maps.sharedBackground(token);
+      // **`ADR-004` Decision 4, as one condition rather than two places.** A stranger's browser
+      // fetches tiles from a third party, telling it that this installation exists and which
+      // coordinates it cares about; the map's author has to have asked for that.
+      const shared = resolved.geo?.publicTiles === true && tiles.urlTemplate !== '' ? tiles : null;
       return {
         name: opened.map.name,
         description: opened.map.description,
         widgets: resolved.widgets,
         connectors: resolved.connectors,
+        geo: resolved.geo,
+        tiles: shared,
         problems: resolved.problems,
         hasBackground: background !== undefined,
       };

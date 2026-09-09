@@ -146,6 +146,8 @@ describe('the page a stranger opens', () => {
       },
     ],
     connectors: [],
+    geo: null,
+    tiles: null,
     problems: [],
     hasBackground: false,
   };

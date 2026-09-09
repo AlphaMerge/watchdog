@@ -699,6 +699,8 @@ export type ResolvedWidget = {
   id: string;
   kind: 'status' | 'sensor-list' | 'table' | 'graph' | 'html';
   box: { x: number; y: number; w: number; h: number };
+  /** Present when the widget is placed on the ground rather than on the grid (`G-08`). */
+  at?: { lat: number; lon: number };
   title: string;
 } & (
   | { state: 'ok'; data: ResolvedWidgetData }
@@ -757,10 +759,32 @@ export interface ResolvedConnector {
   to: string;
 }
 
+/**
+ * A map's geographical block: where it opens, and whether a share link may draw tiles (`G-08`).
+ *
+ * **Not the same type as the renderer's `GeoView`**, which is a viewport — a place and a zoom.
+ * This is the document, and `publicTiles` is a property of the map rather than of where somebody
+ * is looking; conflating them is how a pan ends up deciding what a stranger can see.
+ */
+export interface MapGeo {
+  lat: number;
+  lon: number;
+  zoom: number;
+  publicTiles: boolean;
+}
+
+/** What an operator configured, or `null` when nothing is (`ADR-004` Decision 1). */
+export interface TileSource {
+  urlTemplate: string;
+  attribution: string;
+}
+
 export interface ResolvedMap {
   map: MapSummary;
   widgets: ResolvedWidget[];
   connectors: ResolvedConnector[];
+  geo: MapGeo | null;
+  tiles: TileSource | null;
   /** Widgets whose document could not be read at all, kept rather than dropped. */
   problems: { id: string; problem: string }[];
 }
@@ -784,6 +808,9 @@ export interface SharedMap {
   description?: string;
   widgets: ResolvedWidget[];
   connectors: ResolvedConnector[];
+  geo: MapGeo | null;
+  /** Null unless this map's author opted in to tiles for strangers (`ADR-004` Decision 4). */
+  tiles: TileSource | null;
   problems: { id: string; problem: string }[];
   hasBackground: boolean;
 }

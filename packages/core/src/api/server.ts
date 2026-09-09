@@ -107,6 +107,13 @@ export interface ApiServerOptions {
    * has no maps API, which is a different statement from having no maps.
    */
   maps?: MapService;
+  /**
+   * Where a geographical map's tiles come from (`G-08`, `ADR-004`).
+   *
+   * Absent or empty means no provider is configured, which is the default and is a working map
+   * rather than a broken one: the widgets draw over the background image instead.
+   */
+  mapTiles?: { urlTemplate: string; attribution: string };
   /** Fills a map's widgets in for the view route (`G-10`). */
   mapResolver?: MapResolver;
   /**
@@ -226,6 +233,7 @@ export class ApiServer {
   readonly #mapResolver: MapResolver | undefined;
   /** Per share link, because the global limiter already bounds per address (`G-06`). */
   readonly #shareLimit = new ShareRateLimit();
+  readonly #mapTiles: { urlTemplate: string; attribution: string } | undefined;
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -282,6 +290,7 @@ export class ApiServer {
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#maps = options.maps;
     this.#mapResolver = options.mapResolver;
+    this.#mapTiles = options.mapTiles;
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
@@ -403,7 +412,10 @@ export class ApiServer {
 
     // **Security headers on everything, including the app shell and the error pages** (`A-09`).
     // Registered first so nothing can answer without them.
-    registerSecurityHeaders(this.#app);
+    // The tile provider's origin, and nothing else, joins `img-src` (`ADR-004`). A template
+    // that does not parse adds nothing rather than breaking the policy.
+    const tileOrigin = originOf(this.#mapTiles?.urlTemplate ?? '');
+    registerSecurityHeaders(this.#app, tileOrigin === null ? {} : { imageOrigins: [tileOrigin] });
 
     // Rate limiting sits *after* authentication in registration order, so it can key by account
     // where there is one — everybody behind one NAT would otherwise share a bucket.
@@ -548,6 +560,7 @@ export class ApiServer {
           mapRoutes(scope, {
             maps: this.#maps,
             ...(this.#mapResolver === undefined ? {} : { resolver: this.#mapResolver }),
+            ...(this.#mapTiles === undefined ? {} : { tiles: this.#mapTiles }),
           });
           // The one map route that answers bytes rather than JSON (`G-05`). Exempted from the
           // response-schema rule for the same reason the static plugin is, and registered on its
@@ -564,6 +577,7 @@ export class ApiServer {
               maps: this.#maps,
               resolver: this.#mapResolver,
               limit: this.#shareLimit,
+              ...(this.#mapTiles === undefined ? {} : { tiles: this.#mapTiles }),
             };
             publicMapRoutes(scope, shared);
             this.#exempting = 'a stored image, with no JSON to filter';
@@ -855,4 +869,23 @@ export async function sensorsOfDevice(
     params: catalogue.has(row.type) ? catalogue.redact(row.type, row.params).params : {},
     isMaster: row.is_master,
   }));
+}
+
+/**
+ * The origin a tile template loads from, or `null` when it is not a usable template.
+ *
+ * Here rather than in the renderer because the policy is written at startup: a template with a
+ * missing placeholder or a bad scheme widens nothing, which is the safe direction — the map then
+ * draws no tiles and says so, instead of the browser refusing images the policy forgot to allow.
+ */
+function originOf(template: string): string | null {
+  if (!template.includes('{z}') || !template.includes('{x}') || !template.includes('{y}')) {
+    return null;
+  }
+  try {
+    const url = new URL(template.replace('{z}', '0').replace('{x}', '0').replace('{y}', '0'));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
 }

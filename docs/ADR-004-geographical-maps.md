@@ -1,6 +1,6 @@
 # ADR-004: Where a geographical map's tiles come from
 
-- **Status**: **Proposed** — `G-08` is blocked on accepting or changing this
+- **Status**: Accepted (2026-09-09, on the instruction to start `G-08`)
 - **Date**: 2026-09-09
 - **Deciders**: Roman
 - **Supersedes**: —
@@ -153,12 +153,19 @@ without touching Decisions 1 to 4, which is exactly why it is listed last.
   projection and a tile grid rather than a dependency. If the implementation of Decision 5 turns
   out to be as fiddly as it might, this option comes back onto the table honestly.
 
-## What is still open, and needs a decision before `G-08` starts
+## The two questions this left open, answered by `G-08`
 
-1. **Is the extent per map or per view?** A map that always opens on the same rectangle is simpler;
-   one that remembers where somebody left it is friendlier and is per-viewer state this system has
-   nowhere to put yet.
-2. **Do geo widgets and canvas widgets share one map, or is a geo map a different kind of map?**
-   Mixing them means a widget has both a `box` and a coordinate and the renderer has to choose;
-   separating them means a `kind` on `map` and two designers. Neither is obviously right, and it is
-   a modelling decision rather than a security one — so it belongs in `G-08`'s own design, not here.
+Recorded here because the answers are part of the model rather than of one ticket's code.
+
+1. **The extent is per map.** A map is a saved picture and where it opens is part of what the
+   author arranged, exactly as widget positions are: `layout.geo` carries the home view — a
+   latitude, a longitude and a zoom. A viewer may pan and zoom, and nothing persists it. Per-viewer
+   state has nowhere to live in this system, and a wall display has to come back to the same place
+   after a reboot rather than to wherever somebody left it on Tuesday.
+
+2. **One kind of map, and widgets may carry a coordinate.** The tile layer is a property of the
+   map — the same shape `G-05`'s background already has — rather than a widget kind, and a widget
+   with `lat`/`lon` is placed by them while a widget without keeps its `box`. The deciding argument
+   is that a geographical map needs *both* anyway: a legend, a status list and a note belong pinned
+   to the canvas, not to a point on the ground. Separating the two would have meant a second
+   designer that immediately grew the first one's features back.

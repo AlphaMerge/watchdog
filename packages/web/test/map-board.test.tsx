@@ -49,6 +49,8 @@ function resolved(...widgets: ResolvedWidget[]): ResolvedMap {
     },
     widgets,
     connectors: [],
+    geo: null,
+    tiles: null,
     problems: [],
   };
 }

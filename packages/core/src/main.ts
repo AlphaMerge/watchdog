@@ -919,6 +919,10 @@ async function serve(): Promise<void> {
     },
     maps,
     mapResolver,
+    mapTiles: {
+      urlTemplate: config.maps.tileUrl,
+      attribution: config.maps.tileAttribution,
+    },
     triggers,
     templates,
     deliveryHealth,

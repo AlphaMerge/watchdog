@@ -847,7 +847,7 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 | --- | --- | --- | --- |
 | `id` | path | string | **required** |
 
-**200** { map, widgets, connectors, problems }
+**200** { map, widgets, connectors, problems, geo, tiles }
 
 ### `GET /api/v1/maps/{id}/shares`
 
@@ -981,7 +981,7 @@ The map a share token opens, with every widget resolved. Expired, revoked and ne
 | --- | --- | --- | --- |
 | `token` | path | string | **required** |
 
-**200** { name, description, widgets, connectors, problems, hasBackground }
+**200** { name, description, widgets, connectors, problems, hasBackground, geo, tiles }
 
 ### `GET /api/v1/public/maps/{token}/background`
 
