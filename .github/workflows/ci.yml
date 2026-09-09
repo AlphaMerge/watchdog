@@ -159,17 +159,26 @@ jobs:
 
       # Built here rather than on the Windows runner because wixl is msitools and runs on Linux —
       # the MSI comes off the same staged tree as every other artefact. The Windows job installs
-      # what this produces.
+      # what this produces. `msitools` is in the runner image (`dev/runner/Dockerfile`), so this
+      # no longer installs it per run: a hosted image needed that and a local one already has it.
       - name: build the Windows installers
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wixl msitools
           scripts/package-msi.sh
           scripts/package.sh --probe-only
           scripts/package-msi.sh --probe-only
 
+      # **Uploaded only when something is waiting to download it.** `windows-install` is the sole
+      # consumer and it is skipped until `CI_RUNNER_WINDOWS` names a machine, so on this
+      # installation the upload was pure cost — and it is a cost that fails: the account's
+      # artifact *storage* quota is full, which is a separate billed resource from runner minutes
+      # and one local runners do nothing about. It failed an otherwise green run on exactly that
+      # (`P-198`), with this repository storing no artifacts at all; the quota is consumed
+      # elsewhere in the account.
+      #
+      # The same variable that brings the Windows job back brings its input back with it, so
+      # there is one switch rather than two to remember.
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && vars.CI_RUNNER_WINDOWS != ''
         with:
           name: release-artifacts
           path: |
