@@ -543,3 +543,53 @@ describe('the field-test runbook', () => {
     );
   });
 });
+
+/**
+ * Every GitHub workflow parses, and every job it defines has steps (`S-11`).
+ *
+ * **The workflow is the one file in this repository that nothing was checking.** It is also the
+ * file that runs everything else, and it has been switched off for weeks — so a syntax error in
+ * it would sit there silently until the day somebody turns CI back on and needs it to work. That
+ * is the same argument `P-53` made for the PowerShell installers, and the same answer: parse it
+ * in the ordinary suite, on every machine, disabled CI or not.
+ *
+ * Written because it caught its author. Adding `S-11`'s Windows job meant embedding PowerShell in
+ * a YAML block scalar, a PowerShell here-string must close at column zero, and column zero is not
+ * available inside a block scalar — so the workflow became invalid YAML and nothing said so.
+ *
+ * A parse is a floor and not a proof: it cannot tell whether a job does what it claims, only that
+ * GitHub would get as far as reading it. The job assertions are in the job.
+ */
+describe('the CI workflows', () => {
+  it('parse, and define jobs with steps', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const dir = join(repoRoot, '.github', 'workflows');
+    const files = (await readdir(dir)).filter(
+      (name) => name.endsWith('.yml') || name.endsWith('.yaml'),
+    );
+    // A directory that has been renamed or emptied would make every assertion below vacuous.
+    assert.ok(files.length > 0, `no workflows found in ${dir}`);
+
+    const { load } = await import('js-yaml');
+    for (const file of files) {
+      const text = await readFile(join(dir, file), 'utf8');
+      let document: unknown;
+      try {
+        document = load(text);
+      } catch (error: unknown) {
+        assert.fail(`${file} is not valid YAML: ${(error as Error).message}`);
+      }
+
+      const jobs = (document as { jobs?: Record<string, { steps?: unknown[] }> }).jobs;
+      assert.ok(jobs !== undefined, `${file} defines no jobs`);
+      for (const [name, job] of Object.entries(jobs)) {
+        // A job with no steps is a job that runs nothing and reports success, which is the one
+        // shape of broken workflow that looks green.
+        assert.ok(
+          Array.isArray(job.steps) && job.steps.length > 0,
+          `${file}: job "${name}" has no steps`,
+        );
+      }
+    }
+  });
+});

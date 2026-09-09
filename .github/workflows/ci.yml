@@ -288,6 +288,84 @@ jobs:
             uninstall.log
           retention-days: 7
 
+  # **The other half of the Windows story, and the one `S-11` has been open on** — not the
+  # installer this time but the database under it. `S-11`'s decision half is answered from the
+  # release channel: TimescaleDB publishes current Windows builds and they carry the licensed
+  # module, so no plain-PostgreSQL fallback engine is needed on availability grounds
+  # (`docs/findings/2026-09-03-timescaledb-on-windows.md`). What could not be answered without
+  # Windows is whether any of it *runs*: whether `setup.exe` composes with a PostgreSQL somebody
+  # installed themselves, and whether the one Timescale-Licence feature this product depends on —
+  # native compression — works there.
+  #
+  # A hosted runner answers that and does not answer the other thing `S-11` asks for. This is
+  # pass/fail, which a shared VM settles as well as bare metal; the benchmark is a measurement,
+  # and a number taken beside neighbours nobody can see is not one (`CLAUDE.md`, `P-192`).
+  #
+  # No `needs:`, because it depends on nothing this workflow builds — only on the repository and
+  # a PostgreSQL it installs itself. That also makes it the cheapest job to dispatch alone.
+  windows-timescaledb:
+    name: TimescaleDB provisions on Windows Server
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner ships PostgreSQL 14, and TimescaleDB publishes no Windows build for it — 15
+      # was dropped at 2.29.0 and 14 before that. So install one that is covered rather than
+      # discover the gap halfway through an install; `provision-postgres.ps1` refuses with that
+      # sentence if this ever stops being true.
+      - name: install a PostgreSQL TimescaleDB still builds for
+        shell: pwsh
+        run: |
+          choco install postgresql17 --no-progress --yes `
+            --params '/Password:postgres' --ia '--enable-components server,commandlinetools'
+          $bin = 'C:\Program Files\PostgreSQL\17\bin'
+          if (-not (Test-Path $bin)) { throw "PostgreSQL 17 did not land at $bin" }
+          echo $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: provision it
+        shell: pwsh
+        env:
+          PGPASSWORD: postgres
+        run: ./scripts/windows/provision-postgres.ps1
+
+      # **The assertions are the three claims `S-11` rests on**, in the order they would fail.
+      # `extversion` says the extension loaded at all; the licence says the TSL half is available,
+      # which migration 004 refuses to run without; and compressing a chunk is the one accepted
+      # Timescale-Licence feature actually doing its job. A green `CREATE EXTENSION` with
+      # compression that throws would be the worst outcome to ship, because it looks like a pass.
+      - name: assert the extension is loaded, licensed and compressing
+        shell: pwsh
+        env:
+          PGPASSWORD: postgres
+        run: |
+          function Invoke-Psql {
+            param([string] $Sql)
+            $out = & psql -U postgres -d monitoring -v ON_ERROR_STOP=1 -tAc $Sql
+            if ($LASTEXITCODE -ne 0) { throw "psql failed: $Sql" }
+            return ($out | Out-String).Trim()
+          }
+
+          $version = Invoke-Psql "SELECT extversion FROM pg_extension WHERE extname='timescaledb'"
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'timescaledb is not installed in the database' }
+          Write-Host "timescaledb $version"
+
+          $licence = Invoke-Psql 'SHOW timescaledb.license'
+          if ($licence -ne 'timescale') { throw "timescaledb.license is '$licence', so migration 004 would refuse to apply" }
+
+          # One statement per call rather than a here-string: `'@` has to sit at column zero in
+          # PowerShell, and column zero is not available inside a YAML block scalar.
+          Invoke-Psql 'CREATE TABLE sample (time timestamptz NOT NULL, channel_id int NOT NULL, value double precision)' | Out-Null
+          Invoke-Psql "SELECT create_hypertable('sample', 'time')" | Out-Null
+          Invoke-Psql "INSERT INTO sample SELECT now() - (n || ' minutes')::interval, 1, n FROM generate_series(1, 5000) n" | Out-Null
+          Invoke-Psql "ALTER TABLE sample SET (timescaledb.compress, timescaledb.compress_segmentby = 'channel_id', timescaledb.compress_orderby = 'time')" | Out-Null
+
+          # The whole point: compression is the Timescale-Licence feature `CLAUDE.md` accepts the
+          # licence for, and it is worth 12.5x on disk. If it does not run here, a Windows
+          # installation is a different product from a Linux one.
+          $compressed = Invoke-Psql "SELECT count(*) FROM (SELECT compress_chunk(c) FROM show_chunks('sample') c) s"
+          if ([int]$compressed -lt 1) { throw 'no chunk was compressed' }
+          Write-Host "compressed $compressed chunks"
+
   enrol-smoke:
     name: remote probe enrolment across two boxes
     needs: build

@@ -314,9 +314,33 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       `pg_config`. So it does not guess a path, and neither would a script driving it. What is
       left unproven is that any of it runs, which is what the job would settle.
 
-      **Still open:** a Windows provisioning script and the job that runs it — neither written,
-      because the job could not run today (CI is disabled at the operator's request and the
-      account is blocked on billing, `H-06`) — and the benchmark, which still wants a real host.
+      **Both are now written, and neither has run.** `scripts/windows/provision-postgres.ps1` is
+      the Windows counterpart of `scripts/smoke/provision-postgres.sh` — find `pg_config`, fetch
+      the asset for *that* major version, `setup.exe -pgconfig … -quiet -no-tune`, add
+      `shared_preload_libraries` and `timescaledb.license`, restart, wait, create the role and the
+      database, `CREATE EXTENSION`. Every path is discovered and every failure names which
+      assumption broke, because the first run is where those get settled. CI's
+      `windows-timescaledb` job runs it on `windows-latest` and asserts the three claims `S-11`
+      rests on, in the order they would fail: the extension loads, `timescaledb.license` is
+      `timescale` — migration 004 refuses to apply otherwise — and a chunk actually compresses,
+      which is the one Timescale-Licence feature `CLAUDE.md` accepts the licence for. A green
+      `CREATE EXTENSION` with compression that throws would be the worst thing to ship, because
+      it looks like a pass.
+
+      **Tick this only when that job goes green.** It has never run — CI is disabled at the
+      operator's request and the account is blocked on billing (`H-06`) — so what exists is a
+      proposal that parses. `P-53`'s check covers the script, and a parse check is not a run; the
+      danger of writing it now is precisely that it *looks* checked, which is why this paragraph
+      is here.
+
+      **Still needs a real host after that:** the benchmark. A hosted runner is a shared VM, and
+      the number it produced would not be a measurement.
+
+      Writing the job found the gap it fell into: **nothing in this repository parsed the
+      workflow.** Embedding PowerShell in a YAML block scalar broke `ci.yml` — a here-string must
+      close at column zero and a block scalar has no column zero — and with CI switched off,
+      nothing would have said so until somebody turned it back on and needed it. The ordinary
+      suite now parses every workflow and asserts each job has steps, for `P-53`'s reason.
 
       Re-check the availability finding
       before a Windows release; an upstream that stopped publishing Windows builds would flip it.
