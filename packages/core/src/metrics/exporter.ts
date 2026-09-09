@@ -274,6 +274,24 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'flowReceived',
+    name: 'ms_probe_flows_received_total',
+    help: 'NetFlow records this probe’s collector accepted.',
+    counter: true,
+  },
+  {
+    key: 'flowRejected',
+    name: 'ms_probe_flows_rejected_total',
+    help: 'Flow datagrams turned away because their exporter is not in the accept list.',
+    counter: true,
+  },
+  {
+    key: 'flowMissed',
+    name: 'ms_probe_flows_missed_total',
+    help: 'Flows an exporter’s own sequence says it sent and this probe never received.',
+    counter: true,
+  },
+  {
     key: 'scheduled',
     name: 'ms_probe_sensors_scheduled',
     help: 'Sensors this probe currently has on its wheel.',

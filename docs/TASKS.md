@@ -12321,7 +12321,7 @@ analysis". `F-` is Phase 0.
       nanosecond term. 12 tests; the workspace went 807 to 820 and the full suite is green at
       3,545.
 
-- [ ] **B-02 — The flow listener** · M · B-01 · The socket half: one UDP socket for the probe, the
+- [x] **B-02 — The flow listener** · M · B-01 · The socket half: one UDP socket for the probe, the
       `NotificationRing`, a cursor per sensor, and the stats every listener reports — running,
       received, rejected, malformed, buffered, cursors, overwritten. Mechanical given `T-06` and
       `T-20`, and it should read that way; the injectable `open` is what makes it testable without
@@ -12329,6 +12329,40 @@ analysis". `F-` is Phase 0.
 
       **The sender allow-list is a filter and not a lock**, and the comment must say so, exactly
       as the other two do. A flow exporter authenticates nothing.
+
+      **B-02 outcome.** `openFlowReceiver` in `@ms/sensors/flow` and `FlowListener` in the probe,
+      the syslog listener with a different socket in front of it. **UDP only**, unlike `T-20`:
+      IPFIX over TCP and SCTP exist on paper and on essentially no switch, and offering them
+      would advertise something nothing sends.
+
+      **One notification per flow record, not per datagram.** A datagram holds one to thirty flows
+      depending on how busy the exporter was, so buffering by datagram would make the ring's
+      capacity mean thirty different things and a drop count uninterpretable.
+
+      **The counter that is not like the others is `missed`** — flows the exporter's own
+      `flowSequence` says it sent and this probe never received. UDP drops silently, so the
+      exporter's running count is the only evidence loss exists at all; without it a link shedding
+      a third of its flow export is indistinguishable from a quiet network. Kept **per exporter**,
+      because two devices have unrelated sequences and one shared counter reports a loss on every
+      alternate datagram. A sequence that goes *backwards* is a reboot, not a loss, and resyncs
+      silently rather than reporting four billion missing flows.
+
+      **The ticket was half the work, and a guard said so.** `probe-health-report.test.ts` scans
+      `src/listeners/` and fails when something keeping counters is not named in
+      `ProbeHealthSources` — the rule `P-61` bought and `P-64` widened, and it caught this
+      immediately. Wiring it up meant five places, not one: the source key, the report fields, the
+      channels on the Probe Health sensor type, the core's mapping (`?? null`, because absent must
+      not read as a confident zero), the Prometheus names, and the wire type **and its JSON
+      Schema** — without which the numbers validate away at the boundary and reach nothing, which
+      is `P-61` exactly. `H-07`'s generator guard then caught `docs/sensor-reference.md` going
+      stale, and it is regenerated.
+
+      **Mutations 5/5 — and one survived first.** The case named *keeps a sequence per exporter*
+      gave both exporters the same sequence numbers, which makes one shared counter and two
+      separate ones behave identically, so it passed against the bug it was written for. Catalogued
+      as entry 38: a fixture where every actor is identical cannot test per-actor anything. Fixed
+      by putting the second exporter nine hundred ahead, and the mutation dies. 13 tests; the
+      probe workspace went 285 to 298 and the full suite is green at 3,558.
 
 - [ ] **B-03 — NetFlow v9 and IPFIX, and the template cache** · L · B-01, B-02 · Where the
       difficulty actually is. A data record cannot be decoded without the template that describes

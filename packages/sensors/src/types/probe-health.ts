@@ -188,6 +188,19 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'syslogReceived', name: 'Syslog received', unit: 'messages', counter: { bits: 64 } },
   { key: 'syslogRejected', name: 'Syslog rejected', unit: 'messages', counter: { bits: 64 } },
   { key: 'syslogMalformed', name: 'Syslog malformed', unit: 'messages', counter: { bits: 64 } },
+  // **The flow collector (`B-02`), and one of these is unlike everything else on this sensor.**
+  // `flowMissed` counts what did *not* arrive — read out of the exporter's own running sequence,
+  // which is the only evidence there is, because UDP drops silently. Without it a collector losing
+  // a third of its flows to a saturated link is indistinguishable from a quiet network.
+  { key: 'flowReceived', name: 'Flows received', unit: 'flows', counter: { bits: 64 } },
+  { key: 'flowRejected', name: 'Flows rejected', unit: 'flows', counter: { bits: 64 } },
+  {
+    key: 'flowMalformed',
+    name: 'Flow datagrams malformed',
+    unit: 'datagrams',
+    counter: { bits: 64 },
+  },
+  { key: 'flowMissed', name: 'Flows missed', unit: 'flows', counter: { bits: 64 } },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
   // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
   // worker, with their own much smaller ceiling — so the pool channels above say nothing at all

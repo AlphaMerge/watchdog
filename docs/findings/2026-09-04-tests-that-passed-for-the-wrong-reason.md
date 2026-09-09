@@ -769,6 +769,43 @@ predicate in the workspace — 966 of them — was scanned for one that asserts 
 the error; after this fix there are zero. The other tests holding hardcoded addresses hold them as
 data, not as connection targets.
 
+### 38. Two exporters that were the same exporter (`B-02`, found by the mutation surviving)
+
+The flow listener reads UDP loss out of each exporter's own `flowSequence`, and the bug worth
+guarding against is one shared counter instead of one per exporter — two devices sending to one
+collector have unrelated sequences, and a single "expected next" reports a loss on every alternate
+datagram, a number that looks like a failing network and is arithmetic.
+
+There was a test for exactly that, named for it: *keeps a sequence per exporter, because they are
+unrelated*. It delivered
+
+    A: sequence 0, five flows
+    B: sequence 0, five flows
+    A: sequence 5, five flows
+    B: sequence 5, five flows
+
+and asserted nothing was counted missing. It passes. **It also passes with the bug**, and the
+mutation is what said so: with a shared counter the expected-next runs 5, 5, 10, 10, every arriving
+sequence is less than or equal to it, no forward gap is ever seen, and the count is zero for the
+wrong reason. Both exporters were at the same point in their sequences, so the fixture could not
+tell one counter from two.
+
+Fixed by putting B nine hundred ahead of A. Then the shared counter sees B's 900 against an
+expected 5 and invents 895 missing flows, which is the failure the test was always meant to
+describe.
+
+Two things worth taking from it.
+
+**The test was written before the mutation, and knowing the bug in detail did not help.** The name
+of the case states the property correctly; the author had the shared-counter failure in mind
+clearly enough to write a paragraph about it in the source. What went wrong was one step further
+down — choosing fixture values that make two mechanisms indistinguishable — and no amount of
+understanding the property protects against that. This is entry 7 and entry 34 again.
+
+**A fixture where every actor is identical cannot test per-actor anything.** The general form:
+if the code under test keys something by X, the fixture needs at least two X's that *differ in the
+keyed dimension*, not merely two X's. Two exporters at the same sequence are one exporter twice.
+
 ## What actually found them
 
 

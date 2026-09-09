@@ -2,6 +2,7 @@ import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
 import type { CheckFlowStats } from './check-flow.js';
 import type { ProcessRunnerStats } from '../runner/process-runner.js';
+import type { FlowListenerStats } from '../listeners/flow-listener.js';
 import type { SyslogListenerStats } from '../listeners/syslog-listener.js';
 import type { TrapListenerStats } from '../listeners/trap-listener.js';
 import type { DrainStats } from '../spool/drain.js';
@@ -45,6 +46,15 @@ export interface ProbeHealthSources {
   checkFlow?: () => CheckFlowStats;
   trapListener?: () => TrapListenerStats;
   syslogListener?: () => SyslogListenerStats;
+  /**
+   * The flow collector (`B-02`).
+   *
+   * It carries one counter the other two have no equivalent for — `missed`, flows the exporter's
+   * own running sequence says it sent and this probe never received. UDP drops silently, so
+   * without it a collector losing a third of its flows to a saturated link looks exactly like a
+   * quiet network.
+   */
+  flowListener?: () => FlowListenerStats;
   /** Absent when this build runs no spool. */
   spool?: () => SpoolStats;
   /**
@@ -86,6 +96,8 @@ export class ProbeHealthReporter {
     const flow = this.#sources.checkFlow?.();
     const trap = this.#sources.trapListener?.();
     const syslog = this.#sources.syslogListener?.();
+    // `flow` above is the check-flow watchdog (`P-76`); this is the NetFlow collector.
+    const flows = this.#sources.flowListener?.();
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
@@ -149,6 +161,16 @@ export class ProbeHealthReporter {
             syslogReceived: syslog.received,
             syslogRejected: syslog.rejected,
             syslogMalformed: syslog.malformed,
+          }),
+      ...(flows === undefined
+        ? {}
+        : {
+            flowReceived: flows.received,
+            flowRejected: flows.rejected,
+            flowMalformed: flows.malformed,
+            // The one an operator acts on: everything else counts what arrived, and this counts
+            // what did not.
+            flowMissed: flows.missed,
           }),
       ...(spool === undefined
         ? {}

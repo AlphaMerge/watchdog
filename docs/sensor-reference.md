@@ -1030,6 +1030,10 @@ cost: **light** · evaluated by the core, never by a probe
 | `syslogReceived` | Syslog received | messages | 64-bit counter → rate |
 | `syslogRejected` | Syslog rejected | messages | 64-bit counter → rate |
 | `syslogMalformed` | Syslog malformed | messages | 64-bit counter → rate |
+| `flowReceived` | Flows received | flows | 64-bit counter → rate |
+| `flowRejected` | Flows rejected | flows | 64-bit counter → rate |
+| `flowMalformed` | Flow datagrams malformed | datagrams | 64-bit counter → rate |
+| `flowMissed` | Flows missed | flows | 64-bit counter → rate |
 | `scheduled` | Sensors scheduled | sensors | — |
 | `childSlots` | Child process slots | processes | — |
 | `childBusy` | Child processes running | processes | — |

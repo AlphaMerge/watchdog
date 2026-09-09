@@ -390,6 +390,18 @@ export interface ProbeHealthReport {
   syslogReceived?: number;
   syslogRejected?: number;
   syslogMalformed?: number;
+  flowReceived?: number;
+  flowRejected?: number;
+  flowMalformed?: number;
+  /**
+   * Flows an exporter's own running sequence says it sent and this probe never received (`B-02`).
+   *
+   * **Unlike every other counter here, this one measures an absence.** NetFlow rides UDP, which
+   * drops silently, so a collector cannot notice loss by looking at what arrived — the exporter's
+   * `flowSequence` is the only evidence there is. Without it a link dropping a third of its flow
+   * export looks exactly like a quiet network.
+   */
+  flowMissed?: number;
   /**
    * Whether this probe is getting back the checks it dispatches (`P-76`): 1 yes, 0 no.
    *
@@ -763,6 +775,10 @@ const PROBE_HEALTH_SCHEMA = {
     syslogReceived: { type: 'integer', minimum: 0 },
     syslogRejected: { type: 'integer', minimum: 0 },
     syslogMalformed: { type: 'integer', minimum: 0 },
+    flowReceived: { type: 'integer', minimum: 0 },
+    flowRejected: { type: 'integer', minimum: 0 },
+    flowMalformed: { type: 'integer', minimum: 0 },
+    flowMissed: { type: 'integer', minimum: 0 },
     checksCompleting: { type: 'integer', minimum: 0, maximum: 1 },
     checksBehind: { type: 'integer', minimum: 0 },
     checksOutstanding: { type: 'integer', minimum: 0 },

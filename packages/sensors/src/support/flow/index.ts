@@ -14,6 +14,8 @@ export {
   decodeNetflowV5,
   flowWindow,
 } from './netflow5.js';
+export { openFlowReceiver } from './receiver.js';
+export type { FlowReceiver, FlowReceiverOptions, ReceivedFlow } from './receiver.js';
 export type {
   FlowDecodeFailure,
   NetflowV5Datagram,
