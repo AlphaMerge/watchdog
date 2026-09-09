@@ -18,7 +18,7 @@ env:
 jobs:
   build:
     name: build, lint and tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
 
     # The database integration tests skip themselves when nothing is listening, which would
     # quietly mean no coverage in CI. Give them a real PostgreSQL.
@@ -102,7 +102,7 @@ jobs:
   install-smoke:
     name: install smoke test on a clean box
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -179,7 +179,14 @@ jobs:
   windows-install:
     name: MSI installs on Windows Server
     needs: install-smoke
-    runs-on: windows-latest
+    # **Skipped, not deleted, until there is a Windows machine to run it on.** This installation
+    # uses self-hosted runners only — the hosted ones fail in two seconds with zero steps while
+    # the account's Actions spending limit is unpaid, which is a red cross nobody can act on
+    # rather than a gap in coverage. There is no Windows box here yet, so the job waits for one:
+    # register a runner on it, set `CI_RUNNER_WINDOWS` to its label, and this comes back exactly
+    # as written. Nothing else in this file needs to change on that day.
+    if: vars.CI_RUNNER_WINDOWS != ''
+    runs-on: ${{ vars.CI_RUNNER_WINDOWS }}
     steps:
       - uses: actions/checkout@v4
 
@@ -305,7 +312,14 @@ jobs:
   # a PostgreSQL it installs itself. That also makes it the cheapest job to dispatch alone.
   windows-timescaledb:
     name: TimescaleDB provisions on Windows Server
-    runs-on: windows-latest
+    # **Skipped, not deleted, until there is a Windows machine to run it on.** This installation
+    # uses self-hosted runners only — the hosted ones fail in two seconds with zero steps while
+    # the account's Actions spending limit is unpaid, which is a red cross nobody can act on
+    # rather than a gap in coverage. There is no Windows box here yet, so the job waits for one:
+    # register a runner on it, set `CI_RUNNER_WINDOWS` to its label, and this comes back exactly
+    # as written. Nothing else in this file needs to change on that day.
+    if: vars.CI_RUNNER_WINDOWS != ''
+    runs-on: ${{ vars.CI_RUNNER_WINDOWS }}
     steps:
       - uses: actions/checkout@v4
 
@@ -369,7 +383,7 @@ jobs:
   enrol-smoke:
     name: remote probe enrolment across two boxes
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -385,23 +399,31 @@ jobs:
       - name: enrolment smoke test
         run: scripts/smoke-enrol.sh
 
+  # **`down -v` is why this job carries its own project name.** On a hosted runner the machine is
+  # thrown away and the flag costs nothing. On a self-hosted runner it is the developer's Docker,
+  # and the default project name is the one their dev stack is already running under — so the
+  # teardown would delete the `postgres_data` volume out from under them, which is hours of local
+  # state and no warning. `-p` gives this job its own containers, network and volumes, so `-v`
+  # removes exactly what this job created.
   dev-environment:
     name: dev compose comes up
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
+    env:
+      COMPOSE: docker compose -p watchdog-ci -f docker-compose.dev.yml
     steps:
       - uses: actions/checkout@v4
 
       - name: start dependency services
-        run: docker compose -f docker-compose.dev.yml up -d --wait postgres mailhog
+        run: $COMPOSE up -d --wait postgres mailhog
 
       - name: TimescaleDB is present and the licence is pinned
         run: |
-          docker compose -f docker-compose.dev.yml exec -T postgres \
+          $COMPOSE exec -T postgres \
             psql -U monitoring -d monitoring -tAc \
             "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname='timescaledb'"
-          docker compose -f docker-compose.dev.yml exec -T postgres \
+          $COMPOSE exec -T postgres \
             psql -U monitoring -d monitoring -tAc "SHOW timescaledb.license"
 
       - name: tear down
         if: always()
-        run: docker compose -f docker-compose.dev.yml down -v
+        run: $COMPOSE down -v
