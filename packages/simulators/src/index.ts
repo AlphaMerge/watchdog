@@ -77,7 +77,14 @@ export {
 
 export {
   exportNetflowV5,
+  renderIpfix,
   renderNetflowV5,
+  renderNetflowV9,
+  variableLength,
+  type DataSetSpec,
   type ExportedFlow,
   type ExportOptions,
+  type FlowSetExportOptions,
+  type TemplateFieldSpec,
+  type TemplateSpec,
 } from './netflow-exporter.js';

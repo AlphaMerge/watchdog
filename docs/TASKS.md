@@ -12364,7 +12364,7 @@ analysis". `F-` is Phase 0.
       by putting the second exporter nine hundred ahead, and the mutation dies. 13 tests; the
       probe workspace went 285 to 298 and the full suite is green at 3,558.
 
-- [ ] **B-03 — NetFlow v9 and IPFIX, and the template cache** · L · B-01, B-02 · Where the
+- [x] **B-03 — NetFlow v9 and IPFIX, and the template cache** · L · B-01, B-02 · Where the
       difficulty actually is. A data record cannot be decoded without the template that describes
       it; templates arrive out of band, are keyed by (exporter, observation domain, template id),
       are re-sent on the exporter's own schedule, and can be redefined under a live id.
@@ -12377,6 +12377,50 @@ analysis". `F-` is Phase 0.
 
       IPFIX is not "v9 with a different version number": different set ids, enterprise-specific
       fields with a private enterprise number, and variable-length encoding v9 has no concept of.
+
+      **B-03 outcome.** `TemplateCache` and `decodeFlowSets` in `@ms/sensors/flow`, with v9 and
+      IPFIX exporters in `@ms/simulators` written against RFC 3954 and RFC 7011 rather than by
+      running the decoder backwards.
+
+      **One module for both formats, because they are one format with different constants** — and
+      separating them would mean two copies of the set walk, the template parse and the record
+      split, which are the three places a mistake is silent rather than loud. Every difference is
+      enumerated in one `DIALECTS` table, and each is one somebody has shipped wrong: the header
+      is 20 bytes against 16; v9's `count` is records where IPFIX's `length` is bytes; template
+      sets are 0/1 against 2/3; only IPFIX has enterprise elements and variable-length fields; and
+      **the sequence number counts packets in v9 and data records in IPFIX**, so `B-02`'s loss
+      arithmetic cannot be applied to both the same way — the header says which, rather than
+      leaving a caller to assume.
+
+      **Keyed by exporter, observation domain and template id, all three.** Template 256 from one
+      switch has nothing to do with 256 from another, and one switch may export several domains
+      with independent ids. Keying on the id alone decodes one device's flows with another's
+      layout and yields plausible, wrong numbers instead of an error — which is worse than
+      dropping them, because nothing downstream can tell.
+
+      **Data arriving before its template is dropped and counted**, which is the choice this
+      ticket asked for. Parking it would need a bounded buffer and an expiry keyed the same three
+      ways, and would buy one interval's flows on a path where exporters re-send templates on
+      their own schedule anyway. The count is the honest part: it is the ordinary state for
+      seconds after a restart and should fall to zero, and a count that *stays* above zero means
+      an exporter whose template interval is longer than its data interval — a device
+      misconfiguration that is invisible without it. **Templates are learnt as they are met, in
+      order**, so the first datagram after a restart — template then data for that template —
+      decodes fully rather than being dropped by a collector making two passes.
+
+      **The cache is bounded and expiring because its key is attacker-influenced**: nothing
+      authenticates a flow datagram, so anything that can reach the port can mint templates under
+      invented domains until the process dies. Oldest-seen is evicted past the ceiling, which is
+      also right for the honest case of an exporter churning ids. Expiry runs from when a template
+      was last *seen*, not first learnt, or a live exporter's templates age out mid-conversation.
+      Re-sending an identical template is not a redefinition, or every healthy exporter reads as
+      constantly reconfiguring itself.
+
+      **Mutations 7/7**: the IPFIX header read at v9's width (15 cases red), its template set id
+      read as v9's (9), the enterprise bit ignored, the declared length ignored so padding is
+      walked as sets, an unknown template decoded as empty rather than counted (6), the cache keyed
+      on the id alone (7), and expiry measured from the first learn instead of the last sighting.
+      38 tests; the sensors workspace went 820 to 858 and the full suite is green at 3,596.
 
 - [ ] **B-04 — The flow sensor type** · M · B-03 · Channels per protocol and per host, and the
       user-defined channel and filter rules `CAPABILITIES.MD §3.9` calls "custom flow variants".

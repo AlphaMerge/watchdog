@@ -14,6 +14,16 @@ export {
   decodeNetflowV5,
   flowWindow,
 } from './netflow5.js';
+export { IPFIX, NETFLOW_V9, decodeFlowSets, isTemplatedVersion } from './netflow9.js';
+export type { DecodedFlowSets, FlowFields, FlowSetHeader } from './netflow9.js';
+export { TemplateCache, VARIABLE_LENGTH } from './templates.js';
+export type {
+  Template,
+  TemplateCacheOptions,
+  TemplateCacheStats,
+  TemplateField,
+  TemplateKey,
+} from './templates.js';
 export { openFlowReceiver } from './receiver.js';
 export type { FlowReceiver, FlowReceiverOptions, ReceivedFlow } from './receiver.js';
 export type {
