@@ -4022,6 +4022,58 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [ ] **P-197 — no smoke test approves a probe, so nothing proves a decision reaches one in the
+      packaged build** · M · P-189, P-196 · Approving a connected probe (`P-189`) and withdrawing
+      one (`P-196`) are both proved only by unit tests. `smoke-install.sh` deliberately stops at
+      "connected, pending approval" and hands off to `smoke-enrol.sh`, which never approves — so
+      the one path an operator actually walks on a fresh install, *approve it and watch it start
+      scanning*, is not exercised anywhere against a packaged install.
+
+      **What that leaves uncovered is the wiring, which is where all four of these bugs lived.**
+      `main.ts` binds the registry to the endpoint with `probeRegistry.attach(probeEndpoint)`, and
+      neither `withdraw` nor `remoteAddressOf` is reached by any test that runs the real services.
+      Both halves are unit-tested; the line joining them is not. `P-189` and `P-196` were each a
+      decision that wrote its rows and never reached the probe — exactly the class of defect a
+      unit test cannot see.
+
+      **Where it goes: `smoke-enrol.sh`, not `smoke-install.sh`.** The two-box shape is the point.
+      Approving a probe binds it to a branch and issues it a key in the welcome, and a bundle that
+      quietly depended on a path only the core host has is the failure this file already exists to
+      catch. `smoke-install.sh` should keep stopping where it does.
+
+      The sequence, and each step is an assertion:
+
+      1. Approve the pending probe onto a branch — create a probe object, `POST
+         /probes/:gid/approve` with `local: false` (it is on the other box). Assert `applied
+         configuration` appears in the probe's journal and `systemctl show ms-probe -p NRestarts`
+         is still `0`. **The restart count is half the assertion**: bouncing the service would
+         prove the handshake works, which was never in doubt, and hide whether the decision
+         reached a live connection.
+      2. Revoke it with a note. Assert `stopped scanning` in the probe's journal, `NRestarts`
+         still `0`, and that the operator's own sentence — not the word "revoked" — reached that
+         journal. The last one is what proves the reason travelled rather than a bare close.
+      3. Optionally re-approve and assert it comes back, which is the only end-to-end check on
+         `P-37`'s key re-issue after the hash was cleared.
+
+      **Three things that will bite whoever writes it:**
+
+      - **The API needs authentication now.** Use `ms_docker_curl` from `scripts/lib/api-auth.sh`,
+        which `smoke-install.sh` already does; the older helpers predate it and used bare `curl`.
+      - **A poll under `set -euo pipefail` aborts on its first failure.** `gid="$(curl -sf … |
+        …)"` takes the pipeline's status, so a core that has not opened its port yet ends the
+        script instead of being retried. `|| true` inside the substitution, and silence the
+        parser's stderr on that one call so an expected non-answer does not print a stack trace
+        that reads like a crash.
+      - **Order matters, or step 2 makes step 1 vacuous.** Both assert on the probe's journal, and
+        `stopped scanning` after `applied configuration` is only meaningful in that order. A
+        third block that stops the probe (a narrowed `allow-from`, say) has to come after both or
+        it hollows them out.
+
+      Working versions of the approve and revoke helpers exist at `f8ccb54:scripts/smoke/` — they
+      predate the auth requirement and would need `ms_docker_curl`, but the API sequence and the
+      poll handling are right. They are on an unreferenced commit, so retrieve them early or write
+      them fresh.
+
 - [x] **P-196 — a probe the core has stopped trusting keeps scanning until it happens to
       reconnect** · M · R-01, P-189 · `P-189` closed one of four doors. `approve` reaches a
       connected probe now; `revoke`, `remove` and a narrowed `allow-from` still write their rows
@@ -4088,10 +4140,12 @@ because each is a decision rather than a defect:
       uses is a **negative** assertion, so a spurious SIGPIPE would not flake, it would quietly
       pass and stop catching the regression it exists to catch. Same helper, carried across.
 
-      **Not covered by a smoke test.** `smoke-install.sh` deliberately stops at "pending
-      approval" and `smoke-enrol.sh` never approves, so there is no packaged flow to extend
-      without building an approve-and-revoke sequence across two boxes with authentication —
-      which is its own ticket, not a rider on this one.
+      **Not covered by a smoke test**, which is `P-197`. `smoke-install.sh` deliberately stops at
+      "pending approval" and `smoke-enrol.sh` never approves, so there is no packaged flow to
+      extend without building an approve-and-revoke sequence across two boxes with
+      authentication — its own ticket rather than a rider on this one. What that leaves untested
+      is the `attach` wiring in `main.ts`: both halves have unit tests and the line joining them
+      does not, which is the shape of the defect this ticket and `P-189` both were.
 
 - [x] **P-195 — the one test that turned CI red, and could only fail where it mattered** · S ·
       A-09, H-06 · `refuses nothing at all under \`none\`` in `http-ssrf.test.ts` is the **sole**
