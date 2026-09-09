@@ -888,6 +888,42 @@ tell a missing map from a broken server. And the code field survived the catch-a
 switching on `error.code` (the map designer does, for `MAP_CHANGED`) would have behaved correctly
 while the status said something else entirely — the kind of half-working that survives a demo.
 
+### 42. A guard that pinned where the SQL lives, not what it asks for (`S-11`, found by re-deriving the list to re-run a check)
+
+`storage-engine.test.ts` — "names an engine-specific function in no file but the engine and its
+migrations". It walks every file under `src`, looks for `time_bucket`, `create_hypertable`,
+`drop_chunks`, `compress_chunk` and four more, and fails if one appears outside
+`timeseries/engine.ts` and migrations 003/004. It has been green since `S-12` and it is a good
+test of the thing it tests.
+
+It was quietly believed to be more than that. `docs/findings/2026-09-03-timescaledb-on-windows.md`
+decided this project needs no plain-PostgreSQL fallback engine, and it decided it by listing five
+functions and checking each against the Windows package — "that is the whole of this project's
+dependency surface". `CLAUDE.md` accepts the Timescale Licence for **native compression and
+nothing else**, which is a claim about the same list. Two documents rested on it.
+
+Re-deriving the list from the code six days later, to re-run the Windows check, it was eleven
+symbols and not five. `show_chunks`, `decompress_chunk`, `timescaledb_information.chunks` and the
+three `timescaledb.compress*` table options had joined it; `add_compression_policy`, which the
+finding named as a dependency, is a function this project never calls — the housekeeping loop
+compacts chunks precisely because the policies are TSL beyond what `CLAUDE.md` accepts. Nothing
+had gone wrong at runtime, and no test could have gone red: **"no engine token outside these
+files" and "these files use exactly these tokens" are different statements**, and only the first
+one was written.
+
+**The shape.** A containment guard is one-directional by construction. It pins *where* something
+may appear and says nothing about *what*, so the set inside the boundary drifts freely while the
+guard stays green — and the longer it stays green the more load the documents put on it. Stated so
+it is checkable: **when a document depends on a list, assert the list, not just its location.** A
+scan that would still pass if the list doubled is not pinning the list.
+
+The fix asserts both directions and one more: the surface must equal a declared table, a symbol in
+the table that stops being used fails too (or the Windows check is verifying something this
+project no longer asks for), and seven named TSL features must appear nowhere. The comment
+stripping is load-bearing — the migrations explain at length why they *don't* use
+`add_compression_policy` — so it was mutation-tested from both sides: the name in a comment is not
+reported, the same name in SQL is.
+
 ## What actually found them
 
 
@@ -1035,7 +1071,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Thirty-six now, and the twenty-seven added later are the ones that settle the argument.** The first
+**Forty-two now, and the thirty-three added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

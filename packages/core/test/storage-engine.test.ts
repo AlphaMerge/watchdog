@@ -112,6 +112,95 @@ describe('storage engine boundary', () => {
         `StorageEngine (CLAUDE.md, S-12):\n  ${offenders.join('\n  ')}`,
     );
   });
+
+  /**
+   * The whole of what this project asks TimescaleDB for (`S-11`).
+   *
+   * **Two documents rest on this list being complete.** `CLAUDE.md` accepts the Timescale Licence
+   * for native compression *and nothing else*, and
+   * `docs/findings/2026-09-03-timescaledb-on-windows.md` decided against a plain-PostgreSQL
+   * fallback by checking that every symbol below is present in the Windows package. Both were
+   * true when they were written and neither would notice becoming false — the licence rule is a
+   * sentence in a document, and the Windows finding is a `curl` somebody has to remember to
+   * re-run.
+   *
+   * So the surface is asserted rather than described. Adding a Timescale symbol fails here until
+   * it is added to this table with its licence, which is the moment to ask whether the licence
+   * allows it and whether Windows ships it.
+   */
+  const TIMESCALE_SURFACE = [
+    // Apache 2.0 — free of the licence question entirely.
+    'create_hypertable',
+    'time_bucket',
+    'drop_chunks',
+    'show_chunks',
+    'timescaledb_information',
+    // Timescale Licence, and the one feature `CLAUDE.md` accepts it for: native compression,
+    // the two calls that drive it, and the table options that configure it.
+    'compress_chunk',
+    'decompress_chunk',
+    'timescaledb.compress',
+    'timescaledb.compress_segmentby',
+    'timescaledb.compress_orderby',
+    // Read to fail a migration with an explanation rather than a bare permission error.
+    'timescaledb.license',
+  ];
+
+  /**
+   * Timescale-Licence features this project has decided not to depend on.
+   *
+   * Each of these would do work the housekeeping loop does in `packages/core` instead, and the
+   * reason is `CLAUDE.md`: taking one widens what the licence is accepted for, and moving off
+   * TimescaleDB would then cost more than compression. Named individually because "some TSL
+   * feature" is not something a scan can look for.
+   */
+  const REFUSED = [
+    'add_job',
+    'alter_job',
+    'add_compression_policy',
+    'add_retention_policy',
+    'add_continuous_aggregate_policy',
+    'time_bucket_gapfill',
+    'timescaledb.continuous',
+  ];
+
+  it('asks TimescaleDB for exactly what the licence note and the Windows finding say', async () => {
+    const root = join(import.meta.dirname, '..', '..', 'src');
+    const found = new Set<string>();
+    const refused: string[] = [];
+
+    for (const relative of ENGINE_SPECIFIC_FILES) {
+      const text = await readFile(join(root, ...relative.split('/')), 'utf8');
+      // Comments are where the *rejected* features are named — `004-rollups.ts` explains at
+      // length why the housekeeper compacts chunks instead of `add_compression_policy` — so a
+      // scan that read them would report the opposite of the truth.
+      const code = text
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+        .replace(/--[^\n]*/g, ' ');
+
+      for (const symbol of REFUSED) {
+        if (code.includes(symbol)) refused.push(`${relative}: ${symbol}`);
+      }
+      // Longest first, so `time_bucket_gapfill` is never counted as `time_bucket`.
+      for (const symbol of [...TIMESCALE_SURFACE].sort((a, b) => b.length - a.length)) {
+        if (code.includes(symbol)) found.add(symbol);
+      }
+    }
+
+    assert.deepEqual(
+      refused,
+      [],
+      'CLAUDE.md accepts the Timescale Licence for native compression and nothing else:\n  ' +
+        refused.join('\n  '),
+    );
+    assert.deepEqual(
+      [...found].sort(),
+      [...TIMESCALE_SURFACE].sort(),
+      'every symbol in the declared surface must still be used, or the finding that checked it ' +
+        'against the Windows package is checking something this project no longer asks for',
+    );
+  });
 });
 
 describe(

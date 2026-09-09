@@ -278,6 +278,26 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       it, which makes it look checked. Write it on the host, where the first run says whether it is
       right.
 
+      **Re-checked 2026-09-09, and it holds.** 2.30.0 was published the day before and ships
+      `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, as do the nine releases behind it;
+      the PostgreSQL 17 package still carries `timescaledb-tsl-2.30.0.dll` and every symbol this
+      project uses. The channel does drop versions — PostgreSQL 15 had a Windows build through
+      2.28.3 and none since 2.29.0 — which is the argument for re-running the check rather than
+      believing it.
+
+      **What the re-check actually found was in our own documents.** The finding's dependency
+      table was five functions; the code asks for eleven symbols, and one of the five —
+      `add_compression_policy` — this project never calls, because compaction is driven by the
+      housekeeping loop precisely so the Timescale Licence stays accepted for native compression
+      and nothing else. `storage-engine.test.ts` could not have noticed: it pins *where* an
+      engine-specific function may appear, not *which* ones are used. It now asserts the surface
+      in both directions and fails on seven named TSL features the licence note refuses —
+      catalogue entry 42.
+
+      **Still open, and still needs the host:** the benchmark, and whether `setup.exe` composes
+      with how an operator installs PostgreSQL on Windows. No `.ps1` has been written; the
+      argument above still stands.
+
       Re-check the availability finding
       before a Windows release; an upstream that stopped publishing Windows builds would flip it.
       **Added by S-12:** if the answer is a fallback, the work is bounded and half-measured
