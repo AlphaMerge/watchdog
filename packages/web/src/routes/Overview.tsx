@@ -1,9 +1,16 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
-import type { ObjectDetail, SensorState, SensorTypeSummary, SubtreeCounts } from '../api/types';
+import type {
+  MapSummary,
+  ObjectDetail,
+  SensorState,
+  SensorTypeSummary,
+  SubtreeCounts,
+} from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { PageTitle } from '../components/PageTitle';
+import { HOME_PRIORITY, starredMaps } from './home-maps';
 
 interface OpenApi {
   info: { version: string };
@@ -44,6 +51,14 @@ export function Overview(): React.JSX.Element {
     rootId === null ? null : `/objects/${String(rootId)}/counts`,
   );
   const types = useApi<{ items: SensorTypeSummary[] }>('/sensor-types');
+  /**
+   * Every map this account may see, filtered to the starred ones in the browser (`G-09`).
+   *
+   * One request rather than a `?priority=` this page would be the only caller of: the list is
+   * already ordered priority-first, an installation has tens of maps rather than thousands, and
+   * the card needs to know whether *any* map exists to say the right thing when none are starred.
+   */
+  const maps = useApi<{ items: MapSummary[] }>('/maps');
   const api = useApi<OpenApi>('/openapi.json');
 
   if (root.status === 'error') {
@@ -120,6 +135,19 @@ export function Overview(): React.JSX.Element {
           ))}
       </Card>
 
+      {maps.status === 'ready' && maps.data.items.length > 0 && (
+        <Card
+          title="Maps"
+          actions={
+            <Link to="/maps" className="text-sm text-accent hover:underline">
+              All maps
+            </Link>
+          }
+        >
+          <HomeMapList items={maps.data.items} />
+        </Card>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card
           title="Registered sensor types"
@@ -166,6 +194,46 @@ export function Overview(): React.JSX.Element {
           {counts.status === 'loading' && <Loading what="the totals" />}
         </Card>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The starred maps, or why none are here.
+ *
+ * **Only rendered when the installation has maps at all**, so a system that has never made one
+ * does not carry an empty card explaining a feature nobody has reached for. Once there are maps,
+ * saying "none are starred" is a status report rather than a blank space.
+ */
+function HomeMapList({ items }: { readonly items: readonly MapSummary[] }): React.JSX.Element {
+  const { shown, hidden } = starredMaps(items);
+
+  if (shown.length === 0) {
+    return (
+      <Empty because={`A map set to ${String(HOME_PRIORITY)} stars appears here.`}>
+        None of the {items.length} map{items.length === 1 ? '' : 's'} is starred.
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <ul className="divide-y divide-border text-sm">
+        {shown.map((map) => (
+          <li key={map.id} className="py-1.5">
+            <Link to={`/maps/${String(map.id)}`} className="text-text underline">
+              {map.name}
+            </Link>
+            {map.description !== '' && <p className="text-xs text-text-muted">{map.description}</p>}
+          </li>
+        ))}
+      </ul>
+      {/* Never silently truncated: a list that stops without saying so is one somebody trusts. */}
+      {hidden > 0 && (
+        <p className="text-xs text-text-muted">
+          and {hidden} more starred map{hidden === 1 ? '' : 's'}.
+        </p>
+      )}
     </div>
   );
 }

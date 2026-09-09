@@ -13081,9 +13081,47 @@ the state machine and `U-` is the Phase 5 UI.
       Decide, and if the answer is "configurable provider, degrade to a plain background without
       one", say so in the ADR rather than discovering it at install time.
 
-- [ ] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
+- [x] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
       five-star maps surface in Home. Small, and last, because it is a presentation rule over
       whatever `G-01` decides a map is.
+
+      **Landed 2026-09-09, and it needed two halves rather than one.** The presentation rule is
+      four lines; what made it reachable is the control that sets a priority. `map.priority` has
+      existed since `G-01` and `PATCH /maps/:id` has always accepted it, but nothing in the product
+      could change it — every map was created at three stars and stayed there, so the rule would
+      have shipped as a card that was empty on every installation forever.
+
+      **Five stars, not four or more.** `§2` says five-star maps surface in Home, and a friendlier
+      threshold would be a different rule: the point of the top of the scale is that reaching it is
+      a decision somebody took.
+
+      **The order is the core's.** `GET /maps` already answers priority-first and then by name, and
+      a second ordering in the browser is a second thing that eventually disagrees with the first —
+      the same reasoning `CLAUDE.md` applies to inheritance.
+
+      **One request, filtered in the browser.** A `?priority=` this page would be the only caller
+      of is a wider API for no gain: the list is already ordered, an installation has tens of maps,
+      and the card needs to know whether *any* map exists to say the right thing when none are
+      starred. Bounded at eight with the remainder counted, because a list that stops without
+      saying so is one somebody trusts to be complete.
+
+      **The card is absent, not empty, when there are no maps at all.** A card explaining a feature
+      nobody has reached for is a card everybody reads past; once maps exist, "none of them is
+      starred" is a status report.
+
+      **The priority control lives with the designer and shares its version.** A priority change
+      bumps the map's version, so it writes back through the same ref the canvas saves against — a
+      stale copy would turn the operator's next layout save into a conflict with their own edit.
+      It carries `If-Match` like every other change: the rule is not about the size of the field.
+      A refused change puts the number back, because a select still showing five stars is a map
+      somebody believes is on the home screen.
+
+      **Mutations 7/7** — the threshold lowered to four, the ceiling removed, the remainder
+      reported as zero, the order re-sorted by name, the failed change left on screen, `If-Match`
+      dropped, and the card rendered on an installation with no maps.
+
+      9 tests of the model and the control, 3 more on the Overview; the web workspace goes 462 to
+      474. **Phase 12 is done apart from `G-08`, which `ADR-002` Decision 3 still gates.**
 
 - [x] **G-10 — Serving a resolved map, in one pass for real** · M · G-02 · The route that hands a
       client a map with its widgets filled in, and the batching that has to exist before it can be

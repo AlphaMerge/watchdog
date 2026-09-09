@@ -115,4 +115,59 @@ describe('the overview’s totals', () => {
     expect(await screen.findByText(/5,329 objects in the tree/)).toBeDefined();
     expect(screen.queryByText(/Truncated/)).toBeNull();
   });
+
+  describe('the starred maps (`G-09`)', () => {
+    const mapOf = (id: number, priority: number, name: string) => ({
+      id,
+      name,
+      description: '',
+      priority,
+      layout: { widgets: [] },
+      version: 1,
+      createdAt: '2026-09-09T09:00:00.000Z',
+      updatedAt: '2026-09-09T09:00:00.000Z',
+    });
+
+    const overview = (): void => {
+      render(
+        <MemoryRouter>
+          <Overview />
+        </MemoryRouter>,
+      );
+    };
+
+    it('lists the five-star ones and leaves the rest to the Maps page', async () => {
+      stubFetch({
+        ...ROUTES,
+        '/api/v1/maps': {
+          items: [mapOf(1, 5, 'Ground floor'), mapOf(2, 3, 'Spare rack'), mapOf(3, 5, 'DC2')],
+        },
+      });
+      overview();
+
+      expect(await screen.findByRole('link', { name: 'Ground floor' })).toBeDefined();
+      expect(screen.getByRole('link', { name: 'DC2' })).toBeDefined();
+      expect(screen.queryByRole('link', { name: 'Spare rack' })).toBeNull();
+    });
+
+    it('says none are starred rather than showing a blank card', async () => {
+      // An installation with maps and no stars is a status report, not an empty space.
+      stubFetch({ ...ROUTES, '/api/v1/maps': { items: [mapOf(1, 3, 'Ground floor')] } });
+      overview();
+
+      expect(await screen.findByText(/None of the 1 map is starred/)).toBeDefined();
+    });
+
+    it('carries no maps card at all on an installation with no maps', async () => {
+      // A card explaining a feature nobody has reached for is a card everybody reads past.
+      stubFetch({ ...ROUTES, '/api/v1/maps': { items: [] } });
+      overview();
+
+      // Something else on the page has to have rendered before this means anything.
+      await waitFor(() => {
+        expect(screen.getByText('5,329 objects in the tree', { exact: false })).toBeDefined();
+      });
+      expect(screen.queryByText('Maps')).toBeNull();
+    });
+  });
 });

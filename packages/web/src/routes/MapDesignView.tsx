@@ -5,6 +5,7 @@ import type { MapSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { MapDesigner } from '../maps/MapDesigner';
+import { MapPriority } from '../maps/MapPriority';
 import { MapSharePanel } from '../maps/MapSharePanel';
 import { readCanvas, writeLayout, type Canvas } from '../maps/canvas';
 
@@ -61,6 +62,17 @@ function Designer({ map }: { readonly map: MapSummary }): React.JSX.Element {
 
   return (
     <>
+      <Card title="Where this map appears">
+        <MapPriority
+          map={map}
+          version={() => version.current}
+          onSaved={(updated) => {
+            // The same ref the canvas saves against: a priority change bumps the version, and a
+            // stale copy would make the next layout save a conflict with the operator's own edit.
+            version.current = updated.version;
+          }}
+        />
+      </Card>
       <Card title={map.description === '' ? 'Canvas' : map.description}>
         <MapDesigner mapId={map.id} initial={readCanvas(map.layout)} save={save} />
       </Card>
