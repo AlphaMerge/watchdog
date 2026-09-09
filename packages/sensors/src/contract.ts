@@ -188,6 +188,18 @@ export interface ReceivedBatch {
   readonly dropped: number;
   /** When this sensor's cursor was last reset, ISO-8601. Moves on a probe restart. */
   readonly since: string;
+  /**
+   * When the listener drained this batch, ISO-8601 — so `since`..`until` is the window it covers.
+   *
+   * **Added by `B-04`, because a rate needs a window and only the listener knows it.** A type
+   * computing one from its own `Date.now()` measures until the check *ran*, which includes
+   * however long it waited for a free worker — so a busy probe would report lower traffic than a
+   * quiet one for the same link, and the dilution would look like a network change.
+   *
+   * Types that count rather than rate ignore it, which is why it arrived at the third listener
+   * sensor and not the first.
+   */
+  readonly until: string;
 }
 
 export interface CheckExecution {

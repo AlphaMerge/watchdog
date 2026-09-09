@@ -45,6 +45,7 @@ function batch(items: readonly ReceivedNotification[], over: Partial<ReceivedBat
     items,
     dropped: 0,
     since: '2026-08-27T02:59:00.000Z',
+    until: '2026-08-27T03:00:00.000Z',
     ...over,
   } satisfies ReceivedBatch;
 }

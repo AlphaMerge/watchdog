@@ -12422,13 +12422,57 @@ analysis". `F-` is Phase 0.
       on the id alone (7), and expiry measured from the first learn instead of the last sighting.
       38 tests; the sensors workspace went 820 to 858 and the full suite is green at 3,596.
 
-- [ ] **B-04 — The flow sensor type** · M · B-03 · Channels per protocol and per host, and the
+- [x] **B-04 — The flow sensor type** · M · B-03 · Channels per protocol and per host, and the
       user-defined channel and filter rules `CAPABILITIES.MD §3.9` calls "custom flow variants".
       One file against the `SensorType` contract, per `docs/adding-a-sensor-type.md`.
 
       **No-data is not zero applies with force here.** An interval in which the exporter sent
       nothing is a gap, not a line drawn to the floor — and for a flow sensor that distinction is
       the difference between "the link was idle" and "the exporter stopped".
+
+      **B-04 outcome.** `flow.netflow`, the third listener sensor on `T-06`'s contract unchanged —
+      which is the return on having written a contract rather than a syslog listener.
+
+      **Silence fails the check, and that is the one real decision in the file.** A flow exporter
+      with nothing to report sends nothing at all: no heartbeat, no empty datagram, no keepalive.
+      So an interval with no flows is *either* an idle link *or* an exporter that has stopped, been
+      reconfigured or lost its route, and nothing in what arrived can separate them. Reporting zero
+      picks the flattering reading silently and draws a confident line along the floor. Failing
+      says the true thing — this sensor does not know — and `silenceIsIdle` is the escape hatch for
+      a link that is quiet by nature, with the trade stated in the parameter's own description.
+
+      **Rates, not totals**, so a limit survives a change of schedule: a sensor whose reading
+      doubles when the interval doubles is one whose thresholds have to be re-derived every time
+      anybody touches the scan rate.
+
+      **Which needed a window, and finding that changed the contract.** The first version measured
+      from `batch.since` to its own `Date.now()`, and every rate came out 0.1% low in a test that
+      took a millisecond. On a probe that gap is the wait for a free worker — so a busy probe would
+      have reported *less traffic* on the same link than a quiet one, and the dilution would have
+      read as a network change. `ReceivedBatch` now carries `until`, set by the ring at the moment
+      it drains, so the window is what the listener actually covered. Required rather than
+      optional: a batch without a window is incomplete, and the compiler naming every fixture is
+      the point. Counting sensors ignore it, which is why it arrived at the third listener sensor
+      and not the first.
+
+      **Channels**: bytes as primary, packets, flows, then per-protocol TCP/UDP/ICMP/other —
+      because "the link is busy" and "the link is busy with UDP" are different findings and only
+      the second says what to do next. `other` is the remainder, so a protocol nobody thought of
+      lands somewhere instead of vanishing. Distinct sources is the per-host signal that fits a
+      fixed channel set; a channel per host would be unbounded, and the object model has devices
+      for that.
+
+      **Custom channels are the "custom flow variants" `CAPABILITIES.MD §3.9` names**, each
+      counting traffic matching **all** its rules — `T-20`'s reasoning, that "any" would widen a
+      channel as rules are added. A key colliding with a built-in is dropped rather than allowed
+      to shadow it in the reading array. **Rules match on CIDR rather than substring**, because
+      `contains: "10.0."` also matches 110.0.4.1 and the operator who wrote it never finds out:
+      the channel keeps reporting a plausible number.
+
+      **Mutations 6/6**: silence reporting zero, rules matching any instead of all, CIDR falling
+      back to a substring, the rate measured to `now()` instead of the window (7 cases red), a
+      custom key shadowing a built-in, and the dropped-flows guard never firing. 25 tests; the
+      full suite is green at 3,621.
 
 - [ ] **B-05 — sFlow** · L · B-02 · A different protocol wearing a similar name: sampled packet
       headers and interface counters in XDR, not flow records. It shares the listener and shares

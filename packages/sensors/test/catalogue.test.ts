@@ -299,6 +299,7 @@ describe('the built-in catalogue', () => {
       'dns.record',
       'exe.script',
       'exe.script.advanced',
+      'flow.netflow',
       'http.advanced',
       'http.content',
       'http.request',

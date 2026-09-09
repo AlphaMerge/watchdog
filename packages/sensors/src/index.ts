@@ -95,6 +95,7 @@ import { dbMysql } from './types/db-mysql.js';
 import { dbPostgresql } from './types/db-postgresql.js';
 import { exeScript } from './types/exe-script.js';
 import { exeScriptAdvanced } from './types/exe-script-advanced.js';
+import { flowCollector } from './types/flow.js';
 import { syslogReceiver } from './types/syslog.js';
 import { coreFactory } from './types/core-factory.js';
 import { coreHealth } from './types/core-health.js';
@@ -153,6 +154,7 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   exeScript,
   exeScriptAdvanced,
   syslogReceiver,
+  flowCollector,
   coreFactory,
   coreHealth,
   probeHealth,

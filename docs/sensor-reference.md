@@ -4,7 +4,7 @@
 
 What a type is *for* is documented where its author wrote it, in `packages/sensors/src/types/`, and how to add one is `docs/adding-a-sensor-type.md`. What is here is the shape: the parameters an operator fills in, what they default to, the channels that come back, and what the type needs in order to run.
 
-43 types in 11 categories.
+44 types in 12 categories.
 
 - **Availability** — `dns.record`, `icmp.jitter`, `icmp.ping`, `port.range`, `port.tcp`
 - **Custom** — `core.factory`, `exe.script`, `exe.script.advanced`
@@ -15,6 +15,7 @@ What a type is *for* is documented where its author wrote it, in `packages/senso
 - **SNMP** — `snmp.cpu`, `snmp.custom`, `snmp.custom.string`, `snmp.diskfree`, `snmp.memory`, `snmp.table`, `snmp.traffic`, `snmp.trap`, `snmp.uptime`
 - **SSH** — `ssh.diskfree`, `ssh.load`, `ssh.meminfo`, `ssh.script`
 - **System** — `ms.core.health`, `ms.probe.health`
+- **Traffic** — `flow.netflow`
 - **Web** — `http.advanced`, `http.content`, `http.request`, `http.transaction`, `rest.custom`, `tls.certificate`, `tls.security`
 - **Windows** — `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume`
 
@@ -1058,6 +1059,39 @@ cost: **light** · evaluated by the core, never by a probe
 | `probeId` | integer |  | ≥ 1 |  |
 
 - **Probe** (`probeId`) — Which probe this reports on. Left unset, it is the probe this sensor sits under — which is what an operator means every time but one, and the exception is a sensor deliberately placed elsewhere so that losing the probe does not also lose the view of it.
+
+## Traffic
+
+### `flow.netflow`
+
+cost: **light** · fed by the `flow` listener, not polled
+
+**The parameters declare the channels** — one per entry in `channels`.
+
+Every sensor of this type has:
+
+| Channel | Name | Unit | Notes |
+| --- | --- | --- | --- |
+| `bytes` | Traffic | B/s | **primary** |
+| `packets` | Packets | /s | — |
+| `flows` | Flows | /s | — |
+| `tcp` | TCP | B/s | — |
+| `udp` | UDP | B/s | — |
+| `icmp` | ICMP | B/s | — |
+| `other` | Other protocols | B/s | — |
+| `hosts` | Distinct sources | — | — |
+
+| Parameter | Type | Default | Bounds | |
+| --- | --- | --- | --- | --- |
+| `sourceIsDevice` | boolean | `true` |  |  |
+| `silenceIsIdle` | boolean | `false` |  |  |
+| `warnOnDropped` | boolean | `true` |  |  |
+| `channels` | array of object | _(none)_ | ≤ 10 entries |  |
+
+- **Only this exporter** (`sourceIsDevice`) — Counts only flows exported by the device this sensor sits under. Turn it off for a sensor watching every exporter that reaches this probe, which is what you want on a single site-wide traffic sensor and not what you want on a per-router one.
+- **Treat silence as an idle link** (`silenceIsIdle`) — Off by default, and deliberately. A flow exporter with nothing to report sends nothing at all — there is no heartbeat — so an interval with no flows is either an idle link or an exporter that has stopped, and nothing in what arrived can tell them apart. Left off, the check fails and says so. Turn it on for a link that is genuinely quiet much of the time, and accept that a stopped exporter will then read as zero.
+- **Fail when the buffer overflowed** (`warnOnDropped`) — Flows that reached this probe but were overwritten before this sensor read them make every count short by an unknown amount. Failing is the honest reading; turn this off only for an exporter whose flood is expected and whose totals you do not act on.
+- **Extra channels** (`channels`) — Your own channels, each counting the traffic that satisfies **all** of its rules — what `CAPABILITIES.MD` calls custom flow variants. Each reports bytes per second, beside the built-in channels rather than instead of them.
 
 ## Web
 

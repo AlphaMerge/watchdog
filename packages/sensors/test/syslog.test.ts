@@ -314,6 +314,7 @@ function run(
       items,
       dropped: 0,
       since: '2026-08-27T09:14:00.000Z',
+      until: '2026-08-27T09:15:00.000Z',
     },
     ...over,
   });
@@ -426,6 +427,7 @@ describe('syslog.receiver', () => {
             items: [],
             dropped: 412,
             since: '2026-08-27T09:14:00.000Z',
+            until: '2026-08-27T09:15:00.000Z',
           },
         }),
       /412 messages were overwritten/,

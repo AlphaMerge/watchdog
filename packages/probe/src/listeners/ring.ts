@@ -52,7 +52,13 @@ export class NotificationRing {
     const cursor = this.#cursors.get(sensorId);
     if (cursor === undefined) {
       this.#cursors.set(sensorId, { next: this.#nextSequence, since: now });
-      return { listener, items: [], dropped: 0, since: now.toISOString() };
+      return {
+        listener,
+        items: [],
+        dropped: 0,
+        since: now.toISOString(),
+        until: now.toISOString(),
+      };
     }
 
     const size = this.#slots.length;
@@ -69,7 +75,7 @@ export class NotificationRing {
     const since = cursor.since;
     cursor.next = this.#nextSequence;
     cursor.since = now;
-    return { listener, items, dropped, since: since.toISOString() };
+    return { listener, items, dropped, since: since.toISOString(), until: now.toISOString() };
   }
 
   /** Keeps only the cursors for sensors the probe still holds, so a deleted one stops costing. */
