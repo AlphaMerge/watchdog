@@ -30,6 +30,7 @@ import {
   type SweepEnding,
   type SweepHost,
   type SweepJob,
+  type WithdrawnCode,
 } from '@ms/shared';
 import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
 
@@ -1039,6 +1040,47 @@ export class ProbeEndpoint {
     this.#logger.info({ gid, reason }, 'closing a probe connection so a decision reaches it');
     session.connection.destroy(reason);
     return true;
+  }
+
+  /**
+   * Closes a connection **and says why**, because this probe is not to come back (`R-01`).
+   *
+   * **The difference from `disconnect` is the whole reason both exist.** That one is for a
+   * decision the probe should return from — approval — where a bare close is right because the
+   * reconnect *is* the mechanism. This is the opposite case, and a bare close would be silently
+   * wrong: losing the core is a condition the probe is built to survive, so it keeps checking
+   * and spools to disk, and a revoked machine would go on probing devices on somebody's network
+   * for as long as its process happened to live. The `reject` is what tells it this close is
+   * different; `rejectionStopsMonitoring` on the probe's side turns that into an empty schedule.
+   *
+   * `close` rather than `destroy`, because the message has to leave the socket before the FIN.
+   *
+   * Everything else follows from the close already: the sensors this probe carried go to Unknown
+   * rather than Down (`R-05`) because nobody is asking them anything now, and any discovery run
+   * it held goes back to `queued` for whichever probe takes the branch next.
+   */
+  withdraw(gid: string, code: WithdrawnCode, detail: string): boolean {
+    const session = this.#sessions.get(gid) ?? this.#pending.get(gid);
+    if (session === undefined) return false;
+    this.#logger.warn(
+      { gid, code, detail },
+      'closing the link to a probe that is no longer trusted',
+    );
+    session.connection.close(`withdrawn: ${detail}`, { type: 'reject', code, message: detail });
+    return true;
+  }
+
+  /**
+   * Where this gid is connected from, or null if it is not connected at all.
+   *
+   * For the registry, which decides whether an address filter still covers a probe and holds no
+   * sockets to ask. Deliberately the only thing the transport answers about a session here: the
+   * *policy* belongs where the identical handshake check already lives, and a second copy of it
+   * on this side is a second copy to drift.
+   */
+  remoteAddressOf(gid: string): string | null {
+    const session = this.#sessions.get(gid) ?? this.#pending.get(gid);
+    return session?.info.remoteAddress ?? null;
   }
 
   #openSession(

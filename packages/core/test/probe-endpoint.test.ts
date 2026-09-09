@@ -613,6 +613,73 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('tells a withdrawn probe why, so it stops rather than treating it as a blip', async () => {
+    // **The difference from `disconnect`, and the reason both exist.** That one is for approval,
+    // where a bare close is right because the reconnect is the mechanism. This is the opposite:
+    // a probe that merely loses the core keeps checking and spools to disk, so a bare close
+    // would leave a machine somebody just refused probing their network. The `reject` carries
+    // the code the probe acts on, and it has to leave the socket before the FIN.
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(null),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+      registry: { admit: () => Promise.resolve({ kind: 'pending' as const, gid: 'waiting' }) },
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello({ gid: 'waiting' }));
+      await probe.waitFor((m) => m.type === 'welcome');
+
+      assert.equal(
+        endpoint.withdraw('waiting', 'revoked', 'decommissioned, replaced by web-dc4'),
+        true,
+      );
+
+      const rejected = await probe.waitFor((m) => m.type === 'reject');
+      assert.ok(rejected.type === 'reject');
+      assert.equal(rejected.code, 'revoked');
+      assert.equal(
+        rejected.message,
+        'decommissioned, replaced by web-dc4',
+        'the operator’s own sentence is what the probe’s journal should carry',
+      );
+      await probe.waitForClose();
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('answers where a probe is connected from, for the registry to judge', async () => {
+    // The registry decides whether an address filter still covers a probe — the same decision
+    // the handshake makes — and holds no sockets to ask. `null` has to mean "not connected"
+    // rather than an error, because narrowing a filter on a machine that is switched off is the
+    // ordinary case. A *pending* session counts: it is exactly the one an operator is looking at.
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      registry: { admit: () => Promise.resolve({ kind: 'pending' as const, gid: 'waiting' }) },
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello({ gid: 'waiting' }));
+      await probe.waitFor((m) => m.type === 'welcome');
+
+      assert.equal(endpoint.remoteAddressOf('waiting'), '127.0.0.1');
+      assert.equal(endpoint.remoteAddressOf('somewhere-else'), null);
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
   it('says so when a decision is about a probe that is not connected', async () => {
     // Approving a machine that is switched off is an ordinary thing to do, and the registry uses
     // the answer to tell "we closed a connection" from "there was nothing to close".

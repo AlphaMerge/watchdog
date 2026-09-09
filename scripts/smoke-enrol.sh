@@ -89,6 +89,20 @@ note_failure() {
   failed=1
 }
 
+# **`grep -q` in a pipeline lies under `pipefail`**, the same way it did in `smoke-install.sh`
+# before that script grew this helper: grep exits at the first match, the producer gets SIGPIPE
+# and reports 141, and `pipefail` turns a *successful* match into a failed assertion whenever the
+# producer had more to write. It matters more here than it did there, because one of the two uses
+# below is a **negative** assertion — a spurious failure would not flake, it would quietly pass
+# and stop catching the regression it exists to catch.
+matches() {
+  local pattern="$1"
+  shift
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  printf '%s' "${output}" | grep -q -- "${pattern}"
+}
+
 # --- the core -----------------------------------------------------------------------------
 echo "==> installing the core"
 docker cp "${repo_root}/scripts/smoke/provision-postgres.sh" "${core_box}:/tmp/provision-postgres.sh"
@@ -181,7 +195,7 @@ fi
 echo "==> asserting the probe reached the core across the network"
 connected=0
 for _ in $(seq 1 30); do
-  if docker exec "${probe_box}" journalctl -u ms-probe --no-pager | grep -q 'connected to core'; then
+  if matches 'connected to core' docker exec "${probe_box}" journalctl -u ms-probe --no-pager; then
     connected=1
     break
   fi
@@ -221,7 +235,7 @@ esac
 echo "==> asserting an unapproved probe was given nothing to scan"
 # R-01's claim, across two hosts this time: a probe that has connected is not a probe that may
 # scan, and the door is the core's.
-if docker exec "${probe_box}" journalctl -u ms-probe --no-pager | grep -q 'applied configuration'; then
+if matches 'applied configuration' docker exec "${probe_box}" journalctl -u ms-probe --no-pager; then
   note_failure "an unapproved probe was sent configuration"
 else
   echo "    no configuration before approval: ok"

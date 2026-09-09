@@ -8,6 +8,7 @@ import {
   negotiatedVersion,
   parseCoreToProbe,
   PROTOCOL_VERSION,
+  rejectionStopsMonitoring,
   type ConnectionClose,
   type CoreToProbeMessage,
   type Logger,
@@ -17,6 +18,7 @@ import {
   type ProbeQuery,
   type QueryFailure,
   type NackReason,
+  type RejectCode,
   type CheckResult,
   type SweepJob,
   type IdentifyJob,
@@ -238,6 +240,35 @@ export class CoreClient {
    * persists *that*, which is the same path a first enrolment takes. If it fails, `P-37`'s
    * fallback means the probe can still come back.
    */
+  /**
+   * Drops everything this probe was scanning, because the core has refused it (`R-01`).
+   *
+   * An empty snapshot rather than a new mechanism: `config-set` with no sensors is already how
+   * the core says "you own nothing", it already empties the wheel, and reusing it means there is
+   * one path that stops checks rather than two that have to agree.
+   *
+   * The fingerprint is cleared with it, and that is the load-bearing half. It is what the next
+   * `hello` presents, so leaving it set would have a re-approved probe claim to be running a
+   * configuration it had just thrown away — and the core would answer `config-unchanged` and
+   * send nothing, leaving it connected, approved and scanning nothing at all.
+   */
+  #stopMonitoring(code: RejectCode): void {
+    const apply = this.#options.onConfig;
+    if (apply === undefined) return;
+    this.#configVersion = '';
+    try {
+      const scheduled = apply({ kind: 'set', version: '', sensors: [] });
+      this.#logger.warn({ code, scheduled }, 'stopped scanning: this core has refused this probe');
+    } catch (error: unknown) {
+      // Loud, and nothing else to do: the scheduler is the only thing that can stop itself, and
+      // a probe still checking after a revocation is the one outcome worth shouting about.
+      this.#logger.error(
+        { ...describeError(error), code },
+        'could not stop scanning after the core refused this probe',
+      );
+    }
+  }
+
   #giveUpOnStoredKey(): void {
     const action = staleKeyAction({
       stored: this.#identity.accessKey,
@@ -552,6 +583,14 @@ export class CoreClient {
           'core rejected this probe',
         );
         if (message.code === 'bad-access-key') this.#giveUpOnStoredKey();
+        // **And for some of them, stop scanning.** Dropping the link is a condition this probe
+        // is built to survive — it keeps checking and spools to disk, so an outage costs no data
+        // — and that is exactly wrong when the core has said who it is and refused it. `P-189`
+        // closes the connection to make a decision land, so a bare close is indistinguishable
+        // from a blip; the code is what carries the difference. A revoked machine that kept its
+        // assignments would carry on probing devices on somebody else's network for as long as
+        // its process happened to live, which is precisely what the operator revoked it to stop.
+        if (rejectionStopsMonitoring(message.code)) this.#stopMonitoring(message.code);
         return;
       }
 

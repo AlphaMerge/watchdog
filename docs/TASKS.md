@@ -4022,6 +4022,77 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
+- [x] **P-196 — a probe the core has stopped trusting keeps scanning until it happens to
+      reconnect** · M · R-01, P-189 · `P-189` closed one of four doors. `approve` reaches a
+      connected probe now; `revoke`, `remove` and a narrowed `allow-from` still write their rows
+      and tell the live connection nothing, so the refusal only bites at a handshake that may be
+      hours away.
+
+      **It is worse than the approval case it mirrors, and `disconnect` alone would not fix it.**
+      A probe that merely loses the core is built to carry on: it keeps checking and spools to
+      disk (`R-02`), so an outage costs no data. `ProbeConnections.disconnect` is a bare
+      `connection.destroy(reason)` — exactly what a blip looks like — which is right for approval,
+      where the reconnect *is* the mechanism, and silently wrong here. A machine somebody had just
+      revoked would go on probing devices on their network for as long as its process happened to
+      live, which is precisely what revoking it was meant to stop.
+
+      **P-196 outcome. The close carries a reason, and the probe acts on the code.**
+      `ProbeConnections` gains `withdraw(gid, code, detail)` beside `disconnect`, and the two stay
+      separate on purpose: one is for a decision the probe should come *back* from, the other for
+      one it should not. `rejectionStopsMonitoring` in `@ms/shared` is where the split lives,
+      beside the union rather than inside the probe, for the reason `capabilities.ts` exists — a
+      meaning scattered across call sites is a meaning that drifts.
+
+      Trust withdrawn — `revoked`, `not-approved`, `source-not-allowed` — drops the assignments
+      and scans nothing. Cannot agree or cannot ask — `protocol-version`, `bad-access-key`,
+      `internal-error` — keeps scanning and spooling, because nobody has said the machine must
+      stop and an operator fixes one end: there the spool is exactly right, and clearing would
+      turn a mistyped key into a hole in the graphs rather than a gap of minutes. A `switch` with
+      no `default`, so a new code is a type error.
+
+      **The fingerprint is cleared with the assignments, and that is the subtle half.** It is what
+      the next `hello` presents, so a probe that dropped its configuration and still claimed to
+      hold it would be answered `config-unchanged` on re-approval — connected, approved and
+      scanning nothing, which is `P-189`'s failure reached from the other end.
+
+      **The operator's own sentence travels with it.** "revoked" tells whoever reads the probe's
+      journal nothing they did not know; "decommissioned, replaced by web-dc4" tells them
+      everything. `refusedFrom` and the revoke note are the same strings `admit` sends at a
+      refused handshake, so a probe refused live and one refused on reconnect read identically.
+
+      `remove` withdraws with `not-approved` rather than `revoked` — a forgotten probe that comes
+      back enrols as a stranger and waits in the queue, so both stop it and only one is true.
+      Deleting the row while a probe is still connected would otherwise leave the least
+      accountable state here: a machine checking devices under assignments the core no longer has
+      any record of giving it.
+
+      **`allow-from` needed the decision kept in the registry.** The rule is not "is this address
+      in the list": an empty per-probe filter defers to the installation's `enrolFrom`, so
+      clearing one does not mean "anywhere" everywhere. That rule already existed inside `admit`;
+      it is now `#addressAllowedFor`, used by both, because two copies would disagree the first
+      time somebody changed one. The transport answers `remoteAddressOf` and nothing else.
+      Narrowing a filter that still covers the probe costs nothing, which is the case that had to
+      be got right — tightening a range around the machines already inside it must not be an
+      outage.
+
+      `packages/probe/test/core-client.test.ts` is new. The endpoint's tests drive a hand-written
+      probe stub, which agrees with whatever the core does by construction, and `core-handlers.ts`
+      does not carry `reject`; nothing covered the client's own reading of one. That is exactly
+      where "the probe kept scanning after it was refused" lives — nothing fails, nothing logs an
+      error. Mutations 2/2 on the probe side and 4/4 on the registry: the two stop-scanning tests
+      and the four withdrawal tests fail against the old code, while the three that assert
+      *absence* pass either way, which is the point of having them.
+
+      Found on the way: `smoke-enrol.sh` still had the `grep -q` under `pipefail` defect that
+      `smoke-install.sh` grew its `matches` helper for. It matters more there — one of the two
+      uses is a **negative** assertion, so a spurious SIGPIPE would not flake, it would quietly
+      pass and stop catching the regression it exists to catch. Same helper, carried across.
+
+      **Not covered by a smoke test.** `smoke-install.sh` deliberately stops at "pending
+      approval" and `smoke-enrol.sh` never approves, so there is no packaged flow to extend
+      without building an approve-and-revoke sequence across two boxes with authentication —
+      which is its own ticket, not a rider on this one.
+
 - [x] **P-195 — the one test that turned CI red, and could only fail where it mattered** · S ·
       A-09, H-06 · `refuses nothing at all under \`none\`` in `http-ssrf.test.ts` is the **sole**
       failure in every CI run before the workflow was disabled — three checked, same single test

@@ -292,6 +292,54 @@ export type RejectCode =
   | 'internal-error';
 
 /**
+ * The reject codes that mean a probe's trust was **withdrawn** — the core knows exactly who this
+ * is and will not have it.
+ *
+ * Exactly the codes `rejectionStopsMonitoring` answers `true` for, which is a correspondence a
+ * test pins rather than the type system: the function is an exhaustive `switch` so that adding a
+ * code is a compile error there, and deriving one from the other would trade that away.
+ */
+export type WithdrawnCode = 'revoked' | 'not-approved' | 'source-not-allowed';
+
+/**
+ * Whether a rejection means the probe should **stop checking things**, rather than keep going.
+ *
+ * **Losing the core is not the same as being told to go away, and the probe cannot tell them
+ * apart from the socket alone.** A dropped link is an ordinary condition it is built to survive:
+ * it keeps scanning and spools to disk (`R-02`), so an outage costs no data. Applying that to a
+ * rejection would mean a revoked machine carried on probing devices on somebody's network for as
+ * long as its process happened to live — the operator having done the one thing available to
+ * stop it. `P-189` closes the connection when a decision has to reach a probe, and a bare close
+ * is exactly what a blip looks like, so the code is what carries the difference.
+ *
+ * The split is by what a person would have to do about it:
+ *
+ * - **Trust withdrawn** — somebody decided this machine is not part of the installation, or is
+ *   not where it is allowed to be. Scanning on would be work nobody asked for and nobody will
+ *   accept.
+ * - **Cannot agree, or cannot ask** — a version skew, a key out of step, a registry that is
+ *   briefly unreachable. Nobody has said this machine must stop; an operator fixes one end and
+ *   it comes back. Here the spool is exactly right: the probe keeps checking, keeps the results
+ *   on disk, and drains them once the two ends can talk again, so an upgrade or a mistyped key
+ *   costs minutes of graphs rather than a hole in them.
+ *
+ * A `switch` with no `default`, so adding a code is a type error here rather than a silent
+ * assignment to whichever side happened to be the fallback.
+ */
+export function rejectionStopsMonitoring(code: RejectCode): boolean {
+  switch (code) {
+    case 'revoked':
+    case 'not-approved':
+    case 'source-not-allowed':
+      return true;
+    case 'protocol-version':
+    case 'bad-access-key':
+    case 'internal-error':
+      return false;
+  }
+}
+
+/**
  * What a probe knows about itself and the core does not (`P-13`, `P-04`).
  *
  * **Sent on the heartbeat rather than as its own message**, because it is the same fact the

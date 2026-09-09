@@ -52,6 +52,30 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     probeId = probe.id;
   });
 
+  /**
+   * A stand-in for the transport, recording what a decision would have done to a live link.
+   *
+   * `connectedFrom` is the transport's one contribution to an address-filter decision: where the
+   * probe actually is. `null` stands for a probe that is not connected at all.
+   */
+  function recorder(connectedFrom: string | null = null) {
+    const closed: { gid: string; reason: string }[] = [];
+    const withdrawn: { gid: string; code: string; detail: string }[] = [];
+    return {
+      closed,
+      withdrawn,
+      disconnect: (gid: string, reason: string) => {
+        closed.push({ gid, reason });
+        return true;
+      },
+      withdraw: (gid: string, code: string, detail: string) => {
+        withdrawn.push({ gid, code, detail });
+        return connectedFrom !== null;
+      },
+      remoteAddressOf: () => connectedFrom,
+    };
+  }
+
   const hello = (over: Partial<Parameters<ProbeRegistry['admit']>[0]> = {}) => ({
     gid: '',
     displayName: 'backup-01',
@@ -70,13 +94,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // **`P-189`.** The rows are only half of a decision. `session.approved` is fixed at
       // admission, so approving a probe that connected while pending changed nothing it could
       // observe — it kept scanning nothing until something else made it reconnect.
-      const closed: { gid: string; reason: string }[] = [];
-      registry.attach({
-        disconnect: (gid, reason) => {
-          closed.push({ gid, reason });
-          return true;
-        },
-      });
+      const link = recorder();
+      registry.attach(link);
+      const closed = link.closed;
 
       await registry.admit(hello({ gid: 'reconnecting-probe' }));
       await registry.approve('reconnecting-probe', probeId);
@@ -349,6 +369,154 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
 
       const again = await registry.admit(hello({ gid: first.gid }));
       assert.equal(again.kind, 'pending');
+    });
+  });
+
+  describe('withdrawing trust from a probe that is connected', () => {
+    // **`P-189` closed the approval half of this and left the other three.** `revoke`, `remove`
+    // and a narrowed `allow-from` all wrote their rows and told the live connection nothing, so
+    // the refusal only bit at a handshake that might be hours away. Worse than the approval case
+    // it mirrors: a probe that merely loses the core keeps checking and spools to disk, so the
+    // machine an operator had just refused went on probing their network.
+
+    it('carries the operator’s own sentence, not the word “revoked”', async () => {
+      // A probe journal that says "revoked" tells whoever reads it nothing they did not already
+      // know. The note is the only place the reason exists, and it is the same sentence `admit`
+      // sends at a refused handshake — so a probe refused live and one refused on reconnect are
+      // told the same thing.
+      const link = recorder('10.4.2.9');
+      registry.attach(link);
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+      assert.deepEqual(link.withdrawn, [], 'approving is not withdrawing');
+
+      await registry.revoke(first.gid, 'decommissioned, replaced by web-dc4');
+      assert.deepEqual(link.withdrawn, [
+        { gid: first.gid, code: 'revoked', detail: 'decommissioned, replaced by web-dc4' },
+      ]);
+    });
+
+    it('falls back to the sentence a refused handshake would have used', async () => {
+      const link = recorder('10.4.2.9');
+      registry.attach(link);
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+
+      await registry.revoke(first.gid, '');
+      assert.deepEqual(link.withdrawn, [
+        { gid: first.gid, code: 'revoked', detail: 'this probe has been revoked' },
+      ]);
+    });
+
+    it('stops a forgotten probe too, which is the least accountable case', async () => {
+      // Deleting the row says "this machine is gone". Said about one still connected, it would
+      // leave a probe checking devices under assignments the core no longer has any record of
+      // giving it. `not-approved`, because that is what it now is.
+      const link = recorder('10.4.2.9');
+      registry.attach(link);
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+
+      assert.equal(await registry.remove(first.gid), true);
+      assert.deepEqual(link.withdrawn, [
+        {
+          gid: first.gid,
+          code: 'not-approved',
+          detail: 'this probe is no longer registered with this core',
+        },
+      ]);
+    });
+
+    it('says nothing about a probe that was never there', async () => {
+      // `remove` answers false for a GID it did not delete, and must not announce a withdrawal
+      // for it — the transport would go looking for a session that cannot exist.
+      const link = recorder('10.4.2.9');
+      registry.attach(link);
+
+      assert.equal(await registry.remove('never-seen'), false);
+      assert.deepEqual(link.withdrawn, []);
+    });
+
+    it('closes a connected probe that its new filter no longer covers', async () => {
+      // Narrowing a filter is a statement already true the moment it is written — the very next
+      // handshake refuses this probe — so leaving the session up only decides *when*, and
+      // "whenever it happens to reconnect" is an answer nobody chose. It would also make the
+      // probes page lie: a filter of 10.0.0.0/24 beside a probe at 192.0.2.5, still scanning.
+      const link = recorder('192.0.2.5');
+      registry.attach(link);
+      const first = await registry.admit(hello({ remoteAddress: '192.0.2.5' }));
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      assert.deepEqual(link.withdrawn, [
+        {
+          gid: first.gid,
+          code: 'source-not-allowed',
+          detail: 'this probe is not accepted from 192.0.2.5',
+        },
+      ]);
+    });
+
+    it('leaves one alone when the narrower filter still covers it', async () => {
+      // The ordinary case, and the one that must cost nothing: an operator tightening a range
+      // around the machines already inside it. Getting this wrong makes every filter edit an
+      // outage.
+      const link = recorder('10.0.0.9');
+      registry.attach(link);
+      const first = await registry.admit(hello({ remoteAddress: '10.0.0.9' }));
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId);
+
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      assert.deepEqual(link.withdrawn, [], 'a probe inside its own filter was disconnected');
+    });
+
+    it('falls back to the installation’s filter, exactly as the handshake does', async () => {
+      // An empty per-probe list defers to `enrolFrom`, so clearing one does *not* mean anywhere
+      // on an installation that has narrowed the default. The handshake resolves it that way;
+      // this has to agree, or an operator would clear a filter and disconnect the probe — or,
+      // worse, clear one and leave a probe connected from somewhere the installation refuses.
+      const link = recorder('192.0.2.5');
+      const narrowed = new ProbeRegistry({
+        db,
+        logger: silentLogger,
+        enrolmentKeys: ['shared-key'],
+        enrolFrom: ['10.0.0.0/24'],
+      });
+      narrowed.attach(link);
+      const first = await narrowed.admit(hello({ remoteAddress: '10.0.0.9' }));
+      assert.ok(first.kind === 'pending');
+
+      await narrowed.setAllowFrom(first.gid, ['192.0.2.0/24']);
+      assert.deepEqual(link.withdrawn, [], 'its own filter covers where it is');
+
+      await narrowed.setAllowFrom(first.gid, []);
+      assert.deepEqual(
+        link.withdrawn,
+        [
+          {
+            gid: first.gid,
+            code: 'source-not-allowed',
+            detail: 'this probe is not accepted from 192.0.2.5',
+          },
+        ],
+        'clearing it fell back to the installation filter, which does not cover this probe',
+      );
+    });
+
+    it('says nothing about a filter change on a probe that is not connected', async () => {
+      // The common case: an operator narrows a filter on a machine that is switched off. There
+      // is nothing to close, and its next handshake is refused by `admit`.
+      const link = recorder(null);
+      registry.attach(link);
+      const first = await registry.admit(hello({ remoteAddress: '192.0.2.5' }));
+      assert.ok(first.kind === 'pending');
+
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      assert.deepEqual(link.withdrawn, []);
     });
   });
 
