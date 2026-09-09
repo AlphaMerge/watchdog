@@ -13081,6 +13081,15 @@ the state machine and `U-` is the Phase 5 UI.
       Decide, and if the answer is "configurable provider, degrade to a plain background without
       one", say so in the ADR rather than discovering it at install time.
 
+      **`ADR-004` is written and is `Proposed`, 2026-09-09.** It says: ship no tiles and no default
+      provider, take a URL template an operator configures, render the widgets over the `G-05`
+      background when there is none, keep coordinates on the widget rather than on the object, draw
+      no tiles on a `G-06` share link unless somebody opts in, and write the projection and the
+      tile grid rather than taking a mapping library. **This ticket stays blocked until that ADR is
+      accepted**, and it carries two open modelling questions the ADR deliberately left to `G-08`:
+      whether a map's extent is per map or per viewer, and whether geo widgets share a canvas with
+      box-positioned ones or a geo map is a different kind of map.
+
 - [x] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
       five-star maps surface in Home. Small, and last, because it is a presentation rule over
       whatever `G-01` decides a map is.
