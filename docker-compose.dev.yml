@@ -68,8 +68,12 @@ services:
       POSTGRES_USER: monitoring
       POSTGRES_PASSWORD: monitoring
       TIMESCALEDB_TELEMETRY: 'off'
+    # **The port is a variable so a second stack can exist beside a developer's.** CI runs on a
+    # self-hosted runner sharing this machine's Docker, and a fixed 5432 means its database
+    # cannot start while the dev stack holds the port — which is how the first local-runner run
+    # failed (`P-198`).
     ports:
-      - '127.0.0.1:5432:5432'
+      - '127.0.0.1:${MS_DEV_PG_PORT:-5432}:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

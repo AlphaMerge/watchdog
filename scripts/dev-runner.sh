@@ -65,6 +65,7 @@ for i in $(seq "$COUNT"); do
     --group-add 0 \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${WORK}:${WORK}" \
+    --add-host host.docker.internal:host-gateway \
     -e ImageOS=ubuntu24 \
     --entrypoint bash \
     "$IMAGE" -c "./config.sh \

@@ -20,25 +20,31 @@ jobs:
     name: build, lint and tests
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
 
-    # The database integration tests skip themselves when nothing is listening, which would
-    # quietly mean no coverage in CI. Give them a real PostgreSQL.
-    services:
-      postgres:
-        image: timescale/timescaledb:latest-pg17
-        env:
-          POSTGRES_DB: monitoring
-          POSTGRES_USER: monitoring
-          POSTGRES_PASSWORD: monitoring
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U monitoring -d monitoring"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+    # **The database comes from this repository's own compose file, not from a `services:` block.**
+    # Two reasons, both found by the first run on a local runner (`P-198`). A service container is
+    # published to the *host*, and this runner is itself a container — so `localhost` inside the
+    # job is not where the service is, and the job could not reach it however the ports were
+    # arranged. And the block declared a second, subtly different PostgreSQL: no `shm_size`, no
+    # pinned `timescaledb.license`, free to drift from the one everybody develops against.
+    #
+    # `MS_DEV_PG_PORT` keeps it off the developer's 5432 and `-p` keeps its containers and volumes
+    # separate, so `down -v` at the end removes what this job made and nothing of theirs.
+    env:
+      COMPOSE: docker compose -p watchdog-ci -f docker-compose.dev.yml
+      MS_DEV_PG_PORT: '55432'
+      # Reached across the container boundary: Docker Desktop resolves this name to the host, and
+      # `dev-runner.sh` adds it as `host-gateway` so a Linux runner behaves the same. Set
+      # `CI_DB_HOST` to `127.0.0.1` if these jobs are ever moved back to a hosted runner.
+      MS_TEST_DB_HOST: ${{ vars.CI_DB_HOST || 'host.docker.internal' }}
+      MS_TEST_DB_PORT: '55432'
 
     steps:
       - uses: actions/checkout@v4
+
+      # `--wait` blocks on the healthcheck the compose file already declares, so the first test to
+      # open a connection is not the thing waiting for the server to finish starting.
+      - name: start the test database
+        run: $COMPOSE up -d --wait postgres
 
       - uses: actions/setup-node@v4
         with:
@@ -98,6 +104,12 @@ jobs:
       # everybody to ignore this step, which is how the production advisory gets ignored too.
       - name: dependency audit
         run: npm audit --omit=dev --audit-level=high
+
+      # `-v` is safe here only because of `-p` above: it removes this job's own volume, not the
+      # `postgres-data` a developer has been filling all week.
+      - name: stop the test database
+        if: always()
+        run: $COMPOSE down -v
 
   install-smoke:
     name: install smoke test on a clean box
@@ -410,6 +422,8 @@ jobs:
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LINUX || '["self-hosted","watchdog-linux"]') }}
     env:
       COMPOSE: docker compose -p watchdog-ci -f docker-compose.dev.yml
+      # Off the developer's 5432, for the same reason the build job is (`P-198`).
+      MS_DEV_PG_PORT: '55432'
     steps:
       - uses: actions/checkout@v4
 
