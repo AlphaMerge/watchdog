@@ -954,6 +954,45 @@ equality: a test comparing A to B is two tests, and passing one of them is not p
 
 The fix is four `!== undefined` checks and a comment saying why an object is not a bound.
 
+### 44. The container was too fast for the bug to happen in (`P-197`, found by the mutation surviving)
+
+`P-196` is a latency defect. Revoking a probe wrote its rows and told the live connection nothing,
+so the refusal only bit at the next handshake — hours away on a real network, with the machine
+somebody had just revoked still probing their devices in the meantime. The fix was `withdraw`
+beside `disconnect`: close the link *with a reason the probe acts on*, rather than with a bare
+close it is built to treat as a blip.
+
+`smoke-enrol.sh` grew the two assertions that seemed to say so, against a packaged build on two
+boxes: after revoking, `stopped scanning` reaches the probe's journal, and the operator's own
+sentence reaches it too. Both green. Then `withdraw` was replaced by `disconnect` — the defect
+itself, exactly — and **both assertions stayed green and the smoke test passed.**
+
+They are true on the broken path as well. The bare close makes the probe reconnect; the handshake
+it comes back on is refused, with the same code and the same sentence; it stops. Same journal
+lines, same order of magnitude apart — **because in a container the reconnect is one second, and
+the entire defect is that on a real network it is not.** A test environment fast enough to make a
+latency bug invisible is not a neutral convenience; it is a test environment that agrees with
+whatever you assert.
+
+**The shape.** This is entry 40's shape — an end state reachable by both the right and the wrong
+path — in a distributed system rather than an undo stack, and it is worth the second entry because
+the disguise is different. There the wrong path took four extra steps and arrived at the same
+place. Here the wrong path arrives at the same place *later*, and "later" is the whole bug, so the
+assertion has to be about the route and not the destination. Stated so it is checkable: **when the
+defect is that something happens too late, no assertion that it happened can catch it.** Assert
+what the fast path did *not* have to do.
+
+The fix reads a journal cursor before the revocation and asserts, inside the slice after it, that
+`stopped scanning` appears before `link to core closed` — the probe stopped without having to
+reconnect. That is false on the broken path and true on the fixed one, and re-running the same
+mutation now fails on that assertion and on nothing else.
+
+Two smaller things from the same ticket. A second mutation — `approve` no longer closing the
+session, which is `P-189`'s defect — fails step 1 and nothing else, so the two steps are
+independent rather than one riding on the other. And step 3's first assertion was wrong in the
+other direction: it read `hasOwnKey`, which is `hash AND confirmed`, for a claim about issuance
+alone. It failed on the first run, which is the cheap kind of wrong.
+
 ## What actually found them
 
 
@@ -1101,7 +1140,7 @@ somebody who already knows what the answer should be, which is every test anybod
 their own fix. The mutation is cheap and catches most of it. The rest needs somebody — or
 something — that did not write the code and is rewarded for refuting rather than agreeing.
 
-**Forty-three now, and the thirty-four added later are the ones that settle the argument.** The first
+**Forty-four now, and the thirty-five added later are the ones that settle the argument.** The first
 nine were all written in the rush of a single day, which is the comfortable explanation. Entries
 10 to 13 are in code that was written unhurriedly a fortnight earlier, reviewed at the time, and
 green ever since — and each one had a name that described a property the test did not check. The

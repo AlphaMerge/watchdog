@@ -4042,7 +4042,7 @@ because each is a decision rather than a defect:
       scanning one, which is the only claim that matters here and the one that could not be made
       before `P-187` existed.
 
-- [ ] **P-197 — no smoke test approves a probe, so nothing proves a decision reaches one in the
+- [x] **P-197 — no smoke test approves a probe, so nothing proves a decision reaches one in the
       packaged build** · M · P-189, P-196 · Approving a connected probe (`P-189`) and withdrawing
       one (`P-196`) are both proved only by unit tests. `smoke-install.sh` deliberately stops at
       "connected, pending approval" and hands off to `smoke-enrol.sh`, which never approves — so
@@ -4093,6 +4093,37 @@ because each is a decision rather than a defect:
       predate the auth requirement and would need `ms_docker_curl`, but the API sequence and the
       poll handling are right. They are on an unreferenced commit, so retrieve them early or write
       them fresh.
+
+      **P-197 outcome. Three steps in `smoke-enrol.sh`, and one of them proved nothing until a
+      mutation said so.** Approve onto a branch with `local: false`, revoke with a note,
+      re-approve — seven assertions, run against the packaged build on two boxes. The helpers at
+      `f8ccb54` were the right shape; they were rewritten inline against `ms_docker_curl`, with
+      the poll handling the ticket described.
+
+      **The mutation that mattered: `withdraw` replaced by a bare `disconnect`, which is exactly
+      the pre-`P-196` defect. The first version of step 2 passed.** Both of its assertions —
+      `stopped scanning` and the operator's sentence — are true on the old path too: a bare close
+      makes the probe reconnect, and the handshake it comes back on is refused with the same code
+      and the same sentence, so the probe stops either way. On a real network that refusal is
+      hours away, which is the whole bug; in a container it is one second away, which is why
+      asserting the outcome proved nothing.
+
+      What tells them apart is **whether the probe had to reconnect to find out**. Step 2 now
+      takes a journal cursor before revoking, reads only the slice after it, and asserts that
+      `stopped scanning` appears *before* `link to core closed` — true when the reject lands on
+      the live connection, false when the link drops first. Re-measured: the mutation now fails
+      on that assertion and on nothing else. A second mutation — `approve` no longer closing the
+      session, which is `P-189`'s defect — fails step 1 and nothing else.
+
+      **What step 3 could not assert, and why.** `hasOwnKey` on the API is
+      `access_key_hash AND access_key_confirmed_at`, and confirmation is written when the probe
+      *presents* the key, at the handshake after the one that issued it — so it is false here by
+      design, on a link that is up and working. The first run failed on it. The assertion reads
+      the registration row instead: revoking cleared the hash, and re-approval put one back.
+
+      `NRestarts` is checked at each step and stayed `0` throughout, which is half of every
+      assertion above: bouncing the service would prove the handshake works, which was never in
+      doubt, and would hide whether the decision reached a live connection.
 
 - [x] **P-196 — a probe the core has stopped trusting keeps scanning until it happens to
       reconnect** · M · R-01, P-189 · `P-189` closed one of four doors. `approve` reaches a

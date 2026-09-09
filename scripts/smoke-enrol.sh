@@ -241,6 +241,200 @@ else
   echo "    no configuration before approval: ok"
 fi
 
+# --- the decision has to reach the machine (`P-197`) -----------------------------------------
+# **Approving and revoking are proved only by unit tests until here.** `main.ts` binds the
+# registry to the endpoint with one line — `probeRegistry.attach(probeEndpoint)` — and both halves
+# are unit-tested while the line joining them is not. `P-189` and `P-196` were each a decision
+# that wrote its rows and never reached the probe, which is exactly the class of defect a unit
+# test cannot see. It goes here rather than in `smoke-install.sh` because approving binds a probe
+# to a branch and issues it a key in the welcome, and a bundle that quietly depended on a path
+# only the core host has is the failure this file exists to catch.
+
+# Reads one field out of a JSON body on stdin, using the *box's* node. `curl | node` rather than
+# `sed`, because a regex over JSON is a test that passes until somebody reorders a field — and the
+# box's node rather than the host's, because this repository's toolchain is in a container
+# (`scripts/dev.sh`) and the host may have no node at all.
+field() { docker exec -i "${core_box}" node -pe "JSON.parse(require('node:fs').readFileSync(0,'utf8'))$1"; }
+
+# How many times a pattern appears, so "it happened again" can be told from "it happened once".
+# `grep -c` exits 1 on no match, which `set -e` would take as a failure rather than as zero.
+occurrences() {
+  local pattern="$1"
+  shift
+  local output
+  output="$("$@" 2>/dev/null || true)"
+  printf '%s' "${output}" | grep -c -- "${pattern}" || true
+}
+
+restarts() { docker exec "${probe_box}" systemctl show ms-probe -p NRestarts --value | tr -d '\r'; }
+
+# **The restart count is half of every assertion below.** Bouncing the service would prove the
+# handshake works, which was never in doubt, and would hide whether the decision reached a live
+# connection — which is the whole of `P-189` and `P-196`.
+before_restarts="$(restarts)"
+
+echo "==> approving the probe onto a branch of the tree"
+api=http://127.0.0.1:8080/api/v1
+# The probe is already in the queue — the block above asserted it — but poll anyway, because the
+# gid is what every call below needs and a race here would read exactly like the bug this exists
+# to catch. `|| true` inside the substitution: under `pipefail` a core that has not answered yet
+# would end the script instead of being retried, and stderr is silenced on this one call so an
+# expected non-answer does not print a parser stack trace that reads like a crash.
+gid=''
+for _ in $(seq 1 30); do
+  gid="$(ms_docker_curl "${core_box}" -sf "${api}/probes?status=pending" 2>/dev/null | field ".items[0]?.gid ?? ''" 2>/dev/null || true)"
+  [ -n "${gid}" ] && break
+  sleep 1
+done
+[ -n "${gid}" ] || { note_failure "no probe is waiting for approval"; gid=''; }
+
+if [ -n "${gid}" ]; then
+  # The branch it is approved onto. Created here rather than by the installer: a probe object with
+  # no probe behind it is a branch of the tree an operator did not ask for.
+  root="$(ms_docker_curl "${core_box}" -sf "${api}/objects/root" | field '.id')"
+  probe_object="$(ms_docker_curl "${core_box}" -sf -X POST "${api}/objects" \
+    -H 'content-type: application/json' \
+    -d "{\"kind\":\"probe\",\"parentId\":${root},\"name\":\"web-dc2\"}" | field '.id')"
+
+  # `local: false`, and it is the truth rather than a default: this probe is on the other box.
+  ms_docker_curl "${core_box}" -sf -X POST "${api}/probes/${gid}/approve" \
+    -H 'content-type: application/json' \
+    -d "{\"objectId\":${probe_object},\"local\":false}" >/dev/null
+  echo "    approved ${gid} onto probe object ${probe_object}"
+
+  echo "==> asserting the approval reached the probe, without restarting it"
+  applied=0
+  for _ in $(seq 1 60); do
+    if matches 'applied configuration' docker exec "${probe_box}" journalctl -u ms-probe --no-pager; then
+      applied=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "${applied}" -eq 1 ]; then
+    echo "    configuration applied after approval: ok"
+  else
+    docker exec "${probe_box}" journalctl -u ms-probe --no-pager -n 40 || true
+    docker exec "${core_box}" journalctl -u ms-core --no-pager -n 40 || true
+    note_failure "the probe was approved and never applied a configuration (P-189)"
+  fi
+  now_restarts="$(restarts)"
+  if [ "${now_restarts}" = "${before_restarts}" ]; then
+    echo "    ms-probe restarts still ${now_restarts}: ok"
+  else
+    note_failure "the probe restarted (${before_restarts} -> ${now_restarts}) — a bounce proves the handshake, not the decision"
+  fi
+
+  # --- and so does withdrawing it ------------------------------------------------------------
+  # Order matters: `stopped scanning` is only meaningful after `applied configuration`, so this
+  # block has to follow the one above and anything that stops the probe has to follow both.
+  echo "==> revoking it with a note, and asserting the machine stops"
+  # **Everything below reads only the journal written after this point.** `stopped scanning` and
+  # the operator's sentence both appear on the pre-`P-196` path as well — a bare close makes the
+  # probe reconnect, and the handshake it comes back on is refused with the same code and the same
+  # sentence — so a test that greps the whole journal for either of them passes with `withdraw`
+  # replaced by `disconnect`. Measured: that mutation survived the first version of this block.
+  # What tells them apart is whether the probe had to reconnect to find out, which is the whole of
+  # `P-196`, and that is an ordering question inside this slice.
+  cursor="$(docker exec "${probe_box}" bash -c "journalctl -u ms-probe --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")"
+  since_revoke() { docker exec "${probe_box}" journalctl -u ms-probe --no-pager --after-cursor "${cursor}" 2>/dev/null || true; }
+
+  revoke_note='decommissioned by the smoke test'
+  ms_docker_curl "${core_box}" -sf -X POST "${api}/probes/${gid}/revoke" \
+    -H 'content-type: application/json' \
+    -d "{\"note\":\"${revoke_note}\"}" >/dev/null
+
+  stopped=0
+  for _ in $(seq 1 60); do
+    if printf '%s' "$(since_revoke)" | grep -q 'stopped scanning'; then
+      stopped=1
+      break
+    fi
+    sleep 1
+  done
+  slice="$(since_revoke)"
+  if [ "${stopped}" -eq 1 ]; then
+    echo "    probe stopped scanning: ok"
+  else
+    docker exec "${probe_box}" journalctl -u ms-probe --no-pager -n 40 || true
+    note_failure "a revoked probe kept its assignments — it goes on probing the network until its process dies (P-196)"
+  fi
+
+  # **On the connection it already had.** `withdraw` sends a `reject` down the open link and then
+  # closes it, so the probe stops and *then* notices the close. A bare `disconnect` is the other
+  # order: the link drops, the probe treats it as the blip it is built to survive, and it only
+  # learns it is refused at the next handshake — hours away on a real network, a second away here,
+  # which is exactly why asserting on the outcome alone proves nothing.
+  stop_at="$(printf '%s' "${slice}" | grep -n 'stopped scanning' | head -1 | cut -d: -f1)"
+  close_at="$(printf '%s' "${slice}" | grep -n 'link to core closed' | head -1 | cut -d: -f1)"
+  if [ -z "${stop_at}" ]; then
+    : # already reported above
+  elif [ -z "${close_at}" ] || [ "${stop_at}" -lt "${close_at}" ]; then
+    echo "    it stopped without reconnecting first: ok"
+  else
+    note_failure "the probe only stopped after the link dropped and it came back — the decision did not reach the live connection (P-196)"
+  fi
+
+  # **The operator's own sentence, not the word "revoked".** "Decommissioned, replaced by web-dc4"
+  # tells whoever reads the probe's journal everything and "revoked" tells them nothing. This one
+  # is about the *content* of the refusal and deliberately not about the mechanism — the same
+  # sentence travels on a refused handshake, which is what the ordering check above is for.
+  if printf '%s' "${slice}" | grep -q -- "${revoke_note}"; then
+    echo "    the operator's reason reached the probe: ok"
+  else
+    note_failure "the probe was told it was refused and not why — the note never left the core"
+  fi
+
+  now_restarts="$(restarts)"
+  if [ "${now_restarts}" = "${before_restarts}" ]; then
+    echo "    ms-probe restarts still ${now_restarts}: ok"
+  else
+    note_failure "the probe restarted during revocation (${before_restarts} -> ${now_restarts})"
+  fi
+
+  # --- and it can be let back in ------------------------------------------------------------
+  # The only end-to-end check on `P-37`: revoking cleared `access_key_hash`, so coming back means
+  # presenting the *enrolment* key from the bundle and being issued a fresh one in the welcome.
+  # Nothing but a second machine and a real handshake exercises that.
+  echo "==> re-approving, and asserting it comes back on a freshly issued key"
+  applied_before="$(occurrences 'applied configuration' docker exec "${probe_box}" journalctl -u ms-probe --no-pager)"
+  ms_docker_curl "${core_box}" -sf -X POST "${api}/probes/${gid}/approve" \
+    -H 'content-type: application/json' \
+    -d "{\"objectId\":${probe_object},\"local\":false}" >/dev/null
+
+  # Up to 90 s: every rejected reconnect widened the backoff, which tops out at 60 s.
+  came_back=0
+  for _ in $(seq 1 90); do
+    applied_now="$(occurrences 'applied configuration' docker exec "${probe_box}" journalctl -u ms-probe --no-pager)"
+    if [ "${applied_now}" -gt "${applied_before}" ]; then
+      came_back=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "${came_back}" -eq 1 ]; then
+    echo "    re-approved probe applied a configuration again: ok"
+  else
+    docker exec "${probe_box}" journalctl -u ms-probe --no-pager -n 40 || true
+    note_failure "a re-approved probe never came back — its key hash was cleared and nothing reissued one (P-37)"
+  fi
+
+  # **Read from the database rather than from `hasOwnKey`, and the difference is the point.**
+  # The API's `hasOwnKey` is `access_key_hash AND access_key_confirmed_at`, and confirmation is
+  # written when the probe *presents* the key — the handshake after the one that issued it. So it
+  # is false here by design, on a link that is up and working, and asserting it would be asserting
+  # something the core deliberately does not claim yet: it knowing a key and the probe having it
+  # are different facts (`P-37`). What this step can prove is that a key was issued at all, which
+  # is what revoking cleared.
+  issued="$(docker exec "${core_box}" su postgres -c \
+    "psql -d monitoring -tAc \"SELECT access_key_hash IS NOT NULL FROM probe_registration WHERE gid = '${gid}'\"" | tr -d '[:space:]')"
+  if [ "${issued}" = "t" ]; then
+    echo "    the core issued it a fresh key in the welcome: ok"
+  else
+    note_failure "a re-approved probe was issued no key — revoking cleared the hash and nothing replaced it (P-37)"
+  fi
+fi
+
 echo "==> asserting a re-run keeps the operator's configuration"
 docker exec "${probe_box}" bash -c "
   node -e '
