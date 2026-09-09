@@ -99,6 +99,7 @@ state, and before assuming you know what a pause does to a subtree.
 | [CAPABILITIES.MD](CAPABILITIES.MD)                 | What PRTG does, marked `[V1]` / `[V2]` / `[OUT]`. **The scope contract.**   |
 | [ADR-001-architecture.md](ADR-001-architecture.md) | Stack and architecture decisions, each with its rationale                   |
 | [ADR-002-map-exposure.md](ADR-002-map-exposure.md) | How a map is exposed: public share links, custom HTML, and why geo maps wait |
+| [ADR-003-uploaded-files.md](ADR-003-uploaded-files.md) | Where an operator's uploaded file lives, what bounds it, and why SVG is refused |
 | [PLAN.md](PLAN.md)                                 | The phased roadmap, with exit criteria and the measured results per phase    |
 | [TASKS.md](TASKS.md)                               | The ticket-sized backlog — **pick work from here**                           |
 

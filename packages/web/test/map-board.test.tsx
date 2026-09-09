@@ -48,6 +48,7 @@ function resolved(...widgets: ResolvedWidget[]): ResolvedMap {
       updatedAt: '2026-09-09T09:00:00.000Z',
     },
     widgets,
+    connectors: [],
     problems: [],
   };
 }
@@ -159,6 +160,18 @@ describe('a map on screen', () => {
     expect(screen.getByText('12 ms')).toBeDefined();
     // Not "0 %". A Down sensor recorded no value, and a zero would say it measured one.
     expect(screen.getByText('—')).toBeDefined();
+  });
+
+  it('says what is joined to what, for a reader who cannot see the lines', () => {
+    // The SVG is `aria-hidden` — a `<line>` has no name worth announcing — so the visually hidden
+    // list is the whole of what a screen reader gets. Drawing one without the other means either
+    // a picture nobody can read or a list nobody can see.
+    const view = resolved(
+      widget({ id: 'w1', title: 'Router' }),
+      widget({ id: 'w2', title: 'Switch', box: { x: 10, y: 0, w: 6, h: 4 } }),
+    );
+    render(<MapBoard view={{ ...view, connectors: [{ id: 'c1', from: 'w1', to: 'w2' }] }} />);
+    expect(screen.getByText('Router to Switch')).toBeDefined();
   });
 
   it('asks for the graph range the author chose', async () => {

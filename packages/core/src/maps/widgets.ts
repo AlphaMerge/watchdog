@@ -133,6 +133,8 @@ export interface ChannelLine {
 
 const MAX_TITLE = 80;
 const MAX_WIDGETS = 200;
+/** Two per widget. Bounded for the same reason the widgets are: the document is caller-supplied. */
+const MAX_CONNECTORS = 400;
 /** A day either side of the default hour, and a ceiling a document cannot argue past. */
 const MIN_RANGE_MINUTES = 5;
 const MAX_RANGE_MINUTES = 60 * 24 * 31;
@@ -191,6 +193,83 @@ export function readWidget(raw: unknown, index: number): Widget | { problem: str
  * problem instead of being silently ignored, which is `CLAUDE.md`'s rule that backpressure is
  * visible.
  */
+/**
+ * A line drawn between two widgets (`G-05`).
+ *
+ * **Endpoints are widget ids, not object ids.** A connector says "this tile connects to that tile",
+ * which is a statement about the picture; the same sensor can appear twice on a canvas, and a
+ * connector to *the sensor* would be ambiguous about which of the two tiles it meant.
+ *
+ * No styling here on purpose: a line is a line until somebody asks for more, and a colour or a
+ * dash pattern in the document is a thing every later renderer has to keep honouring.
+ */
+export interface Connector {
+  readonly id: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+/**
+ * Every connector on a layout, with the ones that cannot be drawn kept as problems.
+ *
+ * **A connector naming a widget that is not on the canvas is reported, not dropped.** It has no
+ * geometry, so it cannot be rendered as a broken line the way a widget is rendered as a broken
+ * tile — but silently discarding it would let a designer save a document, reopen it, and find the
+ * line gone with nothing said. Same rule as the widgets: what could not be read is named.
+ *
+ * A connector from a widget to itself is refused rather than drawn as a dot.
+ */
+export function readConnectors(
+  layout: unknown,
+  widgets: readonly Widget[],
+): { connectors: Connector[]; problems: { id: string; problem: string }[] } {
+  const raw = isRecord(layout) && Array.isArray(layout['connectors']) ? layout['connectors'] : [];
+  const known = new Set(widgets.map((widget) => widget.id));
+  const connectors: Connector[] = [];
+  const problems: { id: string; problem: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, entry] of raw.slice(0, MAX_CONNECTORS).entries()) {
+    const id =
+      isRecord(entry) && typeof entry['id'] === 'string'
+        ? entry['id']
+        : `connector-${String(index)}`;
+    if (!isRecord(entry)) {
+      problems.push({ id, problem: 'not an object' });
+      continue;
+    }
+    const from = entry['from'];
+    const to = entry['to'];
+    if (typeof from !== 'string' || typeof to !== 'string') {
+      problems.push({ id, problem: 'from and to must be widget ids' });
+      continue;
+    }
+    if (from === to) {
+      problems.push({ id, problem: 'a connector cannot join a widget to itself' });
+      continue;
+    }
+    if (!known.has(from) || !known.has(to)) {
+      problems.push({ id, problem: `no widget called ${known.has(from) ? to : from}` });
+      continue;
+    }
+    if (seen.has(id)) {
+      problems.push({ id, problem: 'two connectors share an id' });
+      continue;
+    }
+    seen.add(id);
+    connectors.push({ id, from, to });
+  }
+
+  if (raw.length > MAX_CONNECTORS) {
+    problems.push({
+      id: 'connectors',
+      problem: `this map holds ${String(raw.length)} connectors; only the first ${String(MAX_CONNECTORS)} are drawn`,
+    });
+  }
+
+  return { connectors, problems };
+}
+
 export function readWidgets(layout: unknown): {
   widgets: Widget[];
   problems: { id: string; problem: string }[];

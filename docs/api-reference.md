@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-130 routes.
+134 routes.
 
 ## Conventions
 
@@ -830,6 +830,54 @@ Change a map
 Delete a map
 
 Needs full access. The grants on it go with it.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**204**
+
+### `GET /api/v1/maps/{id}/view`
+
+One map with its widgets filled in
+
+What a map draws, rather than the document it is stored as. A widget naming an object that has been deleted, or one this account may not see, comes back as `unavailable` and stays on the canvas — a dashboard that quietly stops mentioning what failed is worse than one with a hole in it. Why it is unavailable is told only to somebody holding full access on the map.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { map, widgets, connectors, problems }
+
+### `GET /api/v1/maps/{id}/background`
+
+The background image behind a map
+
+The stored bytes, with the SHA-256 of them as a strong ETag. Send `If-None-Match` and a wall display re-opens without downloading the floor plan again.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200**
+
+### `POST /api/v1/maps/{id}/background`
+
+Put a background image behind a map
+
+PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decided by reading the file’s own header — the declared content type is a claim by the client and is never trusted. SVG is refused: it is a document rather than an image, and a background is drawn in the application’s own page (`ADR-003`). Needs `write`, the same right as moving a widget. The body is the file itself, not JSON.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { mediaType, digest, width, height, bytes, uploadedAt, uploadedBy }
+
+### `DELETE /api/v1/maps/{id}/background`
+
+Take the background off a map
+
+Silent when there was none: the map ends up without one either way.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

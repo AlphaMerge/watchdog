@@ -37,7 +37,7 @@ import { BulkService } from '../objects/bulk.js';
 import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
-import { mapRoutes } from './routes/maps.js';
+import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { deviceTemplateRoutes } from './routes/device-templates.js';
@@ -535,6 +535,12 @@ export class ApiServer {
             maps: this.#maps,
             ...(this.#mapResolver === undefined ? {} : { resolver: this.#mapResolver }),
           });
+          // The one map route that answers bytes rather than JSON (`G-05`). Exempted from the
+          // response-schema rule for the same reason the static plugin is, and registered on its
+          // own so the exemption covers this route and not the eight beside it.
+          this.#exempting = 'a stored image, with no JSON to filter';
+          mapBackgroundRoute(scope, { maps: this.#maps });
+          this.#exempting = null;
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

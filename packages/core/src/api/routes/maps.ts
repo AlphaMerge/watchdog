@@ -6,6 +6,8 @@ import type { AccessRight } from '../../auth/access.js';
 import type { MapLayout, MapRow } from '../../maps/repository.js';
 import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
+import { MapError } from '../../maps/errors.js';
+import { MAX_IMAGE_BYTES } from '../../maps/images.js';
 import { READS } from '../authorization.js';
 
 /**
@@ -64,6 +66,32 @@ const mapResponse = {
     updatedAt: { type: 'string', format: 'date-time' },
   },
 } as const;
+
+const backgroundResponse = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['mediaType', 'digest', 'width', 'height', 'bytes', 'uploadedAt', 'uploadedBy'],
+  properties: {
+    mediaType: { type: 'string' },
+    /** The SHA-256 the serving route answers as a strong `ETag` (`ADR-003` Decision 4). */
+    digest: { type: 'string' },
+    width: { type: 'integer' },
+    height: { type: 'integer' },
+    bytes: { type: 'integer' },
+    uploadedAt: { type: 'string', format: 'date-time' },
+    uploadedBy: { type: 'string' },
+  },
+} as const;
+
+/**
+ * The types the upload route will *parse*, which is not the same as the types it accepts.
+ *
+ * Fastify needs a parser matched to the declared content type before a handler ever runs, so this
+ * list decides what reaches the sniffer. `application/octet-stream` is here because a client that
+ * declines to guess is being more honest than one that guesses wrong — and nothing downstream
+ * believes any of it: `readImage` decides the format from the bytes (`ADR-003` Decision 2).
+ */
+const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'];
 
 const mapBody = {
   type: 'object',
@@ -163,13 +191,26 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
             200: {
               type: 'object',
               additionalProperties: false,
-              required: ['map', 'widgets', 'problems'],
+              required: ['map', 'widgets', 'connectors', 'problems'],
               properties: {
                 map: mapResponse,
                 // Loose on purpose: a resolved widget is a discriminated union whose arms differ
                 // by kind, and a response schema that enumerated them would strip a field the
                 // day a new widget kind arrives rather than failing loudly.
                 widgets: { type: 'array', items: { type: 'object', additionalProperties: true } },
+                connectors: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['id', 'from', 'to'],
+                    properties: {
+                      id: { type: 'string' },
+                      from: { type: 'string' },
+                      to: { type: 'string' },
+                    },
+                  },
+                },
                 problems: {
                   type: 'array',
                   items: {
@@ -194,7 +235,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
           viewer,
           holdsFull: right === 'full',
         });
-        return { map: serialise(map), widgets: resolved.widgets, problems: resolved.problems };
+        return {
+          map: serialise(map),
+          widgets: resolved.widgets,
+          connectors: resolved.connectors,
+          problems: resolved.problems,
+        };
       },
     );
   }
@@ -250,6 +296,72 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         request.principal?.login ?? '',
       );
       return serialise(updated);
+    },
+  );
+
+  app.addContentTypeParser(UPLOAD_TYPES, { parseAs: 'buffer' }, (_request, body, done) => {
+    done(null, body);
+  });
+
+  app.post<{ Params: { id: string } }>(
+    '/maps/:id/background',
+    {
+      config: READS,
+      // Refused by the framework before a byte of it is buffered, rather than after. The service
+      // checks the same ceiling against what it received, because a limit enforced in one place
+      // is a limit that moves when somebody adds a second caller.
+      bodyLimit: MAX_IMAGE_BYTES,
+      schema: {
+        tags: ['maps'],
+        summary: 'Put a background image behind a map',
+        description:
+          'PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decided by ' +
+          'reading the file’s own header — the declared content type is a claim by the client ' +
+          'and is never trusted. SVG is refused: it is a document rather than an image, and a ' +
+          'background is drawn in the application’s own page (`ADR-003`). Needs `write`, the ' +
+          'same right as moving a widget. The body is the file itself, not JSON.',
+        // **No body schema on purpose.** The body is a `Buffer`, and every JSON Schema that
+        // could be written here — `type: string` included — is a claim AJV would check against
+        // an object that is not one, refusing every upload. What validates this body is
+        // `readImage`, which is the only thing that can: a schema cannot read a PNG header.
+        response: { 200: backgroundResponse },
+      },
+    },
+    async (request) => {
+      const body = request.body;
+      if (!Buffer.isBuffer(body)) {
+        throw new MapError('MAP_INVALID', 'the request body must be image bytes', {
+          context: { phase: 'upload-background' },
+        });
+      }
+      const stored = await maps.setBackground(
+        viewerOf(request),
+        Number(request.params.id),
+        body,
+        request.principal?.login ?? '',
+      );
+      return { ...stored, uploadedAt: stored.uploadedAt.toISOString() };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    '/maps/:id/background',
+    {
+      config: READS,
+      schema: {
+        tags: ['maps'],
+        summary: 'Take the background off a map',
+        description: 'Silent when there was none: the map ends up without one either way.',
+        response: { 204: { type: 'null' } },
+      },
+    },
+    async (request, reply) => {
+      await maps.removeBackground(
+        viewerOf(request),
+        Number(request.params.id),
+        request.principal?.login ?? '',
+      );
+      return reply.code(204).send();
     },
   );
 
@@ -365,6 +477,82 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         request.principal?.login ?? '',
       );
       return reply.code(204).send();
+    },
+  );
+}
+
+/**
+ * Serving the bytes (`G-05`, `ADR-003` Decisions 3 and 4).
+ *
+ * **Registered apart from the rest**, because this is the one map route that does not answer JSON
+ * and so cannot declare a response schema for `fast-json-stringify` to filter — the server's
+ * `onRoute` guard requires one, and the exemption is granted around this call the same way it is
+ * around the static plugin and the Prometheus endpoint. Keeping it to one function keeps the
+ * exemption to one route rather than to the eight beside it.
+ */
+export function mapBackgroundRoute(app: FastifyInstance, options: { maps: MapService }): void {
+  const { maps } = options;
+
+  app.get<{ Params: { id: string }; Headers: { 'if-none-match'?: string } }>(
+    '/maps/:id/background',
+    {
+      config: READS,
+      schema: {
+        tags: ['maps'],
+        summary: 'The background image behind a map',
+        description:
+          'The stored bytes, with the SHA-256 of them as a strong ETag. Send `If-None-Match` ' +
+          'and a wall display re-opens without downloading the floor plan again.',
+      },
+    },
+    async (request, reply) => {
+      const principal = request.principal;
+      if (principal === undefined) {
+        throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
+      }
+      const viewer: MapViewer =
+        principal.scope === undefined
+          ? { userId: principal.userId, role: principal.role }
+          : { userId: principal.userId, role: principal.role, scope: principal.scope };
+
+      const id = Number(request.params.id);
+      // Metadata first, and the bytes only if they are actually needed: answering a conditional
+      // request should not cost a two-megabyte read.
+      const stored = await maps.backgroundOf(viewer, id);
+      if (stored === undefined) {
+        throw new MapError('MAP_NOT_FOUND', `map ${String(id)} has no background`, {
+          context: { mapId: id, phase: 'read-background' },
+        });
+      }
+
+      const etag = `"${stored.digest}"`;
+      // **Not awaited.** A Fastify reply is thenable — `await reply` waits for the response to be
+      // *sent*, which is a request that never finishes when nothing has sent one yet. Setting
+      // headers is synchronous and returns the reply for chaining, and awaiting that chain hung
+      // every conditional request until a test sat on it for two minutes.
+      reply
+        .header('etag', etag)
+        // Stable URL across a replacement, so a long max-age would leave somebody looking at the
+        // plan they just replaced. A revalidation is one small request and is right on the day
+        // it matters.
+        .header('cache-control', 'private, max-age=0, must-revalidate')
+        // Defence in depth for a file an operator supplied: the browser may not decide this is
+        // something other than the type we sniffed, and if it somehow reaches an executing
+        // context there is nothing for it to reach.
+        .header('x-content-type-options', 'nosniff')
+        .header('content-security-policy', "default-src 'none'")
+        // No filename: the stored one is an operator's string and does not belong in a header.
+        .header('content-disposition', 'inline');
+
+      if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+
+      const bytes = await maps.backgroundBytes(viewer, id);
+      /* c8 ignore next -- the metadata row was read in the same request */
+      if (bytes === undefined)
+        throw new MapError('MAP_NOT_FOUND', 'the background has gone', {
+          context: { mapId: id, phase: 'read-background' },
+        });
+      return reply.type(stored.mediaType).send(bytes);
     },
   );
 }

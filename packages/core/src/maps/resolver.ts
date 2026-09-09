@@ -4,8 +4,10 @@ import { atLeast } from '../auth/access.js';
 import type { HistoryService, SensorValues } from '../timeseries/history.js';
 import type { MapViewer } from './service.js';
 import {
+  readConnectors,
   readWidgets,
   type ChannelLine,
+  type Connector,
   type ResolvedWidget,
   type SensorLine,
   type Widget,
@@ -58,7 +60,9 @@ const SENSORS_PER_LIST = 100;
 
 export interface ResolvedMap {
   readonly widgets: readonly ResolvedWidget[];
-  /** Widgets whose document could not be read at all, kept rather than dropped. */
+  /** The lines between them (`G-05`). Geometry is the client's; which tiles is the document's. */
+  readonly connectors: readonly Connector[];
+  /** Widgets and connectors whose document could not be read, kept rather than dropped. */
   readonly problems: readonly { id: string; problem: string }[];
 }
 
@@ -88,7 +92,13 @@ export class MapResolver {
     q: Queryable = this.#db,
   ): Promise<ResolvedMap> {
     const { widgets, problems } = readWidgets(layout);
-    if (widgets.length === 0) return { widgets: [], problems };
+    // Read against the widgets, because a connector's endpoints are widget ids and a line to a
+    // tile that is not on the canvas is a problem rather than a line.
+    const lines = readConnectors(layout, widgets);
+    const allProblems = [...problems, ...lines.problems];
+    if (widgets.length === 0) {
+      return { widgets: [], connectors: lines.connectors, problems: allProblems };
+    }
 
     const ids = [...new Set(widgets.map((widget) => widget.objectId))];
     const objects = await this.#objects(q, ids);
@@ -137,7 +147,7 @@ export class MapResolver {
       });
     }
 
-    return { widgets: resolved, problems };
+    return { widgets: resolved, connectors: lines.connectors, problems: allProblems };
   }
 
   /**

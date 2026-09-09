@@ -4,7 +4,7 @@ import type { Database, Queryable } from '../src/db/pool.js';
 import { AccessService } from '../src/auth/access.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { MapResolver, type MapAudience } from '../src/maps/resolver.js';
-import { readWidgets } from '../src/maps/widgets.js';
+import { readConnectors, readWidgets } from '../src/maps/widgets.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -103,6 +103,56 @@ describe('reading a widget document', () => {
     const { widgets, problems } = readWidgets({ widgets: many });
     assert.equal(widgets.length, 200);
     assert.match(problems.at(-1)?.problem ?? '', /only the first 200/);
+  });
+
+  it('keeps a connector between two widgets, and reports one that cannot be drawn', () => {
+    const { widgets } = readWidgets({
+      widgets: [
+        { id: 'a', kind: 'status', objectId: 1 },
+        { id: 'b', kind: 'status', objectId: 2 },
+      ],
+    });
+    const { connectors, problems } = readConnectors(
+      {
+        connectors: [
+          { id: 'c1', from: 'a', to: 'b' },
+          { id: 'c2', from: 'a', to: 'nowhere' },
+          { id: 'c3', from: 'a', to: 'a' },
+          { id: 'c4', from: 'a' },
+          { id: 'c1', from: 'b', to: 'a' },
+          'not an object',
+        ],
+      },
+      widgets,
+    );
+
+    assert.deepEqual(
+      connectors.map((one) => one.id),
+      ['c1'],
+    );
+    // Named rather than dropped: a line has no geometry to be drawn as broken with, so the only
+    // way to say it exists is to say why it could not be drawn.
+    assert.deepEqual(
+      problems.map((one) => one.id),
+      ['c2', 'c3', 'c4', 'c1', 'connector-5'],
+    );
+  });
+
+  it('bounds the connectors and says what it left out', () => {
+    const { widgets } = readWidgets({
+      widgets: [
+        { id: 'a', kind: 'status', objectId: 1 },
+        { id: 'b', kind: 'status', objectId: 2 },
+      ],
+    });
+    const many = Array.from({ length: 450 }, (_, i) => ({
+      id: `c${String(i)}`,
+      from: 'a',
+      to: 'b',
+    }));
+    const { connectors, problems } = readConnectors({ connectors: many }, widgets);
+    assert.equal(connectors.length, 400);
+    assert.match(problems.at(-1)?.problem ?? '', /only the first 400/);
   });
 
   it('treats a layout with no widgets key as an empty canvas', () => {

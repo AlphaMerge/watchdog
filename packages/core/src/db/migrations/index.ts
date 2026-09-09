@@ -42,6 +42,7 @@ import { migration040 } from './040-runtime-channel-verdict.js';
 import { migration041 } from './041-credential-delete-touch.js';
 import { migration042 } from './042-runtime-resumed-at.js';
 import { migration044 } from './044-maps.js';
+import { migration045 } from './045-map-background.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -95,6 +96,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration042,
   migration043,
   migration044,
+  migration045,
 ];
 
 export type { Migration } from './types.js';

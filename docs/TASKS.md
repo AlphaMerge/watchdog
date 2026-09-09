@@ -12843,10 +12843,83 @@ the state machine and `U-` is the Phase 5 UI.
       which refresh, not the pixels. The drawing itself is `U-05`'s component, unchanged. Together
       with `G-03`'s note about the browser, the visual half of Phase 12 is still unverified.
 
-- [ ] **G-05 — Connector lines and background images** · M · G-03 · The part that makes a map a
+- [x] **G-05 — Connector lines and background images** · M · G-03 · The part that makes a map a
       map rather than a grid of tiles. An uploaded background is a file this system stores on
       behalf of an operator, which is a first for it — where it lives and what bounds it are part
       of the ticket.
+
+      **Landed 2026-09-09, and the file question got an ADR.** `ADR-003` settles where an
+      operator's uploaded file lives, because more of them are coming — `G-07`'s custom HTML,
+      report templates, the inevitable device photograph — and deciding it per feature is how a
+      system ends up with three answers.
+
+      **The bytes live in PostgreSQL, and the deciding argument is backup.** An operator who backs
+      up the database has backed up their maps; the moment a background is a file under the data
+      directory that stops being true, and nobody discovers it until the day they restore. One
+      thing to install has a matching rule: one thing to back up. Deletion becomes a foreign key
+      rather than a reaper, and `V2-06`'s clustering replicates rows but not one node's disk. The
+      cost — large objects in a relational database — is bounded by 2 MiB and by what this is for;
+      a feature wanting hundreds of megabytes gets its own ADR rather than being smuggled in under
+      this one.
+
+      **A table of its own, not a column on `map`.** `map` is read on every list and every view,
+      and a row carrying two megabytes of TOASTed image is a cost paid by every caller who did not
+      want it.
+
+      **The declared `Content-Type` is never consulted.** `images.ts` reads the file's own header —
+      PNG's IHDR, JPEG's segment walk, WebP's three forms — and a file whose bytes are not one of
+      those three is refused whatever it is called. The dimensions come from the same read, because
+      asking the client for them is the same claim again and decoding the image to learn them means
+      running a decoder over hostile bytes. Every read is bounds-checked: a truncated header is a
+      400, never an exception.
+
+      **The JPEG reader walks segment lengths rather than scanning for a frame marker**, which is
+      not fussiness: an Exif segment routinely contains a whole second JPEG, and a scan finds the
+      thumbnail's header first and reports a 160×120 background.
+
+      **SVG is refused, and `ADR-002` is why.** An SVG is a document that can carry script, and
+      Decision 2 there already settled that operator-supplied documents run in a sandboxed iframe
+      and never in the application's own page — which is exactly where a background is drawn. The
+      response carries `nosniff`, `default-src 'none'` and no filename regardless.
+
+      **The bytes are addressed by content**: the SHA-256 is the strong `ETag`, so a wall display
+      re-opens with a 304 instead of the floor plan. Not immutable caching — the URL is stable
+      across a replacement, and a long max-age would leave somebody looking at the plan they had
+      just replaced.
+
+      **Connectors are widget ids in the same document, not a table.** A line is a statement about
+      the picture, and the same sensor can be on a canvas twice — a connector to *the sensor* would
+      be ambiguous about which tile it meant. Removing a tile takes its lines with it, because a
+      connector whose endpoint is missing has no geometry: it cannot be drawn as a broken line the
+      way a widget is drawn as a broken tile, so the core reports it and the designer never saves
+      one.
+
+      **The lines are drawn once and said twice.** The SVG is `aria-hidden` — a `<line>` has no
+      name worth announcing — and the same connections are a list of text: visually hidden on the
+      board, and visible in the designer where each row carries the button that cuts that line.
+      One list, both jobs, and it is also the only way to remove a connector without deleting a
+      widget.
+
+      **Two things this ticket found in code that was already green.** A Fastify reply is
+      thenable, so `await reply.header(...)` waits for a response nobody has sent yet — every
+      conditional request for a background hung until a test sat on it for two minutes. And the
+      security-headers hook overwrote whatever a route had set, so the stricter
+      `default-src 'none'` on an operator's uploaded image was being widened to the application's
+      own `'self'` on the way out; every header there is a floor, and the hook now says so.
+
+      **The API reference had been missing `GET /maps/:id/view` since `G-10`** — the generator
+      builds a server from stubs and had no resolver, so the route was never registered and the
+      hygiene check compared two documents that agreed with each other. One line in the generator.
+
+      **Mutations 8/8** — a JPEG scan instead of a segment walk, no ceiling on claimed dimensions,
+      the header hook overwriting a stricter policy, an upload needing only `read`, a connector to
+      a widget that is not there, a deleted tile leaving its lines, lines drawn centre to centre,
+      and A→B and B→A as two different lines. 15 image tests, 9 API tests, 2 resolver tests and 22
+      in the browser; the web workspace goes 423 to 445 and the backend 3,721 to 3,748.
+
+      Deliberately not built: connector styling. A line is a line until somebody asks for more, and
+      a colour or a dash pattern in the document is a thing every later renderer has to keep
+      honouring.
 
 - [ ] **G-06 — Public share URLs** · M · G-02 · **Decided 2026-09-09: build it, token-gated —
       `ADR-002` Decision 1.** A per-map bearer token, revocable, with a mandatory expiry, on one

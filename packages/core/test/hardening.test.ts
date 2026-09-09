@@ -43,6 +43,26 @@ describe('security headers', () => {
     await app.close();
   });
 
+  it('leaves a stricter policy alone when a route has already set one', async () => {
+    // **Every header here is a floor, not a ceiling.** `G-05` serves an operator's uploaded image
+    // under `default-src 'none'`, and a hook that overwrote it would quietly widen the one
+    // response on the system whose bytes did not come from us.
+    const strict = await build((instance) => {
+      registerSecurityHeaders(instance);
+      instance.get('/api/v1/image', (_request, reply) => {
+        void reply.header('content-security-policy', "default-src 'none'").send('bytes');
+      });
+    });
+    try {
+      const response = await strict.inject({ method: 'GET', url: '/api/v1/image' });
+      assert.equal(response.headers['content-security-policy'], "default-src 'none'");
+      // And the ones it did not set still arrive.
+      assert.equal(response.headers['x-frame-options'], 'DENY');
+    } finally {
+      await strict.close();
+    }
+  });
+
   it('sets a content security policy that makes an injected script inert', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/thing' });
     const csp = response.headers['content-security-policy'];

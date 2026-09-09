@@ -31,6 +31,23 @@ export interface MapLayout {
   readonly widgets: readonly Record<string, unknown>[];
 }
 
+/**
+ * A stored background, without its bytes (`G-05`).
+ *
+ * Separate from the bytes because almost every caller wants only this: whether there is one, what
+ * it is, and the `ETag` that decides whether the client already has it. Reading two megabytes to
+ * answer a conditional request would defeat the point of answering it.
+ */
+export interface MapBackground {
+  readonly mediaType: string;
+  readonly digest: string;
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+  readonly uploadedAt: Date;
+  readonly uploadedBy: string;
+}
+
 export interface MapGrant {
   readonly groupId: number;
   readonly groupName: string;
@@ -228,5 +245,95 @@ export class MapRepository {
       [mapId, groupIds],
     );
     return rows[0]?.right_ ?? 'none';
+  }
+
+  /* ---------------------------------------------------------- backgrounds */
+
+  /** What is stored, without reading it. */
+  async background(q: Queryable, mapId: number): Promise<MapBackground | undefined> {
+    const rows = await q.query<{
+      media_type: string;
+      digest: string;
+      width: number;
+      height: number;
+      bytes: string;
+      uploaded_at: Date;
+      uploaded_by: string;
+    }>(
+      `SELECT media_type, digest, width, height,
+              octet_length(bytes)::text AS bytes, uploaded_at, uploaded_by
+       FROM map_background WHERE map_id = $1`,
+      [mapId],
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return {
+      mediaType: row.media_type,
+      digest: row.digest,
+      width: row.width,
+      height: row.height,
+      bytes: Number(row.bytes),
+      uploadedAt: row.uploaded_at,
+      uploadedBy: row.uploaded_by,
+    };
+  }
+
+  /** The bytes. Only the serving route asks for these, and only after a cache check. */
+  async backgroundBytes(q: Queryable, mapId: number): Promise<Buffer | undefined> {
+    const rows = await q.query<{ bytes: Buffer }>(
+      `SELECT bytes FROM map_background WHERE map_id = $1`,
+      [mapId],
+    );
+    return rows[0]?.bytes;
+  }
+
+  /**
+   * Stores one, replacing whatever was there.
+   *
+   * An upsert rather than a delete-then-insert: a map has one background, and the two-statement
+   * version has a window where it has none — which a wall display would render as a blank canvas.
+   */
+  async putBackground(
+    q: Queryable,
+    mapId: number,
+    image: {
+      mediaType: string;
+      digest: string;
+      width: number;
+      height: number;
+      bytes: Buffer;
+      uploadedBy: string;
+    },
+  ): Promise<void> {
+    await q.query(
+      `INSERT INTO map_background
+         (map_id, media_type, digest, width, height, bytes, uploaded_by, uploaded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+       ON CONFLICT (map_id) DO UPDATE SET
+         media_type = excluded.media_type,
+         digest = excluded.digest,
+         width = excluded.width,
+         height = excluded.height,
+         bytes = excluded.bytes,
+         uploaded_by = excluded.uploaded_by,
+         uploaded_at = excluded.uploaded_at`,
+      [
+        mapId,
+        image.mediaType,
+        image.digest,
+        image.width,
+        image.height,
+        image.bytes,
+        image.uploadedBy,
+      ],
+    );
+  }
+
+  async removeBackground(q: Queryable, mapId: number): Promise<boolean> {
+    const rows = await q.query<{ map_id: string }>(
+      `DELETE FROM map_background WHERE map_id = $1 RETURNING map_id::text`,
+      [mapId],
+    );
+    return rows.length > 0;
   }
 }

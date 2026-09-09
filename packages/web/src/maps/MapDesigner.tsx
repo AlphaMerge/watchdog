@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../api/client';
 import { ErrorPanel } from '../components/Panels';
 import { ObjectPicker } from './ObjectPicker';
+import { MapBackgroundControl } from './MapBackgroundControl';
+import { MapBackgroundImage } from './MapBackgroundImage';
+import { ConnectorLayer } from './ConnectorLayer';
 import {
   CELL,
   COLUMNS,
@@ -12,6 +15,8 @@ import {
   WIDGET_KINDS,
   addTile,
   canRedo,
+  connect,
+  disconnect,
   canUndo,
   canvasCommand,
   change,
@@ -59,6 +64,8 @@ import {
  */
 
 export interface MapDesignerProps {
+  /** Which map this is, for the background upload. Absent in tests that only drive the canvas. */
+  readonly mapId?: number;
   readonly initial: Canvas;
   /** Saves, and answers with the version to send with the next one. Rejects with an `ApiError`. */
   readonly save: (canvas: Canvas) => Promise<void>;
@@ -67,6 +74,7 @@ export interface MapDesignerProps {
 }
 
 export function MapDesigner({
+  mapId,
   initial,
   save,
   disabled = false,
@@ -87,6 +95,16 @@ export function MapDesigner({
    * into the edge of the canvas, usually. Silence is what "nothing happened" sounds like.
    */
   const [said, setSaid] = useState('');
+  /**
+   * The tile a connector is being drawn from, if one is.
+   *
+   * **A mode, and it says so on screen.** The alternative — drag from one tile to another — has no
+   * keyboard equivalent that is not a mode anyway, and a hidden mode is how somebody ends up
+   * connecting two tiles they meant to select.
+   */
+  const [connecting, setConnecting] = useState<string | null>(null);
+  /** Bumped after a background change, so the stable image URL is re-requested this once. */
+  const [backgroundNonce, setBackgroundNonce] = useState(0);
 
   /** Where the drag has got to. Read on pointer-up, which is a frame ahead of the last render. */
   const dragged = useRef<Box | null>(null);
@@ -101,6 +119,7 @@ export function MapDesigner({
   // it naming a tile that is gone, and every toolbar button would then silently do nothing.
   useEffect(() => {
     setSelected((was) => keepSelection(canvas, was));
+    setConnecting((was) => keepSelection(canvas, was));
   }, [canvas]);
 
   const apply = useCallback(
@@ -164,6 +183,11 @@ export function MapDesigner({
     // Escape during a drag puts the tile back where it was picked up — the one gesture a pointer
     // has no button for, and the reason a half-finished drag is not a trap.
     if (command.kind === 'cancel') {
+      if (connecting !== null) {
+        setConnecting(null);
+        announce('Connection abandoned');
+        return;
+      }
       if (gesture !== null) {
         setLine((was) => draft(was, gesture.before));
         setGesture(null);
@@ -351,6 +375,24 @@ export function MapDesigner({
           </button>
           <button
             type="button"
+            aria-pressed={connecting !== null}
+            onClick={() => {
+              if (connecting !== null) {
+                setConnecting(null);
+                announce('Connection abandoned');
+                return;
+              }
+              if (selectedTile === undefined) return;
+              setConnecting(selectedTile.id);
+              announce(`Connecting from ${nameOf(selectedTile)} — now choose the other widget`);
+            }}
+            disabled={(selected === null && connecting === null) || disabled}
+            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+          >
+            {connecting === null ? 'Connect' : 'Cancel'}
+          </button>
+          <button
+            type="button"
             onClick={() => {
               if (selected !== null) remove(selected);
             }}
@@ -395,6 +437,10 @@ export function MapDesigner({
           className="relative bg-bg"
           style={grid}
         >
+          {mapId !== undefined && <MapBackgroundImage mapId={mapId} nonce={backgroundNonce} />}
+
+          <ConnectorLayer canvas={canvas} />
+
           {canvas.tiles.map((tile) => (
             <button
               key={tile.id}
@@ -403,6 +449,16 @@ export function MapDesigner({
               aria-label={`${nameOf(tile)}, ${KIND_LABELS[tile.kind]}, ${describeBox(tile.box)}`}
               onFocus={() => {
                 setSelected(tile.id);
+              }}
+              onClick={() => {
+                if (connecting === null || connecting === tile.id) return;
+                const next = connect(canvas, connecting, tile.id);
+                setConnecting(null);
+                if (next === canvas) {
+                  announce('Those two are already connected');
+                  return;
+                }
+                apply(next, `Connected to ${nameOf(tile)}`);
               }}
               onPointerDown={(event) => {
                 begin(event, tile, 'move');
@@ -464,8 +520,58 @@ export function MapDesigner({
         {said}
       </p>
 
+      {/*
+        **The lines, as text, and it is not only an accessibility afterthought.** An SVG line has
+        no accessible name worth giving one, and a connection nobody can remove is a connection
+        that has to be undone by deleting a widget. One list solves both: it says what is joined
+        to what, and every row has the button that unjoins it.
+      */}
+      {canvas.connectors.length > 0 && (
+        <div>
+          <h3 className="ms-label">Connections</h3>
+          <ul className="mt-1 space-y-1">
+            {canvas.connectors.map((line) => {
+              const from = tileById(canvas, line.from);
+              const to = tileById(canvas, line.to);
+              const label = `${from === undefined ? line.from : nameOf(from)} to ${
+                to === undefined ? line.to : nameOf(to)
+              }`;
+              return (
+                <li key={line.id} className="flex items-center gap-2 text-xs text-text-muted">
+                  <span>{label}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      apply(disconnect(canvas, line.id), `${label} disconnected`);
+                    }}
+                    disabled={disabled}
+                    className="ms-label border border-control px-1.5 py-0.5 text-text-muted hover:text-text disabled:opacity-50"
+                  >
+                    <span className="sr-only">Disconnect </span>
+                    {label}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {mapId !== undefined && (
+        <MapBackgroundControl
+          mapId={mapId}
+          disabled={disabled}
+          onChanged={() => {
+            setBackgroundNonce((was) => was + 1);
+          }}
+        />
+      )}
+
       <p className="text-xs text-text-muted">
         {String(canvas.tiles.length)} widget{canvas.tiles.length === 1 ? '' : 's'}
+        {canvas.connectors.length > 0
+          ? `, ${String(canvas.connectors.length)} connection${canvas.connectors.length === 1 ? '' : 's'}`
+          : ''}
         {dirty ? ' · unsaved changes' : ' · saved'}
       </p>
     </div>

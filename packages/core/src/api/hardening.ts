@@ -48,7 +48,14 @@ const HSTS = 'max-age=31536000; includeSubDomains';
 
 export function registerSecurityHeaders(app: FastifyInstance): void {
   app.addHook('onSend', (request: FastifyRequest, reply: FastifyReply, payload, done) => {
-    for (const [name, value] of Object.entries(HEADERS)) void reply.header(name, value);
+    for (const [name, value] of Object.entries(HEADERS)) {
+      // **A route that has already set one of these keeps it** — and every one of these headers
+      // is a floor rather than a ceiling, so the only way a route can differ is by being
+      // stricter. `G-05` serves an operator's uploaded image under `default-src 'none'`, which
+      // this hook would otherwise widen to the application's own `'self'` on the way out.
+      if (reply.getHeader(name) !== undefined) continue;
+      void reply.header(name, value);
+    }
     if (request.protocol === 'https') void reply.header('strict-transport-security', HSTS);
     done(null, payload);
   });

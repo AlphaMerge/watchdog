@@ -14,8 +14,9 @@ import { groupByUnit } from '../charts/groups';
 import { TimeSeriesChart } from '../charts/TimeSeriesChart';
 import type { ChartSeries } from '../charts/time-series-model';
 import { formatValue } from '../routes/detail/model';
-import { CELL, COLUMNS, ROWS, rangeLabel } from './canvas';
+import { CELL, COLUMNS, ROWS, connectorLine, rangeLabel } from './canvas';
 import { historyPathFor } from './graph';
+import { MapBackgroundImage } from './MapBackgroundImage';
 
 /**
  * A map as it is looked at, rather than as it is edited (`G-04`).
@@ -58,6 +59,10 @@ export function MapBoard({
         aria-label="Map"
         role="group"
       >
+        <MapBackgroundImage mapId={view.map.id} />
+
+        <Connectors view={view} />
+
         {view.widgets.map((widget) => (
           <div
             key={widget.id}
@@ -313,5 +318,58 @@ function GraphTile({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The lines, and the same lines as text (`G-05`).
+ *
+ * **Both, always.** The SVG is `aria-hidden` because a `<line>` has no name worth announcing, and
+ * the visually-hidden list is what a screen reader actually reads — "Router to Switch". Rendering
+ * only one of them would mean either a picture nobody can read or a list nobody can see.
+ */
+function Connectors({ view }: { readonly view: ResolvedMap }): React.JSX.Element | null {
+  if (view.connectors.length === 0) return null;
+  const boxes = new Map(view.widgets.map((widget) => [widget.id, widget]));
+  const named = (id: string): string => {
+    const widget = boxes.get(id);
+    if (widget === undefined) return id;
+    return widget.title === '' ? id : widget.title;
+  };
+
+  return (
+    <>
+      <svg
+        aria-hidden="true"
+        className="pointer-events-none absolute left-0 top-0"
+        width={COLUMNS * CELL}
+        height={ROWS * CELL}
+      >
+        {view.connectors.map((line) => {
+          const from = boxes.get(line.from);
+          const to = boxes.get(line.to);
+          if (from === undefined || to === undefined) return null;
+          const ends = connectorLine(from.box, to.box);
+          return (
+            <line
+              key={line.id}
+              x1={ends.x1}
+              y1={ends.y1}
+              x2={ends.x2}
+              y2={ends.y2}
+              stroke="var(--ms-control-border)"
+              strokeWidth={2}
+            />
+          );
+        })}
+      </svg>
+      <ul className="sr-only">
+        {view.connectors.map((line) => (
+          <li key={line.id}>
+            {named(line.from)} to {named(line.to)}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }

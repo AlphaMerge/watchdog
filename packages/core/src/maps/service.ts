@@ -3,7 +3,9 @@ import type { Database, Queryable } from '../db/pool.js';
 import { atLeast, cappedBy, type AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
-import type { MapGrant, MapLayout, MapRepository, MapRow } from './repository.js';
+import { createHash } from 'node:crypto';
+import { readImage } from './images.js';
+import type { MapBackground, MapGrant, MapLayout, MapRepository, MapRow } from './repository.js';
 
 /**
  * Everything about a map that decides something (`G-01`).
@@ -225,6 +227,82 @@ export class MapService {
       await this.require(viewer, id, 'full', tx);
       await this.#repository.remove(tx, id);
       this.#logger.info({ mapId: id, actor }, 'map deleted');
+    });
+  }
+
+  /* ---------------------------------------------------------- backgrounds */
+
+  /**
+   * Stores a background, having decided what the bytes actually are (`G-05`, `ADR-003`).
+   *
+   * **`write`, not `full`.** Putting a floor plan behind the widgets is editing the canvas, which
+   * is the same right as moving a tile; deciding who else may see the map is what `full` is for.
+   *
+   * The format and the dimensions come from `readImage`, which reads the file's own header — the
+   * declared content type never reaches this method, because it is a claim by the client and
+   * accepting it is the oldest upload hole there is.
+   */
+  async setBackground(
+    viewer: MapViewer,
+    id: number,
+    bytes: Buffer,
+    actor: string,
+  ): Promise<MapBackground> {
+    const facts = readImage(bytes);
+    if ('problem' in facts) {
+      throw new MapError('MAP_INVALID', facts.problem, {
+        context: { mapId: id, phase: 'upload-background' },
+      });
+    }
+
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    return this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'write', tx);
+      await this.#repository.putBackground(tx, id, {
+        mediaType: facts.mediaType,
+        digest,
+        width: facts.width,
+        height: facts.height,
+        bytes,
+        uploadedBy: actor,
+      });
+      this.#logger.info(
+        { mapId: id, actor, mediaType: facts.mediaType, bytes: bytes.length, digest },
+        'map background stored',
+      );
+      const stored = await this.#repository.background(tx, id);
+      /* c8 ignore next -- it was written in this transaction */
+      if (stored === undefined) throw mapNotFound(id);
+      return stored;
+    });
+  }
+
+  /** What is stored, without the bytes. `read`, because it is part of looking at the map. */
+  async backgroundOf(viewer: MapViewer, id: number): Promise<MapBackground | undefined> {
+    return this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'read', tx);
+      return this.#repository.background(tx, id);
+    });
+  }
+
+  /**
+   * The bytes, for a caller that has already been told it does not have them.
+   *
+   * Split from `backgroundOf` so a conditional request costs one small row: a serving route asks
+   * for the metadata, answers 304 against the digest, and only then reads two megabytes.
+   */
+  async backgroundBytes(viewer: MapViewer, id: number): Promise<Buffer | undefined> {
+    return this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'read', tx);
+      return this.#repository.backgroundBytes(tx, id);
+    });
+  }
+
+  async removeBackground(viewer: MapViewer, id: number, actor: string): Promise<void> {
+    await this.#db.tx(async (tx) => {
+      await this.require(viewer, id, 'write', tx);
+      const removed = await this.#repository.removeBackground(tx, id);
+      if (removed) this.#logger.info({ mapId: id, actor }, 'map background removed');
     });
   }
 

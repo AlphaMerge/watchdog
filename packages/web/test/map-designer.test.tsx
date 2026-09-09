@@ -169,6 +169,60 @@ describe('the designer canvas', () => {
     expect(undoButton().disabled).toBe(true);
   });
 
+  it('joins two widgets, lists the connection, and cuts it again', async () => {
+    // **Connecting is a mode and it says so**: the button reads Cancel while it is armed, and the
+    // second widget is chosen by activating it — a click or Enter, so the keyboard path is the
+    // same path.
+    designer();
+    fireEvent.focus(router());
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Uplink,/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Disconnect Router to Uplink' })).toBeDefined();
+    });
+    // The list is the text alternative for a line no screen reader can read, and the place the
+    // line is removed from. One list, both jobs.
+    expect(screen.getByRole('heading', { name: 'Connections' })).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect Router to Uplink' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Connections' })).toBeNull();
+    });
+  });
+
+  it('abandons a half-drawn connection on Escape', async () => {
+    designer();
+    fireEvent.focus(router());
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    fireEvent.keyDown(screen.getByRole('group', { name: 'Map canvas' }), { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Connect' })).toBeDefined();
+    });
+    // And clicking the other widget after that connects nothing.
+    fireEvent.click(screen.getByRole('button', { name: /^Uplink,/ }));
+    expect(screen.queryByRole('heading', { name: 'Connections' })).toBeNull();
+  });
+
+  it('takes the line with the widget', async () => {
+    designer();
+    fireEvent.focus(router());
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Uplink,/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Connections' })).toBeDefined();
+    });
+
+    const tile = router();
+    fireEvent.focus(tile);
+    fireEvent.keyDown(tile, { key: 'Delete' });
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Connections' })).toBeNull();
+    });
+  });
+
   it('has nothing to save until something changes', () => {
     designer();
     expect(saveButton().disabled).toBe(true);

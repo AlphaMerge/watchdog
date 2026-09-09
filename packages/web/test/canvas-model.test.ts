@@ -13,6 +13,9 @@ import {
   canUndo,
   canvasCommand,
   change,
+  connect,
+  connectorLine,
+  disconnect,
   clampMoved,
   clampSized,
   describeBox,
@@ -62,7 +65,7 @@ function tile(id: string, box: Partial<Box> = {}): Tile {
 }
 
 function canvas(...tiles: Tile[]): Canvas {
-  return { tiles };
+  return { tiles, connectors: [] };
 }
 
 function press(key: string, held: Partial<KeyPress> = {}): KeyPress {
@@ -179,6 +182,88 @@ describe('editing tiles', () => {
     const start = canvas(tile('w1'), tile('w2'));
     expect(nextTileId(start)).toBe('w3');
     expect(nextTileId(canvas(tile('w1'), tile('w3')))).toBe('w4');
+  });
+});
+
+describe('connectors', () => {
+  const two = canvas(
+    tile('w1', { x: 0, y: 0, w: 4, h: 4 }),
+    tile('w2', { x: 10, y: 0, w: 4, h: 4 }),
+  );
+
+  it('joins two tiles', () => {
+    const joined = connect(two, 'w1', 'w2');
+    expect(joined.connectors).toHaveLength(1);
+    expect(joined.connectors[0]?.from).toBe('w1');
+  });
+
+  it('refuses a loop, an unknown tile, and a line that already exists either way round', () => {
+    expect(connect(two, 'w1', 'w1')).toBe(two);
+    expect(connect(two, 'w1', 'nope')).toBe(two);
+    const joined = connect(two, 'w1', 'w2');
+    // A→B and B→A are one line on screen. Letting both exist means a canvas that looks unchanged
+    // and a document that grows every time somebody clicks.
+    expect(connect(joined, 'w2', 'w1')).toBe(joined);
+  });
+
+  it('takes the lines with the tile', () => {
+    // A connector whose endpoint is not on the canvas has no geometry: leaving it behind saves a
+    // document the core can only report as broken.
+    const joined = connect(two, 'w1', 'w2');
+    expect(removeTile(joined, 'w2').connectors).toHaveLength(0);
+  });
+
+  it('disconnects one line and leaves the rest', () => {
+    const three = addTile(connect(two, 'w1', 'w2'), tile('w3', { x: 20, y: 0 }));
+    const joined = connect(three, 'w2', 'w3');
+    expect(joined.connectors).toHaveLength(2);
+    const cut = disconnect(joined, joined.connectors[0]?.id ?? '');
+    expect(cut.connectors).toHaveLength(1);
+    expect(disconnect(cut, 'not-a-line')).toBe(cut);
+  });
+
+  it('counts a changed line as a changed canvas', () => {
+    // Otherwise Save stays disabled after drawing one, and the work is lost on the next reload.
+    expect(sameCanvas(two, connect(two, 'w1', 'w2'))).toBe(false);
+  });
+
+  it('draws from edge to edge, not centre to centre', () => {
+    // A line under both tiles is invisible exactly where it matters, and reads as two boxes with
+    // a gap rather than as a connection.
+    const line = connectorLine({ x: 0, y: 0, w: 4, h: 4 }, { x: 10, y: 0, w: 4, h: 4 });
+    expect(line.x1).toBe(4 * CELL); // the right edge of the first
+    expect(line.x2).toBe(10 * CELL); // the left edge of the second
+    expect(line.y1).toBe(2 * CELL);
+    expect(line.y2).toBe(2 * CELL);
+  });
+
+  it('leaves through the top when the other tile is above', () => {
+    const line = connectorLine({ x: 0, y: 10, w: 4, h: 4 }, { x: 0, y: 0, w: 4, h: 4 });
+    expect(line.y1).toBe(10 * CELL);
+    expect(line.x1).toBe(2 * CELL);
+  });
+
+  it('gives two tiles in the same place a line with no direction rather than a made-up one', () => {
+    const line = connectorLine({ x: 3, y: 3, w: 4, h: 4 }, { x: 3, y: 3, w: 4, h: 4 });
+    expect(line.x1).toBe(line.x2);
+    expect(line.y1).toBe(line.y2);
+  });
+
+  it('round-trips through the document', () => {
+    const joined = connect(two, 'w1', 'w2');
+    expect(readCanvas(writeLayout(joined))).toEqual(joined);
+  });
+
+  it('drops a saved line whose tile has gone, rather than opening broken', () => {
+    const read = readCanvas({
+      widgets: [{ id: 'a', kind: 'status', objectId: 1 }],
+      connectors: [
+        { id: 'c1', from: 'a', to: 'gone' },
+        { id: 'c2', from: 'a', to: 'a' },
+      ],
+    });
+    expect(read.connectors).toHaveLength(0);
+    expect(read.tiles).toHaveLength(1);
   });
 });
 

@@ -41,6 +41,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
   let scratch: ScratchDatabase;
   let db: Database;
   let app: FastifyInstance;
+  let built: ApiServer;
   let author = '';
   let reader = '';
   let sensorId: number;
@@ -87,6 +88,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     });
     await server.build('9.9.9', harness.service);
     app = server.app;
+    built = server;
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -271,5 +273,165 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     const response = await view(999_999, author);
     assert.equal(response.statusCode, 404);
     assert.equal(response.json<{ error: { code: string } }>().error.code, 'MAP_NOT_FOUND');
+  });
+
+  describe('the background image', () => {
+    /** A 24-byte PNG header, which is all `readImage` reads and all this needs to store. */
+    const png = (width: number, height: number): Buffer => {
+      const bytes = Buffer.alloc(24);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+      bytes.writeUInt32BE(13, 8);
+      bytes.write('IHDR', 12, 'latin1');
+      bytes.writeUInt32BE(width, 16);
+      bytes.writeUInt32BE(height, 20);
+      return bytes;
+    };
+
+    const upload = async (id: number, body: Buffer, cookie = author, type = 'image/png') =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: { ...as(cookie), 'content-type': type },
+        payload: body,
+      });
+
+    it('stores one, and answers with what it decided the file is', async () => {
+      const id = await makeMap('with-a-plan', []);
+      const response = await upload(id, png(1200, 800));
+      assert.equal(response.statusCode, 200, response.body);
+
+      const stored = response.json<{
+        mediaType: string;
+        width: number;
+        height: number;
+        digest: string;
+        bytes: number;
+      }>();
+      assert.equal(stored.mediaType, 'image/png');
+      assert.equal(stored.width, 1200);
+      assert.equal(stored.height, 800);
+      assert.match(stored.digest, /^[0-9a-f]{64}$/);
+      assert.equal(stored.bytes, 24);
+    });
+
+    it('does not believe the content type it was given', async () => {
+      // **The whole point of sniffing.** This body is a PNG and the header says JPEG; what comes
+      // back says PNG, because nothing downstream ever reads the claim.
+      const id = await makeMap('mislabelled', []);
+      const response = await upload(id, png(64, 64), author, 'image/jpeg');
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json<{ mediaType: string }>().mediaType, 'image/png');
+    });
+
+    it('serves the bytes back with a strong ETag and a 304 next time', async () => {
+      const id = await makeMap('cached', []);
+      const bytes = png(320, 240);
+      await upload(id, bytes);
+
+      const first = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: as(author),
+      });
+      assert.equal(first.statusCode, 200);
+      assert.equal(first.headers['content-type'], 'image/png');
+      assert.deepEqual(first.rawPayload, bytes);
+
+      // Defence in depth for a file an operator supplied (`ADR-003` Decision 3).
+      assert.equal(first.headers['x-content-type-options'], 'nosniff');
+      assert.equal(first.headers['content-security-policy'], "default-src 'none'");
+
+      const etag = first.headers['etag'];
+      assert.ok(typeof etag === 'string' && etag.length > 2);
+      const again = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: { ...as(author), 'if-none-match': etag },
+      });
+      assert.equal(again.statusCode, 304);
+      assert.equal(again.rawPayload.length, 0, 'a 304 carries no image');
+    });
+
+    it('refuses an SVG, and says why rather than "unsupported"', async () => {
+      const id = await makeMap('svg-attempt', []);
+      const response = await upload(
+        id,
+        Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+        author,
+        'image/png',
+      );
+      assert.equal(response.statusCode, 400);
+      const error = response.json<{ error: { code: string; message: string } }>().error;
+      assert.equal(error.code, 'MAP_INVALID');
+      assert.match(error.message, /SVG is not accepted/);
+    });
+
+    it('needs write, not read', async () => {
+      // A background is editing the canvas. Deciding who else sees the map is what `full` is for,
+      // and a reader holds neither.
+      const id = await makeMap('read-only-for-them', []);
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/maps/${String(id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'read' },
+      });
+      await upload(id, png(100, 100));
+
+      const refused = await upload(id, png(200, 200), reader);
+      assert.equal(refused.statusCode, 403);
+      assert.equal(refused.json<{ error: { code: string } }>().error.code, 'MAP_FORBIDDEN');
+
+      // And they may still look at it, which is the half that has to keep working.
+      const seen = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: as(reader),
+      });
+      assert.equal(seen.statusCode, 200);
+    });
+
+    it('answers 404 for a map with no background', async () => {
+      const id = await makeMap('bare', []);
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 404);
+    });
+
+    it('takes one off again', async () => {
+      const id = await makeMap('removable', []);
+      await upload(id, png(50, 50));
+      const removed = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: as(author),
+      });
+      assert.equal(removed.statusCode, 204);
+
+      const gone = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: as(author),
+      });
+      assert.equal(gone.statusCode, 404);
+    });
+
+    it('refuses a body past the ceiling before it is buffered', async () => {
+      // Fastify's own limit, set from the same constant the service checks. Two enforcements of
+      // one number, because a limit in a single place is a limit that moves when a second caller
+      // appears.
+      const id = await makeMap('too-big', []);
+      const response = await upload(id, Buffer.alloc(2 * 1024 * 1024 + 1));
+      assert.equal(response.statusCode, 413);
+    });
+
+    it('is the only route exempt from the response-schema rule', () => {
+      // The guard that would otherwise be quietly widened: `mapBackgroundRoute` is registered on
+      // its own so the exemption covers the one route that answers bytes, not the eight beside it.
+      assert.deepEqual(built.unfilteredRoutes, ['GET /api/v1/maps/:id/background']);
+    });
   });
 });

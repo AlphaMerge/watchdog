@@ -748,9 +748,17 @@ export type ResolvedWidgetData =
       channels: ResolvedChannel[];
     };
 
+/** A line between two widgets on a map (`G-05`). Endpoints are widget ids, not object ids. */
+export interface ResolvedConnector {
+  id: string;
+  from: string;
+  to: string;
+}
+
 export interface ResolvedMap {
   map: MapSummary;
   widgets: ResolvedWidget[];
+  connectors: ResolvedConnector[];
   /** Widgets whose document could not be read at all, kept rather than dropped. */
   problems: { id: string; problem: string }[];
 }

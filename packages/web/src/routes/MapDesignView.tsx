@@ -60,7 +60,7 @@ function Designer({ map }: { readonly map: MapSummary }): React.JSX.Element {
 
   return (
     <Card title={map.description === '' ? 'Canvas' : map.description}>
-      <MapDesigner initial={readCanvas(map.layout)} save={save} />
+      <MapDesigner mapId={map.id} initial={readCanvas(map.layout)} save={save} />
     </Card>
   );
 }

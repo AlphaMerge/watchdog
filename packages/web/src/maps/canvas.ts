@@ -64,11 +64,25 @@ export interface Tile {
   readonly rangeMinutes: number;
 }
 
-export interface Canvas {
-  readonly tiles: readonly Tile[];
+/**
+ * A line between two tiles (`G-05`).
+ *
+ * **Endpoints are tile ids, not object ids.** A connector is a statement about the picture, and
+ * the same sensor can appear on a canvas twice — a line to *the sensor* would be ambiguous about
+ * which tile it meant.
+ */
+export interface Connector {
+  readonly id: string;
+  readonly from: string;
+  readonly to: string;
 }
 
-export const EMPTY: Canvas = { tiles: [] };
+export interface Canvas {
+  readonly tiles: readonly Tile[];
+  readonly connectors: readonly Connector[];
+}
+
+export const EMPTY: Canvas = { tiles: [], connectors: [] };
 
 /** How wide the canvas is, in grid units. Fixed, so a map made on a laptop fits a wall display. */
 export const COLUMNS = 32;
@@ -92,6 +106,9 @@ export const MIN_H = 2;
 
 /** The core resolves the first 200 widgets and reports the rest as a problem; do not make 201. */
 export const MAX_TILES = 200;
+
+/** Two per tile, matching the core's ceiling. Bounded because the document is caller-supplied. */
+export const MAX_CONNECTORS = 400;
 
 /** How far back undo goes. Bounded, because a designer left open all afternoon is not a leak. */
 export const HISTORY_DEPTH = 50;
@@ -181,7 +198,10 @@ function replace(canvas: Canvas, id: string, next: (tile: Tile) => Tile): Canvas
   // what every caller would otherwise have to run to find that out.
   const found = canvas.tiles.find((tile) => tile.id === id);
   if (found === undefined) return canvas;
-  return { tiles: canvas.tiles.map((tile) => (tile === found ? next(tile) : tile)) };
+  return {
+    ...canvas,
+    tiles: canvas.tiles.map((tile) => (tile === found ? next(tile) : tile)),
+  };
 }
 
 export function tileById(canvas: Canvas, id: string | null): Tile | undefined {
@@ -215,9 +235,89 @@ export function retimeTile(canvas: Canvas, id: string, rangeMinutes: number): Ca
   return replace(canvas, id, (tile) => ({ ...tile, rangeMinutes }));
 }
 
+/**
+ * Removes a tile **and every line that touched it**.
+ *
+ * Leaving the lines would save a document the core can only report as broken — a connector whose
+ * endpoint is not on the canvas has no geometry, so it cannot be drawn as a broken line the way a
+ * widget is drawn as a broken tile. Undo restores both together, because it restores the canvas.
+ */
 export function removeTile(canvas: Canvas, id: string): Canvas {
   const tiles = canvas.tiles.filter((tile) => tile.id !== id);
-  return tiles.length === canvas.tiles.length ? canvas : { tiles };
+  if (tiles.length === canvas.tiles.length) return canvas;
+  return {
+    tiles,
+    connectors: canvas.connectors.filter((line) => line.from !== id && line.to !== id),
+  };
+}
+
+/** A line between two tiles, or the canvas unchanged when it would be a duplicate or a loop. */
+export function connect(canvas: Canvas, from: string, to: string): Canvas {
+  if (from === to) return canvas;
+  const known = new Set(canvas.tiles.map((tile) => tile.id));
+  if (!known.has(from) || !known.has(to)) return canvas;
+  // Undirected as far as duplicates go: A→B and B→A are one line on screen, and letting both
+  // exist means a canvas that looks unchanged and a document that grows every time it is clicked.
+  const already = canvas.connectors.some(
+    (line) => (line.from === from && line.to === to) || (line.from === to && line.to === from),
+  );
+  if (already) return canvas;
+  return {
+    ...canvas,
+    connectors: [...canvas.connectors, { id: nextConnectorId(canvas), from, to }],
+  };
+}
+
+export function disconnect(canvas: Canvas, id: string): Canvas {
+  const connectors = canvas.connectors.filter((line) => line.id !== id);
+  return connectors.length === canvas.connectors.length ? canvas : { ...canvas, connectors };
+}
+
+function nextConnectorId(canvas: Canvas): string {
+  const taken = new Set(canvas.connectors.map((line) => line.id));
+  let n = canvas.connectors.length + 1;
+  while (taken.has(`c${String(n)}`)) n += 1;
+  return `c${String(n)}`;
+}
+
+/**
+ * Where a line between two tiles starts and ends, in pixels.
+ *
+ * **Clipped to each tile's own edge rather than drawn centre to centre.** A line under both tiles
+ * is invisible where it matters — at the tiles — and reads as two boxes with a gap between them
+ * rather than as a connection. The clip is the point where the centre-to-centre ray leaves each
+ * rectangle: whichever of the two edges it reaches first.
+ */
+export function connectorLine(
+  from: Box,
+  to: Box,
+): { x1: number; y1: number; x2: number; y2: number } {
+  const a = { x: (from.x + from.w / 2) * CELL, y: (from.y + from.h / 2) * CELL };
+  const b = { x: (to.x + to.w / 2) * CELL, y: (to.y + to.h / 2) * CELL };
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  // Two tiles stacked exactly on top of each other have no direction to clip along. A zero-length
+  // line is the honest answer; anything else would be a made-up direction.
+  if (dx === 0 && dy === 0) return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+
+  const start = edge(a, dx, dy, from);
+  const end = edge(b, -dx, -dy, to);
+  return { x1: start.x, y1: start.y, x2: end.x, y2: end.y };
+}
+
+function edge(
+  centre: { x: number; y: number },
+  dx: number,
+  dy: number,
+  box: Box,
+): { x: number; y: number } {
+  const hw = (box.w * CELL) / 2;
+  const hh = (box.h * CELL) / 2;
+  // How far along the ray each edge is; the nearer one is the edge it actually crosses.
+  const toSide = dx === 0 ? Infinity : hw / Math.abs(dx);
+  const toTop = dy === 0 ? Infinity : hh / Math.abs(dy);
+  const scale = Math.min(toSide, toTop);
+  return { x: centre.x + dx * scale, y: centre.y + dy * scale };
 }
 
 /**
@@ -230,7 +330,7 @@ export function removeTile(canvas: Canvas, id: string): Canvas {
 export function addTile(canvas: Canvas, tile: Tile): Canvas {
   if (canvas.tiles.length >= MAX_TILES) return canvas;
   if (canvas.tiles.some((existing) => existing.id === tile.id)) return canvas;
-  return { tiles: [...canvas.tiles, { ...tile, box: fit(tile.box) }] };
+  return { ...canvas, tiles: [...canvas.tiles, { ...tile, box: fit(tile.box) }] };
 }
 
 export function sameBox(a: Box, b: Box): boolean {
@@ -240,6 +340,17 @@ export function sameBox(a: Box, b: Box): boolean {
 export function sameCanvas(a: Canvas, b: Canvas): boolean {
   if (a === b) return true;
   if (a.tiles.length !== b.tiles.length) return false;
+  if (a.connectors.length !== b.connectors.length) return false;
+  const linesAgree = a.connectors.every((line, index) => {
+    const other = b.connectors[index];
+    return (
+      other !== undefined &&
+      line.id === other.id &&
+      line.from === other.from &&
+      line.to === other.to
+    );
+  });
+  if (!linesAgree) return false;
   return a.tiles.every((tile, index) => {
     const other = b.tiles[index];
     return (
@@ -479,11 +590,34 @@ export function readCanvas(layout: unknown): Canvas {
     });
   }
 
-  return { tiles };
+  // Connectors last, because an endpoint has to be a tile that survived the read above: a line
+  // to a widget the document could not describe is a line with nowhere to start.
+  const known = new Set(tiles.map((tile) => tile.id));
+  const rawLines =
+    isRecord(layout) && Array.isArray(layout['connectors']) ? layout['connectors'] : [];
+  const connectors: Connector[] = [];
+  const claimed = new Set<string>();
+  for (const [index, entry] of rawLines.slice(0, MAX_CONNECTORS).entries()) {
+    if (!isRecord(entry)) continue;
+    const from = entry['from'];
+    const to = entry['to'];
+    if (typeof from !== 'string' || typeof to !== 'string') continue;
+    if (from === to || !known.has(from) || !known.has(to)) continue;
+    const id = typeof entry['id'] === 'string' ? entry['id'] : `c${String(index)}`;
+    if (claimed.has(id)) continue;
+    claimed.add(id);
+    connectors.push({ id, from, to });
+  }
+
+  return { tiles, connectors };
 }
 
-export function writeLayout(canvas: Canvas): { widgets: Record<string, unknown>[] } {
+export function writeLayout(canvas: Canvas): {
+  widgets: Record<string, unknown>[];
+  connectors: Connector[];
+} {
   return {
+    connectors: [...canvas.connectors],
     widgets: canvas.tiles.map((tile) => ({
       id: tile.id,
       kind: tile.kind,
