@@ -96,6 +96,7 @@ const server = new ApiServer({
   audit: new AuditRepository(),
   catalogue,
   schedules: stub,
+  maps: stub,
   discovery: stub,
   rediscovery: stub,
   provision: () => Promise.resolve({}),

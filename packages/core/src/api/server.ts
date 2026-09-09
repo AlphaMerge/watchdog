@@ -37,6 +37,7 @@ import { BulkService } from '../objects/bulk.js';
 import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
+import { mapRoutes } from './routes/maps.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { deviceTemplateRoutes } from './routes/device-templates.js';
@@ -60,6 +61,7 @@ import { QUERY_SCHEMAS } from './schemas/queries.js';
 import type { ProbeQueryService } from '../probes/queries.js';
 import type { ProbeConfigService } from '../probes/config.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
+import type { MapService } from '../maps/service.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -90,6 +92,14 @@ export interface ApiServerOptions {
    * an empty list, which is the honest answer for an installation with no lookups.
    */
   lookups?: LookupCatalogue;
+  /**
+   * Maps and dashboards (`G-01`).
+   *
+   * Optional, like the schedule library: a test about objects need not build one, and absent the
+   * routes are simply not registered rather than answering an empty list — a build without maps
+   * has no maps API, which is a different statement from having no maps.
+   */
+  maps?: MapService;
   /**
    * The schedule library (`M-09`).
    *
@@ -203,6 +213,7 @@ export class ApiServer {
   readonly #audit: AuditRepository;
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
+  readonly #maps: MapService | undefined;
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -257,6 +268,7 @@ export class ApiServer {
     this.#audit = options.audit;
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
+    this.#maps = options.maps;
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
@@ -513,6 +525,9 @@ export class ApiServer {
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
         await scope.register(lookupRoutes, { lookups: this.#lookups });
+        if (this.#maps !== undefined) {
+          mapRoutes(scope, { maps: this.#maps });
+        }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });
         }

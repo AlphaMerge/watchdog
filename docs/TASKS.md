@@ -12597,7 +12597,7 @@ because it is on a capability list.
 **The tickets use the `G-` prefix** for the graphical views `CAPABILITIES.MD §6` describes. `M-` is
 the state machine and `U-` is the Phase 5 UI.
 
-- [ ] **G-01 — The map entity** · M · — · Storage, migration with a tested rollback, CRUD API, and
+- [x] **G-01 — The map entity** · M · — · Storage, migration with a tested rollback, CRUD API, and
       access by group the way `§9` grants it. No widgets and no canvas: this is the thing every
       other ticket here needs, and the one that decides whether a map is versioned, how it is
       scoped, and what happens to it when an object it points at is deleted.
@@ -12633,7 +12633,43 @@ the state machine and `U-` is the Phase 5 UI.
       `updated_at` trigger never created, a group's grants outliving the group, and a nullable
       layout. 10 tests; the full suite is green at 3,679.
 
-      **Still to do on this ticket**: the repository, the service and the routes.
+      **The repository, service and routes landed the same day, and G-01 is done.**
+
+      **Access is resolved in `MapService` and nowhere else**, which is `CLAUDE.md`'s rule for
+      inheritance applied to the thing that will have two callers: the authenticated API, and
+      `G-06`'s public route, which arrives with no principal at all. The route-level `onObject(...)`
+      helper resolves against the *object tree* and could not have been reused — pointing it at a
+      map id asks the wrong table a question it cannot answer — so every route is `READS` and the
+      real decision happens one layer down.
+
+      Four rules, each asserted rather than described: an administrator group short-circuits the
+      lookup, because "may do anything, including to things that do not exist yet" must not depend
+      on a row somebody can delete; the account's role caps what its groups granted (`A-04`) and a
+      token's scope caps its owner (`A-06`), both only ever lowering; granting needs `full`, so a
+      `write` holder may edit the canvas without deciding who else sees it; and **a map the caller
+      cannot read answers 404 rather than 403**, because distinguishing them turns the error into
+      an oracle for enumerating which ids exist.
+
+      **A creator's primary group is granted `full` in the same transaction as the insert.**
+      Without it a non-administrator creates a map and immediately loses it — access is per group
+      and a new map has no grants — which is the kind of thing a user finds rather than a test.
+
+      **The version goes in the `WHERE` clause, not a comparison before the write**, so the
+      zero-row result *is* the conflict and there is no window for the other designer to commit
+      into. `If-Match` is required on a PATCH: last-write-wins on a canvas is somebody's afternoon
+      disappearing without a message.
+
+      **Two guards caught things on the way.** `listFor` used `SELECT DISTINCT` with an ordering
+      expression outside the select list — rewritten as `EXISTS`, which avoids the duplicate rows
+      a two-group grant produces rather than de-duplicating after the fact. And `H-07`'s API
+      reference generator **refused to run**: it derives its route list from `server.ts` and will
+      not produce a reference that silently omits a gated group, so `mapRoutes` had to be given a
+      stub before it would write. That is the guard doing exactly what it was built for.
+
+      **Mutations 6/6 on the access decisions** — an unreadable map answering forbidden instead of
+      absent, the role ceiling dropped, the token scope dropped, the creator's grant removed (8
+      cases red), granting needing only `write`, and the version leaving the `WHERE` clause. 25
+      tests across the schema and the service; the full suite is green at 3,694.
 
 - [ ] **G-02 — Widgets, and where their data comes from** · L · G-01 · The widget model — status
       icon, sensor list, data table — and one resolver that fills them, in the core rather than in

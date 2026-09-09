@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-122 routes.
+130 routes.
 
 ## Conventions
 
@@ -764,6 +764,120 @@ What each value maps to. `undefinedState` is what a value no entry covers become
 | `id` | path | string | **required** |
 
 **200** { id, name, description, type, undefinedState, entries }
+
+## maps
+
+### `GET /api/v1/maps`
+
+The maps this account may see
+
+Highest priority first, then by name. An administrator sees every map; everybody else sees the ones a group they belong to has been granted.
+
+**200** { items }
+
+### `POST /api/v1/maps`
+
+Create a map
+
+The creator’s primary group is granted full access in the same transaction — access is per group and a new map has no grants, so otherwise the person who made it could not see it.
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string | **required** |
+| `description` | string |  |
+| `priority` | integer |  |
+| `layout` | object |  |
+
+**201** { id, name, description, priority, layout, version, createdAt, updatedAt }
+
+### `GET /api/v1/maps/{id}`
+
+One map, with its canvas
+
+A map this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { id, name, description, priority, layout, version, createdAt, updatedAt }
+
+### `PATCH /api/v1/maps/{id}`
+
+Change a map
+
+`If-Match` carries the version this edit was made against. Without it the request is refused: a designer is a thing two people open at once, and last-write-wins there means somebody’s afternoon disappears without a message.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string |  |
+| `description` | string |  |
+| `priority` | integer |  |
+| `layout` | object |  |
+
+**200** { id, name, description, priority, layout, version, createdAt, updatedAt }
+
+### `DELETE /api/v1/maps/{id}`
+
+Delete a map
+
+Needs full access. The grants on it go with it.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**204**
+
+### `GET /api/v1/maps/{id}/access`
+
+Which groups may see this map
+
+Needs full access: who else can see a thing is not a read.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { items }
+
+### `PUT /api/v1/maps/{id}/access/{groupId}`
+
+Grant a group access to this map
+
+Needs full access, so a write holder may edit the canvas without deciding who else sees it. Granting twice replaces rather than failing: it is a correction.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |
+
+**204**
+
+### `DELETE /api/v1/maps/{id}/access/{groupId}`
+
+Take a group’s access away
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
+
+**204**
 
 ## meta
 
