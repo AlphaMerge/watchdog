@@ -18,6 +18,7 @@ that gets run badly or not at all.
 | `.deb` and `.rpm` install, upgrade, remove | 2026-09-03, locally | `scripts/smoke-packages.sh` |
 | Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
 | 5,000 sensors for 24 h | 2026-08-30 | `docs/findings/2026-08-30-soak-24h.md` |
+| MSI installs on Windows | **never** | CI's `windows-install` job, which has not run (`H-06`) |
 
 > **"Last verified" is a date, not a guarantee, and that is deliberate.** These four used to read
 > "in CI", which stopped being true the moment the workflow was disabled — a table telling you
@@ -41,8 +42,12 @@ in ways a simulator does not, and a week of unattended running.
 
 ## Before you start
 
-- **A Windows Server host.** `H-06` builds an MSI that has never been installed; this is the
-  first time it runs. Expect to find things, and file them rather than patching around them.
+- **A Windows Server host.** Note what this is and is not: `windows-latest` on GitHub Actions is
+  Windows Server 2022, and `H-06`'s `windows-install` job installs the MSI there — so the
+  *installer* has a machine that can prove it, whenever CI is running. What it cannot reach is
+  this runbook: a hundred real devices for a week is hardware and wall-clock, not a job. If that
+  job has still never run when you start, then this is the first time the MSI is installed
+  anywhere, and you should expect to find things — file them rather than patching around them.
 - **An Ubuntu host** for the core, unless you are testing the Windows core.
 - **100 devices you did not choose for being easy.** A field test against a hundred identical
   Linux VMs proves the scheduler and nothing about the sensor catalogue. Aim for a spread: some

@@ -294,9 +294,29 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       in both directions and fails on seven named TSL features the licence note refuses —
       catalogue entry 42.
 
-      **Still open, and still needs the host:** the benchmark, and whether `setup.exe` composes
-      with how an operator installs PostgreSQL on Windows. No `.ps1` has been written; the
-      argument above still stands.
+      **"Needs a Windows host" was the wrong framing, and `H-06` had already found that out.**
+      `windows-latest` on GitHub Actions *is* Windows Server 2022 — `H-06`'s `windows-install` job
+      installs the MSI there — so the machine has existed all along and the missing thing is a
+      job. What that runner can and cannot answer is not the same for both halves of what is left:
+
+      - **Provisioning composes, and a runner can prove it.** Install PostgreSQL, run `setup.exe`,
+        set `shared_preload_libraries`, restart, `CREATE EXTENSION`, compress a chunk. That is a
+        pass/fail question and a hosted runner answers it exactly as well as a bare-metal one.
+      - **The benchmark is not a question a hosted runner can answer.** It is a shared VM with
+        neighbours nobody can see, which is the same reason `CLAUDE.md` says to stop `ms-server`
+        before `test:perf` and why `P-192` prints the conditions with the numbers. A figure
+        measured there would be a number, not a measurement, and committing it would be worse
+        than having none.
+
+      **And the "it would be a guess" objection is now mostly answered** (2026-09-09): `setup.exe`
+      is a Go binary whose own strings give the flags — `-pgconfig`, `-quiet`, `-no-tune` — and say
+      it copies the extension to `pg_config --pkglibdir` / `--sharedir`, asked of *that server's*
+      `pg_config`. So it does not guess a path, and neither would a script driving it. What is
+      left unproven is that any of it runs, which is what the job would settle.
+
+      **Still open:** a Windows provisioning script and the job that runs it — neither written,
+      because the job could not run today (CI is disabled at the operator's request and the
+      account is blocked on billing, `H-06`) — and the benchmark, which still wants a real host.
 
       Re-check the availability finding
       before a Windows release; an upstream that stopped publishing Windows builds would flip it.

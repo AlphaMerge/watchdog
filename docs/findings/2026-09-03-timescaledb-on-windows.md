@@ -78,11 +78,27 @@ swapped), but Windows is not the thing forcing it.
 than on Linux, and that would be worth knowing — but it would be a performance note, not a reason
 for a different engine. Measuring it needs a Windows Server host, and so does the rest of `S-11`.
 
-**Not settled: the installer's assumptions.** `setup.exe` places the extension beside an existing
-PostgreSQL installation. Whether that composes with how an operator installs PostgreSQL on
-Windows, and what it needs in `postgresql.conf` (`shared_preload_libraries`, the licence setting)
-is unverified here — `scripts/smoke/provision-postgres.sh` does the Linux equivalent and has no
-Windows counterpart.
+**Mostly settled on 2026-09-09: what `setup.exe` actually does.** It is a Go program, and its
+strings say how it is driven and where it puts things — evidence rather than the guess this
+section previously left open:
+
+| | |
+| --- | --- |
+| Flags | `-pgconfig` ("Path to pg_config binary"), `-quiet`, `-yes-tune` / `-no-tune`, `-tune-flags`, `-tune-bin-path`, `-tune-conf-path` |
+| Where the extension goes | `pg_config --pkglibdir` and `pg_config --sharedir` — "Will copy dll files to:" |
+| What it refuses | "ERROR: path to pg_config cannot be empty"; it fails rather than guessing |
+| What else it runs | `./timescaledb-tune.exe`, which is what `-no-tune` skips |
+
+So a silent install is `setup.exe -pgconfig "<pgroot>\bin\pg_config.exe" -quiet -no-tune`, and
+**the "will a running server find it?" question answers itself**: the installer asks *that
+server's own* `pg_config` where its library and share directories are, rather than assuming a
+path. Point it at the right `pg_config` and the extension lands where that server looks.
+
+**Still not settled, and it needs Windows:** that this actually runs — the flags above are read
+off the binary, not executed — and the `postgresql.conf` half, which is the same on both
+platforms and equally unproven here: `shared_preload_libraries = 'timescaledb'` and
+`timescaledb.license = 'timescale'`, then a restart. `scripts/smoke/provision-postgres.sh` does
+the Linux equivalent and still has no Windows counterpart.
 
 ## The 2026-09-09 re-check
 
@@ -113,6 +129,10 @@ Nothing here changes the decision. What changed is the table, and that the table
     # the compression table options and the licence GUC are in the C module, not the SQL:
     strings -a timescaledb-2.30.0.dll     | grep -E '^(compress|compress_(segment|order)by|timescaledb\.license)$'
     strings -a timescaledb-tsl-2.30.0.dll | grep -E 'compress_chunk_impl|decompress_chunk_impl'
+
+    # how setup.exe is driven, and where it puts the extension:
+    strings -a setup.exe | grep -oE '\-(quiet|yes-tune|no-tune|pgconfig|tune-(bin|conf)-path)\b' | sort -u
+    strings -a setup.exe | grep -iE 'pg_config|sharedir|pkglibdir|copy dll files'
 
 Re-runnable, and worth re-running before a Windows release: an upstream that stopped publishing
 Windows builds would flip this finding, and the fallback `S-12` costed would come back.
