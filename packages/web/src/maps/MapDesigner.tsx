@@ -11,6 +11,8 @@ import {
   COLUMNS,
   DEFAULT_RANGE_MINUTES,
   KIND_LABELS,
+  MAX_HTML,
+  OBJECT_KINDS,
   RANGES,
   ROWS,
   WIDGET_KINDS,
@@ -34,6 +36,7 @@ import {
   removeTile,
   resizeTile,
   retimeTile,
+  rewriteHtml,
   sameCanvas,
   rangeLabel,
   timeline,
@@ -131,20 +134,29 @@ export function MapDesigner({
     [announce],
   );
 
-  const nameOf = (tile: Tile): string =>
-    tile.title === '' ? `${KIND_LABELS[tile.kind]} of #${String(tile.objectId)}` : tile.title;
+  const nameOf = (tile: Tile): string => {
+    if (tile.title !== '') return tile.title;
+    return tile.objectId === null
+      ? KIND_LABELS[tile.kind]
+      : `${KIND_LABELS[tile.kind]} of #${String(tile.objectId)}`;
+  };
 
   /* ------------------------------------------------------------ the toolbar */
 
+  /** A custom HTML tile names no object, so the picker is not part of adding one (`G-07`). */
+  const needsObject = OBJECT_KINDS.has(kind);
+
   const add = (): void => {
-    if (target === null) return;
+    if (needsObject && target === null) return;
     const id = nextTileId(canvas);
+    const named = needsObject && target !== null;
     const tile: Tile = {
       id,
       kind,
-      objectId: target.id,
-      title: target.name,
+      objectId: named ? target.id : null,
+      title: named ? target.name : KIND_LABELS[kind],
       rangeMinutes: DEFAULT_RANGE_MINUTES,
+      html: '',
       box: firstFreeBox(canvas),
     };
     const next = addTile(canvas, tile);
@@ -152,7 +164,7 @@ export function MapDesigner({
       announce('This map is full — 200 widgets is the most the core will draw.');
       return;
     }
-    apply(next, `${target.name} added at ${describeBox(tile.box)}`);
+    apply(next, `${tile.title} added at ${describeBox(tile.box)}`);
     setSelected(id);
   };
 
@@ -314,18 +326,20 @@ export function MapDesigner({
           </select>
         </label>
 
-        <ObjectPicker
-          kind={kind}
-          value={target}
-          onPick={(picked) => {
-            setTarget(picked);
-          }}
-        />
+        {needsObject && (
+          <ObjectPicker
+            kind={kind}
+            value={target}
+            onPick={(picked) => {
+              setTarget(picked);
+            }}
+          />
+        )}
 
         <button
           type="button"
           onClick={add}
-          disabled={target === null || disabled}
+          disabled={(needsObject && target === null) || disabled}
           className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
         >
           Add widget
@@ -529,6 +543,34 @@ export function MapDesigner({
         that has to be undone by deleting a widget. One list solves both: it says what is joined
         to what, and every row has the button that unjoins it.
       */}
+      {selectedTile?.kind === 'html' && (
+        <div className="space-y-1">
+          <label className="text-xs text-text-muted" htmlFor="widget-html">
+            <span className="ms-label block">Custom HTML</span>
+          </label>
+          <textarea
+            id="widget-html"
+            value={selectedTile.html}
+            maxLength={MAX_HTML}
+            rows={6}
+            disabled={disabled}
+            onChange={(event) => {
+              apply(rewriteHtml(canvas, selectedTile.id, event.target.value), 'Markup changed');
+            }}
+            className="w-full border border-control bg-surface px-2 py-1 font-mono text-xs text-text"
+          />
+          {/*
+            Said plainly, because the constraint is surprising and the alternative is somebody
+            spending an afternoon on a stylesheet that will never load.
+          */}
+          <p className="text-xs text-text-muted">
+            Drawn in a sandboxed frame with no access to this page, the session, or the network — so
+            scripts do not run, external images and stylesheets do not load, and the tile will not
+            match the rest of the page. Markup and text.
+          </p>
+        </div>
+      )}
+
       {canvas.connectors.length > 0 && (
         <div>
           <h3 className="ms-label">Connections</h3>

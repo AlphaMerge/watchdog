@@ -13000,7 +13000,7 @@ the state machine and `U-` is the Phase 5 UI.
       7 unit tests for the token and the limiter, 10 API tests, 9 in the browser; the web workspace
       goes 445 to 454 and the backend 3,748 to 3,765.
 
-- [ ] **G-07 — Custom HTML widgets** · M · G-02 · **Decided 2026-09-09: sandboxed iframe —
+- [x] **G-07 — Custom HTML widgets** · M · G-02 · **Decided 2026-09-09: sandboxed iframe —
       `ADR-002` Decision 2.** `<iframe sandbox srcdoc>` with no `allow-same-origin` and a
       restrictive CSP: safe by construction rather than by a sanitiser being complete and staying
       complete. It costs theming and layout freedom, which is the right cost. **Sharper because
@@ -13015,6 +13015,59 @@ the state machine and `U-` is the Phase 5 UI.
       widget model, so it is decided before `G-02` finalises and not after. Note the interaction
       with `G-06`: custom HTML on a publicly shared map is operator-supplied content served
       unauthenticated, which is a different question again.
+
+      **Landed 2026-09-09.** A `html` widget kind whose markup renders inside
+      `<iframe sandbox srcdoc>` — and `sandbox=""`, no tokens at all, which is stricter than the
+      ADR asked for.
+
+      **The markup is never cleaned, and that is the decision rather than an omission.** Nothing
+      between the textarea and the frame rewrites what an operator typed: a sanitiser is safe for
+      as long as it is complete and stays complete against the whole history of browser parsing
+      quirks, while an opaque-origin frame with no script, no forms and no navigation is safe by
+      construction. A half-cleaner in front of that would be a weaker second defence somebody
+      eventually leans on.
+
+      **`srcdoc`, never a served URL.** A route serving operator markup from this origin is a page
+      somebody can open in a tab, and an operator-authored page on the monitoring domain is exactly
+      the phishing kit `ADR-002` refuses — sharper still now that `G-06` exists and the map may be
+      public. The same component draws the tile on the shared page, so there is one sandbox rather
+      than two.
+
+      **Why no scripts at all, when the ADR only refused `allow-same-origin`.** A `srcdoc` document
+      inherits the embedding page's content security policy, which is `default-src 'self'` with no
+      `unsafe-inline` — so inline styles, style attributes and third-party images are inert in
+      there whatever the sandbox says, and granting `allow-scripts` would have been a promise the
+      policy breaks. **A custom widget is markup and text**, and the designer says so under the
+      textarea rather than leaving somebody to spend an afternoon on a stylesheet that cannot load.
+      Recorded as an amendment to `ADR-002`. The safety argument rests on the sandbox attribute,
+      which is well defined; the inheritance is read from the specification and is not verified in
+      a browser here.
+
+      **A widget that draws no object no longer has to name one.** `objectId` is `number | null`,
+      required for the four kinds that read something and dropped for the one that does not —
+      because a sensor id a widget never reads is a field a later ticket starts believing, and
+      inventing one would eventually block that sensor's deletion. The resolver skips such a widget
+      entirely: no lookup, no visibility decision, no place in either batched read. A canvas of
+      nothing but custom HTML now costs **zero** queries, which it did not before — `#objects` was
+      asking `ANY('{}')` for the privilege of being told so.
+
+      Bounded at 4 KiB of markup per widget, truncated rather than refused: a tile showing the
+      first few kilobytes is a better answer than a map that will not open. The layout as a whole
+      is bounded again by the request body limit.
+
+      **Mutations 8/8** — the sandbox attribute removed, the sandbox widened to
+      `allow-scripts allow-same-origin`, the markup sanitised on the way in, the 4 KiB cap dropped,
+      `html` added to the kinds that must name an object, an object id kept on a widget that draws
+      none, the empty-lookup guard removed, and `html` dropped from the saved document.
+
+      **What the tests cannot say, said here.** jsdom does not enforce a sandbox, so nothing in the
+      suite proves a script fails to run — a test that claimed to would be proving nothing. What is
+      asserted is the three things that have to hold for the browser's guarantee to apply: the
+      markup reaches a frame, the frame carries `sandbox=""`, and what arrives is byte-for-byte
+      what was typed. The guarantee itself is the browser's.
+
+      5 core tests and 8 in the browser; the web workspace goes 454 to 462 and the backend 3,765 to
+      3,770.
 
 - [ ] **G-08 — Geographical maps** · L · G-02 · **Still gated, and `ADR-002` Decision 3 says only
       what the eventual answer must satisfy**: whatever is chosen degrades to a plain background

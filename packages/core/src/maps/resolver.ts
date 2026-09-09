@@ -100,7 +100,9 @@ export class MapResolver {
       return { widgets: [], connectors: lines.connectors, problems: allProblems };
     }
 
-    const ids = [...new Set(widgets.map((widget) => widget.objectId))];
+    // Only the widgets that name one. A `html` tile draws whatever an operator typed and needs
+    // no lookup, no visibility decision, and no place in either of the batched reads (`G-07`).
+    const ids = [...new Set(widgets.map((widget) => widget.objectId).filter((id) => id !== null))];
     const objects = await this.#objects(q, ids);
     const visible = await this.#visible(audience, ids, q);
 
@@ -108,16 +110,20 @@ export class MapResolver {
     // passed both checks: a deleted or invisible object must not put its id into a query, or a
     // widget nobody may see would still cost the read it was refused.
     const drawable = widgets.filter(
-      (widget) => objects.has(widget.objectId) && visible.has(widget.objectId),
+      (widget) =>
+        widget.objectId !== null && objects.has(widget.objectId) && visible.has(widget.objectId),
     );
     const listRoots = new Set<number>();
     const tableSensors = new Set<number>();
     for (const widget of drawable) {
-      if (widget.kind === 'sensor-list') listRoots.add(widget.objectId);
+      const objectId = widget.objectId;
+      /* c8 ignore next -- `drawable` has already filtered these out */
+      if (objectId === null) continue;
+      if (widget.kind === 'sensor-list') listRoots.add(objectId);
       // A channel table or a graph on something that is not a sensor has nothing to read.
       const drawsChannels = widget.kind === 'table' || widget.kind === 'graph';
-      if (drawsChannels && objects.get(widget.objectId)?.kind === 'sensor') {
-        tableSensors.add(widget.objectId);
+      if (drawsChannels && objects.get(objectId)?.kind === 'sensor') {
+        tableSensors.add(objectId);
       }
     }
 
@@ -128,6 +134,20 @@ export class MapResolver {
 
     const resolved: ResolvedWidget[] = [];
     for (const widget of widgets) {
+      // A widget that names nothing cannot be unavailable: there is no object to be deleted or
+      // hidden, and the markup is already in the document.
+      if (widget.objectId === null) {
+        resolved.push({
+          id: widget.id,
+          kind: widget.kind,
+          box: widget.box,
+          title: widget.title,
+          state: 'ok',
+          data: { kind: 'html', html: widget.html },
+        });
+        continue;
+      }
+
       const object = objects.get(widget.objectId);
       if (object === undefined) {
         resolved.push(this.#unavailable(widget, audience, 'object-deleted'));
@@ -176,6 +196,9 @@ export class MapResolver {
 
   /** Every object a widget names, in one query. Absent from the map means deleted. */
   async #objects(q: Queryable, ids: readonly number[]): Promise<Map<number, ObjectRow>> {
+    // A canvas of nothing but custom HTML names no objects, and `ANY('{}')` is a round trip to
+    // be told so (`G-07`).
+    if (ids.length === 0) return new Map();
     const rows = await q.query<ObjectRow>(
       `SELECT o.id::text AS id, o.kind, o.name,
               r.state::text AS state, r.message, r.since

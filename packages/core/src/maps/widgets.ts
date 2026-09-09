@@ -7,8 +7,17 @@
  * that saved something odd should not take a wall display down with it.
  */
 
-/** The kinds resolved today. Custom HTML is `G-07`, geo `G-08`. */
-export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph'] as const;
+/** The kinds resolved today. Geo is `G-08`. */
+export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph', 'html'] as const;
+
+/**
+ * The kinds that draw an object, which is every kind but one.
+ *
+ * `html` draws whatever an operator typed and names nothing — so requiring an `objectId` of it
+ * would mean inventing one, and a widget carrying a sensor id it does not read is a widget that
+ * blocks that sensor's deletion in a future ticket that starts believing the field.
+ */
+const OBJECT_KINDS: ReadonlySet<string> = new Set(['status', 'sensor-list', 'table', 'graph']);
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
 
@@ -26,8 +35,19 @@ export interface Widget {
   readonly kind: WidgetKind;
   readonly box: WidgetBox;
   /** What this widget draws. A sensor for `status` and `table`, any object for `sensor-list`. */
-  readonly objectId: number;
+  /** The object this widget draws, or `null` for the kinds that draw none (`G-07`). */
+  readonly objectId: number | null;
   readonly title: string;
+  /**
+   * The markup a `html` widget renders (`G-07`, `ADR-002` Decision 2). Empty for every other kind.
+   *
+   * **Stored exactly as it was typed, and deliberately not sanitised.** A sanitiser is safe for
+   * as long as it is complete and stays complete against the entire history of browser parsing
+   * quirks; the renderer puts this in a sandboxed iframe with no same-origin access, which is
+   * safe by construction. Cleaning it here would be a second, weaker defence that invites
+   * somebody to rely on it.
+   */
+  readonly html: string;
   /**
    * How far back a `graph` widget draws (`G-04`). Ignored by every other kind.
    *
@@ -78,6 +98,18 @@ export type ResolvedWidget =
 export type UnavailableReason = 'object-deleted' | 'not-visible';
 
 export type WidgetData =
+  | {
+      /**
+       * Markup, passed through untouched (`G-07`).
+       *
+       * The renderer's contract is `<iframe sandbox srcdoc>` with no `allow-same-origin`, so this
+       * string is inert wherever it lands. Nothing between here and there cleans it, and that is
+       * the decision `ADR-002` took: safe by construction beats safe by a sanitiser that has to
+       * stay complete.
+       */
+      readonly kind: 'html';
+      readonly html: string;
+    }
   | {
       /**
        * What a graph tile needs to *start* (`G-04`).
@@ -132,6 +164,8 @@ export interface ChannelLine {
 }
 
 const MAX_TITLE = 80;
+/** Per widget. A tile is a tile; anything longer is a page, and a page is not a widget. */
+const MAX_HTML = 4096;
 const MAX_WIDGETS = 200;
 /** Two per widget. Bounded for the same reason the widgets are: the document is caller-supplied. */
 const MAX_CONNECTORS = 400;
@@ -158,8 +192,12 @@ export function readWidget(raw: unknown, index: number): Widget | { problem: str
     return { id, problem: `unknown widget kind ${String(kind)}` };
   }
 
-  const objectId = raw['objectId'];
-  if (typeof objectId !== 'number' || !Number.isInteger(objectId) || objectId <= 0) {
+  const rawObjectId = raw['objectId'];
+  const objectId =
+    typeof rawObjectId === 'number' && Number.isInteger(rawObjectId) && rawObjectId > 0
+      ? rawObjectId
+      : null;
+  if (objectId === null && OBJECT_KINDS.has(kind)) {
     return { id, problem: 'objectId must be a positive whole number' };
   }
 
@@ -170,8 +208,14 @@ export function readWidget(raw: unknown, index: number): Widget | { problem: str
   return {
     id,
     kind: kind as WidgetKind,
-    objectId,
+    // Dropped for the kinds that do not draw one, even when a document carries it: a field that
+    // is read by nothing is a field a later reader starts trusting.
+    objectId: OBJECT_KINDS.has(kind) ? objectId : null,
     title,
+    // Bounded, and truncated rather than refused — a tile showing the first few kilobytes of
+    // what somebody typed is a better answer than a map that will not open. The layout as a
+    // whole is bounded again by the request body limit.
+    html: typeof raw['html'] === 'string' ? raw['html'].slice(0, MAX_HTML) : '',
     // Clamped rather than refused: a range somebody typed badly is a tile drawn over a strange
     // period, not a map that will not open — and an unbounded one is a query anybody can ask.
     rangeMinutes: Math.min(Math.max(MIN_RANGE_MINUTES, range), MAX_RANGE_MINUTES),

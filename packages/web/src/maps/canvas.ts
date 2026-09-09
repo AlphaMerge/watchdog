@@ -13,8 +13,19 @@
  * share link render the same map on a wall display and a laptop.
  */
 
-/** The kinds the core resolves today. `G-07` and `G-08` each add to this list. */
-export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph'] as const;
+/** The kinds the core resolves today. `G-08` adds to this list. */
+export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph', 'html'] as const;
+
+/** The kinds that draw an object. `html` draws what somebody typed and names nothing. */
+export const OBJECT_KINDS: ReadonlySet<WidgetKind> = new Set<WidgetKind>([
+  'status',
+  'sensor-list',
+  'table',
+  'graph',
+]);
+
+/** Per widget, matching the core's ceiling. A tile is a tile; longer than this is a page. */
+export const MAX_HTML = 4096;
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
 
@@ -23,6 +34,7 @@ export const KIND_LABELS: Readonly<Record<WidgetKind, string>> = {
   'sensor-list': 'Sensor list',
   table: 'Channel table',
   graph: 'Graph',
+  html: 'Custom HTML',
 };
 
 /**
@@ -57,11 +69,20 @@ export interface Box {
 export interface Tile {
   readonly id: string;
   readonly kind: WidgetKind;
-  readonly objectId: number;
+  /** `null` for the kinds that draw no object (`G-07`). */
+  readonly objectId: number | null;
   readonly title: string;
   readonly box: Box;
   /** Only a `graph` reads this; every kind carries it so the document has one shape. */
   readonly rangeMinutes: number;
+  /**
+   * The markup a `html` tile renders (`G-07`).
+   *
+   * Never cleaned here or anywhere else: it is rendered inside `<iframe sandbox srcdoc>` with no
+   * same-origin access, which is safe by construction. A sanitiser in front of that would be a
+   * weaker second defence that invites somebody to lean on it (`ADR-002` Decision 2).
+   */
+  readonly html: string;
 }
 
 /**
@@ -235,6 +256,11 @@ export function retimeTile(canvas: Canvas, id: string, rangeMinutes: number): Ca
   return replace(canvas, id, (tile) => ({ ...tile, rangeMinutes }));
 }
 
+/** Truncated rather than refused, the same as the core does when it reads one back. */
+export function rewriteHtml(canvas: Canvas, id: string, html: string): Canvas {
+  return replace(canvas, id, (tile) => ({ ...tile, html: html.slice(0, MAX_HTML) }));
+}
+
 /**
  * Removes a tile **and every line that touched it**.
  *
@@ -360,6 +386,7 @@ export function sameCanvas(a: Canvas, b: Canvas): boolean {
       tile.objectId === other.objectId &&
       tile.title === other.title &&
       tile.rangeMinutes === other.rangeMinutes &&
+      tile.html === other.html &&
       sameBox(tile.box, other.box)
     );
   });
@@ -564,9 +591,14 @@ export function readCanvas(layout: unknown): Canvas {
   for (const [index, entry] of raw.slice(0, MAX_TILES).entries()) {
     if (!isRecord(entry)) continue;
     const kind = entry['kind'];
-    const objectId = entry['objectId'];
     if (typeof kind !== 'string' || !(WIDGET_KINDS as readonly string[]).includes(kind)) continue;
-    if (typeof objectId !== 'number' || !Number.isInteger(objectId) || objectId <= 0) continue;
+    const rawObjectId = entry['objectId'];
+    const objectId =
+      typeof rawObjectId === 'number' && Number.isInteger(rawObjectId) && rawObjectId > 0
+        ? rawObjectId
+        : null;
+    // Only the kinds that draw one need one; the core reads it back the same way.
+    if (objectId === null && OBJECT_KINDS.has(kind as WidgetKind)) continue;
 
     // A duplicate id is two tiles React would give the same key and two tiles the toolbar could
     // not tell apart; the second one gets a fresh one rather than being dropped.
@@ -578,9 +610,10 @@ export function readCanvas(layout: unknown): Canvas {
     tiles.push({
       id,
       kind: kind as WidgetKind,
-      objectId,
+      objectId: OBJECT_KINDS.has(kind as WidgetKind) ? objectId : null,
       title: typeof entry['title'] === 'string' ? entry['title'] : '',
       rangeMinutes: whole(entry['rangeMinutes'], DEFAULT_RANGE_MINUTES),
+      html: typeof entry['html'] === 'string' ? entry['html'].slice(0, MAX_HTML) : '',
       box: fit({
         x: whole(box['x'], 0),
         y: whole(box['y'], 0),
@@ -624,6 +657,7 @@ export function writeLayout(canvas: Canvas): {
       objectId: tile.objectId,
       title: tile.title,
       rangeMinutes: tile.rangeMinutes,
+      html: tile.html,
       box: tile.box,
     })),
   };

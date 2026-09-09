@@ -24,6 +24,8 @@ const KIND_QUERY: Readonly<Record<WidgetKind, string>> = {
   table: 'kind=sensor',
   graph: 'kind=sensor',
   'sensor-list': 'kind=probe&kind=group&kind=device',
+  // Never asked: a custom HTML tile draws no object, so the picker is not rendered for it.
+  html: '',
 };
 
 export interface Picked {

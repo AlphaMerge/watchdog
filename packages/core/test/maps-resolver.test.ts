@@ -155,6 +155,42 @@ describe('reading a widget document', () => {
     assert.match(problems.at(-1)?.problem ?? '', /only the first 400/);
   });
 
+  it('lets a custom HTML widget name no object at all', () => {
+    // A widget that draws whatever somebody typed has nothing to point at, and requiring an id
+    // would mean inventing one — a sensor id a widget does not read is a field a later ticket
+    // starts believing.
+    const { widgets, problems } = readWidgets({
+      widgets: [{ id: 'a', kind: 'html', html: '<p>on call: 555</p>' }],
+    });
+    assert.equal(problems.length, 0);
+    const widget = widgets[0];
+    assert.ok(widget);
+    assert.equal(widget.objectId, null);
+    assert.equal(widget.html, '<p>on call: 555</p>');
+  });
+
+  it('still insists on an object for the kinds that draw one', () => {
+    const { problems } = readWidgets({ widgets: [{ id: 'a', kind: 'status' }] });
+    assert.match(problems[0]?.problem ?? '', /objectId/);
+  });
+
+  it('drops an object id from a widget that does not draw one', () => {
+    const { widgets } = readWidgets({ widgets: [{ id: 'a', kind: 'html', objectId: 42 }] });
+    assert.equal(widgets[0]?.objectId, null, 'a field nothing reads is a field somebody trusts');
+  });
+
+  it('keeps the markup exactly, and bounds it', () => {
+    // **Not sanitised, on purpose** (`ADR-002` Decision 2): the renderer's sandbox is what makes
+    // this safe, and a half-cleaner in front of it would invite somebody to lean on it.
+    const hostile = '<img src=x onerror="alert(1)"><script>fetch("/api/v1/maps")</script>';
+    const { widgets } = readWidgets({ widgets: [{ id: 'a', kind: 'html', html: hostile }] });
+    assert.equal(widgets[0]?.html, hostile);
+
+    const long = 'x'.repeat(9000);
+    const bounded = readWidgets({ widgets: [{ id: 'b', kind: 'html', html: long }] });
+    assert.equal(bounded.widgets[0]?.html.length, 4096);
+  });
+
   it('treats a layout with no widgets key as an empty canvas', () => {
     assert.deepEqual(readWidgets({}).widgets, []);
     assert.deepEqual(readWidgets(null).widgets, []);
@@ -332,6 +368,25 @@ describe(
         assert.ok(widget.data.kind === 'sensor-list');
         assert.equal(widget.data.sensors.length, 1);
         assert.equal(widget.data.sensors[0]?.name, 'res-sensor');
+      });
+
+      it('resolves a custom HTML widget without touching the database', async () => {
+        // It names nothing, so there is nothing to look up, nothing to be deleted underneath it
+        // and no visibility decision to take.
+        const watch = watchStatements(db);
+        try {
+          const { widgets } = await resolver.resolve(
+            { widgets: [{ id: 'w1', kind: 'html', html: '<b>hello</b>' }] },
+            asPublic(),
+          );
+          const widget = widgets[0];
+          assert.ok(widget?.state === 'ok');
+          assert.ok(widget.data.kind === 'html');
+          assert.equal(widget.data.html, '<b>hello</b>');
+        } finally {
+          watch.stop();
+        }
+        assert.equal(watch.seen.length, 0, 'a widget that names nothing costs no query');
       });
 
       it('gives a graph its channels, its state and the range the author chose', async () => {

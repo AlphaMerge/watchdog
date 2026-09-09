@@ -60,6 +60,7 @@ function tile(id: string, box: Partial<Box> = {}): Tile {
     objectId: 1,
     title: id,
     rangeMinutes: DEFAULT_RANGE_MINUTES,
+    html: '',
     box: { x: 0, y: 0, w: 4, h: 3, ...box },
   };
 }

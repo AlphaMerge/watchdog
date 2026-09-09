@@ -178,6 +178,12 @@ function Drawn({
   readonly tick: number;
   readonly graphs: 'chart' | 'values';
 }): React.JSX.Element {
+  if (data.kind === 'html') {
+    // **No title bar and no frame chrome.** A custom widget is a rectangle an operator owns; a
+    // heading we add on top of it is a heading they cannot remove.
+    return <HtmlTile title={widget.title} html={data.html} />;
+  }
+
   const title = widget.title === '' ? data.name : widget.title;
 
   if (data.kind === 'status') {
@@ -422,5 +428,44 @@ function Connectors({
         ))}
       </ul>
     </>
+  );
+}
+
+/**
+ * An operator's own markup, in a box it cannot leave (`G-07`, `ADR-002` Decision 2).
+ *
+ * **`sandbox` with no tokens at all**, which is the most restrictive value there is: a unique
+ * opaque origin, no scripts, no forms, no navigation, no access to this document. `srcdoc` rather
+ * than a served URL, because a URL on this origin is a page somebody can open in a tab — and an
+ * operator-authored page on the monitoring system's domain is the phishing kit `ADR-002` refuses.
+ *
+ * **The markup is not cleaned on the way in or on the way out.** That is the decision, not an
+ * omission: a sanitiser is safe while it is complete and stays complete against every browser
+ * parsing quirk, and a hostile document in here can affect its own rectangle and nothing else.
+ *
+ * **What an author gets is markup and text.** A `srcdoc` document inherits this page's content
+ * security policy, which has no `unsafe-inline` and no third-party origins — so a `<style>` block,
+ * a `style` attribute and an external image are all inert. The sandbox alone would have stopped
+ * the scripts; the inherited policy is what makes the rest of it a text-and-markup feature, and
+ * the designer says so where somebody is typing rather than in a document nobody reads.
+ */
+function HtmlTile({
+  title,
+  html,
+}: {
+  readonly title: string;
+  readonly html: string;
+}): React.JSX.Element {
+  return (
+    <iframe
+      // An empty string is not the same as leaving the attribute off: absent means "not
+      // sandboxed", and `sandbox=""` is every restriction at once.
+      sandbox=""
+      srcDoc={html}
+      // The frame has no accessible content of its own that this page can see, so the title an
+      // author gave the tile is the only name it can carry.
+      title={title === '' ? 'Custom HTML widget' : title}
+      className="h-full w-full border-0 bg-surface"
+    />
   );
 }

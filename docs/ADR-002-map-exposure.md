@@ -104,6 +104,19 @@ The API lives under the versioned prefix with everything else, because that is w
 authentication hook can exempt exactly one namespace; the human-facing URL has to be a route the
 app shell serves, and the two cannot be the same string.
 
+**Decision 2 said "no `allow-same-origin`"; what shipped is `sandbox=""` — no tokens at all**
+(`G-07`). Stricter than the decision rather than looser, so nothing here is weakened: a custom
+widget gets a unique opaque origin, no scripts, no forms and no navigation.
+
+The reason for going further is worth recording, because it changes what an operator can do. A
+`srcdoc` document is a local scheme and inherits the embedding page's content security policy,
+which here is `default-src 'self'` with no `unsafe-inline` — so inline `<style>`, `style`
+attributes and third-party images are inert inside the frame whatever the sandbox says. Granting
+`allow-scripts` would therefore have been a promise the policy breaks. **A custom widget is markup
+and text**, and the designer says so where somebody is typing rather than leaving them to discover
+it. *(The sandbox is what the safety argument rests on and is well defined; the inheritance is read
+from the specification and has not been checked in a browser here.)*
+
 **One thing this decision did not anticipate, decided the same way it would have been:** a shared
 map's *graph* widgets show their channels' current readings rather than a chart. Drawing history
 would mean an unauthenticated range query per graph tile, which is precisely the work the fourth

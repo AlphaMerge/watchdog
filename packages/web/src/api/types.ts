@@ -697,7 +697,7 @@ export interface MapSummary {
 /** A widget with its data filled in, from `GET /maps/:id/view` (`G-02`, `G-10`). */
 export type ResolvedWidget = {
   id: string;
-  kind: 'status' | 'sensor-list' | 'table' | 'graph';
+  kind: 'status' | 'sensor-list' | 'table' | 'graph' | 'html';
   box: { x: number; y: number; w: number; h: number };
   title: string;
 } & (
@@ -746,7 +746,9 @@ export type ResolvedWidgetData =
       sensorState: string;
       rangeMinutes: number;
       channels: ResolvedChannel[];
-    };
+    }
+  /** Markup an operator typed, rendered in a sandboxed frame and nowhere else (`G-07`). */
+  | { kind: 'html'; html: string };
 
 /** A line between two widgets on a map (`G-05`). Endpoints are widget ids, not object ids. */
 export interface ResolvedConnector {
