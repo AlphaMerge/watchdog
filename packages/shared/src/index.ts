@@ -61,6 +61,7 @@ export {
   parseProbeToCore,
   PROTOCOL_VERSION,
   ProtocolError,
+  rejectionStopsMonitoring,
 } from './protocol/messages.js';
 export type {
   ChannelReading,
@@ -74,6 +75,7 @@ export type {
   QueryFailure,
   RejectCode,
   SensorAssignment,
+  WithdrawnCode,
   IdentifyJob,
   SweepEnding,
   SweepHost,

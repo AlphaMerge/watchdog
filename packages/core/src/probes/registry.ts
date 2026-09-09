@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   type Logger,
   type ProtocolSkew,
+  type WithdrawnCode,
 } from '@ms/shared';
 
 /**
@@ -106,6 +107,25 @@ interface Db {
  */
 export interface ProbeConnections {
   disconnect(gid: string, reason: string): boolean;
+  /**
+   * Closes a connection **and says why**, so the probe stops rather than treating it as a blip.
+   *
+   * Separate from `disconnect`, and the difference is the whole of it. `disconnect` is for a
+   * decision the probe should come *back* from — approval (`P-189`) — where a bare close is
+   * right because the reconnect is the point. Withdrawal is the opposite: the probe keeps
+   * checking and spools to disk when it merely loses the core, so a bare close would leave a
+   * machine somebody has just refused probing their network until its process happened to die.
+   * The `reject` carries a code the probe acts on.
+   */
+  withdraw(gid: string, code: WithdrawnCode, detail: string): boolean;
+  /**
+   * Where this gid is connected from right now, or null if it is not connected at all.
+   *
+   * The one fact the transport has that this does not. Asking for it is what keeps the *policy*
+   * here: whether an address filter still covers a probe is the same decision `admit` makes at a
+   * handshake, and a second copy of it in the transport is a second copy to drift.
+   */
+  remoteAddressOf(gid: string): string | null;
 }
 
 export interface ProbeRegistryOptions {
@@ -212,18 +232,19 @@ export class ProbeRegistry {
       };
     }
 
-    // The probe's own filter, then the installation's. A probe with a filter of its own is
-    // saying something narrower than the default, and the narrower statement wins.
-    const filters = existing.allowFrom.length > 0 ? existing.allowFrom : this.#enrolFrom;
-    if (!addressAllowed(hello.remoteAddress, filters)) {
+    if (!this.#addressAllowedFor(existing, hello.remoteAddress)) {
       this.#logger.warn(
-        { gid: existing.gid, remoteAddress: hello.remoteAddress, filters },
+        {
+          gid: existing.gid,
+          remoteAddress: hello.remoteAddress,
+          filters: existing.allowFrom.length > 0 ? existing.allowFrom : this.#enrolFrom,
+        },
         'a probe connected from an address its filter does not allow',
       );
       return {
         kind: 'refused',
         code: 'source-not-allowed',
-        detail: `this probe is not accepted from ${hello.remoteAddress}`,
+        detail: refusedFrom(hello.remoteAddress),
       };
     }
 
@@ -445,6 +466,14 @@ export class ProbeRegistry {
     // probe was replaced would be the wrong end of the trade.
     await this.#db.query(`UPDATE probe_config SET gid = NULL WHERE gid = $1`, [gid]);
     this.#logger.warn({ gid, note }, 'a probe was revoked');
+
+    // **The decision has to reach the machine, and `disconnect` would not be enough** (`P-189`
+    // closed the approval half of this). A probe that merely loses the core keeps checking and
+    // spools to disk, so a bare close leaves a revoked machine probing somebody's network until
+    // its process happens to die. The operator's own sentence travels with it, because "revoked"
+    // tells whoever reads the probe's journal nothing and "decommissioned, replaced by web-dc4"
+    // tells them everything — and it is the same sentence `admit` sends at a refused handshake.
+    this.#connections?.withdraw(gid, 'revoked', note === '' ? 'this probe has been revoked' : note);
     return read(row);
   }
 
@@ -455,7 +484,20 @@ export class ProbeRegistry {
       `DELETE FROM probe_registration WHERE gid = $1 RETURNING gid`,
       [gid],
     );
-    return rows.length > 0;
+    if (rows.length === 0) return false;
+
+    // **Forgetting a probe stops it too, and it has to.** Deleting the row means "this machine
+    // is gone", which is usually said about one that is — but said about one still connected it
+    // would leave the least accountable state this system can reach: a machine checking devices
+    // under assignments the core no longer has any record of giving it. `not-approved` rather
+    // than `revoked`, because that is what it now is: a forgotten probe that comes back enrols
+    // as a stranger and waits in the queue. Both stop it; only one of them is true.
+    this.#connections?.withdraw(
+      gid,
+      'not-approved',
+      'this probe is no longer registered with this core',
+    );
+    return true;
   }
 
   /** Narrows where one probe may connect from. */
@@ -472,7 +514,39 @@ export class ProbeRegistry {
     const row = rows[0];
     if (row === undefined)
       throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
-    return read(row);
+    const updated = read(row);
+
+    // **A filter that no longer covers where the probe actually is takes effect now.** The
+    // narrower statement is already true the moment it is written — the very next handshake
+    // refuses it — so leaving the live session up only decides *when*, and "whenever this probe
+    // happens to reconnect" is an answer nobody chose. It would also make the probes page lie: a
+    // registration reading `10.0.0.0/24` beside a probe at `192.0.2.5`, still scanning.
+    //
+    // Only when it is genuinely outside. Narrowing a filter that still covers the probe is the
+    // ordinary case — an operator tightening a range around the machines already in it — and
+    // must cost nothing at all.
+    const address = this.#connections?.remoteAddressOf(gid) ?? null;
+    if (address !== null && !this.#addressAllowedFor(updated, address)) {
+      this.#logger.warn(
+        { gid, remoteAddress: address, filters: [...filters] },
+        'a connected probe is outside its new address filter',
+      );
+      this.#connections?.withdraw(gid, 'source-not-allowed', refusedFrom(address));
+    }
+    return updated;
+  }
+
+  /**
+   * Whether this registration accepts a connection from this address.
+   *
+   * **The probe's own filter, then the installation's.** A probe with a filter of its own is
+   * saying something narrower than the default, and the narrower statement wins. Extracted so
+   * the handshake and a filter that has just changed cannot come to different conclusions about
+   * the same probe — which they would, the first time somebody changed one and not the other.
+   */
+  #addressAllowedFor(registration: ProbeRegistration, address: string): boolean {
+    const filters = registration.allowFrom.length > 0 ? registration.allowFrom : this.#enrolFrom;
+    return addressAllowed(address, filters);
   }
 
   #enrolmentKeyMatches(presented: string): boolean {
@@ -546,6 +620,16 @@ export class ProbeRegistry {
       ],
     );
   }
+}
+
+/**
+ * What a probe is told when its address is not accepted.
+ *
+ * One function so a probe refused at a handshake and one refused because the filter moved under
+ * it read identically in the journal — the operator is looking at the same fact either way.
+ */
+function refusedFrom(address: string): string {
+  return `this probe is not accepted from ${address}`;
 }
 
 /**

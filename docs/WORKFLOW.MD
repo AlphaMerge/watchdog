@@ -392,6 +392,15 @@ Key properties:
   model works in customer networks and why we copy it.
 - **Approval is explicit.** A new probe arrives pending; an administrator approves it. Access
   keys, an IP allowlist and per-GID revocation are the controls.
+- **A decision reaches the probe that is already connected.** Approving one closes its link so it
+  comes straight back with a key and a subtree (`P-189`); withdrawing trust — revoking it,
+  deleting it, or narrowing an address filter past where it sits — closes the link _and says
+  why_, so it drops its assignments and scans nothing. The reason has to travel: disconnect
+  tolerance below means a probe that merely loses the core keeps checking and spools, so a bare
+  close would leave a machine somebody just refused still probing their network. A version skew
+  or a key out of step is not that — nobody has said the machine must stop, so it keeps checking
+  and spooling while an operator fixes one end. Narrowing a filter that still covers the probe
+  costs nothing: tightening a range around the machines already inside it must never be an outage.
 - **Disconnect tolerance.** PRTG buffers up to 500,000 results _in RAM_, losing them if the
   probe restarts. We spool to disk instead, with a bounded size and oldest-first eviction —
   and we count what we drop.

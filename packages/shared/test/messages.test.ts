@@ -10,6 +10,9 @@ import {
   parseProbeToCore,
   PROTOCOL_VERSION,
   ProtocolError,
+  rejectionStopsMonitoring,
+  type RejectCode,
+  type WithdrawnCode,
 } from '../src/protocol/messages.js';
 
 const hello = {
@@ -558,5 +561,66 @@ describe('the protocol version and its own history', () => {
       'PROTOCOL_VERSION and the version history in its comment disagree — one of them was ' +
         'not updated, and a health-report field added without a bump is refused by the far end',
     );
+  });
+});
+
+describe('what a rejection means for a probe that is running', () => {
+  // **The probe cannot tell "the core went away" from "the core sent me away" by the socket
+  // alone**, and it must, because it answers the two oppositely: it survives the first by
+  // scanning on and spooling to disk, and that same behaviour applied to the second leaves a
+  // revoked machine probing somebody's network for as long as its process lives. `P-189` closes
+  // the connection to make a decision land, so a bare close is exactly what a blip looks like.
+
+  /** Every code the union has. A code added there and forgotten here fails the last test. */
+  const every: RejectCode[] = [
+    'protocol-version',
+    'bad-access-key',
+    'not-approved',
+    'revoked',
+    'source-not-allowed',
+    'internal-error',
+  ];
+
+  it('stops a probe the core knows and will not have', () => {
+    for (const code of ['revoked', 'not-approved', 'source-not-allowed'] satisfies RejectCode[]) {
+      assert.equal(rejectionStopsMonitoring(code), true, code);
+    }
+  });
+
+  it('keeps one scanning when the two ends merely cannot agree', () => {
+    // A version skew, a key out of step, a registry that is briefly unreachable: nobody has said
+    // this machine must stop, and an operator fixes one end. The spool is exactly right here —
+    // the checks keep running and drain when the two ends can talk, so an upgrade costs minutes
+    // of graphs rather than a hole in them.
+    for (const code of [
+      'protocol-version',
+      'bad-access-key',
+      'internal-error',
+    ] satisfies RejectCode[]) {
+      assert.equal(rejectionStopsMonitoring(code), false, code);
+    }
+  });
+
+  it('agrees exactly with the codes that mean trust was withdrawn', () => {
+    // `WithdrawnCode` names the same set from the other side — what the core may say when it
+    // closes a live link — and the two drifting apart is how a probe ends up withdrawn with a
+    // code it then decides to keep scanning through.
+    const withdrawn: WithdrawnCode[] = ['revoked', 'not-approved', 'source-not-allowed'];
+    for (const code of withdrawn) {
+      assert.equal(rejectionStopsMonitoring(code), true, code);
+    }
+    assert.deepEqual(
+      [...every.filter((code) => rejectionStopsMonitoring(code))].sort(),
+      [...withdrawn].sort(),
+      'a code stops monitoring without being a withdrawal, or the other way about',
+    );
+  });
+
+  it('has an answer for every code there is', () => {
+    // The switch has no `default`, so a new code is a type error rather than a silent assignment
+    // to whichever side happened to be the fallback. This is the runtime half of that.
+    for (const code of every) {
+      assert.equal(typeof rejectionStopsMonitoring(code), 'boolean', code);
+    }
   });
 });
