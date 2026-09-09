@@ -367,13 +367,21 @@ export const flowCollector: SensorType = {
 
     let bytes = 0;
     let packets = 0;
+    let sampled = 0;
     const protocols = new Map<number, number>();
     const hosts = new Set<string>();
     const customBytes = new Map<string, number>(custom.map((channel) => [channel.key, 0]));
 
     for (const item of mine) {
-      const octets = Number(item.detail['octets'] ?? 0);
-      const count = Number(item.detail['packets'] ?? 0);
+      // **Scaled by what each record stands for** (`B-06`). sFlow sends one packet in N — 2,048
+      // is an ordinary setting — and NetFlow v5 can sample too. Summing the raw octets would
+      // under-report a sampled exporter by exactly N, silently, and the number would look
+      // entirely plausible on the busiest link in the building. What comes out is an estimate,
+      // which is what sampling gives you and what the message below says it is.
+      const rate = Math.max(1, Number(item.detail['samplingRate'] ?? 1));
+      if (rate > 1) sampled += 1;
+      const octets = Number(item.detail['octets'] ?? 0) * rate;
+      const count = Number(item.detail['packets'] ?? 0) * rate;
       const protocol = Number(item.detail['protocol'] ?? -1);
       bytes += octets;
       packets += count;
@@ -411,7 +419,11 @@ export const flowCollector: SensorType = {
       message:
         `${String(mine.length)} flow${mine.length === 1 ? '' : 's'}, ` +
         `${formatRate(perSecond(bytes))} from ${String(hosts.size)} source` +
-        `${hosts.size === 1 ? '' : 's'} since ${batch.since}`,
+        `${hosts.size === 1 ? '' : 's'} since ${batch.since}` +
+        // Said out loud, because an estimate from one packet in two thousand deserves to be
+        // read as one — and because an operator comparing this against an interface counter
+        // needs to know why the two do not agree exactly.
+        (sampled === 0 ? '' : `; estimated from ${String(sampled)} sampled`),
     });
   },
 };

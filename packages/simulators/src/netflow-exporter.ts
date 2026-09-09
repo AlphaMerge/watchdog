@@ -275,3 +275,190 @@ export function variableLength(value: Buffer | string): Buffer {
   prefix.writeUInt16BE(bytes.length, 1);
   return Buffer.concat([prefix, bytes]);
 }
+
+/**
+ * An sFlow v5 agent (`B-05`).
+ *
+ * Same rule as the NetFlow halves above: the XDR is written out against the sFlow v5 spec rather
+ * than by running the decoder backwards. It matters more here than anywhere else in this file,
+ * because sFlow's numbers only mean anything if `frame_length` and `sampling_rate` are read the
+ * way the specification defines them — and an encoder derived from the decoder would agree with
+ * whatever mistake the decoder made.
+ */
+
+function xdrWord(value: number): Buffer {
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32BE(value >>> 0, 0);
+  return buffer;
+}
+
+/** XDR pads an opaque block up to a 4-byte boundary. */
+function opaque(bytes: Buffer): Buffer {
+  const padding = (4 - (bytes.length % 4)) % 4;
+  return padding === 0 ? bytes : Buffer.concat([bytes, Buffer.alloc(padding)]);
+}
+
+export interface EthernetFrameSpec {
+  srcAddr?: string;
+  dstAddr?: string;
+  srcPort?: number;
+  dstPort?: number;
+  protocol?: number;
+  tos?: number;
+  /** 802.1Q tags to insert before the ethertype. Two makes it Q-in-Q. */
+  vlanTags?: number;
+  /** A non-zero fragment offset, for a fragment that carries no transport header. */
+  fragmentOffset?: number;
+  /** IPv4 options, in 32-bit words, so the header is longer than the usual twenty bytes. */
+  optionWords?: number;
+}
+
+/** An Ethernet frame carrying IPv4, built field by field so the offsets are the assertion. */
+export function ethernetFrame(spec: EthernetFrameSpec = {}): Buffer {
+  const optionWords = spec.optionWords ?? 0;
+  const ihl = 5 + optionWords;
+  const payload = Buffer.alloc(4);
+  payload.writeUInt16BE(spec.srcPort ?? 1234, 0);
+  payload.writeUInt16BE(spec.dstPort ?? 443, 2);
+
+  const ip = Buffer.alloc(ihl * 4);
+  ip.writeUInt8((4 << 4) | ihl, 0);
+  ip.writeUInt8(spec.tos ?? 0, 1);
+  ip.writeUInt16BE(ihl * 4 + payload.length, 2);
+  ip.writeUInt16BE(0, 4); // identification
+  ip.writeUInt16BE((spec.fragmentOffset ?? 0) & 0x1fff, 6);
+  ip.writeUInt8(64, 8); // TTL
+  ip.writeUInt8(spec.protocol ?? 6, 9);
+  Buffer.from((spec.srcAddr ?? '10.0.0.1').split('.').map(Number)).copy(ip, 12);
+  Buffer.from((spec.dstAddr ?? '10.0.0.2').split('.').map(Number)).copy(ip, 16);
+
+  const tags: Buffer[] = [];
+  for (let i = 0; i < (spec.vlanTags ?? 0); i += 1) {
+    const tag = Buffer.alloc(4);
+    tag.writeUInt16BE(i === 0 && (spec.vlanTags ?? 0) > 1 ? 0x88a8 : 0x8100, 0);
+    tag.writeUInt16BE(100 + i, 2);
+    tags.push(tag);
+  }
+
+  const ethertype = Buffer.alloc(2);
+  ethertype.writeUInt16BE(0x0800, 0);
+
+  return Buffer.concat([
+    Buffer.alloc(12, 0xaa), // destination and source MAC
+    ...tags,
+    ethertype,
+    ip,
+    payload,
+  ]);
+}
+
+export interface SflowSampleSpec {
+  samplingRate?: number;
+  /** The length on the wire, which is not the length of the copied header. */
+  frameLength?: number;
+  inputIf?: number;
+  outputIf?: number;
+  drops?: number;
+  frame?: Buffer;
+  /** 1 is Ethernet; anything else should be skipped rather than decoded. */
+  headerProtocol?: number;
+  /** The expanded encoding (format 3), which widens the source id and the interfaces. */
+  expanded?: boolean;
+  /** A flow-record format other than 1, which is not a raw packet header. */
+  recordFormat?: number;
+}
+
+export interface SflowExportOptions {
+  version?: number;
+  agentAddress?: string;
+  /** 1 = IPv4, 2 = IPv6. Anything else is not an address type sFlow defines. */
+  addressType?: number;
+  sequence?: number;
+  sysUptimeMs?: number;
+  /** Written into the header regardless of how many samples follow. */
+  claimSamples?: number;
+  /** Counter samples, which carry interface counters rather than flows. */
+  counterSamples?: number;
+}
+
+function flowSample(spec: SflowSampleSpec): Buffer {
+  const frame = spec.frame ?? ethernetFrame();
+  const header = Buffer.concat([
+    xdrWord(spec.headerProtocol ?? 1),
+    xdrWord(spec.frameLength ?? 1_514),
+    xdrWord(4), // stripped: the FCS
+    xdrWord(frame.length),
+    opaque(frame),
+  ]);
+
+  const record = Buffer.concat([xdrWord(spec.recordFormat ?? 1), xdrWord(header.length), header]);
+
+  const body = spec.expanded
+    ? Buffer.concat([
+        xdrWord(1), // sample sequence
+        xdrWord(0), // source id type
+        xdrWord(1), // source id index
+        xdrWord(spec.samplingRate ?? 1_000),
+        xdrWord(10_000), // sample pool
+        xdrWord(spec.drops ?? 0),
+        xdrWord(0), // input format
+        xdrWord(spec.inputIf ?? 1),
+        xdrWord(0), // output format
+        xdrWord(spec.outputIf ?? 2),
+        xdrWord(1), // one flow record
+        record,
+      ])
+    : Buffer.concat([
+        xdrWord(1), // sample sequence
+        xdrWord(1), // source id, packed
+        xdrWord(spec.samplingRate ?? 1_000),
+        xdrWord(10_000), // sample pool
+        xdrWord(spec.drops ?? 0),
+        xdrWord(spec.inputIf ?? 1),
+        xdrWord(spec.outputIf ?? 2),
+        xdrWord(1), // one flow record
+        record,
+      ]);
+
+  return Buffer.concat([xdrWord(spec.expanded === true ? 3 : 1), xdrWord(body.length), body]);
+}
+
+/** A counter sample carrying generic interface counters, which is not a flow. */
+function counterSample(): Buffer {
+  const counters = Buffer.concat([
+    xdrWord(1), // ifIndex
+    xdrWord(6), // ifType
+    Buffer.alloc(8), // ifSpeed, 64-bit
+    xdrWord(1), // ifDirection
+    xdrWord(3), // ifStatus
+    Buffer.alloc(8), // ifInOctets
+    ...Array.from({ length: 12 }, () => xdrWord(0)),
+  ]);
+  const record = Buffer.concat([xdrWord(1), xdrWord(counters.length), counters]);
+  const body = Buffer.concat([xdrWord(1), xdrWord(1), xdrWord(1), record]);
+  return Buffer.concat([xdrWord(2), xdrWord(body.length), body]);
+}
+
+export function renderSflow(samples: SflowSampleSpec[], options: SflowExportOptions = {}): Buffer {
+  const addressType = options.addressType ?? 1;
+  const agent =
+    addressType === 1
+      ? Buffer.from((options.agentAddress ?? '192.0.2.1').split('.').map(Number))
+      : Buffer.alloc(16);
+
+  const bodies = [
+    ...samples.map(flowSample),
+    ...Array.from({ length: options.counterSamples ?? 0 }, counterSample),
+  ];
+
+  return Buffer.concat([
+    xdrWord(options.version ?? 5),
+    xdrWord(addressType),
+    addressType === 1 || addressType === 2 ? agent : Buffer.alloc(0),
+    xdrWord(0), // sub-agent id
+    xdrWord(options.sequence ?? 0),
+    xdrWord(options.sysUptimeMs ?? 3_600_000),
+    xdrWord(options.claimSamples ?? bodies.length),
+    ...bodies,
+  ]);
+}

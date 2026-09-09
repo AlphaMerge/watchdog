@@ -12527,15 +12527,59 @@ analysis". `F-` is Phase 0.
       counters ship. Covered at 2, 3, 5 and 6 bytes, plus a 64-bit value past 2^53, and the
       mutation dies. Full suite green at 3,638.
 
-- [ ] **B-05 — sFlow** · L · B-02, B-06 · A different protocol wearing a similar name: sampled packet
+- [x] **B-05 — sFlow** · L · B-02, B-06 · A different protocol wearing a similar name: sampled packet
       headers and interface counters in XDR, not flow records. It shares the listener and shares
       nothing else, which is why it is last and its own ticket rather than a variant of `B-01`.
+
+      **`B-06` was added when this ticket was started** and the socket turned out to dispatch on
+      nothing: sFlow would otherwise have been the third decoder wired in by hand, and the second
+      one nothing called.
+
+      **B-05 outcome, and Phase 11 is complete.** `decodeSflow` in `@ms/sensors/flow`, producing
+      `B-06`'s `FlowRecord` like every other dialect, with an sFlow agent in `@ms/simulators` that
+      writes the XDR against the v5 spec rather than by running the decoder backwards.
+
+      **Nothing in an sFlow datagram is a flow.** NetFlow reports accounting — a flow table with
+      byte counts. sFlow copies the first hundred-odd bytes of one packet in N and sends that, so
+      every record here is *reconstructed* from a packet header, and the only thing making it
+      comparable to a NetFlow record is `samplingRate`.
+
+      **Two fields decide whether the numbers mean anything.** `frame_length` is the length on the
+      wire — 1,514 where the copied header is 128 — so reporting the copy under-reports by an
+      order of magnitude and looks entirely plausible doing it. And `sampling_rate` is carried per
+      *sample*, not per datagram, because an agent may sample interfaces at different rates.
+
+      **Which found a defect in `B-04`.** The sensor summed `octets` without scaling, so an sFlow
+      exporter at the ordinary 1-in-2,048 would have reported a two-thousandth of the traffic on
+      the busiest link in the building. Fixed here, along with saying "estimated from N sampled" in
+      the message — an operator comparing this against an interface counter needs to know why the
+      two do not agree exactly.
+
+      **Counter samples are counted and decoded no further, deliberately.** They carry lifetime
+      interface counters, and putting one into a field this subsystem reads as an interval delta
+      would be wrong in a way nothing downstream could see. `snmp.traffic` already covers that
+      ground; making them interface sensors is its own ticket if anybody wants it.
+
+      **The version collision is real and is handled by width.** NetFlow's version is a 16-bit word
+      and sFlow's is 32-bit, so a NetFlow v5 datagram starts `00 05` and an sFlow v5 one starts
+      `00 00 00 05`. A collector guessing on port number would decode one as the other on any site
+      sending both to 2055.
+
+      The packet parse handles what a real switch sends: 802.1Q and Q-in-Q tags, the IHL rather
+      than an assumed twenty bytes (options would otherwise be read as ports), fragments past the
+      first (no transport header, and the offset says so), and the expanded sample encoding, which
+      widens the source id and both interface fields.
+
+      **Mutations 6/6**: the header length reported instead of the wire length, VLAN tags not
+      skipped, a fixed 20-byte IPv4 header, an IPv6 agent address skipped as four bytes, the
+      sensor's scaling removed, and a fragment's payload read as ports. 25 tests here and 31 on the
+      sensor; the full suite is green at 3,669.
 
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
 
-- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **started 2026-09-09**, broken into `B-01`…`B-05` under Phase 11 above
+- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
 - **V2-02** Maps and dashboard designer
 - **V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)
 - **V2-04** Libraries (filter-rule alternate tree views)

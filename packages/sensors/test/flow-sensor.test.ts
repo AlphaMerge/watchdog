@@ -138,6 +138,51 @@ describe('the flow sensor', () => {
     });
   });
 
+  describe('sampling, which sFlow makes unavoidable', () => {
+    it('scales by what each record stands for', async () => {
+      // **The three-orders-of-magnitude error this prevents.** sFlow at 1-in-2,048 sends one
+      // packet and means two thousand; summing the raw octets reports a two-thousandth of the
+      // traffic, and the number looks entirely plausible.
+      const channels = await read(
+        context(batch([flow({ octets: 1_000, packets: 1, samplingRate: 2_048 })])),
+      );
+      assert.equal(valueOf(channels, 'bytes'), (1_000 * 2_048) / 10);
+      assert.equal(valueOf(channels, 'packets'), 2_048 / 10);
+    });
+
+    it('leaves an unsampled record alone', async () => {
+      const channels = await read(context(batch([flow({ octets: 1_000, samplingRate: 1 })])));
+      assert.equal(valueOf(channels, 'bytes'), 100);
+    });
+
+    it('treats a missing or zero rate as one, never as zero', async () => {
+      const missing = await read(context(batch([flow({ octets: 1_000 })])));
+      const zero = await read(context(batch([flow({ octets: 1_000, samplingRate: 0 })])));
+      assert.equal(valueOf(missing, 'bytes'), 100);
+      assert.equal(valueOf(zero, 'bytes'), 100);
+    });
+
+    it('scales the per-protocol and custom channels the same way', async () => {
+      const channels = await read(
+        context(batch([flow({ octets: 1_000, protocol: 6, dstPort: 443, samplingRate: 100 })]), {
+          channels: [{ key: 'https', match: [{ field: 'dstPort', equals: '443' }] }],
+        }),
+      );
+      assert.equal(valueOf(channels, 'tcp'), 10_000);
+      assert.equal(valueOf(channels, 'https'), 10_000);
+    });
+
+    it('says the number is an estimate when anything was sampled', async () => {
+      const execution = await flowCollector.execute(context(batch([flow({ samplingRate: 512 })])));
+      assert.match(execution.message ?? '', /estimated from 1 sampled/);
+    });
+
+    it('says nothing about estimates when nothing was sampled', async () => {
+      const execution = await flowCollector.execute(context(batch([flow({})])));
+      assert.doesNotMatch(execution.message ?? '', /estimated/);
+    });
+  });
+
   describe('per protocol', () => {
     it('splits the bytes by IANA protocol number', async () => {
       const channels = await read(

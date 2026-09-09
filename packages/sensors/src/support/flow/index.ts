@@ -24,6 +24,8 @@ export type {
   TemplateField,
   TemplateKey,
 } from './templates.js';
+export { SFLOW_V5, decodeSflow } from './sflow.js';
+export type { SflowResult } from './sflow.js';
 export { decodeFlowDatagram, openFlowReceiver } from './receiver.js';
 export { fromFlowSets, fromNetflowV5 } from './record.js';
 export type { FlowDialect, FlowMessage, FlowRecord } from './record.js';

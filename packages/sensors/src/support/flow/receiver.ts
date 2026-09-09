@@ -2,6 +2,7 @@ import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { FlowDecodeError, NETFLOW_V5, decodeNetflowV5 } from './netflow5.js';
 import { IPFIX, NETFLOW_V9, decodeFlowSets } from './netflow9.js';
 import { fromFlowSets, fromNetflowV5, type FlowMessage } from './record.js';
+import { SFLOW_V5, decodeSflow } from './sflow.js';
 import { TemplateCache, type TemplateCacheOptions } from './templates.js';
 
 /**
@@ -77,14 +78,24 @@ export function decodeFlowDatagram(
     );
   }
 
+  // **sFlow and NetFlow both call themselves version 5, and they are told apart by width.**
+  // NetFlow's version is a 16-bit word, so a v5 datagram starts 00 05; sFlow's is 32-bit, so an
+  // sFlow v5 datagram starts 00 00 00 05. Reading the first two bytes therefore gives 5 for
+  // NetFlow and 0 for sFlow, which is the discriminator — and it is worth stating, because a
+  // collector that guessed on port number alone would decode one as the other on any site that
+  // sends both to 2055.
   const version = datagram.readUInt16BE(0);
   if (version === NETFLOW_V5) return fromNetflowV5(decodeNetflowV5(datagram));
   if (version === NETFLOW_V9 || version === IPFIX) {
     return fromFlowSets(decodeFlowSets(datagram, exporter, cache));
   }
+  if (version === 0 && datagram.length >= 4 && datagram.readUInt32BE(0) === SFLOW_V5) {
+    return decodeSflow(datagram);
+  }
   throw new FlowDecodeError(
     { kind: 'unsupported-version', version },
-    `NetFlow version ${String(version)} is not one this collector reads (5, 9 or 10)`,
+    `flow version ${String(version)} is not one this collector reads ` +
+      '(NetFlow 5, 9 or 10, or sFlow 5)',
   );
 }
 

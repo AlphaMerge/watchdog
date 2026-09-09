@@ -88,3 +88,11 @@ export {
   type TemplateFieldSpec,
   type TemplateSpec,
 } from './netflow-exporter.js';
+
+export {
+  ethernetFrame,
+  renderSflow,
+  type EthernetFrameSpec,
+  type SflowExportOptions,
+  type SflowSampleSpec,
+} from './netflow-exporter.js';
