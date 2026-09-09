@@ -280,6 +280,12 @@ function classify(error: unknown): { error: string; retryable: boolean } {
  * do not yet name. Every field below is checked against nodemailer's documented SMTP options and
  * exercised by the tests in `email-delivery.test.ts`, which is a stronger guarantee than a type
  * definition maintained by somebody else.
+ *
+ * **The return is asserted for the same reason, and the lag is now a major version wide.**
+ * nodemailer 10 ships no types of its own and `@types/nodemailer` is still published for 9, where
+ * `createTransport` is declared as returning `Mail<any>` rather than a `Transporter`. The value is
+ * the transport; only the definition disagrees, and `email-delivery.test.ts` sends real mail
+ * through it against a real relay on every run.
  */
 function buildTransport(relay: SmtpRelay, config: SmtpConfig): Transporter {
   const options: Record<string, unknown> = {
@@ -309,5 +315,8 @@ function buildTransport(relay: SmtpRelay, config: SmtpConfig): Transporter {
     pool: false,
     from: config.sender,
   };
+  // See the note above: the 9.x definitions type this as `Mail<any>`, and the runtime returns the
+  // transport this claims. The directive has to sit immediately above the statement it covers.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return createTransport(options as Parameters<typeof createTransport>[0]);
 }
