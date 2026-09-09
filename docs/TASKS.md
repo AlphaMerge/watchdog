@@ -12607,6 +12607,34 @@ the state machine and `U-` is the Phase 5 UI.
       than an empty space — an operator looking at a map with a hole in it should be told the
       sensor is gone, not shown a dashboard that quietly stopped mentioning the thing that failed.
 
+      **G-01 storage landed 2026-09-09; the CRUD API is still open.** Migration 044 creates `map`
+      and `map_access`, and `migrator.test.ts`'s existing "forward and all the way back" case
+      covers the rollback.
+
+      **The dangling-reference question is answered by the storage shape, not left to the API.**
+      Widgets live in a `jsonb` layout, so a foreign key is not available — and that is the right
+      outcome rather than a limitation. Rows in a child table would have to choose between
+      `ON DELETE CASCADE`, where the widget silently disappears and the dashboard stops mentioning
+      what failed, and `RESTRICT`, where deleting a sensor fails because somebody once put it on a
+      map. A document keeps the reference, the object goes, and **`G-02` must render a widget that
+      says so** — a requirement this schema creates rather than a detail it leaves open. Asserted:
+      a widget naming a deleted object is still on the canvas afterwards, still naming it.
+
+      The cost is that "which maps reference sensor 42?" is a document scan. Deferred on purpose:
+      the index wants the shape `G-02` settles on, and building one now would index a guess.
+
+      **Access is flat, unlike `object_access`.** That table walks ancestors because objects nest
+      and maps do not, so a grant is a grant. Both share migration 033's `access_right` enum and
+      `access_rank` ordering rather than declaring a second copy that would eventually disagree
+      about what `write` means. A map carries a `version` for optimistic concurrency, because a
+      designer is the place where silently discarding somebody's work is most visible.
+
+      **Mutations 5/5** — a case-sensitive name index, the priority range dropped, the
+      `updated_at` trigger never created, a group's grants outliving the group, and a nullable
+      layout. 10 tests; the full suite is green at 3,679.
+
+      **Still to do on this ticket**: the repository, the service and the routes.
+
 - [ ] **G-02 — Widgets, and where their data comes from** · L · G-01 · The widget model — status
       icon, sensor list, data table — and one resolver that fills them, in the core rather than in
       the browser. A map with forty widgets must not be forty round trips, and a widget must not be
