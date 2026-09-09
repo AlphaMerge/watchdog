@@ -74,3 +74,10 @@ export {
   type SyslogMessageOptions,
   type TcpFraming,
 } from './syslog-sender.js';
+
+export {
+  exportNetflowV5,
+  renderNetflowV5,
+  type ExportedFlow,
+  type ExportOptions,
+} from './netflow-exporter.js';

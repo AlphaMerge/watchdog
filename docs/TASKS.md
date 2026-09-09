@@ -12252,11 +12252,115 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
 ---
 
+## Phase 11 — Flow monitoring (`V2-01`)
+
+The first v2 subsystem, started 2026-09-09 with v1 complete except for `H-06` and `H-09`, both
+of which need a Windows machine and a week with a hundred devices rather than any more code.
+
+**Why this one first.** It is the top of the v2 ordering, and it is the last of the three
+transports `CLAUDE.md` commits to building in-house — syslog (`T-20`) and WMI (`T-09`) shipped in
+v1, and the reason is the same for all three: npm has no maintained option. It also needs no new
+always-on dependency, so unlike clustering (`V2-06`) or SSO (`V2-07`) it clears the hard
+constraints without an ADR.
+
+**It follows a contract that already exists.** `T-06` built the listener shape and `T-20` proved
+it transfers: one socket for the whole probe, a ring buffer, a cursor per sensor, and **nothing in
+the listener that decides anything** — filtering, counting and retention are the sensor's
+parameters and live in `@ms/sensors`, testable against a fabricated batch with no socket in sight.
+A flow collector is the same shape with a harder decoder in front of it. Do not invent a third
+arrangement.
+
+**The tickets use the `B-` prefix** after `CAPABILITIES.MD §3.9`, "Bandwidth and traffic
+analysis". `F-` is Phase 0.
+
+- [x] **B-01 — NetFlow v5, decoded** · M · — · The fixed-layout format, as pure functions over a
+      buffer: a 24-byte header and 48-byte records, no templates anywhere. Ships with a v5
+      exporter in `packages/simulators` (`CLAUDE.md`: sensor types are tested against the
+      simulator harness, never live network targets).
+
+      **First because it is the format with no template cache in it.** Everything hard about flow
+      collection lives in v9/IPFIX, and doing v5 first gets the decode contract, the fixtures and
+      the simulator settled against a format that cannot fail in that particular way. `T-06` and
+      `T-20` earned the same order.
+
+      Things a v5 decoder gets wrong and the tests should say out loud: the counts in the header
+      are records claimed rather than records present, so a truncated datagram must be refused
+      rather than half-read; `sysUptime` is milliseconds since the exporter booted and the flow
+      timestamps are in that same clock, so wall-clock conversion needs the header's `unix_secs`
+      and is where an exporter with a wrong clock shows up; and the record's `srcaddr`/`dstaddr`
+      are big-endian words, not strings.
+
+      **B-01 outcome.** `@ms/sensors/flow` — `decodeNetflowV5` and `flowWindow` — with a v5
+      exporter in `@ms/simulators` that writes the bytes out against Cisco's layout rather than
+      running the decoder backwards, which is the rule `syslog-sender.ts` and `snmp-agent.ts`
+      both state: a harness built from the code under test proves the decoder can read what the
+      encoder wrote, and that loop closes whether or not either matches the specification.
+
+      **The decoder is mostly its refusals, so the simulator can emit datagrams that are wrong on
+      purpose** — a truncated one, a count nothing backs up, a v9 datagram at a v5 collector.
+      Failures are a discriminated `FlowDecodeFailure` rather than a thrown string, because
+      `B-02` counts them by kind and an operator reading a `malformed` counter needs to know
+      whether the exporter is set to v9 or sending rubbish.
+
+      **The header's `count` is a claim, not a length**, and that is the case that matters: v5
+      rides UDP with no length negotiation, so a path MTU below what the exporter assumed clips
+      the datagram silently. The claim is checked against the bytes present and a mismatch is
+      refused whole — half a flow table is worse than none, because the missing half is invisible
+      to everything downstream. Trailing bytes beyond the claim are ignored, since padding to a
+      convenient size is a thing exporters do and is not a fault.
+
+      `flowWindow` is a named function rather than three inlined lines because it is the
+      arithmetic every NetFlow collector gets asked about: `first`/`last` are uptime
+      milliseconds, and only the header knows what the wall clock was at that uptime. Every
+      timestamp this produces inherits the exporter's opinion of the time, which nothing here can
+      fix and everything here should make checkable.
+
+      **Mutations 5/5**, each killed by exactly the case written for it: trusting the claimed
+      count, reading `srcAddr` one field along, reading the sampling word without splitting mode
+      from interval, adding the uptime delta instead of subtracting it, and dropping the
+      nanosecond term. 12 tests; the workspace went 807 to 820 and the full suite is green at
+      3,545.
+
+- [ ] **B-02 — The flow listener** · M · B-01 · The socket half: one UDP socket for the probe, the
+      `NotificationRing`, a cursor per sensor, and the stats every listener reports — running,
+      received, rejected, malformed, buffered, cursors, overwritten. Mechanical given `T-06` and
+      `T-20`, and it should read that way; the injectable `open` is what makes it testable without
+      a port.
+
+      **The sender allow-list is a filter and not a lock**, and the comment must say so, exactly
+      as the other two do. A flow exporter authenticates nothing.
+
+- [ ] **B-03 — NetFlow v9 and IPFIX, and the template cache** · L · B-01, B-02 · Where the
+      difficulty actually is. A data record cannot be decoded without the template that describes
+      it; templates arrive out of band, are keyed by (exporter, observation domain, template id),
+      are re-sent on the exporter's own schedule, and can be redefined under a live id.
+
+      **The case that decides the design is data arriving before its template**, which happens on
+      every collector restart and after every exporter reboot. Dropping it is honest and loses the
+      first interval; parking it needs a bounded buffer and an expiry, or it is a memory leak with
+      a protocol in front of it. Whichever is chosen, the count of undecodable records is a
+      channel — `CLAUDE.md`: backpressure is visible, never silent.
+
+      IPFIX is not "v9 with a different version number": different set ids, enterprise-specific
+      fields with a private enterprise number, and variable-length encoding v9 has no concept of.
+
+- [ ] **B-04 — The flow sensor type** · M · B-03 · Channels per protocol and per host, and the
+      user-defined channel and filter rules `CAPABILITIES.MD §3.9` calls "custom flow variants".
+      One file against the `SensorType` contract, per `docs/adding-a-sensor-type.md`.
+
+      **No-data is not zero applies with force here.** An interval in which the exporter sent
+      nothing is a gap, not a line drawn to the floor — and for a flow sensor that distinction is
+      the difference between "the link was idle" and "the exporter stopped".
+
+- [ ] **B-05 — sFlow** · L · B-02 · A different protocol wearing a similar name: sampled packet
+      headers and interface counters in XDR, not flow records. It shares the listener and shares
+      nothing else, which is why it is last and its own ticket rather than a variant of `B-01`.
+
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
 
-- **V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors
+- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **started 2026-09-09**, broken into `B-01`…`B-05` under Phase 11 above
 - **V2-02** Maps and dashboard designer
 - **V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)
 - **V2-04** Libraries (filter-rule alternate tree views)

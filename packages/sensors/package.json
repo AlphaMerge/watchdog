@@ -29,6 +29,10 @@
     "./ping": {
       "types": "./dist/src/support/ping.d.ts",
       "default": "./dist/src/support/ping.js"
+    },
+    "./flow": {
+      "types": "./dist/src/support/flow/index.d.ts",
+      "default": "./dist/src/support/flow/index.js"
     }
   },
   "scripts": {
