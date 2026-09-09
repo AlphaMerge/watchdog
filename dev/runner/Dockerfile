@@ -40,6 +40,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       msitools \
       # jq is used by several steps to read JSON out of the API.
       jq \
+      # **`ping`, because it is the product's default ICMP path** (`CLAUDE.md`), not a test
+      # convenience: `icmp.ping` and `icmp.jitter` shell out to the system binary and say so when
+      # it is missing. Hosted images happen to carry it; this one has to ask. Seven tests failed
+      # on the first local run for want of it.
+      iputils-ping \
+      # `shellcheck` is a build step of its own over scripts/ and deploy/.
+      shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 # The Docker client and the compose plugin, from Docker's own repository so the two stay in step
