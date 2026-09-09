@@ -327,9 +327,12 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       `CREATE EXTENSION` with compression that throws would be the worst thing to ship, because
       it looks like a pass.
 
-      **Tick this only when that job goes green.** It has never run — CI is disabled at the
-      operator's request and the account is blocked on billing (`H-06`) — so what exists is a
-      proposal that parses. `P-53`'s check covers the script, and a parse check is not a run; the
+      **Tick this only when that job goes green.** It has still never run, but the reason changed
+      on 2026-09-09: CI runs again, on a self-hosted runner (`P-198`), and every Linux job in it
+      is green. What is missing now is a *Windows machine* — the job is skipped by
+      `if: vars.CI_RUNNER_WINDOWS != ''` rather than failing. Register a runner on any Windows
+      box, set that variable to its label, and this runs. Until then what exists is a proposal
+      that parses. `P-53`'s check covers the script, and a parse check is not a run; the
       danger of writing it now is precisely that it *looks* checked, which is why this paragraph
       is here.
 
@@ -4168,6 +4171,70 @@ because each is a decision rather than a defect:
       `NRestarts` is checked at each step and stayed `0` throughout, which is half of every
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
+
+- [x] **P-198 — CI has never run, so every job in it is a claim** · M · P-197 · The workflow was
+      switched off in August when the account's Actions spending limit went unpaid, and hosted
+      jobs since then fail in two seconds with zero steps. Six jobs, several written after that
+      date, had therefore never executed anywhere. A job that has never run is not coverage; it
+      is a paragraph of YAML that says what somebody expected.
+
+      **The fix was a runner, not a payment.** `AlphaMerge/sociall-media-chatbot` had already hit
+      this and answered it: self-hosted runners on the machines that are already here, selected by
+      repository variable so a hosted one can come back without a code change. Same shape here —
+      `dev/runner/Dockerfile` and `scripts/dev-runner.sh` build and register a runner labelled
+      `watchdog-linux`, and the four Linux jobs target it through `CI_RUNNER_LINUX`.
+
+      **The runner needs the host's Docker, which is what makes two details load-bearing.** Every
+      job here shells out — the toolchain runs through compose, both smoke tests boot privileged
+      systemd boxes — so the image carries the Docker CLI and the socket is bind-mounted. And the
+      work directory is mounted at the *same path* inside and out, because `docker-compose.dev.yml`
+      mounts `.:/workspace` and the host daemon resolves that path itself; with the usual
+      `/home/runner/_work` it mounts an empty directory and the toolchain comes up with no source
+      in it.
+
+      **Six commits to green, and every one was a defect the first local run found.** None was
+      findable while CI could not start:
+
+      - **`down -v` in the teardown job would have deleted the developer's database.** On a
+        throwaway hosted VM the flag costs nothing; on a runner sharing this machine's Docker the
+        default project name is the one their stack is already running under. Fixed before the
+        first run, not by it — `-p watchdog-ci` scopes what `-v` removes.
+      - **Two port collisions with the dev stack.** The `build` job's `services:` block wanted
+        5432 and could not have been reached anyway: a service container is published to the host
+        and this runner is itself a container, so `localhost` in the job is not where the service
+        is. It was also a second, drifting PostgreSQL — no `shm_size`, no pinned licence. It now
+        starts the repository's own compose postgres on `MS_DEV_PG_PORT`.
+      - **No `ping` in the runner image**, and seven `icmp.*` tests said so. `CLAUDE.md` names the
+        system binary as the default ICMP path; hosted images happen to carry it, so the
+        dependency had never had to be stated. `shellcheck` was in the same position.
+      - **`latest-pg17` is a moving tag, and it moved.** The developer's container was 2.29.2 and
+        CI pulled 2.30.0 the day it was released, from the same line of the same file — so a
+        query-plan test passed for one and failed for the other. 2.30.0 wraps the plan in
+        `Custom Scan (DeferredChunkAppend)`, which prints no children under a plain `EXPLAIN`.
+        Measured with `EXPLAIN (ANALYZE …)`: the `Index Scan` is still there and there is still no
+        `Sort`, so the property held and the string moved. The test runs the plan now and passes
+        on both versions — both checked, because a fix verified only against the new one would
+        have moved the breakage. The image is pinned.
+      - **A high-severity advisory in a production dependency** (`A-09`). `npm audit
+        --omit=dev --audit-level=high` had been a build step for weeks and had never executed;
+        its first run reported nodemailer ≤9.1.0 with four advisories, two of them
+        recipient-domain validation bypasses that deliver mail to an attacker-controlled domain.
+        In a product whose whole notification path is operator-authored templates sent to
+        operator-supplied addresses. Bumped to 10.0.1.
+      - **Artifact storage is billed separately from minutes**, so local runners did nothing about
+        it and the upload failed an otherwise green run — with this repository storing no
+        artifacts at all, the quota being consumed elsewhere in the account. `windows-install` is
+        the only consumer and it is skipped until there is a Windows machine, so the upload now
+        carries the same condition as the job that downloads it.
+
+      **The two Windows jobs are skipped, not deleted** — `if: vars.CI_RUNNER_WINDOWS != ''`,
+      which is the chatbot project's pattern verbatim. There is no Windows box here, so they wait
+      for one rather than failing red every run. Setting that variable brings back the MSI install
+      (`H-06`), the TimescaleDB provisioning (`S-11`) and the artifact they need, together.
+
+      Green on 2026-09-09: build, tests, dev-compose, install smoke and enrolment smoke. The
+      enrolment run is also the first execution of `P-197`'s approve/revoke assertions anywhere
+      but by hand.
 
 - [x] **P-196 — a probe the core has stopped trusting keeps scanning until it happens to
       reconnect** · M · R-01, P-189 · `P-189` closed one of four doors. `approve` reaches a
@@ -12360,8 +12427,12 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       That is not this job's other assertions — installing, the services, the firewall, the upgrade
       — which still need Windows and still keep this ticket open.
 
-      **The job has never run**, because CI is disabled at the operator's request. Tick H-06 when
-      it goes green, not before.
+      **The job has never run**, and as of 2026-09-09 the reason is no longer CI. The workflow is
+      enabled and green on a self-hosted runner (`P-198`); this job is *skipped*, by
+      `if: vars.CI_RUNNER_WINDOWS != ''`, because there is no Windows machine registered. That is
+      now the whole of the blocker: a runner on a Windows box and one repository variable brings
+      back this job, `S-11`'s provisioning job, and the `release-artifacts` upload they need.
+      Tick H-06 when it goes green, not before.
 
       Three things the build taught, all recorded in the script:
 
