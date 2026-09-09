@@ -12671,11 +12671,50 @@ the state machine and `U-` is the Phase 5 UI.
       cases red), granting needing only `write`, and the version leaving the `WHERE` clause. 25
       tests across the schema and the service; the full suite is green at 3,694.
 
-- [ ] **G-02 — Widgets, and where their data comes from** · L · G-01 · The widget model — status
+- [x] **G-02 — Widgets, and where their data comes from** · L · G-01 · The widget model — status
       icon, sensor list, data table — and one resolver that fills them, in the core rather than in
       the browser. A map with forty widgets must not be forty round trips, and a widget must not be
       able to read an object the viewer cannot see: the resolver is the one place that can enforce
       both.
+
+      **Landed 2026-09-09.** `widgets.ts` reads a `jsonb` layout into `Widget`s and `resolver.ts`
+      fills them: one object lookup, one access resolution, one history read for the whole canvas.
+
+      **The audience is a choice at the call site, not an absent principal.** `MapAudience` is a
+      discriminated union — `{ kind: 'viewer', viewer, holdsFull }` or `{ kind: 'public' }` — so
+      `G-06`'s share link cannot be built by passing `undefined` and hoping the resolver treats it
+      as anonymous. An optional viewer would have made "nobody is looking" and "I forgot to thread
+      the principal through" the same value, and the second one fails open. The public branch
+      returns every requested id as visible because the token already decided which map may be
+      seen; that decision belongs to the route that minted it, not to a null check here.
+
+      **A widget naming something gone stays on the canvas** — `G-01`'s requirement, now asserted
+      from the rendering half. It resolves to `state: 'unavailable'`, keeps its title and its
+      position, and carries a `reason` only when the viewer holds `full`. Everyone else, the public
+      audience included, is told the tile is unavailable and not whether the id is deleted or
+      merely invisible to them: the same oracle `G-01` closed by answering 404 for an unreadable
+      map, closed again one layer in, because a map anybody may embed is a place to ask that
+      question forty times a second.
+
+      **Forty widgets are one object lookup, counted rather than timed.** The test wraps the
+      `Queryable` and counts the queries matching the object lookup, so a slow machine cannot make
+      it pass or fail for the wrong reason. Table widgets read through `HistoryService`'s
+      `latestForSensor` instead of querying the readings directly — it applies a staleness window
+      that is a multiple of *this sensor's* interval, so a sensor Down for a day shows a gap rather
+      than yesterday's healthy figure. `no-data is not zero` is easiest to break in a new reader.
+
+      **Malformed widgets are kept as problems, not dropped**, and the layout is capped at
+      `MAX_WIDGETS = 200`: a document a user can grow without limit is a document that can be made
+      to cost the server an unbounded resolve.
+
+      **Mutations 6/6, and the sixth is why this ticket has a catalogue entry.** The forty-widget
+      case originally pointed all forty widgets at one sensor — and the resolver de-duplicates ids
+      before it queries, so one lookup and forty lookups behaved identically and the case passed
+      against exactly the bug it exists to catch. Found by the mutation surviving, fixed with forty
+      distinct ids, and written down as entry 39 of
+      `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` — the same shape as
+      entry 38, four hours earlier, in a different subsystem: a fixture where every actor is the
+      same actor. 15 tests; the full suite is green at 3,709.
 
 - [ ] **G-03 — The designer canvas** · L · G-02 · Drag, drop, resize, snap, undo. Keyboard-operable
       throughout, per `U-11` — a designer that can only be used with a mouse fails the same WCAG

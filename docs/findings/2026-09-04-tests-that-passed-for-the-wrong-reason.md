@@ -806,6 +806,31 @@ understanding the property protects against that. This is entry 7 and entry 34 a
 if the code under test keys something by X, the fixture needs at least two X's that *differ in the
 keyed dimension*, not merely two X's. Two exporters at the same sequence are one exporter twice.
 
+### 39. Forty widgets that were one widget (`G-02`, found by the mutation surviving — again)
+
+`MapResolver` must resolve a whole canvas in one pass: a map with forty tiles is not forty round
+trips, which is the constraint the ticket carried and the reason the resolver collects every object
+id before it queries anything.
+
+The test for it built forty widgets and counted the object lookups. It pointed all forty at the
+same sensor. The resolver de-duplicates ids before querying, so the batched implementation and a
+per-widget loop both issue exactly one query, and the case passed against the bug it exists to
+catch. Fixed by giving the forty widgets forty distinct object ids; the mutation then dies.
+
+**This is entry 38 with different nouns, four hours later.** There, two exporters were given the
+same sequence numbers, so one shared counter and two separate ones behaved identically. Here,
+forty widgets were given the same object id, so one query and forty behaved identically. Both times
+the property was understood well enough to write a paragraph about it in the source, and both times
+the fixture was built out of one thing repeated.
+
+The rule, stated so it is checkable rather than merely true: **if the code under test collapses,
+groups or keys by X, the fixture needs at least two X's that differ in X.** N copies of one input
+cannot distinguish "handled once" from "handled N times", and no amount of understanding the
+mechanism substitutes for counting the distinct values in the fixture.
+
+It is also the second entry in a row found by a mutation surviving rather than by a test failing,
+which is the case for running them on new tests and not only on new code.
+
 ## What actually found them
 
 
