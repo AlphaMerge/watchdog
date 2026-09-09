@@ -859,6 +859,35 @@ exactly one entry after a simulated drag — and that test kills a mutation of `
 cannot see is the component wiring `draft` where it should, which is the one thing the component
 test existed to cover.
 
+### 41. A claim about the wire, asserted one layer below it (`G-10`, found by writing the first HTTP test)
+
+`G-01` is careful that **a map the caller may not read answers 404 rather than 403**, because
+answering 403 for one that exists and 404 for one that does not turns the error into an oracle for
+enumerating ids. `maps/errors.ts` says so, the row in `TASKS.md` says so, and `maps-service.test.ts`
+asserts it: `MapService` throws `mapNotFound` in both cases.
+
+All of that is true, and none of it was reaching the client. `MapError` extends `AppError`, and
+`api/errors.ts` — which translates an exception into a status — had a branch for `ObjectError`,
+`QueryError`, `AuthError` and nine others, and none for `MapError`. Every map error fell through to
+the catch-all: **500, with the message replaced by "the request could not be completed"**. The 404
+that avoids the oracle, the 409 a second designer gets from `If-Match`, the 400 for an invalid
+name — all 500s.
+
+Nothing could have caught it at the layer it was tested. The service was right; the translation was
+missing; and the maps routes had no HTTP test at all, because the routes had never been mounted in
+`main.ts` either (`G-03` found that half). The first `app.inject` against `/maps/:id/view` failed on
+its first run.
+
+**The rule: assert a claim at the layer the claim is about.** "The API answers 404" is a statement
+about a response, and a test that the service *throws a 404-shaped error* is a statement about a
+service. Between them sits a translation table that a new error class does not automatically join.
+
+Two things worth noticing. The security property survived by accident — both the visible and the
+invisible map answered 500, so the oracle never opened; what broke was every client's ability to
+tell a missing map from a broken server. And the code field survived the catch-all, so a client
+switching on `error.code` (the map designer does, for `MAP_CHANGED`) would have behaved correctly
+while the status said something else entirely — the kind of half-working that survives a demo.
+
 ## What actually found them
 
 

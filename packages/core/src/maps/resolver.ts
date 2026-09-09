@@ -1,7 +1,7 @@
 import type { Database, Queryable } from '../db/pool.js';
 import type { AccessService } from '../auth/access.js';
 import { atLeast } from '../auth/access.js';
-import type { HistoryService } from '../timeseries/history.js';
+import type { HistoryService, SensorValues } from '../timeseries/history.js';
 import type { MapViewer } from './service.js';
 import {
   readWidgets,
@@ -25,6 +25,13 @@ import {
  * object id on the canvas is collected first, then resolved in a fixed number of queries. That is
  * also the only place both rules can be enforced at once — what a viewer may see, and what has
  * been deleted underneath the map.
+ *
+ * **That claim was only two-thirds true until `G-10`.** The object lookup and the access
+ * resolution were one pass from the start; the per-widget reads underneath them were not — a
+ * subtree query per sensor list and `latestForSensor` (three statements of its own) per channel
+ * table, awaited one at a time. Forty tables were about a hundred and twenty sequential round
+ * trips. Every one of those is now batched, so the query count is a small constant whatever is on
+ * the canvas, and the test counts each of them rather than only the first.
  */
 
 /** Who is looking. `public` is `G-06`: the widget list itself is the authorisation. */
@@ -45,6 +52,9 @@ export interface MapResolverOptions {
    */
   readonly history: HistoryService;
 }
+
+/** How many sensors one list widget shows. Per widget, not per request — see `#sensorLists`. */
+const SENSORS_PER_LIST = 100;
 
 export interface ResolvedMap {
   readonly widgets: readonly ResolvedWidget[];
@@ -84,6 +94,28 @@ export class MapResolver {
     const objects = await this.#objects(q, ids);
     const visible = await this.#visible(audience, ids, q);
 
+    // **What the surviving widgets need, gathered before anything is drawn.** Only the tiles that
+    // passed both checks: a deleted or invisible object must not put its id into a query, or a
+    // widget nobody may see would still cost the read it was refused.
+    const drawable = widgets.filter(
+      (widget) => objects.has(widget.objectId) && visible.has(widget.objectId),
+    );
+    const listRoots = new Set<number>();
+    const tableSensors = new Set<number>();
+    for (const widget of drawable) {
+      if (widget.kind === 'sensor-list') listRoots.add(widget.objectId);
+      // A channel table or a graph on something that is not a sensor has nothing to read.
+      const drawsChannels = widget.kind === 'table' || widget.kind === 'graph';
+      if (drawsChannels && objects.get(widget.objectId)?.kind === 'sensor') {
+        tableSensors.add(widget.objectId);
+      }
+    }
+
+    const [lists, latest] = await Promise.all([
+      this.#sensorLists(q, [...listRoots]),
+      this.#history.latestForSensors([...tableSensors]),
+    ]);
+
     const resolved: ResolvedWidget[] = [];
     for (const widget of widgets) {
       const object = objects.get(widget.objectId);
@@ -101,7 +133,7 @@ export class MapResolver {
         box: widget.box,
         title: widget.title,
         state: 'ok',
-        data: await this.#data(q, widget, object),
+        data: this.#data(widget, object, lists, latest),
       });
     }
 
@@ -180,7 +212,64 @@ export class MapResolver {
     return allowed;
   }
 
-  async #data(q: Queryable, widget: Widget, object: ObjectRow): Promise<WidgetData> {
+  /**
+   * Every sensor below every list widget's root, in one recursive query.
+   *
+   * **Ranked per root rather than limited per query**, because the limit is a property of one
+   * widget: a hundred sensors under *each* root, not a hundred across all of them, which is what
+   * a plain `LIMIT` over the union would have meant.
+   */
+  async #sensorLists(q: Queryable, roots: readonly number[]): Promise<Map<number, SensorLine[]>> {
+    const lists = new Map<number, SensorLine[]>();
+    if (roots.length === 0) return lists;
+
+    const rows = await q.query<{
+      root: string;
+      id: string;
+      name: string;
+      state: string;
+      message: string;
+    }>(
+      `WITH RECURSIVE below AS (
+         SELECT o.id AS root, o.id AS id FROM object o WHERE o.id = ANY($1::bigint[])
+         UNION ALL
+         SELECT b.root, c.id FROM object c JOIN below b ON c.parent_id = b.id
+       ),
+       ranked AS (
+         SELECT b.root::text AS root, o.id::text AS id, o.name,
+                r.state::text AS state, r.message,
+                row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name)) AS rn
+         FROM below b
+         JOIN object o ON o.id = b.id
+         JOIN sensor_runtime r ON r.object_id = o.id
+         WHERE o.kind = 'sensor'
+       )
+       SELECT root, id, name, state, message FROM ranked WHERE rn <= $2 ORDER BY root, rn`,
+      [[...roots], SENSORS_PER_LIST],
+    );
+
+    for (const root of roots) lists.set(root, []);
+    for (const row of rows) {
+      lists.get(Number(row.root))?.push({
+        id: Number(row.id),
+        name: row.name,
+        sensorState: row.state,
+        message: row.message,
+      });
+    }
+    return lists;
+  }
+
+  /**
+   * What one widget draws, from what has already been read. No queries: everything this needs
+   * was gathered for the whole canvas before the first tile was built.
+   */
+  #data(
+    widget: Widget,
+    object: ObjectRow,
+    lists: ReadonlyMap<number, SensorLine[]>,
+    latest: ReadonlyMap<number, SensorValues>,
+  ): WidgetData {
     const objectId = Number(object.id);
     if (widget.kind === 'status') {
       return {
@@ -196,42 +285,40 @@ export class MapResolver {
     }
 
     if (widget.kind === 'sensor-list') {
-      const rows = await q.query<{ id: string; name: string; state: string; message: string }>(
-        `WITH RECURSIVE below AS (
-           SELECT id FROM object WHERE id = $1
-           UNION ALL SELECT c.id FROM object c JOIN below b ON c.parent_id = b.id
-         )
-         SELECT o.id::text AS id, o.name, r.state::text AS state, r.message
-         FROM object o JOIN below ON below.id = o.id
-         JOIN sensor_runtime r ON r.object_id = o.id
-         WHERE o.kind = 'sensor'
-         ORDER BY lower(o.name) LIMIT 100`,
-        [objectId],
-      );
-      const sensors: SensorLine[] = rows.map((row) => ({
-        id: Number(row.id),
-        name: row.name,
-        sensorState: row.state,
-        message: row.message,
-      }));
-      return { kind: 'sensor-list', objectId, name: object.name, sensors };
+      return {
+        kind: 'sensor-list',
+        objectId,
+        name: object.name,
+        sensors: lists.get(objectId) ?? [],
+      };
     }
 
-    // A table widget on something that is not a sensor has no channels to draw, and saying so
-    // is better than an empty table that looks like a sensor reporting nothing.
-    if (object.kind !== 'sensor') {
-      return { kind: 'table', objectId, name: object.name, channels: [] };
+    // A table or graph widget on something that is not a sensor has no channels to draw, and
+    // saying so is better than an empty table that looks like a sensor reporting nothing.
+    const values = latest.get(objectId);
+    const channels: ChannelLine[] =
+      values === undefined
+        ? []
+        : values.channels.map((channel) => ({
+            key: channel.key,
+            name: channel.name,
+            unit: channel.unit,
+            // Null is a gap, never a zero: a Down sensor recorded no value, and the staleness
+            // window already refuses to present an old reading as a current one.
+            value: channel.value,
+          }));
+
+    if (widget.kind === 'graph') {
+      return {
+        kind: 'graph',
+        objectId,
+        name: object.name,
+        sensorState: object.state ?? 'unknown',
+        rangeMinutes: widget.rangeMinutes,
+        channels,
+      };
     }
 
-    const latest = await this.#history.latestForSensor(objectId);
-    const channels: ChannelLine[] = latest.channels.map((channel) => ({
-      key: channel.key,
-      name: channel.name,
-      unit: channel.unit,
-      // Null is a gap, never a zero: a Down sensor recorded no value, and `latestForSensor`
-      // already refuses to present a stale reading as a current one.
-      value: channel.value,
-    }));
     return { kind: 'table', objectId, name: object.name, channels };
   }
 }

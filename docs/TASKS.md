@@ -12797,9 +12797,51 @@ the state machine and `U-` is the Phase 5 UI.
       handler reads arrives `undefined`, and the drag case silently exercised nothing until a
       `MouseEvent` subclass was put in its place.
 
-- [ ] **G-04 — Live graphs on a map** · M · G-02, U-05 · The uPlot charts the sensor detail page
+- [x] **G-04 — Live graphs on a map** · M · G-02, U-05 · The uPlot charts the sensor detail page
       already draws, at a size somebody chose, updating from the same WebSocket stream rather than
       polling per widget.
+
+      **Landed 2026-09-09, on top of `G-10`**, which is the same day's other ticket and had to come
+      first: a live graph on a map needs a map you can look at, and until the view route existed
+      the only way to see one was the designer.
+
+      **`/maps/:id` is now the map and `/maps/:id/design` is the designer**, the other way round
+      from how `G-03` shipped it. Opening a map to find an editing surface is the same mistake as a
+      document that opens in a form.
+
+      **One socket and one clock for the whole canvas.** Every tile showing a state reads it from a
+      single `useStateStream(null)` — the whole tree, because a map's widgets can name anything and
+      a subtree subscription would silently stop updating the tiles pointing outside it — and every
+      graph refreshes on one shared interval. The failure this avoids is the one a widget-shaped
+      codebase drifts into: twenty tiles with twenty timers and twenty sockets, a page that never
+      settles. A tile owns no schedule of its own.
+
+      **A tile prefers the stream to the map it was loaded with**, which is the whole of "live". A
+      resolved map is a snapshot taken when the request was made; a wall display left open for a
+      day would show that snapshot for ever otherwise.
+
+      **The series are fetched per graph tile and are not in the resolved map.** One request brings
+      back every tile's identity, state and channels; a week of buckets for every graph on a canvas
+      is not a thing to fold into it, and each tile draws a range its author chose. Ranges are per
+      tile — the point of a week beside an hour is the comparison — which is the opposite of the
+      sensor page's one control for the whole tab, and safe here only because every tile is
+      labelled with its own period.
+
+      **One chart per tile, not one per unit.** `U-05` splits a sensor's channels into a chart per
+      unit because a shared y-axis across units is the dual-axis lie. A tile has room for one
+      chart, so it draws the group the primary channel is in — keeping the one-axis rule rather
+      than bending it to fit.
+
+      **Mutations 7/7** across both tickets — the widest staleness window applied to every sensor,
+      the subtree answers keyed by sensor instead of by root, the `MapError` translation removed,
+      an unclamped graph range, every viewer reduced to `read`, the snapshot preferred over the
+      stream, and a range running forward from now. 7 web tests and 12 core; the web workspace goes
+      416 to 423 and the backend 3,709 to 3,721.
+
+      **What is not covered: the drawn chart.** `uPlot` does not mount under jsdom — it needs a
+      canvas and a `ResizeObserver` — so what these tests assert is which sensor, which period and
+      which refresh, not the pixels. The drawing itself is `U-05`'s component, unchanged. Together
+      with `G-03`'s note about the browser, the visual half of Phase 12 is still unverified.
 
 - [ ] **G-05 — Connector lines and background images** · M · G-03 · The part that makes a map a
       map rather than a grid of tiles. An uploaded background is a file this system stores on
@@ -12854,7 +12896,7 @@ the state machine and `U-` is the Phase 5 UI.
       five-star maps surface in Home. Small, and last, because it is a presentation rule over
       whatever `G-01` decides a map is.
 
-- [ ] **G-10 — Serving a resolved map, in one pass for real** · M · G-02 · The route that hands a
+- [x] **G-10 — Serving a resolved map, in one pass for real** · M · G-02 · The route that hands a
       client a map with its widgets filled in, and the batching that has to exist before it can be
       one. `G-02`'s resolver is one pass for the two things it counts — the object lookup and the
       access resolution — and an N+1 for the rest: `latestForSensor` runs per table widget (three
@@ -12870,6 +12912,36 @@ the state machine and `U-` is the Phase 5 UI.
 
       `G-04`, `G-06` and `G-07` all need this route. `G-03` deliberately does not: a designer edits
       the document and shows the tiles it holds, which needs no resolution at all.
+
+      **Landed 2026-09-09, and measured: a forty-table canvas costs four statements.** The object
+      lookup, one channel lookup for every sensor at once, one `resolveForObjects` for their
+      effective intervals, and one newest-per-channel scan. A viewer who is not the public audience
+      costs a fifth, for the access resolution. Before this it was 1 + 40 × 3 = 121, sequentially.
+      Forty sensor lists are one recursive query ranked per root, so the hundred-sensor limit stays
+      a property of one widget rather than of the request. The counts are asserted, not asserted
+      about: `maps-resolver.test.ts` watches the real `Database` — including `HistoryService`'s own
+      handle, which the earlier counting stub could not see — and pins the number at four.
+
+      **One query, but every sensor keeps its own window.** `latestValues` takes a single
+      `notBefore`, so `latestForSensors` asks it the widest question and holds each sensor's rows to
+      its own cut-off afterwards. A daily check and a minute-interval sensor cannot share a
+      staleness window: widening the *query* is free, and widening the *rule* would let a
+      day-old reading through as current.
+
+      **`GET /maps/:id/view` resolves the widgets and answers 404 for a map the caller may not
+      read**, the same as every other map route, so the view cannot be used to enumerate ids. The
+      audience is built here: `withRight` resolves the caller's right once and `holdsFull` decides
+      whether a broken tile explains itself.
+
+      **Two things were found by writing the first HTTP test against these routes.** The first is
+      why there was none: `G-03` had only just mounted them. The second is entry 41 of the
+      catalogue — **every map error reached the client as a 500**. `MapError` extends `AppError`,
+      `api/errors.ts` had no branch for it, and the careful 404-not-403, the 409 from `If-Match`
+      and the 400 for a bad name all fell through to the catch-all with their messages replaced.
+      The service was right about all of them and the wire said "the request could not be
+      completed". A claim about what the API answers has to be asserted where the API answers.
+
+      6 API tests, and the resolver's own file goes 15 to 21.
 
 ## Backlog — v2 candidates
 

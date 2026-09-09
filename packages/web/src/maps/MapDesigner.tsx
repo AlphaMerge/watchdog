@@ -5,7 +5,9 @@ import { ObjectPicker } from './ObjectPicker';
 import {
   CELL,
   COLUMNS,
+  DEFAULT_RANGE_MINUTES,
   KIND_LABELS,
+  RANGES,
   ROWS,
   WIDGET_KINDS,
   addTile,
@@ -25,7 +27,9 @@ import {
   redo,
   removeTile,
   resizeTile,
+  retimeTile,
   sameCanvas,
+  rangeLabel,
   timeline,
   tileById,
   undo,
@@ -120,6 +124,7 @@ export function MapDesigner({
       kind,
       objectId: target.id,
       title: target.name,
+      rangeMinutes: DEFAULT_RANGE_MINUTES,
       box: firstFreeBox(canvas),
     };
     const next = addTile(canvas, tile);
@@ -300,6 +305,32 @@ export function MapDesigner({
         >
           Add widget
         </button>
+
+        {/*
+          Only for a graph, and only when one is selected: a control that is present for every
+          tile and does nothing on four of them is a control that teaches people to ignore it.
+        */}
+        {selectedTile?.kind === 'graph' && (
+          <label className="text-xs text-text-muted">
+            <span className="ms-label block">Range</span>
+            <select
+              value={selectedTile.rangeMinutes}
+              onChange={(event) => {
+                apply(
+                  retimeTile(canvas, selectedTile.id, Number(event.target.value)),
+                  `${nameOf(selectedTile)} showing ${rangeLabel(Number(event.target.value))}`,
+                );
+              }}
+              className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+            >
+              {RANGES.map((range) => (
+                <option key={range.minutes} value={range.minutes}>
+                  {range.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <button

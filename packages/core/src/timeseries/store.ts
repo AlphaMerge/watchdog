@@ -101,6 +101,14 @@ export interface TimeSeriesStore {
     q: Queryable,
     sensorId: number,
   ): Promise<{ exists: boolean; channels: ChannelRef[] }>;
+  /**
+   * The same, for many sensors at once (`G-10`).
+   *
+   * A sensor that exists is a key with a possibly-empty list; a id that is not a sensor, or is
+   * gone, is absent. The distinction is what lets a caller answer "no such sensor" without a
+   * second query.
+   */
+  sensorsChannels(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, ChannelRef[]>>;
   readSeries(
     q: Queryable,
     options: {
@@ -389,28 +397,48 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
    * One query for both, because "no such sensor" and "a sensor with no channels yet" are
    * different answers — 404 against an empty series — and asking twice would let them race.
    */
+  /** One sensor, through the batched query, so there is one statement to keep correct. */
   async sensorChannels(
     q: Queryable,
     sensorId: number,
   ): Promise<{ exists: boolean; channels: ChannelRef[] }> {
+    const found = await this.sensorsChannels(q, [sensorId]);
+    const channels = found.get(sensorId);
+    return channels === undefined ? { exists: false, channels: [] } : { exists: true, channels };
+  }
+
+  async sensorsChannels(
+    q: Queryable,
+    sensorIds: readonly number[],
+  ): Promise<Map<number, ChannelRef[]>> {
+    const found = new Map<number, ChannelRef[]>();
+    if (sensorIds.length === 0) return found;
+
     const rows = await q.query<{
+      sensor_id: string;
       channel_id: number | null;
       key: string | null;
       name: string | null;
       unit: string | null;
       decimals: number | null;
     }>(
-      `SELECT c.id AS channel_id, c.key, c.name, c.unit, c.decimals
+      `SELECT o.id::text AS sensor_id, c.id AS channel_id, c.key, c.name, c.unit, c.decimals
        FROM object o
        LEFT JOIN channel c ON c.sensor_id = o.id
-       WHERE o.id = $1 AND o.kind = 'sensor'
-       ORDER BY c.is_primary DESC NULLS LAST, c.key`,
-      [sensorId],
+       WHERE o.id = ANY($1::bigint[]) AND o.kind = 'sensor'
+       ORDER BY o.id, c.is_primary DESC NULLS LAST, c.key`,
+      [[...sensorIds]],
     );
 
-    if (rows.length === 0) return { exists: false, channels: [] };
-    const channels: ChannelRef[] = [];
     for (const row of rows) {
+      const sensorId = Number(row.sensor_id);
+      // The row exists, so the sensor does — the left join means a sensor with no channels
+      // still arrives, once, with nulls. That is a key with an empty list, not a missing key.
+      let channels = found.get(sensorId);
+      if (channels === undefined) {
+        channels = [];
+        found.set(sensorId, channels);
+      }
       if (row.channel_id === null || row.key === null) continue;
       channels.push({
         id: row.channel_id,
@@ -420,7 +448,7 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
         decimals: row.decimals,
       });
     }
-    return { exists: true, channels };
+    return found;
   }
 
   /**

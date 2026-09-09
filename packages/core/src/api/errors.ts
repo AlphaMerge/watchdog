@@ -1,6 +1,7 @@
 import { AppError, describeError, type Logger } from '@ms/shared';
 import { DatabaseError } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
+import { MapError } from '../maps/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { DiscoveryError } from '../discovery/errors.js';
@@ -65,6 +66,21 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
       {
         ...error.details,
       },
+    );
+  }
+
+  if (error instanceof MapError) {
+    // **Absent until `G-10` went looking for it.** `MapError` extends `AppError`, and without a
+    // branch of its own every one of them fell through to the catch-all below and reached the
+    // client as a 500 with its message replaced: the 404 that `G-01` is careful to answer instead
+    // of a 403, the 409 a second designer gets from `If-Match`, the 400 for an invalid name. The
+    // service was right about all of them and the wire said "the request could not be completed".
+    return envelope(
+      error.status,
+      error.code,
+      error.message,
+      { ...error.context },
+      { ...error.details },
     );
   }
 

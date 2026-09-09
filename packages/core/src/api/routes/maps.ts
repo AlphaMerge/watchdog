@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { AccessRight } from '../../auth/access.js';
 import type { MapLayout, MapRow } from '../../maps/repository.js';
+import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
 import { READS } from '../authorization.js';
 
@@ -22,6 +23,14 @@ import { READS } from '../authorization.js';
 
 export interface MapRouteOptions {
   maps: MapService;
+  /**
+   * Fills the widgets in (`G-02`), for the view route (`G-10`).
+   *
+   * Optional for the same reason `maps` is optional on the server: a build without one serves the
+   * canvas document and not the resolved map, which is a different statement from serving an
+   * empty one.
+   */
+  resolver?: MapResolver;
 }
 
 interface MapBody {
@@ -82,7 +91,7 @@ function serialise(map: MapRow): Record<string, unknown> {
 }
 
 export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void {
-  const { maps } = options;
+  const { maps, resolver } = options;
 
   /** The viewer, or a refusal. Every route needs one; `G-06` is the only caller that will not. */
   const viewerOf = (request: {
@@ -135,6 +144,60 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     },
     async (request) => serialise(await maps.get(viewerOf(request), Number(request.params.id))),
   );
+
+  if (resolver !== undefined) {
+    app.get<{ Params: { id: string } }>(
+      '/maps/:id/view',
+      {
+        config: READS,
+        schema: {
+          tags: ['maps'],
+          summary: 'One map with its widgets filled in',
+          description:
+            'What a map draws, rather than the document it is stored as. A widget naming an ' +
+            'object that has been deleted, or one this account may not see, comes back as ' +
+            '`unavailable` and stays on the canvas — a dashboard that quietly stops mentioning ' +
+            'what failed is worse than one with a hole in it. Why it is unavailable is told ' +
+            'only to somebody holding full access on the map.',
+          response: {
+            200: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['map', 'widgets', 'problems'],
+              properties: {
+                map: mapResponse,
+                // Loose on purpose: a resolved widget is a discriminated union whose arms differ
+                // by kind, and a response schema that enumerated them would strip a field the
+                // day a new widget kind arrives rather than failing loudly.
+                widgets: { type: 'array', items: { type: 'object', additionalProperties: true } },
+                problems: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['id', 'problem'],
+                    properties: { id: { type: 'string' }, problem: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      async (request) => {
+        const viewer = viewerOf(request);
+        // One access resolution for both questions this route asks — may they read it, and do
+        // they hold `full`, which is what decides whether a broken tile says why.
+        const { map, right } = await maps.withRight(viewer, Number(request.params.id), 'read');
+        const resolved = await resolver.resolve(map.layout, {
+          kind: 'viewer',
+          viewer,
+          holdsFull: right === 'full',
+        });
+        return { map: serialise(map), widgets: resolved.widgets, problems: resolved.problems };
+      },
+    );
+  }
 
   app.post<{ Body: MapBody }>(
     '/maps',

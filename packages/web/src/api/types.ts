@@ -693,3 +693,64 @@ export interface MapSummary {
   createdAt: string;
   updatedAt: string;
 }
+
+/** A widget with its data filled in, from `GET /maps/:id/view` (`G-02`, `G-10`). */
+export type ResolvedWidget = {
+  id: string;
+  kind: 'status' | 'sensor-list' | 'table' | 'graph';
+  box: { x: number; y: number; w: number; h: number };
+  title: string;
+} & (
+  | { state: 'ok'; data: ResolvedWidgetData }
+  | {
+      state: 'unavailable';
+      /**
+       * Why — and only for somebody holding full access on the map.
+       *
+       * Its absence is not a missing field: telling a plain reader "deleted" rather than "you
+       * may not see it" would say whether an id they already know is still alive (`G-02`).
+       */
+      reason?: 'object-deleted' | 'not-visible';
+    }
+  | { state: 'invalid'; problem: string }
+);
+
+export interface ResolvedChannel {
+  key: string;
+  name: string;
+  unit: string;
+  /** `null` is a gap, never a zero — the sensor recorded nothing inside its staleness window. */
+  value: number | null;
+}
+
+export type ResolvedWidgetData =
+  | {
+      kind: 'status';
+      objectId: number;
+      name: string;
+      sensorState: string;
+      message: string;
+      since: string;
+    }
+  | {
+      kind: 'sensor-list';
+      objectId: number;
+      name: string;
+      sensors: { id: number; name: string; sensorState: string; message: string }[];
+    }
+  | { kind: 'table'; objectId: number; name: string; channels: ResolvedChannel[] }
+  | {
+      kind: 'graph';
+      objectId: number;
+      name: string;
+      sensorState: string;
+      rangeMinutes: number;
+      channels: ResolvedChannel[];
+    };
+
+export interface ResolvedMap {
+  map: MapSummary;
+  widgets: ResolvedWidget[];
+  /** Widgets whose document could not be read at all, kept rather than dropped. */
+  problems: { id: string; problem: string }[];
+}

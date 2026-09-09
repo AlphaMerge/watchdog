@@ -61,6 +61,7 @@ import { QUERY_SCHEMAS } from './schemas/queries.js';
 import type { ProbeQueryService } from '../probes/queries.js';
 import type { ProbeConfigService } from '../probes/config.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
+import type { MapResolver } from '../maps/resolver.js';
 import type { MapService } from '../maps/service.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
@@ -100,6 +101,8 @@ export interface ApiServerOptions {
    * has no maps API, which is a different statement from having no maps.
    */
   maps?: MapService;
+  /** Fills a map's widgets in for the view route (`G-10`). */
+  mapResolver?: MapResolver;
   /**
    * The schedule library (`M-09`).
    *
@@ -214,6 +217,7 @@ export class ApiServer {
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
   readonly #maps: MapService | undefined;
+  readonly #mapResolver: MapResolver | undefined;
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -269,6 +273,7 @@ export class ApiServer {
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#maps = options.maps;
+    this.#mapResolver = options.mapResolver;
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
@@ -526,7 +531,10 @@ export class ApiServer {
         await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
         await scope.register(lookupRoutes, { lookups: this.#lookups });
         if (this.#maps !== undefined) {
-          mapRoutes(scope, { maps: this.#maps });
+          mapRoutes(scope, {
+            maps: this.#maps,
+            ...(this.#mapResolver === undefined ? {} : { resolver: this.#mapResolver }),
+          });
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

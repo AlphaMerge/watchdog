@@ -8,6 +8,7 @@ import { ErrorPanel } from './components/Panels';
 import { AlarmsView } from './routes/AlarmsView';
 import { AddSensor } from './routes/AddSensor';
 import { LogsView } from './routes/LogsView';
+import { MapDesignView } from './routes/MapDesignView';
 import { MapView } from './routes/MapView';
 import { MapsView } from './routes/MapsView';
 import { Overview } from './routes/Overview';
@@ -72,6 +73,7 @@ export function App(): React.JSX.Element {
         <Route path="sensor-types" element={<SensorTypesView />} />
         <Route path="maps" element={<MapsView />} />
         <Route path="maps/:id" element={<MapView />} />
+        <Route path="maps/:id/design" element={<MapDesignView />} />
         {/*
           Signed in only. With `api.requireAuthentication` off an anonymous browser reaches the
           rest of this table, and a change-password form is the one page there whose request the

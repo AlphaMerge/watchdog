@@ -77,6 +77,23 @@ export class MapService {
     needed: AccessRight,
     q: Queryable = this.#db,
   ): Promise<MapRow> {
+    return (await this.withRight(viewer, mapId, needed, q)).map;
+  }
+
+  /**
+   * The map, and what this viewer holds on it.
+   *
+   * **One resolution, not two.** `G-10`'s view route needs the map *and* whether the caller holds
+   * `full` — the resolver tells only a `full` holder why a widget could not be drawn — and asking
+   * `require` and then `rightFor` would resolve the same access twice per request. `require` is
+   * this method with the right thrown away.
+   */
+  async withRight(
+    viewer: MapViewer,
+    mapId: number,
+    needed: AccessRight,
+    q: Queryable = this.#db,
+  ): Promise<{ map: MapRow; right: AccessRight }> {
     const map = await this.#repository.find(q, mapId);
     if (map === undefined) throw mapNotFound(mapId);
 
@@ -90,7 +107,7 @@ export class MapService {
         details: { held, needed },
       });
     }
-    return map;
+    return { map, right: held };
   }
 
   /** The maps this viewer may see. Administrators see all of them. */

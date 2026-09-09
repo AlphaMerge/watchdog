@@ -13,8 +13,8 @@
  * share link render the same map on a wall display and a laptop.
  */
 
-/** The kinds the core resolves today (`G-02`). `G-04`, `G-07` and `G-08` each add to this list. */
-export const WIDGET_KINDS = ['status', 'sensor-list', 'table'] as const;
+/** The kinds the core resolves today. `G-07` and `G-08` each add to this list. */
+export const WIDGET_KINDS = ['status', 'sensor-list', 'table', 'graph'] as const;
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
 
@@ -22,7 +22,30 @@ export const KIND_LABELS: Readonly<Record<WidgetKind, string>> = {
   status: 'Status',
   'sensor-list': 'Sensor list',
   table: 'Channel table',
+  graph: 'Graph',
 };
+
+/**
+ * How far back a graph tile draws, in minutes (`G-04`).
+ *
+ * Per tile rather than one control for the canvas: the point of putting a week beside an hour is
+ * the comparison. Each tile carries its range in its own label, so nobody has to remember which
+ * period they are looking at — which is the failure a shared control on the sensor page avoids
+ * by having one range for everything.
+ */
+export const RANGES: readonly { readonly minutes: number; readonly label: string }[] = [
+  { minutes: 60, label: '1 hour' },
+  { minutes: 6 * 60, label: '6 hours' },
+  { minutes: 24 * 60, label: '24 hours' },
+  { minutes: 7 * 24 * 60, label: '7 days' },
+  { minutes: 30 * 24 * 60, label: '30 days' },
+];
+
+export const DEFAULT_RANGE_MINUTES = 60;
+
+export function rangeLabel(minutes: number): string {
+  return RANGES.find((range) => range.minutes === minutes)?.label ?? `${String(minutes)} minutes`;
+}
 
 export interface Box {
   readonly x: number;
@@ -37,6 +60,8 @@ export interface Tile {
   readonly objectId: number;
   readonly title: string;
   readonly box: Box;
+  /** Only a `graph` reads this; every kind carries it so the document has one shape. */
+  readonly rangeMinutes: number;
 }
 
 export interface Canvas {
@@ -186,6 +211,10 @@ export function retitleTile(canvas: Canvas, id: string, title: string): Canvas {
   return replace(canvas, id, (tile) => ({ ...tile, title }));
 }
 
+export function retimeTile(canvas: Canvas, id: string, rangeMinutes: number): Canvas {
+  return replace(canvas, id, (tile) => ({ ...tile, rangeMinutes }));
+}
+
 export function removeTile(canvas: Canvas, id: string): Canvas {
   const tiles = canvas.tiles.filter((tile) => tile.id !== id);
   return tiles.length === canvas.tiles.length ? canvas : { tiles };
@@ -219,6 +248,7 @@ export function sameCanvas(a: Canvas, b: Canvas): boolean {
       tile.kind === other.kind &&
       tile.objectId === other.objectId &&
       tile.title === other.title &&
+      tile.rangeMinutes === other.rangeMinutes &&
       sameBox(tile.box, other.box)
     );
   });
@@ -439,6 +469,7 @@ export function readCanvas(layout: unknown): Canvas {
       kind: kind as WidgetKind,
       objectId,
       title: typeof entry['title'] === 'string' ? entry['title'] : '',
+      rangeMinutes: whole(entry['rangeMinutes'], DEFAULT_RANGE_MINUTES),
       box: fit({
         x: whole(box['x'], 0),
         y: whole(box['y'], 0),
@@ -458,6 +489,7 @@ export function writeLayout(canvas: Canvas): { widgets: Record<string, unknown>[
       kind: tile.kind,
       objectId: tile.objectId,
       title: tile.title,
+      rangeMinutes: tile.rangeMinutes,
       box: tile.box,
     })),
   };

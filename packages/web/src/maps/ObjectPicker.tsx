@@ -22,6 +22,7 @@ const DEBOUNCE_MS = 200;
 const KIND_QUERY: Readonly<Record<WidgetKind, string>> = {
   status: 'kind=sensor',
   table: 'kind=sensor',
+  graph: 'kind=sensor',
   'sensor-list': 'kind=probe&kind=group&kind=device',
 };
 

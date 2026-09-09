@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CELL,
   COLUMNS,
+  DEFAULT_RANGE_MINUTES,
   HISTORY_DEPTH,
   MAX_TILES,
   MIN_H,
@@ -55,6 +56,7 @@ function tile(id: string, box: Partial<Box> = {}): Tile {
     kind: 'status',
     objectId: 1,
     title: id,
+    rangeMinutes: DEFAULT_RANGE_MINUTES,
     box: { x: 0, y: 0, w: 4, h: 3, ...box },
   };
 }

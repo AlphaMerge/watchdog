@@ -92,6 +92,7 @@ import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
 import { AccessService } from './auth/access.js';
 import { MapRepository } from './maps/repository.js';
+import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
@@ -830,6 +831,10 @@ async function serve(): Promise<void> {
   // wrong wiring: until here, the only caller passing one was a test, so every route `G-01`
   // shipped answered 404 in the service somebody actually runs.
   const maps = new MapService({ db, repository: new MapRepository(), logger });
+  // Reads through the same `AccessService` the object API uses and the same `HistoryService`
+  // the sensor pages use: a widget must not become a second, more permissive way to read a
+  // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
+  const mapResolver = new MapResolver({ db, access: objectAccess, history });
 
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
@@ -913,6 +918,7 @@ async function serve(): Promise<void> {
       required: config.api.requireAuthentication,
     },
     maps,
+    mapResolver,
     triggers,
     templates,
     deliveryHealth,

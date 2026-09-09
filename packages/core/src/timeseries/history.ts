@@ -210,52 +210,101 @@ export class HistoryService {
    * prevent. `at` says how old the reading that *is* shown really is.
    */
   async latestForSensor(sensorId: number): Promise<SensorValues> {
-    const { exists, channels } = await this.#db.tx((q) => this.#store.sensorChannels(q, sensorId));
-    if (!exists) {
+    const found = await this.latestForSensors([sensorId]);
+    const values = found.get(sensorId);
+    if (values === undefined) {
       throw new ObjectError('OBJECT_NOT_FOUND', 'no such sensor', {
         context: { objectId: sensorId, phase: 'read-values' },
       });
     }
+    return values;
+  }
 
-    // The window is a multiple of this sensor's own interval, not a constant. A constant would
-    // have to be either too short for a daily check — reporting every one of its channels as
-    // having no data — or long enough to call a minute-interval sensor's hour-old reading
-    // current. Through the resolver, because parent-walking happens in exactly one place
-    // (CLAUDE.md) and this interval is usually set on the device or the group.
-    const interval = await this.#settings.resolve<number>(sensorId, SCAN_INTERVAL_SECONDS.key);
-    const intervalSeconds = interval.value;
-    const lookbackMs = Math.max(MIN_LOOKBACK_MS, intervalSeconds * CURRENT_INTERVALS * 1_000);
+  /**
+   * The same, for many sensors, in a fixed number of queries (`G-10`).
+   *
+   * **Three statements whatever the count**, and that is the whole point: channels for every
+   * sensor at once, the effective interval for every sensor at once — `resolveForObjects` exists
+   * because the scheduler needed exactly this — and one newest-per-channel scan over the union of
+   * their channels. A map with forty channel tables was forty times this, sequentially, which is
+   * the N+1 `G-10` exists to remove.
+   *
+   * **One query, but every sensor keeps its own window.** `latestValues` takes a single
+   * `notBefore`, so it is asked for the widest of them and each sensor's rows are then held to
+   * its own — a daily check and a minute-interval sensor cannot share a cut-off, and widening the
+   * *query* is free while widening the *rule* would let a stale reading through as current.
+   *
+   * A sensor id that is not a sensor, or has been deleted, is simply absent from the result.
+   */
+  async latestForSensors(sensorIds: readonly number[]): Promise<Map<number, SensorValues>> {
+    const out = new Map<number, SensorValues>();
+    if (sensorIds.length === 0) return out;
+
+    const unique = [...new Set(sensorIds)];
+    const byId = await this.#db.tx((q) => this.#store.sensorsChannels(q, unique));
+    if (byId.size === 0) return out;
+
+    const present = [...byId.keys()];
+    const intervals = await this.#settings.resolveForObjects<number>(
+      present,
+      SCAN_INTERVAL_SECONDS.key,
+    );
 
     const readAt = new Date();
-    const notBefore = new Date(readAt.getTime() - lookbackMs);
+    const windows = new Map<number, { intervalSeconds: number; notBefore: Date }>();
+    let widest = MIN_LOOKBACK_MS;
+    for (const sensorId of present) {
+      const intervalSeconds = intervals.get(sensorId)?.value ?? SCAN_INTERVAL_SECONDS.default;
+      const lookbackMs = Math.max(MIN_LOOKBACK_MS, intervalSeconds * CURRENT_INTERVALS * 1_000);
+      widest = Math.max(widest, lookbackMs);
+      windows.set(sensorId, {
+        intervalSeconds,
+        notBefore: new Date(readAt.getTime() - lookbackMs),
+      });
+    }
+
+    const channelIds = [...byId.values()].flatMap((channels) =>
+      channels.map((channel) => channel.id),
+    );
     const latest =
-      channels.length === 0
+      channelIds.length === 0
         ? []
         : await this.#db.tx((q) =>
             this.#store.latestValues(q, {
-              channelIds: channels.map((channel) => channel.id),
-              notBefore,
+              channelIds,
+              notBefore: new Date(readAt.getTime() - widest),
             }),
           );
-
     const byChannel = new Map(latest.map((row) => [row.channelId, row]));
-    return {
-      sensorId,
-      readAt: readAt.toISOString(),
-      notBefore: notBefore.toISOString(),
-      intervalSeconds,
-      channels: channels.map((channel) => {
-        const row = byChannel.get(channel.id);
-        return {
-          id: channel.id,
-          key: channel.key,
-          name: channel.name,
-          unit: channel.unit,
-          decimals: channel.decimals,
-          value: row?.value ?? null,
-          at: row === undefined ? null : row.at.toISOString(),
-        };
-      }),
-    };
+
+    for (const sensorId of present) {
+      const channels = byId.get(sensorId) ?? [];
+      const window = windows.get(sensorId);
+      /* c8 ignore next -- every present sensor got a window in the loop above */
+      if (window === undefined) continue;
+      out.set(sensorId, {
+        sensorId,
+        readAt: readAt.toISOString(),
+        notBefore: window.notBefore.toISOString(),
+        intervalSeconds: window.intervalSeconds,
+        channels: channels.map((channel) => {
+          const row = byChannel.get(channel.id);
+          // The query was asked the widest question; this is where each sensor's own answer is
+          // cut back to its own window.
+          const current = row !== undefined && row.at >= window.notBefore ? row : undefined;
+          return {
+            id: channel.id,
+            key: channel.key,
+            name: channel.name,
+            unit: channel.unit,
+            decimals: channel.decimals,
+            value: current?.value ?? null,
+            at: current === undefined ? null : current.at.toISOString(),
+          };
+        }),
+      });
+    }
+
+    return out;
   }
 }
