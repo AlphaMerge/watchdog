@@ -12575,12 +12575,111 @@ analysis". `F-` is Phase 0.
       sensor's scaling removed, and a fragment's payload read as ports. 25 tests here and 31 on the
       sensor; the full suite is green at 3,669.
 
+## Phase 12 — Maps and dashboards (`V2-02`)
+
+The second v2 subsystem, started 2026-09-09 with Phase 11 complete. `CAPABILITIES.MD §6` asks for
+a drag-and-drop designer producing an HTML page: status icons, live graphs, data tables, sensor
+lists, connector lines, geo maps, custom HTML and background images, publicly shareable by URL,
+with 5-star maps in the Home menu.
+
+**A map is not a tree object.** The hierarchy is Root → Probe → Group → Device → Sensor → Channel
+and a map is none of those; `§9` grants access to "tree, libraries, maps and reports" per group,
+which makes it a first-class entity with its own storage, its own API and its own RBAC surface.
+That is why `G-01` exists before any pixel does.
+
+**Three of these were gated on a decision rather than on effort. Two are now settled** in
+`ADR-002`, written before any code because each changes the widget model: public share links exist
+as per-map revocable bearer tokens with an expiry, and custom HTML runs in a sandboxed iframe.
+`G-08` stays gated, because a tile provider would put a network dependency into a product whose
+whole architecture is "one service an operator installs". None of the three should be built merely
+because it is on a capability list.
+
+**The tickets use the `G-` prefix** for the graphical views `CAPABILITIES.MD §6` describes. `M-` is
+the state machine and `U-` is the Phase 5 UI.
+
+- [ ] **G-01 — The map entity** · M · — · Storage, migration with a tested rollback, CRUD API, and
+      access by group the way `§9` grants it. No widgets and no canvas: this is the thing every
+      other ticket here needs, and the one that decides whether a map is versioned, how it is
+      scoped, and what happens to it when an object it points at is deleted.
+
+      **That last question is the interesting one.** A map holds references to sensors that can be
+      deleted underneath it. A dangling reference must render as a visibly broken widget rather
+      than an empty space — an operator looking at a map with a hole in it should be told the
+      sensor is gone, not shown a dashboard that quietly stopped mentioning the thing that failed.
+
+- [ ] **G-02 — Widgets, and where their data comes from** · L · G-01 · The widget model — status
+      icon, sensor list, data table — and one resolver that fills them, in the core rather than in
+      the browser. A map with forty widgets must not be forty round trips, and a widget must not be
+      able to read an object the viewer cannot see: the resolver is the one place that can enforce
+      both.
+
+- [ ] **G-03 — The designer canvas** · L · G-02 · Drag, drop, resize, snap, undo. Keyboard-operable
+      throughout, per `U-11` — a designer that can only be used with a mouse fails the same WCAG
+      criteria the tree did, and for the same reason.
+
+- [ ] **G-04 — Live graphs on a map** · M · G-02, U-05 · The uPlot charts the sensor detail page
+      already draws, at a size somebody chose, updating from the same WebSocket stream rather than
+      polling per widget.
+
+- [ ] **G-05 — Connector lines and background images** · M · G-03 · The part that makes a map a
+      map rather than a grid of tiles. An uploaded background is a file this system stores on
+      behalf of an operator, which is a first for it — where it lives and what bounds it are part
+      of the ticket.
+
+- [ ] **G-06 — Public share URLs** · M · G-02 · **Decided 2026-09-09: build it, token-gated —
+      `ADR-002` Decision 1.** A per-map bearer token, revocable, with a mandatory expiry, on one
+      unauthenticated route that serves that map's widgets and nothing else: no object id, no tree
+      walk, no drill-through, no object API. The blast radius of a leaked link is exactly what the
+      person who made it was looking at. What it still leaks — hostnames, sensor names, what is
+      failing — the sharing UI says at the point of sharing. **The resolver must therefore work
+      with no principal at all**, which is a constraint on `G-02` rather than a detail of this
+      ticket. The original framing follows.
+
+      **Gated: this is a security posture, not a feature.** PRTG offers it and the capability list carries it, and it means an unauthenticated
+      route returning live monitoring data — topology, hostnames, what is failing — to anybody with
+      a link. Phase 9 spent a lot of effort making every read answer to a principal. Before any
+      code: decide whether this exists at all, and if it does, whether the link is a bearer token
+      with an expiry and a revocation list, whether it is per-map, and what it may show. Write it
+      down as an ADR; `A-11` is the precedent for treating an access decision that way.
+
+- [ ] **G-07 — Custom HTML widgets** · M · G-02 · **Decided 2026-09-09: sandboxed iframe —
+      `ADR-002` Decision 2.** `<iframe sandbox srcdoc>` with no `allow-same-origin` and a
+      restrictive CSP: safe by construction rather than by a sanitiser being complete and staying
+      complete. It costs theming and layout freedom, which is the right cost. **Sharper because
+      `G-06` exists**: operator HTML on a public map is arbitrary content served to strangers from
+      this system's origin, so without the sandbox a map author who is not an administrator could
+      publish script under the monitoring domain. The two features are individually defensible and
+      together are a phishing kit unless the sandbox is non-negotiable. The original framing
+      follows.
+
+      **Gated: arbitrary operator HTML in the application is XSS by design.** The honest options are a sandboxed iframe with no same-origin
+      access, a strict sanitiser with a small allowlist, or not building it. Which one changes the
+      widget model, so it is decided before `G-02` finalises and not after. Note the interaction
+      with `G-06`: custom HTML on a publicly shared map is operator-supplied content served
+      unauthenticated, which is a different question again.
+
+- [ ] **G-08 — Geographical maps** · L · G-02 · **Still gated, and `ADR-002` Decision 3 says only
+      what the eventual answer must satisfy**: whatever is chosen degrades to a plain background
+      when no provider is configured, so an air-gapped installation gets a map without tiles rather
+      than a map that does not load. Deciding it properly wants its own ADR and is not on the path
+      of any other Phase 12 ticket. **Gated: it needs map tiles from somewhere.** A
+      tile provider is a network dependency in a product that installs as one service and is
+      expected to run in a NOC that may not reach the internet. Bundling tiles is gigabytes;
+      requiring an API key makes an operator sign up for something; a self-hosted tile server is
+      another thing to install, which `CLAUDE.md`'s third hard constraint has an opinion about.
+      Decide, and if the answer is "configurable provider, degrade to a plain background without
+      one", say so in the ADR rather than discovering it at install time.
+
+- [ ] **G-09 — 5-star maps in the Home menu** · S · G-01 · `§2` says priority sorts objects and
+      five-star maps surface in Home. Small, and last, because it is a presentation rule over
+      whatever `G-01` decides a map is.
+
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
 
 - ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
-- **V2-02** Maps and dashboard designer
+- ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
 - **V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)
 - **V2-04** Libraries (filter-rule alternate tree views)
 - **V2-05** Ticket system (user, ToDo and notification tickets)
