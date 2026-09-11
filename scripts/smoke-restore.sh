@@ -30,8 +30,11 @@ matches() {
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/api-auth.sh
 . "${repo_root}/scripts/lib/api-auth.sh"
-origin=ms-smoke-backup-origin
-target=ms-smoke-backup-target
+# shellcheck source=scripts/lib/smoke-names.sh
+. "${repo_root}/scripts/lib/smoke-names.sh"
+# Per-run (`P-200`): CI and a hand-run share one Docker daemon now.
+origin="$(ms_smoke_name backup-origin)"
+target="$(ms_smoke_name backup-target)"
 image=ms-smoke:bookworm
 failed=0
 
@@ -64,7 +67,10 @@ boot() {
   docker rm -f "${name}" >/dev/null 2>&1 || true
   # The same invocation `smoke-install.sh` uses, including `--cgroupns=host` and letting the
   # image's own entrypoint be init — without those systemd never finishes booting.
+  # The labels are two separate arguments by design, so this expansion must split.
+  # shellcheck disable=SC2046
   docker run -d --name "${name}" \
+    $(ms_smoke_labels) \
     --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock \

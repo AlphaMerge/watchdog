@@ -17,9 +17,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/api-auth.sh
 . "${repo_root}/scripts/lib/api-auth.sh"
-core_box=ms-smoke-core
-probe_box=ms-smoke-probe
-network=ms-smoke-net
+# shellcheck source=scripts/lib/smoke-names.sh
+. "${repo_root}/scripts/lib/smoke-names.sh"
+# Per-run, so a push and a hand-run do not delete each other's boxes mid-test (`P-200`).
+core_box="$(ms_smoke_name core)"
+probe_box="$(ms_smoke_name probe)"
+network="$(ms_smoke_name net)"
 image=ms-smoke:bookworm
 
 # **Always the toolchain container, never the host's npm.** This script boots Docker containers,
@@ -60,14 +63,18 @@ cleanup() {
 }
 trap cleanup EXIT
 cleanup
+ms_smoke_reap_orphans
 
 echo "==> building smoke image"
 docker build -q -t "${image}" "${repo_root}/scripts/smoke" >/dev/null
 
 echo "==> booting two clean systemd boxes on one network"
-docker network create "${network}" >/dev/null
+docker network create --label ms-smoke "${network}" >/dev/null
 for box in "${core_box}" "${probe_box}"; do
+  # The labels are two separate arguments by design, so this expansion must split.
+  # shellcheck disable=SC2046
   docker run -d --name "${box}" --hostname "${box}" --network "${network}" \
+    $(ms_smoke_labels) \
     --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock \

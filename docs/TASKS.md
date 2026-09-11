@@ -4172,7 +4172,7 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
-- [ ] **P-200 — the smoke tests take fixed container names, and CI is on the developer's Docker
+- [x] **P-200 — the smoke tests take fixed container names, and CI is on the developer's Docker
       now** · S · P-198 · Every smoke harness names its boxes the same way on every run —
       `ms-smoke-core` and `ms-smoke-probe` on a network called `ms-smoke-net`
       (`smoke-enrol.sh`), `ms-smoke-install-<distro>` (`smoke-install.sh`),
@@ -4199,6 +4199,35 @@ because each is a decision rather than a defect:
       Worth doing with it: the image tag `ms-smoke:bookworm` is shared and should stay shared —
       two runs building the same content under one tag is fine and the rebuild is most of the
       runtime. Only the *containers* and the *network* need to be per-run.
+
+      **P-200 outcome.** `scripts/lib/smoke-names.sh` beside `api-auth.sh`, sourced by all four
+      harnesses: `ms_smoke_name core` gives `ms-smoke-core-<run>`, where the run is
+      `MS_SMOKE_RUN`, else `GITHUB_RUN_ID`-`GITHUB_RUN_ATTEMPT`, else the PID. The attempt is in
+      there because a re-run of a CI run repeats its id; the PID is enough for anything local,
+      since two concurrent runs on one machine cannot share one.
+
+      **Per-run names cost the one virtue fixed names had** — the next run tidied up after a
+      killed one — so the containers carry an `ms-smoke` label and the epoch second they started,
+      and every harness reaps labelled containers older than an hour before it begins. **The age
+      is a label rather than a parsed timestamp** because the two places this runs, a Mac and the
+      Linux runner image, disagree about parsing an ISO date; an integer comparison behaves the
+      same in both. An hour, because the longest harness here is minutes.
+
+      Proved rather than argued. A bystander container wearing the **old fixed name** was left
+      running while a full `smoke-enrol.sh` went by: it survived both the startup cleanup and the
+      `EXIT` trap, which the previous code would have deleted twice over, and the run's own box
+      was gone afterwards. The reaper was checked from both sides — it removes a two-hour-old
+      orphan and leaves a fresh one alone.
+
+      **What this does not fix, and it surfaced while testing.** Two runs *in the same checkout*
+      still collide, one level below the containers: `package.sh` stages into
+      `build/<name>-<version>` and starts with `rm -rf`, so the second run deletes the first's
+      staging mid-copy — `cp: cannot create regular file …/build/ms-0.1.0/etc/core.json`. That is
+      **not** the case this ticket was written for: CI checks out into the runner's own workspace,
+      so its `build/` and `release/` are not the developer's. Making two runs share one checkout
+      safely means threading a run id through `package.sh` and the `newest()` lookup the harnesses
+      use to find what it produced, which is a larger change than this one and wants its own
+      ticket if anybody needs it.
 
 - [x] **P-199 — two of the four withdrawal doors are proved by unit tests only** · S · P-197,
       P-198 · `P-196` closed four doors: `revoke`, `remove`, a narrowed `allow-from`, and the

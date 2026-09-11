@@ -16,6 +16,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/smoke-names.sh
+. "${repo_root}/scripts/lib/smoke-names.sh"
 # Word splitting is what turns the default "deb rpm" into two entries; arguments given on the
 # command line are already separate.
 if [ "$#" -gt 0 ]; then
@@ -58,7 +60,7 @@ one_format() {
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
-      container=ms-smoke-deb
+      container="$(ms_smoke_name deb)"
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-deb.sh" >/dev/null
       pkg="$(ls -t "${repo_root}"/release/ms_*.deb | head -1)"
@@ -69,7 +71,7 @@ one_format() {
       ;;
     rpm)
       image=ms-smoke:rocky
-      container=ms-smoke-rpm
+      container="$(ms_smoke_name rpm)"
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile.rocky" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-rpm.sh" >/dev/null
       pkg="$(ls -t "${repo_root}"/release/ms-*.rpm | head -1)"
@@ -92,7 +94,10 @@ one_format() {
 
   # A real systemd, because the scriptlets enable and start units and a container without pid 1
   # would let a broken unit file pass. Same shape as `smoke-install.sh`.
+  # The labels are two separate arguments by design, so this expansion must split.
+  # shellcheck disable=SC2046
   docker run -d --name "${container}" \
+    $(ms_smoke_labels) \
     --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock \

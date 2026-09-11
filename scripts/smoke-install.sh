@@ -21,6 +21,8 @@ matches() {
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/api-auth.sh
 . "${repo_root}/scripts/lib/api-auth.sh"
+# shellcheck source=scripts/lib/smoke-names.sh
+. "${repo_root}/scripts/lib/smoke-names.sh"
 
 # **Ubuntu is named in the exit criterion, so it is a target here** (`PLAN.md` Phase 10: "a clean
 # install on Ubuntu and on Windows Server"). Proving Debian and *assuming* Ubuntu would be
@@ -34,7 +36,8 @@ case "${distro}" in
   ubuntu) dockerfile=Dockerfile.ubuntu; image=ms-smoke:ubuntu ;;
   *) echo "unknown MS_SMOKE_DISTRO: ${distro} (debian|ubuntu)" >&2; exit 2 ;;
 esac
-container="ms-smoke-install-${distro}"
+# Per-run (`P-200`): CI and a hand-run share one Docker daemon now.
+container="$(ms_smoke_name "install-${distro}")"
 
 # Build unless handed a specific tarball. Reusing whichever one happened to be lying around is
 # how this test silently validated a package built before the change under test — which is worse
@@ -76,7 +79,10 @@ docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/${dockerfile}" \
 
 echo "==> booting a clean systemd box"
 cleanup
+# The labels are two separate arguments by design, so this expansion must split.
+# shellcheck disable=SC2046
 docker run -d --name "${container}" \
+  $(ms_smoke_labels) \
   --privileged --cgroupns=host \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   --tmpfs /run --tmpfs /run/lock \
