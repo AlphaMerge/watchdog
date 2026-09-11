@@ -38,7 +38,7 @@ import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
-import { reportRenderRoute, reportRoutes } from './routes/reports.js';
+import { reportDownloadRoute, reportRenderRoute, reportRoutes } from './routes/reports.js';
 import {
   PUBLIC_MAP_PREFIX,
   publicMapBackgroundRoute,
@@ -74,6 +74,7 @@ import type { ReportService } from '../reports/service.js';
 import type { ReportContext } from '../reports/context.js';
 import type { ReportRenderer } from '../reports/render.js';
 import type { ReportRunner, ReportRunRepository } from '../reports/runs.js';
+import type { ReportOutputRepository } from '../reports/delivery.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -140,6 +141,7 @@ export interface ApiServerOptions {
     renderer: ReportRenderer;
     runner: ReportRunner;
     runs: ReportRunRepository;
+    outputStore: ReportOutputRepository;
   };
   /**
    * The schedule library (`M-09`).
@@ -619,6 +621,7 @@ export class ApiServer {
             renderer: this.#reports.renderer,
             runner: this.#reports.runner,
             runs: this.#reports.runs,
+            outputStore: this.#reports.outputStore,
             db: this.#db,
           };
           reportRoutes(scope, wired);
@@ -627,6 +630,7 @@ export class ApiServer {
           // so the exemption covers this route and not the seven beside it.
           this.#exempting = 'a rendered report, in HTML or CSV rather than JSON';
           reportRenderRoute(scope, wired);
+          reportDownloadRoute(scope, wired);
           this.#exempting = null;
         }
         if (this.#schedules !== undefined) {

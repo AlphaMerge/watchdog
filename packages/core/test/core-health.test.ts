@@ -53,6 +53,7 @@ function sources(
     queriesRefused: number;
     reportsDeferred: number;
     reportsFailed: number;
+    reportsUndelivered: number;
     resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
@@ -78,6 +79,7 @@ function sources(
     reports: () => ({
       deferred: overrides.reportsDeferred ?? 0,
       failed: overrides.reportsFailed ?? 0,
+      undelivered: overrides.reportsUndelivered ?? 0,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
     ingestionDiscards: () => ({ discardedFutureTime: overrides.resultsFutureDated ?? 0 }),

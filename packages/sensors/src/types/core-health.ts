@@ -240,6 +240,15 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'runs',
     counter: { bits: 64 },
   },
+  // `E-09`. **A gauge, not a counter**, and that is the difference that makes it useful: the
+  // question is "how many reports are stuck right now", which a rate cannot answer. A relay that
+  // has been down for an hour shows a line climbing and then falling back to zero when it
+  // recovers; a counter would show a step nobody can tell apart from a step last week.
+  {
+    key: 'reportsUndelivered',
+    name: 'Reports waiting to be delivered',
+    unit: 'reports',
+  },
   // `P-99`. A result stamped far in the future is refused rather than stored, because storing
   // one freezes that sensor's history for ever — `last_result_at` is a high-water mark, and
   // everything genuine after it reads as stale. Refusing it fixes the freeze; this channel is

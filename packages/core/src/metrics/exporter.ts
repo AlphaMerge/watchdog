@@ -179,6 +179,11 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Report runs that ended in a failure. A rising rate is one report that is broken.',
     counter: true,
   },
+  {
+    key: 'reportsUndelivered',
+    name: 'ms_core_reports_undelivered',
+    help: 'Rendered reports still waiting on a mail relay. A gauge: it falls when they go out.',
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

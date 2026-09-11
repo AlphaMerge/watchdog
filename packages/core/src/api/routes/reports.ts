@@ -7,6 +7,8 @@ import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/re
 import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
 import { REPORT_FREQUENCIES, describeSchedule, validateSchedule } from '../../reports/cadence.js';
 import type { ReportRun, ReportRunner, ReportRunRepository } from '../../reports/runs.js';
+import { REPORT_DELIVERY_MODES, REPORT_FORMATS, MAX_RECIPIENTS } from '../../reports/outputs.js';
+import { mediaTypeOf, type ReportOutputRepository } from '../../reports/delivery.js';
 import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
@@ -39,6 +41,8 @@ export interface ReportRouteOptions {
   /** Runs one, on demand or on a schedule (`E-08`). */
   runner: ReportRunner;
   runs: ReportRunRepository;
+  /** What a run produced, and the bytes behind it (`E-09`). */
+  outputStore: ReportOutputRepository;
   db: Database;
 }
 
@@ -140,6 +144,47 @@ const scheduleSchema = {
   },
 } as const;
 
+/**
+ * What a report renders and where it goes (`E-09`, `CAPABILITIES.MD §6`).
+ *
+ * No `pdf` and no `xml`: `E-05` is gated on Phase 13's first decision and nothing produces either,
+ * so admitting them in a schema would be promising a format the renderer has never heard of.
+ * `ADR-005` Decision 3 records when the list is reopened.
+ */
+const outputsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    formats: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', enum: [...REPORT_FORMATS] },
+    },
+    delivery: { type: 'string', enum: [...REPORT_DELIVERY_MODES] },
+    /** Addresses, not accounts — see `outputs.ts` on why the audience is not the security context. */
+    recipients: {
+      type: 'array',
+      maxItems: MAX_RECIPIENTS,
+      items: { type: 'string', maxLength: 320 },
+    },
+    /** One archive rather than several attachments. */
+    zip: { type: 'boolean' },
+  },
+} as const;
+
+const outputFileResponse = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['format', 'filename', 'byteSize', 'sha256', 'createdAt'],
+  properties: {
+    format: { type: 'string', enum: ['html', 'csv', 'zip'] },
+    filename: { type: 'string' },
+    byteSize: { type: 'integer' },
+    sha256: { type: 'string' },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+} as const;
+
 const runResponse = {
   type: 'object',
   additionalProperties: false,
@@ -159,6 +204,7 @@ const runResponse = {
     'cells',
     'errorCode',
     'errorMessage',
+    'delivery',
   ],
   properties: {
     id: { type: 'integer' },
@@ -177,6 +223,27 @@ const runResponse = {
     cells: { type: ['integer', 'null'] },
     errorCode: { type: 'string' },
     errorMessage: { type: 'string' },
+    /**
+     * Where the document went (`E-09`).
+     *
+     * `none` is a run nobody asked to have delivered. `pending` has bytes and an address and has
+     * not gone yet. `failed` is terminal: it will not be retried again without somebody acting,
+     * which is the half of the rule that says a delivery failure must not be silent.
+     */
+    delivery: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['state', 'attempts', 'error', 'nextAttemptAt', 'deliveredAt'],
+      properties: {
+        state: { type: 'string', enum: ['none', 'pending', 'sent', 'failed'] },
+        attempts: { type: 'integer' },
+        error: { type: 'string' },
+        nextAttemptAt: { type: ['string', 'null'], format: 'date-time' },
+        deliveredAt: { type: ['string', 'null'], format: 'date-time' },
+      },
+    },
+    /** What this run produced and still holds. Empty once an email-only report has been sent. */
+    outputs: { type: 'array', items: outputFileResponse },
   },
 } as const;
 
@@ -209,7 +276,7 @@ const reportResponse = {
     span: spanSchema,
     resolved: resolvedSchema,
     unresolvable: unresolvableSchema,
-    outputs: { type: 'object', additionalProperties: true },
+    outputs: outputsSchema,
     schedule: scheduleSchema,
     /** `every Monday at 03:00`, so a client need not restate the rules to show them. */
     scheduleSummary: { type: 'string' },
@@ -264,7 +331,7 @@ const reportBody = {
       properties: { objectIds: { type: 'array', items: { type: 'integer' } } },
     },
     span: spanSchema,
-    outputs: { type: 'object', additionalProperties: true },
+    outputs: outputsSchema,
     schedule: scheduleSchema,
     runAs: { type: 'string', maxLength: 64 },
   },
@@ -359,7 +426,16 @@ function viewerOf(request: {
     : { userId: principal.userId, role: principal.role, scope: principal.scope };
 }
 
-function serialiseRun(run: ReportRun): Record<string, unknown> {
+function serialiseRun(
+  run: ReportRun,
+  outputs: readonly {
+    format: string;
+    filename: string;
+    byteSize: number;
+    sha256: string;
+    createdAt: Date;
+  }[] = [],
+): Record<string, unknown> {
   return {
     id: run.id,
     reportId: run.reportId,
@@ -376,6 +452,20 @@ function serialiseRun(run: ReportRun): Record<string, unknown> {
     cells: run.cells,
     errorCode: run.errorCode,
     errorMessage: run.errorMessage,
+    delivery: {
+      state: run.delivery.state,
+      attempts: run.delivery.attempts,
+      error: run.delivery.error,
+      nextAttemptAt: run.delivery.nextAttemptAt?.toISOString() ?? null,
+      deliveredAt: run.delivery.deliveredAt?.toISOString() ?? null,
+    },
+    outputs: outputs.map((file) => ({
+      format: file.format,
+      filename: file.filename,
+      byteSize: file.byteSize,
+      sha256: file.sha256,
+      createdAt: file.createdAt.toISOString(),
+    })),
   };
 }
 
@@ -383,7 +473,7 @@ function serialiseRun(run: ReportRun): Record<string, unknown> {
 const RUNS_PER_PAGE = 50;
 
 export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions): void {
-  const { reports, context, runner, runs, db } = options;
+  const { reports, context, runner, runs, outputStore, db } = options;
 
   app.get(
     '/reports',
@@ -610,7 +700,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     async (request, reply) => {
       const report = await reports.require(viewerOf(request), Number(request.params.id), 'write');
       const run = await runner.runNow(report, request.principal?.login ?? '');
-      return reply.code(201).send(serialiseRun(run));
+      return reply.code(201).send(serialiseRun(run, await outputStore.list(db, run.id)));
     },
   );
 
@@ -640,7 +730,16 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
     async (request) => {
       const report = await reports.get(viewerOf(request), Number(request.params.id));
-      return { items: (await runs.list(db, report.id, RUNS_PER_PAGE)).map(serialiseRun) };
+      const listed = await runs.list(db, report.id, RUNS_PER_PAGE);
+      // One query for every run's outputs rather than one per run: a page of fifty would
+      // otherwise be fifty round trips to say how big things are.
+      const files = await outputStore.listFor(
+        db,
+        listed.map((one) => one.id),
+      );
+      return {
+        items: listed.map((one) => serialiseRun(one, files.get(one.id) ?? [])),
+      };
     },
   );
 
@@ -773,6 +872,78 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           // filename still travels, so saving it produces something named after the report.
           .header('content-disposition', `inline; filename="${slug}.${format}"`)
           .send(format === 'csv' ? renderCsv(document) : renderHtml(document))
+      );
+    },
+  );
+}
+
+/**
+ * Downloading a stored report (`E-09`, `ADR-005`).
+ *
+ * Registered beside `reportRenderRoute` and exempt from the response-schema guard for the same
+ * reason: it answers bytes. The second route in this system to do so after `G-05`'s background,
+ * and it borrows that one's caching shape — the output's own SHA-256 as a strong `ETag`, honoured
+ * on `If-None-Match`, because a stored report never changes and re-downloading a megabyte to be
+ * told so is waste.
+ */
+export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOptions): void {
+  const { reports, runs, outputStore, db } = options;
+
+  app.get<{
+    Params: { id: string; runId: string; format: string };
+    Headers: { 'if-none-match'?: string };
+  }>(
+    '/reports/:id/runs/:runId/:format',
+    {
+      config: READS,
+      schema: {
+        tags: ['reports'],
+        summary: 'Download what a run produced',
+        description:
+          'The stored document, as `html`, `csv` or `zip` depending on what the report was set ' +
+          'to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` ' +
+          'and a second download is a 304.\n\n' +
+          '**An email-only report keeps nothing once it has been delivered** (`ADR-005` ' +
+          'Decision 4) and answers 404 here. It is stored between rendering and sending because a ' +
+          'retry needs the bytes, and a re-render months later is a different document.',
+      },
+    },
+    async (request, reply) => {
+      // Read on the *report* is the gate, and the run has to belong to it: without that check a
+      // caller who may read one report could download any run by guessing an id.
+      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const runId = Number(request.params.runId);
+      const run = await runs.find(db, runId);
+      if (run === undefined || run.reportId !== report.id) {
+        throw new ReportError('REPORT_NOT_FOUND', `run ${String(runId)} does not exist`, {
+          context: { reportId: report.id, phase: 'download' },
+        });
+      }
+
+      const stored = await outputStore.read(db, runId, request.params.format);
+      if (stored === undefined) {
+        throw new ReportError(
+          'REPORT_NOT_FOUND',
+          `run ${String(runId)} has no ${request.params.format} output`,
+          { context: { reportId: report.id, phase: 'download' } },
+        );
+      }
+
+      const etag = `"${stored.sha256}"`;
+      if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+
+      return (
+        reply
+          .type(mediaTypeOf(stored.format))
+          .header('etag', etag)
+          // The URL is stable and the bytes behind it never change, so revalidation is cheap and
+          // correct. `ADR-003` Decision 4 explains why this is not an immutable max-age.
+          .header('cache-control', 'private, max-age=0, must-revalidate')
+          .header('content-disposition', `attachment; filename="${stored.filename}"`)
+          // Belt and braces around a stored document: `G-05` serves an operator's image the same
+          // way, and a report is HTML somebody's browser would happily execute.
+          .header('x-content-type-options', 'nosniff')
+          .send(stored.body)
       );
     },
   );

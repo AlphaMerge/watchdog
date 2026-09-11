@@ -51,9 +51,11 @@ export interface CoreHealthSources {
    * those adds a metric here. `deferred` is the backpressure: reports the sweep found due and
    * could not start because the bound was reached. `failed` is the one an operator acts on — a
    * report that has failed every night for a week is otherwise discovered by somebody asking
-   * where the report is.
+   * where the report is. `undelivered` is `E-09`'s half of the same rule: a report that rendered
+   * and is still waiting on a mail relay is neither a success nor yet a failure, and a gauge is
+   * the only shape that says "this is piling up" while it still is.
    */
-  reports: () => { deferred: number; failed: number };
+  reports: () => { deferred: number; failed: number; undelivered: number };
   /**
    * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`).
    *
@@ -223,6 +225,7 @@ export class CoreHealthService {
       queriesRefused: queries.refused,
       reportsDeferred: reports.deferred,
       reportsFailed: reports.failed,
+      reportsUndelivered: reports.undelivered,
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
       reactionsDeferred: ingestion.deferredReactions,
     };

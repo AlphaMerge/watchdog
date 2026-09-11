@@ -16,6 +16,9 @@ import { ReportService } from '../src/reports/service.js';
 import { ReportContext } from '../src/reports/context.js';
 import { ReportRenderer } from '../src/reports/render.js';
 import { ReportRunner, ReportRunRepository, type ReportRanEvent } from '../src/reports/runs.js';
+import { ReportDelivery, ReportOutputRepository } from '../src/reports/delivery.js';
+import type { DocumentMessage } from '../src/notifications/delivery/email.js';
+import type { DeliveryResult } from '../src/notifications/delivery/transport.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -51,6 +54,11 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   let reportRunner: ReportRunner;
   let reportRuns: ReportRunRepository;
   let reportRepositoryRef: ReportRepository;
+  let reportOutputs: ReportOutputRepository;
+  let reportDelivery: ReportDelivery;
+  const sentMail: DocumentMessage[] = [];
+  /** Mutable so a case can make the relay fail, and read back by the stub below. */
+  const relay: { answer: DeliveryResult } = { answer: { ok: true, detail: 'test relay' } };
   const auditedRuns: ReportRanEvent[] = [];
   let authorGroupId: number;
   let sensorId: number;
@@ -76,11 +84,26 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     });
     const reportRenderer = new ReportRenderer({ context: reportContext, history, logger: silent });
     reportRuns = new ReportRunRepository();
+    reportOutputs = new ReportOutputRepository();
+    reportDelivery = new ReportDelivery({
+      db,
+      outputs: reportOutputs,
+      // A relay that records rather than sends, so the delivery cases assert what went out
+      // without standing up SMTP.
+      email: {
+        sendDocument: (message: DocumentMessage): Promise<DeliveryResult> => {
+          sentMail.push(message);
+          return Promise.resolve(relay.answer);
+        },
+      },
+      logger: silent,
+    });
     reportRunner = new ReportRunner({
       db,
       reports: reportRepository,
       runs: reportRuns,
       renderer: reportRenderer,
+      delivery: reportDelivery,
       logger: silent,
       audit: (event) => {
         auditedRuns.push(event);
@@ -109,6 +132,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         renderer: reportRenderer,
         runner: reportRunner,
         runs: reportRuns,
+        outputStore: reportOutputs,
       },
       auth: {
         accounts,
@@ -842,6 +866,160 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.equal(event.requestedBy, 'author');
       assert.equal(event.runAs, 'reader', 'the act-as, which is the auditable fact');
       assert.equal(event.trigger, 'manual');
+    });
+  });
+
+  describe('storing and delivering over the wire (E-09)', () => {
+    it('defaults to storing HTML and sending nothing', async () => {
+      const made = await makeReport('default-outputs');
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: as(author),
+      });
+      assert.deepEqual(listed.json<{ outputs: unknown }>().outputs, {
+        formats: ['html'],
+        delivery: 'store',
+        recipients: [],
+        zip: false,
+      });
+    });
+
+    it('refuses an email delivery with nowhere to send it, at the write', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers: as(author),
+        payload: {
+          name: 'nowhere',
+          kind: 'table_only',
+          outputs: { formats: ['csv'], delivery: 'email' },
+        },
+      });
+      assert.equal(response.statusCode, 400);
+      assert.match(
+        response.json<{ error: { message: string } }>().error.message,
+        /needs at least one recipient/u,
+      );
+    });
+
+    it('refuses a format nothing renders, at the schema', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers: as(author),
+        payload: { name: 'pdf-please', kind: 'table_only', outputs: { formats: ['pdf'] } },
+      });
+      assert.equal(response.statusCode, 400);
+    });
+
+    it('lists what a run produced, and downloads it with a strong ETag', async () => {
+      const made = await makeReport('downloadable', {
+        subjects: { objectIds: [sensorId] },
+        outputs: { formats: ['html', 'csv'], delivery: 'store' },
+      });
+      const started = await app.inject({
+        method: 'POST',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      assert.equal(started.statusCode, 201, started.body);
+      const run = started.json<{
+        id: number;
+        outputs: { format: string; filename: string; sha256: string }[];
+        delivery: { state: string };
+      }>();
+      assert.deepEqual(
+        run.outputs.map((one) => one.format),
+        ['html', 'csv'],
+      );
+      assert.equal(run.delivery.state, 'none', 'nothing to deliver for a stored-only report');
+
+      const csv = run.outputs.find((one) => one.format === 'csv');
+      assert.ok(csv);
+      const download = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs/${String(run.id)}/csv`,
+        headers: as(author),
+      });
+      assert.equal(download.statusCode, 200, download.body);
+      assert.match(download.headers['content-type'] ?? '', /^text\/csv/u);
+      assert.equal(download.headers.etag, `"${csv.sha256}"`);
+      assert.match(
+        download.headers['content-disposition'] ?? '',
+        new RegExp(`filename="${csv.filename}"`, 'u'),
+      );
+      assert.equal(download.headers['x-content-type-options'], 'nosniff');
+      assert.ok(download.body.startsWith('Report,downloadable'), download.body.slice(0, 40));
+
+      // A stored report never changes, so the second download is a 304.
+      const again = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs/${String(run.id)}/csv`,
+        headers: { ...as(author), 'if-none-match': `"${csv.sha256}"` },
+      });
+      assert.equal(again.statusCode, 304);
+      assert.equal(again.body, '');
+    });
+
+    it('will not hand a run of one report to a reader of another', async () => {
+      // Without checking that the run belongs to the report, a caller who may read one report
+      // could download any run by guessing an id.
+      const mine = await makeReport('mine-to-read', { subjects: { objectIds: [sensorId] } });
+      const theirs = await makeReport('not-yours-to-read', { subjects: { objectIds: [sensorId] } });
+      const run = (
+        await app.inject({
+          method: 'POST',
+          url: `/api/v1/reports/${String(theirs.id)}/runs`,
+          headers: as(author),
+        })
+      ).json<{ id: number }>();
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(mine.id)}/runs/${String(run.id)}/html`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 404);
+    });
+
+    it('arms a delivery on the run, and records it once it has gone', async () => {
+      const before = sentMail.length;
+      const made = await makeReport('mailed', {
+        subjects: { objectIds: [sensorId] },
+        outputs: {
+          formats: ['csv'],
+          delivery: 'store-and-email',
+          recipients: ['ops@example.test'],
+          zip: true,
+        },
+      });
+      const run = (
+        await app.inject({
+          method: 'POST',
+          url: `/api/v1/reports/${String(made.id)}/runs`,
+          headers: as(author),
+        })
+      ).json<{ id: number; delivery: { state: string }; outputs: { format: string }[] }>();
+      assert.equal(run.delivery.state, 'pending');
+      assert.deepEqual(
+        run.outputs.map((one) => one.format),
+        ['zip'],
+        'one archive rather than the parts',
+      );
+
+      await reportDelivery.tick();
+      assert.equal(sentMail.length, before + 1);
+      assert.deepEqual(sentMail[before]?.recipients, ['ops@example.test']);
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      const row = listed.json<{ items: { id: number; delivery: { state: string } }[] }>().items[0];
+      assert.equal(row?.id, run.id);
+      assert.equal(row.delivery.state, 'sent');
     });
   });
 

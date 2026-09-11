@@ -100,6 +100,7 @@ import { ReportService } from './reports/service.js';
 import { ReportContext } from './reports/context.js';
 import { ReportRenderer } from './reports/render.js';
 import { ReportRunner, ReportRunRepository } from './reports/runs.js';
+import { ReportDelivery, ReportOutputRepository } from './reports/delivery.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -856,11 +857,20 @@ async function serve(): Promise<void> {
   const reportRenderer = new ReportRenderer({ context: reportContext, history, logger });
   const reportAudit = new CompositeAuditSink(reportAuditSinks(auditSinks));
   const reportRuns = new ReportRunRepository();
+  const reportOutputs = new ReportOutputRepository();
+  // `N-07`'s transport, not a second one — a report is an attachment, not a new channel (`E-09`).
+  const reportDelivery = new ReportDelivery({
+    db,
+    outputs: reportOutputs,
+    email,
+    logger,
+  });
   const reportRunner = new ReportRunner({
     db,
     reports: reportRepository,
     runs: reportRuns,
     renderer: reportRenderer,
+    delivery: reportDelivery,
     logger,
     // The act-as `E-03` deferred: an audit row for a report that actually ran, naming both who
     // asked and whose visibility it used.
@@ -897,6 +907,7 @@ async function serve(): Promise<void> {
     renderer: reportRenderer,
     runner: reportRunner,
     runs: reportRuns,
+    outputStore: reportOutputs,
   };
 
   // **Runs abandoned by a core that stopped mid-render are cleared once, here.** `running` is a
@@ -911,7 +922,13 @@ async function serve(): Promise<void> {
     logger,
     component: 'report-sweep',
     what: 'a report sweep failed',
-    run: () => reportRunner.tick(),
+    run: async () => {
+      // Rendering first, then delivering: a report that just rendered goes out on this same pass
+      // rather than waiting a minute, and a delivery backlog cannot starve the renders because
+      // each half is separately bounded.
+      await reportRunner.tick();
+      await reportDelivery.tick();
+    },
     intervalMs: 60_000,
   });
   reportSweep.start();
@@ -1173,7 +1190,11 @@ async function serve(): Promise<void> {
       ingestionDiscards: () => ingestion.stats(),
       reports: () => {
         const stats = reportRunner.stats();
-        return { deferred: stats.deferred, failed: stats.failed };
+        return {
+          deferred: stats.deferred,
+          failed: stats.failed,
+          undelivered: reportDelivery.stats().pending,
+        };
       },
     },
     ingest: async (results) => {

@@ -3,6 +3,7 @@ import type { AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { ReportSpan } from './span.js';
 import type { ReportSchedule } from './cadence.js';
+import type { ReportOutputs } from './outputs.js';
 
 /**
  * Every statement a report needs, and nothing that decides anything (`E-01`).
@@ -42,9 +43,6 @@ export function isReportKind(value: unknown): value is ReportKind {
 export interface ReportSubjects {
   readonly objectIds: readonly number[];
 }
-
-/** A stub until `E-09`. Stored, never interpreted here. */
-export type ReportOutputs = Record<string, unknown>;
 
 export interface ReportRow {
   readonly id: number;

@@ -7,13 +7,13 @@ import {
   isReportKind,
   type ReportGrant,
   type ReportKind,
-  type ReportOutputs,
   type ReportRepository,
   type ReportRow,
   type ReportSubjects,
 } from './repository.js';
 import { validateSpan, type ReportSpan } from './span.js';
 import { validateSchedule, type ReportSchedule } from './cadence.js';
+import { validateOutputs, DEFAULT_OUTPUTS, type ReportOutputs } from './outputs.js';
 
 /**
  * What a caller may do with a report, and every write that changes one (`E-01`).
@@ -75,7 +75,8 @@ export interface ReportInput {
   readonly subjects?: ReportSubjects;
   /** `unknown` because it arrives from JSON; `validateSpan` is what turns it into a `ReportSpan`. */
   readonly span?: unknown;
-  readonly outputs?: ReportOutputs;
+  /** `unknown` because it arrives from JSON; `validateOutputs` is what narrows it (`E-09`). */
+  readonly outputs?: unknown;
   /** `unknown` because it arrives from JSON; `validateSchedule` is what narrows it (`E-08`). */
   readonly schedule?: unknown;
   /** The login whose visibility this report renders through (`§6`). */
@@ -170,6 +171,7 @@ export class ReportService {
     const subjects = validSubjects(input.subjects ?? { objectIds: [] });
     const span = validateSpan(input.span ?? DEFAULT_SPAN);
     const schedule = validateSchedule(input.schedule ?? DEFAULT_SCHEDULE);
+    const outputs = validateOutputs(input.outputs ?? DEFAULT_OUTPUTS);
 
     return this.#db.tx(async (tx) => {
       await this.#refuseDuplicateName(tx, name, null);
@@ -181,7 +183,7 @@ export class ReportService {
         kind,
         subjects,
         span,
-        outputs: input.outputs ?? { formats: ['html'], delivery: 'store' },
+        outputs,
         schedule,
         runAsUserId: runAs.userId,
         runAsLogin: runAs.login,
@@ -238,7 +240,7 @@ export class ReportService {
       if (patch.kind !== undefined) next.kind = validKind(patch.kind);
       if (patch.subjects !== undefined) next.subjects = validSubjects(patch.subjects);
       if (patch.span !== undefined) next.span = validateSpan(patch.span);
-      if (patch.outputs !== undefined) next.outputs = patch.outputs;
+      if (patch.outputs !== undefined) next.outputs = validateOutputs(patch.outputs);
       if (patch.schedule !== undefined) next.schedule = validateSchedule(patch.schedule);
 
       if (patch.runAs !== undefined && patch.runAs !== current.runAsLogin) {

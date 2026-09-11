@@ -100,7 +100,14 @@ const server = new ApiServer({
   // Without one, `GET /maps/:id/view` is simply not registered — and a reference that
   // silently omits a route is exactly what this generator exists to prevent (`H-07`).
   mapResolver: stub,
-  reports: { service: stub, context: stub, renderer: stub },
+  reports: {
+    service: stub,
+    context: stub,
+    renderer: stub,
+    runner: stub,
+    runs: stub,
+    outputStore: stub,
+  },
   discovery: stub,
   rediscovery: stub,
   provision: () => Promise.resolve({}),

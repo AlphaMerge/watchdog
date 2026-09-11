@@ -7,6 +7,7 @@ import { nextReportRun, validateSchedule } from './cadence.js';
 import { ReportError } from './errors.js';
 import type { ReportRepository, ReportRow } from './repository.js';
 import type { ReportRenderer } from './render.js';
+import type { ReportDelivery } from './delivery.js';
 
 /**
  * Running a report, on a schedule or on demand (`E-08`, `CAPABILITIES.MD §6`).
@@ -57,6 +58,14 @@ export interface ReportRun {
   readonly cells: number | null;
   readonly errorCode: string;
   readonly errorMessage: string;
+  /** Where the document went (`E-09`). */
+  readonly delivery: {
+    readonly state: 'none' | 'pending' | 'sent' | 'failed';
+    readonly attempts: number;
+    readonly error: string;
+    readonly nextAttemptAt: Date | null;
+    readonly deliveredAt: Date | null;
+  };
 }
 
 interface RawRun {
@@ -75,11 +84,17 @@ interface RawRun {
   cells: number | null;
   error_code: string;
   error_message: string;
+  delivery_state: 'none' | 'pending' | 'sent' | 'failed';
+  delivery_attempts: number;
+  delivery_error: string;
+  delivery_next_at: Date | null;
+  delivered_at: Date | null;
 }
 
 const RUN_COLUMNS =
   'id, report_id, trigger, requested_by, state, queued_at, started_at, finished_at, ' +
-  'duration_ms, span_label, sections, unavailable, cells, error_code, error_message';
+  'duration_ms, span_label, sections, unavailable, cells, error_code, error_message, ' +
+  'delivery_state, delivery_attempts, delivery_error, delivery_next_at, delivered_at';
 
 function toRun(row: RawRun): ReportRun {
   return {
@@ -98,6 +113,13 @@ function toRun(row: RawRun): ReportRun {
     cells: row.cells,
     errorCode: row.error_code,
     errorMessage: row.error_message,
+    delivery: {
+      state: row.delivery_state,
+      attempts: row.delivery_attempts,
+      error: row.delivery_error,
+      nextAttemptAt: row.delivery_next_at,
+      deliveredAt: row.delivered_at,
+    },
   };
 }
 
@@ -218,6 +240,11 @@ export interface ReportRunnerOptions {
   readonly reports: ReportRepository;
   readonly runs: ReportRunRepository;
   readonly renderer: ReportRenderer;
+  /**
+   * Where the document goes (`E-09`). Optional, so a build with no reporting delivery still runs
+   * and records — and so the `E-08` tests that predate it keep asserting what they were about.
+   */
+  readonly delivery?: ReportDelivery;
   readonly logger: Logger;
   /** Records that a report ran, for the audit log (`E-03` deferred this here). */
   readonly audit?: (event: ReportRanEvent) => Promise<void>;
@@ -268,6 +295,7 @@ export class ReportRunner {
   readonly #reports: ReportRepository;
   readonly #runs: ReportRunRepository;
   readonly #renderer: ReportRenderer;
+  readonly #delivery: ReportDelivery | undefined;
   readonly #logger: Logger;
   readonly #audit: ((event: ReportRanEvent) => Promise<void>) | undefined;
   readonly #now: () => Date;
@@ -286,6 +314,7 @@ export class ReportRunner {
     this.#reports = options.reports;
     this.#runs = options.runs;
     this.#renderer = options.renderer;
+    this.#delivery = options.delivery;
     this.#logger = options.logger.child({ component: 'report-runner' });
     this.#audit = options.audit;
     this.#now = options.now ?? ((): Date => new Date());
@@ -450,8 +479,39 @@ export class ReportRunner {
 
       spanLabel = document.window.label;
       runAs = document.runAs;
-      // **The document is not stored, and that is `E-09`'s decision to make** — see migration 048.
-      // What is kept is the shape of it, which is what makes a run reviewable without it.
+
+      // **Stored and armed before the run is marked succeeded**, so a run that says it worked has
+      // its output. The reverse order would leave a succeeded run with nothing to download after a
+      // crash between the two writes, which is the state that reads as data loss.
+      try {
+        await this.#delivery?.place(claimed.id, report, document);
+      } catch (error) {
+        const code = error instanceof ReportError ? error.code : 'REPORT_STORE_FAILED';
+        const message = error instanceof Error ? error.message : 'the output could not be stored';
+        await this.#runs.finish(this.#db, claimed.id, {
+          state: 'failed',
+          spanLabel,
+          code,
+          message,
+        });
+        this.#failed += 1;
+        this.#logger.error(
+          { reportId: report.id, runId: claimed.id, code, message },
+          'a report rendered but its output could not be stored',
+        );
+        await this.#record(
+          report,
+          claimed.id,
+          trigger,
+          requestedBy,
+          runAs,
+          spanLabel,
+          'failed',
+          code,
+        );
+        return (await this.#runs.find(this.#db, claimed.id)) ?? claimed;
+      }
+
       await this.#runs.finish(this.#db, claimed.id, {
         state: 'succeeded',
         spanLabel,

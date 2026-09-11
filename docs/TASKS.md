@@ -14039,11 +14039,60 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       17 cadence tests, 13 runner tests against a real database, 7 API.
 
-- [ ] **E-09 — Delivery** · M · E-08 · Store, store and email, or email only, with optional ZIP.
+- [x] **E-09 — Delivery** · M · E-08 · Store, store and email, or email only, with optional ZIP.
       The email half is `N-07`'s transport unchanged — a report is an attachment, not a new
       channel. **The failure to design against is one this project already has a rule for**: a
       scheduled report that cannot deliver must not retry into an alarm storm, and must not fail
       silently either.
+
+      **Landed 2026-09-11, and it needed an ADR first.** `ADR-003` Decision 1 put uploaded files in
+      PostgreSQL and explicitly refused to cover this case — *"if a later feature wants files
+      measured in hundreds of megabytes — packet captures, report archives — that is a different
+      question and it gets its own ADR"*. `ADR-005` is that ADR, and it settles **only Phase 13's
+      third question**: a stored report lives in PostgreSQL as `bytea`, bounded by `E-04`'s cell
+      limit rather than a second number, compressed by TOAST rather than by the application, and
+      admitting `html`, `csv` and `zip` only. The PDF and graph questions stay open, and the ADR
+      says it is reopened when they are answered rather than treating this as a precedent.
+
+      **`ADR-005` Decision 4 is the one that was not obvious.** Email-only still stores, and then
+      deletes: a delivery that fails is retried, a retry needs the bytes, and the alternatives are
+      re-rendering — minutes of work, and a *different document* once a rollup has moved underneath
+      it — or holding megabytes in memory across an outage. A delivery that has **permanently
+      failed keeps its output**, because deleting the evidence of a failure is the opposite of what
+      somebody investigating one needs.
+
+      The failure rule is kept with four things rather than one: bounded attempts (five, over about
+      ninety minutes) with a growing delay; **a permanent rejection that is not retried at all**,
+      using the retryable/permanent distinction `N-07` already draws between an address the relay
+      refused and a relay that timed out; one row holding one state, so a relay down for an hour is
+      one failed report rather than sixty log lines; and a terminal `failed` that nothing re-arms
+      on a timer. Core Health gains `reportsUndelivered` — **a gauge, not a counter**, because the
+      question is how many are stuck *now*.
+
+      **`N-07`'s transport did need a second entry point**, and pretending otherwise would have
+      meant fabricating an eighteen-field `MessageContext` about a sensor that does not exist.
+      `EmailTransport.sendDocument` shares the relay selection, the fallback, the header
+      sanitising and `P-119`'s partial-send detection; `send` is unchanged from the outside and the
+      alarm-shaped `OutgoingMessage` is untouched. The `X-MS-Sensor` header is now omitted rather
+      than claiming sensor 0.
+
+      The ZIP writer is ~140 lines over `node:zlib`, for the reason this project writes its own
+      syslog and NetFlow: a small, completely specified slice of a format against a dependency tree
+      inside a service whose premise is that an operator installs one thing. It is checked against
+      the specification byte by byte **and handed to a real `unzip`**, which verifies every entry's
+      CRC — an implementation that satisfies only its own reader is worth very little.
+
+      Three defects found while writing it, all by the tests:
+
+      - **`0o100644 << 16` is negative.** The Unix file mode in the central directory overflows a
+        signed 32-bit shift, so `writeUInt32LE` refused it and *every* archive threw. `>>> 0`.
+      - **Two clocks in one comparison.** `place` wrote `delivery_next_at` with SQL's `now()` while
+        `tick` compared it against the runner's injected clock. Fine until they differ, and then
+        nothing is ever due.
+      - **An enum column orders by declaration, not alphabet.** `ORDER BY format` gives
+        `html, csv, zip`, which is what was wanted and not what the test assumed.
+
+      8 ZIP tests (one against a real `unzip`), 14 delivery tests against a real database, 6 API.
 
 - [ ] **E-10 — Retention of stored reports** · S · E-09 · What the housekeeper does with old
       output. Follows `S-14`'s shape — a bound an operator sets, enforced by the same loop that

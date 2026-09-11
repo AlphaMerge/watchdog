@@ -8,6 +8,7 @@ import {
   type OutgoingMessage,
 } from './transport.js';
 import type { Escaping } from '../placeholders.js';
+import type { Recipient } from '../templates.js';
 
 export interface EmailTransportOptions {
   config: SmtpConfig;
@@ -20,6 +21,44 @@ export interface EmailTransportOptions {
 interface Attempt {
   readonly relay: string;
   readonly result: DeliveryResult;
+}
+
+/** One file on a message. Only email can carry these; no other method has an attachment. */
+export interface MailAttachment {
+  readonly filename: string;
+  readonly contentType: string;
+  readonly content: Buffer;
+}
+
+/**
+ * A message to send, with nothing about *why* in it.
+ *
+ * **The alarm shape is `OutgoingMessage` and is one caller's contract, not SMTP's.** `E-09` sends a
+ * report, which has no sensor, no notification request and no `MessageContext` — eighteen fields
+ * that would all have to be filled with lies. Rather than loosen that type for every transport, or
+ * build a second SMTP client, the relay handling below works on this and both entry points build
+ * one. `send` is unchanged from the outside.
+ */
+interface Envelope {
+  readonly subject: string;
+  readonly body: string;
+  readonly html: boolean;
+  readonly priority: number;
+  readonly from: string;
+  readonly attachments: readonly MailAttachment[];
+  /** For the correlation headers and the log lines. `sensorId` 0 means "not about a sensor". */
+  readonly requestId: number;
+  readonly sensorId: number;
+}
+
+/** What `E-09` hands this transport: a document, some addresses, and nothing else. */
+export interface DocumentMessage {
+  readonly subject: string;
+  readonly body: string;
+  readonly recipients: readonly string[];
+  readonly attachments: readonly MailAttachment[];
+  /** Ties the delivered mail back to the row that owed it. A report run's id. */
+  readonly requestId: number;
 }
 
 /**
@@ -71,17 +110,75 @@ export class EmailTransport implements DeliveryTransport {
       };
     }
 
-    const addresses = this.#addressesIn(message);
+    const addresses = this.#addressesIn(message.recipients);
     if ('error' in addresses) return addresses.error;
 
+    const override = message.settings['senderOverride'];
+    return this.#deliver(
+      {
+        subject: message.subject,
+        body: message.body,
+        html: message.settings['format'] === 'html',
+        priority: message.priority,
+        from: headerSafe(
+          typeof override === 'string' && override !== '' ? override : this.#config.sender,
+        ),
+        attachments: [],
+        requestId: message.requestId,
+        sensorId: message.sensorId,
+      },
+      addresses.to,
+    );
+  }
+
+  /**
+   * Sends a document to a list of addresses (`E-09`).
+   *
+   * The same relays, the same fallback, the same header sanitising and the same partial-send
+   * detection `P-119` added — a report is an attachment, not a new channel, and building a second
+   * path to the same relay is how the two drift.
+   */
+  async sendDocument(message: DocumentMessage): Promise<DeliveryResult> {
+    if (!this.configured) {
+      return {
+        ok: false,
+        retryable: false,
+        error:
+          'no SMTP relay is configured — set notifications.smtp.primary.host and ' +
+          'notifications.smtp.sender',
+      };
+    }
+    const addresses = this.#addressesIn(
+      message.recipients.map((value) => ({ kind: 'address' as const, value })),
+    );
+    if ('error' in addresses) return addresses.error;
+
+    return this.#deliver(
+      {
+        subject: message.subject,
+        body: message.body,
+        html: false,
+        // 3 is normal. A report is not an alarm, and one that arrives marked high-importance every
+        // month is how a mail client's rules learn to ignore it.
+        priority: 3,
+        from: headerSafe(this.#config.sender),
+        attachments: message.attachments,
+        requestId: message.requestId,
+        sensorId: 0,
+      },
+      addresses.to,
+    );
+  }
+
+  async #deliver(mail: Envelope, to: readonly string[]): Promise<DeliveryResult> {
     const attempts: Attempt[] = [];
     for (const [name, relay] of this.#relays()) {
-      const result = await this.#sendVia(relay, name, message, addresses.to);
+      const result = await this.#sendVia(relay, name, mail, to);
       attempts.push({ relay: name, result });
       if (result.ok) {
         if (attempts.length > 1) {
           this.#logger.warn(
-            { requestId: message.requestId, relay: name },
+            { requestId: mail.requestId, relay: name },
             'the primary relay failed; the message went out through the fallback',
           );
         }
@@ -115,10 +212,10 @@ export class EmailTransport implements DeliveryTransport {
     if (this.#config.fallback.host !== '') yield ['fallback', this.#config.fallback];
   }
 
-  #addressesIn(message: OutgoingMessage): { to: string[] } | { error: DeliveryResult } {
+  #addressesIn(recipients: readonly Recipient[]): { to: string[] } | { error: DeliveryResult } {
     const to: string[] = [];
     const unresolved: string[] = [];
-    for (const recipient of message.recipients) {
+    for (const recipient of recipients) {
       if (recipient.kind === 'address') to.push(headerSafe(recipient.value));
       else unresolved.push(`${recipient.kind} "${recipient.value}"`);
     }
@@ -154,31 +251,41 @@ export class EmailTransport implements DeliveryTransport {
   async #sendVia(
     relay: SmtpRelay,
     name: string,
-    message: OutgoingMessage,
+    mail: Envelope,
     to: readonly string[],
   ): Promise<DeliveryResult> {
     try {
       const transport = this.#transportFor(name, relay);
-      const html = message.settings['format'] === 'html';
-      const override = message.settings['senderOverride'];
-      const from = headerSafe(
-        typeof override === 'string' && override !== '' ? override : this.#config.sender,
-      );
+      const { html, from } = mail;
 
       const sent: unknown = await transport.sendMail({
         from,
         to: [...to],
-        subject: headerSafe(message.subject),
-        ...(html ? { html: message.body } : { text: message.body }),
+        subject: headerSafe(mail.subject),
+        ...(html ? { html: mail.body } : { text: mail.body }),
+        ...(mail.attachments.length === 0
+          ? {}
+          : {
+              attachments: mail.attachments.map((file) => ({
+                // Sanitised here as well: a filename is built from an operator's report title and
+                // travels in a Content-Disposition header, which is line-oriented like every
+                // other one.
+                filename: headerSafe(file.filename),
+                contentType: file.contentType,
+                content: file.content,
+              })),
+            }),
         headers: {
           // What an operator's mail client sorts on. 1-2 high, 3 normal, 4-5 low, which is the
           // convention every client agrees on even though the header is not standardised.
-          'X-Priority': String(message.priority),
-          Importance: message.priority <= 2 ? 'high' : message.priority >= 4 ? 'low' : 'normal',
+          'X-Priority': String(mail.priority),
+          Importance: mail.priority <= 2 ? 'high' : mail.priority >= 4 ? 'low' : 'normal',
           // Ties a delivered message back to the row that owed it, which is the only way to
           // answer "did this alarm go out" from the mail side.
-          'X-MS-Request': String(message.requestId),
-          'X-MS-Sensor': String(message.sensorId),
+          'X-MS-Request': String(mail.requestId),
+          // Omitted rather than claiming sensor zero: `E-09` sends a report, which is not about
+          // one sensor, and a header that says `0` is a worse answer than no header.
+          ...(mail.sensorId === 0 ? {} : { 'X-MS-Sensor': String(mail.sensorId) }),
         },
       });
       // Narrowed rather than trusted: `@types/nodemailer` lags the runtime (see
@@ -229,7 +336,7 @@ export class EmailTransport implements DeliveryTransport {
         // because "delivered" for a message half the list never saw is how a rota gap survives
         // for months.
         this.#logger.warn(
-          { relay: name, rejected, requestId: message.requestId, sensorId: message.sensorId },
+          { relay: name, rejected, requestId: mail.requestId, sensorId: mail.sensorId },
           'the relay rejected some recipients',
         );
         return { ok: true, detail: `${name}: ${messageId}; rejected ${rejected.join(', ')}` };

@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-151 routes.
+152 routes.
 
 ## Conventions
 
@@ -1435,7 +1435,7 @@ Renders the report against its span and its security context, and records the ou
 | --- | --- | --- | --- |
 | `id` | path | string | **required** |
 
-**201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage }
+**201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage, delivery, outputs }
 
 ### `GET /api/v1/reports/{id}/access`
 
@@ -1488,6 +1488,20 @@ Runs the report against its span and its security context and answers the docume
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | string | **required** |
+
+**200**
+
+### `GET /api/v1/reports/{id}/runs/{runId}/{format}`
+
+Download what a run produced
+
+The stored document, as `html`, `csv` or `zip` depending on what the report was set to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` and a second download is a 304. **An email-only report keeps nothing once it has been delivered** (`ADR-005` Decision 4) and answers 404 here. It is stored between rendering and sending because a retry needs the bytes, and a re-render months later is a different document.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `runId` | path | string | **required** |
+| `format` | path | string | **required** |
 
 **200**
 

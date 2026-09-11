@@ -398,3 +398,45 @@ failed** rises when one report is broken: a security context that was deleted or
 that resolves to nothing, or a document over the size limit. The two name different fixes, which is
 why they are two lines.
 
+---
+
+## What happens to a report once it has run
+
+A report renders one or both of HTML and CSV, and is delivered one of three ways: stored, stored
+and emailed, or emailed only. **A new report stores HTML and sends nothing** — creating one must
+not arrange for this system to send mail.
+
+**A stored report lives in the database** (`ADR-005`), not in a directory. Backing up the database
+backs up the reports; there is no second procedure, and a restore does not produce a list of
+reports whose files are all missing. The cost is that backups grow with what you retain, which is
+what `E-10`'s retention setting is for.
+
+**"Email only" still stores the report briefly.** A delivery that fails is retried, a retry needs
+the bytes, and re-rendering later is a *different document* — the same span gives different numbers
+once a rollup or retention has moved underneath it. The stored copy is deleted as soon as it has
+gone. A delivery that has permanently failed keeps its copy, because that is the one somebody
+investigating needs.
+
+**The ZIP option replaces the attachments rather than joining them.** A report set to render HTML
+and CSV with ZIP on produces one archive containing both, not three files.
+
+### When a report cannot be delivered
+
+Four rules, and they are the same ones the alarm pipeline follows.
+
+- **Bounded retries with a growing delay** — five attempts over roughly ninety minutes, per
+  report. A hundred reports queued behind one dead relay retry on their own schedules.
+- **A permanent rejection is not retried at all.** An address the relay refused will be refused
+  again; only a relay that timed out is worth waiting for. The distinction comes from the relay's
+  own response code.
+- **One report, one failure.** A relay that has been down for an hour is one report in `failed`
+  with one log line, not sixty.
+- **Failed means failed.** Nothing re-arms a delivery on a timer. `GET /reports/:id/runs` shows the
+  state, the attempt count and the relay's own error, and Core Health's **Reports waiting to be
+  delivered** rises while a backlog exists and falls when it clears.
+
+`GET /reports/:id/runs/:runId/:format` downloads what a run produced — `html`, `csv` or `zip`. The
+bytes carry their own SHA-256 as an ETag, so a second download of an unchanged report is a 304.
+Reading a report is enough to download its output; the run has to belong to the report, so an id
+from somewhere else answers 404 rather than serving somebody else's data.
+
