@@ -352,3 +352,49 @@ silently missing its last four hundred sensors would be worse than no report.
 CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
 is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
 
+---
+
+## When a report runs
+
+A report runs when somebody asks (`POST /reports/:id/runs`) or on a schedule: hourly, daily,
+weekly, monthly, quarterly or annual. **A new report is manual** — creating one does not schedule
+one, because choosing a frequency for somebody is this system deciding on its own to send email.
+`GET /reports/:id` answers `scheduleSummary` in words and `nextRunAt`; **a null `nextRunAt` is not
+an error**, it means the report does not run on its own.
+
+A few rules are worth knowing before somebody files a bug about them.
+
+**A monthly report set to the 31st runs on the 28th of February**, not never. The day is clamped to
+the end of a shorter month. A report that silently had no February would be missing the month
+somebody eventually asks about.
+
+**A schedule from the schedule library is a permission window, not the cadence.** Attaching one to
+a report means "monthly on the 1st at 02:00, but only while this window is open", which is `§4`'s
+rule that inactive periods pause reports as well as monitoring. A booking that lands while the
+window is shut is moved forward to the next open minute — up to a week, which is as long as a
+weekly calendar can be shut — rather than skipped. A window that is never open means the report
+never runs on its own, which is a configuration you can make and is reported as a null next run.
+
+**One run at a time.** Asking for a run while one is in flight answers 409 rather than queueing:
+a render is minutes of work, and a button pressed six times must not become six of them. Starting a
+run needs `write` on the report; reading its history needs only `read`.
+
+**A run that was in flight when the core stopped is marked failed at the next startup**, with
+`REPORT_INTERRUPTED`. A report more than six hours behind its booking is skipped rather than run,
+so a core that was down for two days does not produce a burst of reports each covering a period the
+next one also covers — the log says when this happens, and the next run is on time.
+
+**Every run is a row.** `GET /reports/:id/runs` answers the last fifty: when, who asked, what period
+it covered, how many sensors it rendered, how long it took, and — if it failed — the same error code
+the API would have answered with. That is what tells you at 09:00 whether last night worked.
+
+**A report that ran writes an audit entry**, naming both who asked and the account whose visibility
+it rendered through. Those are routinely different, and the second is the one that decides what the
+document contained.
+
+Core Health carries two channels for this. **Scheduled reports deferred** rises when more reports
+are due than the core will render at once — schedule fewer, or spread them out. **Report runs
+failed** rises when one report is broken: a security context that was deleted or disabled, a span
+that resolves to nothing, or a document over the size limit. The two name different fixes, which is
+why they are two lines.
+

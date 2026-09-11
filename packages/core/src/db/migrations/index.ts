@@ -45,6 +45,7 @@ import { migration044 } from './044-maps.js';
 import { migration045 } from './045-map-background.js';
 import { migration046 } from './046-map-shares.js';
 import { migration047 } from './047-reports.js';
+import { migration048 } from './048-report-runs.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -101,6 +102,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration045,
   migration046,
   migration047,
+  migration048,
 ];
 
 export type { Migration } from './types.js';

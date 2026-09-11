@@ -5,9 +5,12 @@ import { AuthError } from '../../auth/errors.js';
 import type { AccessRight } from '../../auth/access.js';
 import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/repository.js';
 import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
+import { REPORT_FREQUENCIES, describeSchedule, validateSchedule } from '../../reports/cadence.js';
+import type { ReportRun, ReportRunner, ReportRunRepository } from '../../reports/runs.js';
 import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
+import type { Database } from '../../db/pool.js';
 import { renderCsv, renderHtml } from '../../reports/table.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
@@ -33,6 +36,10 @@ export interface ReportRouteOptions {
   context: ReportContext;
   /** Turns a report into a document (`E-04`). Required for the same reason `context` is. */
   renderer: ReportRenderer;
+  /** Runs one, on demand or on a schedule (`E-08`). */
+  runner: ReportRunner;
+  runs: ReportRunRepository;
+  db: Database;
 }
 
 interface ReportBody {
@@ -108,6 +115,71 @@ const unresolvableSchema = {
   properties: { code: { type: 'string' }, message: { type: 'string' } },
 } as const;
 
+/**
+ * How often a report runs (`E-08`, `CAPABILITIES.MD §6`).
+ *
+ * `additionalProperties: false` for the reason the span's is: a `weekday` on a monthly report is
+ * a setting somebody made and nothing honours, and silently accepting it is worse than refusing
+ * it. The service refuses the same combinations again — the schema cannot know that `scheduleId`
+ * names a schedule that exists, and the two checks answer different halves.
+ */
+const scheduleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind'],
+  properties: {
+    kind: { type: 'string', enum: [...REPORT_FREQUENCIES] },
+    /** Minutes past the hour for `hourly`, past midnight for everything coarser. */
+    minute: { type: 'integer', minimum: 0, maximum: 1439 },
+    weekday: { type: 'integer', minimum: 0, maximum: 6 },
+    dayOfMonth: { type: 'integer', minimum: 1, maximum: 31 },
+    month: { type: 'integer', minimum: 1, maximum: 12 },
+    timezone: { type: 'string', maxLength: 64 },
+    /** A `M-09` schedule whose active periods gate this (`§4`). */
+    scheduleId: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
+const runResponse = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'id',
+    'reportId',
+    'trigger',
+    'requestedBy',
+    'state',
+    'queuedAt',
+    'startedAt',
+    'finishedAt',
+    'durationMs',
+    'spanLabel',
+    'sections',
+    'unavailable',
+    'cells',
+    'errorCode',
+    'errorMessage',
+  ],
+  properties: {
+    id: { type: 'integer' },
+    reportId: { type: 'integer' },
+    trigger: { type: 'string', enum: ['manual', 'scheduled'] },
+    requestedBy: { type: 'string' },
+    state: { type: 'string', enum: ['running', 'succeeded', 'failed'] },
+    queuedAt: { type: 'string', format: 'date-time' },
+    startedAt: { type: ['string', 'null'], format: 'date-time' },
+    finishedAt: { type: ['string', 'null'], format: 'date-time' },
+    durationMs: { type: ['integer', 'null'] },
+    /** The period it covered, as the report labelled it — "do we have August" is the question. */
+    spanLabel: { type: 'string' },
+    sections: { type: ['integer', 'null'] },
+    unavailable: { type: ['integer', 'null'] },
+    cells: { type: ['integer', 'null'] },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
+  },
+} as const;
+
 const reportResponse = {
   type: 'object',
   additionalProperties: false,
@@ -120,6 +192,9 @@ const reportResponse = {
     'span',
     'outputs',
     'schedule',
+    'scheduleSummary',
+    'nextRunAt',
+    'lastRunAt',
     'runAs',
     'version',
     'createdAt',
@@ -135,7 +210,12 @@ const reportResponse = {
     resolved: resolvedSchema,
     unresolvable: unresolvableSchema,
     outputs: { type: 'object', additionalProperties: true },
-    schedule: { type: 'object', additionalProperties: true },
+    schedule: scheduleSchema,
+    /** `every Monday at 03:00`, so a client need not restate the rules to show them. */
+    scheduleSummary: { type: 'string' },
+    /** When the scheduler will next run this. **Null is not an error** — see the description. */
+    nextRunAt: { type: ['string', 'null'], format: 'date-time' },
+    lastRunAt: { type: ['string', 'null'], format: 'date-time' },
     /**
      * The security context, and **`available` is the half a client has to act on**.
      *
@@ -185,7 +265,7 @@ const reportBody = {
     },
     span: spanSchema,
     outputs: { type: 'object', additionalProperties: true },
-    schedule: { type: 'object', additionalProperties: true },
+    schedule: scheduleSchema,
     runAs: { type: 'string', maxLength: 64 },
   },
 } as const;
@@ -232,6 +312,11 @@ function serialise(report: ReportRow, now: Date): Record<string, unknown> {
     ...resolveFor(report, now),
     outputs: report.outputs,
     schedule: report.schedule,
+    // Regenerated rather than stored: one description of what a schedule means, beside the code
+    // that acts on it. A stored summary is a second copy that goes stale on the first edit.
+    scheduleSummary: describeSchedule(validateSchedule(report.schedule)),
+    nextRunAt: report.nextRunAt?.toISOString() ?? null,
+    lastRunAt: report.lastRunAt?.toISOString() ?? null,
     runAs: {
       login: report.runAsLogin,
       // **Both ways of losing a context, not just the one `E-01` could see.** A deleted account
@@ -274,8 +359,31 @@ function viewerOf(request: {
     : { userId: principal.userId, role: principal.role, scope: principal.scope };
 }
 
+function serialiseRun(run: ReportRun): Record<string, unknown> {
+  return {
+    id: run.id,
+    reportId: run.reportId,
+    trigger: run.trigger,
+    requestedBy: run.requestedBy,
+    state: run.state,
+    queuedAt: run.queuedAt.toISOString(),
+    startedAt: run.startedAt?.toISOString() ?? null,
+    finishedAt: run.finishedAt?.toISOString() ?? null,
+    durationMs: run.durationMs,
+    spanLabel: run.spanLabel,
+    sections: run.sections,
+    unavailable: run.unavailable,
+    cells: run.cells,
+    errorCode: run.errorCode,
+    errorMessage: run.errorMessage,
+  };
+}
+
+/** How many past runs one listing shows. A month of hourly runs is more than anybody reads. */
+const RUNS_PER_PAGE = 50;
+
 export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions): void {
-  const { reports, context } = options;
+  const { reports, context, runner, runs, db } = options;
 
   app.get(
     '/reports',
@@ -474,6 +582,65 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         visible: resolved.visible,
         unavailable: resolved.unavailable,
       };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/reports/:id/runs',
+    {
+      config: READS,
+      schema: {
+        tags: ['reports'],
+        summary: 'Run this report now',
+        description:
+          'Renders the report against its span and its security context, and records the ' +
+          'outcome. **Needs `write`, not `read`** — a render is minutes of work against the same ' +
+          'database serving live checks, so starting one is a write even though it changes ' +
+          'nothing about the report.\n\n' +
+          '**One run at a time.** A report already rendering answers 409 rather than queueing: a ' +
+          'button pressed six times must not become six renders competing for the same pool. The ' +
+          'constraint is a partial unique index, so two requests racing lose at the database ' +
+          'rather than in a window between a check and an insert.\n\n' +
+          'The rendered document is not kept — `E-09` decides where a report goes. What this ' +
+          'records is that it ran, what period it covered, how large it was, and why it failed ' +
+          'if it did, which is what tells an operator at 09:00 whether last night worked.',
+        response: { 201: runResponse },
+      },
+    },
+    async (request, reply) => {
+      const report = await reports.require(viewerOf(request), Number(request.params.id), 'write');
+      const run = await runner.runNow(report, request.principal?.login ?? '');
+      return reply.code(201).send(serialiseRun(run));
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    '/reports/:id/runs',
+    {
+      config: READS,
+      schema: {
+        tags: ['reports'],
+        summary: 'When this report ran, and what happened',
+        description:
+          `Newest first, at most ${String(RUNS_PER_PAGE)} of them. A run that failed carries the ` +
+          'same code the API would have answered with, so an operator reading this and an ' +
+          'operator reading a 422 are told the same thing.\n\n' +
+          'A run left `failed` with `REPORT_INTERRUPTED` was in flight when the core stopped. It ' +
+          'is marked at the next startup rather than left `running` for ever — the partial unique ' +
+          'index over `running` would otherwise keep that report unrunnable.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: runResponse } },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      return { items: (await runs.list(db, report.id, RUNS_PER_PAGE)).map(serialiseRun) };
     },
   );
 

@@ -5,7 +5,7 @@ import {
   describeCadence,
   nextRun,
   type CadenceSpec,
-} from '../src/discovery/cadence.js';
+} from '../src/schedules/cadence.js';
 
 /**
  * When a rediscovery next runs (`D-07`).

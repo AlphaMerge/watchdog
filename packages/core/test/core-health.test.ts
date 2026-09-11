@@ -51,6 +51,8 @@ function sources(
     alarmsFired: number;
     nextWakeAt: Date | null;
     queriesRefused: number;
+    reportsDeferred: number;
+    reportsFailed: number;
     resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
@@ -72,6 +74,10 @@ function sources(
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
       nextWakeAt: overrides.nextWakeAt ?? null,
+    }),
+    reports: () => ({
+      deferred: overrides.reportsDeferred ?? 0,
+      failed: overrides.reportsFailed ?? 0,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
     ingestionDiscards: () => ({ discardedFutureTime: overrides.resultsFutureDated ?? 0 }),

@@ -85,6 +85,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         stream: () => ({ overflowed: 2 }),
         probes: () => ({ probesDown: 1, probesSilent: 2 }),
         alarms: () => ({ fired: 6, nextWakeAt: null }),
+        reports: () => ({ deferred: 5, failed: 3 }),
         queries: () => ({ refused: 2 }),
         ingestionDiscards: () => ({ discardedFutureTime: 0 }),
         delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),

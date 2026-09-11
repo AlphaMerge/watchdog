@@ -15,6 +15,7 @@ import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService } from '../src/reports/service.js';
 import { ReportContext } from '../src/reports/context.js';
 import { ReportRenderer } from '../src/reports/render.js';
+import { ReportRunner, ReportRunRepository, type ReportRanEvent } from '../src/reports/runs.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -47,6 +48,10 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   let author = '';
   let reader = '';
   let readerGroupId: number;
+  let reportRunner: ReportRunner;
+  let reportRuns: ReportRunRepository;
+  let reportRepositoryRef: ReportRepository;
+  const auditedRuns: ReportRanEvent[] = [];
   let authorGroupId: number;
   let sensorId: number;
   let hiddenSensorId: number;
@@ -62,11 +67,25 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     const access = new AccessService({ db, logger: silent });
     const history = new HistoryService({ db, logger: silent });
     const reportRepository = new ReportRepository();
+    reportRepositoryRef = reportRepository;
     const reportContext = new ReportContext({
       db,
       repository: reportRepository,
       access,
       logger: silent,
+    });
+    const reportRenderer = new ReportRenderer({ context: reportContext, history, logger: silent });
+    reportRuns = new ReportRunRepository();
+    reportRunner = new ReportRunner({
+      db,
+      reports: reportRepository,
+      runs: reportRuns,
+      renderer: reportRenderer,
+      logger: silent,
+      audit: (event) => {
+        auditedRuns.push(event);
+        return Promise.resolve();
+      },
     });
 
     const server = new ApiServer({
@@ -87,7 +106,9 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       reports: {
         service: new ReportService({ db, repository: reportRepository, logger: silent }),
         context: reportContext,
-        renderer: new ReportRenderer({ context: reportContext, history, logger: silent }),
+        renderer: reportRenderer,
+        runner: reportRunner,
+        runs: reportRuns,
       },
       auth: {
         accounts,
@@ -222,6 +243,9 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     version: number;
     subjects: { objectIds: number[] };
     span: { kind: string; offset?: number; timezone?: string };
+    scheduleSummary: string;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
     resolved?: {
       from: string;
       to: string;
@@ -695,6 +719,129 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: as(reader),
       });
       assert.equal(response.statusCode, 404);
+    });
+  });
+
+  describe('scheduling and running over the wire (E-08)', () => {
+    it('defaults to manual, and says so in words rather than only in a document', async () => {
+      // Creating a report must not schedule one: `§6` offers six frequencies and choosing any of
+      // them for somebody is this system deciding on its own to send email.
+      const made = await makeReport('unscheduled');
+      assert.deepEqual(made.span.kind, 'month');
+      assert.equal(made.scheduleSummary, 'only when somebody runs it');
+      assert.equal(made.nextRunAt, null, 'null is not an error — it is "does not run on its own"');
+    });
+
+    it('describes a schedule an operator set, and books it', async () => {
+      const made = await makeReport('scheduled', {
+        subjects: { objectIds: [sensorId] },
+        schedule: { kind: 'weekly', weekday: 0, minute: 180, timezone: 'UTC' },
+      });
+      assert.equal(made.scheduleSummary, 'every Monday at 03:00');
+    });
+
+    it('refuses a schedule field the frequency will not honour', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers: as(author),
+        payload: {
+          name: 'bad-schedule',
+          kind: 'table_only',
+          schedule: { kind: 'monthly', weekday: 2 },
+        },
+      });
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.json<{ error: { code: string } }>().error.code, 'REPORT_INVALID');
+    });
+
+    it('runs on demand, records the run, and lists it', async () => {
+      const made = await makeReport('run-me', { subjects: { objectIds: [sensorId] } });
+      const started = await app.inject({
+        method: 'POST',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      assert.equal(started.statusCode, 201, started.body);
+      const run = started.json<{
+        id: number;
+        state: string;
+        spanLabel: string;
+        sections: number;
+      }>();
+      assert.equal(run.state, 'succeeded');
+      assert.ok(run.spanLabel.length > 0, 'and says which period it covered');
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      assert.equal(listed.statusCode, 200);
+      assert.ok(listed.json<{ items: { id: number }[] }>().items.some((one) => one.id === run.id));
+    });
+
+    it('needs write to start one, because a render is minutes of work', async () => {
+      // Read is enough to look at a report; starting one is a long sequence of reads against the
+      // database serving live checks, so it is a write even though it changes nothing.
+      const made = await makeReport('write-to-run', { subjects: { objectIds: [sensorId] } });
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/reports/${String(made.id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'read' },
+      });
+      const refused = await app.inject({
+        method: 'POST',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(reader),
+      });
+      assert.equal(refused.statusCode, 403);
+      assert.equal(refused.json<{ error: { code: string } }>().error.code, 'REPORT_FORBIDDEN');
+
+      // Reading the history needs only read, which is the asymmetry that makes it useful.
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(reader),
+      });
+      assert.equal(listed.statusCode, 200);
+    });
+
+    it('answers 409 rather than queueing a second run of the same report', async () => {
+      const made = await makeReport('busy', { subjects: { objectIds: [sensorId] } });
+      const report = await reportRepositoryRef.find(db, made.id);
+      assert.ok(report);
+      // Hold the slot the way an in-flight render does.
+      assert.ok(await reportRuns.claim(db, made.id, 'manual', 'holder'));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json<{ error: { code: string } }>().error.code, 'REPORT_BUSY');
+    });
+
+    it('records the audit event, naming who asked and whose eyes it used', async () => {
+      const before = auditedRuns.length;
+      // `reader` rather than `temp`: the E-03 cases above delete one account and disable
+      // another, and a fixture that quietly depends on test order is a flake waiting to happen.
+      const made = await makeReport('audited', {
+        runAs: 'reader',
+        subjects: { objectIds: [sensorId] },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/reports/${String(made.id)}/runs`,
+        headers: as(author),
+      });
+      const event = auditedRuns[before];
+      assert.ok(event);
+      assert.equal(event.requestedBy, 'author');
+      assert.equal(event.runAs, 'reader', 'the act-as, which is the auditable fact');
+      assert.equal(event.trigger, 'manual');
     });
   });
 

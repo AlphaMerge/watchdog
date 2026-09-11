@@ -24,7 +24,8 @@ export type ReportErrorCode =
   | 'REPORT_GROUP_NOT_FOUND'
   | 'REPORT_USER_NOT_FOUND'
   | 'REPORT_NO_CONTEXT'
-  | 'REPORT_TOO_LARGE';
+  | 'REPORT_TOO_LARGE'
+  | 'REPORT_BUSY';
 
 export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   REPORT_INVALID: 400,
@@ -44,6 +45,11 @@ export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   // request entity is a few hundred bytes — and it is not a 500, because nothing failed: the
   // answer is "narrow it", and only the author can.
   REPORT_TOO_LARGE: 422,
+  // **409, because the state of the report is what refuses it** — the same reasoning as
+  // `REPORT_CHANGED`. A report already rendering will not render again, and the fix is to wait
+  // rather than to change the request. A 429 would suggest a rate limit that clears on its own
+  // schedule; this clears when that run finishes, which the runs list can be asked about.
+  REPORT_BUSY: 409,
 };
 
 export class ReportError extends AppError {

@@ -7,7 +7,7 @@ import {
   nextRun,
   type Cadence,
   type CadenceSpec,
-} from './cadence.js';
+} from '../schedules/cadence.js';
 import { DiscoveryError } from './errors.js';
 import type { DiscoveryService } from './service.js';
 

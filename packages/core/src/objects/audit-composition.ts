@@ -56,6 +56,18 @@ export function scheduleAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging, all.configNotifier, all.scheduleSync, all.dependencySync];
 }
 
+/**
+ * A report that ran (`E-08`).
+ *
+ * **The record and nothing else**, deliberately. The other sets here fan out to caches and
+ * synchronisers because the mutation *changed* something they hold; a report that ran changed no
+ * configuration at all. What it did was move data past a boundary under somebody's visibility
+ * scope, and the only things that want to know are the two that keep the record.
+ */
+export function reportAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
 /** Editing the trigger library, which changes who is notified and not what is scanned. */
 export function triggerAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging, all.triggerSync];

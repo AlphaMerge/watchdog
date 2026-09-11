@@ -13966,12 +13966,78 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 - [ ] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
       exists, and worth doing with CSV rather than after the pictures.
 
-- [ ] **E-08 — Scheduling** · M · E-04 · One-off "run now", and hourly, daily, weekly, monthly,
+- [x] **E-08 — Scheduling** · M · E-04 · One-off "run now", and hourly, daily, weekly, monthly,
       quarterly or annual. **Two constraints decide the design.** `CLAUDE.md` says nothing blocks
       the scheduler, and a report is the longest-running thing this system will ever do — so it
       runs where a check does not, and its progress is visible. And `§4` says a Schedule's
       inactive periods pause reports as well as monitoring, so this reuses the existing schedule
       resolution rather than growing a second idea of "is it office hours".
+
+      **Landed 2026-09-11.** Migration 048 adds `report_run` and `report.next_run_at`;
+      `reports/cadence.ts` answers when; `reports/runs.ts` runs it on its own `PeriodicSweep`, two
+      at a time, nowhere near the timing wheel. `§4`'s window is honoured by asking `isActiveAt`,
+      which is `M-09`'s own evaluator — a cadence says when, a window says whether, and neither
+      learned the other's job.
+
+      **Three of the six frequencies could reuse `D-07`'s cadence and three could not**, for a
+      mechanical reason rather than a preference: that module finds the next firing by scanning
+      forward a minute at a time, bounded at a week. A year is half a million minutes and half a
+      million calls into the zone database. Hourly, daily and weekly delegate to it unchanged;
+      monthly, quarterly and annual compute the civil date and resolve it through `E-02`'s
+      `instantOf`, so "the 1st at 00:00 in Beirut" lands on the morning that has no midnight.
+      **It moved to `schedules/cadence.ts` to make that honest** — it was never about discovery,
+      and it is the event twin of the window in `definition.ts`.
+
+      Writing the tests found **four defects, three of them in code that was already green**:
+
+      - **`nextRun` can book the instant it was given.** `Math.ceil` on a minute boundary returns
+        it unchanged, so a scheduler re-booking from the instant it just fired books the same
+        instant, finds it due, and runs every minute for ever. Rediscovery never hit it because
+        `tick` passes `now`, which has milliseconds. **The fix is not in the shared module**: a
+        pre-existing test says "at or after" is deliberate there, so a sweep waking a moment early
+        does not skip the occurrence it was woken for. `reports/cadence.ts` asks for strictly-after
+        explicitly, and says why.
+      - **A one-day window grace skips most months.** A monthly report on the 1st with an
+        office-hours window would have run only in months whose 1st is a weekday. The grace is a
+        week, because a `M-09` window *is* a week: seven days covers every minute it has, so if
+        none is open the answer is "never" rather than "later", and seven days cannot reach the
+        next firing of a monthly report.
+      - **`started_at` was never written**, so every run's duration was null and the history could
+        not answer "is this report getting slower".
+      - **The `queued` state was a lie.** Nothing could produce one — a render starts the moment
+        its slot is claimed — and the API schema would have promised a state it never answers.
+        Removed; `E-09` can add one with its own migration when delivery is the thing that waits.
+
+      **One run at a time, and the database says so.** `report_run_active_idx` is a partial unique
+      index over `running`, so a double-clicked button loses on an insert rather than in the window
+      between a check and an insert, and answers 409. `recover()` clears runs abandoned by a core
+      that stopped mid-render — without it that index keeps the report unrunnable for ever, which
+      is what a `kill -9` would have left behind.
+
+      The next run is booked **before** the render, so a render that throws does not leave the
+      report due for ever; `D-07` arrived at the same rule the same way. A report more than six
+      hours behind is skipped with a log line rather than run, so a core that was down for two days
+      does not produce a burst of runs each covering a period the next one also covers.
+
+      **The audit row `E-03` deferred is here**, because an act-as that actually happened is the
+      auditable event. It names *both* accounts: who asked, and whose visibility it rendered
+      through. Those are routinely different and the second is the one that decides what left the
+      building. `reportAuditSinks` is the record and nothing else — a report that ran changed no
+      configuration, so none of the caches or synchronisers the other sets fan out to want it.
+
+      Core Health gains `reportsDeferred` and `reportsFailed`, because a subsystem with a pool and
+      a queue reports here (`CLAUDE.md`). Two lines rather than one: a rising `reportsDeferred` is
+      an installation that has scheduled more than it can render, a rising `reportsFailed` is one
+      report that is broken, and collapsing them would name neither fix.
+
+      Not here: what happens to the document. `E-09` decides that, and `ADR-005` has not settled
+      where a generated report lives — storing it now to save it for later would be deciding that
+      question in a migration. A run records that it rendered, what period it covered, how large it
+      was, and why it failed. **That is not a wasted render**: a scheduled run that finds a
+      disabled security context or a document over the cell limit records the failure at 03:00,
+      which is the point of scheduling something.
+
+      17 cadence tests, 13 runner tests against a real database, 7 API.
 
 - [ ] **E-09 — Delivery** · M · E-08 · Store, store and email, or email only, with optional ZIP.
       The email half is `N-07`'s transport unchanged — a report is an attachment, not a new

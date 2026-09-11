@@ -296,6 +296,37 @@ export type Mutation =
        * watched — a wider blast radius than most single-object edits, and one nobody would
        * think to look for after the fact.
        */
+      action: 'report.ran';
+      objectId: null;
+      reportId: number;
+      runId: number;
+      reportName: string;
+      trigger: 'manual' | 'scheduled';
+      /** Who asked. Empty for the scheduler, which is nobody. */
+      requestedBy: string;
+      /** Whose visibility it rendered through — the act-as fact, and the one that matters. */
+      runAs: string;
+      spanLabel: string;
+      outcome: 'succeeded' | 'failed';
+      errorCode: string;
+    }
+  | {
+      /**
+       * A report was rendered through somebody's visibility scope (`E-08`).
+       *
+       * **The auditable fact is the act-as, not the render.** `§6` lets a report run under a named
+       * account's scope, which means data that account can see leaves the building on a schedule,
+       * started by nobody. `requestedBy` is who asked and `runAs` is whose eyes it used; they are
+       * routinely different accounts, and the second is the one that decides what the document
+       * contains.
+       *
+       * `E-03` deferred this here because until something ran a report there was no event:
+       * resolving a security context on an API read is not one.
+       *
+       * `objectId` is null for the reason a schedule's is — a report is not a tree object
+       * (`E-01`) — and the subjects it covered live in the report rather than being copied into
+       * every audit row it writes.
+       */
       action: 'schedule.created';
       objectId: null;
       scheduleId: number;
@@ -484,6 +515,16 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         name: mutation.name,
         method: mutation.method,
         delivered: mutation.delivered,
+      };
+    case 'report.ran':
+      return {
+        action: mutation.action,
+        reportId: mutation.reportId,
+        runId: mutation.runId,
+        trigger: mutation.trigger,
+        requestedBy: mutation.requestedBy,
+        runAs: mutation.runAs,
+        outcome: mutation.outcome,
       };
     case 'schedule.created':
     case 'schedule.deleted':

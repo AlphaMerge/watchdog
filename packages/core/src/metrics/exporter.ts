@@ -167,6 +167,18 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'On-demand checks turned away because too many were already in flight.',
     counter: true,
   },
+  {
+    key: 'reportsDeferred',
+    name: 'ms_core_reports_deferred_total',
+    help: 'Scheduled reports found due and not started because the render pool was full.',
+    counter: true,
+  },
+  {
+    key: 'reportsFailed',
+    name: 'ms_core_report_runs_failed_total',
+    help: 'Report runs that ended in a failure. A rising rate is one report that is broken.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

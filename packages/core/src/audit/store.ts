@@ -61,6 +61,7 @@ export const AUDIT_CATEGORIES = [
   'template',
   'schedule',
   'sensor',
+  'report',
 ] as const;
 
 /**
@@ -372,6 +373,27 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         },
         // No diff, because nothing changed. The entry exists to say who sent it and whether it
         // arrived, which is the whole of what a test send is.
+        diff: [],
+      };
+
+    case 'report.ran':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          reportId: mutation.reportId,
+          runId: mutation.runId,
+          name: mutation.reportName,
+          trigger: mutation.trigger,
+          // **Both accounts, always.** Who asked and whose visibility it used are different
+          // questions, and a row recording only the first would say nothing about what the
+          // report was allowed to contain.
+          requestedBy: mutation.requestedBy,
+          runAs: mutation.runAs,
+          span: mutation.spanLabel,
+          outcome: mutation.outcome,
+          ...(mutation.errorCode === '' ? {} : { errorCode: mutation.errorCode }),
+        },
         diff: [],
       };
 

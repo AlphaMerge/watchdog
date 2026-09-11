@@ -301,7 +301,7 @@ export function planReportSpan(
 
 /* ------------------------------------------------------------------ the calendar */
 
-interface Wall {
+export interface Wall {
   year: number;
   month: number;
   day: number;
@@ -335,7 +335,7 @@ function formatterFor(timezone: string): Intl.DateTimeFormat {
 }
 
 /** Where an instant falls on the wall clock of a zone. */
-function wallOf(at: Date, timezone: string): Wall {
+export function wallOf(at: Date, timezone: string): Wall {
   const parts = formatterFor(timezone).formatToParts(at);
   const wall: Wall = { year: 0, month: 1, day: 1, hour: 0, minute: 0, second: 0 };
   let bc = false;
@@ -376,7 +376,7 @@ function asUtcMs(wall: Wall): number {
  *   still springs forward at 00:00, and a month there can begin at 01:00 — so "start of day" must
  *   not be assumed to be midnight anywhere in this file.
  */
-function instantOf(timezone: string, wall: Wall): Date {
+export function instantOf(timezone: string, wall: Wall): Date {
   const nominal = asUtcMs(wall);
   const firstOffset = asUtcMs(wallOf(new Date(nominal), timezone)) - nominal;
   const first = nominal - firstOffset;
@@ -399,7 +399,7 @@ function instantOf(timezone: string, wall: Wall): Date {
  * one month is not 31 February, and that 2028 has a 29th. No instant in this function means
  * anything until `instantOf` gives it a zone.
  */
-function civil(
+export function civil(
   year: number,
   month: number,
   day: number,

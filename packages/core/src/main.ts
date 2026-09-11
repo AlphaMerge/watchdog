@@ -19,6 +19,7 @@ import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
   objectAuditSinks,
+  reportAuditSinks,
   scheduleAuditSinks,
   triggerAuditSinks,
   type AuditSinkSet,
@@ -98,6 +99,7 @@ import { MapService } from './maps/service.js';
 import { ReportService } from './reports/service.js';
 import { ReportContext } from './reports/context.js';
 import { ReportRenderer } from './reports/render.js';
+import { ReportRunner, ReportRunRepository } from './reports/runs.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -851,13 +853,76 @@ async function serve(): Promise<void> {
     access: objectAccess,
     logger,
   });
+  const reportRenderer = new ReportRenderer({ context: reportContext, history, logger });
+  const reportAudit = new CompositeAuditSink(reportAuditSinks(auditSinks));
+  const reportRuns = new ReportRunRepository();
+  const reportRunner = new ReportRunner({
+    db,
+    reports: reportRepository,
+    runs: reportRuns,
+    renderer: reportRenderer,
+    logger,
+    // The act-as `E-03` deferred: an audit row for a report that actually ran, naming both who
+    // asked and whose visibility it used.
+    audit: async (event) => {
+      await reportAudit.record(
+        db,
+        event.requestedBy === ''
+          ? { kind: 'system', component: 'report-scheduler' }
+          : { kind: 'user', userId: 0, login: event.requestedBy },
+        [
+          {
+            action: 'report.ran',
+            objectId: null,
+            reportId: event.reportId,
+            runId: event.runId,
+            reportName: event.reportName,
+            trigger: event.trigger,
+            requestedBy: event.requestedBy,
+            runAs: event.runAs,
+            spanLabel: event.spanLabel,
+            outcome: event.outcome,
+            errorCode: event.errorCode,
+          },
+        ],
+        new Date(),
+      );
+    },
+  });
   const reports = {
     service: new ReportService({ db, repository: reportRepository, logger }),
     context: reportContext,
     // And through the same `HistoryService` the sensor pages use, so a report and the graph an
     // operator checks it against cannot disagree about an hour (`E-04`).
-    renderer: new ReportRenderer({ context: reportContext, history, logger }),
+    renderer: reportRenderer,
+    runner: reportRunner,
+    runs: reportRuns,
   };
+
+  // **Runs abandoned by a core that stopped mid-render are cleared once, here.** `running` is a
+  // claim about a process that no longer exists, and the partial unique index would otherwise keep
+  // that report unrunnable for ever (`E-08`).
+  await reportRunner.recover();
+
+  // A report is the longest-running thing this system does, so it runs on its own sweep and never
+  // anywhere near the timing wheel — `CLAUDE.md`: nothing blocks the scheduler. A minute, because
+  // that is the resolution a cadence has, and the same period the rediscovery sweep uses.
+  const reportSweep = new PeriodicSweep({
+    logger,
+    component: 'report-sweep',
+    what: 'a report sweep failed',
+    run: () => reportRunner.tick(),
+    intervalMs: 60_000,
+  });
+  reportSweep.start();
+  lifecycle.onShutdown({
+    name: 'report-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      reportSweep.stop();
+      return Promise.resolve();
+    },
+  });
 
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
@@ -1106,6 +1171,10 @@ async function serve(): Promise<void> {
       evictedChunks: () => housekeeper.stats.evictedChunks,
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
+      reports: () => {
+        const stats = reportRunner.stats();
+        return { deferred: stats.deferred, failed: stats.failed };
+      },
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {

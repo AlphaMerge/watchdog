@@ -221,6 +221,25 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'queries',
     counter: { bits: 64 },
   },
+  // `E-08`. A report is the longest-running thing the core does, so its sweep is a pool with a
+  // queue and `CLAUDE.md` says one of those reports here. **Two lines rather than one**, because
+  // they mean different things to whoever is looking: a rising `reportsDeferred` is an
+  // installation that has scheduled more reports than it can render and needs fewer or a bigger
+  // bound, while a rising `reportsFailed` is one report that is broken — a security context that
+  // was disabled, a span that resolves to nothing, a document over the cell limit. Collapsing
+  // them into "report problems" would name neither fix.
+  {
+    key: 'reportsDeferred',
+    name: 'Scheduled reports deferred',
+    unit: 'reports',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'reportsFailed',
+    name: 'Report runs failed',
+    unit: 'runs',
+    counter: { bits: 64 },
+  },
   // `P-99`. A result stamped far in the future is refused rather than stored, because storing
   // one freezes that sensor's history for ever — `last_result_at` is a high-water mark, and
   // everything genuine after it reads as stale. Refusing it fixes the freeze; this channel is

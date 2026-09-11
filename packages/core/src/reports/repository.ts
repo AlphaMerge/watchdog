@@ -2,6 +2,7 @@ import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { ReportSpan } from './span.js';
+import type { ReportSchedule } from './cadence.js';
 
 /**
  * Every statement a report needs, and nothing that decides anything (`E-01`).
@@ -42,9 +43,8 @@ export interface ReportSubjects {
   readonly objectIds: readonly number[];
 }
 
-/** Stubs until `E-08` and `E-09`. Stored, never interpreted here. */
+/** A stub until `E-09`. Stored, never interpreted here. */
 export type ReportOutputs = Record<string, unknown>;
-export type ReportSchedule = Record<string, unknown>;
 
 export interface ReportRow {
   readonly id: number;
@@ -73,6 +73,16 @@ export interface ReportRow {
    */
   readonly runAsDisabled: boolean;
   readonly version: number;
+  /**
+   * When the scheduler will next run this (`E-08`).
+   *
+   * **Null is not an error.** A manual report has no next run, and neither has one whose `M-09`
+   * window never opens — both are configurations an operator can make, and a client has to be
+   * able to show "this does not run on its own" rather than "something went wrong".
+   */
+  readonly nextRunAt: Date | null;
+  readonly lastRunAt: Date | null;
+  readonly lastRunId: number | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -98,6 +108,9 @@ interface RawReport {
   run_as_login: string;
   run_as_disabled: boolean | null;
   version: string;
+  next_run_at: Date | null;
+  last_run_at: Date | null;
+  last_run_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -119,6 +132,9 @@ function toReport(row: RawReport): ReportRow {
     // `null` is "there is no account to ask", which the null id already reports.
     runAsDisabled: row.run_as_disabled === true,
     version: Number(row.version),
+    nextRunAt: row.next_run_at,
+    lastRunAt: row.last_run_at,
+    lastRunId: row.last_run_id === null ? null : Number(row.last_run_id),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -133,7 +149,8 @@ function toReport(row: RawReport): ReportRow {
  */
 const COLUMNS =
   'r.id, r.name, r.description, r.kind, r.subjects, r.span, r.outputs, r.schedule, ' +
-  'r.run_as_user_id, r.run_as_login, r.version, r.created_at, r.updated_at';
+  'r.run_as_user_id, r.run_as_login, r.version, ' +
+  'r.next_run_at, r.last_run_at, r.last_run_id, r.created_at, r.updated_at';
 
 /**
  * Whether the security context's account has been disabled (`E-03`).

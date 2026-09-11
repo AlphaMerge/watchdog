@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-149 routes.
+151 routes.
 
 ## Conventions
 
@@ -1350,7 +1350,7 @@ The creator’s primary group is granted full access in the same transaction, or
 | `schedule` | object |  |
 | `runAs` | string |  |
 
-**201** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
+**201** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
 ### `GET /api/v1/reports/{id}`
 
@@ -1362,7 +1362,7 @@ A report this account may not read answers 404 rather than 403, so the error can
 | --- | --- | --- | --- |
 | `id` | path | string | **required** |
 
-**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
+**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
 ### `PATCH /api/v1/reports/{id}`
 
@@ -1387,7 +1387,7 @@ Change a report
 | `schedule` | object |  |
 | `runAs` | string |  |
 
-**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
+**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
 ### `DELETE /api/v1/reports/{id}`
 
@@ -1412,6 +1412,30 @@ A report renders through a named account, not through whoever is asking (`§6`).
 | `id` | path | string | **required** |
 
 **200** { runAs, visible, unavailable }
+
+### `GET /api/v1/reports/{id}/runs`
+
+When this report ran, and what happened
+
+Newest first, at most 50 of them. A run that failed carries the same code the API would have answered with, so an operator reading this and an operator reading a 422 are told the same thing. A run left `failed` with `REPORT_INTERRUPTED` was in flight when the core stopped. It is marked at the next startup rather than left `running` for ever — the partial unique index over `running` would otherwise keep that report unrunnable.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { items }
+
+### `POST /api/v1/reports/{id}/runs`
+
+Run this report now
+
+Renders the report against its span and its security context, and records the outcome. **Needs `write`, not `read`** — a render is minutes of work against the same database serving live checks, so starting one is a write even though it changes nothing about the report. **One run at a time.** A report already rendering answers 409 rather than queueing: a button pressed six times must not become six renders competing for the same pool. The constraint is a partial unique index, so two requests racing lose at the database rather than in a window between a check and an insert. The rendered document is not kept — `E-09` decides where a report goes. What this records is that it ran, what period it covered, how large it was, and why it failed if it did, which is what tells an operator at 09:00 whether last night worked.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage }
 
 ### `GET /api/v1/reports/{id}/access`
 

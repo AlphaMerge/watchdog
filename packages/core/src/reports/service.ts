@@ -10,10 +10,10 @@ import {
   type ReportOutputs,
   type ReportRepository,
   type ReportRow,
-  type ReportSchedule,
   type ReportSubjects,
 } from './repository.js';
 import { validateSpan, type ReportSpan } from './span.js';
+import { validateSchedule, type ReportSchedule } from './cadence.js';
 
 /**
  * What a caller may do with a report, and every write that changes one (`E-01`).
@@ -60,6 +60,14 @@ const MAX_SUBJECTS = 500;
  */
 const DEFAULT_SPAN: ReportSpan = { kind: 'month', offset: 1 };
 
+/**
+ * What a report does when nobody said how often.
+ *
+ * Manual, not daily: creating a report should not schedule one. `§6` offers six frequencies and
+ * choosing any of them for somebody would be this system deciding on its own to send email.
+ */
+const DEFAULT_SCHEDULE: ReportSchedule = { kind: 'manual' };
+
 export interface ReportInput {
   readonly name: string;
   readonly description?: string;
@@ -68,7 +76,8 @@ export interface ReportInput {
   /** `unknown` because it arrives from JSON; `validateSpan` is what turns it into a `ReportSpan`. */
   readonly span?: unknown;
   readonly outputs?: ReportOutputs;
-  readonly schedule?: ReportSchedule;
+  /** `unknown` because it arrives from JSON; `validateSchedule` is what narrows it (`E-08`). */
+  readonly schedule?: unknown;
   /** The login whose visibility this report renders through (`§6`). */
   readonly runAs?: string;
 }
@@ -160,6 +169,7 @@ export class ReportService {
     const kind = validKind(input.kind);
     const subjects = validSubjects(input.subjects ?? { objectIds: [] });
     const span = validateSpan(input.span ?? DEFAULT_SPAN);
+    const schedule = validateSchedule(input.schedule ?? DEFAULT_SCHEDULE);
 
     return this.#db.tx(async (tx) => {
       await this.#refuseDuplicateName(tx, name, null);
@@ -172,7 +182,7 @@ export class ReportService {
         subjects,
         span,
         outputs: input.outputs ?? { formats: ['html'], delivery: 'store' },
-        schedule: input.schedule ?? { kind: 'manual' },
+        schedule,
         runAsUserId: runAs.userId,
         runAsLogin: runAs.login,
       });
@@ -229,7 +239,7 @@ export class ReportService {
       if (patch.subjects !== undefined) next.subjects = validSubjects(patch.subjects);
       if (patch.span !== undefined) next.span = validateSpan(patch.span);
       if (patch.outputs !== undefined) next.outputs = patch.outputs;
-      if (patch.schedule !== undefined) next.schedule = patch.schedule;
+      if (patch.schedule !== undefined) next.schedule = validateSchedule(patch.schedule);
 
       if (patch.runAs !== undefined && patch.runAs !== current.runAsLogin) {
         await this.require(viewer, id, 'full', tx);

@@ -44,6 +44,17 @@ export interface CoreHealthSources {
   /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
   queries: () => { refused: number };
   /**
+   * `ReportRunner.stats()` — the report sweep's queue and its failures (`E-08`).
+   *
+   * A report is the longest-running thing this core does and the only one that runs unattended
+   * for minutes at a time, so it is a subsystem with a pool and a queue — `CLAUDE.md` says one of
+   * those adds a metric here. `deferred` is the backpressure: reports the sweep found due and
+   * could not start because the bound was reached. `failed` is the one an operator acts on — a
+   * report that has failed every night for a week is otherwise discovered by somebody asking
+   * where the report is.
+   */
+  reports: () => { deferred: number; failed: number };
+  /**
    * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`).
    *
    * The only one of that service's discard counters on this sensor, and deliberately: the others
@@ -171,6 +182,7 @@ export class CoreHealthService {
     const probes = this.#sources.probes();
     const alarms = this.#sources.alarms();
     const queries = this.#sources.queries();
+    const reports = this.#sources.reports();
     const disk = this.#sources.disk();
 
     const memory = this.#process.memoryUsage();
@@ -209,6 +221,8 @@ export class CoreHealthService {
       alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
       alarmsFired: alarms.fired,
       queriesRefused: queries.refused,
+      reportsDeferred: reports.deferred,
+      reportsFailed: reports.failed,
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
       reactionsDeferred: ingestion.deferredReactions,
     };

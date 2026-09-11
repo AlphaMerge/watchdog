@@ -1,7 +1,13 @@
-import { isKnownTimeZone, weekMinuteOf } from '../schedules/definition.js';
+import { isKnownTimeZone, weekMinuteOf } from './definition.js';
 
 /**
- * When a rediscovery next runs (`D-07`).
+ * When a recurring job next runs (`D-07`, `E-08`).
+ *
+ * **Beside `M-09`'s schedule rather than inside `discovery/`, because it is not about discovery.**
+ * It moved here when `E-08` needed the same answer for reports: a cadence is the *event* twin of
+ * the window in `definition.ts`, the two are read together on every booking, and two copies of
+ * "what is 02:30 on the morning the clocks go forward" is exactly the duplication that produces a
+ * job which runs twice a year and nobody can explain.
  *
  * **Not `M-09`'s schedule, and the difference is the question each answers.** A schedule is a
  * weekly calendar of *windows* — "is monitoring active right now" — which is exactly right for
@@ -87,6 +93,11 @@ export function nextRun(
 ): Date | null {
   const zone = zoneOf(spec);
   // Start on the next whole minute: a cadence fires on a minute, and `from` is usually now.
+  //
+  // **At or after, deliberately** — an instant already on a firing minute is answered unchanged,
+  // so a sweep that ran a moment early does not skip the occurrence it was woken for. A caller
+  // that needs the *next* one, such as a scheduler re-booking from the instant it just fired,
+  // has to say so; `reports/cadence.ts` does, and explains why.
   const start = new Date(Math.ceil(from.getTime() / 60_000) * 60_000);
 
   // A week of minutes covers every cadence: hourly repeats within an hour, daily within a day,

@@ -73,6 +73,7 @@ import type { MapService } from '../maps/service.js';
 import type { ReportService } from '../reports/service.js';
 import type { ReportContext } from '../reports/context.js';
 import type { ReportRenderer } from '../reports/render.js';
+import type { ReportRunner, ReportRunRepository } from '../reports/runs.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -133,7 +134,13 @@ export interface ApiServerOptions {
    * the routes without one would not be a reduced API, it would be an unscoped one. Making them
    * inseparable is cheaper than remembering.
    */
-  reports?: { service: ReportService; context: ReportContext; renderer: ReportRenderer };
+  reports?: {
+    service: ReportService;
+    context: ReportContext;
+    renderer: ReportRenderer;
+    runner: ReportRunner;
+    runs: ReportRunRepository;
+  };
   /**
    * The schedule library (`M-09`).
    *
@@ -610,6 +617,9 @@ export class ApiServer {
             reports: this.#reports.service,
             context: this.#reports.context,
             renderer: this.#reports.renderer,
+            runner: this.#reports.runner,
+            runs: this.#reports.runs,
+            db: this.#db,
           };
           reportRoutes(scope, wired);
           // The one report route that answers text rather than JSON (`E-04`). Exempted from the
