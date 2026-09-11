@@ -92,8 +92,10 @@ import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
 import { AccessService } from './auth/access.js';
 import { MapRepository } from './maps/repository.js';
+import { ReportRepository } from './reports/repository.js';
 import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
+import { ReportService } from './reports/service.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -836,6 +838,10 @@ async function serve(): Promise<void> {
   // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
   const mapResolver = new MapResolver({ db, access: objectAccess, history });
 
+  // Mounted here at the same time the routes were written, rather than a phase later: the maps
+  // note directly above is the record of what happens otherwise.
+  const reports = new ReportService({ db, repository: new ReportRepository(), logger });
+
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
   // generated password, printed once where the operator installing this will see it, and flagged
@@ -918,6 +924,7 @@ async function serve(): Promise<void> {
       required: config.api.requireAuthentication,
     },
     maps,
+    reports,
     mapResolver,
     mapTiles: {
       urlTemplate: config.maps.tileUrl,

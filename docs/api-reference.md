@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-139 routes.
+147 routes.
 
 ## Conventions
 
@@ -1318,6 +1318,128 @@ Different from revoking: a forgotten probe that connects again enrols as a stran
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `gid` | path | string | **required** |
+
+**204**
+
+## reports
+
+### `GET /api/v1/reports`
+
+The reports this account may see
+
+By name. An administrator sees every report; everybody else sees the ones a group they belong to has been granted.
+
+**200** { items }
+
+### `POST /api/v1/reports`
+
+Create a report
+
+The creator’s primary group is granted full access in the same transaction, or a non-administrator would create a report and immediately lose sight of it. `runAs` defaults to the caller: a report renders through somebody’s eyes, and the person making it is the only safe default.
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string | **required** |
+| `description` | string |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |
+| `subjects` | object |  |
+| `span` | object |  |
+| `outputs` | object |  |
+| `schedule` | object |  |
+| `runAs` | string |  |
+
+**201** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+
+### `GET /api/v1/reports/{id}`
+
+One report
+
+A report this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+
+### `PATCH /api/v1/reports/{id}`
+
+Change a report
+
+`If-Match` carries the version this edit was made against. Changing `runAs` needs full access rather than write: it decides whose data the output contains, which is the same class of act as granting access.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string |  |
+| `description` | string |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` |  |
+| `subjects` | object |  |
+| `span` | object |  |
+| `outputs` | object |  |
+| `schedule` | object |  |
+| `runAs` | string |  |
+
+**200** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+
+### `DELETE /api/v1/reports/{id}`
+
+Delete a report
+
+Needs full access, because deleting one takes its grants with it.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**204**
+
+### `GET /api/v1/reports/{id}/access`
+
+Which groups may see this report
+
+Needs full access: who else can read a report is not a read-only detail.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { items }
+
+### `PUT /api/v1/reports/{id}/access/{groupId}`
+
+Grant a group access to this report
+
+Needs full access, so a write holder may edit what a report measures without deciding who else reads it. Granting twice replaces rather than failing.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |
+
+**204**
+
+### `DELETE /api/v1/reports/{id}/access/{groupId}`
+
+Take a group’s access away
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
 
 **204**
 

@@ -53,6 +53,22 @@ TOTP, per account, self-enrolled under the account's own settings. Recovery code
 at enrolment and shown once. An administrator can disable MFA on an account that has locked
 itself out; they cannot read anybody's secret.
 
+### A report renders through an account, and says so when that account is gone
+
+A report is granted to groups the same way a branch of the tree is — `none`, `read`, `write`,
+`full`, highest right across your groups wins, role still the ceiling. Two of its rules are its
+own, and both exist because a report is read later, by somebody who was not in the room:
+
+- **A report names the account whose visibility it renders through**, which defaults to whoever
+  created it. That is what decides which sensors appear in the output, so **changing it needs
+  `full`, not `write`** — a colleague who may edit what a report measures cannot quietly make it
+  measure as you.
+- **Deleting that account does not widen the report; it stops it.** The report keeps the login it
+  was pointed at and reports the account as unavailable, and it will refuse to run rather than run
+  with no scope at all. Point it at a live account to start it again. An operator who deletes a
+  departing colleague's account should expect their scheduled reports to go quiet, and this is
+  where to look when one does.
+
 ---
 
 ## Credentials for monitored devices

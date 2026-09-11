@@ -2,6 +2,7 @@ import { AppError, describeError, type Logger } from '@ms/shared';
 import { DatabaseError } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { MapError } from '../maps/errors.js';
+import { ReportError } from '../reports/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { DiscoveryError } from '../discovery/errors.js';
@@ -75,6 +76,22 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // client as a 500 with its message replaced: the 404 that `G-01` is careful to answer instead
     // of a 403, the 409 a second designer gets from `If-Match`, the 400 for an invalid name. The
     // service was right about all of them and the wire said "the request could not be completed".
+    return envelope(
+      error.status,
+      error.code,
+      error.message,
+      { ...error.context },
+      { ...error.details },
+    );
+  }
+
+  if (error instanceof ReportError) {
+    // Written with the map branch above in view, which was missing until `G-10` went looking and
+    // turned every `MapError` into a 500. The same trap is set here: `ReportError` extends
+    // `AppError`, so without this branch the 404 that hides a report's existence, the 409 from
+    // `If-Match`, and — worst — `REPORT_NO_CONTEXT`'s 422 would all reach the client as "the
+    // request could not be completed". A report whose account was deleted has to say so; that is
+    // the entire reason migration 047 keeps the login.
     return envelope(
       error.status,
       error.code,

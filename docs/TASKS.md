@@ -13732,7 +13732,7 @@ graphical half of the same section and `R-` is remote probes.
 `E-01` to `E-04` and `E-08` to `E-11` need none of that and are the path to a useful report today:
 HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates the pictures.
 
-- [ ] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
+- [x] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
       and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
       same reason: a report is not a tree object. It holds a template kind, an object set, a time
       span, a security context, a schedule and a set of outputs. No rendering and no scheduling
@@ -13743,6 +13743,34 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       quietly stopped mentioning it. A report has the same problem and a worse version of it: a
       monthly report whose sensor was deleted on the 3rd must say so in the output, because a
       report is read by somebody who was not there.
+
+      **Landed 2026-09-11.** Migration 047 creates `report` and `report_access`; `subjects` is a
+      `jsonb` document for the reason above, and the rollback is covered by `migrator.test.ts`'s
+      forward-and-all-the-way-back case — mutation-proved by removing `DROP TYPE IF EXISTS
+      report_kind`, which fails the re-up with `type "report_kind" already exists`.
+
+      **The security context turned out to be the substantive decision, not the object set.**
+      `§6` says a report renders under a named account's visibility, which is an "act as" path
+      granted to whoever can edit a report. Two rules follow, and both are in `reports/service.ts`
+      rather than the schema, because neither can be written as a `CHECK`:
+
+      - **Changing it needs `full`, not `write`.** Everything else `update` touches is a document;
+        this field decides whose data the output contains, which is the same class of act as
+        granting access. A `write` holder may change what a report measures and not as whom.
+      - **Losing the account must stop the report, not unscope it.** The reference is
+        `ON DELETE SET NULL` *and* the login is snapshotted beside it, so a deleted account leaves
+        a readable broken state — the API answers `runAs: { login, available: false }` and
+        `E-03` refuses to run it. The alternative, a null column and nothing else, reads as "run as
+        nobody", and nobody in a scheduler with no session is one careless join from everybody.
+
+      Routes mirror `G-01`'s: `READS` with the right resolved per report, 404 rather than 403 for
+      one the caller may not see, `If-Match` on the write, 204 from the grant routes. `ReportError`
+      got its branch in `api/errors.ts` **in the same commit as the routes** — the catalogue's
+      entry 41 is `G-10` discovering that every `MapError` had been reaching the wire as a 500 for
+      months because that branch was missing. Mounted in `main.ts` at the same time for the other
+      half of that story: `G-01`'s routes existed and nothing passed the service.
+
+      18 service tests and 14 API tests.
 
 - [ ] **E-02 — Time spans, and the rules that bound them** · S · E-01 · Day, week, month, quarter,
       year, and custom start and end. **`§6`'s three rules are the ticket**: a span over 500 days

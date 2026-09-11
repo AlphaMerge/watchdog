@@ -38,6 +38,7 @@ import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
+import { reportRoutes } from './routes/reports.js';
 import {
   PUBLIC_MAP_PREFIX,
   publicMapBackgroundRoute,
@@ -69,6 +70,7 @@ import type { ProbeConfigService } from '../probes/config.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { MapResolver } from '../maps/resolver.js';
 import type { MapService } from '../maps/service.js';
+import type { ReportService } from '../reports/service.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -116,6 +118,14 @@ export interface ApiServerOptions {
   mapTiles?: { urlTemplate: string; attribution: string };
   /** Fills a map's widgets in for the view route (`G-10`). */
   mapResolver?: MapResolver;
+  /**
+   * Reports (`E-01`).
+   *
+   * Optional on the same terms as `maps`: absent, the routes are not registered at all rather
+   * than answering an empty list, because "this build has no reporting" and "this installation
+   * has written no reports" are different answers and a client should be able to tell them apart.
+   */
+  reports?: ReportService;
   /**
    * The schedule library (`M-09`).
    *
@@ -234,6 +244,7 @@ export class ApiServer {
   /** Per share link, because the global limiter already bounds per address (`G-06`). */
   readonly #shareLimit = new ShareRateLimit();
   readonly #mapTiles: { urlTemplate: string; attribution: string } | undefined;
+  readonly #reports: ReportService | undefined;
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -291,6 +302,7 @@ export class ApiServer {
     this.#maps = options.maps;
     this.#mapResolver = options.mapResolver;
     this.#mapTiles = options.mapTiles;
+    this.#reports = options.reports;
     this.#schedules = options.schedules;
     this.#discovery = options.discovery;
     this.#deviceTemplates = options.deviceTemplates;
@@ -584,6 +596,9 @@ export class ApiServer {
             publicMapBackgroundRoute(scope, shared);
             this.#exempting = null;
           }
+        }
+        if (this.#reports !== undefined) {
+          reportRoutes(scope, { reports: this.#reports });
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });
