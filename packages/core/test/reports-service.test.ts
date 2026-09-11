@@ -418,6 +418,66 @@ describe(
       });
     });
 
+    describe('the span, which the service validates on the write (E-02)', () => {
+      it('defaults to last month, so a scheduled report is never about two hours', async () => {
+        const user = await makeUser([await makeGroup(`r-span-${String(seq)}`)]);
+        const report = await reports.create(
+          viewer(user.id),
+          { name: `span-default-${String(seq)}`, kind: 'table_only' },
+          user.login,
+        );
+        assert.deepEqual(report.span, { kind: 'month', offset: 1 });
+      });
+
+      it('stores what it accepted, through a round trip to jsonb and back', async () => {
+        const user = await makeUser([await makeGroup(`r-span2-${String(seq)}`)]);
+        const span = { kind: 'quarter', offset: 2, timezone: 'Pacific/Chatham' };
+        const report = await reports.create(
+          viewer(user.id),
+          { name: `span-kept-${String(seq)}`, kind: 'graph_only', span },
+          user.login,
+        );
+        assert.deepEqual((await reports.get(viewer(user.id), report.id)).span, span);
+      });
+
+      it('refuses a span at the write rather than letting it fail on a schedule', async () => {
+        // The same argument as the security context: the person who typed it is at a keyboard
+        // now, and asleep when the schedule fires.
+        const user = await makeUser([await makeGroup(`r-span3-${String(seq)}`)]);
+        await assert.rejects(
+          () =>
+            reports.create(
+              viewer(user.id),
+              { name: `span-bad-${String(seq)}`, kind: 'table_only', span: { kind: 'fortnight' } },
+              user.login,
+            ),
+          /no report span called/,
+        );
+
+        const report = await reports.create(
+          viewer(user.id),
+          { name: `span-edit-${String(seq)}`, kind: 'table_only' },
+          user.login,
+        );
+        await assert.rejects(
+          () =>
+            reports.update(
+              viewer(user.id),
+              report.id,
+              report.version,
+              { span: { kind: 'month', timezone: 'Mars/Olympus_Mons' } },
+              user.login,
+            ),
+          /not a time zone this system knows/,
+        );
+        // And the refusal left the stored span alone.
+        assert.deepEqual((await reports.get(viewer(user.id), report.id)).span, {
+          kind: 'month',
+          offset: 1,
+        });
+      });
+    });
+
     describe('validation', () => {
       it('refuses a blank name, an over-long one, and a duplicate whatever its case', async () => {
         const user = await makeUser([await makeGroup(`r-v-${String(seq)}`)]);

@@ -1,5 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
+import type { ReportSpan } from './span.js';
 
 /**
  * Every statement a report needs, and nothing that decides anything (`E-01`).
@@ -40,8 +41,7 @@ export interface ReportSubjects {
   readonly objectIds: readonly number[];
 }
 
-/** Stubs until `E-02`, `E-08` and `E-09`. Stored, never interpreted here. */
-export type ReportSpan = Record<string, unknown>;
+/** Stubs until `E-08` and `E-09`. Stored, never interpreted here. */
 export type ReportOutputs = Record<string, unknown>;
 export type ReportSchedule = Record<string, unknown>;
 

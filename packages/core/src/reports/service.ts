@@ -11,9 +11,9 @@ import {
   type ReportRepository,
   type ReportRow,
   type ReportSchedule,
-  type ReportSpan,
   type ReportSubjects,
 } from './repository.js';
+import { validateSpan, type ReportSpan } from './span.js';
 
 /**
  * What a caller may do with a report, and every write that changes one (`E-01`).
@@ -52,12 +52,21 @@ const MAX_DESCRIPTION = 1000;
  */
 const MAX_SUBJECTS = 500;
 
+/**
+ * What a report covers when nobody said.
+ *
+ * Last month, not this one: see `span.ts` on why `offset` defaults to 1. The zone is left out so
+ * it resolves in the core's own zone, which is the only zone an installation certainly agrees on.
+ */
+const DEFAULT_SPAN: ReportSpan = { kind: 'month', offset: 1 };
+
 export interface ReportInput {
   readonly name: string;
   readonly description?: string;
   readonly kind: string;
   readonly subjects?: ReportSubjects;
-  readonly span?: ReportSpan;
+  /** `unknown` because it arrives from JSON; `validateSpan` is what turns it into a `ReportSpan`. */
+  readonly span?: unknown;
   readonly outputs?: ReportOutputs;
   readonly schedule?: ReportSchedule;
   /** The login whose visibility this report renders through (`§6`). */
@@ -150,6 +159,7 @@ export class ReportService {
     const description = validDescription(input.description ?? '');
     const kind = validKind(input.kind);
     const subjects = validSubjects(input.subjects ?? { objectIds: [] });
+    const span = validateSpan(input.span ?? DEFAULT_SPAN);
 
     return this.#db.tx(async (tx) => {
       await this.#refuseDuplicateName(tx, name, null);
@@ -160,7 +170,7 @@ export class ReportService {
         description,
         kind,
         subjects,
-        span: input.span ?? { kind: 'month' },
+        span,
         outputs: input.outputs ?? { formats: ['html'], delivery: 'store' },
         schedule: input.schedule ?? { kind: 'manual' },
         runAsUserId: runAs.userId,
@@ -217,7 +227,7 @@ export class ReportService {
       if (patch.description !== undefined) next.description = validDescription(patch.description);
       if (patch.kind !== undefined) next.kind = validKind(patch.kind);
       if (patch.subjects !== undefined) next.subjects = validSubjects(patch.subjects);
-      if (patch.span !== undefined) next.span = patch.span;
+      if (patch.span !== undefined) next.span = validateSpan(patch.span);
       if (patch.outputs !== undefined) next.outputs = patch.outputs;
       if (patch.schedule !== undefined) next.schedule = patch.schedule;
 

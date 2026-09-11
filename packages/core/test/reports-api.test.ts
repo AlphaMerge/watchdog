@@ -137,6 +137,17 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     kind: string;
     version: number;
     subjects: { objectIds: number[] };
+    span: { kind: string; offset?: number; timezone?: string };
+    resolved?: {
+      from: string;
+      to: string;
+      label: string;
+      timezone: string;
+      bucketSeconds: number;
+      source: string;
+      adjustments: { kind: string; reason: string }[];
+    };
+    unresolvable?: { code: string; message: string };
     runAs: { login: string; available: boolean };
   }
 
@@ -332,6 +343,83 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       });
       assert.equal(response.statusCode, 403);
       assert.equal(response.json<{ error: { code: string } }>().error.code, 'REPORT_FORBIDDEN');
+    });
+  });
+
+  describe('the span, resolved where the author can still see it (E-02)', () => {
+    it('defaults to last month, and says which month that is', async () => {
+      const made = await makeReport('default-span');
+      assert.deepEqual(made.span, { kind: 'month', offset: 1 });
+      assert.ok(made.resolved, 'the response carries the window the span works out to');
+      assert.match(made.resolved.label, /^\d{4}-\d{2} \(/);
+      assert.ok(new Date(made.resolved.to) <= new Date(), 'the last complete month is in the past');
+    });
+
+    it('tells the author their pinned averaging will be overruled, before they save again', async () => {
+      // **The whole reason `resolved` is on the response.** `§6`'s averaging rule is not cosmetic
+      // — it decides which rollup tier answers. An author who pinned five-minute buckets over a
+      // quarter has to learn that here, not from a PDF a month later.
+      const made = await makeReport('coarsened', {
+        span: { kind: 'quarter', offset: 1, timezone: 'UTC', resolutionSeconds: 300 },
+      });
+      assert.ok(made.resolved);
+      assert.equal(made.resolved.bucketSeconds, 3_600);
+      assert.notEqual(made.resolved.source, 'sample');
+      assert.ok(
+        made.resolved.adjustments.some((one) => one.kind === 'resolution-coarsened'),
+        'and the reason travels with it',
+      );
+    });
+
+    it('refuses a span it cannot act on at the schema, before the service sees it', async () => {
+      for (const span of [
+        { kind: 'fortnight' },
+        { kind: 'month', offset: -1 },
+        { kind: 'month', weekStartsOn: 'sunday' },
+      ]) {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/reports',
+          headers: as(author),
+          payload: { name: `bad-span-${JSON.stringify(span)}`, kind: 'table_only', span },
+        });
+        assert.equal(response.statusCode, 400, JSON.stringify(span));
+      }
+    });
+
+    it('refuses a span the schema cannot judge, as a 400 from the service', async () => {
+      // `timezone` is a string either way; only the zone database can say it is not one.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers: as(author),
+        payload: {
+          name: 'bad-zone',
+          kind: 'table_only',
+          span: { kind: 'month', timezone: 'Europe/Berlim' },
+        },
+      });
+      assert.equal(response.statusCode, 400);
+      const body = response.json<{ error: { code: string; message: string } }>();
+      assert.equal(body.error.code, 'REPORT_INVALID');
+      assert.match(body.error.message, /not a time zone/);
+    });
+
+    it('reports an unresolvable span as a field rather than failing the read', async () => {
+      // A month-to-date report is unresolvable for the first instant of every month. Answering
+      // 500 for the whole listing because one report is a millisecond early would be the worse
+      // bug — so the refusal travels as a field on the report it belongs to.
+      const made = await makeReport('to-date', { span: { kind: 'month', offset: 0 } });
+      assert.ok(made.resolved, 'ordinarily it resolves');
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: '/api/v1/reports',
+        headers: as(author),
+      });
+      assert.equal(listed.statusCode, 200);
+      const mine = listed.json<{ items: Wire[] }>().items.find((one) => one.id === made.id);
+      assert.ok(mine?.resolved ?? mine?.unresolvable, 'and always says which');
     });
   });
 

@@ -13772,7 +13772,7 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       18 service tests and 14 API tests.
 
-- [ ] **E-02 — Time spans, and the rules that bound them** · S · E-01 · Day, week, month, quarter,
+- [x] **E-02 — Time spans, and the rules that bound them** · S · E-01 · Day, week, month, quarter,
       year, and custom start and end. **`§6`'s three rules are the ticket**: a span over 500 days
       is rejected and shortened to 365, and a span of 40 to 500 days forces averaging of at least
       60 minutes. Pure logic, property-tested, no database.
@@ -13781,6 +13781,48 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       beside `tiers.ts` rather than in a renderer. **And `CLAUDE.md`'s "no-data is not zero" is the
       case to get right here**: a span with a gap in it must render a gap, in CSV as much as in a
       graph, or a report becomes the most durable way this system can tell a lie.
+
+      **Landed 2026-09-11, and the ticket was wrong about what the work was.** All three rules
+      were already written — `planSeries` in `timeseries/query.ts` has had them since `M-13`,
+      because the history API and the sensor detail page need exactly the same bounds. A second
+      copy beside a renderer is the duplication `CLAUDE.md` forbids for inheritance, and the
+      failure mode is worse here than for a graph: two copies that drift mean a report and the
+      graph a user checks it against are drawn from different data and neither says so. So
+      `reports/span.ts` calls `planSeries` and imports its constants.
+
+      **What was actually missing is the calendar**, which `planSeries` cannot do because it takes
+      two instants. "Last month" is 28 to 31 days long, starts at local midnight in a zone somebody
+      chose, and in that zone one of its days may have had 23 or 25 hours. Three things fell out of
+      writing it that were not in the ticket:
+
+      - **A day does not start at midnight.** `Asia/Beirut` and `America/Santiago` change their
+        clocks *at* 00:00, so that wall time does not exist twice a year and the first instant of
+        the day is 01:00. Resolution takes two offset samples and picks the earlier of two valid
+        instants, the only valid one, or — when the clock jumped over the time entirely — the
+        later, which is the first instant that exists. Property-tested over eight zones including
+        `Australia/Lord_Howe`, whose shift is 30 minutes.
+      - **`offset` defaults to 1, the last complete period.** A monthly report fires on the 1st at
+        02:00, and one covering "this month" would cover two hours — every month, without
+        complaint. `0` is offered for month-to-date and is the only span whose end is clamped to
+        now.
+      - **The 500-day rule is applied to the window before it is labelled**, rather than left to
+        `planSeries`. A 600-day custom span would otherwise be planned over 365 days while the
+        report's own header still said 600. A graph that shortens its x-axis is self-evident; a
+        PDF in a compliance folder is read by somebody who cannot check.
+
+      The resolved window is on the API response as `resolved` — the interval, the bucket width,
+      the rollup tier that will answer, and every adjustment — so an author who pins five-minute
+      averaging over a quarter is told it will be hourly **while they are still looking at the
+      form**. `unresolvable` carries the one refusal a read must not fail on: a month-to-date span
+      fetched at 00:00:00 on the 1st.
+
+      "No-data is not zero" is `E-04`'s to keep, not this ticket's: a span is a window, and nothing
+      here reads a sample. What `E-02` owes `E-04` is that the window is honest — it never covers
+      more than it says, and `to` is exclusive so consecutive periods tile without an overlapping
+      instant. Both are property-tested.
+
+      22 span tests (three of them property-based over 8 zones × 5 kinds), plus 5 API and 3
+      service tests for the wiring.
 
 - [ ] **E-03 — The security context** · M · E-01 · A report runs under a named user's visibility
       scope, so what it contains is what that person could see — not what the person who scheduled

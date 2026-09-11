@@ -1335,7 +1335,7 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 
 Create a report
 
-The creator’s primary group is granted full access in the same transaction, or a non-administrator would create a report and immediately lose sight of it. `runAs` defaults to the caller: a report renders through somebody’s eyes, and the person making it is the only safe default.
+The creator’s primary group is granted full access in the same transaction, or a non-administrator would create a report and immediately lose sight of it. `runAs` defaults to the caller: a report renders through somebody’s eyes, and the person making it is the only safe default. `span` names a calendar period — `{ kind, offset, timezone }` for `day`, `week`, `month`, `quarter` and `year`, or `{ kind: "custom", from, to }` with ISO 8601 instants. **`offset` counts periods back and defaults to 1**, the last complete one: a monthly report fires on the 1st, and "this month" would be two hours long. `0` is the period in progress and ends now. Weeks start on Monday (ISO 8601), and the zone defaults to the core’s own. Add `resolutionSeconds` to pin an averaging interval. The response carries `resolved`: the window the span works out to right now, the bucket width, the rollup tier that will answer, and anything the rules changed — a span of 40 days or more is averaged over at least an hour, and one over 500 days is shortened to 365. A span that cannot resolve yet answers `unresolvable` instead.
 
 **Body**
 
@@ -1350,7 +1350,7 @@ The creator’s primary group is granted full access in the same transaction, or
 | `schedule` | object |  |
 | `runAs` | string |  |
 
-**201** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+**201** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
 
 ### `GET /api/v1/reports/{id}`
 
@@ -1362,7 +1362,7 @@ A report this account may not read answers 404 rather than 403, so the error can
 | --- | --- | --- | --- |
 | `id` | path | string | **required** |
 
-**200** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
 
 ### `PATCH /api/v1/reports/{id}`
 
@@ -1387,7 +1387,7 @@ Change a report
 | `schedule` | object |  |
 | `runAs` | string |  |
 
-**200** { id, name, description, kind, subjects, span, outputs, schedule, runAs, version, createdAt, updatedAt }
+**200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, runAs, version, createdAt, updatedAt }
 
 ### `DELETE /api/v1/reports/{id}`
 

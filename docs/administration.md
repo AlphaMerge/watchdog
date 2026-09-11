@@ -285,3 +285,31 @@ geographical map talks to the provider directly. Two consequences:
 Where a map opens is saved with the map by its author. Panning and zooming are local to a browser
 and are not saved, so a wall display comes back to the same place after a reboot rather than to
 wherever somebody left it.
+
+---
+
+## What period a report covers
+
+A report names a calendar period rather than a number of days: `day`, `week`, `month`, `quarter`,
+`year`, or a custom start and end. Three things about that are worth knowing before somebody files
+a bug about them.
+
+**"Month" means last month, not this one.** The `offset` on a span counts periods backwards and
+defaults to 1, the last complete one. A monthly report fires on the 1st at 02:00, and one covering
+"this month" would cover two hours — every month, without complaint. Set `offset: 0` for
+month-to-date; that is the only span whose end is clamped to now rather than to a calendar
+boundary.
+
+**The period is read in a zone, and the zone is part of the span.** Absent one, it resolves in the
+zone the core process runs in. Weeks start on Monday, as ISO 8601 defines them, and are numbered
+the same way — which is why the week of 28 December 2026 is `2026-W53` and not `2027-W01`.
+
+**Two rules can change the report out from under the request, and both are visible before it
+runs.** A span of 40 days or more is averaged over at least an hour, and one longer than 500 days
+is shortened to 365 counted back from the end. These are the same rules the sensor graphs obey, and
+they are the same code — a report and the graph an operator checks it against cannot disagree. The
+API answers `resolved` alongside every report: the interval it works out to right now, the bucket
+width, the rollup tier that will answer, and anything a rule changed. An author who pinned
+five-minute averaging over a quarter is told it will be hourly while they are still looking at the
+form, rather than a month later in a PDF.
+

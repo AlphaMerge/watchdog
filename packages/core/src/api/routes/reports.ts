@@ -4,6 +4,8 @@ import type { FastifyInstance } from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { AccessRight } from '../../auth/access.js';
 import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/repository.js';
+import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
+import { ReportError } from '../../reports/errors.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
 
@@ -34,6 +36,68 @@ interface ReportBody {
   runAs?: string;
 }
 
+/**
+ * The span document, which `E-02` gave a shape (`CAPABILITIES.MD §6`).
+ *
+ * `additionalProperties: false` on purpose: a typo in `timezone` that the schema waved through
+ * would resolve in the core's own zone and produce a month that is right to within a few hours,
+ * which is the kind of wrong nobody notices until an audit.
+ */
+const spanSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind'],
+  properties: {
+    kind: { type: 'string', enum: [...REPORT_SPAN_KINDS] },
+    /** Periods back from now: 1 is the last complete one, 0 the one in progress. */
+    offset: { type: 'integer', minimum: 0, maximum: MAX_SPAN_OFFSET },
+    timezone: { type: 'string', maxLength: 64 },
+    from: { type: 'string' },
+    to: { type: 'string' },
+    resolutionSeconds: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
+/**
+ * What the span works out to right now, and what the rules did to it.
+ *
+ * **Read-only, and computed per request rather than stored**, because "last month" is a different
+ * fortnight every month. It is on the response at all because `§6`'s rules are not cosmetic: an
+ * author who pinned five-minute averaging over a quarter has to be told it will be rendered hourly
+ * *while they are still looking at the form*, not discover it in a PDF a month later.
+ */
+const resolvedSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['from', 'to', 'label', 'timezone', 'bucketSeconds', 'source', 'adjustments'],
+  properties: {
+    from: { type: 'string', format: 'date-time' },
+    to: { type: 'string', format: 'date-time' },
+    label: { type: 'string' },
+    timezone: { type: 'string' },
+    bucketSeconds: { type: 'integer' },
+    /** Which rollup tier answers — the visible consequence of the averaging rule. */
+    source: { type: 'string' },
+    adjustments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['kind', 'reason'],
+        properties: { kind: { type: 'string' }, reason: { type: 'string' } },
+      },
+    },
+  },
+} as const;
+
+/** Set when the span cannot be resolved at all, which is the only state `resolved` cannot describe. */
+const unresolvableSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['code', 'message'],
+  properties: { code: { type: 'string' }, message: { type: 'string' } },
+} as const;
+
 const reportResponse = {
   type: 'object',
   additionalProperties: false,
@@ -57,7 +121,9 @@ const reportResponse = {
     description: { type: 'string' },
     kind: { type: 'string', enum: [...REPORT_KINDS] },
     subjects: { type: 'object', additionalProperties: true },
-    span: { type: 'object', additionalProperties: true },
+    span: spanSchema,
+    resolved: resolvedSchema,
+    unresolvable: unresolvableSchema,
     outputs: { type: 'object', additionalProperties: true },
     schedule: { type: 'object', additionalProperties: true },
     /**
@@ -106,14 +172,45 @@ const reportBody = {
       required: ['objectIds'],
       properties: { objectIds: { type: 'array', items: { type: 'integer' } } },
     },
-    span: { type: 'object', additionalProperties: true },
+    span: spanSchema,
     outputs: { type: 'object', additionalProperties: true },
     schedule: { type: 'object', additionalProperties: true },
     runAs: { type: 'string', maxLength: 64 },
   },
 } as const;
 
-function serialise(report: ReportRow): Record<string, unknown> {
+/**
+ * The window a span works out to, or why it does not work out to one.
+ *
+ * **A span that cannot resolve must not fail the read.** The one case that reaches this is an
+ * `offset: 0` span asked for before its period has started — a month-to-date report fetched at
+ * 00:00:00 on the 1st — and answering 500 for a listing because one of twenty reports is a
+ * minute early would be a worse bug than the one it reports. The refusal travels as a field on
+ * that report instead, which is also the only way a UI can say which one it is.
+ */
+function resolveFor(report: ReportRow, now: Date): Record<string, unknown> {
+  try {
+    const { window, plan } = planReportSpan(report.span, now);
+    return {
+      resolved: {
+        from: window.from.toISOString(),
+        to: window.to.toISOString(),
+        label: window.label,
+        timezone: window.timezone,
+        bucketSeconds: plan.bucketSeconds,
+        source: plan.source,
+        adjustments: window.adjustments,
+      },
+    };
+  } catch (error) {
+    if (error instanceof ReportError) {
+      return { unresolvable: { code: error.code, message: error.message } };
+    }
+    throw error;
+  }
+}
+
+function serialise(report: ReportRow, now: Date): Record<string, unknown> {
   return {
     id: report.id,
     name: report.name,
@@ -121,6 +218,7 @@ function serialise(report: ReportRow): Record<string, unknown> {
     kind: report.kind,
     subjects: report.subjects,
     span: report.span,
+    ...resolveFor(report, now),
     outputs: report.outputs,
     schedule: report.schedule,
     runAs: { login: report.runAsLogin, available: report.runAsUserId !== null },
@@ -175,7 +273,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         },
       },
     },
-    async (request) => ({ items: (await reports.list(viewerOf(request))).map(serialise) }),
+    async (request) => {
+      // One clock for the whole listing, so twenty reports on the same span all name the same
+      // window rather than drifting apart by however long the loop took.
+      const now = new Date();
+      return { items: (await reports.list(viewerOf(request))).map((one) => serialise(one, now)) };
+    },
   );
 
   app.get<{ Params: { id: string } }>(
@@ -191,7 +294,8 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         response: { 200: reportResponse },
       },
     },
-    async (request) => serialise(await reports.get(viewerOf(request), Number(request.params.id))),
+    async (request) =>
+      serialise(await reports.get(viewerOf(request), Number(request.params.id)), new Date()),
   );
 
   app.post<{ Body: ReportBody }>(
@@ -205,7 +309,17 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
           'The creator’s primary group is granted full access in the same transaction, or a ' +
           'non-administrator would create a report and immediately lose sight of it. `runAs` ' +
           'defaults to the caller: a report renders through somebody’s eyes, and the person ' +
-          'making it is the only safe default.',
+          'making it is the only safe default.\n\n' +
+          '`span` names a calendar period — `{ kind, offset, timezone }` for `day`, `week`, ' +
+          '`month`, `quarter` and `year`, or `{ kind: "custom", from, to }` with ISO 8601 ' +
+          'instants. **`offset` counts periods back and defaults to 1**, the last complete one: ' +
+          'a monthly report fires on the 1st, and "this month" would be two hours long. `0` is ' +
+          'the period in progress and ends now. Weeks start on Monday (ISO 8601), and the zone ' +
+          'defaults to the core’s own. Add `resolutionSeconds` to pin an averaging interval.\n\n' +
+          'The response carries `resolved`: the window the span works out to right now, the ' +
+          'bucket width, the rollup tier that will answer, and anything the rules changed — ' +
+          'a span of 40 days or more is averaged over at least an hour, and one over 500 days ' +
+          'is shortened to 365. A span that cannot resolve yet answers `unresolvable` instead.',
         body: reportBody,
         response: { 201: reportResponse },
       },
@@ -216,7 +330,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         request.body,
         request.principal?.login ?? '',
       );
-      return reply.code(201).send(serialise(created));
+      return reply.code(201).send(serialise(created, new Date()));
     },
   );
 
@@ -251,7 +365,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         request.body,
         request.principal?.login ?? '',
       );
-      return serialise(updated);
+      return serialise(updated, new Date());
     },
   );
 
