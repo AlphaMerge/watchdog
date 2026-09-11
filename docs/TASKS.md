@@ -4172,6 +4172,55 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
+- [x] **P-199 — two of the four withdrawal doors are proved by unit tests only** · S · P-197,
+      P-198 · `P-196` closed four doors: `revoke`, `remove`, a narrowed `allow-from`, and the
+      approval that reopens one. `P-197` put the first through a smoke test on two boxes. The
+      other two still reach a live connection only in unit tests, and `P-197` named the specific
+      thing that leaves uncovered: **`remoteAddressOf` is reached by nothing that runs the real
+      services.**
+
+      **It is the input to the `allow-from` decision, and returning `null` makes the whole
+      withdrawal a silent no-op** — the probe carries on scanning from an address the operator has
+      just excluded, the registration reads as narrowed, and nothing anywhere says otherwise. That
+      is the same shape as the defects `P-189` and `P-196` were: a decision that wrote its rows
+      and never reached the machine.
+
+      **Two boxes are what make it testable.** On one host the probe's address is loopback, which
+      proves nothing about an address filter; the smoke harness already has a probe on its own box
+      with an address of its own, so the assertion is available for the cost of writing it.
+
+      Both halves are worth asserting, and the first is the one a naive implementation fails:
+      narrowing a filter that **still covers** the probe must cost nothing, and one that excludes
+      it must stop it — on the live connection, not at the next handshake. The refusal carries the
+      address (`this probe is not accepted from …`), so the probe's own address arriving in its
+      own journal is the end-to-end proof that the lookup answered.
+
+      `remove` is deliberately not covered: it is the same `withdraw` with a different code and no
+      `remoteAddressOf`, and it would have to run after this one, by which point the probe is
+      already stopped and the assertion would be hollow — `P-197`'s ordering rule.
+
+      **P-199 outcome.** Four assertions at the end of `smoke-enrol.sh`, after the re-approval so
+      they cannot hollow out what came before: the core recorded an address at all, a filter that
+      still covers the probe costs it nothing, a filter that excludes it stops it on the live
+      connection rather than at the next handshake, and the probe is told *which* address was
+      refused. Measured on 2026-09-09 against a probe at `172.23.0.3` — a real address on the
+      second box, which is the whole reason this cannot be done on one host.
+
+      **Two mutations, both caught, each by the assertion meant for it and by no other.** Making
+      `remoteAddressOf` return `null` — the silent no-op this ticket exists for — fails "a filter
+      that excludes it stops it": the probe carries on scanning from an address its operator has
+      just excluded. Dropping the `!addressAllowedFor(...)` half of the guard, so every edit
+      withdraws, fails "a filter that still covers it costs nothing" while the exclusion case
+      stays green. That is the pair: one mutation proves the filter bites, the other proves it
+      does not bite when it should not.
+
+      **A methodology defect worth recording, because it cost two days.** The first mutation run
+      was killed part-way and the restore was sequenced *after* the wait, so it never ran: the
+      mutated `remoteAddressOf` sat in the working tree until 2026-09-11. Nothing was committed
+      with it and CI stayed green throughout — the mutation never left the machine — but the rule
+      is now the stronger one. **The restore belongs in a `trap … EXIT INT TERM`, not after the
+      command**, so a run that dies half way still puts the file back. The second mutation was run
+      that way and restored itself.
 - [x] **P-198 — CI has never run, so every job in it is a claim** · M · P-197 · The workflow was
       switched off in August when the account's Actions spending limit went unpaid, and hosted
       jobs since then fail in two seconds with zero steps. Six jobs, several written after that

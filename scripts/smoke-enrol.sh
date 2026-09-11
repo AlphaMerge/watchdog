@@ -337,7 +337,9 @@ if [ -n "${gid}" ]; then
   # What tells them apart is whether the probe had to reconnect to find out, which is the whole of
   # `P-196`, and that is an ordering question inside this slice.
   cursor="$(docker exec "${probe_box}" bash -c "journalctl -u ms-probe --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")"
-  since_revoke() { docker exec "${probe_box}" journalctl -u ms-probe --no-pager --after-cursor "${cursor}" 2>/dev/null || true; }
+  # Reads `${cursor}` when it is called, not when it is defined, so re-stamping the cursor before
+  # a later step re-points this at that step's slice. The `allow-from` block below relies on it.
+  since_cursor() { docker exec "${probe_box}" journalctl -u ms-probe --no-pager --after-cursor "${cursor}" 2>/dev/null || true; }
 
   revoke_note='decommissioned by the smoke test'
   ms_docker_curl "${core_box}" -sf -X POST "${api}/probes/${gid}/revoke" \
@@ -346,13 +348,13 @@ if [ -n "${gid}" ]; then
 
   stopped=0
   for _ in $(seq 1 60); do
-    if printf '%s' "$(since_revoke)" | grep -q 'stopped scanning'; then
+    if printf '%s' "$(since_cursor)" | grep -q 'stopped scanning'; then
       stopped=1
       break
     fi
     sleep 1
   done
-  slice="$(since_revoke)"
+  slice="$(since_cursor)"
   if [ "${stopped}" -eq 1 ]; then
     echo "    probe stopped scanning: ok"
   else
@@ -432,6 +434,84 @@ if [ -n "${gid}" ]; then
     echo "    the core issued it a fresh key in the welcome: ok"
   else
     note_failure "a re-approved probe was issued no key — revoking cleared the hash and nothing replaced it (P-37)"
+  fi
+
+  # --- narrowing where it may connect from (`P-199`) ------------------------------------------
+  # **Last, because it stops the probe for good.** `P-197` said a block that does this has to
+  # follow the others or it hollows them out, and this one cannot be undone from here: once the
+  # filter excludes the probe, every handshake it makes is refused.
+  #
+  # `revoke` above proved `withdraw` reaches a live connection. This proves the *other* thing
+  # `P-197` named as unreached by anything running the real services: `remoteAddressOf`. It is
+  # only used here, it is the one input to the decision, and returning `null` from it makes the
+  # whole withdrawal a silent no-op — the probe keeps scanning from an address the operator has
+  # just excluded, and nothing anywhere says so. Two boxes are what make it real: on one host the
+  # address would be loopback and prove nothing about a filter.
+  echo "==> narrowing the address filter, and asserting it only bites when it should"
+  address="$(ms_docker_curl "${core_box}" -sf "${api}/probes" | field ".items.find((p) => p.gid === '${gid}')?.lastAddress ?? ''")"
+  if [ -z "${address}" ]; then
+    note_failure "the core recorded no address for a probe it is talking to (P-199)"
+  else
+    echo "    connected from ${address}"
+
+    narrow() {
+      ms_docker_curl "${core_box}" -sf -X PUT "${api}/probes/${gid}/allow-from" \
+        -H 'content-type: application/json' -d "$1" >/dev/null
+    }
+
+    # **The half a naive implementation gets wrong.** Tightening a range around the machines
+    # already inside it is the ordinary case and must cost nothing — an implementation that
+    # withdraws on every edit passes the negative case below and fails here.
+    cursor="$(docker exec "${probe_box}" bash -c "journalctl -u ms-probe --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")"
+    narrow "{\"allowFrom\":[\"${address}\"]}"
+    sleep 5
+    if printf '%s' "$(since_cursor)" | grep -q 'stopped scanning'; then
+      note_failure "a filter that still covers the probe stopped it anyway (P-199)"
+    else
+      echo "    a filter that still covers it costs nothing: ok"
+    fi
+
+    # TEST-NET-1, which no Docker network hands out, so this excludes the probe wherever it ran.
+    cursor="$(docker exec "${probe_box}" bash -c "journalctl -u ms-probe --no-pager -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")"
+    narrow '{"allowFrom":["192.0.2.0/24"]}'
+
+    excluded=0
+    for _ in $(seq 1 60); do
+      if printf '%s' "$(since_cursor)" | grep -q 'stopped scanning'; then
+        excluded=1
+        break
+      fi
+      sleep 1
+    done
+    slice="$(since_cursor)"
+    if [ "${excluded}" -eq 1 ]; then
+      echo "    a filter that excludes it stops it: ok"
+    else
+      docker exec "${probe_box}" journalctl -u ms-probe --no-pager -n 30 || true
+      note_failure "the probe kept scanning from an address its operator had just excluded (P-199)"
+    fi
+
+    # The same ordering question as the revocation: on the live connection, or only after the
+    # link dropped and it came back?
+    stop_at="$(printf '%s' "${slice}" | grep -n 'stopped scanning' | head -1 | cut -d: -f1)"
+    close_at="$(printf '%s' "${slice}" | grep -n 'link to core closed' | head -1 | cut -d: -f1)"
+    if [ -z "${stop_at}" ]; then
+      : # already reported above
+    elif [ -z "${close_at}" ] || [ "${stop_at}" -lt "${close_at}" ]; then
+      echo "    it stopped without reconnecting first: ok"
+    else
+      note_failure "the filter only bit at the next handshake, not on the live connection (P-196)"
+    fi
+
+    # **The address itself has to reach the probe**, and that is what says `remoteAddressOf`
+    # answered rather than returning null: the core builds "this probe is not accepted from
+    # <address>" out of the live socket, so its own address coming back in its own journal is the
+    # end-to-end proof that the lookup worked.
+    if printf '%s' "${slice}" | grep -q -- "${address}"; then
+      echo "    it was told which address was refused: ok"
+    else
+      note_failure "the probe was refused without being told from where — remoteAddressOf (P-199)"
+    fi
   fi
 fi
 
