@@ -21,13 +21,17 @@
 # What makes one run's names different from another's.
 #
 # The PID is enough and is the honest default: two concurrent runs on one machine cannot share
-# one. `GITHUB_RUN_ID` alone would not do — a re-run of the same CI run repeats it — so the
-# attempt goes in with it, and `MS_SMOKE_RUN` overrides both for anyone who wants to name a run.
+# one. `GITHUB_RUN_ID` alone would not do — a re-run of the same CI run repeats it, and two jobs
+# of one run share it — so the attempt and the job go in with it, and `MS_SMOKE_RUN` overrides
+# all of it for anyone who wants to name a run.
 ms_smoke_run_id() {
   if [ -n "${MS_SMOKE_RUN:-}" ]; then
     printf '%s' "${MS_SMOKE_RUN}"
   elif [ -n "${GITHUB_RUN_ID:-}" ]; then
-    printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT:-1}"
+    # The job goes in because the run id is per *run*: two jobs of one run would otherwise share
+    # a suffix, and today that is survived only by their harnesses having different base names
+    # (`P-201`). A matrix over distros would not survive it.
+    printf '%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT:-1}" "${GITHUB_JOB:-job}"
   else
     printf '%s' "$$"
   fi

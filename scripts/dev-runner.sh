@@ -28,13 +28,12 @@ IMAGE=watchdog-runner:local
 LABEL=watchdog-linux
 COUNT=${RUNNER_COUNT:-1}
 
-# **The work directory is bind-mounted at the same path inside and out, and that is not a style
-# choice.** `docker-compose.dev.yml` mounts `.:/workspace`, so when a job runs `scripts/dev.sh`
+# **Each runner's work directory is bind-mounted at the same path inside and out, and that is not
+# a style choice.** `docker-compose.dev.yml` mounts `.:/workspace`, so when a job runs `scripts/dev.sh`
 # the *host's* Docker is asked to bind-mount the job's checkout — by the path the job sees. With
 # the usual `/home/runner/_work` that path does not exist on the host and compose silently mounts
 # an empty directory, which surfaces as a toolchain container with no source in it.
 WORK=${RUNNER_WORK_DIR:-$HOME/watchdog-runner-work}
-mkdir -p "$WORK"
 
 echo "==> building $IMAGE"
 docker build -q -f "${repo_root}/dev/runner/Dockerfile" -t "$IMAGE" "${repo_root}/dev/runner" >/dev/null
@@ -48,11 +47,25 @@ if [ -z "${RUNNER_TOKEN:-}" ]; then
 fi
 [ -n "${RUNNER_TOKEN}" ] || { echo "no registration token — are you an admin on ${REPO}?" >&2; exit 1; }
 
-for stale in $(docker ps -aq --filter "name=^${PREFIX}-[0-9]\+$"); do
+# **`+`, not `\+`.** Docker's name filter is a Go RE2 pattern, where `\+` is an escaped literal
+# plus rather than "one or more" — so the version this was inherited with matched nothing at all,
+# and re-running the script failed on a name conflict instead of replacing the pool. Removing a
+# container does not deregister the runner: GitHub keeps showing it offline until `--replace`
+# below takes its name back, which is why the names are stable rather than random.
+for stale in $(docker ps -aq --filter "name=^${PREFIX}-[0-9]+$"); do
   docker rm -f "$stale" >/dev/null 2>&1 || true
 done
 
 for i in $(seq "$COUNT"); do
+  # **One work directory per runner, not one for the pool** (`P-201`). A runner derives its
+  # checkout path from `--work`, so two agents sharing it would hand two concurrent jobs the same
+  # directory: `install-smoke` and `enrol-smoke` both wait on `build` and become runnable
+  # together, and they would then clean the tree under each other and stage into one `build/`.
+  # What either reported afterwards would be a packaging failure, which is exactly what those
+  # jobs exist to find — so the false one would look like the real thing.
+  work="${WORK}-${i}"
+  mkdir -p "${work}"
+
   # --group-add 0: the mounted socket is root:root inside Docker Desktop's VM, and the image's
   #   `runner` user is not in a group that matches — group 0 is what actually grants access.
   # --restart on-failure:2, not unless-stopped: registration happens inside this same command, so
@@ -64,7 +77,7 @@ for i in $(seq "$COUNT"); do
     --restart on-failure:2 \
     --group-add 0 \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "${WORK}:${WORK}" \
+    -v "${work}:${work}" \
     --add-host host.docker.internal:host-gateway \
     -e ImageOS=ubuntu24 \
     --entrypoint bash \
@@ -73,7 +86,7 @@ for i in $(seq "$COUNT"); do
         --token '${RUNNER_TOKEN}' \
         --name '${PREFIX}-${i}' \
         --labels self-hosted,linux,${LABEL} \
-        --work '${WORK}' \
+        --work '${work}' \
         --unattended --replace \
      && ./run.sh"
 done

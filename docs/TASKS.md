@@ -4172,6 +4172,48 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
+- [x] **P-201 — the runner pool shares one workspace, and the script that builds it recommends
+      two** · S · P-198, P-200 · `scripts/dev-runner.sh` passes the same `--work` to every runner
+      it registers, so a pool of two agents derives the same checkout path —
+      `<work>/watchdog/watchdog` — for both. Its own header calls two "the useful number".
+
+      **Following that advice breaks CI in the way that is hardest to read.** `install-smoke` and
+      `enrol-smoke` both `needs: build`, so they become runnable at the same moment; with two
+      runners they start together, in one directory. The second job's checkout cleans the tree
+      under the first, `package.sh` stages both into `build/<name>-<version>` and opens with
+      `rm -rf`, and `release/` holds one set of tarballs for two jobs that may not even be at the
+      same commit. What either job reports afterwards is a packaging or install failure, which is
+      exactly what these jobs are for — so the false one looks like the real thing.
+
+      Nothing has hit it because the pool has only ever been one runner, which serialises
+      everything. That is luck, not design, and it is one environment variable from ending.
+
+      **Two fixes, and the first is the load-bearing one.** Give each runner its own work
+      directory — `${WORK}-${i}`, bind-mounted at the same path inside and out as now, since that
+      trick is what makes compose's `.:/workspace` resolve. Then two jobs have two checkouts and
+      the rest of the collision goes with it.
+
+      **The second closes a hole in `P-200`.** The smoke suffix is
+      `GITHUB_RUN_ID`-`GITHUB_RUN_ATTEMPT`, which is per *run*, not per *job* — two jobs in one
+      run share it. It does not bite today only because the harnesses that run in CI use different
+      base names (`ms-smoke-install-<distro>` against `ms-smoke-core`), so a matrix over distros,
+      or any second job running the same harness, would collide. `GITHUB_JOB` belongs in the
+      suffix.
+
+      **P-201 outcome.** Each runner gets `${WORK}-${i}`, created and bind-mounted at that path
+      inside and out. Verified by registering a pool of two: they report
+      `/Users/admin/watchdog-runner-work-1` and `-2`. The smoke suffix gained `GITHUB_JOB`, so two
+      jobs of one run no longer share it — `…-555-1-install-smoke` against `…-555-1-enrol-smoke`,
+      and a second attempt differs again.
+
+      **A third defect fell out of testing it, in this script since it was written.** Re-running
+      it failed on a name conflict rather than replacing the pool: the stale-container filter was
+      `name=^watchdog-runner-[0-9]\+$`, and Docker's name filter is a Go RE2 pattern where `\+`
+      is an escaped literal plus, not "one or more". It matched nothing, always. Measured on the
+      live daemon before and after: `0` containers against `1`. Every earlier re-registration in
+      this session worked only because the container had been removed by hand first — which is
+      why nobody noticed.
+
 - [x] **P-200 — the smoke tests take fixed container names, and CI is on the developer's Docker
       now** · S · P-198 · Every smoke harness names its boxes the same way on every run —
       `ms-smoke-core` and `ms-smoke-probe` on a network called `ms-smoke-net`
