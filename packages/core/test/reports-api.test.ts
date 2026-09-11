@@ -13,13 +13,14 @@ import { AuditRepository } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService } from '../src/reports/service.js';
+import { ReportContext } from '../src/reports/context.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent } from './support/tree.js';
+import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -45,6 +46,10 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   let author = '';
   let reader = '';
   let readerGroupId: number;
+  let authorGroupId: number;
+  let sensorId: number;
+  let hiddenSensorId: number;
+  let deletedId: number;
 
   before(async () => {
     scratch = await createScratchDatabase('reportsapi');
@@ -55,6 +60,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     const groups = new GroupService({ db, logger: silent });
     const access = new AccessService({ db, logger: silent });
     const history = new HistoryService({ db, logger: silent });
+    const reportRepository = new ReportRepository();
 
     const server = new ApiServer({
       config: {
@@ -71,7 +77,15 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       db,
       audit: new AuditRepository(),
       catalogue: testCatalogue(),
-      reports: new ReportService({ db, repository: new ReportRepository(), logger: silent }),
+      reports: {
+        service: new ReportService({ db, repository: reportRepository, logger: silent }),
+        context: new ReportContext({
+          db,
+          repository: reportRepository,
+          access,
+          logger: silent,
+        }),
+      },
       auth: {
         accounts,
         sessions,
@@ -88,7 +102,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
 
     // Both `readwrite`: an administrator short-circuits every grant and would make the access
     // half of this file assert nothing.
-    for (const login of ['author', 'reader', 'temp']) {
+    for (const login of ['author', 'reader', 'temp', 'temp2']) {
       await accounts.create({ login, password: 'correct-horse-battery', role: 'readwrite' });
     }
     const authorGroup = await db.query<{ id: string }>(
@@ -98,6 +112,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       `INSERT INTO user_group (name) VALUES ('readers') RETURNING id`,
     );
     readerGroupId = Number(readerGroup[0]?.id);
+    authorGroupId = Number(authorGroup[0]?.id);
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
        SELECT $1, id, true FROM user_account WHERE login = 'author'`,
@@ -105,9 +120,75 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     );
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
-       SELECT $1, id, true FROM user_account WHERE login IN ('reader', 'temp')`,
+       SELECT $1, id, true FROM user_account WHERE login IN ('reader', 'temp', 'temp2')`,
       [readerGroupId],
     );
+
+    // **Only the author's group may see the tree.** `reader` gets access to some *reports* below
+    // and never to an object, which is what makes the act-as cases mean anything: if everybody
+    // could read the tree, a report that returned the caller's view would pass too.
+    await db.query(
+      `INSERT INTO object_access (object_id, group_id, right_) VALUES ($1, $2, 'read')`,
+      [harness.rootId, authorGroupId],
+    );
+    // `temp2` is the account a report runs as while it is being disabled; it needs the same view
+    // so the "while the account is enabled" half of that case asserts something.
+    await db.query(
+      `INSERT INTO user_group_member (group_id, user_id, is_primary)
+       SELECT $1, id, false FROM user_account WHERE login = 'temp2'`,
+      [authorGroupId],
+    );
+
+    const probe = await harness.service.create(testActor, {
+      kind: 'probe',
+      name: 'reports-probe',
+      parentId: harness.rootId,
+    });
+    const device = await harness.service.create(testActor, {
+      kind: 'device',
+      name: 'reports-device',
+      parentId: probe.id,
+      host: '10.0.0.2',
+    });
+    sensorId = (
+      await harness.service.create(testActor, {
+        kind: 'sensor',
+        name: 'reports-sensor',
+        parentId: device.id,
+        sensorType: 'icmp.ping',
+      })
+    ).id;
+    // **A device the author's group explicitly may not see**, which is `A-03`'s third rule: an
+    // explicit grant beats an inherited one, and `none` carves a hole in a branch. Without this
+    // the read grant on the root makes every subject visible, and an API case asserting "only
+    // what the context can read" would pass just as well with no access check at all.
+    const walled = await harness.service.create(testActor, {
+      kind: 'device',
+      name: 'reports-walled',
+      parentId: probe.id,
+      host: '10.0.0.3',
+    });
+    hiddenSensorId = (
+      await harness.service.create(testActor, {
+        kind: 'sensor',
+        name: 'reports-hidden',
+        parentId: walled.id,
+        sensorType: 'icmp.ping',
+      })
+    ).id;
+    await db.query(
+      `INSERT INTO object_access (object_id, group_id, right_) VALUES ($1, $2, 'none')`,
+      [walled.id, authorGroupId],
+    );
+
+    const doomed = await harness.service.create(testActor, {
+      kind: 'sensor',
+      name: 'reports-doomed',
+      parentId: device.id,
+      sensorType: 'icmp.ping',
+    });
+    deletedId = doomed.id;
+    await db.query('DELETE FROM object WHERE id = $1', [deletedId]);
 
     author = await sessionFor('author');
     reader = await sessionFor('reader');
@@ -420,6 +501,110 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.equal(listed.statusCode, 200);
       const mine = listed.json<{ items: Wire[] }>().items.find((one) => one.id === made.id);
       assert.ok(mine?.resolved ?? mine?.unresolvable, 'and always says which');
+    });
+  });
+
+  describe('the security context over the wire (E-03)', () => {
+    it('answers the subjects its runAs account can read, not the caller’s', async () => {
+      // `author` and `reader` are in different groups and `reader` has no grant on the tree, yet
+      // reading a report that runs as `author` returns author's view. That is the act-as grant,
+      // and it is the reason a report's ACL has to be treated as the account it runs as.
+      const made = await makeReport('scoped', {
+        subjects: { objectIds: [sensorId, hiddenSensorId, deletedId] },
+      });
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/reports/${String(made.id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'read' },
+      });
+
+      for (const [who, cookie] of [
+        ['author', author],
+        ['reader', reader],
+      ] as const) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/reports/${String(made.id)}/subjects`,
+          headers: as(cookie),
+        });
+        assert.equal(response.statusCode, 200, `${who}: ${response.body}`);
+        const body = response.json<{
+          runAs: { login: string; role: string };
+          visible: { id: number; kind: string; name: string }[];
+          unavailable: number[];
+        }>();
+        assert.equal(body.runAs.login, 'author', `${who} sees the report's own context`);
+        assert.deepEqual(
+          body.visible.map((one) => one.id),
+          [sensorId],
+        );
+        assert.deepEqual(
+          [...body.unavailable].sort((a, b) => a - b),
+          [hiddenSensorId, deletedId].sort((a, b) => a - b),
+          'the out-of-scope one and the deleted one are both counted, and not told apart',
+        );
+      }
+    });
+
+    it('projects identity only, with no field a credential could ride out on', async () => {
+      const made = await makeReport('no-params', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/subjects`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 200);
+      const subject = response.json<{ visible: Record<string, unknown>[] }>().visible[0];
+      assert.ok(subject);
+      assert.deepEqual(Object.keys(subject).sort(), ['id', 'kind', 'name']);
+    });
+
+    it('answers 422 once the account is disabled, and stops calling it available', async () => {
+      const made = await makeReport('disabled-context', {
+        runAs: 'temp2',
+        subjects: { objectIds: [sensorId] },
+      });
+      assert.deepEqual(made.runAs, { login: 'temp2', available: true });
+      assert.equal(
+        (
+          await app.inject({
+            method: 'GET',
+            url: `/api/v1/reports/${String(made.id)}/subjects`,
+            headers: as(author),
+          })
+        ).statusCode,
+        200,
+        'while the account is enabled',
+      );
+
+      await db.query(`UPDATE user_account SET disabled = true WHERE login = 'temp2'`);
+
+      const refused = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/subjects`,
+        headers: as(author),
+      });
+      assert.equal(refused.statusCode, 422);
+      assert.equal(refused.json<{ error: { code: string } }>().error.code, 'REPORT_NO_CONTEXT');
+
+      // And the report itself now reports the context as unusable, without being asked twice.
+      const reread = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: as(author),
+      });
+      assert.deepEqual(reread.json<Wire>().runAs, { login: 'temp2', available: false });
+    });
+
+    it('hides the subjects route behind read on the report, like every other read', async () => {
+      const made = await makeReport('private-subjects', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/subjects`,
+        headers: as(reader),
+      });
+      assert.equal(response.statusCode, 404, 'absent rather than forbidden, as everywhere else');
     });
   });
 

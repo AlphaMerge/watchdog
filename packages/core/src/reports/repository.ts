@@ -1,5 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
+import type { AccountRole } from '../auth/accounts.js';
 import type { ReportSpan } from './span.js';
 
 /**
@@ -63,6 +64,14 @@ export interface ReportRow {
    */
   readonly runAsUserId: number | null;
   readonly runAsLogin: string;
+  /**
+   * Whether that account has been disabled (`E-03`).
+   *
+   * Carried on every read because it decides whether the report can run at all, and a client that
+   * had to ask a second question would show a green report that refuses. False when the account is
+   * gone — the null id already says that, and two ways to spell "no context" is one too many.
+   */
+  readonly runAsDisabled: boolean;
   readonly version: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -87,6 +96,7 @@ interface RawReport {
   schedule: ReportSchedule;
   run_as_user_id: string | null;
   run_as_login: string;
+  run_as_disabled: boolean | null;
   version: string;
   created_at: Date;
   updated_at: Date;
@@ -106,19 +116,43 @@ function toReport(row: RawReport): ReportRow {
     // account zero rather than saying there is none.
     runAsUserId: row.run_as_user_id === null ? null : Number(row.run_as_user_id),
     runAsLogin: row.run_as_login,
+    // `null` is "there is no account to ask", which the null id already reports.
+    runAsDisabled: row.run_as_disabled === true,
     version: Number(row.version),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
+/**
+ * Every column a `ReportRow` needs, qualified so one list serves every statement.
+ *
+ * The alias is always `r`, including where there is only one table, because the same list has to
+ * work in a `SELECT` and in an `INSERT ... RETURNING`. Two lists that could disagree about which
+ * columns exist is how a field ends up silently null on one path.
+ */
 const COLUMNS =
-  'id, name, description, kind, subjects, span, outputs, schedule, ' +
-  'run_as_user_id, run_as_login, version, created_at, updated_at';
+  'r.id, r.name, r.description, r.kind, r.subjects, r.span, r.outputs, r.schedule, ' +
+  'r.run_as_user_id, r.run_as_login, r.version, r.created_at, r.updated_at';
+
+/**
+ * Whether the security context's account has been disabled (`E-03`).
+ *
+ * A correlated subquery rather than a join, because `RETURNING` cannot join and a report has to
+ * come back the same shape whether it was just written or just read. Null — no account at all —
+ * reads as false: the null id already says there is no context, and two ways to spell that is one
+ * too many.
+ */
+const RUN_AS_DISABLED =
+  '(SELECT ua.disabled FROM user_account ua WHERE ua.id = r.run_as_user_id) AS run_as_disabled';
+
+const RETURNING = `${COLUMNS}, ${RUN_AS_DISABLED}`;
 
 export class ReportRepository {
   async list(q: Queryable): Promise<ReportRow[]> {
-    const rows = await q.query<RawReport>(`SELECT ${COLUMNS} FROM report ORDER BY lower(name)`);
+    const rows = await q.query<RawReport>(
+      `SELECT ${RETURNING} FROM report r ORDER BY lower(r.name)`,
+    );
     return rows.map(toReport);
   }
 
@@ -132,7 +166,7 @@ export class ReportRepository {
   async listFor(q: Queryable, groupIds: readonly number[]): Promise<ReportRow[]> {
     if (groupIds.length === 0) return [];
     const rows = await q.query<RawReport>(
-      `SELECT ${COLUMNS} FROM report r
+      `SELECT ${RETURNING} FROM report r
        WHERE EXISTS (
          SELECT 1 FROM report_access a
          WHERE a.report_id = r.id AND a.group_id = ANY($1::bigint[]) AND a.right_ <> 'none'
@@ -144,7 +178,9 @@ export class ReportRepository {
   }
 
   async find(q: Queryable, id: number): Promise<ReportRow | undefined> {
-    const rows = await q.query<RawReport>(`SELECT ${COLUMNS} FROM report WHERE id = $1`, [id]);
+    const rows = await q.query<RawReport>(`SELECT ${RETURNING} FROM report r WHERE r.id = $1`, [
+      id,
+    ]);
     const row = rows[0];
     return row === undefined ? undefined : toReport(row);
   }
@@ -164,10 +200,10 @@ export class ReportRepository {
     },
   ): Promise<ReportRow> {
     const rows = await q.query<RawReport>(
-      `INSERT INTO report
+      `INSERT INTO report AS r
          (name, description, kind, subjects, span, outputs, schedule, run_as_user_id, run_as_login)
        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
-       RETURNING ${COLUMNS}`,
+       RETURNING ${RETURNING}`,
       [
         input.name,
         input.description,
@@ -212,7 +248,7 @@ export class ReportRepository {
     },
   ): Promise<ReportRow | undefined> {
     const rows = await q.query<RawReport>(
-      `UPDATE report SET
+      `UPDATE report AS r SET
          name           = COALESCE($3, name),
          description    = COALESCE($4, description),
          kind           = COALESCE($5::report_kind, kind),
@@ -223,8 +259,8 @@ export class ReportRepository {
          run_as_user_id = CASE WHEN $10 THEN $11 ELSE run_as_user_id END,
          run_as_login   = CASE WHEN $10 THEN $12 ELSE run_as_login END,
          version        = version + 1
-       WHERE id = $1 AND version = $2
-       RETURNING ${COLUMNS}`,
+       WHERE r.id = $1 AND r.version = $2
+       RETURNING ${RETURNING}`,
       [
         id,
         expectedVersion,
@@ -318,6 +354,28 @@ export class ReportRepository {
       [reportId, groupIds],
     );
     return rows[0]?.right_ ?? 'none';
+  }
+
+  /**
+   * The account a report renders through, with the two facts `E-03` refuses on.
+   *
+   * `disabled` is the one `E-01` could not see: a deleted account nulls the reference, but a
+   * disabled one keeps its row, and disabling is how `031` says this system revokes an account.
+   */
+  async findRunAs(
+    q: Queryable,
+    userId: number,
+  ): Promise<{ id: number; login: string; role: AccountRole; disabled: boolean } | undefined> {
+    const rows = await q.query<{
+      id: string;
+      login: string;
+      role: AccountRole;
+      disabled: boolean;
+    }>(`SELECT id, login, role, disabled FROM user_account WHERE id = $1`, [userId]);
+    const row = rows[0];
+    return row === undefined
+      ? undefined
+      : { id: Number(row.id), login: row.login, role: row.role, disabled: row.disabled };
   }
 
   /**

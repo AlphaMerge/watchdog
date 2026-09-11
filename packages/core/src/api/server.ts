@@ -71,6 +71,7 @@ import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { MapResolver } from '../maps/resolver.js';
 import type { MapService } from '../maps/service.js';
 import type { ReportService } from '../reports/service.js';
+import type { ReportContext } from '../reports/context.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -119,13 +120,19 @@ export interface ApiServerOptions {
   /** Fills a map's widgets in for the view route (`G-10`). */
   mapResolver?: MapResolver;
   /**
-   * Reports (`E-01`).
+   * Reports (`E-01`), and the security context they render through (`E-03`).
    *
    * Optional on the same terms as `maps`: absent, the routes are not registered at all rather
    * than answering an empty list, because "this build has no reporting" and "this installation
    * has written no reports" are different answers and a client should be able to tell them apart.
+   *
+   * **One option holding both, rather than two that can be passed separately.** `maps` and
+   * `mapResolver` are two fields and `G-06`'s public routes have to check for the second before
+   * registering; here the second decides *whose data a report contains*, so a build that mounted
+   * the routes without one would not be a reduced API, it would be an unscoped one. Making them
+   * inseparable is cheaper than remembering.
    */
-  reports?: ReportService;
+  reports?: { service: ReportService; context: ReportContext };
   /**
    * The schedule library (`M-09`).
    *
@@ -244,7 +251,7 @@ export class ApiServer {
   /** Per share link, because the global limiter already bounds per address (`G-06`). */
   readonly #shareLimit = new ShareRateLimit();
   readonly #mapTiles: { urlTemplate: string; attribution: string } | undefined;
-  readonly #reports: ReportService | undefined;
+  readonly #reports: ApiServerOptions['reports'];
   readonly #schedules: ScheduleService | undefined;
   readonly #discovery: DiscoveryService | undefined;
   readonly #deviceTemplates: DeviceTemplateCatalogue | undefined;
@@ -598,7 +605,10 @@ export class ApiServer {
           }
         }
         if (this.#reports !== undefined) {
-          reportRoutes(scope, { reports: this.#reports });
+          reportRoutes(scope, {
+            reports: this.#reports.service,
+            context: this.#reports.context,
+          });
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

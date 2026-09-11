@@ -13824,7 +13824,7 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       22 span tests (three of them property-based over 8 zones × 5 kinds), plus 5 API and 3
       service tests for the wiring.
 
-- [ ] **E-03 — The security context** · M · E-01 · A report runs under a named user's visibility
+- [x] **E-03 — The security context** · M · E-01 · A report runs under a named user's visibility
       scope, so what it contains is what that person could see — not what the person who scheduled
       it could see, and not everything.
 
@@ -13833,6 +13833,54 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       credentials are never returned by any route to anyone (`CLAUDE.md`), and access is resolved
       in one place. A report that renders a sensor's `writeOnly` parameters, or that widens scope
       because the scheduler runs as nobody, is the failure. Scenario tests, not unit tests.
+
+      **Landed 2026-09-11.** `reports/context.ts` resolves a report's account into a principal and
+      answers what that principal can see, through the same `AccessService` the object API uses —
+      the rule `G-10` applied to the map resolver, for the same reason: a report must not become a
+      second, more permissive way to read a sensor. Inheritance, explicit-beats-inherited,
+      highest-across-groups and the role ceiling all arrive for free and cannot drift.
+
+      Three things came out of writing it, and two were holes rather than decisions:
+
+      - **`E-01` closed only one of the two ways to lose a security context.** A deleted account
+        nulls `run_as_user_id`; a **disabled** one keeps its row, so the reference stays valid and
+        nothing would have noticed. Disabling is how `031` says this system revokes an account —
+        it is what an operator does when somebody leaves — so ignoring it made revocation not work
+        for the one path that runs unattended, and a departed colleague's scope would have gone on
+        publishing monthly. Both now refuse with `REPORT_NO_CONTEXT`, and `runAs.available` on the
+        API counts both. A *locked* account is deliberately not refused: lockout is `A-08`'s
+        brute-force defence, it clears on its own, and stopping a monthly report for one would be
+        a denial of service anybody could trigger from the login form.
+      - **Telling "deleted" from "forbidden" would have been an existence oracle.** A `write`
+        holder on a report needs no access to the object tree at all, so a subject list that said
+        which unavailable ids existed would let anyone who can edit a report enumerate every id in
+        the installation — add ids, run it, read which came back forbidden. `unavailable` is a
+        bare list of numbers with nowhere to put the distinction; the split is written to the core
+        log, which only an administrator reads.
+      - **A principal cannot be fabricated.** `ReportPrincipal` carries a branded symbol no other
+        module can produce, so the only way to obtain one is `resolve()`, which is also the only
+        place the refusals are applied. A future caller cannot hand `subjectsFor` an ad-hoc
+        `{ userId, role }` and skip them — it does not typecheck. `ApiServer` takes the service and
+        the context as **one option** for the same reason: a build that mounted the routes without
+        a context would not be a reduced API, it would be an unscoped one.
+
+      The credential rule is kept structurally rather than by redaction: the subject projection is
+      `{ id, kind, name }` and has no field a `writeOnly` parameter could ride out on. An
+      installation report needs configuration and must get it from `ObjectService`, whose `#redact`
+      is the one boundary that strips them — never from the repository, and never by widening that
+      shape. A test asserts the key list, so widening it later fails there rather than in a PDF.
+
+      `GET /reports/:id/subjects` answers what a report would contain, which makes every property
+      above checkable over HTTP and gives an operator the way to see what granting a report would
+      hand somebody. **The asymmetry is documented rather than fixed**, because it is the feature:
+      `read` on a report is `read` on everything its account can see. `administration.md` says to
+      grant a report the way you would grant the account it runs as.
+
+      Not here: the audit row. An act-as that runs is an auditable event, and nothing runs a report
+      until `E-08` — resolving a context on an API read is not the event. `E-08` adds `report.ran`
+      to the audit union; until then the refusals and the visibility split are structured log lines.
+
+      12 scenario tests over a real tree with real grants, plus 4 API tests.
 
 - [ ] **E-04 — Data-table rendering, HTML and CSV** · M · E-02, E-03 · The two outputs that need no
       new dependency, and the two that make a report useful before any picture exists. Channel

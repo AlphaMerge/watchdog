@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-147 routes.
+148 routes.
 
 ## Conventions
 
@@ -1400,6 +1400,18 @@ Needs full access, because deleting one takes its grants with it.
 | `id` | path | string | **required** |
 
 **204**
+
+### `GET /api/v1/reports/{id}/subjects`
+
+What this report would contain, as its security context sees it
+
+A report renders through a named account, not through whoever is asking (`§6`). This route answers the same question the renderer will: which of the objects the report names that account can actually read. **Reading this needs only `read` on the report, and that is the act-as grant working as designed** — granting somebody access to a report grants them everything its `runAs` account can see, whatever their own rights are. Grant reports the way you would grant the account they run as. `unavailable` lists ids this report will not render, and deliberately does not say whether each is deleted or merely out of scope: a `write` holder on a report needs no access to the object tree, and telling the two apart would make this an existence oracle for every id in the installation. The distinction is in the core log. Answers 422 when the account has been deleted or disabled — understood request, real report, no scope to render it through, and no right the caller could hold would fix it.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { runAs, visible, unavailable }
 
 ### `GET /api/v1/reports/{id}/access`
 

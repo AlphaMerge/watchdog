@@ -96,6 +96,7 @@ import { ReportRepository } from './reports/repository.js';
 import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
 import { ReportService } from './reports/service.js';
+import { ReportContext } from './reports/context.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -840,7 +841,13 @@ async function serve(): Promise<void> {
 
   // Mounted here at the same time the routes were written, rather than a phase later: the maps
   // note directly above is the record of what happens otherwise.
-  const reports = new ReportService({ db, repository: new ReportRepository(), logger });
+  const reportRepository = new ReportRepository();
+  const reports = {
+    service: new ReportService({ db, repository: reportRepository, logger }),
+    // Reads through the same `AccessService` the object API uses, for the reason the map resolver
+    // does: a report must not become a second, more permissive way to read a sensor (`E-03`).
+    context: new ReportContext({ db, repository: reportRepository, access: objectAccess, logger }),
+  };
 
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a

@@ -6,6 +6,7 @@ import type { AccessRight } from '../../auth/access.js';
 import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/repository.js';
 import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
 import { ReportError } from '../../reports/errors.js';
+import type { ReportContext } from '../../reports/context.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
 
@@ -23,6 +24,11 @@ import { READS } from '../authorization.js';
 
 export interface ReportRouteOptions {
   reports: ReportService;
+  /**
+   * Resolves the security context (`E-03`). Required rather than optional, and on purpose: an
+   * optional one would make "no context resolver" a silent second meaning for "no checks".
+   */
+  context: ReportContext;
 }
 
 interface ReportBody {
@@ -128,10 +134,11 @@ const reportResponse = {
     schedule: { type: 'object', additionalProperties: true },
     /**
      * The security context, and **`available` is the half a client has to act on**.
+     *
      * `login` is always the account this report was set to render through; `available` is false
-     * once that account has been deleted, which means the report cannot run until somebody points
-     * it at a live account (`E-03`). Two fields rather than a nullable one, so a UI can say
-     * "renders as alice — that account is gone" instead of "renders as nobody".
+     * once it has been **deleted or disabled**, either of which means the report will refuse to
+     * run until somebody points it at a live account. Two fields rather than a nullable one, so a
+     * UI can say "renders as alice — that account is gone" instead of "renders as nobody".
      */
     runAs: {
       type: 'object',
@@ -221,7 +228,13 @@ function serialise(report: ReportRow, now: Date): Record<string, unknown> {
     ...resolveFor(report, now),
     outputs: report.outputs,
     schedule: report.schedule,
-    runAs: { login: report.runAsLogin, available: report.runAsUserId !== null },
+    runAs: {
+      login: report.runAsLogin,
+      // **Both ways of losing a context, not just the one `E-01` could see.** A deleted account
+      // nulls the id; a disabled one keeps its row and would otherwise read as available on a
+      // report that refuses to run (`E-03`).
+      available: report.runAsUserId !== null && !report.runAsDisabled,
+    },
     version: report.version,
     createdAt: report.createdAt.toISOString(),
     updatedAt: report.updatedAt.toISOString(),
@@ -239,7 +252,7 @@ function serialiseGrant(grant: ReportGrant): Record<string, unknown> {
 }
 
 export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions): void {
-  const { reports } = options;
+  const { reports, context } = options;
 
   const viewerOf = (request: {
     principal?: { userId: number; role: ReportViewer['role']; scope?: AccessRight } | undefined;
@@ -387,6 +400,69 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         request.principal?.login ?? '',
       );
       return reply.code(204).send();
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    '/reports/:id/subjects',
+    {
+      config: READS,
+      schema: {
+        tags: ['reports'],
+        summary: 'What this report would contain, as its security context sees it',
+        description:
+          'A report renders through a named account, not through whoever is asking (`§6`). This ' +
+          'route answers the same question the renderer will: which of the objects the report ' +
+          'names that account can actually read.\n\n' +
+          '**Reading this needs only `read` on the report, and that is the act-as grant working ' +
+          'as designed** — granting somebody access to a report grants them everything its ' +
+          '`runAs` account can see, whatever their own rights are. Grant reports the way you ' +
+          'would grant the account they run as.\n\n' +
+          '`unavailable` lists ids this report will not render, and deliberately does not say ' +
+          'whether each is deleted or merely out of scope: a `write` holder on a report needs no ' +
+          'access to the object tree, and telling the two apart would make this an existence ' +
+          'oracle for every id in the installation. The distinction is in the core log.\n\n' +
+          'Answers 422 when the account has been deleted or disabled — understood request, real ' +
+          'report, no scope to render it through, and no right the caller could hold would fix it.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['runAs', 'visible', 'unavailable'],
+            properties: {
+              runAs: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['login', 'role'],
+                properties: { login: { type: 'string' }, role: { type: 'string' } },
+              },
+              visible: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['id', 'kind', 'name'],
+                  properties: {
+                    id: { type: 'integer' },
+                    kind: { type: 'string' },
+                    name: { type: 'string' },
+                  },
+                },
+              },
+              unavailable: { type: 'array', items: { type: 'integer' } },
+            },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const resolved = await context.subjectsFor(report);
+      return {
+        runAs: { login: resolved.principal.login, role: resolved.principal.role },
+        visible: resolved.visible,
+        unavailable: resolved.unavailable,
+      };
     },
   );
 

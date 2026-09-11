@@ -56,18 +56,31 @@ itself out; they cannot read anybody's secret.
 ### A report renders through an account, and says so when that account is gone
 
 A report is granted to groups the same way a branch of the tree is — `none`, `read`, `write`,
-`full`, highest right across your groups wins, role still the ceiling. Two of its rules are its
-own, and both exist because a report is read later, by somebody who was not in the room:
+`full`, highest right across your groups wins, role still the ceiling. Three of its rules are its
+own, and they exist because a report is read later, by somebody who was not in the room:
 
 - **A report names the account whose visibility it renders through**, which defaults to whoever
   created it. That is what decides which sensors appear in the output, so **changing it needs
   `full`, not `write`** — a colleague who may edit what a report measures cannot quietly make it
   measure as you.
-- **Deleting that account does not widen the report; it stops it.** The report keeps the login it
-  was pointed at and reports the account as unavailable, and it will refuse to run rather than run
-  with no scope at all. Point it at a live account to start it again. An operator who deletes a
-  departing colleague's account should expect their scheduled reports to go quiet, and this is
-  where to look when one does.
+- **Granting somebody a report grants them everything that account can see.** This is the point of
+  the feature and it is worth saying out loud: a colleague with `read` on a report gets the data
+  its `runAs` account could reach, whatever their own rights are. **Grant a report the way you
+  would grant the account it runs as.** `GET /reports/:id/subjects` answers exactly what a given
+  report would contain, which is the way to check before granting it.
+- **Deleting or disabling that account does not widen the report; it stops it.** The report keeps
+  the login it was pointed at, reports the account as unavailable, and refuses to run rather than
+  run with no scope at all. Point it at a live account to start it again.
+
+That last one is the thing to know when somebody leaves. **Disabling an account stops its reports**
+— which is what you want, and which is why they go quiet rather than quietly continuing to publish
+what that person could see. An account that is merely *locked out* after too many bad passwords is
+a different case and its reports keep running: a lockout clears on its own, and anybody could
+trigger one from the login form.
+
+A report never contains a monitored device's credentials. What it names an object by is its id,
+kind and name; sensor parameters marked `writeOnly` are stripped at one place for every route in
+the system, and the report projection has no field for one in the first place.
 
 ---
 
