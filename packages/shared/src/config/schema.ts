@@ -85,6 +85,26 @@ export interface HousekeepingConfig {
      * It costs almost nothing: a row per transition, and a quiet sensor produces one a year.
      */
     stateDays: number;
+    /**
+     * Stored report documents (`E-10`, `ADR-005`).
+     *
+     * **The one retention setting that is about bytes an operator asked for rather than
+     * measurements this system took.** A month of HTML data tables over a few dozen sensors is
+     * tens of kilobytes; hourly reports over five hundred sensors is not, and `ADR-005` says
+     * plainly that the default has to be chosen with that in mind rather than set to "forever".
+     * Ninety days is a quarter, which is the period a report is usually compared against.
+     */
+    reportDays: number;
+    /**
+     * The record that a report *ran* — when, for what period, and whether it worked.
+     *
+     * Longer than the documents, and for the same reason `auditDays` is longer than `rawDays`:
+     * this is a row of a few hundred bytes, and "has this report been failing since August" is
+     * asked long after nobody needs August's document. Deleting a run takes its documents with
+     * it, so setting this below `reportDays` makes `reportDays` ineffective rather than wrong —
+     * the effective horizon is whichever comes first.
+     */
+    reportRunDays: number;
   };
   /**
    * Age at which a chunk is compressed. Measured at 12.5x on raw readings
@@ -936,6 +956,8 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             'dailyDays',
             'auditDays',
             'stateDays',
+            'reportDays',
+            'reportRunDays',
           ],
           properties: {
             // 40 days of raw is PRTG's figure (CAPABILITIES.MD §9), and the reason its UI
@@ -946,6 +968,8 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
             dailyDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
             auditDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 730 },
             stateDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 3_650 },
+            reportDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 90 },
+            reportRunDays: { type: 'integer', minimum: 1, maximum: 36_500, default: 730 },
           },
         },
         disk: {

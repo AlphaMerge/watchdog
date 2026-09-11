@@ -517,6 +517,8 @@ describe(
             dailyDays: 3_650,
             auditDays: 20,
             stateDays: 3_650,
+            reportDays: 90,
+            reportRunDays: 730,
           },
           compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
           disk: {

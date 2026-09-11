@@ -46,6 +46,8 @@ function housekeeping(overrides: Partial<HousekeepingConfig['disk']> = {}): Hous
       dailyDays: 3_650,
       auditDays: 3_650,
       stateDays: 3_650,
+      reportDays: 90,
+      reportRunDays: 730,
     },
     compression: { rawAfterDays: 3_650, fiveMinuteAfterDays: 3_650 },
     disk: {

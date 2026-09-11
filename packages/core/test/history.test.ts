@@ -35,6 +35,8 @@ const housekeeping = {
     dailyDays: 3_650,
     auditDays: 730,
     stateDays: 3_650,
+    reportDays: 90,
+    reportRunDays: 730,
   },
   compression: { rawAfterDays: 7, fiveMinuteAfterDays: 30 },
   disk: { path: '', evictBelowPercent: 10, recoverAbovePercent: 15, minimumRetainedHours: 48 },

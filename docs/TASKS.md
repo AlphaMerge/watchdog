@@ -14094,10 +14094,38 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       8 ZIP tests (one against a real `unzip`), 14 delivery tests against a real database, 6 API.
 
-- [ ] **E-10 — Retention of stored reports** · S · E-09 · What the housekeeper does with old
+- [x] **E-10 — Retention of stored reports** · S · E-09 · What the housekeeper does with old
       output. Follows `S-14`'s shape — a bound an operator sets, enforced by the same loop that
       drops chunks, counted where somebody can see it. Blocked with `E-06` only in so far as the
       ADR decides what is being retained.
+
+      **Landed 2026-09-11.** `ADR-005` settled what is retained, so this was unblocked: a
+      `report-retention` step in the housekeeping pass, bounded per statement and per pass like the
+      audit prune, counted in the housekeeping report and logged.
+
+      **Two horizons rather than one**, and that is a judgement rather than an oversight.
+      `reportDays` (90) bounds the documents and `reportRunDays` (730) bounds the record that a
+      report ran. The two are different sizes and answer different questions — a rendered report is
+      kilobytes and is what grows a backup, a run row is a few hundred bytes and is what answers
+      "has this been failing since August". The config already draws exactly this distinction six
+      times over, and `auditDays` is twice `rawDays` for the same reason. A run horizon set below
+      the document horizon makes the shorter one win, because deleting a run cascades — coherent
+      rather than contradictory, and it needs no cross-field validation to be safe.
+
+      **The interesting part is the two refusals.** Retention must not delete the bytes under a
+      delivery that is still queued: `E-09` treats missing bytes as a *permanent* failure —
+      correctly, since there is nothing left to send — so pruning them would be this system
+      manufacturing the one outcome it cannot recover from. And it must not delete a run that is
+      still rendering, which would free `report_run_active_idx` and let a second render start
+      beside the first. Both cases wait for the next pass, which costs five minutes; both are
+      tested.
+
+      The per-statement bound is 200, not the audit prune's 5,000, and the difference is the point:
+      an audit row is a few hundred bytes and a report document is kilobytes to megabytes of
+      TOASTed `bytea`, so the same number would be a transaction holding megabytes of dead tuples
+      and a lock while it ran.
+
+      8 tests, including both refusals and the backlog draining across passes.
 
 - [ ] **E-11 — The reports UI** · M · E-08 · List, create, edit, run now, download, and see what a
       schedule will do next. Follows the maps views: the designer half is behind write access and

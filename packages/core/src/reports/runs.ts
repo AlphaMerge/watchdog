@@ -215,6 +215,36 @@ export class ReportRunRepository {
   }
 
   /**
+   * Deletes run history past its horizon (`E-10`).
+   *
+   * **A run that is still running or still waiting to be delivered is never pruned**, whatever
+   * `queued_at` says. Deleting a running row would free the partial unique index and let a second
+   * render of the same report start beside the first; deleting a pending one would cascade its
+   * output away and turn a queued delivery into a permanent failure. Both are this system
+   * breaking something that was working, in the name of a bound that had all the time in the
+   * world to wait one more pass.
+   *
+   * The cascade from `report_output` means the documents go with the run, so setting the run
+   * horizon shorter than the document horizon simply makes the shorter one win.
+   */
+  async pruneOlderThan(q: Queryable, olderThan: Date, limit: number): Promise<number> {
+    const rows = await q.query<{ count: string }>(
+      `WITH gone AS (
+         DELETE FROM report_run
+         WHERE id IN (
+           SELECT id FROM report_run
+           WHERE queued_at < $1 AND state <> 'running' AND delivery_state <> 'pending'
+           ORDER BY id LIMIT $2
+         )
+         RETURNING 1
+       )
+       SELECT count(*) AS count FROM gone`,
+      [olderThan, limit],
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
    * Marks runs that were in flight when the core stopped.
    *
    * **Called once at startup, because `running` is a claim about a process that no longer exists.**

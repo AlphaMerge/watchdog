@@ -5,6 +5,8 @@ import type { DiskReading, DiskWatcher } from './disk.js';
 import type { EngineCapabilities } from './engine.js';
 import { SqlTimeSeriesStore, type TimeSeriesStore } from './store.js';
 import { ROLLUP_TIERS, type RollupTier, type RollupTierId } from './tiers.js';
+import { ReportOutputRepository } from '../reports/delivery.js';
+import { ReportRunRepository } from '../reports/runs.js';
 
 /**
  * One advisory-lock namespace for the data lifecycle. Two cores against one database — which
@@ -35,6 +37,18 @@ const MAX_AUDIT_PER_STATEMENT = 5_000;
 const MAX_AUDIT_STATEMENTS_PER_PASS = 10;
 
 /**
+ * How many stored reports one pass may delete, and in how many statements (`E-10`).
+ *
+ * **Much smaller than the audit's five thousand, and for a reason rather than by analogy.** An
+ * audit row is a few hundred bytes; a report document is kilobytes to megabytes of TOASTed
+ * `bytea`, so five thousand of them in one statement is a transaction holding megabytes of dead
+ * tuples and a lock while it does. Two hundred at a time clears a backlog over a handful of
+ * five-minute passes, which is soon enough for something measured in days.
+ */
+const MAX_REPORTS_PER_STATEMENT = 200;
+const MAX_REPORT_STATEMENTS_PER_PASS = 5;
+
+/**
  * How far one eviction step reaches, and how many it may take in a pass (`S-17`).
  *
  * A day at a time so the disk is re-measured often enough to stop as soon as it is healthy; a
@@ -63,6 +77,10 @@ export interface HousekeepingReport {
   compressedChunks: number;
   droppedChunks: number;
   prunedAuditEntries: number;
+  /** Stored report documents deleted past their horizon (`E-10`). */
+  prunedReportOutputs: number;
+  /** Report run rows deleted past theirs, which takes any documents left on them. */
+  prunedReportRuns: number;
   /**
    * Sensors whose state was carried forward past the horizon (`S-15`).
    *
@@ -138,6 +156,15 @@ export class Housekeeper {
   #evictedChunks = 0;
   readonly #store: TimeSeriesStore;
   readonly #audit: AuditRepository;
+  /**
+   * `E-10`'s two prunes.
+   *
+   * Built here rather than injected, for the reason `HistoryService` builds its own resolver: they
+   * are stateless holders of two `DELETE` statements, and a constructor argument whose only job is
+   * to carry one would be ceremony at every call site.
+   */
+  readonly #reportOutputs = new ReportOutputRepository();
+  readonly #reportRuns = new ReportRunRepository();
   readonly #abort = new AbortController();
 
   #capabilities: EngineCapabilities | undefined;
@@ -330,6 +357,10 @@ export class Housekeeper {
     await this.#step(report, 'state-retention', () => this.#stateRetention(report));
     await this.#step(report, 'reap', () => this.#reap(report));
     await this.#step(report, 'audit-retention', () => this.#pruneAudit(report));
+    // Its own step, after the audit prune: the two are unrelated, and a failure in either must
+    // not stop the other. Last because it is the cheapest to miss for one pass — a report kept
+    // five minutes too long costs disk, and every other step here is protecting correctness.
+    await this.#step(report, 'report-retention', () => this.#pruneReports(report));
   }
 
   async #step(report: HousekeepingReport, step: string, run: () => Promise<void>): Promise<void> {
@@ -791,6 +822,58 @@ export class Housekeeper {
   }
 
   /**
+   * Deletes stored reports and run history past their horizons (`E-10`, `ADR-005`).
+   *
+   * **Two horizons, and the documents go first.** A stored report is the only thing this system
+   * keeps that is measured in kilobytes per row rather than bytes, so it is what fills a disk; the
+   * run row beside it is a few hundred bytes and answers "has this report been failing since
+   * August", which is asked long after nobody wants August's document. `ADR-003`'s worry about
+   * large objects in a relational database is answered here rather than by refusing to store them.
+   *
+   * Deleting a run cascades to any document still on it, so a run horizon shorter than the
+   * document horizon simply makes the shorter one win. That is a coherent configuration rather
+   * than a contradiction, and it needs no cross-field validation to be safe.
+   */
+  async #pruneReports(report: HousekeepingReport): Promise<void> {
+    const retention = this.#config.retention;
+
+    for (const [what, days, prune] of [
+      [
+        'documents',
+        retention.reportDays,
+        (q: Queryable, olderThan: Date): Promise<number> =>
+          this.#reportOutputs.pruneOlderThan(q, olderThan, MAX_REPORTS_PER_STATEMENT),
+      ],
+      [
+        'runs',
+        retention.reportRunDays,
+        (q: Queryable, olderThan: Date): Promise<number> =>
+          this.#reportRuns.pruneOlderThan(q, olderThan, MAX_REPORTS_PER_STATEMENT),
+      ],
+    ] as const) {
+      const olderThan = await this.#db.tx((q) => this.#store.horizon(q, days));
+      let total = 0;
+      for (let statement = 0; statement < MAX_REPORT_STATEMENTS_PER_PASS; statement += 1) {
+        if (this.#aborted()) return;
+        const deleted = await this.#db.tx((q) => prune(q, olderThan));
+        total += deleted;
+        // Short of the limit means the horizon is clear; anything else and the next pass carries
+        // on where this one stopped.
+        if (deleted < MAX_REPORTS_PER_STATEMENT) break;
+      }
+
+      if (what === 'documents') report.prunedReportOutputs = total;
+      else report.prunedReportRuns = total;
+      if (total > 0) {
+        this.#logger.info(
+          { what, count: total, olderThan: olderThan.toISOString() },
+          'stored reports pruned by retention',
+        );
+      }
+    }
+  }
+
+  /**
    * Caps an age horizon by the two things that make it unsafe to act on.
    *
    * A tier that has never run yields `undefined` and returns null — refusing to compress or drop
@@ -828,6 +911,8 @@ function emptyReport(): HousekeepingReport {
     compressedChunks: 0,
     droppedChunks: 0,
     prunedAuditEntries: 0,
+    prunedReportOutputs: 0,
+    prunedReportRuns: 0,
     anchoredSensors: 0,
     reapedChannels: 0,
     reapedRows: 0,

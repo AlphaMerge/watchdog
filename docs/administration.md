@@ -209,6 +209,27 @@ one that has forgotten last month. Treat any eviction as "add disk", not as norm
 If the configured data path is on a remote database host, the core cannot measure it and reports
 nothing rather than guessing — a wrong number here would be worse than no number.
 
+### Stored reports have their own two horizons
+
+`housekeeping.retention.reportDays` (90 by default) bounds the **documents** and
+`reportRunDays` (730) bounds the **record that a report ran**. Two settings because the two are
+not the same size: a rendered report is kilobytes and is what grows a backup, while a run row is a
+few hundred bytes and is what answers "has this report been failing since August". The same
+reasoning gives `auditDays` twice the life of the raw data.
+
+Deleting a run takes any document still attached to it, so setting `reportRunDays` below
+`reportDays` simply makes the shorter one win. That is a coherent way to configure it, not a
+mistake.
+
+**Two things are never pruned, whatever their age.** A report still rendering keeps its run row —
+deleting it would let a second render start beside the first. And a report whose delivery is still
+queued keeps its bytes: a queued delivery with nothing to send is recorded as a *permanent*
+failure, and retention causing that would be this system manufacturing the one outcome it cannot
+recover from. Both wait for the next pass, which costs five minutes.
+
+If reports are what is filling the disk, `reportDays` is the setting to shorten; the run history
+is almost free and worth keeping.
+
 ---
 
 ## Backups

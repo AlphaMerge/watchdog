@@ -149,6 +149,36 @@ export class ReportOutputRepository {
     return grouped;
   }
 
+  /**
+   * Deletes stored documents past their horizon (`E-10`, `ADR-005`).
+   *
+   * **A pending delivery is never pruned**, whatever its age. `E-09` treats missing bytes as a
+   * permanent delivery failure — correctly, since there is nothing left to send — so retention
+   * taking them out from under a queued report would be this system manufacturing the one failure
+   * it cannot recover from. The bound on attempts means a pending run cannot be old anyway, which
+   * makes the guard cheap as well as right.
+   *
+   * The run row survives: "this report ran on the 1st and produced 40 kB" is worth keeping long
+   * after the 40 kB is not, which is why `E-10` has two horizons.
+   */
+  async pruneOlderThan(q: Queryable, olderThan: Date, limit: number): Promise<number> {
+    const rows = await q.query<{ count: string }>(
+      `WITH gone AS (
+         DELETE FROM report_output
+         WHERE id IN (
+           SELECT o.id FROM report_output o
+           JOIN report_run r ON r.id = o.run_id
+           WHERE o.created_at < $1 AND r.delivery_state <> 'pending'
+           ORDER BY o.id LIMIT $2
+         )
+         RETURNING 1
+       )
+       SELECT count(*) AS count FROM gone`,
+      [olderThan, limit],
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
   /** `ADR-005` Decision 4: an email-only report keeps nothing once it has gone. */
   async discard(q: Queryable, runId: number): Promise<number> {
     const rows = await q.query<{ id: string }>(
