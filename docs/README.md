@@ -102,6 +102,7 @@ state, and before assuming you know what a pause does to a subtree.
 | [ADR-003-uploaded-files.md](ADR-003-uploaded-files.md) | Where an operator's uploaded file lives, what bounds it, and why SVG is refused |
 | [ADR-004-geographical-maps.md](ADR-004-geographical-maps.md) | Where a geo map's tiles come from, and why the product ships none            |
 | [ADR-005-stored-reports.md](ADR-005-stored-reports.md) | Where a generated report lives, and why PDFs are excluded until they exist |
+| [ADR-006-report-rendering.md](ADR-006-report-rendering.md) | A PDF and a graph without a browser, and what that costs instead |
 | [PLAN.md](PLAN.md)                                 | The phased roadmap, with exit criteria and the measured results per phase    |
 | [TASKS.md](TASKS.md)                               | The ticket-sized backlog — **pick work from here**                           |
 

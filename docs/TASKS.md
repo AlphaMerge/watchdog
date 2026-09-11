@@ -13733,8 +13733,10 @@ a security context — and §14 gives stored reports a home of their own.
 **The tickets use the `E-` prefix**, for the exported documents `§6` calls reports: `G-` is the
 graphical half of the same section and `R-` is remote probes.
 
-**Three of these are gated on a decision rather than on effort, and the gate is the same one
+**Three of these were gated on a decision rather than on effort, and the gate is the same one
 `ADR-001` Decision 1 sets for everything else: production is a standalone native service.**
+`ADR-005` settled the third on 2026-09-11; **`ADR-006` settles the first two**, and is *Proposed*
+rather than Accepted — `E-05` and `E-06` start once it is agreed.
 
 1. **A PDF without a browser.** The obvious way to render one is to drive headless Chromium, and
    that is a several-hundred-megabyte dependency an operator has to install, patch and supervise —
@@ -13959,12 +13961,36 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       18 rendering tests, 8 against real readings with a deliberate hole in the middle, 5 API.
 
-- [ ] **E-05 — Graphs in a report** · L · E-04 · **Gated on the ADR.** See decision 2 above.
+- [ ] **E-05 — Graphs in a report** · L · E-04 · **`ADR-006` Decision 3**, once it is accepted: the
+      chart's geometry is computed in `@ms/shared` and drawn twice — SVG for the HTML report,
+      `pdfkit` primitives for the PDF. No browser, no `node-canvas`, no raster.
 
-- [ ] **E-06 — PDF output** · L · E-04 · **Gated on the ADR.** See decision 1 above.
+      **The move matters more than the drawing.** `packages/web/src/charts/groups.ts` already holds
+      every charting *decision* — one chart per unit, colour by entity, what an all-gap channel
+      means — and uPlot only draws pixels. That file moves to `@ms/shared` so the core and the web
+      app read one copy, and it lands with this ticket rather than after it. What is duplicated is
+      a drawing routine, which is the cheap half; a report's graph is static, paged and printed,
+      and matching uPlot pixel for pixel would be an expensive way to be wrong.
+
+      The expensive part is axis tick selection, label collision and the null-gap path — all of
+      them assertable from an SVG string, which is why this is drawn rather than rasterised.
+
+- [ ] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**, once accepted: `pdfkit`,
+      laying the document out ourselves, with DejaVu Sans embedded.
+
+      A third renderer over `E-04`'s `ReportDocument`, beside HTML and CSV. Chromium is refused —
+      measured at 195 MB for `linux64` and 205 MB for `win64`, per platform, to lay out a table we
+      generated ourselves. **The font is not optional**: the standard PDF fonts encode WinAnsi, and
+      `pdfkit` asked for `Маршрут` emits truncated code points without throwing, so a Cyrillic
+      sensor name would reach a filed document as mojibake with nothing having failed.
+
+      The work is pagination: repeating column headers, column widths from the content, and a page
+      break that does not separate a row from its own timestamp.
 
 - [ ] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
-      exists, and worth doing with CSV rather than after the pictures.
+      exists, and worth doing with CSV rather than after the pictures. **`ADR-006` Decision 4 says
+      it goes first** — a third formatting of a document model that already exists, with no
+      dependency, no font and no geometry, against two `L` tickets.
 
 - [x] **E-08 — Scheduling** · M · E-04 · One-off "run now", and hourly, daily, weekly, monthly,
       quarterly or annual. **Two constraints decide the design.** `CLAUDE.md` says nothing blocks
