@@ -12,6 +12,8 @@ import { MapDesignView } from './routes/MapDesignView';
 import { MapView } from './routes/MapView';
 import { SharedMapView } from './routes/SharedMapView';
 import { MapsView } from './routes/MapsView';
+import { ReportsView } from './routes/ReportsView';
+import { ReportView } from './routes/ReportView';
 import { Overview } from './routes/Overview';
 import { PasswordView } from './routes/PasswordView';
 import { TemplatesView } from './routes/TemplatesView';
@@ -91,6 +93,8 @@ export function App(): React.JSX.Element {
         <Route path="maps" element={<MapsView />} />
         <Route path="maps/:id" element={<MapView />} />
         <Route path="maps/:id/design" element={<MapDesignView />} />
+        <Route path="reports" element={<ReportsView />} />
+        <Route path="reports/:id" element={<ReportView />} />
         {/*
           Signed in only. With `api.requireAuthentication` off an anonymous browser reaches the
           rest of this table, and a change-password form is the one page there whose request the

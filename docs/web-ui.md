@@ -24,6 +24,7 @@ Eight sections, in the order the header lists them.
 | **Templates**    | `/templates`     | What does a notification say, and to whom?                        |
 | **Sensor types** | `/sensor-types`  | What can this installation measure?                               |
 | **Maps**         | `/maps`          | What did somebody arrange to be looked at, and where?             |
+| **Reports**      | `/reports`       | What is being sent to whom, and did last night's run work?        |
 
 Alarms sits second, ahead of the tree, deliberately: [`WORKFLOW.MD §7`](WORKFLOW.MD) calls it the
 operator's home screen, and the thing somebody opens this product to look at belongs near the
@@ -136,6 +137,31 @@ not read is absent from the list rather than refused.
   somebody is arranging one, because the fix is an administrator's
   ([administration.md](administration.md)). Panning is local to your browser: where a map opens is
   its author's decision, so a wall display comes back to the same place after a reboot.
+
+### Reports
+
+A report is a saved question about a period — which sensors, over what span, rendered through whose
+eyes, on what schedule, delivered where. Like a map it is not a tree object and has its own access
+by group, so a report you may not read is absent from the list rather than refused.
+
+- **The report and its settings are one page**, unlike a map and its designer. A map's editing
+  surface is a canvas that wants the whole viewport; a report's is eight fields, and somebody
+  checking why last night failed should not have to navigate away to fix it.
+- **A report that will not run says so in the list**, not only on its own page — a lost security
+  context, or a template that does not render yet. The failure that prevents is scanning twenty
+  reports and seeing nothing wrong with the one that has been refusing since August.
+- **The schedule form offers only the fields its frequency uses.** A weekday appears for a weekly
+  report and not for a monthly one, because the core refuses the second outright.
+- **What the period works out to is shown while you are still editing it**, along with the bucket
+  width, the rollup tier that will answer, and anything the rules changed — an author who pinned
+  five-minute averaging over a quarter learns it will be hourly here rather than from a document a
+  month later.
+- **What the report's account cannot see is counted, not hidden.** The ids are listed; whether each
+  is deleted or merely out of scope is deliberately not said, because a `write` holder on a report
+  needs no access to the object tree.
+- **Every run is listed with the period it covered**, how long it took, whether it was delivered,
+  and a link to what it produced. `store` keeps the document, `email only` does not — see
+  [administration.md](administration.md).
 
 ## The object detail page
 

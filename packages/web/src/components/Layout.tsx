@@ -13,6 +13,7 @@ const NAV = [
   { to: '/templates', label: 'Templates', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
   { to: '/maps', label: 'Maps', end: false },
+  { to: '/reports', label: 'Reports', end: false },
 ];
 
 /**

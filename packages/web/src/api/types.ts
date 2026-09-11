@@ -814,3 +814,138 @@ export interface SharedMap {
   problems: { id: string; problem: string }[];
   hasBackground: boolean;
 }
+
+/* ------------------------------------------------------------------------- reports */
+
+/** The seven templates `§6` lists, as migration 047 spells them (`E-01`). */
+export type ReportKind =
+  | 'graph_and_table'
+  | 'table_only'
+  | 'graph_only'
+  | 'sensor_list'
+  | 'installation'
+  | 'top_values'
+  | 'top_uptime';
+
+export type ReportFrequency =
+  'manual' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'annual';
+
+export interface ReportSpan {
+  kind: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'custom';
+  offset?: number;
+  timezone?: string;
+  from?: string;
+  to?: string;
+  resolutionSeconds?: number;
+}
+
+export interface ReportSchedule {
+  kind: ReportFrequency;
+  minute?: number;
+  weekday?: number;
+  dayOfMonth?: number;
+  month?: number;
+  timezone?: string;
+  scheduleId?: number;
+}
+
+export interface ReportOutputs {
+  formats: ('html' | 'csv')[];
+  delivery: 'store' | 'store-and-email' | 'email';
+  recipients: string[];
+  zip: boolean;
+}
+
+/**
+ * What a report's span works out to right now (`E-02`).
+ *
+ * Computed per request rather than stored, because "last month" is a different fortnight every
+ * month. Absent when the span cannot resolve at all — see `unresolvable`.
+ */
+export interface ResolvedSpan {
+  from: string;
+  to: string;
+  label: string;
+  timezone: string;
+  bucketSeconds: number;
+  /** Which rollup tier will answer — the visible consequence of the averaging rule. */
+  source: string;
+  adjustments: { kind: string; reason: string }[];
+}
+
+export interface ReportSummary {
+  id: number;
+  name: string;
+  description: string;
+  kind: ReportKind;
+  subjects: { objectIds: number[] };
+  span: ReportSpan;
+  resolved?: ResolvedSpan;
+  /** Set instead of `resolved` when the span names a period that has not started (`E-02`). */
+  unresolvable?: { code: string; message: string };
+  outputs: ReportOutputs;
+  schedule: ReportSchedule;
+  /** `every Monday at 03:00`, generated beside the code that acts on it (`E-08`). */
+  scheduleSummary: string;
+  /** **Null is not an error** — it means the report does not run on its own. */
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  /**
+   * The account this renders through, and whether it still can (`E-03`).
+   *
+   * `available` is false once that account has been deleted *or disabled*, either of which stops
+   * the report rather than widening it.
+   */
+  runAs: { login: string; available: boolean };
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReportOutputFile {
+  format: 'html' | 'csv' | 'zip';
+  filename: string;
+  byteSize: number;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface ReportRun {
+  id: number;
+  reportId: number;
+  trigger: 'manual' | 'scheduled';
+  requestedBy: string;
+  state: 'running' | 'succeeded' | 'failed';
+  queuedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** The period it covered, as the report labelled it — "do we have August" is the question. */
+  spanLabel: string;
+  sections: number | null;
+  unavailable: number | null;
+  cells: number | null;
+  errorCode: string;
+  errorMessage: string;
+  delivery: {
+    state: 'none' | 'pending' | 'sent' | 'failed';
+    attempts: number;
+    error: string;
+    nextAttemptAt: string | null;
+    deliveredAt: string | null;
+  };
+  outputs: ReportOutputFile[];
+}
+
+/** What `GET /reports/:id/subjects` answers (`E-03`). */
+export interface ReportSubjects {
+  runAs: { login: string; role: string };
+  visible: { id: number; kind: string; name: string }[];
+  /**
+   * Ids this report will not render.
+   *
+   * Deliberately not told apart: a `write` holder on a report needs no access to the object tree,
+   * so saying which are deleted and which are out of scope would be an existence oracle.
+   */
+  unavailable: number[];
+}

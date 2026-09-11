@@ -14127,9 +14127,44 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       8 tests, including both refusals and the backlog draining across passes.
 
-- [ ] **E-11 — The reports UI** · M · E-08 · List, create, edit, run now, download, and see what a
+- [x] **E-11 — The reports UI** · M · E-08 · List, create, edit, run now, download, and see what a
       schedule will do next. Follows the maps views: the designer half is behind write access and
       the reading half is not.
+
+      **Landed 2026-09-11.** `/reports` lists and creates; `/reports/:id` is the report, its runs
+      and its settings. **Both halves on one page**, which is where this departs from `/maps/:id`
+      and its separate designer — a map's editing surface is a canvas that needs the viewport, a
+      report's is eight fields, and splitting them would make an operator checking why last night
+      failed navigate away to fix it.
+
+      Nothing here decides whether the caller may write. The core refuses with a message and the
+      message is shown, which is the choice `MapView` makes about its Edit link and the reasoning
+      `Layout` records about showing the role beside the name: a button that explains why beats one
+      whose absence is a support conversation.
+
+      **The logic that had to be right is which schedule fields a frequency uses.** The core refuses
+      a weekday on a monthly report outright, so a form offering the control produces a 400 nobody
+      can explain — and worse, a frequency changed in the form must not leave a `weekday` behind
+      from the one before it. `scheduleFields` mirrors `validateSchedule` and `scheduleFrom` builds
+      by dropping rather than assembling. A model test proves the rule; a rendered test proves the
+      form listened, which is the pair that makes it worth having both.
+
+      Four things are said where somebody can act on them rather than discovered by running one:
+      **a template that does not render yet** (only two of the seven do), **a lost security
+      context** — shown in the *list*, not only on the report's own page, because the failure to
+      prevent is an operator scanning twenty reports and seeing nothing wrong with the one that has
+      been silently refusing since August — **what the averaging rule changed**, and **a bad
+      recipient named individually** rather than twelve addresses coming back as one error about
+      the field.
+
+      **Not verified in a browser, and the reason is worth recording.** The dev installation
+      requires a login, and entering a password into a form is something this assistant does not
+      do. The substitute is stronger rather than weaker: 13 rendered tests against stubbed API
+      responses, committed and run by CI, asserting behaviour rather than appearance — including
+      the one assertion a manual look would most likely miss, that the weekday control is absent
+      for a monthly report.
+
+      21 model tests and 13 rendered tests.
 
 ## Backlog — v2 candidates
 
