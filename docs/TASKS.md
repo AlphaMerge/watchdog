@@ -13703,13 +13703,107 @@ the state machine and `U-` is the Phase 5 UI.
 
       6 API tests, and the resolver's own file goes 15 to 21.
 
+## Phase 13 — Reporting (`V2-03`)
+
+The third v2 subsystem, started 2026-09-11 with Phase 12 complete. `CAPABILITIES.MD §6` asks for
+report templates, scheduling, time spans with rules, four output formats, three delivery modes and
+a security context — and §14 gives stored reports a home of their own.
+
+**The tickets use the `E-` prefix**, for the exported documents `§6` calls reports: `G-` is the
+graphical half of the same section and `R-` is remote probes.
+
+**Three of these are gated on a decision rather than on effort, and the gate is the same one
+`ADR-001` Decision 1 sets for everything else: production is a standalone native service.**
+
+1. **A PDF without a browser.** The obvious way to render one is to drive headless Chromium, and
+   that is a several-hundred-megabyte dependency an operator has to install, patch and supervise —
+   on Windows too, where `H-06` is already the hard half. A PDF library is small and cannot lay out
+   HTML. Which of those this project accepts is an ADR, not a preference.
+2. **A graph without a browser**, and it is not the same question. The UI draws with uPlot in a
+   canvas; a report needs the same series as an image on the server. That is either a second
+   renderer to keep in step with the first — `CLAUDE.md`'s "inheritance is resolved in one place"
+   applied to charts — or a decision that a report's graph is deliberately a different picture.
+3. **Where a generated report lives.** `ADR-003` put uploaded files in PostgreSQL as `bytea` and
+   justified the 2 MiB bound by the feature being small — one background per map. Reports are the
+   opposite shape: produced on a schedule, retained, potentially large, and `§14` names a
+   `\Report PDFs` directory as though they are files. That decision has to be made again rather
+   than inherited.
+
+`E-01` to `E-04` and `E-08` to `E-11` need none of that and are the path to a useful report today:
+HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates the pictures.
+
+- [ ] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
+      and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
+      same reason: a report is not a tree object. It holds a template kind, an object set, a time
+      span, a security context, a schedule and a set of outputs. No rendering and no scheduling
+      here.
+
+      **The question this ticket settles is what a report points at.** `G-01` chose a document over
+      a foreign key so that deleting a sensor leaves a tile saying so rather than a canvas that
+      quietly stopped mentioning it. A report has the same problem and a worse version of it: a
+      monthly report whose sensor was deleted on the 3rd must say so in the output, because a
+      report is read by somebody who was not there.
+
+- [ ] **E-02 — Time spans, and the rules that bound them** · S · E-01 · Day, week, month, quarter,
+      year, and custom start and end. **`§6`'s three rules are the ticket**: a span over 500 days
+      is rejected and shortened to 365, and a span of 40 to 500 days forces averaging of at least
+      60 minutes. Pure logic, property-tested, no database.
+
+      The averaging rule is not cosmetic — it decides which rollup tier answers, so it belongs
+      beside `tiers.ts` rather than in a renderer. **And `CLAUDE.md`'s "no-data is not zero" is the
+      case to get right here**: a span with a gap in it must render a gap, in CSV as much as in a
+      graph, or a report becomes the most durable way this system can tell a lie.
+
+- [ ] **E-03 — The security context** · M · E-01 · A report runs under a named user's visibility
+      scope, so what it contains is what that person could see — not what the person who scheduled
+      it could see, and not everything.
+
+      **This is the ticket with a security property to prove rather than a feature to build.** It
+      is a deliberate "act as" path, and the rules it must not break are already written:
+      credentials are never returned by any route to anyone (`CLAUDE.md`), and access is resolved
+      in one place. A report that renders a sensor's `writeOnly` parameters, or that widens scope
+      because the scheduler runs as nobody, is the failure. Scenario tests, not unit tests.
+
+- [ ] **E-04 — Data-table rendering, HTML and CSV** · M · E-02, E-03 · The two outputs that need no
+      new dependency, and the two that make a report useful before any picture exists. Channel
+      values over the span, per sensor, with gaps as gaps.
+
+- [ ] **E-05 — Graphs in a report** · L · E-04 · **Gated on the ADR.** See decision 2 above.
+
+- [ ] **E-06 — PDF output** · L · E-04 · **Gated on the ADR.** See decision 1 above.
+
+- [ ] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
+      exists, and worth doing with CSV rather than after the pictures.
+
+- [ ] **E-08 — Scheduling** · M · E-04 · One-off "run now", and hourly, daily, weekly, monthly,
+      quarterly or annual. **Two constraints decide the design.** `CLAUDE.md` says nothing blocks
+      the scheduler, and a report is the longest-running thing this system will ever do — so it
+      runs where a check does not, and its progress is visible. And `§4` says a Schedule's
+      inactive periods pause reports as well as monitoring, so this reuses the existing schedule
+      resolution rather than growing a second idea of "is it office hours".
+
+- [ ] **E-09 — Delivery** · M · E-08 · Store, store and email, or email only, with optional ZIP.
+      The email half is `N-07`'s transport unchanged — a report is an attachment, not a new
+      channel. **The failure to design against is one this project already has a rule for**: a
+      scheduled report that cannot deliver must not retry into an alarm storm, and must not fail
+      silently either.
+
+- [ ] **E-10 — Retention of stored reports** · S · E-09 · What the housekeeper does with old
+      output. Follows `S-14`'s shape — a bound an operator sets, enforced by the same loop that
+      drops chunks, counted where somebody can see it. Blocked with `E-06` only in so far as the
+      ADR decides what is being retained.
+
+- [ ] **E-11 — The reports UI** · M · E-08 · List, create, edit, run now, download, and see what a
+      schedule will do next. Follows the maps views: the designer half is behind write access and
+      the reading half is not.
+
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
 
 - ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
-- **V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)
+- ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11**, broken into `E-01`…`E-11` under Phase 13 above
 - **V2-04** Libraries (filter-rule alternate tree views)
 - **V2-05** Ticket system (user, ToDo and notification tickets)
 - **V2-06** Failover clustering
