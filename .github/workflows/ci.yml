@@ -88,8 +88,14 @@ jobs:
           fi
 
       # install.sh runs as root on an operator's box; a shell bug there is an outage.
+      # **Derived from the tree, not a list of directories somebody remembered** (`P-202`). The
+      # enumerated version read `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` and reached 24 of
+      # 36 scripts: it missed `scripts/lib`, which every harness *sources*, and `scripts/smoke`,
+      # which runs inside the smoke boxes — so a parse error in the files that break everything at
+      # once was the one thing nothing checked. A directory added later is the case a hand-written
+      # glob cannot cover, and `scripts/lib` was added later.
       - name: shellcheck
-        run: shellcheck -S warning scripts/*.sh scripts/sizing/*.sh deploy/*.sh
+        run: git ls-files '*.sh' | xargs shellcheck -S warning
 
       # **The workflow is the one file nothing else checks**, and it is now five jobs across two
       # operating systems. A bad expression or an unknown runner costs a whole CI cycle to find

@@ -4172,6 +4172,40 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
+- [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
+      step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list
+      reaches 24 of the repository's 36 shell scripts. The twelve it misses are not the harmless
+      ones:
+
+      - **`scripts/lib/api-auth.sh` and `scripts/lib/smoke-names.sh`**, which every smoke harness
+        and the soak harness *source*. A parse error in either breaks all of them at once, and
+        `P-200` added one of those files without the glob noticing.
+      - **`scripts/smoke/provision-postgres.sh`, `configure-core.sh`, `api-token.sh`**, which run
+        *inside* the smoke boxes. A defect there fails every smoke test from the inside, where the
+        symptom is a box that will not provision rather than a script that will not parse.
+      - `scripts/spike/run.sh` and the five `dev/**` scripts.
+
+      **Enumerated rather than derived, which is the failure this repository already has a rule
+      about.** `H-07`'s API-reference completeness guard is derived from the live route set for
+      exactly this reason: a list maintained by hand covers what somebody remembered. A directory
+      added later — `scripts/lib` was — is invisible to it, silently, for ever.
+
+      All twelve are clean today, so this is a guard to widen and not a pile of warnings to fix.
+      `git ls-files '*.sh'` is the derived list, and it cannot miss a directory nobody thought of.
+
+      **P-202 outcome.** The step is `git ls-files '*.sh' | xargs shellcheck -S warning`, and it
+      covers all 36. Proved by mutation rather than by reading: an `SC2164` planted in
+      `scripts/lib/smoke-names.sh` is **invisible to the old glob and caught by the new one**.
+
+      **The first mutation was the wrong one and nearly produced a wrong conclusion.** `SC2086`,
+      an unquoted expansion, is *info* severity — correctly filtered by `-S warning` — so the new
+      command passed and the obvious reading was "the guard does not work". The other reading was
+      worse and had to be ruled out: `git ls-files` failing inside the container would leave
+      `xargs` with nothing and shellcheck exiting 0 over no files at all, which is a guard that
+      silently checks nothing. It returns 36 in there, so that was not it. **A mutation that a
+      filter discards proves nothing about the filter** — pick one that clears the threshold being
+      tested.
+
 - [x] **P-201 — the runner pool shares one workspace, and the script that builds it recommends
       two** · S · P-198, P-200 · `scripts/dev-runner.sh` passes the same `--work` to every runner
       it registers, so a pool of two agents derives the same checkout path —
