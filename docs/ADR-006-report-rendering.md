@@ -1,7 +1,7 @@
 # ADR-006: A PDF and a graph, without a browser
 
-- **Status**: Proposed — this settles Decisions 1 and 2 of Phase 13's three open questions, and
-  needs acceptance before `E-05` and `E-06` start
+- **Status**: Accepted — this settles Decisions 1 and 2 of Phase 13's three open questions.
+  `E-05` and `E-06` are unblocked
 - **Date**: 2026-09-12
 - **Deciders**: Roman
 - **Supersedes**: —

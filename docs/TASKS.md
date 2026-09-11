@@ -13735,8 +13735,8 @@ graphical half of the same section and `R-` is remote probes.
 
 **Three of these were gated on a decision rather than on effort, and the gate is the same one
 `ADR-001` Decision 1 sets for everything else: production is a standalone native service.**
-`ADR-005` settled the third on 2026-09-11; **`ADR-006` settles the first two**, and is *Proposed*
-rather than Accepted — `E-05` and `E-06` start once it is agreed.
+`ADR-005` settled the third on 2026-09-11 and **`ADR-006` settled the first two on 2026-09-12**, so
+nothing in this phase is gated on a decision any more.
 
 1. **A PDF without a browser.** The obvious way to render one is to drive headless Chromium, and
    that is a several-hundred-megabyte dependency an operator has to install, patch and supervise —
@@ -13961,7 +13961,7 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       18 rendering tests, 8 against real readings with a deliberate hole in the middle, 5 API.
 
-- [ ] **E-05 — Graphs in a report** · L · E-04 · **`ADR-006` Decision 3**, once it is accepted: the
+- [ ] **E-05 — Graphs in a report** · L · E-04 · **`ADR-006` Decision 3**: the
       chart's geometry is computed in `@ms/shared` and drawn twice — SVG for the HTML report,
       `pdfkit` primitives for the PDF. No browser, no `node-canvas`, no raster.
 
@@ -13975,8 +13975,8 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       The expensive part is axis tick selection, label collision and the null-gap path — all of
       them assertable from an SVG string, which is why this is drawn rather than rasterised.
 
-- [ ] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**, once accepted: `pdfkit`,
-      laying the document out ourselves, with DejaVu Sans embedded.
+- [ ] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**: `pdfkit`, laying the
+      document out ourselves, with DejaVu Sans embedded.
 
       A third renderer over `E-04`'s `ReportDocument`, beside HTML and CSV. Chromium is refused —
       measured at 195 MB for `linux64` and 205 MB for `win64`, per platform, to lay out a table we
