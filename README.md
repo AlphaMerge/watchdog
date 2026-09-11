@@ -328,6 +328,42 @@ Enforced by `npm run lint`, not by review:
 
 See [`CLAUDE.md`](CLAUDE.md) for the full set and the hard constraints behind them.
 
+## Continuous integration
+
+**CI runs on self-hosted runners, on this machine.** GitHub-hosted jobs cannot start while the
+account's Actions spending limit is unpaid — they fail in seconds with zero steps and no logs,
+only a check-run annotation — so the workflow targets `self-hosted` instead (`P-198`).
+
+Bring the runner up, or back:
+
+```
+scripts/dev-runner.sh                 # one runner
+RUNNER_COUNT=2 scripts/dev-runner.sh  # two, so two jobs run at once
+```
+
+It builds `dev/runner/Dockerfile`, mints a registration token with `gh`, and starts a container
+per runner labelled `watchdog-linux`. Each gets its own work directory, because two agents sharing
+one would hand concurrent jobs the same checkout (`P-201`). `docker start watchdog-runner-1` is
+enough after a reboot; re-running the script re-registers the pool and is also how you shrink it.
+
+The runner drives **this machine's** Docker through a mounted socket, which is what lets the jobs
+run the toolchain through compose and boot privileged systemd boxes. Two consequences worth
+knowing:
+
+- CI's containers and volumes are scoped so they cannot touch yours — the compose project is
+  `watchdog-ci`, its PostgreSQL is on `MS_DEV_PG_PORT` (55432) rather than your 5432, and the
+  smoke harnesses name their boxes per run and reap only their own (`P-200`).
+- A CI run and a `scripts/smoke-*.sh` you start by hand can happily overlap.
+
+Three repository variables steer it, and each is one `gh variable set` away from changing where a
+job runs with no edit to the workflow:
+
+| Variable            | Effect                                                                                                                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CI_RUNNER_LINUX`   | JSON array of labels for the Linux jobs. Unset means `["self-hosted","watchdog-linux"]`                                                                                                        |
+| `CI_RUNNER_WINDOWS` | The label of a Windows runner. **Unset, so the two Windows jobs are skipped** — setting it brings back `H-06`'s MSI install and `S-11`'s TimescaleDB provisioning, and the artifact they share |
+| `CI_DB_HOST`        | Where the tests reach the CI database. Unset means `host.docker.internal`, which is how a containerised runner reaches a port published on the host                                            |
+
 ## Infrastructure
 
 This repo has no dedicated GCP project.
