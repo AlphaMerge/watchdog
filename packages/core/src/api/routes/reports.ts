@@ -7,6 +7,8 @@ import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/re
 import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
 import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
+import type { ReportRenderer } from '../../reports/render.js';
+import { renderCsv, renderHtml } from '../../reports/table.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
 
@@ -29,6 +31,8 @@ export interface ReportRouteOptions {
    * optional one would make "no context resolver" a silent second meaning for "no checks".
    */
   context: ReportContext;
+  /** Turns a report into a document (`E-04`). Required for the same reason `context` is. */
+  renderer: ReportRenderer;
 }
 
 interface ReportBody {
@@ -251,20 +255,27 @@ function serialiseGrant(grant: ReportGrant): Record<string, unknown> {
   };
 }
 
+/**
+ * The viewer behind a request, or a refusal.
+ *
+ * At module scope rather than inside `reportRoutes`, because `reportRenderRoute` is registered
+ * separately for its schema exemption and must reach the same one — two copies would be two
+ * chances for one of them to forget the `scope` ceiling.
+ */
+function viewerOf(request: {
+  principal?: { userId: number; role: ReportViewer['role']; scope?: AccessRight } | undefined;
+}): ReportViewer {
+  const principal = request.principal;
+  if (principal === undefined) {
+    throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
+  }
+  return principal.scope === undefined
+    ? { userId: principal.userId, role: principal.role }
+    : { userId: principal.userId, role: principal.role, scope: principal.scope };
+}
+
 export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions): void {
   const { reports, context } = options;
-
-  const viewerOf = (request: {
-    principal?: { userId: number; role: ReportViewer['role']; scope?: AccessRight } | undefined;
-  }): ReportViewer => {
-    const principal = request.principal;
-    if (principal === undefined) {
-      throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
-    }
-    return principal.scope === undefined
-      ? { userId: principal.userId, role: principal.role }
-      : { userId: principal.userId, role: principal.role, scope: principal.scope };
-  };
 
   app.get(
     '/reports',
@@ -540,6 +551,62 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         request.principal?.login ?? '',
       );
       return reply.code(204).send();
+    },
+  );
+}
+
+/**
+ * A rendered report, as HTML or CSV (`E-04`).
+ *
+ * Registered on its own because it answers text rather than JSON, which is the one thing the
+ * response-schema guard cannot filter — the same exemption `mapBackgroundRoute` takes, declared
+ * next to the registration so it covers this route and not the seven beside it.
+ */
+export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOptions): void {
+  const { reports, renderer } = options;
+
+  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+    '/reports/:id/render',
+    {
+      config: READS,
+      schema: {
+        tags: ['reports'],
+        summary: 'Render this report now, as HTML or CSV',
+        description:
+          'Runs the report against its span and its security context and answers the document. ' +
+          '`?format=html` (the default) or `?format=csv`.\n\n' +
+          '**An interval with no reading is a gap, in both formats** — an empty field in CSV and ' +
+          '`—` in HTML, never a zero and never the previous value carried forward. A row whose ' +
+          'channels are all empty is still printed: dropping it would make the table claim the ' +
+          'period was shorter than it was.\n\n' +
+          'Subjects the report’s account cannot read are counted in the document rather than ' +
+          'omitted from it, and answer as ids without saying which are deleted (`E-03`). A report ' +
+          'whose account has been deleted or disabled answers 422, and one that would render more ' +
+          'values than the limit answers 422 with the count and what to narrow — refused rather ' +
+          'than truncated, because a report quietly missing its last four hundred sensors is the ' +
+          'failure this whole surface exists to avoid.',
+      },
+    },
+    async (request, reply) => {
+      const format = request.query.format ?? 'html';
+      if (format !== 'html' && format !== 'csv') {
+        throw new ReportError('REPORT_INVALID', `there is no report format called "${format}"`, {
+          context: { phase: 'render' },
+          details: { format },
+        });
+      }
+      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const document = await renderer.build(report);
+
+      const slug = report.name.replaceAll(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'report';
+      return (
+        reply
+          .type(format === 'csv' ? 'text/csv; charset=utf-8' : 'text/html; charset=utf-8')
+          // `inline` rather than `attachment`: an operator following a link wants to look at it. The
+          // filename still travels, so saving it produces something named after the report.
+          .header('content-disposition', `inline; filename="${slug}.${format}"`)
+          .send(format === 'csv' ? renderCsv(document) : renderHtml(document))
+      );
     },
   );
 }

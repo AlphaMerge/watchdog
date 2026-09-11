@@ -326,3 +326,29 @@ width, the rollup tier that will answer, and anything a rule changed. An author 
 five-minute averaging over a quarter is told it will be hourly while they are still looking at the
 form, rather than a month later in a PDF.
 
+### What a rendered report says, and what an empty cell means
+
+`GET /reports/:id/render` produces the document now, as HTML (`?format=html`, the default) or CSV
+(`?format=csv`). Both carry the same numbers — they are one document formatted twice — and both
+begin with the period, the account the report rendered through, and the averaging interval, because
+a file that has been forwarded twice has lost whatever the email said.
+
+**An empty cell means no reading was recorded in that interval. It does not mean zero.** In CSV it
+is an empty field; in HTML it is `—`. A sensor that was Down, paused, or unreachable produced no
+readings, and a report that wrote `0` there would be a measurement somebody acts on. A measured
+zero — 0% packet loss, 0 errors — is written as `0`, and the two are always distinguishable. An
+interval where every channel is empty still gets a row: dropping it would make the table claim the
+period was shorter than it was.
+
+Objects the report names but could not render are counted in the document rather than left out, as
+a list of ids. They are either gone or outside what the report's account can read, and the document
+deliberately does not say which — see the note about granting reports above. The core log has the
+breakdown.
+
+A report that would produce more than 200,000 values is refused rather than truncated, with the
+count and what to narrow: fewer sensors, a shorter span, or a coarser averaging interval. A report
+silently missing its last four hundred sensors would be worse than no report.
+
+CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
+is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
+

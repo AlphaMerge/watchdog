@@ -4172,6 +4172,27 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
+- [ ] **P-203 — a report is one query per sensor, and nobody has measured what that costs** · S ·
+      E-04 · `ReportRenderer` calls `HistoryService.forSensor` once per subject, sequentially, and
+      that was the right call for `E-04`: a batched query would be a second implementation of
+      `segmentsFor` — stitching a rollup tier together with everything newer than its watermark —
+      and the first sign of a disagreement would be a report and the sensor page showing different
+      numbers for the same hour. Correct beats fast for the ticket that establishes the rule.
+
+      **But nobody knows what it costs, and `MAX_CELLS` is not the bound that matters.** A cell
+      limit bounds the document; it does not bound the round trips. A report over 500 sensors is
+      500 calls, each of which is several statements, and `E-08` will run those on a schedule
+      against the same database serving live checks — which is the one competitor that certainly
+      reaches everything else (`P-192`).
+
+      The ticket is a measurement first: render a report over 1, 10, 100 and 500 sensors at a
+      month and at a year, with the conditions printed the way `test:perf` prints them, and put the
+      numbers in `docs/findings/`. Then decide. Batching is one answer; a concurrency limit is
+      another and is much cheaper; and it may turn out that 500 sequential reads of a rollup tier
+      are fine and the honest outcome is a finding saying so. **No change without the number** —
+      `CLAUDE.md` does not allow a performance claim without a measurement committed to the repo,
+      and that cuts both ways.
+
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
       step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list
       reaches 24 of the repository's 36 shell scripts. The twelve it misses are not the harmless
@@ -13882,9 +13903,61 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
 
       12 scenario tests over a real tree with real grants, plus 4 API tests.
 
-- [ ] **E-04 — Data-table rendering, HTML and CSV** · M · E-02, E-03 · The two outputs that need no
+- [x] **E-04 — Data-table rendering, HTML and CSV** · M · E-02, E-03 · The two outputs that need no
       new dependency, and the two that make a report useful before any picture exists. Channel
       values over the span, per sensor, with gaps as gaps.
+
+      **Landed 2026-09-11.** `reports/table.ts` is pure — a document in, a string out — and
+      `reports/render.ts` assembles that document from `E-02`'s window, `E-03`'s subjects and
+      `HistoryService`'s readings. **One document formatted twice**, not two renderers reading the
+      database: the two formats have to agree about every number and every gap, and a test asserts
+      cell-for-cell that they do.
+
+      **Gaps survive, and the pipeline is where they would have died.** `HistoryService` already
+      returns dense arrays with `null` for an empty bucket, so the rule was never about inventing
+      it — it was about not losing it. Three places could have: building rows from "the buckets
+      that have data" (the arrays are dense precisely so that cannot be written), dropping a row
+      whose channels are all empty (which compresses time and makes the table claim a shorter
+      period), and CSV. A gap is an empty field in CSV and `—` in HTML, and a **measured** zero is
+      `0` — the fixture has a channel reading zero in every hour that has data, so a rendering that
+      collapsed the two fails rather than looking right.
+
+      **The security issue here is the spreadsheet, and it is not obvious.** Device and sensor
+      names are typed by users, a report is emailed, and Excel evaluates a cell beginning `=`, `+`,
+      `-`, `@`, tab or carriage return — `=cmd|'/C calc'!A0` is the classic. Every *text* field is
+      quoted and prefixed with an apostrophe. **Numbers are deliberately exempt, and that is the
+      half that is easy to get wrong**: `-5` begins with `-`, so a guard applied to every field
+      would write `'-5` and turn every negative measurement into text in every spreadsheet that
+      opened the file. Numbers here are produced by the formatter from a `number` and are never
+      user-typed, so there is nothing to escape. Both halves are tested. The HTML document escapes
+      the same names and **fetches nothing from anywhere** — a remote stylesheet would fail in an
+      air-gapped NOC and a remote asset in an emailed document is a read receipt nobody agreed to.
+
+      **Refused rather than truncated.** `planSeries` bounds buckets per sensor; nothing bounded
+      the product of sensors, buckets and channels, and a year of hourly data over five hundred
+      sensors is tens of millions of cells built in memory. `MAX_CELLS` is 200,000 and a document
+      over it answers 422 with the count and what to narrow. `CLAUDE.md`'s "backpressure is
+      visible, never silent" decides the direction: a report quietly missing its last four hundred
+      sensors is the failure this whole surface exists to avoid.
+
+      Timestamps are the span's wall clock **with the offset attached**, so the hour that repeats
+      in October is two distinct correctly-labelled rows rather than one ambiguous pair. Writing
+      that found a real bug: `Intl`'s `longOffset` renders UTC as `GMT` on some ICU builds and
+      `GMT+00:00` on others, so two installations on different Node versions would have produced
+      different bytes for the same report. Both normalise to `Z`.
+
+      `GET /reports/:id/render?format=html|csv` is the surface, registered separately for the
+      response-schema exemption the way `mapBackgroundRoute` is — it answers text, which the guard
+      cannot filter.
+
+      Not here, and deliberate: `HistoryService.forSensor` is called once per subject,
+      sequentially. A batched query would be a second implementation of `segmentsFor` — the
+      stitching of a rollup tier with everything newer than its watermark — and the first sign of a
+      disagreement would be a report and the sensor page showing different numbers for the same
+      hour. The cost is real and noted in `P-203`, with a measurement, because `CLAUDE.md` does not
+      allow the claim without one.
+
+      18 rendering tests, 8 against real readings with a deliberate hole in the middle, 5 API.
 
 - [ ] **E-05 — Graphs in a report** · L · E-04 · **Gated on the ADR.** See decision 2 above.
 

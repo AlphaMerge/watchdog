@@ -14,6 +14,7 @@ import { HistoryService } from '../src/timeseries/history.js';
 import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService } from '../src/reports/service.js';
 import { ReportContext } from '../src/reports/context.js';
+import { ReportRenderer } from '../src/reports/render.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -61,6 +62,12 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     const access = new AccessService({ db, logger: silent });
     const history = new HistoryService({ db, logger: silent });
     const reportRepository = new ReportRepository();
+    const reportContext = new ReportContext({
+      db,
+      repository: reportRepository,
+      access,
+      logger: silent,
+    });
 
     const server = new ApiServer({
       config: {
@@ -79,12 +86,8 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       catalogue: testCatalogue(),
       reports: {
         service: new ReportService({ db, repository: reportRepository, logger: silent }),
-        context: new ReportContext({
-          db,
-          repository: reportRepository,
-          access,
-          logger: silent,
-        }),
+        context: reportContext,
+        renderer: new ReportRenderer({ context: reportContext, history, logger: silent }),
       },
       auth: {
         accounts,
@@ -102,7 +105,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
 
     // Both `readwrite`: an administrator short-circuits every grant and would make the access
     // half of this file assert nothing.
-    for (const login of ['author', 'reader', 'temp', 'temp2']) {
+    for (const login of ['author', 'reader', 'temp', 'temp2', 'temp3']) {
       await accounts.create({ login, password: 'correct-horse-battery', role: 'readwrite' });
     }
     const authorGroup = await db.query<{ id: string }>(
@@ -120,7 +123,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     );
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
-       SELECT $1, id, true FROM user_account WHERE login IN ('reader', 'temp', 'temp2')`,
+       SELECT $1, id, true FROM user_account WHERE login IN ('reader', 'temp', 'temp2', 'temp3')`,
       [readerGroupId],
     );
 
@@ -135,7 +138,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     // so the "while the account is enabled" half of that case asserts something.
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
-       SELECT $1, id, false FROM user_account WHERE login = 'temp2'`,
+       SELECT $1, id, false FROM user_account WHERE login IN ('temp2', 'temp3')`,
       [authorGroupId],
     );
 
@@ -605,6 +608,93 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: as(reader),
       });
       assert.equal(response.statusCode, 404, 'absent rather than forbidden, as everywhere else');
+    });
+  });
+
+  describe('rendering over the wire (E-04)', () => {
+    it('answers HTML by default and CSV when asked, with the right content type', async () => {
+      const made = await makeReport('rendered', { subjects: { objectIds: [sensorId] } });
+
+      const html = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render`,
+        headers: as(author),
+      });
+      assert.equal(html.statusCode, 200, html.body);
+      assert.match(html.headers['content-type'] ?? '', /^text\/html; charset=utf-8$/u);
+      assert.ok(html.body.startsWith('<!doctype html>'));
+      assert.match(html.headers['content-disposition'] ?? '', /inline; filename="rendered.html"/u);
+
+      const csv = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render?format=csv`,
+        headers: as(author),
+      });
+      assert.equal(csv.statusCode, 200, csv.body);
+      assert.match(csv.headers['content-type'] ?? '', /^text\/csv; charset=utf-8$/u);
+      assert.ok(csv.body.startsWith('Report,rendered'), csv.body.slice(0, 80));
+    });
+
+    it('refuses a format it does not have, rather than guessing', async () => {
+      const made = await makeReport('bad-format', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render?format=pdf`,
+        headers: as(author),
+      });
+      // `E-05` and the ADR decide whether PDF ever exists; until then saying so beats an HTML
+      // document served under a name that promises otherwise.
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.json<{ error: { code: string } }>().error.code, 'REPORT_INVALID');
+    });
+
+    it('renders through the report’s account, not the caller’s', async () => {
+      // `reader` has no access to the tree at all. Reading a report that runs as `author` still
+      // produces author's data — the act-as grant, reaching the rendered document.
+      const made = await makeReport('act-as', { subjects: { objectIds: [sensorId] } });
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/reports/${String(made.id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'read' },
+      });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render?format=csv`,
+        headers: as(reader),
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.ok(response.body.includes('Renders as,author'));
+      assert.ok(response.body.includes('reports-sensor'), 'and contains what author can see');
+    });
+
+    it('answers 422 once the account it renders through is disabled', async () => {
+      const made = await makeReport('render-nocontext', {
+        runAs: 'temp3',
+        subjects: { objectIds: [sensorId] },
+      });
+      await db.query(`UPDATE user_account SET disabled = true WHERE login = 'temp3'`);
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 422);
+      assert.equal(
+        response.json<{ error: { code: string } }>().error.code,
+        'REPORT_NO_CONTEXT',
+        'and as JSON, because the error envelope is the same whatever the route usually answers',
+      );
+    });
+
+    it('is hidden behind read on the report, like every other read', async () => {
+      const made = await makeReport('private-render', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render`,
+        headers: as(reader),
+      });
+      assert.equal(response.statusCode, 404);
     });
   });
 

@@ -38,7 +38,7 @@ import type { ProbeRegistry } from '../probes/registry.js';
 import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
-import { reportRoutes } from './routes/reports.js';
+import { reportRenderRoute, reportRoutes } from './routes/reports.js';
 import {
   PUBLIC_MAP_PREFIX,
   publicMapBackgroundRoute,
@@ -72,6 +72,7 @@ import type { MapResolver } from '../maps/resolver.js';
 import type { MapService } from '../maps/service.js';
 import type { ReportService } from '../reports/service.js';
 import type { ReportContext } from '../reports/context.js';
+import type { ReportRenderer } from '../reports/render.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -132,7 +133,7 @@ export interface ApiServerOptions {
    * the routes without one would not be a reduced API, it would be an unscoped one. Making them
    * inseparable is cheaper than remembering.
    */
-  reports?: { service: ReportService; context: ReportContext };
+  reports?: { service: ReportService; context: ReportContext; renderer: ReportRenderer };
   /**
    * The schedule library (`M-09`).
    *
@@ -605,10 +606,18 @@ export class ApiServer {
           }
         }
         if (this.#reports !== undefined) {
-          reportRoutes(scope, {
+          const wired = {
             reports: this.#reports.service,
             context: this.#reports.context,
-          });
+            renderer: this.#reports.renderer,
+          };
+          reportRoutes(scope, wired);
+          // The one report route that answers text rather than JSON (`E-04`). Exempted from the
+          // response-schema rule for the reason the map background is, and registered on its own
+          // so the exemption covers this route and not the seven beside it.
+          this.#exempting = 'a rendered report, in HTML or CSV rather than JSON';
+          reportRenderRoute(scope, wired);
+          this.#exempting = null;
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

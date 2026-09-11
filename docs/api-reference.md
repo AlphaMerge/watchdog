@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-148 routes.
+149 routes.
 
 ## Conventions
 
@@ -1454,6 +1454,18 @@ Take a group’s access away
 | `groupId` | path | string | **required** |
 
 **204**
+
+### `GET /api/v1/reports/{id}/render`
+
+Render this report now, as HTML or CSV
+
+Runs the report against its span and its security context and answers the document. `?format=html` (the default) or `?format=csv`. **An interval with no reading is a gap, in both formats** — an empty field in CSV and `—` in HTML, never a zero and never the previous value carried forward. A row whose channels are all empty is still printed: dropping it would make the table claim the period was shorter than it was. Subjects the report’s account cannot read are counted in the document rather than omitted from it, and answer as ids without saying which are deleted (`E-03`). A report whose account has been deleted or disabled answers 422, and one that would render more values than the limit answers 422 with the count and what to narrow — refused rather than truncated, because a report quietly missing its last four hundred sensors is the failure this whole surface exists to avoid.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200**
 
 ## schedules
 

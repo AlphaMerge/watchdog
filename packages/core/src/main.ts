@@ -97,6 +97,7 @@ import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
 import { ReportService } from './reports/service.js';
 import { ReportContext } from './reports/context.js';
+import { ReportRenderer } from './reports/render.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -842,11 +843,20 @@ async function serve(): Promise<void> {
   // Mounted here at the same time the routes were written, rather than a phase later: the maps
   // note directly above is the record of what happens otherwise.
   const reportRepository = new ReportRepository();
+  // Reads through the same `AccessService` the object API uses, for the reason the map resolver
+  // does: a report must not become a second, more permissive way to read a sensor (`E-03`).
+  const reportContext = new ReportContext({
+    db,
+    repository: reportRepository,
+    access: objectAccess,
+    logger,
+  });
   const reports = {
     service: new ReportService({ db, repository: reportRepository, logger }),
-    // Reads through the same `AccessService` the object API uses, for the reason the map resolver
-    // does: a report must not become a second, more permissive way to read a sensor (`E-03`).
-    context: new ReportContext({ db, repository: reportRepository, access: objectAccess, logger }),
+    context: reportContext,
+    // And through the same `HistoryService` the sensor pages use, so a report and the graph an
+    // operator checks it against cannot disagree about an hour (`E-04`).
+    renderer: new ReportRenderer({ context: reportContext, history, logger }),
   };
 
   // **An installation with no accounts cannot be administered, and one with a known default

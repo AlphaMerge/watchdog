@@ -23,7 +23,8 @@ export type ReportErrorCode =
   | 'REPORT_FORBIDDEN'
   | 'REPORT_GROUP_NOT_FOUND'
   | 'REPORT_USER_NOT_FOUND'
-  | 'REPORT_NO_CONTEXT';
+  | 'REPORT_NO_CONTEXT'
+  | 'REPORT_TOO_LARGE';
 
 export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   REPORT_INVALID: 400,
@@ -38,6 +39,11 @@ export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   // the account whose scope it renders through, and that is neither the caller's fault nor a
   // failure of this service. A 403 would suggest the caller could fix it by holding a right.
   REPORT_NO_CONTEXT: 422,
+  // **422 as well, and for the same shape of reason.** The request is understood and the report is
+  // real; what cannot be done is produce it at the size it was asked for. It is not a 413 — the
+  // request entity is a few hundred bytes — and it is not a 500, because nothing failed: the
+  // answer is "narrow it", and only the author can.
+  REPORT_TOO_LARGE: 422,
 };
 
 export class ReportError extends AppError {
