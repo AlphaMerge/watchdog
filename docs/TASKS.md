@@ -4172,6 +4172,34 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
+- [ ] **P-200 — the smoke tests take fixed container names, and CI is on the developer's Docker
+      now** · S · P-198 · Every smoke harness names its boxes the same way on every run —
+      `ms-smoke-core` and `ms-smoke-probe` on a network called `ms-smoke-net`
+      (`smoke-enrol.sh`), `ms-smoke-install-<distro>` (`smoke-install.sh`),
+      `ms-smoke-backup-origin` / `-target` (`smoke-restore.sh`) — and each starts by removing
+      those names, then removes them again from an `EXIT` trap.
+
+      **That was free on a hosted runner and is not free now.** Since `P-198` the same machine
+      runs CI and is the machine somebody develops on, so a push and a hand-run of the same script
+      overlap whenever the two happen within a few minutes of each other. They do not collide over
+      a port or fail to start: the second run's `cleanup()` **deletes the first run's boxes
+      mid-test**, and what the first run then reports is a probe that stopped answering — which
+      reads exactly like the defect these tests exist to find.
+
+      It nearly happened while `P-199` was being written: a local `smoke-enrol.sh` and CI's
+      `enrol-smoke` were minutes apart on 2026-09-09, and only the order they reached their
+      container stages kept them apart.
+
+      **The fix is a suffix, not a lock.** A run id in the names — `${MS_SMOKE_RUN:-$$}` or
+      `GITHUB_RUN_ID` when there is one — makes concurrent runs independent rather than serialised,
+      which matters because `enrol-smoke` takes minutes and a lock would make a push wait for
+      whatever somebody is doing by hand. The `EXIT` trap then removes only what that run created,
+      which is the same rule `P-198` applied to compose with `-p watchdog-ci`.
+
+      Worth doing with it: the image tag `ms-smoke:bookworm` is shared and should stay shared —
+      two runs building the same content under one tag is fine and the rebuild is most of the
+      runtime. Only the *containers* and the *network* need to be per-run.
+
 - [x] **P-199 — two of the four withdrawal doors are proved by unit tests only** · S · P-197,
       P-198 · `P-196` closed four doors: `revoke`, `remove`, a narrowed `allow-from`, and the
       approval that reopens one. `P-197` put the first through a smoke test on two boxes. The
