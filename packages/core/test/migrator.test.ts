@@ -194,6 +194,71 @@ describe(
       }
     });
 
+    it('takes an enum value back out, and says what that costs (050)', async () => {
+      // **The half a round trip cannot see.** Rolling 050 back over an empty database proves the
+      // SQL parses; the interesting case is a database that holds a stored XML report, because
+      // PostgreSQL has no DROP VALUE and the column cannot be cast to a type without the label.
+      // The migration deletes those documents on the way, deliberately, and this is where that
+      // claim is checked rather than only written down.
+      const fresh = await createScratchDatabase('enumdown');
+      try {
+        const m = migrator(fresh.db, MIGRATIONS);
+        await m.up();
+
+        // Where the value sits in the type, which is the order PostgreSQL sorts the column by:
+        // the renderings together, the container that wraps them last. `ADD VALUE` appends by
+        // default, and appending would have put `xml` after `zip`.
+        const order = async (): Promise<string[]> =>
+          (
+            await fresh.db.query<{ label: string }>(
+              `SELECT e.enumlabel AS label FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+               WHERE t.typname = 'report_output_format' ORDER BY e.enumsortorder`,
+            )
+          ).map((one) => one.label);
+        assert.deepEqual(await order(), ['html', 'csv', 'xml', 'zip']);
+
+        const report = await fresh.db.query<{ id: string }>(
+          "INSERT INTO report (name, kind) VALUES ('rolled back', 'table_only') RETURNING id",
+        );
+        const run = await fresh.db.query<{ id: string }>(
+          "INSERT INTO report_run (report_id, trigger) VALUES ($1, 'manual') RETURNING id",
+          [report[0]?.id],
+        );
+        await fresh.db.query(
+          `INSERT INTO report_output (run_id, format, filename, byte_size, sha256, body)
+           VALUES ($1, 'xml', 'a.xml', 3, repeat('a', 64), '\\x616263'::bytea)`,
+          [run[0]?.id],
+        );
+
+        const { reverted } = await m.down(1);
+        assert.deepEqual(
+          reverted.map((one) => one.id),
+          [50],
+        );
+
+        assert.deepEqual(await order(), ['html', 'csv', 'zip']);
+        // The document is gone and the run that produced it is not, which is the same thing
+        // `E-10`'s expiry does to a run whose outputs have aged out.
+        const left = await fresh.db.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM report_output',
+        );
+        assert.equal(left[0]?.n, '0');
+        const runs = await fresh.db.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM report_run',
+        );
+        assert.equal(runs[0]?.n, '1');
+
+        // And forward again, which is what an operator who rolled back to look at something does.
+        const again = await m.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [50],
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

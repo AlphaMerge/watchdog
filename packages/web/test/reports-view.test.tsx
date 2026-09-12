@@ -273,6 +273,26 @@ describe('the settings form', () => {
     expect(body.schedule['dayOfMonth']).toBeUndefined();
   });
 
+  it('offers XML beside the other two, and sends what was ticked (E-07)', async () => {
+    // The third format `§6` lists, and the one a script reads. A checkbox that renders and is not
+    // wired to the request is the failure this asserts against — it saves, and the report keeps
+    // producing exactly what it produced before.
+    const api = await showReport();
+    const outputs = fieldsetNamed('Output and delivery');
+    const xml = within(outputs).getByRole('checkbox', { name: 'XML' });
+    expect((xml as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(xml);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(api.calls.some((call) => call.method === 'PATCH')).toBe(true);
+    });
+    const patch = api.calls.find((call) => call.method === 'PATCH');
+    const body = patch?.body as { outputs: { formats: string[] } };
+    expect(body.outputs.formats).toEqual(['html', 'xml']);
+  });
+
   it('hides the recipient list for a stored-only report and shows it when it sends', async () => {
     // The core refuses recipients on a stored-only report, because a list that looks saved and
     // sends nothing is worse than a refusal.

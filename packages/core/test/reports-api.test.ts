@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import { assertWellFormed } from './support/xml.js';
 import { ApiServer } from '../src/api/server.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
@@ -683,6 +684,27 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.ok(csv.body.startsWith('Report,rendered'), csv.body.slice(0, 80));
     });
 
+    it('answers XML with a gap a script cannot read as a zero (E-07)', async () => {
+      const made = await makeReport('rendered-xml', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render?format=xml`,
+        headers: as(author),
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.match(response.headers['content-type'] ?? '', /^application\/xml; charset=utf-8$/u);
+      assert.match(
+        response.headers['content-disposition'] ?? '',
+        /inline; filename="rendered-xml.xml"/u,
+      );
+      assert.ok(response.body.startsWith('<?xml version="1.0" encoding="UTF-8"?>'), response.body);
+      // Over the wire as it is in the unit tests: the document parses, it names the sensor, and a
+      // bucket with no reading says so in XML's own spelling rather than with an empty element.
+      assertWellFormed(response.body);
+      assert.ok(response.body.includes('reports-sensor'));
+      assert.ok(!response.body.includes('></value>'), 'never an empty value element');
+    });
+
     it('refuses a format it does not have, rather than guessing', async () => {
       const made = await makeReport('bad-format', { subjects: { objectIds: [sensorId] } });
       const response = await app.inject({
@@ -916,7 +938,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     it('lists what a run produced, and downloads it with a strong ETag', async () => {
       const made = await makeReport('downloadable', {
         subjects: { objectIds: [sensorId] },
-        outputs: { formats: ['html', 'csv'], delivery: 'store' },
+        outputs: { formats: ['html', 'csv', 'xml'], delivery: 'store' },
       });
       const started = await app.inject({
         method: 'POST',
@@ -929,11 +951,22 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         outputs: { format: string; filename: string; sha256: string }[];
         delivery: { state: string };
       }>();
+      // In the enum's declaration order, which migration 050 put `xml` inside rather than after:
+      // the renderings together, the container that wraps them last.
       assert.deepEqual(
         run.outputs.map((one) => one.format),
-        ['html', 'csv'],
+        ['html', 'csv', 'xml'],
       );
       assert.equal(run.delivery.state, 'none', 'nothing to deliver for a stored-only report');
+
+      const xml = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs/${String(run.id)}/xml`,
+        headers: as(author),
+      });
+      assert.equal(xml.statusCode, 200, xml.body);
+      assert.match(xml.headers['content-type'] ?? '', /^application\/xml; charset=utf-8$/u);
+      assertWellFormed(xml.body);
 
       const csv = run.outputs.find((one) => one.format === 'csv');
       assert.ok(csv);

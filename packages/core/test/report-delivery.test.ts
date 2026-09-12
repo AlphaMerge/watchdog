@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { assertWellFormed } from './support/xml.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { Database } from '../src/db/pool.js';
 import { AccessService } from '../src/auth/access.js';
@@ -185,6 +186,23 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
       const html = await outputs.read(db, run.id, 'html');
       assert.ok(html?.body.toString('utf8').startsWith('<!doctype html>'));
       assert.equal(run.delivery.state, 'none', 'a stored-only report is not waiting on anything');
+    });
+
+    it('stores an XML rendering beside the others, in the declared order (E-07)', async () => {
+      const run = await runWith({ formats: ['html', 'csv', 'xml'], delivery: 'store' });
+      const stored = await outputs.list(db, run.id);
+      // Migration 050 put `xml` before `zip` rather than after it, so the renderings stay together
+      // and the container that wraps them stays last.
+      assert.deepEqual(
+        stored.map((one) => one.format),
+        ['html', 'csv', 'xml'],
+      );
+      const xml = await outputs.read(db, run.id, 'xml');
+      assert.ok(xml);
+      const body = xml.body.toString('utf8');
+      assert.ok(body.startsWith('<?xml version="1.0" encoding="UTF-8"?>'), body.slice(0, 60));
+      assertWellFormed(body);
+      assert.match(xml.filename, /\.xml$/u);
     });
 
     it('replaces the parts with one archive when zip is on', async () => {

@@ -3,7 +3,7 @@ import { describeError, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type { DocumentMessage } from '../notifications/delivery/email.js';
 import type { DeliveryResult } from '../notifications/delivery/transport.js';
-import { renderCsv, renderHtml, type ReportDocument } from './table.js';
+import { RENDERERS, type ReportDocument } from './table.js';
 import { buildZip } from './zip.js';
 import {
   keepsOutput,
@@ -37,10 +37,20 @@ import type { ReportRow } from './repository.js';
  *   days late is worse than one an operator was told about.
  */
 
+/**
+ * What `report_output_format` admits: every rendering, plus the archive that can hold them.
+ *
+ * Derived from `REPORT_FORMATS` rather than restated, so a format added there and not added to
+ * the enum is a type error in the repository rather than a `22P02` at three in the morning. `zip`
+ * is the one member that is a container rather than a rendering, which is why it is not in
+ * `REPORT_FORMATS` — nobody asks for a report *in* zip, they ask for one zipped.
+ */
+export type StoredFormat = ReportFormat | 'zip';
+
 export interface StoredOutput {
   readonly id: number;
   readonly runId: number;
-  readonly format: 'html' | 'csv' | 'zip';
+  readonly format: StoredFormat;
   readonly filename: string;
   readonly byteSize: number;
   readonly sha256: string;
@@ -54,7 +64,7 @@ export interface StoredOutputBody extends StoredOutput {
 interface RawOutput {
   id: string;
   run_id: string;
-  format: 'html' | 'csv' | 'zip';
+  format: StoredFormat;
   filename: string;
   byte_size: number;
   sha256: string;
@@ -80,7 +90,7 @@ export class ReportOutputRepository {
   async store(
     q: Queryable,
     runId: number,
-    output: { format: 'html' | 'csv' | 'zip'; filename: string; body: Buffer },
+    output: { format: StoredFormat; filename: string; body: Buffer },
   ): Promise<StoredOutput> {
     const sha256 = createHash('sha256').update(output.body).digest('hex');
     const rows = await q.query<RawOutput>(
@@ -194,6 +204,9 @@ export class ReportOutputRepository {
 const MEDIA: Readonly<Record<string, string>> = {
   html: 'text/html; charset=utf-8',
   csv: 'text/csv; charset=utf-8',
+  // `application/xml` rather than `text/xml`: RFC 7303 deprecated the latter's charset handling,
+  // and a report is UTF-8 with the encoding declared in the document itself.
+  xml: 'application/xml; charset=utf-8',
   zip: 'application/zip',
 };
 
@@ -221,7 +234,7 @@ export function filenameFor(report: ReportRow, spanLabel: string, extension: str
 }
 
 export interface RenderedOutput {
-  readonly format: 'html' | 'csv' | 'zip';
+  readonly format: StoredFormat;
   readonly filename: string;
   readonly body: Buffer;
 }
@@ -242,7 +255,9 @@ export function renderOutputs(
   const parts: RenderedOutput[] = outputs.formats.map((format: ReportFormat) => ({
     format,
     filename: filenameFor(report, document.window.label, format),
-    body: Buffer.from(format === 'csv' ? renderCsv(document) : renderHtml(document), 'utf8'),
+    // `RENDERERS` rather than a branch here: the render route answers from the same table, and the
+    // two disagreeing is how a download arrives as the right content type around the wrong bytes.
+    body: Buffer.from(RENDERERS[format](document), 'utf8'),
   }));
 
   if (!outputs.zip) return parts;

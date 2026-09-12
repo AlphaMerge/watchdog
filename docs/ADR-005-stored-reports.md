@@ -96,6 +96,12 @@ passed the check.
 **Decision.** `report_output` admits `html`, `csv` and `zip`. A PDF is not stored because nothing
 produces one.
 
+> **Amended 2026-09-12 by `E-07`** — `xml` joined the enum in migration 050, under this decision's
+> own reasoning rather than around it: it is text, the database compresses it as well as it
+> compresses the HTML, and it is bounded by the same `MAX_CELLS`. The reopening clause below is
+> about PDF and is untouched; a format that is text and bounded is admitted, and this is what
+> "admitted" looked like the first time it happened.
+
 **Why this is worth writing down rather than leaving implicit.** The size argument above holds
 *because* the formats are text that the database compresses an order of magnitude. A PDF with an
 embedded raster graph is neither small nor compressible, and a hundred of them a month is the

@@ -1,16 +1,17 @@
 import type { QueryAdjustment } from '../timeseries/query.js';
 import type { ReportSubject } from './context.js';
 import { ReportError } from './errors.js';
+import type { ReportFormat } from './outputs.js';
 import type { ReportKind } from './repository.js';
 
 /**
- * A rendered data table, in HTML and in CSV (`E-04`, `CAPABILITIES.MD §6`).
+ * A rendered data table, in HTML, CSV and XML (`E-04`, `E-07`, `CAPABILITIES.MD §6`).
  *
- * **One document, two renderings**, rather than two renderers reading the database. The two
+ * **One document, three renderings**, rather than three renderers reading the database. The
  * formats have to agree about every number and every gap, and the only way to guarantee that is
- * for them to be the same values formatted twice — `report-table.test.ts` asserts it as a
- * property. This module is pure: it takes a document and returns a string, so every rule below is
- * testable without a database.
+ * for them to be the same values formatted three times — `report-table.test.ts` asserts it as a
+ * property across all of them. This module is pure: it takes a document and returns a string, so
+ * every rule below is testable without a database.
  *
  * ## The rule this ticket exists to keep
  *
@@ -18,8 +19,8 @@ import type { ReportKind } from './repository.js';
  * report is the most durable thing this system emits — an empty bucket rendered as `0` is a
  * measurement somebody will act on, filed, months later, with nobody left who remembers. So:
  *
- * - `null` renders as an **empty CSV field** and as `—` in HTML. Never `0`, never `NaN`, never
- *   the last known value carried forward.
+ * - `null` renders as an **empty CSV field**, as `—` in HTML and as `xsi:nil` in XML. Never `0`,
+ *   never `NaN`, never the last known value carried forward.
  * - **A row whose channels are all gaps is still emitted.** Dropping it would compress time and
  *   make the table claim the period was shorter than it was. It is a timestamp with nothing
  *   beside it, which is the truth.
@@ -377,3 +378,210 @@ export function renderHtml(document: ReportDocument): string {
   out.push('</body></html>');
   return out.join('\n');
 }
+
+/* ------------------------------------------------------------------------- XML */
+
+/**
+ * The third formatting of the same document (`E-07`, `CAPABILITIES.MD §6`).
+ *
+ * **For a reader that is a program**, which is the whole difference from the two above. HTML is
+ * read by a person and CSV by a spreadsheet; XML is opened by a script that wants the numbers
+ * without reconstructing them from a table — so every fact the other two render as a label is an
+ * attribute here, and the structure says what the CSV preamble only spells out.
+ *
+ * ## The decisions in it
+ *
+ * **A gap is `xsi:nil`, not an empty element.** This is the ticket's version of the rule the rest
+ * of this file is about, and an empty element is not good enough for it: `Number(node.textContent)`
+ * on `<value/>` is `0`, which is exactly the reading that must be impossible. `xsi:nil="true"` is
+ * XML Schema's own spelling of "this element has no value", every parser and every XPath can see
+ * it, and no arithmetic on the text can produce a number from it. **And the element is still
+ * emitted** — one per declared channel, per row — so a consumer indexing by position never has to
+ * ask whether a missing child is a gap or a channel the report does not cover.
+ *
+ * **Names are camelCase, matching the JSON API.** `bucketSeconds` is `bucketSeconds` in both, so
+ * somebody who has read one has read the other. XML convention would suggest hyphens; agreeing
+ * with the rest of this system is worth more than agreeing with a convention.
+ *
+ * **No target namespace, and a `version` attribute instead.** The consumer of a report is a script
+ * writing `//sensor/rows/row`, and a default namespace makes that XPath silently match nothing
+ * until the author binds a prefix — a cost paid by everybody for a benefit (mixing documents)
+ * nobody here has. The `xsi` namespace is declared because `nil` lives in it, and a version
+ * attribute is what a future shape change is detected by.
+ *
+ * **`<adjustments>` and `<unavailable>` are always present, with a count.** Absent when empty
+ * would mean a consumer's "did anything go unrendered" check depends on the difference between an
+ * empty node-set and a zero, and those are the same node-set when the element is missing for a
+ * different reason. An always-present count is one thing to read.
+ *
+ * **XML is the most verbose of the three**, and `MAX_CELLS` bounds cells rather than bytes.
+ * Measured at the limit, over two channels of ordinary values: **CSV 3.2 MiB, HTML 6.7 MiB, XML
+ * 10.9 MiB**. That is why a row's values are written on one line rather than indented one per
+ * line — the file stays greppable and stays a size a mail relay accepts — and it is why
+ * `report-table.test.ts` renders a document at the limit and checks the size rather than trusting
+ * this paragraph.
+ */
+
+/**
+ * Characters XML 1.0 cannot carry, dropped rather than escaped.
+ *
+ * **There is no escape for them.** `&#1;` is as illegal as the raw byte in XML 1.0, so a name
+ * holding a control character cannot be represented at all, and a document containing one is not
+ * XML — every parser refuses the whole file, which for a scheduled report means an empty folder
+ * and nothing that failed. This is not hypothetical: device names arrive from SNMP `sysName` and
+ * from WMI, where a stray control byte is ordinary. Lone surrogates go for the same reason.
+ */
+function xmlSafe(raw: string): string {
+  let out = '';
+  for (const character of raw) {
+    const code = character.codePointAt(0) ?? 0;
+    const legal =
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0d ||
+      (code >= 0x20 && code <= 0xd7_ff) ||
+      (code >= 0xe0_00 && code <= 0xff_fd) ||
+      code >= 0x1_00_00;
+    if (legal) out += character;
+  }
+  return out;
+}
+
+export function xmlText(raw: string): string {
+  // `>` needs escaping only inside `]]>`, and is escaped everywhere anyway: the rule with one
+  // exception is the one a later edit forgets.
+  return xmlSafe(raw).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/**
+ * One attribute value, quoted with `"`.
+ *
+ * **Tab, newline and carriage return are escaped numerically**, which text does not need to do.
+ * Attribute-value normalisation replaces a literal one with a space before the application ever
+ * sees it, so a sensor name spanning two lines would come back as one line with a space and no
+ * parser would have done anything wrong. The numeric form survives it.
+ */
+export function xmlAttribute(raw: string): string {
+  return xmlText(raw)
+    .replaceAll('"', '&quot;')
+    .replaceAll('\t', '&#9;')
+    .replaceAll('\n', '&#10;')
+    .replaceAll('\r', '&#13;');
+}
+
+const XSI = 'http://www.w3.org/2001/XMLSchema-instance';
+
+export function renderXml(document: ReportDocument): string {
+  refuseIfTooLarge(document);
+  const a = xmlAttribute;
+  const t = xmlText;
+  const n = (value: number): string => String(value);
+  const out: string[] = [];
+
+  out.push('<?xml version="1.0" encoding="UTF-8"?>');
+  out.push(
+    `<report xmlns:xsi="${XSI}" version="1" id="${n(document.report.id)}" ` +
+      `kind="${a(document.report.kind)}" name="${a(document.report.name)}">`,
+  );
+  out.push(
+    `  <period label="${a(document.window.label)}" timezone="${a(document.window.timezone)}" ` +
+      `from="${a(formatInstant(document.window.from, document.window.timezone))}" ` +
+      `to="${a(formatInstant(document.window.to, document.window.timezone))}"/>`,
+  );
+  // The account it rendered through, named in the output so it can be checked — the same fact
+  // `E-03` puts in the CSV preamble, for the same reason.
+  out.push(
+    `  <rendering runAs="${a(document.runAs)}" ` +
+      `generatedAt="${a(document.generatedAt.toISOString())}"/>`,
+  );
+  out.push(
+    `  <resolution bucketSeconds="${n(document.resolution.bucketSeconds)}" ` +
+      `source="${a(document.resolution.source)}"/>`,
+  );
+
+  out.push(`  <adjustments count="${n(document.adjustments.length)}">`);
+  for (const adjustment of document.adjustments) {
+    const requested =
+      adjustment.kind === 'range-shortened'
+        ? adjustment.requestedDays
+        : adjustment.requestedSeconds;
+    const effective =
+      adjustment.kind === 'range-shortened'
+        ? adjustment.effectiveDays
+        : adjustment.effectiveSeconds;
+    const unit = adjustment.kind === 'range-shortened' ? 'days' : 'seconds';
+    out.push(
+      `    <adjustment kind="${a(adjustment.kind)}" unit="${unit}" ` +
+        `requested="${n(requested)}" effective="${n(effective)}">${t(adjustment.reason)}` +
+        '</adjustment>',
+    );
+  }
+  out.push('  </adjustments>');
+
+  // Ids only, and deliberately not told apart — see `context.ts` on the existence oracle.
+  out.push(`  <unavailable count="${n(document.unavailable.length)}">`);
+  for (const id of document.unavailable) out.push(`    <object id="${n(id)}"/>`);
+  out.push('  </unavailable>');
+
+  out.push(`  <sensors count="${n(document.sections.length)}">`);
+  for (const section of document.sections) {
+    out.push(
+      `    <sensor id="${n(section.subject.id)}" kind="${a(section.subject.kind)}" ` +
+        `name="${a(section.subject.name)}">`,
+    );
+    if (section.note !== undefined) {
+      out.push(`      <note>${t(section.note)}</note>`);
+      out.push('    </sensor>');
+      continue;
+    }
+    out.push(`      <channels count="${n(section.columns.length)}">`);
+    for (const column of section.columns) {
+      // **`decimals` is omitted when it is automatic**, which is the one place this document says
+      // something by absence — and it is metadata about how to print a number rather than a
+      // number, so the rule above does not reach it.
+      const decimals = column.decimals === null ? '' : ` decimals="${n(column.decimals)}"`;
+      out.push(
+        `        <channel key="${a(column.key)}" name="${a(column.name)}" ` +
+          `unit="${a(column.unit)}"${decimals}/>`,
+      );
+    }
+    out.push('      </channels>');
+    out.push(`      <rows count="${n(section.rows.length)}">`);
+    for (const entry of section.rows) {
+      const cells = entry.values.map((value, index) => {
+        const column = section.columns[index];
+        const key = a(column?.key ?? String(index));
+        const rendered = formatValue(value, column?.decimals ?? null);
+        // **The rule this ticket exists to keep, in XML's own spelling.** An empty element would
+        // read as zero to `Number(node.textContent)`; `xsi:nil` cannot.
+        return rendered === ''
+          ? `<value channel="${key}" xsi:nil="true"/>`
+          : `<value channel="${key}">${t(rendered)}</value>`;
+      });
+      out.push(
+        `        <row at="${a(formatInstant(entry.at, document.window.timezone))}">` +
+          `${cells.join('')}</row>`,
+      );
+    }
+    out.push('      </rows>');
+    out.push('    </sensor>');
+  }
+  out.push('  </sensors>');
+  out.push('</report>');
+  return `${out.join('\n')}\n`;
+}
+
+/**
+ * Every formatting of a document, by the format that names it.
+ *
+ * **One table, read by the render route and by the stored-output renderer**, because the two
+ * asking the same question differently is how a download comes back as the right content type
+ * around the wrong document. A `Record<ReportFormat, …>` is exhaustive, so a fourth format added
+ * to `REPORT_FORMATS` and not added here is a type error rather than a silent fall-through to
+ * HTML — which is what a chain of ternaries ending in `: renderHtml` would have been.
+ */
+export const RENDERERS: Readonly<Record<ReportFormat, (document: ReportDocument) => string>> = {
+  html: renderHtml,
+  csv: renderCsv,
+  xml: renderXml,
+};

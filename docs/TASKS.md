@@ -13752,8 +13752,9 @@ nothing in this phase is gated on a decision any more.
    `\Report PDFs` directory as though they are files. That decision has to be made again rather
    than inherited.
 
-`E-01` to `E-04` and `E-08` to `E-11` need none of that and are the path to a useful report today:
-HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates the pictures.
+`E-01` to `E-04`, `E-07` and `E-08` to `E-11` need none of that and are the path to a useful report
+today: HTML, CSV and XML of a data table, on a schedule, delivered by email. `E-05` and `E-06` —
+the pictures — are what the ADRs gated, and `ADR-006` Decision 4 put `E-07` ahead of both.
 
 - [x] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
       and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
@@ -13987,10 +13988,23 @@ HTML and CSV of a data table, on a schedule, delivered by email. The ADR gates t
       The work is pagination: repeating column headers, column widths from the content, and a page
       break that does not separate a row from its own timestamp.
 
-- [ ] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
+- [x] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
       exists, and worth doing with CSV rather than after the pictures. **`ADR-006` Decision 4 says
       it goes first** — a third formatting of a document model that already exists, with no
       dependency, no font and no geometry, against two `L` tickets.
+
+      **Landed 2026-09-12.** `renderXml` beside `renderHtml` and `renderCsv` over the same
+      `ReportDocument`, and the cell-for-cell parity test now covers all three. **A gap is
+      `xsi:nil="true"`, not an empty element** — `Number(node.textContent)` on `<value/>` is `0`,
+      which is the one reading this whole surface exists to make impossible, so the element is
+      always emitted and always says it has no value. Characters XML 1.0 cannot carry are dropped
+      rather than escaped, because `&#1;` is equally illegal and a control byte in an SNMP
+      `sysName` would otherwise produce a document no parser will read; tab, newline and return
+      inside an attribute are escaped numerically, which is what survives attribute-value
+      normalisation. Migration 050 adds `xml` to `report_output_format` before `zip`, with a
+      rollback that deletes the documents it cannot keep and says so (`ADR-005` Decision 3 amended
+      rather than reopened). Tests parse the output with a real parser rather than with the
+      regexes that wrote it; seven mutations were run and all seven were caught.
 
 - [x] **E-08 — Scheduling** · M · E-04 · One-off "run now", and hourly, daily, weekly, monthly,
       quarterly or annual. **Two constraints decide the design.** `CLAUDE.md` says nothing blocks

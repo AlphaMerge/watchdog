@@ -7,13 +7,18 @@ import { REPORT_KINDS, type ReportGrant, type ReportRow } from '../../reports/re
 import { REPORT_SPAN_KINDS, MAX_SPAN_OFFSET, planReportSpan } from '../../reports/span.js';
 import { REPORT_FREQUENCIES, describeSchedule, validateSchedule } from '../../reports/cadence.js';
 import type { ReportRun, ReportRunner, ReportRunRepository } from '../../reports/runs.js';
-import { REPORT_DELIVERY_MODES, REPORT_FORMATS, MAX_RECIPIENTS } from '../../reports/outputs.js';
+import {
+  REPORT_DELIVERY_MODES,
+  REPORT_FORMATS,
+  MAX_RECIPIENTS,
+  type ReportFormat,
+} from '../../reports/outputs.js';
 import { mediaTypeOf, type ReportOutputRepository } from '../../reports/delivery.js';
 import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
-import { renderCsv, renderHtml } from '../../reports/table.js';
+import { RENDERERS } from '../../reports/table.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
 
@@ -145,11 +150,11 @@ const scheduleSchema = {
 } as const;
 
 /**
- * What a report renders and where it goes (`E-09`, `CAPABILITIES.MD §6`).
+ * What a report renders and where it goes (`E-09`, `E-07`, `CAPABILITIES.MD §6`).
  *
- * No `pdf` and no `xml`: `E-05` is gated on Phase 13's first decision and nothing produces either,
- * so admitting them in a schema would be promising a format the renderer has never heard of.
- * `ADR-005` Decision 3 records when the list is reopened.
+ * No `pdf`: `E-06` is unblocked by `ADR-006` but nothing produces one yet, and admitting it in a
+ * schema would be promising a format the renderer has never heard of. `xml` is here because
+ * `E-07` renders it. `ADR-005` Decision 3 and migration 050 record when the stored list moves.
  */
 const outputsSchema = {
   type: 'object',
@@ -177,7 +182,7 @@ const outputFileResponse = {
   additionalProperties: false,
   required: ['format', 'filename', 'byteSize', 'sha256', 'createdAt'],
   properties: {
-    format: { type: 'string', enum: ['html', 'csv', 'zip'] },
+    format: { type: 'string', enum: [...REPORT_FORMATS, 'zip'] },
     filename: { type: 'string' },
     byteSize: { type: 'integer' },
     sha256: { type: 'string' },
@@ -822,7 +827,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
 }
 
 /**
- * A rendered report, as HTML or CSV (`E-04`).
+ * A rendered report, as HTML, CSV or XML (`E-04`, `E-07`).
  *
  * Registered on its own because it answers text rather than JSON, which is the one thing the
  * response-schema guard cannot filter — the same exemption `mapBackgroundRoute` takes, declared
@@ -837,14 +842,14 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
       config: READS,
       schema: {
         tags: ['reports'],
-        summary: 'Render this report now, as HTML or CSV',
+        summary: 'Render this report now, as HTML, CSV or XML',
         description:
           'Runs the report against its span and its security context and answers the document. ' +
-          '`?format=html` (the default) or `?format=csv`.\n\n' +
-          '**An interval with no reading is a gap, in both formats** — an empty field in CSV and ' +
-          '`—` in HTML, never a zero and never the previous value carried forward. A row whose ' +
-          'channels are all empty is still printed: dropping it would make the table claim the ' +
-          'period was shorter than it was.\n\n' +
+          '`?format=html` (the default), `?format=csv` or `?format=xml`.\n\n' +
+          '**An interval with no reading is a gap, in every format** — an empty field in CSV, ' +
+          '`—` in HTML and `xsi:nil="true"` in XML, never a zero and never the previous value ' +
+          'carried forward. A row whose channels are all empty is still printed: dropping it ' +
+          'would make the table claim the period was shorter than it was.\n\n' +
           'Subjects the report’s account cannot read are counted in the document rather than ' +
           'omitted from it, and answer as ids without saying which are deleted (`E-03`). A report ' +
           'whose account has been deleted or disabled answers 422, and one that would render more ' +
@@ -855,23 +860,24 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
     },
     async (request, reply) => {
       const format = request.query.format ?? 'html';
-      if (format !== 'html' && format !== 'csv') {
+      if (!(REPORT_FORMATS as readonly string[]).includes(format)) {
         throw new ReportError('REPORT_INVALID', `there is no report format called "${format}"`, {
           context: { phase: 'render' },
           details: { format },
         });
       }
+      const render = RENDERERS[format as ReportFormat];
       const report = await reports.get(viewerOf(request), Number(request.params.id));
       const document = await renderer.build(report);
 
       const slug = report.name.replaceAll(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'report';
       return (
         reply
-          .type(format === 'csv' ? 'text/csv; charset=utf-8' : 'text/html; charset=utf-8')
+          .type(mediaTypeOf(format))
           // `inline` rather than `attachment`: an operator following a link wants to look at it. The
           // filename still travels, so saving it produces something named after the report.
           .header('content-disposition', `inline; filename="${slug}.${format}"`)
-          .send(format === 'csv' ? renderCsv(document) : renderHtml(document))
+          .send(render(document))
       );
     },
   );
@@ -900,7 +906,8 @@ export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOp
         tags: ['reports'],
         summary: 'Download what a run produced',
         description:
-          'The stored document, as `html`, `csv` or `zip` depending on what the report was set ' +
+          'The stored document, as `html`, `csv`, `xml` or `zip` depending on what the report was ' +
+          'set ' +
           'to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` ' +
           'and a second download is a 304.\n\n' +
           '**An email-only report keeps nothing once it has been delivered** (`ADR-005` ' +

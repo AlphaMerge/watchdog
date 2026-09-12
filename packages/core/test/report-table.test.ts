@@ -1,5 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { XMLParser } from 'fast-xml-parser';
+import { assertWellFormed } from './support/xml.js';
 import {
   MAX_CELLS,
   countCells,
@@ -9,6 +11,9 @@ import {
   formatValue,
   renderCsv,
   renderHtml,
+  renderXml,
+  xmlAttribute,
+  xmlText,
   type ReportDocument,
   type ReportSection,
 } from '../src/reports/table.js';
@@ -56,6 +61,71 @@ const doc = (sections: ReportSection[], extra: Partial<ReportDocument> = {}): Re
   sections,
   ...extra,
 });
+
+/**
+ * The XML read back with a real parser, rather than with the regexes that wrote it.
+ *
+ * A renderer checked only by matching its own output can be well-formed by accident and
+ * unparseable in fact — the document a script actually receives is the one a parser produces, so
+ * that is what these tests assert against.
+ *
+ * `parseTagValue: false` matters: left on, the parser turns `0.00` into the number `0` and the
+ * parity assertion below would compare `'0'` with `'0.00'` and fail for a reason that is the
+ * parser's rather than the renderer's.
+ */
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@',
+  parseTagValue: false,
+});
+
+type XmlNode = Readonly<Record<string, unknown>>;
+
+const parseXml = (xml: string): XmlNode => {
+  assertWellFormed(xml);
+  const parsed: unknown = parser.parse(xml);
+  assert.ok(typeof parsed === 'object' && parsed !== null);
+  return parsed as XmlNode;
+};
+
+const asNode = (value: unknown): XmlNode | undefined =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as XmlNode)
+    : undefined;
+
+/** One named child, as a node. */
+const child = (parent: XmlNode | undefined, name: string): XmlNode | undefined =>
+  asNode(parent?.[name]);
+
+/** Every named child, as nodes — the parser hands back one object rather than a list of one. */
+const many = (parent: XmlNode | undefined, name: string): XmlNode[] => {
+  const found = parent?.[name];
+  if (found === undefined) return [];
+  const list: unknown[] = Array.isArray(found) ? (found as unknown[]) : [found];
+  return list.flatMap<XmlNode>((one) => asNode(one) ?? []);
+};
+
+const attr = (node: XmlNode | undefined, name: string): string => {
+  const value = node?.[`@${name}`];
+  return typeof value === 'string' ? value : '';
+};
+
+/** The report's first sensor, which is the only one most of these fixtures have. */
+const xmlSensor = (xml: string): XmlNode | undefined =>
+  many(child(parseXml(xml), 'report'), 'sensors')
+    .flatMap((sensors) => many(sensors, 'sensor'))
+    .at(0);
+
+/** Its rows, with `null` for a value the document says it does not have. */
+const xmlRows = (xml: string): { at: string; values: (string | null)[] }[] =>
+  many(child(xmlSensor(xml), 'rows'), 'row').map((row) => ({
+    at: attr(row, 'at'),
+    values: many(row, 'value').map((cell) =>
+      // **`xsi:nil` reads as the absence of a value, which is the point.** There is no `#text` on
+      // a gap at all, so nothing a consumer does with it can produce a number.
+      cell['@xsi:nil'] === 'true' ? null : String(cell['#text']),
+    ),
+  }));
 
 describe('a rendered data table', () => {
   describe('keeps a gap a gap, which is the whole point of the ticket', () => {
@@ -116,9 +186,10 @@ describe('a rendered data table', () => {
       assert.equal(formatValue(1.5, null), '1.5');
     });
 
-    it('renders the same values in both formats, gaps included', () => {
-      // The two formats have to agree about every cell, and the way that is guaranteed is that
-      // they are the same document formatted twice. This is the assertion that says so.
+    it('renders the same values in all three formats, gaps included', () => {
+      // The formats have to agree about every cell, and the way that is guaranteed is that they
+      // are the same document formatted three times. This is the assertion that says so, and it
+      // is the reason `E-07` added a renderer rather than a second reader of the database.
       const rows = [
         [1, 2],
         [null, 2],
@@ -135,9 +206,14 @@ describe('a rendered data table', () => {
         .map(([, cells]) => [...(cells ?? '').matchAll(/<td[^>]*>(.*?)<\/td>/gu)])
         .map((cells) => cells.map(([, value]) => (value === '—' ? '' : value)));
       assert.ok(htmlCells.length > 0, 'the HTML rows were found at all');
+      const xmlCells = xmlRows(renderXml(document)).map((row) =>
+        row.values.map((value) => value ?? ''),
+      );
+      assert.ok(xmlCells.length > 0, 'the XML rows were found at all');
 
       assert.equal(csvCells.length, rows.length);
       assert.deepEqual(htmlCells, csvCells);
+      assert.deepEqual(xmlCells, csvCells);
     });
   });
 
@@ -277,7 +353,7 @@ describe('a rendered data table', () => {
         rows: Array.from({ length: MAX_CELLS }, () => ({ at: new Date(0), values: [1, 2] })),
       };
       assert.ok(countCells([huge]) > MAX_CELLS);
-      for (const render of [renderCsv, renderHtml]) {
+      for (const render of [renderCsv, renderHtml, renderXml]) {
         assert.throws(
           () => render(doc([huge])),
           (error: unknown) => {
@@ -300,6 +376,237 @@ describe('a rendered data table', () => {
       };
       assert.equal(countCells([atLimit]), MAX_CELLS);
       assert.ok(renderCsv(doc([atLimit])).length > 0);
+
+      // **And the most verbose format still fits in something a mail relay will carry.** The cell
+      // limit bounds cells, not bytes, so the one place that turns into a size is here: measured
+      // at the limit over two channels, CSV is 3.2 MiB, HTML 6.7 MiB and XML 10.9 MiB. The bound
+      // below is loose on purpose — it is there to catch a change that doubles the document,
+      // not to pin a number that moves with the width of the values.
+      const megabytes = Buffer.byteLength(renderXml(doc([atLimit])), 'utf8') / 1_048_576;
+      assert.ok(megabytes < 16, `an XML report at the cell limit is ${megabytes.toFixed(1)} MiB`);
+    });
+  });
+  describe('renders the same document as XML, for a reader that is a program', () => {
+    it('writes a gap as xsi:nil, which no arithmetic can turn into a zero', () => {
+      // **The ticket's own rule.** An empty element would have been the obvious shape and it is
+      // the wrong one: `Number(node.textContent)` on `<value/>` is `0`, which is exactly the
+      // reading this whole file exists to make impossible.
+      const xml = renderXml(
+        doc([
+          section([
+            [100, 0],
+            [null, null],
+            [0, 0],
+          ]),
+        ]),
+      );
+      assert.deepEqual(
+        xmlRows(xml).map((row) => row.values),
+        [
+          ['100', '0.00'],
+          [null, null],
+          ['0', '0.00'],
+        ],
+      );
+      assert.ok(xml.includes('<value channel="in" xsi:nil="true"/>'), xml);
+      assert.ok(!xml.includes('<value channel="in"></value>'), 'never an empty element');
+      assert.ok(!xml.includes('>0<') || xml.includes('channel="in">0<'), 'and a zero is a zero');
+      // The namespace `nil` lives in, declared once on the root — without it the attribute is
+      // just a name with a colon in it and no parser gives it any meaning.
+      assert.match(xml, /xmlns:xsi="http:\/\/www\.w3\.org\/2001\/XMLSchema-instance"/u);
+    });
+
+    it('emits one value per declared channel, so a consumer never counts children', () => {
+      // A gap dropped rather than marked would make the second channel of a row look like the
+      // first, which is the failure mode of every position-indexed format.
+      const rows = xmlRows(renderXml(doc([section([[null, 5]])])));
+      assert.equal(rows.length, 1);
+      assert.deepEqual(rows[0]?.values, [null, '5.00']);
+      const cells = many(
+        many(child(xmlSensor(renderXml(doc([section([[null, 5]])]))), 'rows'), 'row')[0],
+        'value',
+      );
+      assert.deepEqual(
+        cells.map((cell) => attr(cell, 'channel')),
+        ['in', 'loss'],
+      );
+    });
+
+    it('prints a row whose channels are all missing, rather than dropping it', () => {
+      const rows = xmlRows(
+        renderXml(
+          doc([
+            section([
+              [1, 1],
+              [null, null],
+              [3, 3],
+            ]),
+          ]),
+        ),
+      );
+      assert.equal(rows.length, 3);
+      const empty = rows[1];
+      assert.ok(empty !== undefined);
+      assert.equal(empty.at, '2026-09-01T03:00:00+02:00');
+      assert.deepEqual(empty.values, [null, null]);
+      // And the count the document declares agrees with the rows it holds, so a truncated file is
+      // detectable by the thing that reads it.
+      assert.equal(
+        attr(child(xmlSensor(renderXml(doc([section([[1, 1]])]))), 'rows'), 'count'),
+        '1',
+      );
+    });
+
+    it('stays well-formed with a sensor name that is markup', () => {
+      // The same operator text that is a formula in CSV and a script in HTML. Here the failure is
+      // a document no parser will accept, which for a scheduled report means an empty folder.
+      for (const name of ['<script>alert(1)</script>', 'a & b', 'say "hi"', "it's", 'x]]>y']) {
+        const xml = renderXml(doc([section([[1, 1]], name)]));
+        assert.equal(attr(xmlSensor(xml), 'name'), name, `"${name}" did not survive`);
+        assert.ok(!xml.includes('<script>'), 'and nothing reached the markup');
+      }
+    });
+
+    it('drops a character XML cannot carry rather than emitting a file nothing parses', () => {
+      // **There is no escape for it.** `&#1;` is as illegal as the raw byte in XML 1.0, so the
+      // choice is between losing the character and losing the document — and a device name with a
+      // control byte in its SNMP sysName is ordinary, not hypothetical.
+      const xml = renderXml(doc([section([[1, 1]], 'edge\u0001-router\uD800')]));
+      assert.equal(attr(xmlSensor(xml), 'name'), 'edge-router');
+      assert.ok(!xml.includes('&#1;'), 'not escaped, because escaping it is equally illegal');
+      assert.equal(xmlText('ok\u0000\u001f'), 'ok');
+      // A tab, a newline and a return are the three control characters XML does allow.
+      assert.equal(xmlText('a\tb\nc'), 'a\tb\nc');
+    });
+
+    it('keeps a newline inside an attribute, which normalisation would otherwise eat', () => {
+      // A parser replaces a literal newline in an attribute with a space before the application
+      // ever sees it, so a two-line sensor name would come back as one line and nothing would have
+      // gone wrong anywhere. The numeric form survives it.
+      const xml = renderXml(doc([section([[1, 1]], 'two\nlines\there')]));
+      assert.ok(xml.includes('&#10;') && xml.includes('&#9;'), xml);
+      // `htmlEntities` is this parser's switch for decoding numeric character references, which
+      // are core XML rather than HTML; `trimValues: false` keeps what it decodes.
+      const exact = new XMLParser({
+        ignoreAttributes: false,
+        attributeNamePrefix: '@',
+        parseTagValue: false,
+        trimValues: false,
+        htmlEntities: true,
+      });
+      const parsed: unknown = exact.parse(xml);
+      assert.ok(typeof parsed === 'object' && parsed !== null);
+      const sensor = many(child(parsed as XmlNode, 'report'), 'sensors')
+        .flatMap((sensors) => many(sensors, 'sensor'))
+        .at(0);
+      assert.equal(attr(sensor, 'name'), 'two\nlines\there');
+    });
+
+    it('escapes text and attributes by the rules each of them has', () => {
+      assert.equal(xmlText('<a> & </a>'), '&lt;a&gt; &amp; &lt;/a&gt;');
+      assert.equal(xmlAttribute('say "hi" & <bye>'), 'say &quot;hi&quot; &amp; &lt;bye&gt;');
+      // An apostrophe is left alone: the attributes here are quoted with `"`, and escaping it
+      // would make every possessive in an operator's report title unreadable in a text editor.
+      assert.equal(xmlAttribute("it's"), "it's");
+    });
+
+    it('says how many objects it did not render, even when the answer is none', () => {
+      // Always present with a count, so a consumer's "did anything go unrendered" check is one
+      // thing to read rather than the difference between an empty node-set and a missing element.
+      const empty = child(parseXml(renderXml(doc([section([[1, 1]])]))), 'report');
+      assert.equal(attr(child(empty, 'unavailable'), 'count'), '0');
+      assert.equal(attr(child(empty, 'adjustments'), 'count'), '0');
+
+      const some = child(
+        parseXml(renderXml(doc([section([[1, 1]])], { unavailable: [11, 12, 13] }))),
+        'report',
+      );
+      assert.equal(attr(child(some, 'unavailable'), 'count'), '3');
+      assert.deepEqual(
+        many(child(some, 'unavailable'), 'object').map((one) => attr(one, 'id')),
+        ['11', '12', '13'],
+      );
+    });
+
+    it('prints what the span rules changed, with the numbers rather than only the sentence', () => {
+      const report = child(
+        parseXml(
+          renderXml(
+            doc([section([[1, 1]])], {
+              adjustments: [
+                {
+                  kind: 'resolution-coarsened',
+                  reason: 'ranges of 40 days or more are averaged over at least 60 minutes',
+                  requestedSeconds: 300,
+                  effectiveSeconds: 3_600,
+                },
+              ],
+            }),
+          ),
+        ),
+        'report',
+      );
+      const adjustment = many(child(report, 'adjustments'), 'adjustment')[0];
+      assert.equal(attr(adjustment, 'kind'), 'resolution-coarsened');
+      assert.equal(attr(adjustment, 'unit'), 'seconds');
+      assert.equal(attr(adjustment, 'requested'), '300');
+      assert.equal(attr(adjustment, 'effective'), '3600');
+      assert.match(String(adjustment?.['#text']), /averaged over at least 60 minutes/u);
+    });
+
+    it('names the period, the account and the averaging, like the other two', () => {
+      const report = child(parseXml(renderXml(doc([section([[1, 1]])]))), 'report');
+      assert.equal(attr(child(report, 'period'), 'label'), '2026-09 (Europe/Berlin)');
+      assert.equal(attr(child(report, 'period'), 'timezone'), 'Europe/Berlin');
+      assert.equal(attr(child(report, 'period'), 'from'), '2026-09-01T00:00:00+02:00');
+      assert.equal(attr(child(report, 'rendering'), 'runAs'), 'alice');
+      assert.equal(attr(child(report, 'resolution'), 'bucketSeconds'), '3600');
+      assert.equal(attr(report, 'name'), 'Monthly uptime');
+      assert.equal(attr(report, 'version'), '1');
+    });
+
+    it('declares each channel with its unit, and its precision when it has one', () => {
+      const channels = many(
+        child(xmlSensor(renderXml(doc([section([[1, 1]])]))), 'channels'),
+        'channel',
+      );
+      assert.deepEqual(
+        channels.map((one) => [attr(one, 'key'), attr(one, 'unit'), attr(one, 'decimals')]),
+        [
+          ['in', 'octets/s', '0'],
+          ['loss', '%', '2'],
+        ],
+      );
+      // Automatic precision is the absence of a declared one — metadata about how to print a
+      // number rather than a number, which is why absence is allowed to mean something here.
+      const auto = renderXml(
+        doc([
+          {
+            subject: { id: 3, kind: 'sensor', name: 'auto' },
+            columns: [{ key: 'a', name: 'A', unit: '', decimals: null }],
+            rows: [{ at: new Date(Date.UTC(2026, 8, 1)), values: [1.5] }],
+          },
+        ]),
+      );
+      assert.ok(auto.includes('<channel key="a" name="A" unit=""/>'), auto);
+      assert.deepEqual(xmlRows(auto)[0]?.values, ['1.5']);
+    });
+
+    it('explains an empty section rather than emitting an empty rows element', () => {
+      const xml = renderXml(
+        doc([
+          {
+            subject: { id: 9, kind: 'device', name: 'a device' },
+            columns: [],
+            rows: [],
+            note: 'this device has no channels yet',
+          },
+        ]),
+      );
+      const sensor = xmlSensor(xml);
+      assert.equal(String(sensor?.['note']), 'this device has no channels yet');
+      assert.equal(attr(sensor, 'kind'), 'device');
+      assert.ok(!xml.includes('<rows'), 'and no empty table beside it');
     });
   });
 });

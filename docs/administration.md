@@ -349,13 +349,16 @@ form, rather than a month later in a PDF.
 
 ### What a rendered report says, and what an empty cell means
 
-`GET /reports/:id/render` produces the document now, as HTML (`?format=html`, the default) or CSV
-(`?format=csv`). Both carry the same numbers — they are one document formatted twice — and both
-begin with the period, the account the report rendered through, and the averaging interval, because
-a file that has been forwarded twice has lost whatever the email said.
+`GET /reports/:id/render` produces the document now, as HTML (`?format=html`, the default), CSV
+(`?format=csv`) or XML (`?format=xml`). All three carry the same numbers — they are one document
+formatted three times — and all three begin with the period, the account the report rendered
+through, and the averaging interval, because a file that has been forwarded twice has lost whatever
+the email said.
 
 **An empty cell means no reading was recorded in that interval. It does not mean zero.** In CSV it
-is an empty field; in HTML it is `—`. A sensor that was Down, paused, or unreachable produced no
+is an empty field; in HTML it is `—`; in XML it is `<value channel="…" xsi:nil="true"/>`, which is
+XML Schema's own way of saying an element has no value — an empty element was deliberately not used,
+because a script reading its text as a number would get `0`. A sensor that was Down, paused, or unreachable produced no
 readings, and a report that wrote `0` there would be a measurement somebody acts on. A measured
 zero — 0% packet loss, 0 errors — is written as `0`, and the two are always distinguishable. An
 interval where every channel is empty still gets a row: dropping it would make the table claim the
@@ -372,6 +375,15 @@ silently missing its last four hundred sensors would be worse than no report.
 
 CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
 is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
+
+**XML is the format for a reader that is a program.** Every fact the other two print as a label is
+an attribute — the period, the timezone, the account, the averaging, the channel keys and units,
+and a count on every list — so a script does not have to reconstruct them from a table. There is no
+namespace on the report's own elements, so `//sensor/rows/row` works as written; the `xsi` namespace
+is declared because that is where `nil` lives, and the root carries `version="1"` for the day the
+shape changes. A character XML cannot carry — a control byte in a device name discovered over SNMP,
+say — is dropped rather than escaped, because XML 1.0 has no escape for one and a document
+containing it is a document no parser will read at all.
 
 ---
 
@@ -423,9 +435,9 @@ why they are two lines.
 
 ## What happens to a report once it has run
 
-A report renders one or both of HTML and CSV, and is delivered one of three ways: stored, stored
-and emailed, or emailed only. **A new report stores HTML and sends nothing** — creating one must
-not arrange for this system to send mail.
+A report renders any of HTML, CSV and XML, and is delivered one of three ways: stored, stored and
+emailed, or emailed only. **A new report stores HTML and sends nothing** — creating one must not
+arrange for this system to send mail.
 
 **A stored report lives in the database** (`ADR-005`), not in a directory. Backing up the database
 backs up the reports; there is no second procedure, and a restore does not produce a list of
