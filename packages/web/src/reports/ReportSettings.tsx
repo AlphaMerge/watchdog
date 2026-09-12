@@ -376,7 +376,7 @@ export function ReportSettings({
             <div className="text-xs text-text-muted">
               <span className="ms-label block">Formats</span>
               <div className="mt-1 flex gap-3">
-                {(['html', 'csv', 'xml'] as const).map((one) => (
+                {(['html', 'csv', 'xml', 'pdf'] as const).map((one) => (
                   <label key={one} className="flex items-center gap-1">
                     <input
                       type="checkbox"

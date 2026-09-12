@@ -850,7 +850,7 @@ export interface ReportSchedule {
 }
 
 export interface ReportOutputs {
-  formats: ('html' | 'csv' | 'xml')[];
+  formats: ('html' | 'csv' | 'xml' | 'pdf')[];
   delivery: 'store' | 'store-and-email' | 'email';
   recipients: string[];
   zip: boolean;
@@ -903,7 +903,7 @@ export interface ReportSummary {
 }
 
 export interface ReportOutputFile {
-  format: 'html' | 'csv' | 'xml' | 'zip';
+  format: 'html' | 'csv' | 'xml' | 'pdf' | 'zip';
   filename: string;
   byteSize: number;
   sha256: string;

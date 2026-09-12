@@ -3,7 +3,8 @@ import { describeError, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type { DocumentMessage } from '../notifications/delivery/email.js';
 import type { DeliveryResult } from '../notifications/delivery/transport.js';
-import { RENDERERS, type ReportDocument } from './table.js';
+import { renderDocument } from './formats.js';
+import type { ReportDocument } from './table.js';
 import { buildZip } from './zip.js';
 import {
   keepsOutput,
@@ -204,6 +205,7 @@ export class ReportOutputRepository {
 const MEDIA: Readonly<Record<string, string>> = {
   html: 'text/html; charset=utf-8',
   csv: 'text/csv; charset=utf-8',
+  pdf: 'application/pdf',
   // `application/xml` rather than `text/xml`: RFC 7303 deprecated the latter's charset handling,
   // and a report is UTF-8 with the encoding declared in the document itself.
   xml: 'application/xml; charset=utf-8',
@@ -246,19 +248,25 @@ export interface RenderedOutput {
  * the files it contains is twice the size and asks the recipient which one to open; `§6` calls
  * this "optional ZIP", singular. The parts are what goes into it.
  */
-export function renderOutputs(
+export async function renderOutputs(
   report: ReportRow,
   document: ReportDocument,
   outputs: ReportOutputs,
   at: Date,
-): RenderedOutput[] {
-  const parts: RenderedOutput[] = outputs.formats.map((format: ReportFormat) => ({
-    format,
-    filename: filenameFor(report, document.window.label, format),
-    // `RENDERERS` rather than a branch here: the render route answers from the same table, and the
-    // two disagreeing is how a download arrives as the right content type around the wrong bytes.
-    body: Buffer.from(RENDERERS[format](document), 'utf8'),
-  }));
+): Promise<RenderedOutput[]> {
+  const parts: RenderedOutput[] = [];
+  for (const format of outputs.formats) {
+    parts.push({
+      format,
+      filename: filenameFor(report, document.window.label, format),
+      // `renderDocument` rather than a branch here: the render route answers from the same table,
+      // and the two disagreeing is how a download arrives as the right content type around the
+      // wrong bytes. **One at a time**, deliberately: rendering three formats of a large report in
+      // parallel would put three copies of it in memory at once to save nothing — the work is CPU
+      // on one thread either way.
+      body: await renderDocument(format, document),
+    });
+  }
 
   if (!outputs.zip) return parts;
   return [
@@ -373,7 +381,7 @@ export class ReportDelivery {
     q: Queryable = this.#db,
   ): Promise<{ outputs: readonly StoredOutput[]; mode: ReportDeliveryMode }> {
     const outputs = validateOutputs(report.outputs);
-    const rendered = renderOutputs(report, document, outputs, this.#now());
+    const rendered = await renderOutputs(report, document, outputs, this.#now());
 
     const stored: StoredOutput[] = [];
     for (const file of rendered) {

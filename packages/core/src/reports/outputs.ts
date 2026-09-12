@@ -3,15 +3,14 @@ import { ReportError } from './errors.js';
 /**
  * What a report produces and where it goes (`E-09`, `CAPABILITIES.MD §6`).
  *
- * `§6` offers HTML, PDF, CSV and XML, and three delivery modes. **Three of those four formats are
- * here.** XML joined with `E-07`: `ADR-006` Decision 4 put it ahead of the two `L` tickets
- * precisely because it is a third formatting of a document model that already exists, with no
- * dependency, no font and no geometry. PDF is `E-06`, which `ADR-006` Decision 1 unblocked and
- * which has to produce a real document before `report_output_format` admits it — `ADR-005`
- * Decision 3 records that list and when it is reopened.
+ * `§6` offers HTML, PDF, CSV and XML, and three delivery modes. **All four are here**, PDF last:
+ * `E-07` added XML because it needed nothing, and `E-06` added PDF once `ADR-006` had decided what
+ * it costs — `pdfkit` and a font we ship, rather than a browser. `ADR-005` Decision 3 named the
+ * formats a stored report may hold and said the list reopens when a PDF exists; it does, and
+ * migration 051 is where it reopened.
  */
 
-export const REPORT_FORMATS = ['html', 'csv', 'xml'] as const;
+export const REPORT_FORMATS = ['html', 'csv', 'xml', 'pdf'] as const;
 export type ReportFormat = (typeof REPORT_FORMATS)[number];
 
 export const REPORT_DELIVERY_MODES = ['store', 'store-and-email', 'email'] as const;

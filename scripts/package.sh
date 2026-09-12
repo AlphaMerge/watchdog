@@ -67,6 +67,13 @@ for pkg in "${packages[@]}"; do
   mkdir -p "${stage}/app/${pkg}"
   cp -R "${repo_root}/packages/${pkg}/dist" "${stage}/app/${pkg}/dist"
   cp "${repo_root}/packages/${pkg}/package.json" "${stage}/app/${pkg}/package.json"
+  # Files a package needs at runtime that are not JavaScript — today that is the font a PDF report
+  # is drawn with (`E-06`, `ADR-006` Decision 2), resolved relative to `dist`. Without it the core
+  # starts, serves and renders HTML, CSV and XML, and fails on the first PDF; `tsc` does not copy
+  # non-TypeScript files, so this is the line that puts it in the tarball.
+  if [ -d "${repo_root}/packages/${pkg}/assets" ]; then
+    cp -R "${repo_root}/packages/${pkg}/assets" "${stage}/app/${pkg}/assets"
+  fi
   # Tests, declarations and build metadata are development artefacts. Source maps stay: a
   # stack trace in journalctl that points at the TypeScript line is worth the few hundred KB.
   rm -rf "${stage}/app/${pkg}/dist/test"

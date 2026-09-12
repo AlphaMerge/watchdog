@@ -26,12 +26,16 @@
     "ajv": "^8.17.1",
     "argon2": "^0.45.1",
     "fastify": "^5.0.0",
+    "fontkit": "^2.0.4",
     "nodemailer": "^10.0.1",
     "otpauth": "^9.5.1",
+    "pdfkit": "^0.20.2",
     "pg": "^8.23.0"
   },
   "devDependencies": {
+    "@types/fontkit": "^2.0.9",
     "@types/nodemailer": "^8.0.1",
+    "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.11.0",
     "@types/ws": "^8.18.1",
     "fast-check": "^4.9.0",

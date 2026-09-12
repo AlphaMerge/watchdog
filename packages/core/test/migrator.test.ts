@@ -194,7 +194,7 @@ describe(
       }
     });
 
-    it('takes an enum value back out, and says what that costs (050)', async () => {
+    it('takes an enum value back out, and says what that costs (050, 051)', async () => {
       // **The half a round trip cannot see.** Rolling 050 back over an empty database proves the
       // SQL parses; the interesting case is a database that holds a stored XML report, because
       // PostgreSQL has no DROP VALUE and the column cannot be cast to a type without the label.
@@ -215,7 +215,7 @@ describe(
                WHERE t.typname = 'report_output_format' ORDER BY e.enumsortorder`,
             )
           ).map((one) => one.label);
-        assert.deepEqual(await order(), ['html', 'csv', 'xml', 'zip']);
+        assert.deepEqual(await order(), ['html', 'csv', 'xml', 'pdf', 'zip']);
 
         const report = await fresh.db.query<{ id: string }>(
           "INSERT INTO report (name, kind) VALUES ('rolled back', 'table_only') RETURNING id",
@@ -224,16 +224,20 @@ describe(
           "INSERT INTO report_run (report_id, trigger) VALUES ($1, 'manual') RETURNING id",
           [report[0]?.id],
         );
-        await fresh.db.query(
-          `INSERT INTO report_output (run_id, format, filename, byte_size, sha256, body)
-           VALUES ($1, 'xml', 'a.xml', 3, repeat('a', 64), '\\x616263'::bytea)`,
-          [run[0]?.id],
-        );
+        for (const format of ['xml', 'pdf']) {
+          await fresh.db.query(
+            `INSERT INTO report_output (run_id, format, filename, byte_size, sha256, body)
+             VALUES ($1, $2::report_output_format, 'a.out', 3, repeat('a', 64), '\\x616263'::bytea)`,
+            [run[0]?.id, format],
+          );
+        }
 
-        const { reverted } = await m.down(1);
+        // Both, in one go: 051 admitted `pdf` under the same reasoning 050 admitted `xml`, and
+        // each rollback has to survive a database that holds documents in the format it removes.
+        const { reverted } = await m.down(2);
         assert.deepEqual(
           reverted.map((one) => one.id),
-          [50],
+          [51, 50],
         );
 
         assert.deepEqual(await order(), ['html', 'csv', 'zip']);
@@ -252,7 +256,7 @@ describe(
         const again = await m.up();
         assert.deepEqual(
           again.applied.map((one) => one.id),
-          [50],
+          [50, 51],
         );
       } finally {
         await fresh.drop();

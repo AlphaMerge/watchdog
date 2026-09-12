@@ -4187,7 +4187,14 @@ because each is a decision rather than a defect:
 
       The ticket is a measurement first: render a report over 1, 10, 100 and 500 sensors at a
       month and at a year, with the conditions printed the way `test:perf` prints them, and put the
-      numbers in `docs/findings/`. Then decide. Batching is one answer; a concurrency limit is
+      numbers in `docs/findings/`. Then decide.
+
+      **`E-06` added a second thing to measure while you are there: the formatting, which is CPU on
+      the event loop rather than round trips.** At the cell limit, HTML and CSV take about a second
+      each; a PDF at its 400-page bound takes about three. `ReportRunner` bounds concurrency at
+      two, so the worst case is two renders competing with every request the core is serving. That
+      may be fine — a scheduled report runs at 03:00 — but it is a number this ticket should take
+      rather than a thing to find out from a latency graph. Batching is one answer; a concurrency limit is
       another and is much cheaper; and it may turn out that 500 sequential reads of a rollup tier
       are fine and the honest outcome is a finding saying so. **No change without the number** —
       `CLAUDE.md` does not allow a performance claim without a measurement committed to the repo,
@@ -13752,9 +13759,9 @@ nothing in this phase is gated on a decision any more.
    `\Report PDFs` directory as though they are files. That decision has to be made again rather
    than inherited.
 
-`E-01` to `E-04`, `E-07` and `E-08` to `E-11` need none of that and are the path to a useful report
-today: HTML, CSV and XML of a data table, on a schedule, delivered by email. `E-05` and `E-06` —
-the pictures — are what the ADRs gated, and `ADR-006` Decision 4 put `E-07` ahead of both.
+Everything except `E-05` has landed: HTML, CSV, XML and PDF of a data table, on a schedule,
+delivered by email. `ADR-006` Decision 4 put `E-07` ahead of the two `L` tickets, `E-06` then took
+the PDF without a browser, and **`E-05` — the graphs — is what is left of this phase.**
 
 - [x] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
       and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
@@ -13976,17 +13983,58 @@ the pictures — are what the ADRs gated, and `ADR-006` Decision 4 put `E-07` ah
       The expensive part is axis tick selection, label collision and the null-gap path — all of
       them assertable from an SVG string, which is why this is drawn rather than rasterised.
 
-- [ ] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**: `pdfkit`, laying the
+- [x] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**: `pdfkit`, laying the
       document out ourselves, with DejaVu Sans embedded.
 
-      A third renderer over `E-04`'s `ReportDocument`, beside HTML and CSV. Chromium is refused —
-      measured at 195 MB for `linux64` and 205 MB for `win64`, per platform, to lay out a table we
-      generated ourselves. **The font is not optional**: the standard PDF fonts encode WinAnsi, and
-      `pdfkit` asked for `Маршрут` emits truncated code points without throwing, so a Cyrillic
-      sensor name would reach a filed document as mojibake with nothing having failed.
+      A fourth renderer over `E-04`'s `ReportDocument`, beside HTML, CSV and XML. Chromium is
+      refused — measured at 195 MB for `linux64` and 205 MB for `win64`, per platform, to lay out a
+      table we generated ourselves. **The font is not optional**: the standard PDF fonts encode
+      WinAnsi, and `pdfkit` asked for `Маршрут` emits truncated code points without throwing, so a
+      Cyrillic sensor name would reach a filed document as mojibake with nothing having failed.
 
       The work is pagination: repeating column headers, column widths from the content, and a page
       break that does not separate a row from its own timestamp.
+
+      **Landed 2026-09-13.** Split in two, which is the whole reason the ADR could refuse a
+      browser: **`paginate` is pure** — document in, pages out, with a measuring function the
+      caller supplies — and **`draw` is dumb**, walking those pages and issuing `pdfkit` calls with
+      no decision left in it. So the layout rules are unit tests rather than something to look at:
+      headings repeat on every page, every row is placed exactly once, a section that does not fit
+      the remainder starts a new page unless it does not fit a whole one either (then it flows,
+      marked `(continued)`), small sections pack together, and **columns too wide for the page are
+      carried to a following page group with the time column repeated rather than clipped** —
+      clipping being the one way this layout could have lost a measurement silently. The finished
+      PDF is then read *back* in the tests through its own `ToUnicode` map, which is how a reader
+      copies text out of one, so the assertions are about what a person sees.
+
+      **The font is committed to the repository** (`packages/core/assets/fonts`, Debian's
+      `fonts-dejavu-core 2.37-6` build with its checksum and licence recorded); `scripts/package.sh`
+      now stages a package's `assets` directory, and the package smoke test asserts the font is
+      installed. `ADR-006` said OFL-1.1 and that was wrong — DejaVu is under the **Bitstream Vera**
+      licence, corrected in the ADR.
+
+      **And the first rendered CJK name found the gap the ADR left.** DejaVu has no CJK glyphs, and
+      a font without a glyph draws an empty box without anything failing — the same silent mojibake
+      the decision embedded a font to prevent, one alphabet further out. Characters the font cannot
+      draw are now written as their Unicode notation (`U+6771`) with a line in the document's
+      header saying so; `E-12` is the ticket for covering those scripts properly. Bounds are
+      measured: 10,000 rows over two channels is 185 pages, 0.43 MiB and 1.5 s, and `MAX_PDF_PAGES`
+      refuses beyond 400 pages with the count and the suggestion to take CSV instead. Migration 051
+      admits `pdf` to `report_output_format`, which is the reopening `ADR-005` Decision 3 asked for
+      and was done the way it asked — against a real rendered PDF.
+
+- [ ] **E-12 — A report in a script DejaVu does not cover** · M · E-06 · Japanese, Chinese and
+      Korean device names in a PDF. `E-06` made the failure visible — a character the font cannot
+      draw is written `U+6771` and the document says so — which is honest and is not a report
+      somebody in Tokyo wants to file.
+
+      **The decision is which font, and what it costs the installer.** Noto Sans CJK is tens of
+      megabytes per weight against the 760 KB `ADR-006` Decision 2 weighed, and the alternatives —
+      a subsetted build, a per-installation font path in the configuration, or a fallback chain —
+      each trade size for a different failure. `ADR-006`'s own numbers are the starting point, and
+      the ticket is a decision before it is an implementation. The machinery is already there:
+      `Typesetter.has` asks the font whether it can draw a character, and a second font is a second
+      answer to that question.
 
 - [x] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
       exists, and worth doing with CSV rather than after the pictures. **`ADR-006` Decision 4 says

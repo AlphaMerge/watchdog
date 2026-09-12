@@ -18,7 +18,8 @@ import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
-import { RENDERERS } from '../../reports/table.js';
+import { renderDocument } from '../../reports/formats.js';
+import { MAX_PDF_PAGES } from '../../reports/pdf.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
 
@@ -842,14 +843,17 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
       config: READS,
       schema: {
         tags: ['reports'],
-        summary: 'Render this report now, as HTML, CSV or XML',
+        summary: 'Render this report now, as HTML, CSV, XML or PDF',
         description:
           'Runs the report against its span and its security context and answers the document. ' +
-          '`?format=html` (the default), `?format=csv` or `?format=xml`.\n\n' +
+          '`?format=html` (the default), `?format=csv`, `?format=xml` or `?format=pdf`.\n\n' +
           '**An interval with no reading is a gap, in every format** — an empty field in CSV, ' +
-          '`—` in HTML and `xsi:nil="true"` in XML, never a zero and never the previous value ' +
-          'carried forward. A row whose channels are all empty is still printed: dropping it ' +
-          'would make the table claim the period was shorter than it was.\n\n' +
+          '`—` in HTML and in PDF, and `xsi:nil="true"` in XML, never a zero and never the ' +
+          'previous value carried forward. A row whose channels are all empty is still printed: ' +
+          'dropping it would make the table claim the period was shorter than it was.\n\n' +
+          'A PDF is laid out by this service rather than by a browser (`ADR-006`), so it has a ' +
+          'page limit as well as a value limit: a report over ' +
+          `${String(MAX_PDF_PAGES)} pages answers 422 with the count and what to narrow.\n\n` +
           'Subjects the report’s account cannot read are counted in the document rather than ' +
           'omitted from it, and answer as ids without saying which are deleted (`E-03`). A report ' +
           'whose account has been deleted or disabled answers 422, and one that would render more ' +
@@ -866,7 +870,6 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           details: { format },
         });
       }
-      const render = RENDERERS[format as ReportFormat];
       const report = await reports.get(viewerOf(request), Number(request.params.id));
       const document = await renderer.build(report);
 
@@ -877,7 +880,7 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           // `inline` rather than `attachment`: an operator following a link wants to look at it. The
           // filename still travels, so saving it produces something named after the report.
           .header('content-disposition', `inline; filename="${slug}.${format}"`)
-          .send(render(document))
+          .send(await renderDocument(format as ReportFormat, document))
       );
     },
   );
@@ -906,8 +909,8 @@ export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOp
         tags: ['reports'],
         summary: 'Download what a run produced',
         description:
-          'The stored document, as `html`, `csv`, `xml` or `zip` depending on what the report was ' +
-          'set ' +
+          'The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what the ' +
+          'report was set ' +
           'to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` ' +
           'and a second download is a 304.\n\n' +
           '**An email-only report keeps nothing once it has been delivered** (`ADR-005` ' +

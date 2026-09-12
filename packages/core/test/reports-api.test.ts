@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { assertWellFormed } from './support/xml.js';
+import { readPdf } from './support/pdf.js';
 import { ApiServer } from '../src/api/server.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
@@ -705,15 +706,45 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.ok(!response.body.includes('></value>'), 'never an empty value element');
     });
 
-    it('refuses a format it does not have, rather than guessing', async () => {
-      const made = await makeReport('bad-format', { subjects: { objectIds: [sensorId] } });
+    it('answers a PDF, laid out by this service rather than by a browser (E-06)', async () => {
+      const made = await makeReport('rendered-pdf', { subjects: { objectIds: [sensorId] } });
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/reports/${String(made.id)}/render?format=pdf`,
         headers: as(author),
       });
-      // `E-05` and the ADR decide whether PDF ever exists; until then saying so beats an HTML
-      // document served under a name that promises otherwise.
+      assert.equal(response.statusCode, 200, response.body);
+      assert.match(response.headers['content-type'] ?? '', /^application\/pdf$/u);
+      assert.match(
+        response.headers['content-disposition'] ?? '',
+        /inline; filename="rendered-pdf.pdf"/u,
+      );
+      const pdf = response.rawPayload;
+      assert.ok(pdf.subarray(0, 5).toString('latin1') === '%PDF-', 'it is a PDF');
+      // Read back through its own font map, which is how a reader gets the text out: the report’s
+      // name and the sensor it covers are in the document, not merely in its metadata.
+      const readout = readPdf(pdf);
+      const drawn = readout.pages.flat();
+      assert.ok(drawn.includes('rendered-pdf'), JSON.stringify(drawn.slice(0, 10)));
+      assert.ok(
+        drawn.some((text) => text.includes('reports-sensor')),
+        'and the sensor',
+      );
+      assert.ok(
+        readout.fonts.some((font) => font.endsWith('+DejaVuSans')),
+        readout.fonts.join(','),
+      );
+    });
+
+    it('refuses a format it does not have, rather than guessing', async () => {
+      const made = await makeReport('bad-format', { subjects: { objectIds: [sensorId] } });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/render?format=docx`,
+        headers: as(author),
+      });
+      // Saying so beats an HTML document served under a name that promises otherwise — which is
+      // what a renderer with a default branch would have answered.
       assert.equal(response.statusCode, 400);
       assert.equal(response.json<{ error: { code: string } }>().error.code, 'REPORT_INVALID');
     });
@@ -930,7 +961,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         method: 'POST',
         url: '/api/v1/reports',
         headers: as(author),
-        payload: { name: 'pdf-please', kind: 'table_only', outputs: { formats: ['pdf'] } },
+        payload: { name: 'docx-please', kind: 'table_only', outputs: { formats: ['docx'] } },
       });
       assert.equal(response.statusCode, 400);
     });
@@ -938,7 +969,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     it('lists what a run produced, and downloads it with a strong ETag', async () => {
       const made = await makeReport('downloadable', {
         subjects: { objectIds: [sensorId] },
-        outputs: { formats: ['html', 'csv', 'xml'], delivery: 'store' },
+        outputs: { formats: ['html', 'csv', 'xml', 'pdf'], delivery: 'store' },
       });
       const started = await app.inject({
         method: 'POST',
@@ -955,7 +986,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       // the renderings together, the container that wraps them last.
       assert.deepEqual(
         run.outputs.map((one) => one.format),
-        ['html', 'csv', 'xml'],
+        ['html', 'csv', 'xml', 'pdf'],
       );
       assert.equal(run.delivery.state, 'none', 'nothing to deliver for a stored-only report');
 
@@ -967,6 +998,15 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.equal(xml.statusCode, 200, xml.body);
       assert.match(xml.headers['content-type'] ?? '', /^application\/xml; charset=utf-8$/u);
       assertWellFormed(xml.body);
+
+      const pdf = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}/runs/${String(run.id)}/pdf`,
+        headers: as(author),
+      });
+      assert.equal(pdf.statusCode, 200);
+      assert.match(pdf.headers['content-type'] ?? '', /^application\/pdf$/u);
+      assert.equal(pdf.rawPayload.subarray(0, 5).toString('latin1'), '%PDF-');
 
       const csv = run.outputs.find((one) => one.format === 'csv');
       assert.ok(csv);

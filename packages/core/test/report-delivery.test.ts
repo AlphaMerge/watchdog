@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { assertWellFormed } from './support/xml.js';
+import { readPdf } from './support/pdf.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { Database } from '../src/db/pool.js';
 import { AccessService } from '../src/auth/access.js';
@@ -205,6 +206,27 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
       assert.match(xml.filename, /\.xml$/u);
     });
 
+    it('stores a PDF laid out by us, with the font embedded (E-06)', async () => {
+      const run = await runWith({ formats: ['html', 'pdf'], delivery: 'store' });
+      const stored = await outputs.list(db, run.id);
+      assert.deepEqual(
+        stored.map((one) => one.format),
+        ['html', 'pdf'],
+      );
+      const pdf = await outputs.read(db, run.id, 'pdf');
+      assert.ok(pdf);
+      assert.equal(pdf.body.subarray(0, 5).toString('latin1'), '%PDF-');
+      assert.match(pdf.filename, /\.pdf$/u);
+      const readout = readPdf(pdf.body);
+      assert.ok(readout.pageCount >= 1);
+      // The font travels inside the document, so the reader needs nothing installed — which is
+      // what `ADR-006` Decision 2 bought, and what a system font would not have.
+      assert.ok(
+        readout.fonts.some((font) => font.endsWith('+DejaVuSans')),
+        readout.fonts.join(','),
+      );
+    });
+
     it('replaces the parts with one archive when zip is on', async () => {
       // `§6` calls this "optional ZIP", singular. An email carrying both the archive and the files
       // in it is twice the size and asks the recipient which one to open.
@@ -399,7 +421,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
     });
 
     it('refuses a format nothing renders, and deduplicates one asked for twice', () => {
-      assert.throws(() => validateOutputs({ formats: ['pdf'] }), /no report format called/u);
+      assert.throws(() => validateOutputs({ formats: ['docx'] }), /no report format called/u);
       assert.throws(() => validateOutputs({ formats: [] }), /at least one format/u);
       assert.deepEqual(validateOutputs({ formats: ['html', 'html', 'csv'] }).formats, [
         'html',

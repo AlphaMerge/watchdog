@@ -1,7 +1,6 @@
 import type { QueryAdjustment } from '../timeseries/query.js';
 import type { ReportSubject } from './context.js';
 import { ReportError } from './errors.js';
-import type { ReportFormat } from './outputs.js';
 import type { ReportKind } from './repository.js';
 
 /**
@@ -570,18 +569,3 @@ export function renderXml(document: ReportDocument): string {
   out.push('</report>');
   return `${out.join('\n')}\n`;
 }
-
-/**
- * Every formatting of a document, by the format that names it.
- *
- * **One table, read by the render route and by the stored-output renderer**, because the two
- * asking the same question differently is how a download comes back as the right content type
- * around the wrong document. A `Record<ReportFormat, …>` is exhaustive, so a fourth format added
- * to `REPORT_FORMATS` and not added here is a type error rather than a silent fall-through to
- * HTML — which is what a chain of ternaries ending in `: renderHtml` would have been.
- */
-export const RENDERERS: Readonly<Record<ReportFormat, (document: ReportDocument) => string>> = {
-  html: renderHtml,
-  csv: renderCsv,
-  xml: renderXml,
-};

@@ -1481,9 +1481,9 @@ Take a group’s access away
 
 ### `GET /api/v1/reports/{id}/render`
 
-Render this report now, as HTML, CSV or XML
+Render this report now, as HTML, CSV, XML or PDF
 
-Runs the report against its span and its security context and answers the document. `?format=html` (the default), `?format=csv` or `?format=xml`. **An interval with no reading is a gap, in every format** — an empty field in CSV, `—` in HTML and `xsi:nil="true"` in XML, never a zero and never the previous value carried forward. A row whose channels are all empty is still printed: dropping it would make the table claim the period was shorter than it was. Subjects the report’s account cannot read are counted in the document rather than omitted from it, and answer as ids without saying which are deleted (`E-03`). A report whose account has been deleted or disabled answers 422, and one that would render more values than the limit answers 422 with the count and what to narrow — refused rather than truncated, because a report quietly missing its last four hundred sensors is the failure this whole surface exists to avoid.
+Runs the report against its span and its security context and answers the document. `?format=html` (the default), `?format=csv`, `?format=xml` or `?format=pdf`. **An interval with no reading is a gap, in every format** — an empty field in CSV, `—` in HTML and in PDF, and `xsi:nil="true"` in XML, never a zero and never the previous value carried forward. A row whose channels are all empty is still printed: dropping it would make the table claim the period was shorter than it was. A PDF is laid out by this service rather than by a browser (`ADR-006`), so it has a page limit as well as a value limit: a report over 400 pages answers 422 with the count and what to narrow. Subjects the report’s account cannot read are counted in the document rather than omitted from it, and answer as ids without saying which are deleted (`E-03`). A report whose account has been deleted or disabled answers 422, and one that would render more values than the limit answers 422 with the count and what to narrow — refused rather than truncated, because a report quietly missing its last four hundred sensors is the failure this whole surface exists to avoid.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1495,7 +1495,7 @@ Runs the report against its span and its security context and answers the docume
 
 Download what a run produced
 
-The stored document, as `html`, `csv`, `xml` or `zip` depending on what the report was set to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` and a second download is a 304. **An email-only report keeps nothing once it has been delivered** (`ADR-005` Decision 4) and answers 404 here. It is stored between rendering and sending because a retry needs the bytes, and a re-render months later is a different document.
+The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what the report was set to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` and a second download is a 304. **An email-only report keeps nothing once it has been delivered** (`ADR-005` Decision 4) and answers 404 here. It is stored between rendering and sending because a retry needs the bytes, and a re-render months later is a different document.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

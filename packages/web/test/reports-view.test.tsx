@@ -273,16 +273,22 @@ describe('the settings form', () => {
     expect(body.schedule['dayOfMonth']).toBeUndefined();
   });
 
-  it('offers XML beside the other two, and sends what was ticked (E-07)', async () => {
-    // The third format `§6` lists, and the one a script reads. A checkbox that renders and is not
-    // wired to the request is the failure this asserts against — it saves, and the report keeps
-    // producing exactly what it produced before.
+  it('offers all four formats, and sends what was ticked (E-07, E-06)', async () => {
+    // The formats `§6` lists, in one place. A checkbox that renders and is not wired to the
+    // request is the failure this asserts against — it saves, and the report keeps producing
+    // exactly what it produced before.
     const api = await showReport();
     const outputs = fieldsetNamed('Output and delivery');
+    for (const name of ['HTML', 'CSV', 'XML', 'PDF']) {
+      expect(within(outputs).getByRole('checkbox', { name })).toBeDefined();
+    }
     const xml = within(outputs).getByRole('checkbox', { name: 'XML' });
+    const pdf = within(outputs).getByRole('checkbox', { name: 'PDF' });
     expect((xml as HTMLInputElement).checked).toBe(false);
+    expect((pdf as HTMLInputElement).checked).toBe(false);
 
     fireEvent.click(xml);
+    fireEvent.click(pdf);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
@@ -290,7 +296,7 @@ describe('the settings form', () => {
     });
     const patch = api.calls.find((call) => call.method === 'PATCH');
     const body = patch?.body as { outputs: { formats: string[] } };
-    expect(body.outputs.formats).toEqual(['html', 'xml']);
+    expect(body.outputs.formats).toEqual(['html', 'xml', 'pdf']);
   });
 
   it('hides the recipient list for a stored-only report and shows it when it sends', async () => {

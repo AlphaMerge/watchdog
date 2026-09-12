@@ -162,9 +162,10 @@ by group, so a report you may not read is absent from the list rather than refus
 - **Every run is listed with the period it covered**, how long it took, whether it was delivered,
   and a link to what it produced. `store` keeps the document, `email only` does not — see
   [administration.md](administration.md).
-- **The formats are checkboxes, not a choice.** HTML, CSV and XML are three renderings of one
-  document rather than three reports, so a run can produce all of them and they cannot disagree
-  about a number. HTML is for reading, CSV for a spreadsheet, XML for a script.
+- **The formats are checkboxes, not a choice.** HTML, CSV, XML and PDF are four renderings of one
+  document rather than four reports, so a run can produce all of them and they cannot disagree
+  about a number. HTML is for reading, CSV for a spreadsheet, XML for a script, PDF for filing and
+  printing.
 
 ## The object detail page
 

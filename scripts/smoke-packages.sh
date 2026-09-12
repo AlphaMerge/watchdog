@@ -138,6 +138,13 @@ one_format() {
   ${in} id ms-probe >/dev/null 2>&1 || fail "no ms-probe service user"
   echo "    configuration, PKI, access key and service users: present"
 
+  # The font a PDF report is drawn with (`E-06`). It is the one file the core needs at runtime
+  # that `tsc` does not produce, so it is the one that a packaging change can quietly drop —
+  # and the symptom would be an installation that renders every format except the one somebody
+  # scheduled, months later, at three in the morning.
+  ${in} test -f /opt/ms/app/core/assets/fonts/DejaVuSans.ttf || fail "the report font is missing"
+  echo "    report font: present"
+
   # Not asserted active: these boxes have no database, by the decision above. What a package
   # owns is that the unit is installed and enabled, which is what these two check.
   ${in} test -f /etc/systemd/system/ms-core.service || fail "ms-core.service was not installed"

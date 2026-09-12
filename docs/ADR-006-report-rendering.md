@@ -40,7 +40,7 @@ Everything in this ADR that is a number was measured rather than recalled.
 | `canvas` | 3.2.3, and it is a **N-API native addon** — a compiled binary in the tarball |
 | `chartjs-node-canvas` | 5.0.0, last published March 2025, and it depends on `canvas` |
 | `svg-to-pdfkit` | 0.1.8, last published **2022**. The obvious bridge from an SVG chart into a PDF, and it is stale |
-| `DejaVuSans.ttf` | **760 KB**, OFL-1.1 |
+| `DejaVuSans.ttf` | **760 KB**, Bitstream Vera licence — *this row said OFL-1.1 when the ADR was written; see the correction under Decision 2* |
 
 **And one measurement that decided a sub-question.** `pdfkit`'s standard fonts encode WinAnsi and
 nothing else. Asked to write `Bürorouter`, it emits `<42fc726f726f75746572>` — `ü` as `fc`, which
@@ -93,8 +93,18 @@ Chromium is not and a hand-rolled writer is not either.
 
 ## Decision 2 — A report ships a font. The standard 14 are not enough
 
-**Decision.** `E-06` embeds **DejaVu Sans** (OFL-1.1, 760 KB) and uses it for every string a report
+**Decision.** `E-06` embeds **DejaVu Sans** (759,720 bytes) and uses it for every string a report
 draws. It does not rely on `pdfkit`'s built-in Helvetica.
+
+> **Corrected 2026-09-13 while implementing `E-06`.** This decision said DejaVu Sans is under
+> **OFL-1.1**. It is not: it is under the **Bitstream Vera Fonts licence**, with DejaVu's own
+> changes in the public domain and imported Arev glyphs under a matching notice. The decision
+> survives the correction unchanged — that licence also permits embedding without conditions on
+> the document — but it asks two things OFL-1.1 does not put the same way, and both are now
+> honoured: the permission notice travels with the font (`packages/core/assets/fonts/`, and the
+> release tarball carries the directory), and a *modified* font would have to be renamed, which is
+> why we ship the distribution's file unaltered. The font is not sold by itself, which the licence
+> also forbids.
 
 **Why, and this is the measurement above rather than a worry.** The standard fonts encode WinAnsi.
 Every device and sensor name in a report is text an operator typed, and an installation in Sofia,
@@ -103,8 +113,24 @@ filed document, with nothing failing anywhere. `E-04` already has a test asserti
 survives into a ZIP entry name for this exact class of reason; a report that mangles the name of
 the sensor it is about is worse than one that refuses to render.
 
-760 KB against a 26 MB dependency is not a number worth arguing about, and OFL-1.1 permits
-embedding without conditions on the document. **Chromium would not have solved this**: it falls
+760 KB against a 26 MB dependency is not a number worth arguing about, and the licence permits
+embedding without conditions on the document.
+
+> **Extended 2026-09-13 by `E-06`, and this is the half the decision got wrong.** The paragraph
+> above names Sofia, Athens *and Tokyo*. DejaVu Sans answers the first two and **cannot answer the
+> third**: it has no CJK glyphs at all, and a font without a glyph draws `.notdef` — an empty box —
+> without `pdfkit` complaining. Embedding this font therefore removes the silent-mojibake failure
+> for Latin, Greek and Cyrillic and leaves it exactly in place for Japanese, Chinese and Korean,
+> which is what the first rendered test of a CJK sensor name showed.
+>
+> `E-06` does not pretend otherwise. It asks the font, through `fontkit`, whether it can draw each
+> character of every string an operator typed, writes the ones it cannot as their Unicode notation
+> (`U+6771`), and says once in the document's header that this happened. **Visible and lossless
+> beats blank**, and it is the same rule as the rest of this system: a gap is drawn as a gap.
+>
+> Covering those scripts properly is a second font of a different order of size — Noto Sans CJK is
+> tens of megabytes, against the 760 KB this decision weighed — so it is a decision of its own
+> rather than a patch to this one. `E-12` holds it. **Chromium would not have solved this**: it falls
 back to system fonts, and a minimal Linux server has none installed — the toolchain image this was
 measured in has exactly one. It would have had the same failure, later, and harder to attribute.
 

@@ -350,15 +350,15 @@ form, rather than a month later in a PDF.
 ### What a rendered report says, and what an empty cell means
 
 `GET /reports/:id/render` produces the document now, as HTML (`?format=html`, the default), CSV
-(`?format=csv`) or XML (`?format=xml`). All three carry the same numbers — they are one document
-formatted three times — and all three begin with the period, the account the report rendered
-through, and the averaging interval, because a file that has been forwarded twice has lost whatever
-the email said.
+(`?format=csv`), XML (`?format=xml`) or PDF (`?format=pdf`). All four carry the same numbers — they
+are one document formatted four times — and all four begin with the period, the account the report
+rendered through, and the averaging interval, because a file that has been forwarded twice has lost
+whatever the email said.
 
 **An empty cell means no reading was recorded in that interval. It does not mean zero.** In CSV it
-is an empty field; in HTML it is `—`; in XML it is `<value channel="…" xsi:nil="true"/>`, which is
-XML Schema's own way of saying an element has no value — an empty element was deliberately not used,
-because a script reading its text as a number would get `0`. A sensor that was Down, paused, or unreachable produced no
+is an empty field; in HTML and in PDF it is `—`; in XML it is `<value channel="…" xsi:nil="true"/>`,
+which is XML Schema's own way of saying an element has no value — an empty element was deliberately
+not used, because a script reading its text as a number would get `0`. A sensor that was Down, paused, or unreachable produced no
 readings, and a report that wrote `0` there would be a measurement somebody acts on. A measured
 zero — 0% packet loss, 0 errors — is written as `0`, and the two are always distinguishable. An
 interval where every channel is empty still gets a row: dropping it would make the table claim the
@@ -371,10 +371,26 @@ breakdown.
 
 A report that would produce more than 200,000 values is refused rather than truncated, with the
 count and what to narrow: fewer sensors, a shorter span, or a coarser averaging interval. A report
-silently missing its last four hundred sensors would be worse than no report.
+silently missing its last four hundred sensors would be worse than no report. **A PDF has a second
+bound**, because values become pages: over 400 pages it is refused the same way, with the page
+count and the suggestion to render it as CSV instead, which has no pages.
 
 CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
 is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
+
+**A PDF is laid out by this service, not by a browser** (`ADR-006`). There is no Chromium to
+install, patch or supervise; the layout — column widths from the content, headings repeated on
+every page, a row never split across a break, a column too wide carried to a following page rather
+than clipped — is this service's own, and every page says what a dash means and where it sits in
+the document. **The font travels inside the file**, so the reader needs nothing installed and a
+Cyrillic or Greek sensor name is drawn correctly on a server with no fonts of its own.
+
+The font is DejaVu Sans, which covers Latin, Greek, Cyrillic and much besides, and covers **no
+CJK**. A character it cannot draw is written as its Unicode notation — `U+6771` — and the document
+says once, under its heading, that this happened: an empty box that nothing reports is the failure
+embedding a font was meant to remove, and it would be no better for being ours. A report whose
+device names are Japanese, Chinese or Korean is readable but not pretty, and `E-12` is the ticket
+for that.
 
 **XML is the format for a reader that is a program.** Every fact the other two print as a label is
 an attribute — the period, the timezone, the account, the averaging, the channel keys and units,
@@ -435,8 +451,8 @@ why they are two lines.
 
 ## What happens to a report once it has run
 
-A report renders any of HTML, CSV and XML, and is delivered one of three ways: stored, stored and
-emailed, or emailed only. **A new report stores HTML and sends nothing** — creating one must not
+A report renders any of HTML, CSV, XML and PDF, and is delivered one of three ways: stored, stored
+and emailed, or emailed only. **A new report stores HTML and sends nothing** — creating one must not
 arrange for this system to send mail.
 
 **A stored report lives in the database** (`ADR-005`), not in a directory. Backing up the database
