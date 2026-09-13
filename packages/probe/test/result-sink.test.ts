@@ -4,6 +4,7 @@ import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
 import type { ResultMeta } from '../src/runner/types.js';
 import { resultSink } from '../src/result-sink.js';
+import { SpoolClosedError } from '../src/spool/spool.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -87,6 +88,60 @@ describe('the result sink', () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(appended, [3]);
     assert.equal(woken(), 1, 'so a reachable core gets it immediately rather than on a timer');
+  });
+
+  it('does not spool a check a stopping pool cut off, and counts it', async () => {
+    // "probe is stopping" is not a reading of the device. Spooled, it would be one failed scan per
+    // in-flight check on every restart — a Down for a device nobody touched.
+    const { sink, completed, appended } = sinkOver();
+    sink(result(4, 'error'), meta('pool-stopped'));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(appended, []);
+    assert.deepEqual(completed, [4], 'still a completion: the runner answered');
+    assert.deepEqual(sink.stats(), { abandoned: 1, unspooled: 0 });
+  });
+
+  it('counts every result that arrives after close, and logs it once', async () => {
+    const lines: string[] = [];
+    const logger = pino({ level: 'warn' }, { write: (line: string) => lines.push(line) });
+    const appended: number[] = [];
+    const sink = resultSink({
+      logger,
+      spool: {
+        append: (results) => {
+          appended.push(...results.map((one) => one.sensorId));
+          return Promise.resolve();
+        },
+      },
+      drain: { wake: () => undefined },
+      checkFlow: { completed: () => undefined },
+    });
+
+    assert.deepEqual(sink.close(), { abandoned: 0, unspooled: 0 });
+    for (let id = 1; id <= 45; id += 1) sink(result(id, 'ok'), meta('execute'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(appended, [], 'nothing handed to a spool that is closing');
+    assert.deepEqual(sink.stats(), { abandoned: 0, unspooled: 45 });
+    assert.equal(lines.length, 1, 'forty-five results, one line');
+  });
+
+  it('counts a refusal from a spool closed underneath it, and logs that once too', async () => {
+    // The backstop for an ordering regression: the spool closed without the sink being told.
+    const lines: string[] = [];
+    const logger = pino({ level: 'warn' }, { write: (line: string) => lines.push(line) });
+    const sink = resultSink({
+      logger,
+      spool: { append: () => Promise.reject(new SpoolClosedError()) },
+      drain: { wake: () => undefined },
+      checkFlow: { completed: () => undefined },
+    });
+    for (let id = 1; id <= 10; id += 1) sink(result(id, 'ok'), meta('execute'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(sink.stats(), { abandoned: 0, unspooled: 10 });
+    assert.equal(lines.length, 1);
+    assert.ok(!lines[0]?.includes('could not spool a result'), 'not the per-result error');
   });
 
   it('survives a spool that cannot be written, rather than taking the probe down', async () => {

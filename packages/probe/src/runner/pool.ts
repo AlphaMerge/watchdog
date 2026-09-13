@@ -363,6 +363,8 @@ export class CheckPool {
   #startFailures = 0;
   #stopped = false;
   #disabled = false;
+  /** Set only while `stop` is waiting for running checks to settle. */
+  #onDrained: (() => void) | undefined;
 
   #submitted = 0;
   #completed = 0;
@@ -533,19 +535,39 @@ export class CheckPool {
   }
 
   /**
-   * Stops accepting work and terminates every worker.
+   * Stops accepting work, lets what is running finish for up to `drainMs`, and terminates every
+   * worker.
    *
-   * Checks in flight are abandoned rather than awaited: a probe shutting down has nothing useful
-   * to do with a result nobody will read, and waiting would mean the slowest hung check decides
-   * how long shutdown takes.
+   * **Queued checks are answered at once**, as `pool-stopped`: they never started, so there is no
+   * reading to wait for. **Running ones get the drain window.** A check a worker is already doing
+   * is a reading the spool is still open to take — `main.ts` closes it after this returns — and
+   * throwing it away was the `P-80` shutdown loss. Bounded, because the slowest hung check must
+   * not decide how long shutdown takes: whatever is still running when the window closes is
+   * abandoned as `pool-stopped`, and a check that times out inside it reports `timeout` as it
+   * would on any other day. Zero, the default, abandons everything in flight immediately.
    */
-  async stop(): Promise<void> {
+  async stop(options: { drainMs?: number } = {}): Promise<void> {
     this.#stopped = true;
     if (this.#shrinkTimer !== undefined) clearInterval(this.#shrinkTimer);
     this.#shrinkTimer = undefined;
     if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
     this.#overCeilingTimer = undefined;
     for (const job of this.#queue.splice(0)) this.#settle(job, 'pool-stopped', 'probe is stopping');
+
+    const running = this.#inFlight();
+    const drainMs = options.drainMs ?? 0;
+    if (running > 0 && drainMs > 0) {
+      let deadline: NodeJS.Timeout | undefined;
+      await new Promise<void>((resolve) => {
+        this.#onDrained = resolve;
+        deadline = setTimeout(resolve, drainMs);
+        deadline.unref();
+      });
+      clearTimeout(deadline);
+      this.#onDrained = undefined;
+    }
+    const abandoned = this.#inFlight();
+
     await Promise.all(
       this.#slots.map(async (slot) => {
         if (slot.job !== undefined) {
@@ -555,7 +577,15 @@ export class CheckPool {
       }),
     );
     this.#slots.length = 0;
-    this.#logger.info(this.stats(), 'check pool stopped');
+    this.#logger.info(
+      { ...this.stats(), drainMs, finishedWhileDraining: running - abandoned, abandoned },
+      'check pool stopped',
+    );
+  }
+
+  /** Checks a worker has started and nobody has answered for yet. */
+  #inFlight(): number {
+    return this.#slots.filter((slot) => slot.job !== undefined && !slot.job.settled).length;
   }
 
   /** Offers a check. Never blocks, never throws, always answers what it did. */
@@ -923,7 +953,20 @@ export class CheckPool {
 
   /** A worker died: mid-check, or during start-up. */
   #onWorkerGone(slot: Slot, reason: string): void {
-    if (this.#stopped || slot.retired || slot.gone) return;
+    if (slot.retired || slot.gone) return;
+    if (this.#stopped) {
+      // Inside `stop`'s drain window a check that loses its worker still owes an answer, and
+      // giving it now saves the drain waiting out its whole bound for one that cannot come.
+      // Nothing is respawned. Workers `stop` terminates itself arrive here with their jobs
+      // already settled, so they count as nothing.
+      const job = slot.job;
+      if (job === undefined || job.settled) return;
+      slot.gone = true;
+      this.#crashes += 1;
+      slot.job = undefined;
+      this.#settle(job, 'worker-crash', `the worker running this check ${reason}`);
+      return;
+    }
     slot.gone = true;
     this.#crashes += 1;
 
@@ -1072,6 +1115,7 @@ export class CheckPool {
       channels: parts.outcome === 'ok' ? parts.channels : [],
     };
     this.#onResult(result, { phase, waitMs: job.waitMs, workerId: slot?.id ?? 0 });
+    if (this.#onDrained !== undefined && this.#inFlight() === 0) this.#onDrained();
   }
 }
 

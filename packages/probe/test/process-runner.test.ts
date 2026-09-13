@@ -238,6 +238,18 @@ describe('process runner', () => {
     assert.equal(stats.completed, 2);
   });
 
+  it('answers every queued check when it stops, rather than emptying the queue', async () => {
+    const { runner, seen } = runnerOf({ maxConcurrent: 1 });
+    runner.submit(request(51, 'test.slow', { delayMs: 300 }));
+    runner.submit(request(52, 'test.ok'));
+    assert.equal(runner.stats().queued, 1);
+
+    await runner.stop();
+    const phases = Object.fromEntries(seen.map((one) => [one.result.sensorId, one.meta.phase]));
+    assert.deepEqual(phases, { 51: 'execute', 52: 'pool-stopped' });
+    assert.equal(runner.stats().queued, 0);
+  });
+
   it('stops accepting work once stopped', async () => {
     const { runner } = runnerOf();
     await runner.stop();

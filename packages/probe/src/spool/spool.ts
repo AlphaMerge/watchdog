@@ -61,6 +61,18 @@ export interface SpoolStats {
   unwritten: number;
 }
 
+/**
+ * `append` after `close` (`P-80`), as a type of its own so a caller can tell it from a disk that
+ * failed. The two want different handling: a failed write is news per result, while a refusal at
+ * shutdown arrives in a burst and is one fact with a count.
+ */
+export class SpoolClosedError extends Error {
+  constructor() {
+    super('the result spool is closed and cannot accept results');
+    this.name = 'SpoolClosedError';
+  }
+}
+
 const SEGMENT_SUFFIX = '.ndjson';
 const CURSOR_FILE = 'cursor.json';
 const DEFAULT_SEGMENT_BYTES = 8 * 1024 * 1024;
@@ -98,8 +110,9 @@ export class ResultSpool {
    * `#appendNow` writes through `await this.#handle?.write` and `close()` clears that handle, so
    * without this flag an append after close short-circuited to a no-op, incremented `pending` and
    * `bytes` for records on no disk, and **resolved** — which meant `P-78`'s counter never fired
-   * either. It is reachable on every shutdown: the spool-drain hook runs first, so the runners are
-   * still settling checks into `spoolResult` when the handle goes.
+   * either. It was reachable on every shutdown while the spool-drain hook closed the spool first,
+   * with the runners still settling checks into `spoolResult`; `main.ts` now closes it last, and
+   * this stays as the backstop for anything that gets the order wrong again.
    */
   #closed = false;
   /**
@@ -154,7 +167,7 @@ export class ResultSpool {
       // Counted before throwing, because the caller only gets an error and an error carries no
       // number — the same reasoning as the `.catch` below, for the case that never reached it.
       this.#unwritten += results.length;
-      throw new Error('the result spool is closed and cannot accept results');
+      throw new SpoolClosedError();
     }
     const queued = this.#writing.then(() => this.#appendNow(results));
     // Swallowed on the chain so one failed append cannot reject every later one; the caller

@@ -410,7 +410,18 @@ export class ProcessRunner {
    */
   async stop(): Promise<void> {
     this.#stopped = true;
-    this.#queue.length = 0;
+    // Answered rather than emptied. Truncating the array left every queued check accepted and
+    // never settled — counted in nothing, and its sensor stuck in `#active` — which is the drop
+    // without a count `CLAUDE.md` rules out. They never started, so `pool-stopped` is the truth.
+    for (const job of this.#queue.splice(0)) {
+      this.#failed += 1;
+      this.#active.delete(job.request.sensorId);
+      this.#emit(job, msSince(job.queuedAt), 'pool-stopped', {
+        outcome: 'error',
+        durationMs: 0,
+        message: 'probe is stopping',
+      });
+    }
     while (this.#running > 0) await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }

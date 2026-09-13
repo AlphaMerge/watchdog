@@ -44,6 +44,15 @@ import { VERSION } from './version.js';
  * Anything else is the server, exactly as before. A typo must not silently start a second probe,
  * so `config <anything but check>` is a usage error rather than a fall-through.
  */
+/**
+ * How long a stopping check pool waits for the checks already running (`CheckPool.stop`).
+ *
+ * Inside the check-pool hook's 10 s and well inside the default 20 s service budget, and longer
+ * than an ordinary check takes: a check that runs past it is one its own timeout was going to
+ * report anyway, and shutdown does not wait for the slowest of those.
+ */
+const POOL_DRAIN_MS = 5_000;
+
 function configCheckRequested(argv: readonly string[]): 'check' | 'usage' | 'none' {
   const positional = argv.filter((one) => !one.startsWith('-'));
   // `--config <path>` puts a path in the positional list; the verb is only ever the first word.
@@ -136,6 +145,24 @@ async function main(): Promise<void> {
   // Extracted, because the rule it carries — an error is a completion — could not be asserted
   // while it lived here (`P-83`). `result-sink.ts` says why.
   const spoolResult = resultSink({ logger, spool, drain, checkFlow });
+  // **Registered before anything that produces a result, so it is the last hook to run.** Hooks
+  // run in reverse registration order, and this used to live inside the spool-drain hook at the
+  // bottom of this file — which made closing the spool the *first* thing shutdown did, while the
+  // scheduler was still dispatching and every worker was still delivering. Each of those results
+  // was refused, logged on its own, and lost: forty-five in the second before "shutdown complete"
+  // on a dev probe at the 5,000-sensor class. Nothing may register a hook above this line that
+  // settles checks into `spoolResult`.
+  lifecycle.onShutdown({
+    name: 'result-spool',
+    timeoutMs: 5_000,
+    run: async () => {
+      // The sink first, synchronously: every append it has started is on the spool's write chain,
+      // which `close` finishes, and anything later is counted by the sink instead of refused.
+      const results = spoolResult.close();
+      await spool.close();
+      logger.info({ results, spool: spool.stats() }, 'result spool closed');
+    },
+  });
 
   // Where PowerShell is, for the Windows sensors (`T-09`). In *this* process's environment
   // rather than a runner's `childEnv`, because a Windows check runs in a worker and a worker
@@ -158,7 +185,14 @@ async function main(): Promise<void> {
     onResult: spoolResult,
   });
   await pool.start();
-  lifecycle.onShutdown({ name: 'check-pool', timeoutMs: 10_000, run: () => pool.stop() });
+  // Runs after the scheduler has stopped dispatching (registered before it), and before the
+  // result spool closes (registered after it): running checks get a bounded window to land
+  // in a spool that can still take them, and whatever outlives it is abandoned and counted.
+  lifecycle.onShutdown({
+    name: 'check-pool',
+    timeoutMs: 10_000,
+    run: () => pool.stop({ drainMs: POOL_DRAIN_MS }),
+  });
 
   // Checks that run in a process of their own (`P-03`). Same submit/callback contract as the
   // pool, same spooling on the way out — the only difference is where the check runs, which is
@@ -450,14 +484,15 @@ async function main(): Promise<void> {
 
   drain.start();
   // Ordered after the client on purpose: the drain stops offering batches before the socket
-  // goes, so nothing is left in flight with no way to be answered.
+  // goes, so nothing is left in flight with no way to be answered. It stops the *drain* only —
+  // the spool stays open for the runners still settling checks, and closes in `result-spool`,
+  // last. What lands after this is on disk and goes to the core on the next start.
   lifecycle.onShutdown({
     name: 'spool-drain',
     timeoutMs: 5_000,
     run: async () => {
       await drain.stop();
       logger.info({ drain: drain.stats(), spool: spool.stats() }, 'spool drain stopped');
-      await spool.close();
     },
   });
 

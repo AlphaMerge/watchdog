@@ -270,6 +270,35 @@ describe('check pool', () => {
     assert.equal(pool.submit(request(92, 'test.ok')), 'stopped');
   });
 
+  it('lets a running check finish inside the drain window when it stops', async () => {
+    const { pool, seen } = await poolOf({ size: 1 });
+    pool.submit(request(93, 'test.slow', { delayMs: 200 }));
+    pool.submit(request(94, 'test.ok'));
+
+    const startedAt = Date.now();
+    await pool.stop({ drainMs: 5_000 });
+    assert.ok(Date.now() - startedAt < 4_000, 'returned when the check did, not at the bound');
+    const phases = Object.fromEntries(seen.map((one) => [one.result.sensorId, one.meta.phase]));
+    assert.deepEqual(phases, { 93: 'execute', 94: 'pool-stopped' }, 'the queued one never started');
+    assert.equal(seen.find((one) => one.result.sensorId === 93)?.result.outcome, 'ok');
+    assert.equal(pool.submit(request(95, 'test.ok')), 'stopped');
+  });
+
+  it('abandons a check that outlives the drain window, rather than waiting on it', async () => {
+    const { pool, seen } = await poolOf({ size: 1, abortGraceMs: 10_000 });
+    pool.submit({ ...request(96, 'test.hang'), timeoutMs: 60_000 });
+
+    const startedAt = Date.now();
+    await pool.stop({ drainMs: 150 });
+    const took = Date.now() - startedAt;
+    assert.ok(took >= 140 && took < 3_000, `bounded by the window: ${String(took)} ms`);
+    assert.deepEqual(
+      seen.map((one) => one.meta.phase),
+      ['pool-stopped'],
+      'answered exactly once',
+    );
+  });
+
   it('gives up rather than respawning for ever when workers cannot start', async () => {
     const seen: Seen[] = [];
     const pool = new CheckPool({

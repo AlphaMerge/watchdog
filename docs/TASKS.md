@@ -4260,6 +4260,32 @@ because each is a decision rather than a defect:
       loop 1.5 s. **The sampler had a second omission**, at the end of the last stall, which made
       `P-203`'s 1,268.6 ms too low — corrected in both findings files.
 
+- [x] **P-205 — a probe's graceful shutdown closes the spool first and loses what its workers
+      deliver** · S · P-80 · `docker stop ms-server` on 2026-09-13, at the 5,000-sensor dev load,
+      logged "the result spool is closed and cannot accept results" 45 times in the second before
+      "shutdown complete", exit code 0. `Lifecycle` runs hooks in reverse registration order, and
+      `main.ts` closed the spool inside `spool-drain`, the last hook registered — so it ran *first*,
+      with the scheduler still dispatching and every worker still delivering. `P-80` had noticed
+      the reachability and made the refusal honest (`unwritten`); the order itself stayed, each
+      refusal was its own error line, and the readings were gone.
+
+      **P-205 outcome.** The spool closes in its own `result-spool` hook, registered before any
+      runner so it runs last; `spool-drain` stops the drain only, and what lands afterwards is on
+      disk for the next start. `CheckPool.stop({ drainMs })` answers queued checks at once and
+      gives running ones a bounded window — 5 s in `main.ts` — before abandoning the rest, and a
+      worker that dies inside the window settles its check rather than making the drain wait out
+      the bound. `resultSink` gains `close()`: after it, and on any `SpoolClosedError`, results are
+      counted and logged **once**, and `main.ts` logs the totals in one `result spool closed` line.
+      **`pool-stopped` results are counted as `abandoned` and not spooled** — "probe is stopping"
+      is not a reading of the device, and fixing the order would otherwise have handed the core a
+      failed scan for every hung check on every restart. They had never reached the core before
+      either: the closed spool refused them. `ProcessRunner.stop` answered nothing it had queued —
+      it truncated the array, leaving accepted checks unsettled and uncounted — and now settles
+      them as `pool-stopped` too. `shutdown-order.test.ts` wires the real `Lifecycle`, pool, sink
+      and spool with three checks running when shutdown starts: the old order counts all three
+      under one warning, the new one reads all three back from disk. Disabling the drain window
+      fails both.
+
 
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
       step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list
