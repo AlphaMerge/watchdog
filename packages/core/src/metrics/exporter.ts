@@ -184,6 +184,17 @@ const CORE_METRICS: readonly Metric[] = [
     name: 'ms_core_reports_undelivered',
     help: 'Rendered reports still waiting on a mail relay. A gauge: it falls when they go out.',
   },
+  {
+    key: 'reportFormatsWaiting',
+    name: 'ms_core_report_formats_waiting',
+    help: 'Report documents waiting for a formatting worker. A gauge: it falls as they are formatted.',
+  },
+  {
+    key: 'reportFormatsRefused',
+    name: 'ms_core_report_formats_refused_total',
+    help: 'Report formatting refused because every worker was busy and the queue was full.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

@@ -6,6 +6,7 @@ import { AccessService } from '../../src/auth/access.js';
 import { HistoryService } from '../../src/timeseries/history.js';
 import { ReportContext } from '../../src/reports/context.js';
 import { ReportError } from '../../src/reports/errors.js';
+import { ReportFormatter } from '../../src/reports/formatter.js';
 import { renderPdf } from '../../src/reports/pdf.js';
 import { ReportRenderer } from '../../src/reports/render.js';
 import { ReportRepository } from '../../src/reports/repository.js';
@@ -39,10 +40,10 @@ const available = await databaseAvailable();
  * several times the measured value, so a change that makes this materially worse fails rather than
  * drifts; the numbers themselves live in `docs/findings/2026-09-13-report-render-cost.md`.
  *
- * **One of them guards a number that is not acceptable, and says so.** Two reports formatting at
- * once hold the event loop for over a second, so a request arriving meanwhile waits that long; the
- * assertion below stops it getting worse and is not a claim that it is fine. `P-204` moves the
- * formatting off the loop, and should replace that assertion with a budget worth having.
+ * **One of them is a budget, and it is `P-204`'s.** Two reports formatting on the event loop made a
+ * request arriving meanwhile wait 1.27 s at p95. Formatting now runs in `ReportFormatter`'s workers,
+ * and the two-reports case measures both ways — on the loop, as `P-203` did, and through the
+ * formatter, as the core does — and holds the second to within a few milliseconds of idle.
  */
 
 const SENSORS = 500;
@@ -324,6 +325,10 @@ describe(
         floor.push(ms(started));
       }
 
+      // One unmeasured report first. The first read after a seventeen-million-row fill finds cold
+      // caches, and it was landing inside the 1-sensor row: one run measured 68, 43 and 23 ms.
+      await rendererCounting(fresh()).build(await reportFor(1, 'month', 'graph_and_table'), NOW);
+
       for (const span of ['month', 'year'] as const) {
         lines.push(
           `      ${span === 'month' ? 'last month, 45-minute buckets from sample_5m' : 'last year, 9-hour buckets from sample_1h'}:`,
@@ -385,9 +390,19 @@ describe(
           `        an empty transaction (BEGIN, SELECT 1, COMMIT) — median ${median(floor).toFixed(2)} ms of 200\n`,
       );
 
-      // Loose, on purpose: see the header. A sensor's history read measured in single-digit
-      // milliseconds here; forty is a regression, not a slow machine.
+      // Loose, on purpose: see the header. A sensor's history read measured about twenty
+      // milliseconds here; forty is a regression, not a slow machine. **Per sensor only where
+      // there are enough sensors for that to mean something** — a 1-sensor report is mostly the
+      // report's own fixed costs, so it gets a bound on the whole instead.
       for (const result of results) {
+        if (result.refused) continue;
+        if (result.count === 1) {
+          assert.ok(
+            result.buildMs < 200,
+            `${result.span} over 1 sensor took ${result.buildMs.toFixed(0)} ms`,
+          );
+          continue;
+        }
         assert.ok(
           result.perSensorMs < 40,
           `${result.span} over ${String(result.count)} sensors took ${result.perSensorMs.toFixed(1)} ms a sensor`,
@@ -407,8 +422,9 @@ describe(
       }
     });
 
-    it('formats a document on the event loop, and says for how long', async () => {
+    it('formats a document on the event loop, and in a worker, and says what each holds', async () => {
       const lines: string[] = [];
+      const formatter = new ReportFormatter({ logger: silent });
       for (const [span, count] of [
         ['month', 100],
         ['year', 100],
@@ -421,13 +437,18 @@ describe(
           report: { ...document.report, kind: 'graph_only' },
         };
         lines.push(`      last ${span}, ${String(count)} sensors, graph_and_table:`);
-        lines.push('        format                 wall      event loop held   size');
+        lines.push('        format                           wall      event loop held   size');
         const formats: [string, () => unknown][] = [
           ['HTML', () => renderHtml(document)],
+          ['HTML, in a worker', () => formatter.format('html', document)],
           ['CSV', () => renderCsv(document)],
+          ['CSV, in a worker', () => formatter.format('csv', document)],
           ['XML', () => renderXml(document)],
+          ['XML, in a worker', () => formatter.format('xml', document)],
           ['PDF', () => renderPdf(document)],
+          ['PDF, in a worker', () => formatter.format('pdf', document)],
           ['PDF, graph_only', () => renderPdf(graphsOnly)],
+          ['PDF, graph_only, in a worker', () => formatter.format('pdf', graphsOnly)],
         ];
         for (const [name, work] of formats) {
           let size = '';
@@ -460,12 +481,30 @@ describe(
             measured = refusal;
           }
           lines.push(
-            `        ${name.padEnd(20)} ${measured.ms.toFixed(0).padStart(6)} ms   ${measured.loopMaxMs.toFixed(0).padStart(8)} ms      ${size}`,
+            `        ${name.padEnd(30)} ${measured.ms.toFixed(0).padStart(6)} ms   ${measured.loopMaxMs.toFixed(0).padStart(8)} ms      ${size}`,
           );
           assert.ok(measured.ms < 15_000, `${name} took ${measured.ms.toFixed(0)} ms`);
         }
       }
-      process.stdout.write(`\n    measured, formatting:\n${lines.join('\n')}\n`);
+
+      // What the worker path still does on the loop: copying the document into the worker. Timed
+      // as a structured clone of the largest document, which is the algorithm `postMessage` uses.
+      const largest = await rendererCounting(fresh()).build(
+        await reportFor(100, 'month', 'graph_and_table'),
+        NOW,
+      );
+      const clones: number[] = [];
+      for (let sample = 0; sample < 5; sample += 1) {
+        const started = process.hrtime.bigint();
+        structuredClone(largest);
+        clones.push(ms(started));
+      }
+      await formatter.close();
+      process.stdout.write(
+        `\n    measured, formatting:\n${lines.join('\n')}\n` +
+          `      copying a 100-sensor month into a worker (structured clone), median of 5: ` +
+          `${median(clones).toFixed(0)} ms (${clones.map((c) => c.toFixed(0)).join(', ')})\n`,
+      );
     });
 
     it('shows what two reports running at once do to a request the core is serving', async () => {
@@ -494,8 +533,15 @@ describe(
       const sampleWhile = async (running: () => boolean, minimum: number): Promise<number[]> => {
         const latencies: number[] = [];
         const origin = performance.now();
-        for (let index = 0; running() || latencies.length < minimum; index += 1) {
+        // **Every request due before the work ended is sent**, not only those the loop reached
+        // while it was still running. The first version stopped the moment the work finished, which
+        // is the moment the last stall ended — so every request due during that stall was never
+        // sent, and a run with a 2.7 s worst case reported a 13 ms p95 from half its samples.
+        let endedAt = Number.POSITIVE_INFINITY;
+        for (let index = 0; ; index += 1) {
           const due = origin + index * 25;
+          if (endedAt === Number.POSITIVE_INFINITY && !running()) endedAt = performance.now();
+          if (due > endedAt && latencies.length >= minimum) break;
           const wait = due - performance.now();
           if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
           await pageRead();
@@ -511,52 +557,82 @@ describe(
       const idleUntil = Date.now() + 4_000;
       const idle = await sampleWhile(() => Date.now() < idleUntil, 40);
 
-      const reportsToRun = await Promise.all([
-        reportFor(100, 'month', 'graph_and_table'),
-        reportFor(100, 'year', 'graph_and_table'),
-      ]);
-      let busy = true;
-      const loop = monitorEventLoopDelay({ resolution: 5 });
-      loop.enable();
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      loop.reset();
-      const started = process.hrtime.bigint();
-      const running = Promise.all(
-        reportsToRun.map(async (report) => {
-          const document = await new ReportRenderer({
-            context,
-            history: new HistoryService({ db, logger: silent }),
-            logger: silent,
-          }).build(report, NOW);
-          renderHtml(document);
-          await renderPdf({ ...document, report: { ...document.report, kind: 'graph_only' } });
-        }),
-      ).finally(() => {
-        busy = false;
-      });
-      const during = await sampleWhile(() => busy, 1);
-      await running;
-      const reportsMs = ms(started);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      loop.disable();
+      const formatter = new ReportFormatter({ logger: silent });
+      const onTheLoop = async (document: ReportDocument): Promise<void> => {
+        renderHtml(document);
+        await renderPdf({ ...document, report: { ...document.report, kind: 'graph_only' } });
+      };
+      const inWorkers = async (document: ReportDocument): Promise<void> => {
+        await formatter.format('html', document);
+        await formatter.format('pdf', {
+          ...document,
+          report: { ...document.report, kind: 'graph_only' },
+        });
+      };
+
+      /** Two reports at once, built and formatted one of the two ways, with the sampler running. */
+      const twoReports = async (format: (document: ReportDocument) => Promise<void>) => {
+        const reportsToRun = await Promise.all([
+          reportFor(100, 'month', 'graph_and_table'),
+          reportFor(100, 'year', 'graph_and_table'),
+        ]);
+        let busy = true;
+        const loop = monitorEventLoopDelay({ resolution: 5 });
+        loop.enable();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        const started = process.hrtime.bigint();
+        const running = Promise.all(
+          reportsToRun.map(async (report) => {
+            const document = await new ReportRenderer({
+              context,
+              history: new HistoryService({ db, logger: silent }),
+              logger: silent,
+            }).build(report, NOW);
+            await format(document);
+          }),
+        ).finally(() => {
+          busy = false;
+        });
+        const latencies = await sampleWhile(() => busy, 1);
+        await running;
+        const took = ms(started);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        loop.disable();
+        return { latencies, took, loopMax: loop.max / 1e6, loopP99: loop.percentile(99) / 1e6 };
+      };
+
+      const before = await twoReports(onTheLoop);
+      // A worker's first job pays for starting it — `pdfkit`, `fontkit` and the font. The core pays
+      // that once a minute at most; the measurement is of the steady state, and says so.
+      await inWorkers(
+        await rendererCounting(fresh()).build(await reportFor(1, 'month', 'graph_and_table'), NOW),
+      );
+      const after = await twoReports(inWorkers);
+      await formatter.close();
 
       const row = (label: string, values: number[]) =>
         `      ${label.padEnd(34)} n=${String(values.length).padStart(4)}   p50 ${percentile(values, 50).toFixed(1).padStart(6)} ms` +
         `   p95 ${percentile(values, 95).toFixed(1).padStart(6)} ms   max ${Math.max(...values)
           .toFixed(1)
           .padStart(7)} ms`;
+      const loopLine = (run: typeof before) =>
+        `        the event loop, meanwhile: longest block ${run.loopMax.toFixed(0)} ms, p99 ${run.loopP99.toFixed(0)} ms, ` +
+        `${(run.took / 1_000).toFixed(1)} s of rendering`;
       process.stdout.write(
-        `\n    measured, a sensor-page read while two 100-sensor reports render (HTML + PDF) — ${(reportsMs / 1_000).toFixed(1)} s of rendering:\n` +
-          `${row('idle', idle)}\n${row('during two reports', during)}\n` +
-          `      the event loop, meanwhile: longest block ${(loop.max / 1e6).toFixed(0)} ms, ` +
-          `p99 ${(loop.percentile(99) / 1e6).toFixed(0)} ms\n`,
+        `\n    measured, a sensor-page read while two 100-sensor reports render (HTML + PDF):\n` +
+          `${row('idle', idle)}\n` +
+          `${row('formatting on the event loop', before.latencies)}\n${loopLine(before)}\n` +
+          `${row('formatting in ReportFormatter', after.latencies)}\n${loopLine(after)}\n`,
       );
-      assert.ok(during.length > 0);
-      // Measured at 1.27 s p95 and 2.6 s worst: a regression guard at four times that, **not** an
-      // acceptable level. See the header, and `P-204`.
+      assert.ok(before.latencies.length > 0 && after.latencies.length > 0);
+      // **The budget** (`P-204`): a request the core serves while two reports render waits no more
+      // than it does idle, give or take the ordinary noise of a shared machine — 50 ms at p95 over
+      // idle. On the loop this was 1,268.6 ms.
+      const budget = percentile(idle, 95) + 50;
       assert.ok(
-        percentile(during, 95) < 5_000,
-        `a request waited ${percentile(during, 95).toFixed(0)} ms at p95 while two reports rendered`,
+        percentile(after.latencies, 95) <= budget,
+        `a request waited ${percentile(after.latencies, 95).toFixed(0)} ms at p95 while two reports ` +
+          `formatted in workers, against ${percentile(idle, 95).toFixed(0)} ms idle`,
       );
     });
   },

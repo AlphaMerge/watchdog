@@ -4224,7 +4224,7 @@ because each is a decision rather than a defect:
       sampler frozen by the very stall it was measuring — coordinated omission, which hid a
       2.8-second wait behind a 30 ms worst case on the second run.
 
-- [ ] **P-204 — a report's formatting holds the core's event loop** · M · P-203 · Measured in
+- [x] **P-204 — a report's formatting holds the core's event loop** · M · P-203 · Measured in
       `docs/findings/2026-09-13-report-render-cost.md`: every format is synchronous for its whole
       duration, up to about a second for an HTML document near the value limit and a second and a
       half for a PDF refused for its page count, and two reports rendering at once made a concurrent
@@ -4247,6 +4247,18 @@ because each is a decision rather than a defect:
       been measured. A lower bound on the page count — rows divided by the most rows a page can
       hold — would refuse most of those before the second and a half, the way `P-203` moved the
       value refusal before the reads.
+
+      **Done 2026-09-13** — `docs/findings/2026-09-13-report-formatter.md`. Formatting runs in
+      `ReportFormatter`: two workers started on first use and given back after a minute idle, eight
+      jobs queued and the ninth refused with `409 REPORT_BUSY`, a two-minute timeout that ends the
+      worker, a crash that fails one job, and a `ReportError` rebuilt on the core's side so a
+      refusal stays a 422. Core Health gains **Report formats waiting** and **Report formats
+      refused**. With two 100-sensor reports formatting, a concurrent request measured **p95
+      10.8 ms against 12.3 ms idle** (worst 95 ms, the document's copy into the worker), where the
+      same run on the loop measured 1,777 ms; the guard is now a budget of idle p95 + 50 ms. The
+      PDF lower bound refuses the 1,838-page document in under a millisecond, where it held the
+      loop 1.5 s. **The sampler had a second omission**, at the end of the last stall, which made
+      `P-203`'s 1,268.6 ms too low — corrected in both findings files.
 
 
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI

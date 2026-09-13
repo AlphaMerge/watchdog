@@ -54,6 +54,8 @@ function sources(
     reportsDeferred: number;
     reportsFailed: number;
     reportsUndelivered: number;
+    reportFormatsWaiting: number;
+    reportFormatsRefused: number;
     resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
@@ -80,6 +82,8 @@ function sources(
       deferred: overrides.reportsDeferred ?? 0,
       failed: overrides.reportsFailed ?? 0,
       undelivered: overrides.reportsUndelivered ?? 0,
+      formatsWaiting: overrides.reportFormatsWaiting ?? 0,
+      formatsRefused: overrides.reportFormatsRefused ?? 0,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
     ingestionDiscards: () => ({ discardedFutureTime: overrides.resultsFutureDated ?? 0 }),
@@ -300,6 +304,23 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['notifyPending'], 9);
       assert.equal(reading['notifyFailed'], 4);
       assert.equal(reading['notifyOldest'], 125, 'milliseconds in, seconds out');
+    });
+
+    it('carries each of the reports’ own numbers to its own channel', async () => {
+      // Five numbers from one source, all small integers: a test with them all zero cannot tell one
+      // channel from another, nor a channel from a constant. Distinct values can.
+      const reading = await build({
+        reportsDeferred: 2,
+        reportsFailed: 3,
+        reportsUndelivered: 5,
+        reportFormatsWaiting: 7,
+        reportFormatsRefused: 11,
+      }).read();
+      assert.equal(reading['reportsDeferred'], 2);
+      assert.equal(reading['reportsFailed'], 3);
+      assert.equal(reading['reportsUndelivered'], 5);
+      assert.equal(reading['reportFormatsWaiting'], 7);
+      assert.equal(reading['reportFormatsRefused'], 11);
     });
 
     it('reports the alarm sweep as overdue only once it actually is', async () => {

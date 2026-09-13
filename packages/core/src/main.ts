@@ -101,6 +101,7 @@ import { ReportContext } from './reports/context.js';
 import { ReportRenderer } from './reports/render.js';
 import { ReportRunner, ReportRunRepository } from './reports/runs.js';
 import { ReportDelivery, ReportOutputRepository } from './reports/delivery.js';
+import { ReportFormatter } from './reports/formatter.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -859,10 +860,20 @@ async function serve(): Promise<void> {
   const reportRuns = new ReportRunRepository();
   const reportOutputs = new ReportOutputRepository();
   // `N-07`'s transport, not a second one — a report is an attachment, not a new channel (`E-09`).
+  // Formatting runs in worker threads, not on the loop every request waits on (`P-204`): `P-203`
+  // measured two reports formatting at once making a concurrent request wait 2.6 s. Started on first
+  // use, so an installation that never renders a report never starts a worker.
+  const reportFormatter = new ReportFormatter({ logger });
+  lifecycle.onShutdown({
+    name: 'report formatter',
+    timeoutMs: 5_000,
+    run: () => reportFormatter.close(),
+  });
   const reportDelivery = new ReportDelivery({
     db,
     outputs: reportOutputs,
     email,
+    formatter: reportFormatter,
     logger,
   });
   const reportRunner = new ReportRunner({
@@ -908,6 +919,7 @@ async function serve(): Promise<void> {
     runner: reportRunner,
     runs: reportRuns,
     outputStore: reportOutputs,
+    formatter: reportFormatter,
   };
 
   // **Runs abandoned by a core that stopped mid-render are cleared once, here.** `running` is a
@@ -1194,6 +1206,8 @@ async function serve(): Promise<void> {
           deferred: stats.deferred,
           failed: stats.failed,
           undelivered: reportDelivery.stats().pending,
+          formatsWaiting: reportFormatter.stats().queued,
+          formatsRefused: reportFormatter.stats().refused,
         };
       },
     },

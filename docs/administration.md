@@ -375,7 +375,9 @@ silently missing its last four hundred sensors would be worse than no report. **
 any history is read**: the count is channels times buckets, and both are known up front — a
 500-sensor report used to read for ten seconds before being told no (`P-203`). **A PDF has a second
 bound**, because values become pages: over 400 pages it is refused the same way, with the page
-count and the suggestion to render it as CSV instead, which has no pages.
+count and the suggestion to render it as CSV instead, which has no pages. Most of those are refused
+before a page is laid out as well: a report with more table rows than 400 pages could hold cannot
+fit, and says it is "at least" that many pages (`P-204`).
 
 CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
 is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
@@ -488,6 +490,15 @@ are due than the core will render at once — schedule fewer, or spread them out
 failed** rises when one report is broken: a security context that was deleted or disabled, a span
 that resolves to nothing, or a document over the size limit. The two name different fixes, which is
 why they are two lines.
+
+**Formatting runs beside the core, not on it** (`P-204`). Turning a document into HTML, CSV, XML or
+PDF is CPU work, and on the core's own thread a large report froze every request, probe result and
+browser update for a second or more. It runs in two worker threads instead, started the first time
+a report is formatted and given back after a minute idle. Eight more jobs may wait for them; beyond
+that a render is refused with **`409 REPORT_BUSY`** rather than queued without limit — try again
+when one has finished. Two more Core Health channels watch this: **Report formats waiting** is how
+many are queued now, and **Report formats refused** counts the ones turned away. A steady non-zero
+refusal count means more people are rendering large reports at once than two workers serve.
 
 ---
 

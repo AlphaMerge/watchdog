@@ -18,7 +18,7 @@ import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
-import { renderDocument } from '../../reports/formats.js';
+import type { ReportFormatter } from '../../reports/formatter.js';
 import { MAX_PDF_PAGES } from '../../reports/pdf.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { READS } from '../authorization.js';
@@ -49,6 +49,11 @@ export interface ReportRouteOptions {
   runs: ReportRunRepository;
   /** What a run produced, and the bytes behind it (`E-09`). */
   outputStore: ReportOutputRepository;
+  /**
+   * Formats a document off the event loop (`P-204`). The render route answers from it, so a
+   * hundred people pressing "render" at once queue for two workers rather than freezing the core.
+   */
+  formatter: ReportFormatter;
   db: Database;
 }
 
@@ -151,11 +156,11 @@ const scheduleSchema = {
 } as const;
 
 /**
- * What a report renders and where it goes (`E-09`, `E-07`, `CAPABILITIES.MD §6`).
+ * What a report renders and where it goes (`E-09`, `E-07`, `E-06`, `CAPABILITIES.MD §6`).
  *
- * No `pdf`: `E-06` is unblocked by `ADR-006` but nothing produces one yet, and admitting it in a
- * schema would be promising a format the renderer has never heard of. `xml` is here because
- * `E-07` renders it. `ADR-005` Decision 3 and migration 050 record when the stored list moves.
+ * All four of `§6`'s formats, taken from `REPORT_FORMATS` so a format the renderer does not have
+ * cannot be admitted here. `ADR-005` Decision 3 and migrations 050 and 051 record how the stored
+ * list grew to match.
  */
 const outputsSchema = {
   type: 'object',
@@ -835,7 +840,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
  * next to the registration so it covers this route and not the seven beside it.
  */
 export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOptions): void {
-  const { reports, renderer } = options;
+  const { reports, renderer, formatter } = options;
 
   app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
     '/reports/:id/render',
@@ -880,7 +885,7 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           // `inline` rather than `attachment`: an operator following a link wants to look at it. The
           // filename still travels, so saving it produces something named after the report.
           .header('content-disposition', `inline; filename="${slug}.${format}"`)
-          .send(await renderDocument(format as ReportFormat, document))
+          .send(await formatter.format(format as ReportFormat, document))
       );
     },
   );

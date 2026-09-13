@@ -55,7 +55,19 @@ export interface CoreHealthSources {
    * and is still waiting on a mail relay is neither a success nor yet a failure, and a gauge is
    * the only shape that says "this is piling up" while it still is.
    */
-  reports: () => { deferred: number; failed: number; undelivered: number };
+  reports: () => {
+    deferred: number;
+    failed: number;
+    undelivered: number;
+    /**
+     * `ReportFormatter.stats()` (`P-204`) — documents waiting for a formatting worker, and those
+     * turned away because the queue was full. The pool is new and has a queue, which is exactly
+     * what `CLAUDE.md` says adds a line here: a queue that fills up silently is a render button that
+     * starts failing with nobody able to say why.
+     */
+    formatsWaiting: number;
+    formatsRefused: number;
+  };
   /**
    * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`).
    *
@@ -226,6 +238,8 @@ export class CoreHealthService {
       reportsDeferred: reports.deferred,
       reportsFailed: reports.failed,
       reportsUndelivered: reports.undelivered,
+      reportFormatsWaiting: reports.formatsWaiting,
+      reportFormatsRefused: reports.formatsRefused,
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
       reactionsDeferred: ingestion.deferredReactions,
     };

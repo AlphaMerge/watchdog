@@ -18,6 +18,7 @@ import { ReportService } from '../src/reports/service.js';
 import { ReportContext } from '../src/reports/context.js';
 import { ReportRenderer } from '../src/reports/render.js';
 import { ReportRunner, ReportRunRepository, type ReportRanEvent } from '../src/reports/runs.js';
+import { ReportFormatter } from '../src/reports/formatter.js';
 import { ReportDelivery, ReportOutputRepository } from '../src/reports/delivery.js';
 import type { DocumentMessage } from '../src/notifications/delivery/email.js';
 import type { DeliveryResult } from '../src/notifications/delivery/transport.js';
@@ -58,6 +59,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   let reportRepositoryRef: ReportRepository;
   let reportOutputs: ReportOutputRepository;
   let reportDelivery: ReportDelivery;
+  let formatter: ReportFormatter;
   const sentMail: DocumentMessage[] = [];
   /** Mutable so a case can make the relay fail, and read back by the stub below. */
   const relay: { answer: DeliveryResult } = { answer: { ok: true, detail: 'test relay' } };
@@ -87,7 +89,9 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     const reportRenderer = new ReportRenderer({ context: reportContext, history, logger: silent });
     reportRuns = new ReportRunRepository();
     reportOutputs = new ReportOutputRepository();
+    formatter = new ReportFormatter({ logger: silent });
     reportDelivery = new ReportDelivery({
+      formatter,
       db,
       outputs: reportOutputs,
       // A relay that records rather than sends, so the delivery cases assert what went out
@@ -135,6 +139,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         runner: reportRunner,
         runs: reportRuns,
         outputStore: reportOutputs,
+        formatter,
       },
       auth: {
         accounts,
@@ -245,6 +250,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   });
 
   after(async () => {
+    await formatter.close();
     await scratch.drop();
   });
 

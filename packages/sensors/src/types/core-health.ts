@@ -249,6 +249,22 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Reports waiting to be delivered',
     unit: 'reports',
   },
+  // `P-204`. Report formatting runs in a small worker pool, off the event loop, with a bounded
+  // queue — so it has the two lines every queue here has. **A gauge for what is waiting**, because
+  // "a big report is formatting and three more are behind it" is a state rather than a rate; **a
+  // counter for what was refused**, because a render that was turned away is gone, and the person
+  // who pressed the button is the only other one who knows.
+  {
+    key: 'reportFormatsWaiting',
+    name: 'Report formats waiting',
+    unit: 'formats',
+  },
+  {
+    key: 'reportFormatsRefused',
+    name: 'Report formats refused',
+    unit: 'formats',
+    counter: { bits: 64 },
+  },
   // `P-99`. A result stamped far in the future is refused rather than stored, because storing
   // one freezes that sensor's history for ever — `last_result_at` is a high-water mark, and
   // everything genuine after it reads as stale. Refusing it fixes the freeze; this channel is

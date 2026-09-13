@@ -149,6 +149,7 @@ measurement is not a claim.
 **Reports**
 
 - [What a report costs the database and the event loop](findings/2026-09-13-report-render-cost.md) (`P-203`)
+- [Formatting a report beside the core, not on it](findings/2026-09-13-report-formatter.md) (`P-204`)
 
 **Whole-system**
 

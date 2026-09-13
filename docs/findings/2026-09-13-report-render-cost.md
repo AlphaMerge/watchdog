@@ -113,6 +113,11 @@ request while it renders.
 
 The event loop's longest single block in that time was **1,424 ms**.
 
+> **Correction (`P-204`, same day).** The p95 above is too low. The sampler stopped as soon as the
+> reports finished, so requests due during the last stall were never sent; corrected, formatting on
+> the loop measured 1,777 ms and 2,550 ms at p95 in two runs. The conclusion stands and is stronger.
+> See [formatting a report beside the core](2026-09-13-report-formatter.md).
+
 **The database reads do not hurt anybody** — the median request is unchanged while two reports read
 200 sensors' history between them, because every read yields. **The formatting does.** One request
 in twenty waited more than a second, and the worst waited 2.6 seconds, behind HTML and PDF

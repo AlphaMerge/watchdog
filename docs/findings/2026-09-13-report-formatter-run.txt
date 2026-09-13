@@ -1,0 +1,92 @@
+# P-204 — the committed run of packages/core/test/perf/report-render-performance.test.ts
+# 2026-09-13, with formatting in ReportFormatter and the corrected sampler; see 2026-09-13-report-formatter.md.
+# other containers: monitoring-system-dev-postgres-1 2.73%;whatsbot-runner-fixed 0.07%;monitoring-system-dev-web-1 0.00%;monitoring-system-dev-mariadb-1 0.02%;monitoring-system-dev-syslog-sender-1 0.00%;monitoring-system-dev-target-1 0.13%;monitoring-system-dev-mssql-1 1.17%;monitoring-system-dev-greenmail-1 0.18%;monitoring-system-dev-snmpsim-1 0.21%;
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   1.06 / 1.03 / 1.11  over 8 CPUs  (0.13 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  delivered CPU  270 ms for a fixed loop  (1.01x the reference machine's 267 ms)
+                 a load average cannot see a host starving this VM; this can
+  database       nothing else is connected
+  ----------------------------------------------------------------
+
+
+    built 500 sensors and filled 8,835,956 five-minute and 8,669,691 hourly rows in 96 s (setup, not measured)
+
+    measured, database reads:
+      last month, 45-minute buckets from sample_5m:
+        sensors   build (median of 3)   per sensor   transactions   statements   outcome
+              1         24 ms (35, 24, 21)     24.0 ms              4            4   rendered, 1,984 values
+             10        237 ms (278, 209, 237)    23.7 ms             31           31   rendered, 19,840 values
+            100       2091 ms (1838, 2157, 2091)    20.9 ms            301          301   rendered, 198,400 values
+            500          8 ms (8, 8, 7)         0.0 ms              1            1   refused: 992,000 values
+      last year, 9-hour buckets from sample_1h:
+        sensors   build (median of 3)   per sensor   transactions   statements   outcome
+              1         28 ms (101, 28, 25)    27.6 ms              4            4   rendered, 1,948 values
+             10        231 ms (231, 210, 236)    23.1 ms             31           31   rendered, 19,480 values
+            100       2125 ms (2455, 1876, 2125)    21.2 ms            301          301   rendered, 194,800 values
+            500          7 ms (8, 7, 7)         0.0 ms              1            1   refused: 974,000 values
+      where the time goes:
+        month, 100 sensors, last sample — per transaction: channels 1.2 ms × 101, watermarks 0.5 ms × 100, series 18.0 ms × 100
+        year, 100 sensors, last sample — per transaction: channels 1.0 ms × 101, watermarks 0.5 ms × 100, series 18.5 ms × 100
+        an empty transaction (BEGIN, SELECT 1, COMMIT) — median 0.40 ms of 200
+▶ report render cost
+  ✔ reads a report one sensor at a time, and says what that costs (14427.259422ms)
+
+    measured, formatting:
+      last month, 100 sensors, graph_and_table:
+        format                           wall      event loop held   size
+        HTML                              856 ms        862 ms      14.39 MiB
+        HTML, in a worker                1450 ms         69 ms      14.39 MiB
+        CSV                               479 ms        479 ms      4.04 MiB
+        CSV, in a worker                  594 ms         78 ms      4.04 MiB
+        XML                               709 ms        716 ms      11.73 MiB
+        XML, in a worker                  996 ms         64 ms      11.73 MiB
+        PDF                                 0 ms          7 ms      refused: this report is at least 1838 pages as a …
+        PDF, in a worker                  102 ms         42 ms      refused: this report is at least 1838 pages as a …
+        PDF, graph_only                   695 ms        702 ms      1.93 MiB
+        PDF, graph_only, in a worker      761 ms         48 ms      1.93 MiB
+      last year, 100 sensors, graph_and_table:
+        format                           wall      event loop held   size
+        HTML                              895 ms        905 ms      14.09 MiB
+        HTML, in a worker                 967 ms         54 ms      14.09 MiB
+        CSV                               437 ms        439 ms      3.97 MiB
+        CSV, in a worker                  655 ms         45 ms      3.97 MiB
+        XML                               712 ms        717 ms      11.51 MiB
+        XML, in a worker                  907 ms         50 ms      11.51 MiB
+        PDF                                 0 ms          6 ms      refused: this report is at least 1804 pages as a …
+        PDF, in a worker                   98 ms         50 ms      refused: this report is at least 1804 pages as a …
+        PDF, graph_only                   651 ms        653 ms      1.85 MiB
+        PDF, graph_only, in a worker      830 ms         46 ms      1.85 MiB
+      last month, 10 sensors, graph_and_table:
+        format                           wall      event loop held   size
+        HTML                               92 ms         93 ms      1.44 MiB
+        HTML, in a worker                 116 ms          6 ms      1.44 MiB
+        CSV                                60 ms         60 ms      0.40 MiB
+        CSV, in a worker                   56 ms          8 ms      0.40 MiB
+        XML                                89 ms         94 ms      1.17 MiB
+        XML, in a worker                   91 ms          6 ms      1.17 MiB
+        PDF                               730 ms        737 ms      0.77 MiB
+        PDF, in a worker                  705 ms          9 ms      0.77 MiB
+        PDF, graph_only                    87 ms         93 ms      0.20 MiB
+        PDF, graph_only, in a worker       96 ms         11 ms      0.20 MiB
+      copying a 100-sensor month into a worker (structured clone), median of 5: 89 ms (91, 85, 86, 90, 89)
+  ✔ formats a document on the event loop, and in a worker, and says what each holds (24581.316261ms)
+
+    measured, a sensor-page read while two 100-sensor reports render (HTML + PDF):
+      idle                               n= 161   p50    7.3 ms   p95   12.3 ms   max    14.2 ms
+      formatting on the event loop       n= 212   p50  394.8 ms   p95 1777.3 ms   max  2005.7 ms
+        the event loop, meanwhile: longest block 1386 ms, p99 10 ms, 5.4 s of rendering
+      formatting in ReportFormatter      n= 184   p50    3.1 ms   p95   10.8 ms   max    95.2 ms
+        the event loop, meanwhile: longest block 65 ms, p99 9 ms, 4.6 s of rendering
+  ✔ shows what two reports running at once do to a request the core is serving (14541.168632ms)
+✔ report render cost (150557.645735ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 151140.101819

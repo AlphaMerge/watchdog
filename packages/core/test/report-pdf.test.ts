@@ -2,10 +2,12 @@ import { strict as assert } from 'node:assert';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import fc from 'fast-check';
 import {
   A4_PORTRAIT,
   MAX_PDF_PAGES,
   drawable,
+  minimumPages,
   paginate,
   renderPdf,
   wrapText,
@@ -358,22 +360,93 @@ describe('a report as a PDF', () => {
   });
 
   describe('refuses what it cannot sensibly produce', () => {
-    it('refuses a report that would be more pages than anybody can open', async () => {
-      // Measured rather than asserted: 10,000 rows over two channels is 185 pages and 1.5 s, so
-      // the bound is roughly three seconds of work and under a megabyte. A small page keeps this
-      // test to a fraction of that while exercising the same arithmetic.
-      const tall: PageGeometry = { ...A4_PORTRAIT, height: 160 };
+    // Measured rather than asserted: 10,000 rows over two channels is 185 pages and 1.5 s, so the
+    // bound is roughly three seconds of work and under a megabyte. A small page keeps these tests
+    // to a fraction of that while exercising the same arithmetic.
+    const short: PageGeometry = { ...A4_PORTRAIT, height: 160 };
+
+    it('refuses a report that is too many pages before measuring a single cell', async () => {
       const document = doc([section(straight(1_400))]);
-      assert.ok(paginate(document, type, tall).length > MAX_PDF_PAGES);
+      assert.ok(minimumPages(document, short) > MAX_PDF_PAGES);
       await assert.rejects(
-        () => renderPdf(document, tall),
+        () => renderPdf(document, short),
         (error: unknown) => {
           assert.equal((error as { code: string }).code, 'REPORT_TOO_LARGE');
           assert.equal((error as { status: number }).status, 422);
-          assert.match((error as { message: string }).message, /pages as a PDF/u);
+          assert.equal((error as { details: { estimate: string } }).details.estimate, 'at least');
+          assert.match((error as { message: string }).message, /at least \d+ pages as a PDF/u);
           assert.match((error as { message: string }).message, /render it as CSV/u);
           return true;
         },
+      );
+    });
+
+    it('still refuses by the real count when the bound was not enough to tell', async () => {
+      // Column groups print every row once per group, which the bound deliberately ignores.
+      const document = doc([section(straight(300, 14), 'edge-router', 14)]);
+      assert.ok(minimumPages(document, short) <= MAX_PDF_PAGES);
+      assert.ok(paginate(document, type, short).length > MAX_PDF_PAGES);
+      await assert.rejects(
+        () => renderPdf(document, short),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, 'REPORT_TOO_LARGE');
+          assert.equal((error as { details: { estimate: string } }).details.estimate, 'counted');
+          assert.doesNotMatch((error as { message: string }).message, /at least/u);
+          return true;
+        },
+      );
+    });
+
+    it('does not count a page per section when sections share pages', () => {
+      // The easy wrong bound, and the one a random document rarely reaches: twelve short tables fit
+      // on two pages, and a bound summed per section would say twelve.
+      const document = doc(
+        Array.from({ length: 12 }, (_, index) =>
+          section(straight(4), `s${String(index)}`, 2, index),
+        ),
+      );
+      const pages = paginate(document, type).length;
+      assert.ok(pages < 12, `twelve short tables took ${String(pages)} pages`);
+      assert.ok(minimumPages(document) <= pages);
+    });
+
+    it('never puts its lower bound above the pages a document really takes', () => {
+      // A bound that can over-count refuses a report that fits — the one mistake it must not make.
+      const arbitrarySection = fc.record({
+        rows: fc.integer({ min: 0, max: 120 }),
+        channels: fc.integer({ min: 1, max: 16 }),
+        name: fc.string({ minLength: 1, maxLength: 60 }),
+        note: fc.option(fc.string({ minLength: 1, maxLength: 300 }), { nil: undefined }),
+      });
+      fc.assert(
+        fc.property(
+          fc.array(arbitrarySection, { minLength: 0, maxLength: 8 }),
+          fc.constantFrom('table_only', 'graph_only', 'graph_and_table'),
+          fc.integer({ min: 160, max: 900 }),
+          (sections, kind, height) => {
+            const geometry: PageGeometry = { ...A4_PORTRAIT, height };
+            const document = doc(
+              sections.map((one, index) => {
+                const base = section(
+                  straight(one.rows, one.channels),
+                  one.name,
+                  one.channels,
+                  index,
+                );
+                return one.note === undefined
+                  ? base
+                  : { ...base, columns: [], rows: [], note: one.note };
+              }),
+              { report: { id: 7, name: 'Monthly uptime', kind } },
+            );
+            const pages = paginate(document, type, geometry).length;
+            assert.ok(
+              minimumPages(document, geometry) <= pages,
+              `bound ${String(minimumPages(document, geometry))} over ${String(pages)} pages`,
+            );
+          },
+        ),
+        { numRuns: 200 },
       );
     });
 

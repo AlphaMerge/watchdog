@@ -649,16 +649,50 @@ export function paginate(
   return pages;
 }
 
-function refuseIfTooLong(pages: number, document: ReportDocument): void {
+/**
+ * The fewest pages this document could possibly take (`P-204`).
+ *
+ * **For refusing before the expensive part.** `P-203` measured a PDF refused for its page count
+ * spending a second and a half getting there, because the count is only known once every cell has
+ * been measured. A lower bound needs no measuring at all: every table row is one row high, and a
+ * page can hold no more rows than fit under one title and a one-line heading. So the total rows,
+ * divided by that, is a number the real count can never be under.
+ *
+ * **The total, not a sum per section.** Per-section page counts would over-count — small sections
+ * share pages — and a bound that can over-count would refuse a report that fits. Everything this
+ * ignores (headings that wrap, column groups, charts, the report's own header) only ever adds
+ * pages, so ignoring it keeps the bound a bound. `report-pdf.test.ts` asserts that it is one.
+ */
+export function minimumPages(
+  document: ReportDocument,
+  geometry: PageGeometry = A4_PORTRAIT,
+): number {
+  if (!showsTable(document.report.kind)) return 1;
+  let rows = 0;
+  for (const section of document.sections) {
+    if (section.note === undefined && section.columns.length > 0) rows += section.rows.length;
+  }
+  const bottom = geometry.height - geometry.margin - geometry.lineHeight * 2;
+  const room = bottom - geometry.margin - titleHeight(geometry) - (geometry.lineHeight + 4);
+  const perPage = Math.max(1, Math.floor(room / geometry.rowHeight));
+  return Math.max(1, Math.ceil(rows / perPage));
+}
+
+function refuseIfTooLong(
+  pages: number,
+  document: ReportDocument,
+  estimate: 'counted' | 'at least' = 'counted',
+): void {
   if (pages <= MAX_PDF_PAGES) return;
   throw new ReportError(
     'REPORT_TOO_LARGE',
-    `this report is ${String(pages)} pages as a PDF, and the limit is ${String(MAX_PDF_PAGES)}; ` +
+    `this report is ${estimate === 'at least' ? 'at least ' : ''}${String(pages)} pages as a PDF, ` +
+      `and the limit is ${String(MAX_PDF_PAGES)}; ` +
       'cover fewer sensors, choose a shorter span, pin a coarser averaging interval, or render ' +
       'it as CSV, which has no page count',
     {
       context: { reportId: document.report.id, phase: 'render' },
-      details: { pages, limit: MAX_PDF_PAGES },
+      details: { pages, limit: MAX_PDF_PAGES, estimate },
     },
   );
 }
@@ -890,6 +924,8 @@ export async function renderPdf(
   geometry: PageGeometry = A4_PORTRAIT,
 ): Promise<Buffer> {
   refuseIfTooLarge(document);
+  // Before a font is loaded or a cell is measured (`P-204`): see `minimumPages`.
+  refuseIfTooLong(minimumPages(document, geometry), document, 'at least');
   const doc = new PDFDocument({
     size: [geometry.width, geometry.height],
     margin: geometry.margin,

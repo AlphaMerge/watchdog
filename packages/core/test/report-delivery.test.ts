@@ -18,6 +18,7 @@ import {
   filenameFor,
 } from '../src/reports/delivery.js';
 import { validateOutputs } from '../src/reports/outputs.js';
+import { ReportFormatter } from '../src/reports/formatter.js';
 import type { DocumentMessage } from '../src/notifications/delivery/email.js';
 import type { DeliveryResult } from '../src/notifications/delivery/transport.js';
 import {
@@ -45,6 +46,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
   let runs: ReportRunRepository;
   let outputs: ReportOutputRepository;
   let delivery: ReportDelivery;
+  let formatter: ReportFormatter;
   let runner: ReportRunner;
   let clock: Date;
 
@@ -63,9 +65,11 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
     outputs = new ReportOutputRepository();
     reports = new ReportService({ db, repository, logger: silent });
     clock = new Date('2026-09-11T05:00:00.000Z');
+    formatter = new ReportFormatter({ logger: silent });
     delivery = new ReportDelivery({
       db,
       outputs,
+      formatter,
       email: {
         sendDocument: (message) => {
           sent.push(message);
@@ -133,6 +137,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
   });
 
   after(async () => {
+    await formatter.close();
     await scratch.drop();
   });
 
@@ -165,7 +170,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
       // A filename is the two facts somebody reading a directory listing needs, and neither is
       // recoverable from the other.
       assert.equal(
-        filenameFor({ name: 'Monthly Uptime: EU' } as never, '2026-08 (Europe/Berlin)', 'csv'),
+        filenameFor({ name: 'Monthly Uptime: EU' }, '2026-08 (Europe/Berlin)', 'csv'),
         'Monthly-Uptime-EU_2026-08-Europe-Berlin.csv',
       );
     });

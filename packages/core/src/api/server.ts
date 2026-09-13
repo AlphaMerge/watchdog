@@ -75,6 +75,7 @@ import type { ReportContext } from '../reports/context.js';
 import type { ReportRenderer } from '../reports/render.js';
 import type { ReportRunner, ReportRunRepository } from '../reports/runs.js';
 import type { ReportOutputRepository } from '../reports/delivery.js';
+import type { ReportFormatter } from '../reports/formatter.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { ProvisionReport } from '../discovery/provision.js';
@@ -142,6 +143,8 @@ export interface ApiServerOptions {
     runner: ReportRunner;
     runs: ReportRunRepository;
     outputStore: ReportOutputRepository;
+    /** Turns a document into files, off the event loop (`P-204`). */
+    formatter: ReportFormatter;
   };
   /**
    * The schedule library (`M-09`).
@@ -622,13 +625,14 @@ export class ApiServer {
             runner: this.#reports.runner,
             runs: this.#reports.runs,
             outputStore: this.#reports.outputStore,
+            formatter: this.#reports.formatter,
             db: this.#db,
           };
           reportRoutes(scope, wired);
           // The one report route that answers text rather than JSON (`E-04`). Exempted from the
           // response-schema rule for the reason the map background is, and registered on its own
           // so the exemption covers this route and not the seven beside it.
-          this.#exempting = 'a rendered report, in HTML or CSV rather than JSON';
+          this.#exempting = 'a rendered report, as a document rather than JSON';
           reportRenderRoute(scope, wired);
           reportDownloadRoute(scope, wired);
           this.#exempting = null;
