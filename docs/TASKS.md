@@ -4286,6 +4286,56 @@ because each is a decision rather than a defect:
       under one warning, the new one reads all three back from disk. Disabling the drain window
       fails both.
 
+      **Confirmed live, 2026-09-13**, at the dev load: 5,001 sensors, the pool grown to 64. The
+      probe ran from this commit's build against the dev database, with the main checkout's
+      `dev/data` and `dev/tls` mounted in, for three minutes (15,405 checks dispatched), and was
+      stopped with `docker stop`. The hooks ran in the new order — drain, scheduler, pool (5 s
+      window, `finishedWhileDraining: 0`, `abandoned: 0`), `result spool closed` last — and the
+      spool went from **95 pending when the drain stopped to 167 when it closed**: 72 results
+      settled after the drain stopped, each of which the old order would have refused with its own
+      error line. `results: { abandoned: 0, unspooled: 0 }`, spool `unwritten: 0`, no refusal
+      logged, "shutdown complete" exit 0, about a second from SIGTERM. The old build, stopped the
+      same way a minute earlier, happened to log no refusals — whether it does depends on checks
+      settling between the two hooks — so the 45 from 16:27 is the comparison. The first run of the
+      new build never reached its shutdown — the kernel killed the probe first — and is `P-206`.
+
+- [ ] **P-206 — the dev probe was OOM-killed at 3.7 GiB, eighty seconds after start** · M · P-205 ·
+      Seen once, 2026-09-13, while confirming `P-205`: 5,001 sensors, the pool grown to its
+      ceiling of 64 by 16:44:09, about 80 s after start. The VM's kernel log has the kill —
+      `Out of memory: Killed process (MainThread) … anon-rss:3687196kB`, a `global_oom` in that
+      run's container cgroup — at roughly 16:45:12, taking dmesg's monotonic stamp against
+      `/proc/uptime`, so good to about a second. What it looked like from outside was a stall: the
+      core closed the link at 16:45:13.364 with "connection idle, closing" (nothing within its 6 s
+      idle timeout, where the probe heartbeats every 2 s), and the `docker stop` 107 ms later found
+      a probe that never logged "shutting down" — bash reported `23 Killed` in under a second,
+      far inside `docker stop`'s ten, so the SIGKILL was the kernel's. Six seconds of silence
+      before a global OOM is what reclaim thrashing looks like; that part is inference.
+
+      **The number that needs explaining is 3.7 GiB.** The next run, same build, same load, same
+      64 workers, sat at 2.0 GiB RSS after three minutes and shut down cleanly. The VM has
+      7,936 MiB and was at 6,047 MiB used with 656 of 1,023 MiB swap in use during that second run,
+      beside the core (222 MiB), PostgreSQL and the rest of the dev stack. So either something
+      transient roughly doubled the probe's footprint in its first minute and a half — the pool's
+      growth burst spawns the whole shortfall at once, each worker loading the catalogue, and the
+      drain may have been catching up on the spool the previous probe left — or the difference is the VM's
+      headroom on the day and the footprint is simply too big for it. `workerPoolSize: 0` in
+      `dev/probe.json` derives the ceiling from the machine, which knows its CPUs and not what else
+      is sharing its memory.
+
+      **What it costs if it happens outside dev**: a probe that goes silent and then vanishes —
+      Probe Health Down and `P-74`'s handling for every sensor on it — with no graceful shutdown,
+      so nothing `P-205` saves survives it; and systemd restarts it into the same growth burst.
+      `P-205` changed only shutdown paths, so it is an unlikely cause, but the build before it has
+      not been run under the same conditions.
+
+      **Done when** the cause is named with evidence: reproduce with the probe's RSS and heap
+      sampled through the first two minutes (per worker as well as in total), the VM's memory and
+      swap beside it, and the pool's growth and the drain's catch-up marked on the same timeline;
+      run the build before `P-205` the same way; and then decide whether the pool ceiling should
+      account for memory as well as CPUs, and whether Probe Health can see the approach to this —
+      RSS against a limit — before the kernel acts on it, which is what "the system monitors
+      itself" is for.
+
 
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
       step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list
