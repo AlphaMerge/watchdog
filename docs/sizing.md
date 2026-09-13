@@ -122,13 +122,21 @@ The 35 MB is what a worker costs in a real probe, where each one loads the senso
 measured over 24 hours at 48 workers and 1,790 MB resident. A synthetic pool with no catalogue
 costs about 12 MB a worker, so do not size from a benchmark.
 
-**Size for the start-up peak, not for this number.** The workers all load the catalogue at once
-while the pool ramps, and the first major collection has not run yet: a probe measured at 64
-workers peaked at **2,912 MB** ninety seconds in and settled at **1,975 MB** by two and a half
-minutes (`findings/2026-09-04-live-probe-check.md`). That peak is about 23% above what the formula
-gives. A box sized exactly to the steady state can die during its own start-up and then look
-perfectly healthy in every measurement taken after the restart, which is a miserable thing to
-diagnose — so add headroom of about a third, or size the box from the peak directly.
+**Size for the start-up peak, not for this number.** Workers commit heap while they load the
+catalogue and V8 holds it for about a minute and a half before giving it back, so a probe spends
+its first two minutes well above where it settles. Measured at 64 workers on 2026-09-13
+(`findings/2026-09-13-probe-startup-memory.md`): a peak of **3,189 MB**, held from about ten
+seconds to about a hundred and ten, settling to about **1,800 MB** by four minutes. That peak is
+about 35% above what the formula gives. A box sized exactly to the steady state can die during its
+own start-up and then look perfectly healthy in every measurement taken after the restart — which
+is what happened on the dev VM, and a miserable thing to diagnose — so add headroom of at least a
+third, or size the box from the peak directly.
+
+**The peak was 3,740 MB before `P-206`**, which left a probe at the 5,000-sensor row's 4 GB less
+than 300 MB during its own start-up, before the operating system took its share. The pool used to
+start every worker a growth burst asked for at once, and a worker that loads beside sixty others
+commits half as much heap again as one that loads beside seven; it now loads them eight at a time,
+which is also faster to a full pool.
 
 **The pool settles near the burst, so the burst is what you are buying memory for.** Measured at
 a ceiling of 48, **with 200 ms checks** — the ceiling has since risen to 64, so the two pinned

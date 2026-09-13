@@ -52,6 +52,33 @@ const MIN_DURATION_SAMPLES = 8;
 const OVER_CEILING_RETRY_MS = 250;
 
 /**
+ * Workers allowed to load their registry at the same time (`P-206`).
+ *
+ * **Loading together is most of what made a probe's start-up expensive.** Measured at 64 workers
+ * running `port.tcp` in one-second bursts (`docs/findings/2026-09-13-probe-startup-memory.md`):
+ *
+ *     at once   8 cores               2 cores
+ *          64   4,331+ MiB, 12.1 s    4,250 MiB, 16.2 s     <- the growth burst as it was
+ *          16   3,749 MiB,   5.6 s
+ *           8   2,900 MiB,   6.1 s    2,856 MiB, 12.7 s     <- this
+ *           4   2,802 MiB,   8.6 s
+ *           2                         2,803 MiB, 13.9 s
+ *
+ * Peak resident memory, then the time until all 64 were ready. The 4,331 is a floor: that run was
+ * killed by the kernel fifty seconds in, on the 8 GB dev VM, which is the defect being measured.
+ *
+ * **A constant, not a function of the core count**, because the two-core column has the same shape
+ * as the eight: the excess is heap each isolate commits while dozens load at once, which V8 then
+ * holds for about a minute and a half, and it does not track the cores. Eight is within 100 MiB of
+ * the lowest peak on both and brings a pool to its ceiling faster than starting everything at once
+ * did, so no latency is traded for the memory.
+ *
+ * On the live dev probe it took the peak from 3,567 to 3,041 MiB — less than above, because a live
+ * pool already grows in steps as the wheel's bursts arrive rather than all at once.
+ */
+export const SPAWN_CONCURRENCY = 8;
+
+/**
  * `disabled` is separate from `stopped` on purpose (`P-62`).
  *
  * Stopping is something an operator did and the probe stops heartbeating for; the pool giving up
@@ -354,6 +381,9 @@ export class CheckPool {
   #nextWorkerId = 0;
   /** Spawns in flight, so a burst of pumps does not order the same worker several times over. */
   #growing = 0;
+  /** Workers loading their registry right now, bounded by `SPAWN_CONCURRENCY` (`P-206`). */
+  #loading = 0;
+  readonly #loadingWaiters: (() => void)[] = [];
   #grown = 0;
   #shrunk = 0;
   /** When every slot was last seen busy, or the queue non-empty. Monotonic (`CLAUDE.md`). */
@@ -990,9 +1020,10 @@ export class CheckPool {
       this.#startFailures += 1;
       // **Only when nothing is left working** (`P-80`). The counter is pool-wide and reset only by
       // a worker reaching `ready`, and it used to latch on its own — so three failures during a
-      // *growth* burst killed a pool that was running fine. `#grow` spawns the whole shortfall at
-      // once (sixty at the v1 target, each loading the ~35 MB catalogue), so on a memory-tight
-      // host three of sixty die during bootstrap before any sibling reports ready, and the probe
+      // *growth* burst killed a pool that was running fine. `#grow` spawned the whole shortfall at
+      // once (sixty at the v1 target, each loading the ~35 MB catalogue; eight at a time since
+      // `P-206`, which still leaves room for three), so on a memory-tight host three died during
+      // bootstrap before any sibling reported ready, and the probe
       // monitored nothing until somebody restarted it — `#admission` answers `disabled` before it
       // looks at anything else. The latch is for a pool that cannot run checks at all, which is
       // `P-62`'s broken registry: there every worker dies, so nothing is ready and this still
@@ -1041,6 +1072,44 @@ export class CheckPool {
 
   async #spawn(): Promise<void> {
     if (this.#stopped || this.#disabled) return;
+    await this.#loadingTurn();
+    try {
+      // Checked again: the pool can have stopped, or latched, while this spawn waited its turn.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- both are set by stop() and #onWorkerGone during the await above; the checker narrows across it
+      if (this.#stopped || this.#disabled) return;
+      await this.#start();
+    } finally {
+      this.#endLoadingTurn();
+    }
+  }
+
+  /**
+   * Waits until fewer than `SPAWN_CONCURRENCY` workers are loading (`P-206`).
+   *
+   * Every spawn goes through here — `start`, a growth burst, a crash's replacement, a recycle —
+   * because the cost is per concurrent load wherever it comes from. `#grow` used to start the
+   * whole shortfall at once, and a worker loaded among sixty-three others finished with about
+   * 52 MiB of committed heap where one loaded among seven has 36; see the constant for the run.
+   * A waiting spawn is already counted in `#growing`, so a queue that it will absorb does not
+   * order it a second time.
+   */
+  #loadingTurn(): Promise<void> {
+    if (this.#loading < SPAWN_CONCURRENCY) {
+      this.#loading += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.#loadingWaiters.push(resolve));
+  }
+
+  /** Hands the turn to the next waiting spawn, or gives it back. */
+  #endLoadingTurn(): void {
+    const next = this.#loadingWaiters.shift();
+    if (next === undefined) this.#loading -= 1;
+    else next();
+  }
+
+  /** Starts one worker and resolves when it has said ready, or died trying. */
+  async #start(): Promise<void> {
     this.#nextWorkerId += 1;
     const worker = new Worker(join(import.meta.dirname, 'check-worker.js'), {
       workerData: { registryModule: pathToFileURL(this.#registryModule).href },

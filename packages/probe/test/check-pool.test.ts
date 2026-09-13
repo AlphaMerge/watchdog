@@ -6,7 +6,12 @@ import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { availableParallelism } from 'node:os';
 import type { CheckResult } from '@ms/shared';
-import { CheckPool, defaultPoolSize, type ResultMeta } from '../src/runner/index.js';
+import {
+  CheckPool,
+  defaultPoolSize,
+  SPAWN_CONCURRENCY,
+  type ResultMeta,
+} from '../src/runner/index.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
 
@@ -335,8 +340,9 @@ describe('check pool', () => {
   it('does not give up while it still has workers that are working', async () => {
     // **`P-62`'s latch, over-triggering** (`P-80`). `#startFailures` is pool-wide and reset only
     // by a worker reaching `ready`, and was never weighed against how many workers the pool still
-    // holds. `#grow` spawns the whole shortfall in one synchronous burst — 60 at once at the v1
-    // target, each loading the ~35 MB sensor catalogue — so on a memory-tight host three
+    // holds. `#grow` spawned the whole shortfall in one synchronous burst — 60 at once at the v1
+    // target, each loading the ~35 MB sensor catalogue, and eight at a time since `P-206` — so on
+    // a memory-tight host three
     // bootstrap failures among sixty land before any sibling reports ready, and the pool latches
     // off for good with 57 healthy workers in it. `#admission` returns `disabled` before it looks
     // at anything else, so a probe with a full complement of idle workers monitored nothing until
@@ -480,6 +486,36 @@ describe('growing and shrinking with the load', () => {
     }
     await until(() => seen.length === 40, 'every check to finish', 20_000);
     assert.equal(pool.size, 3);
+  });
+
+  it('loads at most SPAWN_CONCURRENCY workers at once, however large the shortfall', async () => {
+    // **`P-206`.** A growth burst started the whole shortfall at once, and a worker loading its
+    // registry beside sixty-three others commits about half as much heap again as one loading
+    // beside seven — 4.3 GiB against 2.9 at a ceiling of 64, which on an 8 GB box was an OOM kill.
+    // The registry here takes 400 ms to import, so for that long nothing the burst started can
+    // have finished, and every worker the pool holds beyond its first is one still loading.
+    const pool = new CheckPool({
+      logger: silent,
+      size: 24,
+      minSize: 1,
+      queueMaxLength: 100,
+      registryModule: join(import.meta.dirname, 'support', 'slow-registry.js'),
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await pool.start();
+
+    for (let i = 0; i < 40; i += 1) pool.submit(request(400 + i, 'test.slow', { delayMs: 5_000 }));
+    let most = 0;
+    const window = Date.now() + 300;
+    while (Date.now() < window) {
+      most = Math.max(most, pool.size);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(most, 1 + SPAWN_CONCURRENCY, 'the first worker, and a full turn loading');
+
+    await until(() => pool.size === 24, 'the rest to load in turn', 10_000);
+    assert.equal(pool.stats().grown, 23, 'a spawn waiting its turn is not ordered a second time');
   });
 
   it('does not grow for work an idle worker is about to pick up', async () => {

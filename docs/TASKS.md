@@ -4299,7 +4299,7 @@ because each is a decision rather than a defect:
       settling between the two hooks — so the 45 from 16:27 is the comparison. The first run of the
       new build never reached its shutdown — the kernel killed the probe first — and is `P-206`.
 
-- [ ] **P-206 — the dev probe was OOM-killed at 3.7 GiB, eighty seconds after start** · M · P-205 ·
+- [x] **P-206 — the dev probe was OOM-killed at 3.5 GiB, eighty seconds after start** · M · P-205 ·
       Seen once, 2026-09-13, while confirming `P-205`: 5,001 sensors, the pool grown to its
       ceiling of 64 by 16:44:09, about 80 s after start. The VM's kernel log has the kill —
       `Out of memory: Killed process (MainThread) … anon-rss:3687196kB`, a `global_oom` in that
@@ -4311,16 +4311,14 @@ because each is a decision rather than a defect:
       far inside `docker stop`'s ten, so the SIGKILL was the kernel's. Six seconds of silence
       before a global OOM is what reclaim thrashing looks like; that part is inference.
 
-      **The number that needs explaining is 3.7 GiB.** The next run, same build, same load, same
+      **The number that needs explaining is 3.5 GiB.** The next run, same build, same load, same
       64 workers, sat at 2.0 GiB RSS after three minutes and shut down cleanly. The VM has
       7,936 MiB and was at 6,047 MiB used with 656 of 1,023 MiB swap in use during that second run,
       beside the core (222 MiB), PostgreSQL and the rest of the dev stack. So either something
       transient roughly doubled the probe's footprint in its first minute and a half — the pool's
       growth burst spawns the whole shortfall at once, each worker loading the catalogue, and the
-      drain may have been catching up on the spool the previous probe left — or the difference is the VM's
-      headroom on the day and the footprint is simply too big for it. `workerPoolSize: 0` in
-      `dev/probe.json` derives the ceiling from the machine, which knows its CPUs and not what else
-      is sharing its memory.
+      drain may have been catching up on the spool the previous probe left — or the difference is
+      the VM's headroom on the day and the footprint is simply too big for it.
 
       **What it costs if it happens outside dev**: a probe that goes silent and then vanishes —
       Probe Health Down and `P-74`'s handling for every sensor on it — with no graceful shutdown,
@@ -4332,9 +4330,72 @@ because each is a decision rather than a defect:
       sampled through the first two minutes (per worker as well as in total), the VM's memory and
       swap beside it, and the pool's growth and the drain's catch-up marked on the same timeline;
       run the build before `P-205` the same way; and then decide whether the pool ceiling should
-      account for memory as well as CPUs, and whether Probe Health can see the approach to this —
-      RSS against a limit — before the kernel acts on it, which is what "the system monitors
-      itself" is for.
+      account for memory, and whether Probe Health can see the approach to this — RSS against a
+      limit — before the kernel acts on it, which is what "the system monitors itself" is for.
+
+      **Two corrections to the above**: the kill was 3,687,196 kB, which is 3,520 MiB and
+      not the 3.7 GiB this said; and the pool's ceiling is not derived from the CPU count —
+      `defaultPoolSize()` is a constant 64 and `poolSizer` works from the assigned sensors (`P-34`).
+
+      **P-206 outcome** — `docs/findings/2026-09-13-probe-startup-memory.md`. **Both halves of the
+      "either" were true.** The probe has a start-up peak — 3,400–3,519 MiB from 20 s to about
+      105 s, settling to 1,975 by four minutes — made of worker heap committed while the catalogue
+      loads and held for a minute and a half; the kill at ~75 s is inside it. And the box was
+      short that day: the kernel's task table has another session's eslint at 1,294 MiB and
+      PostgreSQL's shared memory at 1,429, with swap exhausted. **`P-205` is not involved**: the
+      `ms-server` built before it, on the same load, had a high-water mark of 3,676 MiB. That is a
+      `VmHWM` read from `/proc`, not a sampled run, and it answers the question the sampled run
+      was for. **The drain is not involved either**: a benchmark with no spool, no core and no
+      drain — 64 real check workers and `port.tcp` checks, `scripts/sizing/worker-startup-memory.mjs`
+      — reproduces the peak, so the drain's catch-up was not put on the timeline.
+
+      **What made the peak was loading together.** A worker loaded beside 63 others commits about
+      52 MiB of heap; beside seven, about 36. Measured peaks at 64 workers, all at once against
+      eight at a time: ≥ 4,331 MiB (killed by the kernel at 50 s) against **2,900** on eight cores,
+      4,250 against **2,856** on two — the same shape, so not a matter of cores — and eight at a time
+      reaches a full pool sooner on both (6.1 s against 12.1; 12.7 against 16.2). **Shipped:
+      `SPAWN_CONCURRENCY = 8`** — every spawn in `CheckPool` waits for one of eight turns, and a
+      spawn waiting its turn still counts as growing, so it is not ordered twice. Pinned by a test
+      with a registry that takes 400 ms to import, which fails with 24 loading at once when the
+      limit is lifted. **Live, same stack and load: high-water mark 3,567 → 3,041 MiB, a full pool
+      at 8 s rather than 18**; less than the benchmark's saving because a live pool already grew in
+      steps.
+
+      **Measured and not shipped.** A forced collection after load shortens the plateau to 15 s
+      but leaves the peak, and needs `--expose-gc` set at runtime — not worth it. A 4 MiB young
+      generation with eight at a time brings the peak to **2,024 MiB**, 20% above steady state,
+      through a supported API — but `port.tcp` cannot show what more frequent scavenges cost a
+      heavier check, so it is `P-207`. **The two questions:** the ceiling should not try to account
+      for memory, because what ran out was the machine and the probe's view of it knows nothing
+      about a lint run or PostgreSQL's buffers; `workerPoolSize` stays the operator's statement, and
+      `docs/sizing.md` now gives the peak (3,189 MB) to size against. Probe Health's `memory`
+      channel already carries resident memory on every heartbeat, so the plateau is visible; the
+      machine running out is not, and that is `P-208`.
+
+- [ ] **P-207 — a 4 MiB young generation for check workers, measured against heavy checks** · S ·
+      P-206 · `resourceLimits: { maxYoungGenerationSizeMb: 4 }` on every check worker, with
+      `SPAWN_CONCURRENCY` at 8, took the 64-worker start-up peak from 2,900 MiB to **2,024** — a
+      plateau 20% above steady state rather than 60% — with `port.tcp` throughput unchanged
+      (`docs/findings/2026-09-13-probe-startup-memory.md`). It is a supported per-worker API and a
+      one-line change. What it costs is not known: a smaller young generation scavenges more often
+      and promotes sooner, and `port.tcp` allocates next to nothing, so the benchmark that found
+      the saving is the one workload that cannot show the price. **Done when** check duration
+      (p50/p95), worker CPU and old-generation growth are measured with and without the cap for
+      the allocation-heavy types — an SNMP walk against `snmpsim`, HTTP with a large body against
+      `target`, and a WMI or database query result — over at least the ten minutes it takes the
+      old generation to settle, and the cap ships, ships at a different size, or is recorded as
+      not worth it, with the numbers.
+
+- [ ] **P-208 — Probe Health cannot see the machine running out of memory** · S · P-206 · The
+      `memory` channel is the probe's own resident memory, which is half of what `P-206` needed:
+      the probe was the largest process on the VM when it was killed, but it was killed because a
+      lint run and PostgreSQL's shared buffers had taken the rest, and no channel on Probe Health
+      could have said so. On a dedicated probe box the two readings nearly coincide; on a shared
+      one — a local probe beside the core and its database, which is the default installation —
+      they do not. **Done when** Probe Health reports what the operating system says is available
+      (`MemAvailable` on Linux, not `MemFree`; the equivalent on Windows), measured to track it
+      under load, with a default limit that has a stated reason, and a gap rather than a zero where
+      the platform cannot say. The same channel on Core Health is worth deciding in the same ticket.
 
 
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
