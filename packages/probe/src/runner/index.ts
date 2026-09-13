@@ -1,4 +1,10 @@
-export { autoPoolCeilingMax, CheckPool, defaultPoolSize, SPAWN_CONCURRENCY } from './pool.js';
+export {
+  autoPoolCeilingMax,
+  CheckPool,
+  defaultPoolSize,
+  SPAWN_CONCURRENCY,
+  WORKER_YOUNG_GENERATION_MB,
+} from './pool.js';
 export type { CheckPoolOptions, PoolStats, SubmitOutcome } from './pool.js';
 export { poolDemand } from './demand.js';
 export type { Demand, DemandInput, DemandOptions } from './demand.js';

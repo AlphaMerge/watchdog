@@ -4372,7 +4372,7 @@ because each is a decision rather than a defect:
       channel already carries resident memory on every heartbeat, so the plateau is visible; the
       machine running out is not, and that is `P-208`.
 
-- [ ] **P-207 — a 4 MiB young generation for check workers, measured against heavy checks** · S ·
+- [x] **P-207 — a 4 MiB young generation for check workers, measured against heavy checks** · S ·
       P-206 · `resourceLimits: { maxYoungGenerationSizeMb: 4 }` on every check worker, with
       `SPAWN_CONCURRENCY` at 8, took the 64-worker start-up peak from 2,900 MiB to **2,024** — a
       plateau 20% above steady state rather than 60% — with `port.tcp` throughput unchanged
@@ -4385,6 +4385,35 @@ because each is a decision rather than a defect:
       `target`, and a WMI or database query result — over at least the ten minutes it takes the
       old generation to settle, and the cap ships, ships at a different size, or is recorded as
       not worth it, with the numbers.
+
+      **P-207 outcome** — `docs/findings/2026-09-13-young-generation-cost.md`. **It ships, at 8 MiB.**
+      Three substitutions against the list above: the SNMP walk is `snmp.table` on `target`'s
+      net-snmp rather than `snmpsim`; the large body is a 476 KB JSON document served by the
+      benchmark, because `target` has nothing larger than 190 bytes; and WMI needed a Windows host,
+      so the third type is `db.mysql` reading 5,000 rows.
+
+      **The first batch was wrong, and how is worth keeping.** One variant per process, in turn, said
+      a 4 MiB cap was up to 30% faster; then a capped run collapsed to twelve seconds of scavenging
+      in a ten-second window while the VM's load average read 2 and the host's read 15. A sequential
+      comparison on this machine measures the hour. `scripts/sizing/young-generation-cost.mjs` now
+      runs every arm at once in one process, on the same load, with `perf-conditions.mjs`'s fixed
+      loop timed in every window, and compares arms window by window over the windows where the CPU
+      was delivered.
+
+      **What it costs**, per-window p95 against uncapped, two runs of 25 and 20 minutes: 2 MiB is
+      measurably worse — 1.11–1.12 on the JSON and database checks, 1.22 on CPU per check. None of
+      4, 8 or 16 is costlier: 4's ranges straddle 1, and 8 and 16 leaned cheaper in the first run —
+      16 clearly, database p95 0.88 and CPU 0.87 — and less so in the replicate (8 MiB: CPU 0.91,
+      then 0.97). The old generation
+      did not grow under any cap. **What it saves**: uncapped, V8 grew every worker's young
+      generation to 123 MiB under these checks and kept it — 1,348 MiB of heap for eight workers,
+      where 8 MiB held 407 (run 2: 1,300 against 368). At start-up, 64 workers eight at a time:
+      2,702 MiB uncapped, **2,129** at 8, 1,873 at 4, and 2,709 at 16, which never binds on a light
+      check. **Eight**, because 16 does nothing at start-up and 4 is one halving from the cap that
+      hurt. `WORKER_YOUNG_GENERATION_MB` in `pool.ts`, with a test that asks a worker what it was
+      given. **Live, same stack as `P-206`: high-water mark 3,041 → 2,473 MiB**, settling where it
+      did. `docs/sizing.md`'s start-up peak is now 2,593 MB, and it says what a worker running
+      heavy checks costs.
 
 - [ ] **P-208 — Probe Health cannot see the machine running out of memory** · S · P-206 · The
       `memory` channel is the probe's own resident memory, which is half of what `P-206` needed:

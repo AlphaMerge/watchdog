@@ -79,6 +79,36 @@ const OVER_CEILING_RETRY_MS = 250;
 export const SPAWN_CONCURRENCY = 8;
 
 /**
+ * The young generation each check worker may grow to, in MiB (`P-207`).
+ *
+ * **Left to itself V8 grew every worker's to 123 MiB** under allocation-heavy checks — a 500 KB
+ * JSON document through JSONPath, 5,000 database rows, an SNMP table walk — and kept it: 986 MiB of
+ * young generation across eight workers, which at the pool's ceiling of 64 would be 7.9 GiB before
+ * the old generation held anything at all. Not measured at 64; the arithmetic is enough to want a
+ * bound. Capping it is one option on the
+ * `Worker`. Measured side by side, every arm on the same load in the same process so the host's
+ * noise lands on all of them at once (`docs/findings/2026-09-13-young-generation-cost.md`):
+ *
+ *     cap     heap, 8 workers   p95 against uncapped, per window     CPU per check
+ *     none    1,348 / 1,300     —                                    —
+ *        2      286             rest 1.12, database 1.11             1.22   <- measurably worse
+ *        4      320             0.93 – 1.02                          0.98
+ *        8      407 /   368     0.91 – 0.96 / 0.98 – 1.02            0.91 / 0.97   <- this
+ *       16      540 /   453     0.88 – 0.95 / 0.97 – 0.98            0.87 / 0.95
+ *
+ * Two runs where there are two numbers. Every cap from 4 up costs nothing measurable in latency or
+ * CPU and most save a little; 2 is where the scavenger starts to cost more than the nursery it
+ * saves.
+ *
+ * **Eight rather than four or sixteen**, because of the other end of a probe's life. Sixty-four
+ * workers starting eight at a time peaked at 2,702 MiB uncapped, 2,129 at 8, 1,873 at 4 — and
+ * 2,709 at 16, which never binds on a light check. Four saves 250 MiB more at start-up and is one
+ * halving from the cap that hurt; eight keeps two halvings of margin for checks heavier than these
+ * and still takes 70% off a busy pool's heap.
+ */
+export const WORKER_YOUNG_GENERATION_MB = 8;
+
+/**
  * `disabled` is separate from `stopped` on purpose (`P-62`).
  *
  * Stopping is something an operator did and the probe stops heartbeating for; the pool giving up
@@ -1113,6 +1143,7 @@ export class CheckPool {
     this.#nextWorkerId += 1;
     const worker = new Worker(join(import.meta.dirname, 'check-worker.js'), {
       workerData: { registryModule: pathToFileURL(this.#registryModule).href },
+      resourceLimits: { maxYoungGenerationSizeMb: WORKER_YOUNG_GENERATION_MB },
     });
     const slot: Slot = {
       id: this.#nextWorkerId,

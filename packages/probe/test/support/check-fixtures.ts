@@ -1,3 +1,4 @@
+import { resourceLimits } from 'node:worker_threads';
 import type { CheckContext, CheckExecution, CheckRegistry } from '../../src/runner/types.js';
 
 /**
@@ -45,6 +46,15 @@ const registry: CheckRegistry = {
 
       case 'test.throw':
         throw new Error('the check failed on purpose');
+
+      case 'test.limits':
+        // What the thread running this check was started with (`P-207`). `resourceLimits` is empty
+        // in the main thread, which is how a test tells a worker that was capped from one that was
+        // not.
+        return {
+          channels: [{ key: 'youngMb', value: resourceLimits.maxYoungGenerationSizeMb ?? 0 }],
+          message: 'limits',
+        };
 
       case 'test.crash':
         // Takes the worker thread down mid-check.

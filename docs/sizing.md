@@ -124,19 +124,28 @@ costs about 12 MB a worker, so do not size from a benchmark.
 
 **Size for the start-up peak, not for this number.** Workers commit heap while they load the
 catalogue and V8 holds it for about a minute and a half before giving it back, so a probe spends
-its first two minutes well above where it settles. Measured at 64 workers on 2026-09-13
-(`findings/2026-09-13-probe-startup-memory.md`): a peak of **3,189 MB**, held from about ten
+its first two minutes above where it settles. Measured at 64 workers on 2026-09-13
+(`findings/2026-09-13-young-generation-cost.md`): a peak of **2,593 MB**, held from about ten
 seconds to about a hundred and ten, settling to about **1,800 MB** by four minutes. That peak is
-about 35% above what the formula gives. A box sized exactly to the steady state can die during its
+about 10% above what the formula gives. A box sized exactly to the steady state can die during its
 own start-up and then look perfectly healthy in every measurement taken after the restart — which
-is what happened on the dev VM, and a miserable thing to diagnose — so add headroom of at least a
-third, or size the box from the peak directly.
+is what happened on the dev VM, and a miserable thing to diagnose — so size the box from the peak,
+with headroom for whatever else runs on it.
 
-**The peak was 3,740 MB before `P-206`**, which left a probe at the 5,000-sensor row's 4 GB less
-than 300 MB during its own start-up, before the operating system took its share. The pool used to
-start every worker a growth burst asked for at once, and a worker that loads beside sixty others
-commits half as much heap again as one that loads beside seven; it now loads them eight at a time,
-which is also faster to a full pool.
+**The peak was 3,740 MB before `P-206` and 3,189 MB before `P-207`.** At 3,740 a probe at the
+5,000-sensor row's 4 GB had less than 300 MB during its own start-up, before the operating system
+took its share. Two changes took it down. The pool used to start every worker a growth burst asked
+for at once, and a worker that loads beside sixty others commits half as much heap again as one
+that loads beside seven; it now loads them eight at a time (`P-206`). And each worker's young
+generation is capped at 8 MiB (`P-207`), which V8 would otherwise grow as far as it likes.
+
+**Checks that allocate cost more per worker than that formula says.** The 35 MB is a probe whose
+checks are mostly light. Eight workers parsing a 476 KB JSON document, reading 5,000 database rows
+and walking an SNMP table held **427 MB of heap between them** with the cap — and **1,413 MB
+without it**, because V8 had grown each young generation to 129 MB and kept it
+(`findings/2026-09-13-young-generation-cost.md`). That is about 53 MB of heap a worker before
+anything native is counted. A full 64-worker pool on work like that has not been measured; size a
+probe that runs mostly REST, database or SNMP-table sensors from a measurement of its own.
 
 **The pool settles near the burst, so the burst is what you are buying memory for.** Measured at
 a ceiling of 48, **with 200 ms checks** — the ceiling has since risen to 64, so the two pinned

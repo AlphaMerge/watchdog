@@ -10,6 +10,7 @@ import {
   CheckPool,
   defaultPoolSize,
   SPAWN_CONCURRENCY,
+  WORKER_YOUNG_GENERATION_MB,
   type ResultMeta,
 } from '../src/runner/index.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
@@ -486,6 +487,19 @@ describe('growing and shrinking with the load', () => {
     }
     await until(() => seen.length === 40, 'every check to finish', 20_000);
     assert.equal(pool.size, 3);
+  });
+
+  it('caps every worker it starts at WORKER_YOUNG_GENERATION_MB of young generation', async () => {
+    // **`P-207`.** Uncapped, V8 grew each worker's young generation to 123 MiB under heavy checks
+    // and kept it. The cap is one option on the `Worker`, which is exactly the kind of line a
+    // refactor of `#start` drops without a test failing — so the worker reports what it got.
+    const { pool, seen } = await poolOf({ size: 2 });
+    for (const id of [500, 501]) pool.submit(request(id, 'test.limits'));
+    await until(() => seen.length === 2, 'both workers to answer');
+    assert.deepEqual(
+      seen.map((one) => one.result.channels[0]?.value),
+      [WORKER_YOUNG_GENERATION_MB, WORKER_YOUNG_GENERATION_MB],
+    );
   });
 
   it('loads at most SPAWN_CONCURRENCY workers at once, however large the shortfall', async () => {
