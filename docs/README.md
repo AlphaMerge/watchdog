@@ -146,6 +146,10 @@ measurement is not a claim.
 - [The tree build was two measurements wearing one name](findings/2026-09-08-tree-build-was-two-measurements.txt) (`P-193`)
 - [Whether a filling database slows creates, and the noise that swallowed the question](findings/2026-09-08-tree-build-fill-and-noise.txt) (`P-194`)
 
+**Reports**
+
+- [What a report costs the database and the event loop](findings/2026-09-13-report-render-cost.md) (`P-203`)
+
 **Whole-system**
 
 - [24-hour soak at 5,000 sensors](findings/2026-08-30-soak-24h.md) (`H-01`)

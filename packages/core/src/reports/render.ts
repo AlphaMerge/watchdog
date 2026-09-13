@@ -5,7 +5,9 @@ import { showsGraph } from './graph.js';
 import type { ReportRow } from './repository.js';
 import { planReportSpan } from './span.js';
 import {
+  MAX_CELLS,
   refuseIfTooLarge,
+  tooLarge,
   type ReportColumn,
   type ReportDocument,
   type ReportSection,
@@ -29,12 +31,11 @@ import {
  * and the first sign of a disagreement would be a report and the sensor page beside it showing
  * different numbers for the same hour.
  *
- * **The cost is real and is not hidden**: one call per subject, sequentially, so a report over
- * hundreds of sensors is hundreds of round trips. That is acceptable for something that runs on a
- * schedule and not on a request, and `MAX_CELLS` refuses the sizes where it would stop being
- * acceptable. Batching it belongs with `E-08`, where the scheduler decides what a long render is
- * allowed to do to the database — and with a measurement, which `CLAUDE.md` requires before any
- * claim about it.
+ * **Measured, and batching is not the answer** (`P-203`, `docs/findings/2026-09-13-report-render-cost.md`):
+ * about twenty milliseconds a sensor, linear from one sensor to a hundred, from either tier — and
+ * nearly all of it is the series query aggregating its buckets, which a batched query would do over
+ * exactly the same rows. The round trips a batch would save are about 1.5 ms a sensor. What the
+ * measurement *did* change is when an oversized report is refused: see `build`.
  */
 
 export interface ReportRendererOptions {
@@ -63,6 +64,28 @@ export class ReportRenderer {
   async build(report: ReportRow, now: Date = new Date()): Promise<ReportDocument> {
     const { window, plan } = planReportSpan(report.span, now);
     const subjects = await this.#context.subjectsFor(report);
+
+    // **Refused before a single reading is fetched, if it is going to be refused at all** (`P-203`).
+    // A report's size is its channels times its buckets, and both are known now: the plan says how
+    // many buckets, one query says how many channels. Measured before this check existed, a report
+    // over 500 two-channel sensors spent 10.4 s and 1,500 transactions reading history against the
+    // live database — and was then refused, on every scheduled run, by `refuseIfTooLarge` below.
+    // That check stays, and stays authoritative: this one is an estimate that happens to be exact,
+    // and a document is still counted before anything is formatted.
+    const sensorIds = subjects.visible
+      .filter((subject) => subject.kind === 'sensor')
+      .map((subject) => subject.id);
+    let expected = 0;
+    for (const channels of (await this.#history.channelCounts(sensorIds)).values()) {
+      expected += channels * plan.bucketCount;
+    }
+    if (expected > MAX_CELLS) {
+      this.#logger.warn(
+        { reportId: report.id, cells: expected, limit: MAX_CELLS, sensors: sensorIds.length },
+        'a report was refused before reading, as over the value limit',
+      );
+      throw tooLarge(expected, report.id, subjects.visible.length);
+    }
 
     const sections: ReportSection[] = [];
     for (const subject of subjects.visible) {

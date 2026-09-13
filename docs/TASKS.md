@@ -4172,7 +4172,7 @@ because each is a decision rather than a defect:
       assertion above: bouncing the service would prove the handshake works, which was never in
       doubt, and would hide whether the decision reached a live connection.
 
-- [ ] **P-203 — a report is one query per sensor, and nobody has measured what that costs** · S ·
+- [x] **P-203 — a report is one query per sensor, and nobody has measured what that costs** · S ·
       E-04 · `ReportRenderer` calls `HistoryService.forSensor` once per subject, sequentially, and
       that was the right call for `E-04`: a batched query would be a second implementation of
       `segmentsFor` — stitching a rollup tier together with everything newer than its watermark —
@@ -4199,6 +4199,55 @@ because each is a decision rather than a defect:
       are fine and the honest outcome is a finding saying so. **No change without the number** —
       `CLAUDE.md` does not allow a performance claim without a measurement committed to the repo,
       and that cuts both ways.
+
+      **Done 2026-09-13** — `docs/findings/2026-09-13-report-render-cost.md`, measured over 500
+      two-channel sensors against 17.5 million real rollup rows. **About 20 ms a sensor, linear**,
+      from either tier, and nearly all of it is the series query aggregating its buckets: the round
+      trips a batch would save are 1.5 ms a sensor, so **batching is not worth a second
+      implementation of `segmentsFor`**, and the ticket's own condition — no change without the
+      number — is what says not to build it.
+
+      **The number that did change something was the 500-sensor row.** A default report over 500
+      sensors is five times `MAX_CELLS`, and the renderer read every sensor's history — 10.4 s and
+      1,500 transactions against the live database — before counting the document and refusing it,
+      on every scheduled run. Both terms of the count are known before any read, so
+      `ReportRenderer.build` now asks `HistoryService.channelCounts` first: refused in 7 ms and one
+      transaction, with the same error and the same advice, and a test that the estimate equals
+      what the finished document counts.
+
+      **And `E-06`'s worry was right.** Every format holds the event loop for its whole duration —
+      HTML 0.8–0.95 s, XML 0.73 s, CSV 0.45 s, a `graph_only` PDF 0.63 s, and a PDF that will be
+      refused for its page count 1.4–1.6 s before it says so. Two reports rendering at once made a
+      concurrent sensor-page read wait **1.27 s at p95 and 2.6 s at worst**, against 11 ms idle. That
+      is `P-204`. Two harness bugs were found on the way and are written up in the finding: an
+      event-loop histogram that cannot see the first interval after it is enabled, and a latency
+      sampler frozen by the very stall it was measuring — coordinated omission, which hid a
+      2.8-second wait behind a 30 ms worst case on the second run.
+
+- [ ] **P-204 — a report's formatting holds the core's event loop** · M · P-203 · Measured in
+      `docs/findings/2026-09-13-report-render-cost.md`: every format is synchronous for its whole
+      duration, up to about a second for an HTML document near the value limit and a second and a
+      half for a PDF refused for its page count, and two reports rendering at once made a concurrent
+      request wait 1.27 s at p95 and 2.6 s at worst. Everything on that loop waits the same — the
+      API, the probes' results, the state machine, the WebSocket. A report at 03:00 costs nobody
+      anything; "Run now" on a large report at 14:00 freezes the core for everybody.
+
+      **The shape of the fix is the one `CLAUDE.md` uses for checks**: formatting in a
+      `worker_threads` worker, the document passed in by structured clone and the bytes passed back,
+      at most `ReportRunner`'s two at a time. What makes it an `M` rather than an afternoon: the
+      document holds `Date`s and a 14 MiB string on the way back, which is worth measuring rather
+      than assuming cheap; `pdfkit`'s font has to load in the worker; an error has to come back as
+      the same `ReportError` with the same code, or a refusal becomes a 500; a worker that dies must
+      fail one run and not the runner; and a pool is exactly the kind of subsystem `CLAUDE.md` says
+      adds a metric to Core Health. **Done when** `report-render-performance.test.ts`'s two-reports
+      case holds a concurrent request's p95 near its idle value, and its guard assertion is
+      replaced with a budget.
+
+      **Worth doing alongside, and cheaper**: the PDF's page refusal happens after every cell has
+      been measured. A lower bound on the page count — rows divided by the most rows a page can
+      hold — would refuse most of those before the second and a half, the way `P-203` moved the
+      value refusal before the reads.
+
 
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
       step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list

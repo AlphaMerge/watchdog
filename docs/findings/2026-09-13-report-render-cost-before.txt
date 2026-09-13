@@ -1,0 +1,65 @@
+# P-203 — the first run, BEFORE the early refusal existed. Kept for its database-read table,
+# which is the measurement that justified the change: the 500-sensor rows read for ~10.4 s and were then refused.
+# DO NOT READ its formatting or two-reports sections: that harness had two bugs, both described in
+# 2026-09-13-report-render-cost.md — the event-loop column reads 0 ms, and its 2.8 s worst case was caught by luck.
+
+  perf run conditions
+  ----------------------------------------------------------------
+  load average   0.20 / 0.45 / 0.65  over 8 CPUs  (0.03 per CPU)
+                 as the container sees it, which is the kernel running the tests
+  delivered CPU  271 ms for a fixed loop  (1.01x the reference machine's 267 ms)
+                 a load average cannot see a host starving this VM; this can
+  database       nothing else is connected
+  ----------------------------------------------------------------
+    built 500 sensors and filled 8,835,956 five-minute and 8,669,691 hourly rows in 84 s (setup, not measured)
+    measured, database reads:
+      last month, 45-minute buckets from sample_5m:
+        sensors   build (median of 3)   per sensor   transactions   statements   outcome
+              1         24 ms (35, 24, 24)     24.3 ms              3            3   rendered, 1,984 values
+             10        214 ms (226, 214, 187)    21.4 ms             30           30   rendered, 19,840 values
+            100       1949 ms (1983, 1949, 1935)    19.5 ms            300          300   rendered, 198,400 values
+            500      10377 ms (9740, 10496, 10377)    20.8 ms           1500         1500   REFUSED after reading: 992,000 values
+      last year, 9-hour buckets from sample_1h:
+        sensors   build (median of 3)   per sensor   transactions   statements   outcome
+              1         23 ms (31, 23, 23)     23.2 ms              3            3   rendered, 1,948 values
+             10        208 ms (220, 208, 199)    20.8 ms             30           30   rendered, 19,480 values
+            100       1953 ms (2066, 1903, 1953)    19.5 ms            300          300   rendered, 194,800 values
+            500      10498 ms (10473, 10498, 10586)    21.0 ms           1500         1500   REFUSED after reading: 974,000 values
+▶ report render cost
+  ✔ reads a report one sensor at a time, and says what that costs (75428.691701ms)
+    measured, formatting:
+      last month, 100 sensors, graph_and_table:
+        format                 wall      event loop held   size
+        HTML                    806 ms          0 ms      14.39 MiB
+        CSV                     481 ms          0 ms      4.04 MiB
+        XML                     713 ms          0 ms      11.73 MiB
+        PDF                    1290 ms          0 ms      refused: this report is 1900 pages as a PDF, and …
+        PDF, graph_only         649 ms          0 ms      1.93 MiB
+      last year, 100 sensors, graph_and_table:
+        format                 wall      event loop held   size
+        HTML                    715 ms          0 ms      14.09 MiB
+        CSV                     434 ms          0 ms      3.97 MiB
+        XML                     722 ms          0 ms      11.51 MiB
+        PDF                    1383 ms          0 ms      refused: this report is 1867 pages as a PDF, and …
+        PDF, graph_only         597 ms          0 ms      1.85 MiB
+      last month, 10 sensors, graph_and_table:
+        format                 wall      event loop held   size
+        HTML                     85 ms          0 ms      1.44 MiB
+        CSV                      43 ms          0 ms      0.40 MiB
+        XML                      73 ms          0 ms      1.17 MiB
+        PDF                     648 ms          0 ms      0.77 MiB
+        PDF, graph_only          83 ms          0 ms      0.20 MiB
+  ✔ formats a document on the event loop, and says for how long (15761.945799ms)
+    measured, a sensor-page read while two 100-sensor reports render (HTML + PDF) — 5.3 s of rendering:
+      idle                               n= 126   p50    6.1 ms   p95    8.6 ms   max    70.8 ms
+      during two reports                 n=  81   p50    3.1 ms   p95   18.2 ms   max  2764.9 ms
+  ✔ shows what two reports running at once do to a request the core is serving (9302.405629ms)
+✔ report render cost (184894.758084ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 185436.383959

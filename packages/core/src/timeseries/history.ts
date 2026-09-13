@@ -221,6 +221,22 @@ export class HistoryService {
   }
 
   /**
+   * How many channels each sensor has, without reading a single reading (`P-203`).
+   *
+   * **For deciding whether to read at all.** A report's size is its channels times its buckets,
+   * and both are known before any history is fetched — so a report over the value limit can be
+   * refused for the price of one query, rather than after reading every sensor it names. Measured
+   * before this existed: a 500-sensor report read for ten seconds and was then refused, on every
+   * scheduled run. A sensor that does not exist is absent, as in `latestForSensors`.
+   */
+  async channelCounts(sensorIds: readonly number[]): Promise<Map<number, number>> {
+    const unique = [...new Set(sensorIds)];
+    if (unique.length === 0) return new Map();
+    const byId = await this.#db.tx((q) => this.#store.sensorsChannels(q, unique));
+    return new Map([...byId].map(([id, channels]) => [id, channels.length]));
+  }
+
+  /**
    * The same, for many sensors, in a fixed number of queries (`G-10`).
    *
    * **Three statements whatever the count**, and that is the whole point: channels for every

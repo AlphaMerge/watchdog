@@ -371,7 +371,9 @@ breakdown.
 
 A report that would produce more than 200,000 values is refused rather than truncated, with the
 count and what to narrow: fewer sensors, a shorter span, or a coarser averaging interval. A report
-silently missing its last four hundred sensors would be worse than no report. **A PDF has a second
+silently missing its last four hundred sensors would be worse than no report. **It is refused before
+any history is read**: the count is channels times buckets, and both are known up front — a
+500-sensor report used to read for ten seconds before being told no (`P-203`). **A PDF has a second
 bound**, because values become pages: over 400 pages it is refused the same way, with the page
 count and the suggestion to render it as CSV instead, which has no pages.
 

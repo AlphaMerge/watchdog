@@ -7,7 +7,8 @@ import { ReportContext } from '../src/reports/context.js';
 import { ReportRenderer } from '../src/reports/render.js';
 import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService, type ReportViewer } from '../src/reports/service.js';
-import { renderCsv, renderHtml } from '../src/reports/table.js';
+import { ReportError } from '../src/reports/errors.js';
+import { countCells, renderCsv, renderHtml } from '../src/reports/table.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -35,6 +36,10 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
   let db: Database;
   let reports: ReportService;
   let renderer: ReportRenderer;
+  let history: HistoryService;
+  /** How many times the renderer asked for a sensor's history. */
+  let historyReads = 0;
+  const extraSensorIds: number[] = [];
 
   let sensorId: number;
   let hiddenSensorId: number;
@@ -55,11 +60,14 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
       logger: silent,
     });
     reports = new ReportService({ db, repository, logger: silent });
-    renderer = new ReportRenderer({
-      context,
-      history: new HistoryService({ db, logger: silent }),
-      logger: silent,
-    });
+    history = new HistoryService({ db, logger: silent });
+    // Counted, so a test can say whether the renderer read anything before it refused (`P-203`).
+    const read = history.forSensor.bind(history);
+    history.forSensor = (...args) => {
+      historyReads += 1;
+      return read(...args);
+    };
+    renderer = new ReportRenderer({ context, history, logger: silent });
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -105,6 +113,18 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
     });
     deletedId = doomed.id;
     await db.query('DELETE FROM object WHERE id = $1', [deletedId]);
+
+    // Six more two-channel sensors, with no readings at all: enough, over a long enough span at a
+    // fine enough resolution, to put a report over the value limit without writing a row.
+    for (let index = 0; index < 6; index += 1) {
+      const extra = await harness.service.create(testActor, {
+        kind: 'sensor',
+        name: `render-bulk-${String(index)}`,
+        parentId: device.id,
+        sensorType: 'icmp.ping',
+      });
+      extraSensorIds.push(extra.id);
+    }
 
     const group = await db.query<{ id: string }>(
       `INSERT INTO user_group (name) VALUES ('renderers') RETURNING id`,
@@ -305,6 +325,44 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
 
     const plain = await build([sensorId]);
     assert.equal(plain.sections[0]?.spread, undefined, 'a table-only report carries none');
+  });
+
+  it('refuses a report over the value limit before reading any history (P-203)', async () => {
+    // **The measurement that asked for this.** Before the check existed, a report over 500
+    // sensors read for ten seconds against the live database and was then refused — on every
+    // scheduled run. Seven two-channel sensors over 39 days at the finest averaging the rules
+    // allow is 7 × 2 × 18,720 = 262,080 values: over the limit, and knowable without a read.
+    const before = historyReads;
+    await assert.rejects(
+      () =>
+        build([sensorId, ...extraSensorIds], {
+          kind: 'custom',
+          from: new Date(base.getTime() - 39 * 24 * HOUR).toISOString(),
+          to: base.toISOString(),
+          timezone: 'UTC',
+          resolutionSeconds: 120,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ReportError);
+        assert.equal(error.code, 'REPORT_TOO_LARGE');
+        assert.equal((error.details as { cells: number }).cells, 262_080, 'with the exact count');
+        assert.match(error.message, /cover fewer sensors/u, 'and the same advice as after reading');
+        return true;
+      },
+    );
+    assert.equal(historyReads, before, 'and not one sensor’s history was read to find that out');
+  });
+
+  it('estimates exactly what the finished document counts, so it never refuses one that fits', async () => {
+    // The early check is only safe if it cannot disagree with the authoritative one. Same report,
+    // counted both ways.
+    const document = await build([sensorId, deviceId, ...extraSensorIds]);
+    const counts = await history.channelCounts([sensorId, ...extraSensorIds]);
+    let expected = 0;
+    for (const channels of counts.values())
+      expected += channels * (document.sections[0]?.rows.length ?? 0);
+    assert.equal(expected, countCells(document.sections));
+    assert.ok(historyReads > 0);
   });
 
   it('uses the same bucketing the span planned, so a report and a graph agree', async () => {

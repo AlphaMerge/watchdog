@@ -130,18 +130,29 @@ export function countCells(sections: readonly ReportSection[]): number {
   return cells;
 }
 
-export function refuseIfTooLarge(document: ReportDocument): void {
-  const cells = countCells(document.sections);
-  if (cells <= MAX_CELLS) return;
-  throw new ReportError(
+/**
+ * The refusal, with the numbers and what to narrow — raised in two places, worded in one.
+ *
+ * `ReportRenderer` raises it **before** reading any history, from the channel count and the planned
+ * bucket count (`P-203`); `refuseIfTooLarge` raises it again on the finished document, which is the
+ * authoritative count. The two must never disagree about what a reader is told.
+ */
+export function tooLarge(cells: number, reportId: number, sections: number): ReportError {
+  return new ReportError(
     'REPORT_TOO_LARGE',
     `this report would render ${String(cells)} values, and the limit is ${String(MAX_CELLS)}; ` +
       'cover fewer sensors, choose a shorter span, or pin a coarser averaging interval',
     {
-      context: { reportId: document.report.id, phase: 'render' },
-      details: { cells, limit: MAX_CELLS, sections: document.sections.length },
+      context: { reportId, phase: 'render' },
+      details: { cells, limit: MAX_CELLS, sections },
     },
   );
+}
+
+export function refuseIfTooLarge(document: ReportDocument): void {
+  const cells = countCells(document.sections);
+  if (cells <= MAX_CELLS) return;
+  throw tooLarge(cells, document.report.id, document.sections.length);
 }
 
 /* ------------------------------------------------------------------- formatting */
