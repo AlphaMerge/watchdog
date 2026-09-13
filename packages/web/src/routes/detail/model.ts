@@ -1,5 +1,5 @@
 import type { HistoryChannel, SettingView, TriggerKind } from '../../api/types';
-import type { ChartGroup } from '../../charts/groups';
+import type { ChartGroup } from '@ms/shared/charts';
 import { labelFor, seedDefaults, type FieldModel, type JsonSchema } from '../../forms/schema';
 
 /**

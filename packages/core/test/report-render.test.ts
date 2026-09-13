@@ -160,13 +160,17 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
   const viewer = (userId: number): ReportViewer => ({ userId, role: 'readwrite' });
 
   let seq = 0;
-  const build = async (subjects: number[], span?: Record<string, unknown>) => {
+  const build = async (
+    subjects: number[],
+    span?: Record<string, unknown>,
+    kind: 'table_only' | 'graph_and_table' | 'graph_only' = 'table_only',
+  ) => {
     seq += 1;
     const report = await reports.create(
       viewer(author.id),
       {
         name: `render-${String(seq)}`,
-        kind: 'table_only',
+        kind,
         subjects: { objectIds: subjects },
         span: span ?? {
           kind: 'custom',
@@ -279,6 +283,28 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
     } finally {
       await db.query(`UPDATE user_account SET disabled = false WHERE id = $1`, [author.id]);
     }
+  });
+
+  it('carries each bucket’s spread for a template that draws graphs, and only for one (E-05)', async () => {
+    // The band on a report's graph comes from the same history read as the line — so the two
+    // cannot be two different readings of the period — and a table-only report does not carry
+    // three times the data it will never draw.
+    const graphed = await build([sensorId], undefined, 'graph_and_table');
+    const section = graphed.sections[0];
+    assert.ok(section?.spread !== undefined, 'a graph template carries the spread');
+    const rtt = section.columns.findIndex((one) => one.key === 'rtt');
+    assert.equal(section.spread.length, section.columns.length, 'one per column');
+    assert.deepEqual(
+      section.spread[rtt]?.min.map((value, index) => [
+        value === null,
+        section.rows[index]?.values[rtt] === null,
+      ]),
+      section.rows.map((row) => [row.values[rtt] === null, row.values[rtt] === null]),
+      'and a gap in the line is a gap in the band, bucket for bucket',
+    );
+
+    const plain = await build([sensorId]);
+    assert.equal(plain.sections[0]?.spread, undefined, 'a table-only report carries none');
   });
 
   it('uses the same bucketing the span planned, so a report and a graph agree', async () => {

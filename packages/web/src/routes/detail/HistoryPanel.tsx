@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
-import type { HistorySeries } from '../../api/types';
+import type { HistoryChannel, HistorySeries } from '../../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
-import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '../../charts/groups';
+import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '@ms/shared/charts';
 import { SeriesLegend } from '../../charts/SeriesLegend';
 import { SeriesTable } from '../../charts/SeriesTable';
 import { TimeSeriesChart } from '../../charts/TimeSeriesChart';
@@ -159,7 +159,7 @@ function Panel({
   times,
   buckets,
 }: {
-  group: ChartGroup;
+  group: ChartGroup<HistoryChannel>;
   times: readonly number[];
   buckets: readonly string[];
 }): React.JSX.Element {

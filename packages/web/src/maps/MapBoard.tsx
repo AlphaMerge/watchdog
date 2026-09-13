@@ -12,7 +12,7 @@ import type {
   TileSource,
 } from '../api/types';
 import { StatusBadge } from '../components/StatusBadge';
-import { groupByUnit } from '../charts/groups';
+import { groupByUnit } from '@ms/shared/charts';
 import { TimeSeriesChart } from '../charts/TimeSeriesChart';
 import type { ChartSeries } from '../charts/time-series-model';
 import { formatValue } from '../routes/detail/model';

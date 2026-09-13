@@ -13759,9 +13759,10 @@ nothing in this phase is gated on a decision any more.
    `\Report PDFs` directory as though they are files. That decision has to be made again rather
    than inherited.
 
-Everything except `E-05` has landed: HTML, CSV, XML and PDF of a data table, on a schedule,
-delivered by email. `ADR-006` Decision 4 put `E-07` ahead of the two `L` tickets, `E-06` then took
-the PDF without a browser, and **`E-05` — the graphs — is what is left of this phase.**
+**Every ticket in this phase has landed**: graphs and data tables as HTML, CSV, XML and PDF, on a
+schedule, delivered by email, rendered without a browser. `ADR-006` Decision 4 put `E-07` ahead of
+the two `L` tickets, `E-06` took the PDF, and `E-05` the graphs. `E-12` — scripts the report font
+does not cover — is the one follow-up it opened.
 
 - [x] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
       and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
@@ -13969,7 +13970,7 @@ the PDF without a browser, and **`E-05` — the graphs — is what is left of th
 
       18 rendering tests, 8 against real readings with a deliberate hole in the middle, 5 API.
 
-- [ ] **E-05 — Graphs in a report** · L · E-04 · **`ADR-006` Decision 3**: the
+- [x] **E-05 — Graphs in a report** · L · E-04 · **`ADR-006` Decision 3**: the
       chart's geometry is computed in `@ms/shared` and drawn twice — SVG for the HTML report,
       `pdfkit` primitives for the PDF. No browser, no `node-canvas`, no raster.
 
@@ -13982,6 +13983,36 @@ the PDF without a browser, and **`E-05` — the graphs — is what is left of th
 
       The expensive part is axis tick selection, label collision and the null-gap path — all of
       them assertable from an SVG string, which is why this is drawn rather than rasterised.
+
+      **Landed 2026-09-13, and Phase 13 with it.** The charting decisions moved first:
+      `@ms/shared/charts` now holds unit grouping, extents, colour slots and the palette, and the web
+      app imports them from there. **The web app had never depended on `@ms/shared`**, whose entry
+      point is service code, so the charts are their own browser-safe subpath with a test that
+      nothing in the directory imports outside it; the web bundle grew by 0.09 kB, and its scripts
+      build shared themselves so a fresh `npm run dev:ui` works. **Moving the palette found drift
+      already there**: the web app's JavaScript copy of the light palette had kept the eight hues and
+      lost the stylesheet's neutrals. One palette now, and a test holding the stylesheet to it.
+
+      Then the geometry, in the same package: a y-axis at 1, 2 or 5 × 10ⁿ that starts at zero for a
+      magnitude and still draws a flat series; lines broken at every gap, a lone reading drawn as a
+      dot rather than lost, the min–max band only where both edges are known; and time labels chosen
+      so that none overlaps another and none leaves the chart. **The candidates for the time axis
+      come from the core**, because which instants are round in a zone is `span.ts`'s calendar —
+      local midnights, the first of the month, and no tick for the hour the clocks skipped. The core
+      draws the one layout twice, as SVG in the HTML and as `pdfkit` primitives in the PDF, where a
+      chart is an atomic block; `graph_only` has no table in either, and CSV and XML carry the data
+      whatever the template says.
+
+      **Two layout bugs were found by looking and are now tests**: the last date of every chart was
+      clipped to `09-0`, and a legend drew its swatches over the dates. Sixteen mutations were run;
+      the first pass caught twelve, and the four that were not caught were weak tests rather than
+      correct code — including the legend test, whose first version would not have caught the very
+      overlap it was written for. All sixteen are caught now. **Measured**: at the value limit an
+      HTML report is 7.3 MiB as a table, 13.9 MiB with graphs and 6.5 MiB as graphs alone; a month of
+      hourly data over fifty sensors is 5.1 MiB of HTML with graphs, and **its PDF with tables is
+      refused at about 700 pages while `graph_only` is under a megabyte** — so for a PDF over many
+      sensors, the graph template is usually the report that was wanted.
+
 
 - [x] **E-06 — PDF output** · L · E-04 · **`ADR-006` Decisions 1 and 2**: `pdfkit`, laying the
       document out ourselves, with DejaVu Sans embedded.
@@ -14260,7 +14291,7 @@ Ordered by expected value. Not scheduled.
 
 - ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
-- ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11**, broken into `E-01`…`E-11` under Phase 13 above
+- ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, with `E-12` (report fonts beyond DejaVu's coverage) open
 - **V2-04** Libraries (filter-rule alternate tree views)
 - **V2-05** Ticket system (user, ToDo and notification tickets)
 - **V2-06** Failover clustering

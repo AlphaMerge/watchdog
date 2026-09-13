@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import { readChartTheme, seriesColour, seriesWash, type ChartTheme } from './palette';
+import { seriesColour, seriesWash, type ChartTheme } from '@ms/shared/charts';
+import { readChartTheme } from './palette';
 import { dataFor, rowsFor, type ChartSeries } from './time-series-model';
 
 export interface TimeSeriesChartProps {

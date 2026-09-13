@@ -1,6 +1,9 @@
 import type { QueryAdjustment } from '../timeseries/query.js';
 import type { ReportSubject } from './context.js';
 import { ReportError } from './errors.js';
+import { escapeHtml } from './escape.js';
+import { chartsFor, showsGraph, showsTable, timeTicksFor } from './graph.js';
+import { approximateWidth, renderChartSvg } from './graph-svg.js';
 import type { ReportKind } from './repository.js';
 
 /**
@@ -59,6 +62,18 @@ export interface ReportSection {
   readonly subject: ReportSubject;
   readonly columns: readonly ReportColumn[];
   readonly rows: readonly ReportTableRow[];
+  /**
+   * Per column, aligned to `rows`: each bucket's lowest and highest reading (`E-05`).
+   *
+   * What a graph draws as its band. Only filled for a template that draws graphs, and optional so
+   * that a document without it is still a document — a graph then draws the averages alone. No
+   * table, CSV or XML reads it: they print the averages, and a spread nobody asked for would be
+   * three times the data in every export.
+   */
+  readonly spread?: readonly {
+    readonly min: readonly (number | null)[];
+    readonly max: readonly (number | null)[];
+  }[];
   /**
    * Why this section has no columns, when it has none.
    *
@@ -276,14 +291,7 @@ export function renderCsv(document: ReportDocument): string {
 
 /* ------------------------------------------------------------------------ HTML */
 
-export function escapeHtml(raw: string): string {
-  return raw
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
+export { escapeHtml } from './escape.js';
 
 /**
  * Inline, because a report is stored and emailed.
@@ -306,7 +314,14 @@ const STYLE = `
   td.gap { color: #999; }
   p.note, p.unavailable { color: #555; background: #f6f6f6; padding: .5rem .75rem; border-left: 3px solid #bbb; }
   footer { margin-top: 2rem; color: #777; font-size: .85rem; }
+  figure.chart { margin: .75rem 0 1.25rem; }
+  figure.chart svg { display: block; max-width: 100%; height: auto; }
 `;
+
+/** A chart's drawing width in the HTML report, in CSS pixels before it scales to the page. */
+const CHART_WIDTH = 760;
+const CHART_PLOT_HEIGHT = 180;
+const CHART_FONT = 11;
 
 export function renderHtml(document: ReportDocument): string {
   refuseIfTooLarge(document);
@@ -339,12 +354,44 @@ export function renderHtml(document: ReportDocument): string {
     );
   }
 
-  for (const section of document.sections) {
+  // The template decides what a reader sees (`E-05`): `graph_only` has no table, `table_only` no
+  // graph. Ticks are worked out once, because every chart in a report covers the same window.
+  const graphed = showsGraph(document.report.kind);
+  const tabled = showsTable(document.report.kind);
+  const ticks = graphed
+    ? timeTicksFor(document.window.from, document.window.to, document.window.timezone)
+    : [];
+
+  for (const [sectionIndex, section] of document.sections.entries()) {
     out.push(`<h2>${e(section.subject.name)}</h2>`);
     if (section.note !== undefined) {
       out.push(`<p class="note">${e(section.note)}</p>`);
       continue;
     }
+    if (graphed) {
+      const charts = chartsFor(section, document.window, ticks, {
+        width: CHART_WIDTH,
+        plotHeight: CHART_PLOT_HEIGHT,
+        fontSize: CHART_FONT,
+        measure: approximateWidth,
+      });
+      for (const [chartIndex, layout] of charts.entries()) {
+        // **A channel that recorded nothing is said, not drawn.** An empty rectangle with axes is
+        // a picture the reader has to interpret, and the obvious interpretation — a flat line
+        // they cannot see — is wrong.
+        out.push(
+          layout.empty
+            ? `<p class="note">No readings were recorded for ${e(layout.title)} in this period.</p>`
+            : `<figure class="chart">${renderChartSvg(layout, {
+                id: `chart-${String(sectionIndex)}-${String(chartIndex)}`,
+                subject: section.subject.name,
+                period: document.window.label,
+                fontSize: CHART_FONT,
+              })}</figure>`,
+        );
+      }
+    }
+    if (!tabled) continue;
     out.push('<table><thead><tr><th>Time</th>');
     for (const column of section.columns) {
       const heading = column.unit === '' ? column.name : `${column.name} (${column.unit})`;
@@ -371,7 +418,12 @@ export function renderHtml(document: ReportDocument): string {
 
   out.push(
     `<footer>Generated ${e(document.generatedAt.toISOString())}. ` +
-      'An empty interval is shown as — and means no reading was recorded, not a reading of zero.' +
+      (graphed && tabled
+        ? 'An empty interval is shown as — in a table and as a break in a line on a graph, and '
+        : graphed
+          ? 'An empty interval is shown as a break in a line, and '
+          : 'An empty interval is shown as — and ') +
+      'means no reading was recorded, not a reading of zero.' +
       '</footer>',
   );
   out.push('</body></html>');

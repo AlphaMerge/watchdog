@@ -6,13 +6,15 @@
   "description": "Web UI, served as static assets by ms-core",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc -b ../shared && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
-    "pretest": "tsc --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc -b ../shared && tsc --noEmit",
+    "pretest": "tsc -b ../shared && tsc --noEmit",
+    "test": "vitest run",
+    "predev": "tsc -b ../shared"
   },
   "dependencies": {
+    "@ms/shared": "0.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.9.0",

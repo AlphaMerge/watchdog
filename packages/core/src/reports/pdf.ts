@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
 import { create, type Font } from 'fontkit';
+import { LIGHT_CHART_THEME, seriesColour, type ChartLayout } from '@ms/shared/charts';
 import { ReportError } from './errors.js';
+import { chartsFor, showsGraph, showsTable, timeTicksFor } from './graph.js';
 import type { ReportSubject } from './context.js';
 import {
   formatInstant,
@@ -119,6 +121,8 @@ export interface PageGeometry {
   readonly cellPadding: number;
   /** Beyond this a column wraps its heading rather than growing. */
   readonly maxColumnWidth: number;
+  /** A graph's plotting area; its title, axis labels and legend are added around it (`E-05`). */
+  readonly chartPlotHeight: number;
 }
 
 /** A4 upright, which is what a report is printed on and attached to an email as. */
@@ -134,6 +138,7 @@ export const A4_PORTRAIT: PageGeometry = {
   lineHeight: 11,
   cellPadding: 6,
   maxColumnWidth: 150,
+  chartPlotHeight: 130,
 };
 
 /**
@@ -241,6 +246,11 @@ export interface PageBlock {
   readonly rows: readonly LaidOutRow[];
   /** Wrapped lines, drawn instead of a table when the section has no channels to show. */
   readonly note: readonly string[] | null;
+  /**
+   * A graph, drawn instead of a table (`E-05`). **Atomic**: a chart is never split across a page
+   * break, because half an axis is not an axis.
+   */
+  readonly chart: ChartLayout | null;
   /** This block carries on a table the previous page started. */
   readonly continued: boolean;
   /** Which slice of a too-wide table this is, when there is more than one. */
@@ -505,6 +515,13 @@ export function paginate(
     (continued ? ' (continued)' : '') +
     (group === null ? '' : ` — columns ${String(group.index)} of ${String(group.of)}`);
 
+  // What the template shows (`E-05`), and the time axis every chart in the document shares.
+  const graphed = showsGraph(document.report.kind);
+  const tabled = showsTable(document.report.kind);
+  const ticks = graphed
+    ? timeTicksFor(document.window.from, document.window.to, document.window.timezone)
+    : [];
+
   for (const section of document.sections) {
     if (section.note !== undefined) {
       const note = wrapText(
@@ -521,12 +538,64 @@ export function paginate(
         columns: [],
         rows: [],
         note,
+        chart: null,
         continued: false,
         group: null,
       });
       y += height;
       continue;
     }
+
+    if (graphed) {
+      const charts = chartsFor(section, document.window, ticks, {
+        width: available,
+        plotHeight: geometry.chartPlotHeight,
+        fontSize: geometry.headingSize,
+        measure: type.measure,
+        // A legend entry is operator text like any other, and gets the same treatment as the
+        // table's heading: a character the font cannot draw is written as what it is.
+        text: (raw) => drawable(raw, type.has),
+      });
+      for (const layout of charts) {
+        if (layout.empty) {
+          // Said in words, as in the HTML — see `renderHtml`.
+          const note = wrapText(
+            `No readings were recorded for ${layout.title} in this period.`,
+            available,
+            geometry.metaSize,
+            type.measure,
+          );
+          const height = titleHeight(geometry) + note.length * geometry.lineHeight + BLOCK_GAP;
+          if (y + height > bottom && blocks.length > 0) flush();
+          blocks.push({
+            subject: section.subject,
+            title: titleOf(section.subject.name, false, null),
+            columns: [],
+            rows: [],
+            note,
+            chart: null,
+            continued: false,
+            group: null,
+          });
+          y += height;
+          continue;
+        }
+        const height = titleHeight(geometry) + layout.height + BLOCK_GAP;
+        if (y + height > bottom && blocks.length > 0) flush();
+        blocks.push({
+          subject: section.subject,
+          title: titleOf(section.subject.name, false, null),
+          columns: [],
+          rows: [],
+          note: null,
+          chart: layout,
+          continued: false,
+          group: null,
+        });
+        y += height;
+      }
+    }
+    if (!tabled) continue;
 
     const rows = cellsOf(section, document.window.timezone);
     const groups = groupColumns(columnsOf(section, rows, type, geometry), available).map((group) =>
@@ -564,6 +633,7 @@ export function paginate(
           columns,
           rows: picked.slice(placed, placed + take),
           note: null,
+          chart: null,
           continued,
           group,
         });
@@ -600,6 +670,88 @@ const HAIRLINE = '#dddddd';
 const INK = '#1a1a1a';
 const QUIET = '#555555';
 
+/**
+ * A chart, drawn where `layoutChart` put everything (`E-05`, `ADR-006` Decision 3).
+ *
+ * The same layout the HTML report draws as SVG, drawn as `pdfkit` primitives — no conversion
+ * between the two, which is why `svg-to-pdfkit` was refused. Nothing here decides a position.
+ */
+function drawChart(
+  doc: PDFKit.PDFDocument,
+  layout: ChartLayout,
+  originX: number,
+  originY: number,
+  size: number,
+): void {
+  const theme = LIGHT_CHART_THEME;
+  const x = (value: number): number => originX + value;
+  const y = (value: number): number => originY + value;
+  const { plot } = layout;
+
+  doc.font(BODY_FONT).fontSize(size).fillColor(theme.ink);
+  doc.text(layout.title, x(0), y(0), { width: layout.width, lineBreak: false });
+
+  for (const tick of layout.yTicks) {
+    doc
+      .moveTo(x(plot.left), y(tick.y))
+      .lineTo(x(plot.right), y(tick.y))
+      .lineWidth(0.5)
+      .strokeColor(theme.grid)
+      .stroke();
+    doc.fillColor(theme.inkMuted).text(tick.label, x(0), y(tick.y) - size * 0.6, {
+      width: plot.left - 6,
+      align: 'right',
+      lineBreak: false,
+    });
+  }
+  doc
+    .moveTo(x(plot.left), y(plot.bottom))
+    .lineTo(x(plot.right), y(plot.bottom))
+    .lineWidth(0.8)
+    .strokeColor(theme.axis)
+    .stroke();
+  for (const tick of layout.xTicks) {
+    const width = doc.widthOfString(tick.label);
+    // `pdfkit` places text by its top, the layout by its baseline — 0.8 em between them.
+    doc.text(tick.label, x(tick.x) - width / 2, y(layout.xLabelY) - size * 0.8, {
+      width: width + 1,
+      lineBreak: false,
+    });
+  }
+
+  // Bands under lines, so a line is never hidden by its own spread.
+  for (const series of layout.series) {
+    const colour = seriesColour(theme, series.slot);
+    for (const band of series.bands) {
+      doc.save();
+      doc.polygon(...band.map((point): [number, number] => [x(point.x), y(point.y)]));
+      doc.fillOpacity(0.14).fill(colour);
+      doc.restore();
+    }
+  }
+  for (const series of layout.series) {
+    const colour = seriesColour(theme, series.slot);
+    // One `moveTo` per run: a gap is a subpath that was never drawn to, as in the SVG.
+    for (const line of series.lines) {
+      const [first, ...rest] = line;
+      if (first === undefined) continue;
+      doc.moveTo(x(first.x), y(first.y));
+      for (const point of rest) doc.lineTo(x(point.x), y(point.y));
+    }
+    if (series.lines.length > 0) {
+      doc.lineWidth(1.4).lineJoin('round').lineCap('round').strokeColor(colour).stroke();
+    }
+    for (const dot of series.dots) doc.circle(x(dot.x), y(dot.y), 1.8).fill(colour);
+  }
+
+  for (const entry of layout.legend) {
+    doc.rect(x(entry.x), y(entry.y) - size * 0.8, 8, 8).fill(seriesColour(theme, entry.slot));
+    doc.fillColor(theme.ink).text(entry.label, x(entry.x + 12), y(entry.y) - size * 0.85, {
+      lineBreak: false,
+    });
+  }
+}
+
 function draw(
   doc: PDFKit.PDFDocument,
   pages: readonly LaidOutPage[],
@@ -631,6 +783,12 @@ function draw(
       doc.font(BODY_FONT).fontSize(geometry.bodySize).fillColor(INK);
       doc.text(block.title, left, y, { width: available, lineBreak: false });
       y += titleHeight(geometry);
+
+      if (block.chart !== null) {
+        drawChart(doc, block.chart, left, y, geometry.headingSize);
+        y += block.chart.height + BLOCK_GAP;
+        continue;
+      }
 
       if (block.note !== null) {
         doc.fontSize(geometry.metaSize).fillColor(QUIET);

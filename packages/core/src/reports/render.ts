@@ -1,6 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { HistoryService } from '../timeseries/history.js';
 import type { ReportContext } from './context.js';
+import { showsGraph } from './graph.js';
 import type { ReportRow } from './repository.js';
 import { planReportSpan } from './span.js';
 import {
@@ -109,7 +110,18 @@ export class ReportRenderer {
         values: history.channels.map((channel) => channel.avg[index] ?? null),
       }));
 
-      sections.push({ subject, columns, rows });
+      sections.push(
+        showsGraph(report.kind)
+          ? {
+              subject,
+              columns,
+              rows,
+              // Straight from the same history the averages came from, so the band and the line
+              // can never be two different reads of the period.
+              spread: history.channels.map((channel) => ({ min: channel.min, max: channel.max })),
+            }
+          : { subject, columns, rows },
+      );
     }
 
     const document: ReportDocument = {

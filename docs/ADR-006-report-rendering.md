@@ -200,6 +200,18 @@ thing ahead of the two expensive ones is not a scheduling detail here; it is the
   else; it does not gain a browser to install, patch or sandbox.
 - **`groups.ts` moves to `@ms/shared`**, and the web app imports it from there. That is a small
   refactor with a test suite already behind it, and it must land with `E-05` rather than after.
+
+  > **Done 2026-09-13 by `E-05`**, with two things this consequence did not foresee. `@ms/web` had
+  > never depended on `@ms/shared`, whose entry point is service code — `pino`, `ajv`, `node:net`
+  > — so the charts are published as their own browser-safe subpath, `@ms/shared/charts`, with a
+  > test that nothing in it imports outside its directory; the web bundle grew by 0.09 kB. And the
+  > palette's rules moved with the grouping, which exposed that the web app's JavaScript copy of the
+  > light palette had **already drifted** from its stylesheet: the eight hues matched, the neutrals
+  > did not. There is now one palette in code and a test holding the stylesheet to it.
+  >
+  > **The time axis's candidates stay in the core**, and this is the one place the geometry is not
+  > wholly in `@ms/shared`: which instants are round in a zone is calendar knowledge, and the
+  > calendar already lives in `reports/span.ts`. The shared layout decides which candidates fit.
 - **We own pagination and axis ticks**, and both are testable without a browser. That is the
   trade: more of our own code, all of it assertable, against a large dependency whose output can
   only be checked by looking at it.

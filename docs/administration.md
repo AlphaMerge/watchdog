@@ -378,6 +378,46 @@ count and the suggestion to render it as CSV instead, which has no pages.
 CSV is written so that a name beginning `=`, `+`, `-` or `@` cannot run as a formula when the file
 is opened in a spreadsheet. Numbers are left exactly as measured, negative ones included.
 
+### Graphs
+
+**The template decides what a reader sees.** `graph_and_table` draws a graph for each sensor and
+then its table; `graph_only` draws the graphs alone; `table_only` draws no graph. This applies to
+the HTML and the PDF. **CSV and XML always carry the data table**, whatever the template: they are
+the data, for a spreadsheet and a script, and a `graph_only` report exported as CSV would otherwise
+be an empty file.
+
+A sensor gets **one graph per unit**, never one graph with two y-axes. A Ping sensor's response
+time and packet loss are two graphs, because on one set of axes the point where two lines cross is
+an artefact of where the axes were put and reads as a relationship. Channels that share a unit —
+traffic in, out and total — share a graph, with a legend, because that is where comparing them is
+real. A channel keeps its colour whichever graph it lands on.
+
+What a graph shows, and what it deliberately does not:
+
+- **A break in a line is an interval with no reading**, exactly as `—` is in a table. The line is
+  never drawn down to zero and never joined across an outage. A single reading with no reading on
+  either side is drawn as a dot, so it is not lost.
+- **The shaded band is each interval's lowest and highest reading**, around the average line — the
+  same band the sensor page draws. An hour's average hides a spike; the band does not.
+- **The value axis starts at zero for anything that never goes below it.** Latency, traffic and loss
+  are magnitudes, and an axis fitted to the data turns a response time wandering between 243 and
+  245 ms into a picture of an outage. The cost is that a steady temperature sits near the top of its
+  graph. Data that goes below zero is drawn as it is. Ticks are always 1, 2 or 5 × 10ⁿ.
+- **The time axis is in the report's own zone**: ticks at local round hours, midnight labelled with
+  its date, months at the local first of the month, and no tick for the hour the clocks skipped.
+- **A channel that recorded nothing in the period is said in words** — "No readings were recorded
+  for Response time (ms) in this period" — rather than drawn as an empty frame.
+
+**Graphs cost size.** Measured at the value limit, a report's HTML is 7.3 MiB as a table, 13.9 MiB
+with graphs and table, and 6.5 MiB as graphs alone. A month of hourly data over fifty sensors is
+2.6, 5.1 and 2.5 MiB. If a mail relay refuses a large report, `graph_only` or a shorter span is the
+first thing to try.
+
+**A PDF of a large table meets the page limit sooner than the value limit.** A month of hourly
+tables for fifty sensors is about 700 pages, and PDFs stop at 400 — while the same report as
+`graph_only` is under a megabyte. For a PDF over many sensors, `graph_only` is usually the report
+that was wanted; the table is still in the CSV.
+
 **A PDF is laid out by this service, not by a browser** (`ADR-006`). There is no Chromium to
 install, patch or supervise; the layout — column widths from the content, headings repeated on
 every page, a row never split across a break, a column too wide carried to a following page rather
