@@ -13,11 +13,37 @@
 #   scripts/dev-services.sh restart
 #
 # Prerequisites: npm run dev (for PostgreSQL), scripts/dev.sh npm run build, scripts/dev-certs.sh
+#
+# The container restarts with Docker (`unless-stopped`), so after a Docker Desktop restart or a
+# reboot the UI on :5173 has a core behind it again. `stop` removes the container, so a stopped
+# ms-server stays stopped — which is what a test:perf run needs.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 compose_file="${repo_root}/docker-compose.dev.yml"
 name="ms-server"
+
+# What runs inside the container. A restart policy only acts when the container exits, so the
+# container must exit when *either* process does: with the probe as the only foreground process,
+# a core that died on start — PostgreSQL not up yet after a reboot, and a failed migration is
+# fatal — left a container that looked healthy and a UI answering 502. `wait -n` returns on the
+# first exit, the survivor is stopped, and Docker starts both again.
+#
+# SIGTERM is passed on to both so `docker stop` and a Docker shutdown let them close cleanly.
+# The sleep runs in the background so a stop during it is not held for its length.
+supervisor='
+core=""; probe=""
+stop_both() { kill -TERM $core $probe 2>/dev/null || true; wait; }
+trap "stop_both; exit 143" TERM INT
+node packages/core/dist/src/main.js --config dev/core.json & core=$!
+sleep 3 & wait $!
+node packages/probe/dist/src/main.js --config dev/probe.json & probe=$!
+wait -n $core $probe
+status=$?
+echo "ms-server: a process exited with status ${status}; stopping the other so Docker restarts both" >&2
+stop_both
+exit $(( status == 0 ? 1 : status ))
+'
 
 case "${1:-start}" in
   stop)
@@ -63,8 +89,11 @@ case "${1:-start}" in
       -p 127.0.0.1:10514:10514/udp \
       -p 127.0.0.1:10514:10514 \
       toolchain \
-      'node packages/core/dist/src/main.js --config dev/core.json & sleep 3; exec node packages/probe/dist/src/main.js --config dev/probe.json' \
+      "${supervisor}" \
       >/dev/null
+
+    # `compose run` has no --restart flag; the policy is set on the container it created.
+    docker update --restart unless-stopped "${name}" >/dev/null
 
     echo "started ${name}"
     echo "  API   http://127.0.0.1:8080/api/v1/objects/root"
