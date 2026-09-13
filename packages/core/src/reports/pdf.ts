@@ -1,9 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
-import { create, type Font } from 'fontkit';
 import { LIGHT_CHART_THEME, seriesColour, type ChartLayout } from '@ms/shared/charts';
 import { ReportError } from './errors.js';
+import { reportFonts, type FontChain } from './fonts.js';
 import { chartsFor, showsGraph, showsTable, timeTicksFor } from './graph.js';
 import type { ReportSubject } from './context.js';
 import {
@@ -47,62 +45,15 @@ import {
  * - **Columns too wide for the page are carried to a following page group**, with the time column
  *   repeated, rather than clipped. A clipped column is a measurement that silently left the
  *   report, which is the failure this whole surface exists to avoid.
- * - **A character the font cannot draw is written as `U+6771`**, not left as the empty box a font
- *   silently substitutes. See `drawable`: this is the failure `ADR-006` Decision 2 embedded a font
- *   to prevent, and the font does not prevent all of it.
+ * - **Every character is drawn by the first font that has it** — DejaVu Sans, then any font the
+ *   operator configured, then WenQuanYi Micro Hei (`E-12`, `fonts.ts`) — and **a character no
+ *   font has is written as `U+20B9F`**, not left as the empty box a font silently substitutes.
+ *   See `drawable`: this is the failure `ADR-006` Decision 2 embedded a font to prevent.
  * - **A page count that a mail relay would refuse is refused here**, with the number and what to
  *   narrow, for the same reason `MAX_CELLS` is refused rather than truncated.
  */
 
-/** Where the font lives, relative to this module inside `dist` — see `assets/fonts/README.md`. */
-const FONT_URL = new URL('../../../assets/fonts/DejaVuSans.ttf', import.meta.url);
-
 const BODY_FONT = 'body';
-
-let fontBytes: Buffer | null = null;
-let fontCoverage: Font | null = null;
-
-/**
- * The embedded font (`ADR-006` Decision 2).
- *
- * **Read once and kept**, because a report over five hundred sensors would otherwise read 760 KB
- * off disk for every render. A missing file is a broken installation rather than a bad request, so
- * it throws with the path it looked in: the release tarball ships `packages/core/assets` beside
- * `dist` (`scripts/package.sh`), and an installation without it can render everything except a
- * PDF, which is a diagnosis worth handing somebody directly.
- */
-function loadFont(): Buffer {
-  if (fontBytes !== null) return fontBytes;
-  const path = fileURLToPath(FONT_URL);
-  try {
-    fontBytes = readFileSync(path);
-  } catch (cause) {
-    throw new Error(
-      `the report font is missing at ${path}; a release ships it beside dist, and without it ` +
-        'this installation can render HTML, CSV and XML but not PDF',
-      { cause },
-    );
-  }
-  return fontBytes;
-}
-
-/**
- * The same font, opened for its character map (`drawable`).
- *
- * `fontkit` is what `pdfkit` embeds and subsets with, so asking it what the font has is asking the
- * same code that will decide what gets drawn. Declared as a dependency of this package rather than
- * borrowed from `pdfkit`'s tree: it is already installed either way, and reaching through another
- * package's `node_modules` is how a transitive version bump becomes our outage.
- */
-function coverage(): Font {
-  if (fontCoverage !== null) return fontCoverage;
-  const opened = create(loadFont());
-  if (!('hasGlyphForCodePoint' in opened)) {
-    throw new Error('the report font is a font collection, and a report draws with one face');
-  }
-  fontCoverage = opened;
-  return fontCoverage;
-}
 
 /* --------------------------------------------------------------------- geometry */
 
@@ -168,11 +119,11 @@ export type Measure = (text: string, size: number) => number;
  * reach a filed PDF as six empty boxes with every layer of this system reporting success. That is
  * the exact failure `ADR-006` Decision 2 embedded a font to prevent, one alphabet further out
  * than the decision looked: DejaVu Sans covers Latin, Greek, Cyrillic and a good deal more, and
- * it has no CJK at all.
+ * it has no CJK at all. In production this asks the whole font chain (`fonts.ts`, `E-12`).
  */
 export interface Typesetter {
   readonly measure: Measure;
-  /** Whether the font has a glyph for this code point. */
+  /** Whether any font the document draws with has a glyph for this code point. */
   readonly has: (codePoint: number) => boolean;
 }
 
@@ -201,7 +152,7 @@ export function drawable(text: string, has: (codePoint: number) => boolean): str
   return changed ? out.replaceAll(/ {2,}/gu, ' ').trim() : text;
 }
 
-/** Whether anything an operator typed into this report is outside the font (see `drawable`). */
+/** Whether anything an operator typed into this report is outside every font (see `drawable`). */
 function anyUndrawable(document: ReportDocument, has: (codePoint: number) => boolean): boolean {
   const texts = [document.report.name, document.window.label, document.runAs];
   for (const section of document.sections) {
@@ -456,8 +407,8 @@ function headerLines(document: ReportDocument, type: Typesetter, geometry: PageG
     // Said once, where the reader of the document will see it — rather than in a log nobody
     // reading the PDF has access to.
     lines.push(
-      'Some characters in this report are outside the font it is drawn with and appear as their ' +
-        'Unicode notation, like U+6771.',
+      'Some characters in this report are outside every font it is drawn with and appear as ' +
+        'their Unicode notation, like U+20B9F.',
     );
   }
   return lines.flatMap((line) =>
@@ -699,6 +650,88 @@ function refuseIfTooLong(
 
 /* --------------------------------------------------------------------- drawing */
 
+/**
+ * Text, measured and drawn through the font chain (`E-12`).
+ *
+ * Every string the drawing code writes goes through here, because a sensor name can be three fonts
+ * long: `Маршрут 東京 core` is DejaVu, WenQuanYi and DejaVu again. **Text one font draws is written
+ * with one `pdfkit` call, exactly as before this existed**, so a report with nothing outside DejaVu
+ * is the document it always was. Text that needs more than one is written run by run, each placed
+ * after the width of the last and lowered by the difference in the two fonts' ascents — `pdfkit`
+ * sets text by the top of its font, and two fonts have two tops, but one line has one baseline.
+ */
+interface Pen {
+  measure(text: string, size: number): number;
+  write(
+    text: string,
+    x: number,
+    y: number,
+    size: number,
+    options?: { readonly width?: number; readonly align?: 'left' | 'right' },
+  ): void;
+}
+
+function penFor(doc: PDFKit.PDFDocument, fonts: FontChain): Pen {
+  const primary = fonts.primary;
+  doc.registerFont(BODY_FONT, primary.bytes);
+  const registered = new Set<string>([BODY_FONT]);
+  /** Sets the document in the font a run is drawn with, registering it the first time. */
+  const use = (index: number, size: number): { ascender: number } => {
+    const font = fonts.font(index) ?? primary;
+    if (!registered.has(font.key)) {
+      doc.registerFont(
+        font.key,
+        font.bytes,
+        ...(font.source.face === '' ? [] : [font.source.face]),
+      );
+      registered.add(font.key);
+    }
+    doc.font(font.key).fontSize(size);
+    return font;
+  };
+  const onlyPrimary = (runs: readonly { font: number }[]): boolean =>
+    runs.length === 1 && runs[0]?.font === 0;
+
+  return {
+    measure(text, size) {
+      const runs = fonts.runs(text);
+      if (onlyPrimary(runs)) return doc.font(BODY_FONT).fontSize(size).widthOfString(text);
+      let width = 0;
+      for (const run of runs) {
+        use(run.font, size);
+        width += doc.widthOfString(run.text);
+      }
+      doc.font(BODY_FONT);
+      return width;
+    },
+    write(text, x, y, size, options = {}) {
+      const runs = fonts.runs(text);
+      if (onlyPrimary(runs)) {
+        doc
+          .font(BODY_FONT)
+          .fontSize(size)
+          .text(text, x, y, {
+            ...(options.width === undefined ? {} : { width: options.width }),
+            ...(options.align === undefined ? {} : { align: options.align }),
+            lineBreak: false,
+          });
+        return;
+      }
+      const total = this.measure(text, size);
+      let at =
+        options.align === 'right' && options.width !== undefined ? x + options.width - total : x;
+      for (const run of runs) {
+        const font = use(run.font, size);
+        doc.text(run.text, at, y + ((primary.ascender - font.ascender) * size) / 1_000, {
+          lineBreak: false,
+        });
+        at += doc.widthOfString(run.text);
+      }
+      doc.font(BODY_FONT);
+    },
+  };
+}
+
 const RULE = '#999999';
 const HAIRLINE = '#dddddd';
 const INK = '#1a1a1a';
@@ -712,6 +745,7 @@ const QUIET = '#555555';
  */
 function drawChart(
   doc: PDFKit.PDFDocument,
+  pen: Pen,
   layout: ChartLayout,
   originX: number,
   originY: number,
@@ -722,8 +756,8 @@ function drawChart(
   const y = (value: number): number => originY + value;
   const { plot } = layout;
 
-  doc.font(BODY_FONT).fontSize(size).fillColor(theme.ink);
-  doc.text(layout.title, x(0), y(0), { width: layout.width, lineBreak: false });
+  doc.fillColor(theme.ink);
+  pen.write(layout.title, x(0), y(0), size, { width: layout.width });
 
   for (const tick of layout.yTicks) {
     doc
@@ -732,10 +766,10 @@ function drawChart(
       .lineWidth(0.5)
       .strokeColor(theme.grid)
       .stroke();
-    doc.fillColor(theme.inkMuted).text(tick.label, x(0), y(tick.y) - size * 0.6, {
+    doc.fillColor(theme.inkMuted);
+    pen.write(tick.label, x(0), y(tick.y) - size * 0.6, size, {
       width: plot.left - 6,
       align: 'right',
-      lineBreak: false,
     });
   }
   doc
@@ -745,11 +779,10 @@ function drawChart(
     .strokeColor(theme.axis)
     .stroke();
   for (const tick of layout.xTicks) {
-    const width = doc.widthOfString(tick.label);
+    const width = pen.measure(tick.label, size);
     // `pdfkit` places text by its top, the layout by its baseline — 0.8 em between them.
-    doc.text(tick.label, x(tick.x) - width / 2, y(layout.xLabelY) - size * 0.8, {
+    pen.write(tick.label, x(tick.x) - width / 2, y(layout.xLabelY) - size * 0.8, size, {
       width: width + 1,
-      lineBreak: false,
     });
   }
 
@@ -780,14 +813,14 @@ function drawChart(
 
   for (const entry of layout.legend) {
     doc.rect(x(entry.x), y(entry.y) - size * 0.8, 8, 8).fill(seriesColour(theme, entry.slot));
-    doc.fillColor(theme.ink).text(entry.label, x(entry.x + 12), y(entry.y) - size * 0.85, {
-      lineBreak: false,
-    });
+    doc.fillColor(theme.ink);
+    pen.write(entry.label, x(entry.x + 12), y(entry.y) - size * 0.85, size);
   }
 }
 
 function draw(
   doc: PDFKit.PDFDocument,
+  pen: Pen,
   pages: readonly LaidOutPage[],
   document: ReportDocument,
   geometry: PageGeometry,
@@ -801,33 +834,33 @@ function draw(
     let y = geometry.margin;
 
     if (page.header !== null) {
-      doc.font(BODY_FONT).fontSize(geometry.titleSize).fillColor(INK);
+      doc.fillColor(INK);
       // The title is the one string the header block does not carry, and it is operator text.
-      doc.text(title, left, y, { width: available, lineBreak: false });
+      pen.write(title, left, y, geometry.titleSize, { width: available });
       y += geometry.titleSize + 8;
-      doc.fontSize(geometry.metaSize).fillColor(QUIET);
+      doc.fillColor(QUIET);
       for (const line of page.header) {
-        doc.text(line, left, y, { width: available, lineBreak: false });
+        pen.write(line, left, y, geometry.metaSize, { width: available });
         y += geometry.lineHeight;
       }
       y += BLOCK_GAP;
     }
 
     for (const block of page.blocks) {
-      doc.font(BODY_FONT).fontSize(geometry.bodySize).fillColor(INK);
-      doc.text(block.title, left, y, { width: available, lineBreak: false });
+      doc.fillColor(INK);
+      pen.write(block.title, left, y, geometry.bodySize, { width: available });
       y += titleHeight(geometry);
 
       if (block.chart !== null) {
-        drawChart(doc, block.chart, left, y, geometry.headingSize);
+        drawChart(doc, pen, block.chart, left, y, geometry.headingSize);
         y += block.chart.height + BLOCK_GAP;
         continue;
       }
 
       if (block.note !== null) {
-        doc.fontSize(geometry.metaSize).fillColor(QUIET);
+        doc.fillColor(QUIET);
         for (const line of block.note) {
-          doc.text(line, left, y, { width: available, lineBreak: false });
+          pen.write(line, left, y, geometry.metaSize, { width: available });
           y += geometry.lineHeight;
         }
         y += BLOCK_GAP;
@@ -835,15 +868,14 @@ function draw(
       }
 
       const heading = headingHeight(block.columns, geometry);
-      doc.fontSize(geometry.headingSize).fillColor(QUIET);
+      doc.fillColor(QUIET);
       let x = left;
       for (const column of block.columns) {
         let line = y;
         for (const part of column.heading) {
-          doc.text(part, x + geometry.cellPadding, line, {
+          pen.write(part, x + geometry.cellPadding, line, geometry.headingSize, {
             width: column.width - geometry.cellPadding * 2,
             align: column.numeric ? 'right' : 'left',
-            lineBreak: false,
           });
           line += geometry.lineHeight;
         }
@@ -857,15 +889,14 @@ function draw(
         .strokeColor(RULE)
         .stroke();
 
-      doc.fontSize(geometry.bodySize).fillColor(INK);
+      doc.fillColor(INK);
       for (const row of block.rows) {
         x = left;
         for (const [cell, column] of row.cells.map((c, i) => [c, block.columns[i]] as const)) {
           if (column === undefined) continue;
-          doc.text(cell, x + geometry.cellPadding, y + 3, {
+          pen.write(cell, x + geometry.cellPadding, y + 3, geometry.bodySize, {
             width: column.width - geometry.cellPadding * 2,
             align: column.numeric ? 'right' : 'left',
-            lineBreak: false,
           });
           x += column.width;
         }
@@ -889,29 +920,29 @@ function draw(
     const footer = geometry.height - geometry.margin - geometry.lineHeight * 2;
     const margins = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
-    doc.font(BODY_FONT).fontSize(geometry.headingSize).fillColor(QUIET);
+    doc.fillColor(QUIET);
     // Two deliberate lines rather than one that wraps: a wrapped line puts its second half below
     // the page, where the margin that would have caught it has just been lifted.
-    doc.text(
+    pen.write(
       'An empty interval is shown as — and means no reading was recorded, not a reading of zero.',
       left,
       footer,
-      { width: available, lineBreak: false },
+      geometry.headingSize,
+      { width: available },
     );
-    doc.text(
+    pen.write(
       `Generated ${document.generatedAt.toISOString()}`,
       left,
       footer + geometry.lineHeight,
-      {
-        width: available,
-        lineBreak: false,
-      },
+      geometry.headingSize,
+      { width: available },
     );
-    doc.text(
+    pen.write(
       `Page ${String(index + 1)} of ${String(pages.length)}`,
       left,
       footer + geometry.lineHeight,
-      { width: available, align: 'right', lineBreak: false },
+      geometry.headingSize,
+      { width: available, align: 'right' },
     );
     doc.page.margins.bottom = margins;
   }
@@ -940,7 +971,7 @@ export async function renderPdf(
       CreationDate: document.generatedAt,
     },
   });
-  doc.registerFont(BODY_FONT, loadFont());
+  const pen = penFor(doc, reportFonts());
 
   const chunks: Buffer[] = [];
   const collected = new Promise<Buffer>((resolve, reject) => {
@@ -951,13 +982,14 @@ export async function renderPdf(
     doc.on('error', reject);
   });
 
+  const fonts = reportFonts();
   const type: Typesetter = {
-    measure: (text, size) => doc.font(BODY_FONT).fontSize(size).widthOfString(text),
-    has: (codePoint) => coverage().hasGlyphForCodePoint(codePoint),
+    measure: (text, size) => pen.measure(text, size),
+    has: (codePoint) => fonts.has(codePoint),
   };
   const pages = paginate(document, type, geometry);
   refuseIfTooLong(pages.length, document);
-  draw(doc, pages, document, geometry, drawable(document.report.name, type.has));
+  draw(doc, pen, pages, document, geometry, drawable(document.report.name, type.has));
   doc.end();
   return await collected;
 }

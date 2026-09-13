@@ -102,6 +102,7 @@ import { ReportRenderer } from './reports/render.js';
 import { ReportRunner, ReportRunRepository } from './reports/runs.js';
 import { ReportDelivery, ReportOutputRepository } from './reports/delivery.js';
 import { ReportFormatter } from './reports/formatter.js';
+import { checkReportFonts, configureReportFonts } from './reports/fonts.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -863,7 +864,17 @@ async function serve(): Promise<void> {
   // Formatting runs in worker threads, not on the loop every request waits on (`P-204`): `P-203`
   // measured two reports formatting at once making a concurrent request wait 2.6 s. Started on first
   // use, so an installation that never renders a report never starts a worker.
-  const reportFormatter = new ReportFormatter({ logger });
+  // The fonts a PDF draws with beyond the bundled two (`E-12`). Checked once here so a path that
+  // is wrong is said at startup, by name, rather than as a worse-looking PDF weeks later — and
+  // configured on this thread too, for anything that renders a PDF without the pool.
+  for (const { source, problem } of checkReportFonts(config.reports.pdfFonts)) {
+    logger.error(
+      { path: source.path, face: source.face, problem },
+      'a configured report font cannot be used; PDFs will draw with the next font that can',
+    );
+  }
+  configureReportFonts(config.reports.pdfFonts);
+  const reportFormatter = new ReportFormatter({ logger, fonts: config.reports.pdfFonts });
   lifecycle.onShutdown({
     name: 'report formatter',
     timeoutMs: 5_000,

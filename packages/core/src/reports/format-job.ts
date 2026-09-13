@@ -1,6 +1,22 @@
 import { ReportError } from './errors.js';
+import { configureReportFonts, type ReportFontSource } from './fonts.js';
 import { renderOutputs } from './formats.js';
 import type { FormatReply, FormatRequest } from './formatter.js';
+
+/** What the pool starts every worker with. */
+export interface FormatWorkerData {
+  /** The fonts an operator configured (`E-12`), so a worker draws with what the core would. */
+  readonly fonts: readonly ReportFontSource[];
+}
+
+/**
+ * Applies what the pool started a worker with. `undefined` — a worker started some other way —
+ * draws with the bundled fonts only.
+ */
+export function configureWorker(data: unknown): void {
+  const fonts = (data as Partial<FormatWorkerData> | undefined)?.fonts ?? [];
+  configureReportFonts(fonts);
+}
 
 /**
  * One formatting job, as a worker runs it (`P-204`).

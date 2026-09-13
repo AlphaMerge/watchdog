@@ -2,9 +2,11 @@ import { strict as assert } from 'node:assert';
 import { after, describe, it } from 'node:test';
 import { ReportError } from '../src/reports/errors.js';
 import { renderOutputs } from '../src/reports/formats.js';
+import { BUNDLED_FALLBACK_FONT } from '../src/reports/fonts.js';
 import { ReportFormatter } from '../src/reports/formatter.js';
 import type { ReportOutputs } from '../src/reports/outputs.js';
 import { MAX_CELLS, renderHtml, type ReportDocument } from '../src/reports/table.js';
+import { readPdf } from './support/pdf.js';
 import { silent } from './support/tree.js';
 
 /**
@@ -243,6 +245,30 @@ describe('the report formatter', () => {
     const stats = pool.stats();
     assert.equal(stats.crashed, 1);
     assert.equal(stats.failed, 1);
+  });
+
+  it('draws a PDF with the fonts the core was configured with, not only the bundled ones', async () => {
+    // `E-12`: the setting is read on the main thread, and a worker is a fresh module graph — so a
+    // font the operator configured reaches a PDF only if the pool hands it over. The Mono face of
+    // the bundled collection stands in for Noto: a different face, whose name the PDF carries.
+    const tokyo = { ...document('東京 本社', 1, 2) };
+    const bodyFonts = (pdf: Buffer): string[] =>
+      readPdf(pdf)
+        .fonts.map((font) => font.replace(/^[A-Z]{6}\+/u, ''))
+        .sort();
+    const configured = formatter({
+      logger: silent,
+      fonts: [{ path: BUNDLED_FALLBACK_FONT.path, face: 'WenQuanYiMicroHeiMono' }],
+    });
+    assert.deepEqual(bodyFonts(await configured.format('pdf', tokyo)), [
+      'DejaVuSans',
+      'WenQuanYiMicroHeiMono',
+    ]);
+    const bundled = formatter({ logger: silent });
+    assert.deepEqual(bodyFonts(await bundled.format('pdf', tokyo)), [
+      'DejaVuSans',
+      'WenQuanYiMicroHei',
+    ]);
   });
 
   it('gives an idle worker back, so an installation that rendered once is not holding pdfkit for ever', async () => {

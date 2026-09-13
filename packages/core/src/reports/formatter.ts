@@ -1,6 +1,8 @@
 import { Worker } from 'node:worker_threads';
 import { describeError, type ErrorContext, type Logger } from '@ms/shared';
 import { ReportError, type ReportErrorCode } from './errors.js';
+import type { FormatWorkerData } from './format-job.js';
+import type { ReportFontSource } from './fonts.js';
 import type { RenderedOutput, StoredFormat } from './formats.js';
 import type { ReportFormat, ReportOutputs } from './outputs.js';
 import type { ReportRow } from './repository.js';
@@ -79,6 +81,8 @@ export interface ReportFormatterOptions {
   readonly idleMs?: number;
   /** The worker module. For tests that need a worker which crashes or hangs on purpose. */
   readonly workerUrl?: URL;
+  /** The fonts an operator configured for PDFs (`E-12`, `reports.pdfFonts`). Default none. */
+  readonly fonts?: readonly ReportFontSource[];
 }
 
 export interface FormatterStats {
@@ -121,6 +125,7 @@ export class ReportFormatter {
   readonly #timeoutMs: number;
   readonly #idleMs: number;
   readonly #workerUrl: URL;
+  readonly #workerData: FormatWorkerData;
   readonly #slots: Slot[] = [];
   readonly #queue: Pending[] = [];
   #nextId = 0;
@@ -138,6 +143,7 @@ export class ReportFormatter {
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.#workerUrl = options.workerUrl ?? new URL('./format-worker.js', import.meta.url);
+    this.#workerData = { fonts: (options.fonts ?? []).map((font) => ({ ...font })) };
   }
 
   /** Every file a report's outputs document asks for, as `renderOutputs` would make them. */
@@ -227,7 +233,7 @@ export class ReportFormatter {
   }
 
   #spawn(): Slot {
-    const worker = new Worker(this.#workerUrl);
+    const worker = new Worker(this.#workerUrl, { workerData: this.#workerData });
     const slot: Slot = { worker, job: undefined, timer: undefined, idle: undefined };
     this.#slots.push(slot);
 

@@ -1,5 +1,5 @@
-import { parentPort } from 'node:worker_threads';
-import { formatJob } from '../../src/reports/format-job.js';
+import { parentPort, workerData } from 'node:worker_threads';
+import { configureWorker, formatJob } from '../../src/reports/format-job.js';
 import type { FormatRequest } from '../../src/reports/formatter.js';
 
 /**
@@ -11,6 +11,7 @@ import type { FormatRequest } from '../../src/reports/formatter.js';
  */
 if (parentPort === null) throw new Error('started outside a worker thread');
 const port = parentPort;
+configureWorker(workerData);
 
 port.on('message', (request: FormatRequest) => {
   if (request.name === 'crash') process.exit(3);

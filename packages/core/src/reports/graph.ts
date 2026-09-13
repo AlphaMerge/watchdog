@@ -165,7 +165,7 @@ export interface ChartOptions {
   /**
    * Applied to every string the chart draws that an operator typed — a channel's name and unit.
    *
-   * The PDF passes `drawable`, so a name the font cannot draw is written as `U+6771` in the legend
+   * The PDF passes `drawable`, so a name no font can draw is written as `U+20B9F` in the legend
    * exactly as it is in the table. The SVG passes nothing: a browser falls back to a font that has
    * the glyph, which is the one thing a browser does better than a PDF.
    */

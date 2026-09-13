@@ -138,12 +138,15 @@ one_format() {
   ${in} id ms-probe >/dev/null 2>&1 || fail "no ms-probe service user"
   echo "    configuration, PKI, access key and service users: present"
 
-  # The font a PDF report is drawn with (`E-06`). It is the one file the core needs at runtime
-  # that `tsc` does not produce, so it is the one that a packaging change can quietly drop —
+  # The fonts a PDF report is drawn with (`E-06`, `E-12`). They are the files the core needs at
+  # runtime that `tsc` does not produce, so they are the ones a packaging change can quietly drop —
   # and the symptom would be an installation that renders every format except the one somebody
-  # scheduled, months later, at three in the morning.
-  ${in} test -f /opt/ms/app/core/assets/fonts/DejaVuSans.ttf || fail "the report font is missing"
-  echo "    report font: present"
+  # scheduled, months later, at three in the morning. Without the second, the symptom is quieter
+  # still: a Japanese sensor name written as `U+6771` instead of as itself.
+  for font in DejaVuSans.ttf LICENSE-DejaVu.txt wqy-microhei.ttc COPYRIGHT-WenQuanYi.txt LICENSE-Apache-2.0.txt; do
+    ${in} test -f "/opt/ms/app/core/assets/fonts/${font}" || fail "the report font file ${font} is missing"
+  done
+  echo "    report fonts and their licences: present"
 
   # Not asserted active: these boxes have no database, by the decision above. What a package
   # owns is that the unit is installed and enabled, which is what these two check.

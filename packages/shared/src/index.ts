@@ -14,6 +14,7 @@ export type {
   LogLevel,
   ProbeConfig,
   ProgramConfig,
+  ReportFontConfig,
   ServiceConfig,
   SmtpConfig,
   SmtpRelay,

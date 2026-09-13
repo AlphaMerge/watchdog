@@ -436,6 +436,24 @@ describe(
           ...document,
           report: { ...document.report, kind: 'graph_only' },
         };
+        // The same document for an installation in Tokyo (`E-12`): every sensor and channel name
+        // needs the second font, so every heading and legend is drawn in two fonts' runs. The first
+        // of these rows in a run also pays for opening WenQuanYi on this thread.
+        const japanese: ReportDocument = {
+          ...document,
+          sections: document.sections.map((section, index) => ({
+            ...section,
+            subject: { ...section.subject, name: `東京 本社 センサー ${String(index)}` },
+            columns: section.columns.map((column) => ({
+              ...column,
+              name: column.key === 'loss' ? 'パケットロス' : '往復時間',
+            })),
+          })),
+        };
+        const japaneseGraphs: ReportDocument = {
+          ...japanese,
+          report: { ...japanese.report, kind: 'graph_only' },
+        };
         lines.push(`      last ${span}, ${String(count)} sensors, graph_and_table:`);
         lines.push('        format                           wall      event loop held   size');
         const formats: [string, () => unknown][] = [
@@ -449,6 +467,8 @@ describe(
           ['PDF, in a worker', () => formatter.format('pdf', document)],
           ['PDF, graph_only', () => renderPdf(graphsOnly)],
           ['PDF, graph_only, in a worker', () => formatter.format('pdf', graphsOnly)],
+          ['PDF, Japanese names', () => renderPdf(japanese)],
+          ['PDF, graph_only, Japanese names', () => renderPdf(japaneseGraphs)],
         ];
         for (const [name, work] of formats) {
           let size = '';

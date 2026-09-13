@@ -134,6 +134,23 @@ embedding without conditions on the document.
 back to system fonts, and a minimal Linux server has none installed — the toolchain image this was
 measured in has exactly one. It would have had the same failure, later, and harder to attribute.
 
+> **Extended again 2026-09-13 by `E-12`: a second font ships, and an operator may name a third.**
+> Measured (`docs/findings/2026-09-13-report-cjk-fonts.md`): Noto Sans CJK covers every CJK
+> standard set and draws each region's shapes, and costs 19.5 MB (+15.5 MB, 73%, on the release
+> tarball) and 80 MiB in a worker; Droid Sans Fallback is 4 MB and has no Korean; **WenQuanYi Micro
+> Hei is 5.2 MB (+2.3 MB, 11%), covers all of JIS X 0208, GB 2312, Big5 and KS X 1001 including
+> Hangul, and costs 22 MiB once opened.** It ships, under its Apache 2.0 option, and every
+> character is drawn by the first of DejaVu Sans, the fonts in `reports.pdfFonts`, and WenQuanYi
+> that has a glyph for it. A font after DejaVu is opened only when a character needs it, and a
+> report with none is byte-identical to one before `E-12`.
+>
+> **What this decision accepts.** WenQuanYi's Han shapes are the Chinese ones — Noto's Japanese and
+> Simplified Chinese faces differ on 8,638 of 20,976 basic ideographs — and the font has not had a
+> release since 2009. Both are answered by the same setting rather than by the installer carrying
+> 15 MB more for every installation: an operator whose readers need Japanese shapes names
+> `fonts-noto-cjk`'s Japanese face, and WenQuanYi still draws what that face lacks. What neither
+> bundled font has, such as the wave dash `〜`, is still written as its notation and said once.
+
 ## Decision 3 — A report's graph is drawn by us, as one model with two drawings
 
 **Decision.** `E-05` computes the chart's geometry in `@ms/shared` and draws it twice: **as SVG**

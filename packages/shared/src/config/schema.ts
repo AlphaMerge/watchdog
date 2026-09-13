@@ -329,6 +329,11 @@ export interface DeliveryRetryConfig {
   staleAfterSeconds: number;
 }
 
+export interface ReportFontConfig {
+  path: string;
+  face: string;
+}
+
 export interface CoreConfig {
   service: ServiceConfig;
   api: {
@@ -399,6 +404,23 @@ export interface CoreConfig {
      * operator breaking somebody's terms using our software.
      */
     tileAttribution: string;
+  };
+  /** How reports are drawn (`E-12`). */
+  reports: {
+    /**
+     * Fonts a PDF report draws with where the bundled ones have no glyph, in order.
+     *
+     * **Empty by default, and a report still draws Japanese, Chinese and Korean**: every PDF
+     * draws with DejaVu Sans first and the bundled WenQuanYi Micro Hei last. What this adds is a
+     * better font between them — Noto Sans CJK from `fonts-noto-cjk`, say, with the face for the
+     * region its readers are in, because one Han code point is drawn differently in Japan and in
+     * China and a single font can only choose one. `face` is the PostScript name inside a font
+     * collection (`NotoSansCJKjp-Regular`), and empty for a file with one face.
+     *
+     * A font that cannot be read is logged at startup and skipped, not a reason to refuse to
+     * start: the core monitors things, and a report font is not one of them.
+     */
+    pdfFonts: ReportFontConfig[];
   };
   /** What a notification needs to know about this installation (`N-06`). */
   notifications: {
@@ -778,6 +800,27 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // rather than by failing to start.
         tileUrl: { type: 'string', default: '' },
         tileAttribution: { type: 'string', default: '' },
+      },
+    },
+    reports: {
+      type: 'object',
+      default: {} as CoreConfig['reports'],
+      additionalProperties: false,
+      required: ['pdfFonts'],
+      properties: {
+        pdfFonts: {
+          type: 'array',
+          default: [],
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['path', 'face'],
+            properties: {
+              path: { type: 'string', minLength: 1 },
+              face: { type: 'string', default: '' },
+            },
+          },
+        },
       },
     },
     notifications: {

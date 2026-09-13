@@ -13899,7 +13899,7 @@ nothing in this phase is gated on a decision any more.
 **Every ticket in this phase has landed**: graphs and data tables as HTML, CSV, XML and PDF, on a
 schedule, delivered by email, rendered without a browser. `ADR-006` Decision 4 put `E-07` ahead of
 the two `L` tickets, `E-06` took the PDF, and `E-05` the graphs. `E-12` — scripts the report font
-does not cover — is the one follow-up it opened.
+did not cover — was the one follow-up it opened, and it has landed too.
 
 - [x] **E-01 — The report entity** · M · — · Storage, migration with a tested rollback, CRUD API,
       and access by group the way `§9` grants it — the same shape `G-01` gave a map, and for the
@@ -14191,7 +14191,7 @@ does not cover — is the one follow-up it opened.
       admits `pdf` to `report_output_format`, which is the reopening `ADR-005` Decision 3 asked for
       and was done the way it asked — against a real rendered PDF.
 
-- [ ] **E-12 — A report in a script DejaVu does not cover** · M · E-06 · Japanese, Chinese and
+- [x] **E-12 — A report in a script DejaVu does not cover** · M · E-06 · Japanese, Chinese and
       Korean device names in a PDF. `E-06` made the failure visible — a character the font cannot
       draw is written `U+6771` and the document says so — which is honest and is not a report
       somebody in Tokyo wants to file.
@@ -14203,6 +14203,24 @@ does not cover — is the one follow-up it opened.
       the ticket is a decision before it is an implementation. The machinery is already there:
       `Typesetter.has` asks the font whether it can draw a character, and a second font is a second
       answer to that question.
+
+      **Landed 2026-09-13** — `docs/findings/2026-09-13-report-cjk-fonts.md`, and `ADR-006`
+      Decision 2 extended. Measured three candidates from Debian's packages: Noto Sans CJK (19.5 MB,
+      every set, regional shapes, 80 MiB once opened), Droid Sans Fallback (4 MB, **no Korean**) and
+      WenQuanYi Micro Hei (5.2 MB, all of JIS X 0208, GB 2312, Big5 and KS X 1001, 22 MiB). **The
+      decision, the project owner's: bundle WenQuanYi and let an operator name a font ahead of it**
+      — +2.3 MB on the tarball against Noto's +15.5 MB — with `reports.pdfFonts` for the regional
+      shapes WenQuanYi does not draw (Noto's Japanese and Simplified Chinese faces differ on 8,638
+      ideographs). A font chain in `reports/fonts.ts` draws each character with the first font that
+      has it, opening the second only when needed; text in two fonts is drawn in runs on one
+      baseline, and right-aligned headings end on the column edge. The pool passes the fonts to
+      its workers; a configured font that cannot be opened is logged at startup with the faces it
+      has, not fatal. **A Latin-only PDF is byte-identical to the previous commit's**, and renders
+      within 3–4% (noise on a busy machine) after an ASCII fast path took the first version's 13%
+      away. `readPdf` decodes per font and reports positions — one merged `ToUnicode` map read the
+      title as `東京nthly` — and glyphs were checked by rendering with macOS's own PDF renderer, since
+      a text round-trip cannot see a blank glyph. Still written as notation: 〜 (U+301C) and CJK
+      Extension B, which need a configured font. Eleven mutations, all caught.
 
 - [x] **E-07 — XML output** · S · E-04 · The fourth format `§6` lists. Cheap once the data layer
       exists, and worth doing with CSV rather than after the pictures. **`ADR-006` Decision 4 says
@@ -14428,7 +14446,7 @@ Ordered by expected value. Not scheduled.
 
 - ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
-- ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, with `E-12` (report fonts beyond DejaVu's coverage) open
+- ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, and `E-12` (report fonts beyond DejaVu's coverage) landed the same day
 - **V2-04** Libraries (filter-rule alternate tree views)
 - **V2-05** Ticket system (user, ToDo and notification tickets)
 - **V2-06** Failover clustering

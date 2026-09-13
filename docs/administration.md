@@ -429,12 +429,37 @@ than clipped — is this service's own, and every page says what a dash means an
 the document. **The font travels inside the file**, so the reader needs nothing installed and a
 Cyrillic or Greek sensor name is drawn correctly on a server with no fonts of its own.
 
-The font is DejaVu Sans, which covers Latin, Greek, Cyrillic and much besides, and covers **no
-CJK**. A character it cannot draw is written as its Unicode notation — `U+6771` — and the document
-says once, under its heading, that this happened: an empty box that nothing reports is the failure
-embedding a font was meant to remove, and it would be no better for being ours. A report whose
-device names are Japanese, Chinese or Korean is readable but not pretty, and `E-12` is the ticket
-for that.
+**Two fonts ship, and every character is drawn by the first that has it** (`E-12`). DejaVu Sans
+draws Latin, Greek, Cyrillic and much besides; **WenQuanYi Micro Hei** draws Japanese, Chinese and
+Korean — every character of JIS X 0208, GB 2312, Big5 and KS X 1001 — so `東京 本社` and `서울 코어`
+are drawn as themselves with nothing configured. A character neither has is written as its Unicode
+notation — `U+20B9F` — and the document says once, under its heading, that this happened: an empty
+box that nothing reports is the failure embedding a font was meant to remove, and it would be no
+better for being ours. The one such character a Japanese name commonly uses is **〜** (the wave
+dash); the rest are rare.
+
+**WenQuanYi's kanji are drawn the Chinese way.** Many Han characters are shaped differently in Japan,
+China, Taiwan and Korea, one font can only choose one shape, and this one chose China's. Reports read
+in Japan, or anywhere the shapes matter, should name a regional font to draw with first:
+
+```json
+{
+  "reports": {
+    "pdfFonts": [
+      { "path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "face": "NotoSansCJKjp-Regular" }
+    ]
+  }
+}
+```
+
+That path is where Debian and Ubuntu's `fonts-noto-cjk` package puts Noto Sans CJK; the faces in
+it are `NotoSansCJKjp-`, `kr-`, `sc-`, `tc-` and `hk-Regular`, for Japan, Korea, mainland China,
+Taiwan and Hong Kong. The fonts listed are tried in order, before WenQuanYi and after DejaVu, and
+WenQuanYi still draws anything they lack. `face` is empty for a font file with only one face in it.
+**A font that cannot be used does not stop the core**: it is logged at startup with the reason — a
+collection opened without a face is answered with the faces it has — and PDFs draw with the next
+font in the list. Opening one costs a formatting worker memory, once, and only when a report first
+needs a character DejaVu lacks: 22 MiB for WenQuanYi, 80 MiB for Noto Sans CJK.
 
 **XML is the format for a reader that is a program.** Every fact the other two print as a label is
 an attribute — the period, the timezone, the account, the averaging, the channel keys and units,

@@ -1,0 +1,337 @@
+# E-12 — the committed measurements behind docs/findings/2026-09-13-report-cjk-fonts.md
+# 2026-09-13. Fonts from Debian bookworm (apt-get download, in the dev toolchain container):
+#   fonts-noto-cjk 1:20220127+repack1-1 (56,547,048-byte .deb), fonts-droid-fallback 1:6.0.1r16-1.1 (1,806,736),
+#   fonts-wqy-microhei 0.2.0-beta-3.1 (1,605,712).
+# Coverage sets are enumerated through Node's WHATWG decoders (euc-jp, gbk, big5, euc-kr), private-use slots excluded.
+# 'embedding' is a one-page PDF of N distinct characters in that font alone; 'cold' is a fresh process opening the
+# font and producing its first PDF, three times. Gzip sizes: gzip -9 of each file.
+#   DejaVuSans.ttf 381,863   NotoSansCJK-Regular.ttc 15,503,732   DroidSansFallbackFull.ttf 2,132,263   wqy-microhei.ttc 2,318,193
+# Release baseline: ms-0.1.0-linux-aarch64.tar.gz, 21,271,370 bytes (built 2026-09-11).
+
+## measurement (a throwaway script, not kept; the method is in the findings file)
+[
+  {
+    "path": "/workspace/packages/core/assets/fonts/DejaVuSans.ttf",
+    "size": 759720,
+    "sha256": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322",
+    "faces": [
+      "DejaVuSans (6253 glyphs)"
+    ],
+    "coverage": {
+      "JIS X 0208 kana (EUC-JP rows 4–5)": "0/169",
+      "JIS X 0208 level 1 kanji": "0/2965",
+      "JIS X 0208 level 2 kanji": "0/3390",
+      "GB 2312 hanzi": "0/6763",
+      "GBK (all double-byte)": "408/21891",
+      "Big5 frequent hanzi (A440–C67E)": "0/5401",
+      "Big5 less frequent hanzi (C940–F9D5)": "34/7693",
+      "KS X 1001 Hangul": "0/2350",
+      "KS X 1001 Hanja": "0/4888",
+      "Unicode Hangul Syllables (all 11,172)": "0/11172",
+      "Unicode CJK Unified Ideographs (basic block)": "0/20992",
+      "Unicode CJK Ext A": "0/6592",
+      "CJK Symbols and Punctuation": "0/64",
+      "Halfwidth and Fullwidth Forms": "0/240",
+      "Latin-1 + Latin Ext-A": "319/319",
+      "Cyrillic basic": "96/96"
+    },
+    "facesAgreeOnCoverage": true,
+    "embedding": {
+      "10 han": "n/a",
+      "100 han": "n/a",
+      "1000 han": "n/a",
+      "100 hangul": "n/a"
+    },
+    "cold": [
+      {
+        "readMs": 1.1,
+        "openMs": 0.8,
+        "firstPdfMs": 31.1,
+        "rssDeltaMiB": 6.4,
+        "glyphs": 6253
+      },
+      {
+        "readMs": 0.7,
+        "openMs": 0.8,
+        "firstPdfMs": 37.8,
+        "rssDeltaMiB": 6.5,
+        "glyphs": 6253
+      },
+      {
+        "readMs": 0.9,
+        "openMs": 0.7,
+        "firstPdfMs": 27.9,
+        "rssDeltaMiB": 4.1,
+        "glyphs": 6253
+      }
+    ]
+  },
+  {
+    "path": ".e12-fonts/NotoSansCJK-Regular.ttc",
+    "size": 19484784,
+    "sha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+    "faces": [
+      "NotoSansCJKjp-Regular (65535 glyphs)",
+      "NotoSansCJKkr-Regular (65535 glyphs)",
+      "NotoSansCJKsc-Regular (65535 glyphs)",
+      "NotoSansCJKtc-Regular (65535 glyphs)",
+      "NotoSansCJKhk-Regular (65535 glyphs)",
+      "NotoSansMonoCJKjp-Regular (65535 glyphs)",
+      "NotoSansMonoCJKkr-Regular (65535 glyphs)",
+      "NotoSansMonoCJKsc-Regular (65535 glyphs)",
+      "NotoSansMonoCJKtc-Regular (65535 glyphs)",
+      "NotoSansMonoCJKhk-Regular (65535 glyphs)"
+    ],
+    "coverage": {
+      "JIS X 0208 kana (EUC-JP rows 4–5)": "169/169",
+      "JIS X 0208 level 1 kanji": "2965/2965",
+      "JIS X 0208 level 2 kanji": "3390/3390",
+      "GB 2312 hanzi": "6763/6763",
+      "GBK (all double-byte)": "21890/21891",
+      "Big5 frequent hanzi (A440–C67E)": "5401/5401",
+      "Big5 less frequent hanzi (C940–F9D5)": "7693/7693",
+      "KS X 1001 Hangul": "2350/2350",
+      "KS X 1001 Hanja": "4888/4888",
+      "Unicode Hangul Syllables (all 11,172)": "11172/11172",
+      "Unicode CJK Unified Ideographs (basic block)": "20976/20992",
+      "Unicode CJK Ext A": "6582/6592",
+      "CJK Symbols and Punctuation": "64/64",
+      "Halfwidth and Fullwidth Forms": "225/240",
+      "Latin-1 + Latin Ext-A": "221/319",
+      "Cyrillic basic": "66/96"
+    },
+    "differsFromFirstFace": {
+      "NotoSansCJKkr-Regular": 630,
+      "NotoSansCJKsc-Regular": 8638,
+      "NotoSansCJKtc-Regular": 11497,
+      "NotoSansCJKhk-Regular": 11106,
+      "NotoSansMonoCJKjp-Regular": 0,
+      "NotoSansMonoCJKkr-Regular": 630,
+      "NotoSansMonoCJKsc-Regular": 8638,
+      "NotoSansMonoCJKtc-Regular": 11497,
+      "NotoSansMonoCJKhk-Regular": 11106
+    },
+    "facesAgreeOnCoverage": true,
+    "embedding": {
+      "10 han": {
+        "chars": 10,
+        "pdfBytes": 57507,
+        "ms": 95,
+        "textRoundTrips": true
+      },
+      "100 han": {
+        "chars": 100,
+        "pdfBytes": 81015,
+        "ms": 120,
+        "textRoundTrips": true
+      },
+      "1000 han": {
+        "chars": 1000,
+        "pdfBytes": 305120,
+        "ms": 263,
+        "textRoundTrips": true
+      },
+      "100 hangul": {
+        "chars": 100,
+        "pdfBytes": 40648,
+        "ms": 104,
+        "textRoundTrips": true
+      }
+    },
+    "cold": [
+      {
+        "readMs": 14.1,
+        "openMs": 1.6,
+        "firstPdfMs": 145.4,
+        "rssDeltaMiB": 82.2,
+        "glyphs": 65535
+      },
+      {
+        "readMs": 10.5,
+        "openMs": 1.6,
+        "firstPdfMs": 103.5,
+        "rssDeltaMiB": 82.2,
+        "glyphs": 65535
+      },
+      {
+        "readMs": 13.2,
+        "openMs": 1.7,
+        "firstPdfMs": 99.5,
+        "rssDeltaMiB": 81.3,
+        "glyphs": 65535
+      }
+    ]
+  },
+  {
+    "path": ".e12-fonts/DroidSansFallbackFull.ttf",
+    "size": 4033420,
+    "sha256": "acb6440a713d880a13a21b468ba7cd43f5a2b2934972e51be791c880730777b8",
+    "faces": [
+      "DroidSansFallback (49382 glyphs)"
+    ],
+    "coverage": {
+      "JIS X 0208 kana (EUC-JP rows 4–5)": "169/169",
+      "JIS X 0208 level 1 kanji": "2965/2965",
+      "JIS X 0208 level 2 kanji": "3390/3390",
+      "GB 2312 hanzi": "6763/6763",
+      "GBK (all double-byte)": "21405/21891",
+      "Big5 frequent hanzi (A440–C67E)": "5401/5401",
+      "Big5 less frequent hanzi (C940–F9D5)": "7659/7693",
+      "KS X 1001 Hangul": "1/2350",
+      "KS X 1001 Hanja": "4888/4888",
+      "Unicode Hangul Syllables (all 11,172)": "3/11172",
+      "Unicode CJK Unified Ideographs (basic block)": "20902/20992",
+      "Unicode CJK Ext A": "6582/6592",
+      "CJK Symbols and Punctuation": "36/64",
+      "Halfwidth and Fullwidth Forms": "164/240",
+      "Latin-1 + Latin Ext-A": "1/319",
+      "Cyrillic basic": "0/96"
+    },
+    "facesAgreeOnCoverage": true,
+    "embedding": {
+      "10 han": {
+        "chars": 10,
+        "pdfBytes": 4087,
+        "ms": 14,
+        "textRoundTrips": true
+      },
+      "100 han": {
+        "chars": 100,
+        "pdfBytes": 15604,
+        "ms": 23,
+        "textRoundTrips": true
+      },
+      "1000 han": {
+        "chars": 1000,
+        "pdfBytes": 113221,
+        "ms": 55,
+        "textRoundTrips": true
+      },
+      "100 hangul": {
+        "chars": 1,
+        "pdfBytes": 2578,
+        "ms": 12,
+        "textRoundTrips": true
+      }
+    },
+    "cold": [
+      {
+        "readMs": 2.7,
+        "openMs": 0.8,
+        "firstPdfMs": 22,
+        "rssDeltaMiB": 10.6,
+        "glyphs": 49382
+      },
+      {
+        "readMs": 2.7,
+        "openMs": 0.8,
+        "firstPdfMs": 32.9,
+        "rssDeltaMiB": 10.6,
+        "glyphs": 49382
+      },
+      {
+        "readMs": 2.9,
+        "openMs": 0.8,
+        "firstPdfMs": 22.3,
+        "rssDeltaMiB": 10.6,
+        "glyphs": 49382
+      }
+    ]
+  },
+  {
+    "path": ".e12-fonts/wqy-microhei.ttc",
+    "size": 5177387,
+    "sha256": "2420e8078af796b19a3f6ef13de527a1a91c1e7171eea115926c614ced1009b3",
+    "faces": [
+      "WenQuanYiMicroHei (49531 glyphs)",
+      "WenQuanYiMicroHeiMono (49531 glyphs)"
+    ],
+    "coverage": {
+      "JIS X 0208 kana (EUC-JP rows 4–5)": "169/169",
+      "JIS X 0208 level 1 kanji": "2965/2965",
+      "JIS X 0208 level 2 kanji": "3390/3390",
+      "GB 2312 hanzi": "6763/6763",
+      "GBK (all double-byte)": "21798/21891",
+      "Big5 frequent hanzi (A440–C67E)": "5401/5401",
+      "Big5 less frequent hanzi (C940–F9D5)": "7693/7693",
+      "KS X 1001 Hangul": "2350/2350",
+      "KS X 1001 Hanja": "4888/4888",
+      "Unicode Hangul Syllables (all 11,172)": "11172/11172",
+      "Unicode CJK Unified Ideographs (basic block)": "20932/20992",
+      "Unicode CJK Ext A": "2/6592",
+      "CJK Symbols and Punctuation": "35/64",
+      "Halfwidth and Fullwidth Forms": "164/240",
+      "Latin-1 + Latin Ext-A": "319/319",
+      "Cyrillic basic": "96/96"
+    },
+    "differsFromFirstFace": {
+      "WenQuanYiMicroHeiMono": 0
+    },
+    "facesAgreeOnCoverage": true,
+    "embedding": {
+      "10 han": {
+        "chars": 10,
+        "pdfBytes": 6557,
+        "ms": 55,
+        "textRoundTrips": true
+      },
+      "100 han": {
+        "chars": 100,
+        "pdfBytes": 20283,
+        "ms": 68,
+        "textRoundTrips": true
+      },
+      "1000 han": {
+        "chars": 1000,
+        "pdfBytes": 133746,
+        "ms": 90,
+        "textRoundTrips": true
+      },
+      "100 hangul": {
+        "chars": 100,
+        "pdfBytes": 10297,
+        "ms": 55,
+        "textRoundTrips": true
+      }
+    },
+    "cold": [
+      {
+        "readMs": 3.3,
+        "openMs": 1.7,
+        "firstPdfMs": 69.7,
+        "rssDeltaMiB": 22,
+        "glyphs": 49531
+      },
+      {
+        "readMs": 3.3,
+        "openMs": 1.7,
+        "firstPdfMs": 89.3,
+        "rssDeltaMiB": 22.4,
+        "glyphs": 49531
+      },
+      {
+        "readMs": 3.4,
+        "openMs": 1.4,
+        "firstPdfMs": 94.4,
+        "rssDeltaMiB": 22.3,
+        "glyphs": 49531
+      }
+    ]
+  }
+]
+
+## PDF render time, before E-12 (HEAD 4810173, a git worktree) against after, alternating in one process, median of 9
+## Conditions: container load average 2.2-6.6 (another session's ms-server container was running, 26% CPU) —
+## not a quiet machine, which is why the comparison is interleaved rather than two separate runs.
+### first version of the font chain
+table, 10 sensors x 720 h, Latin         before   283 ms (320 KiB)   after   319 ms (320 KiB)   ratio 1.13
+graphs, 100 sensors x 720 h, Latin       before   504 ms (1582 KiB)   after   508 ms (1582 KiB)   ratio 1.01
+table, 10 sensors x 720 h, Japanese      before   295 ms (341 KiB)   after   356 ms (331 KiB)   ratio 1.21
+graphs, 100 sensors x 720 h, Japanese    before   505 ms (1597 KiB)   after   551 ms (1591 KiB)   ratio 1.09
+### with the printable-ASCII fast path (the committed code)
+table, 10 sensors x 720 h, Latin         before   303 ms (320 KiB)   after   312 ms (320 KiB)   ratio 1.03
+graphs, 100 sensors x 720 h, Latin       before   525 ms (1582 KiB)   after   549 ms (1582 KiB)   ratio 1.04
+table, 10 sensors x 720 h, Japanese      before   337 ms (341 KiB)   after   381 ms (331 KiB)   ratio 1.13
+graphs, 100 sensors x 720 h, Japanese    before   536 ms (1597 KiB)   after   572 ms (1591 KiB)   ratio 1.07
+table, 10 sensors x 720 h, Latin: byte-identical to before: true
+graphs, 100 sensors x 720 h, Latin: byte-identical to before: true

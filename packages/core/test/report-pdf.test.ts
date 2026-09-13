@@ -16,7 +16,8 @@ import {
   type Typesetter,
 } from '../src/reports/pdf.js';
 import { MAX_CELLS, type ReportDocument, type ReportSection } from '../src/reports/table.js';
-import { readPdf } from './support/pdf.js';
+import { PRIMARY_FONT, configureReportFonts, openFont, reportFonts } from '../src/reports/fonts.js';
+import { readPdf, type PlacedText } from './support/pdf.js';
 
 /**
  * A report as a PDF (`E-06`, `ADR-006` Decisions 1 and 2).
@@ -82,6 +83,25 @@ const doc = (sections: ReportSection[], extra: Partial<ReportDocument> = {}): Re
 
 /** Every string drawn anywhere in the document. */
 const everything = (pages: readonly (readonly string[])[]): string[] => pages.flat();
+
+/**
+ * What a reader sees as lines: the strings set on one baseline, left to right, joined (`E-12`).
+ *
+ * A name drawn in two fonts is two strings in the file, so asserting on strings would be asserting
+ * on how many fonts it took. Strings on one baseline in one table row are joined too, which is
+ * harmless for a substring assertion.
+ */
+const lines = (placed: readonly (readonly PlacedText[])[]): string[] =>
+  placed.flatMap((page) => {
+    const byBaseline = new Map<number, PlacedText[]>();
+    for (const one of page) byBaseline.set(one.y, [...(byBaseline.get(one.y) ?? []), one]);
+    return [...byBaseline.values()].map((row) =>
+      row
+        .sort((a, b) => a.x - b.x)
+        .map((one) => one.text)
+        .join(''),
+    );
+  });
 
 describe('a report as a PDF', () => {
   describe('lays out text without letting any of it escape its column', () => {
@@ -231,14 +251,14 @@ describe('a report as a PDF', () => {
       assert.ok(page !== undefined);
       assert.equal(page.blocks[0]?.title, 'U+6771 U+4EAC router');
       assert.ok(
-        (page.header ?? []).some((line) => line.includes('outside the font')),
+        (page.header ?? []).some((line) => line.includes('outside every font')),
         'and the document says once that it happened',
       );
       // A name the font *can* draw is left exactly alone, header included.
       const plain = paginate(doc([section(straight(2), 'Маршрут')]), narrow)[0];
       assert.ok(plain !== undefined);
       assert.equal(plain.blocks[0]?.title, 'Маршрут');
-      assert.ok(!(plain.header ?? []).some((line) => line.includes('outside the font')));
+      assert.ok(!(plain.header ?? []).some((line) => line.includes('outside every font')));
       assert.equal(
         drawable('ok', () => true),
         'ok',
@@ -276,6 +296,14 @@ describe('a report as a PDF', () => {
         'abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322',
       );
       assert.equal(bytes.length, 759_720);
+      const fallback = readFileSync(
+        new URL('../../assets/fonts/wqy-microhei.ttc', import.meta.url),
+      );
+      assert.equal(
+        createHash('sha256').update(fallback).digest('hex'),
+        '2420e8078af796b19a3f6ef13de527a1a91c1e7171eea115926c614ced1009b3',
+      );
+      assert.equal(fallback.length, 5_177_387);
     });
 
     it('writes a Cyrillic sensor name as text, not as mojibake', async () => {
@@ -283,23 +311,132 @@ describe('a report as a PDF', () => {
       // asked for `Маршрут` one of them emits truncated code points *without throwing*. This
       // reads the text back out through the document's own `ToUnicode` map — the way a reader
       // copies it — so it fails if the embedded font or its mapping is ever lost.
-      const pdf = await renderPdf(doc([section(straight(2), 'Маршрут — Bürorouter 東京')]));
+      const pdf = await renderPdf(doc([section(straight(2), 'Маршрут — Bürorouter')]));
       const readout = readPdf(pdf);
       const drawn = everything(readout.pages);
-      // Cyrillic, an umlaut and an em dash come back as themselves; the two CJK characters the
-      // font has no glyph for come back as what they are rather than as two empty boxes, which is
-      // what this test caught the first version of this renderer doing.
       assert.ok(
-        drawn.includes('Маршрут — Bürorouter U+6771 U+4EAC'),
+        drawn.includes('Маршрут — Bürorouter'),
         JSON.stringify(readout.pages[0]?.slice(0, 12)),
       );
-      assert.ok(
-        drawn.some((line) => line.includes('outside the font it is drawn with')),
-        'and the document says so where its reader will see it',
+      // **And nothing else was needed**, so nothing else was embedded: a report with no character
+      // outside DejaVu is the document it was before `E-12` — no second font, no 22 MiB opened.
+      assert.deepEqual(
+        readout.fonts.map((font) => font.replace(/^[A-Z]{6}\+/u, '')),
+        ['DejaVuSans'],
       );
+      configureReportFonts([]);
+      await renderPdf(doc([section(straight(2), 'Маршрут — Bürorouter')]));
+      assert.deepEqual(
+        reportFonts()
+          .opened()
+          .map((font) => font.key),
+        ['body'],
+        'and the second font was never opened, on a chain that had drawn nothing else',
+      );
+    });
+
+    it('draws Japanese, Chinese and Korean names as themselves (`E-12`)', async () => {
+      // `E-06` wrote these as `U+6771 U+4EAC` — honest, and not a report anybody in Tokyo files.
+      const document = doc([
+        section(straight(2), '東京 本社 コアスイッチ', 2, 1),
+        section(straight(2), '北京 数据中心', 2, 2),
+        section(straight(2), '서울 데이터센터', 2, 3),
+        section(straight(2), 'Маршрут 臺北 core', 2, 4),
+      ]);
+      const readout = readPdf(await renderPdf(document));
+      const seen = lines(readout.placed);
+      for (const name of [
+        '東京 本社 コアスイッチ',
+        '北京 数据中心',
+        '서울 데이터센터',
+        'Маршрут 臺北 core',
+      ]) {
+        assert.ok(seen.includes(name), `${name} in ${JSON.stringify(seen.slice(0, 14))}`);
+      }
       assert.ok(
-        readout.fonts.some((font) => font.endsWith('+DejaVuSans')),
-        readout.fonts.join(','),
+        !seen.some((line) => line.includes('outside every font')),
+        'and the notice is not there, because nothing was lost',
+      );
+      assert.deepEqual(readout.fonts.map((font) => font.replace(/^[A-Z]{6}\+/u, '')).sort(), [
+        'DejaVuSans',
+        'WenQuanYiMicroHei',
+      ]);
+    });
+
+    it('sets a line drawn in two fonts on one baseline, one run after the other', async () => {
+      // `pdfkit` places text by the top of its font, and DejaVu and WenQuanYi have different tops:
+      // without the correction the Latin half of `Маршрут 臺北 core` sits higher than the rest.
+      const readout = readPdf(await renderPdf(doc([section(straight(2), 'Маршрут 臺北 core')])));
+      const runs = (readout.placed[0] ?? []).filter((one) =>
+        ['Маршрут ', '臺北 ', 'core'].includes(one.text),
+      );
+      assert.deepEqual(
+        runs.map((one) => [one.text, one.font]),
+        [
+          ['Маршрут ', 'DejaVuSans'],
+          ['臺北 ', 'WenQuanYiMicroHei'],
+          ['core', 'DejaVuSans'],
+        ],
+      );
+      const [first, second, third] = runs;
+      assert.ok(first !== undefined && second !== undefined && third !== undefined);
+      assert.equal(second.y, first.y);
+      assert.equal(third.y, first.y);
+      assert.ok(second.x > first.x && third.x > second.x, 'and each after the last');
+      // After, and not a gap after: the second run starts where the first one's glyphs end, which
+      // is DejaVu's own advance for `Маршрут ` at the title's size — asked of the font directly,
+      // so a run placed by the wrong font's widths is caught.
+      const dejavu = openFont(PRIMARY_FONT, 'test').font;
+      const advance =
+        (dejavu.layout('Маршрут ').advanceWidth * A4_PORTRAIT.bodySize) / dejavu.unitsPerEm;
+      assert.ok(
+        Math.abs(second.x - first.x - advance) < 0.01,
+        `${String(second.x - first.x)} points against ${String(advance)}`,
+      );
+    });
+
+    it('right-aligns a heading drawn in two fonts to the same edge as the numbers under it', async () => {
+      // A numeric column's heading is set to the right, like its numbers. `往復時間 (ms)` is two
+      // runs in two fonts, so `pdfkit` cannot align it — the pen places the first run where the
+      // whole heading's width says it must start, and the last run then ends on the column's edge.
+      const tokyo: ReportSection = {
+        ...section([[0.5, 7]], 'edge-router'),
+        columns: [
+          { key: 'c0', name: '往復時間', unit: 'ms', decimals: 2 },
+          { key: 'c1', name: 'Loss', unit: '%', decimals: 2 },
+        ],
+      };
+      const placed = readPdf(await renderPdf(doc([tokyo]))).placed[0] ?? [];
+      const dejavu = openFont(PRIMARY_FONT, 'test').font;
+      const endOf = (text: string, size: number): number => {
+        const found = placed.find((one) => one.text === text);
+        assert.ok(
+          found !== undefined,
+          `${text} in ${JSON.stringify(placed.map((one) => one.text))}`,
+        );
+        return found.x + (dejavu.layout(text).advanceWidth * size) / dejavu.unitsPerEm;
+      };
+      assert.ok(
+        placed.some((one) => one.text === '往復時間 ' && one.font === 'WenQuanYiMicroHei'),
+        'the heading is drawn in two runs',
+      );
+      const heading = endOf('(ms)', A4_PORTRAIT.headingSize);
+      const value = endOf('0.50', A4_PORTRAIT.bodySize);
+      assert.ok(
+        Math.abs(heading - value) < 0.01,
+        `heading ends at ${String(heading)}, value at ${String(value)}`,
+      );
+    });
+
+    it('still writes a character no font has as its notation, and says so', async () => {
+      // 𠮟 is in JIS X 0213 and in Noto Sans CJK JP, and in neither font this repository ships —
+      // the case `reports.pdfFonts` exists for.
+      const readout = readPdf(await renderPdf(doc([section(straight(2), '𠮟責 router')])));
+      const seen = lines(readout.placed);
+      assert.ok(seen.includes('U+20B9F 責 router'), JSON.stringify(seen.slice(0, 12)));
+      assert.ok(
+        seen.some((line) => line.includes('outside every font it is drawn with')),
+        'and the document says so where its reader will see it',
       );
     });
 

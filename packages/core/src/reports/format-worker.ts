@@ -1,5 +1,5 @@
-import { parentPort } from 'node:worker_threads';
-import { formatJob } from './format-job.js';
+import { parentPort, workerData } from 'node:worker_threads';
+import { configureWorker, formatJob } from './format-job.js';
 import type { FormatRequest } from './formatter.js';
 
 /**
@@ -18,6 +18,7 @@ import type { FormatRequest } from './formatter.js';
 /* c8 ignore next 2 -- a worker without a parent port cannot have been started by the pool */
 if (parentPort === null) throw new Error('report format worker started outside a worker thread');
 const port = parentPort;
+configureWorker(workerData);
 
 port.on('message', (request: FormatRequest) => {
   void formatJob(request).then(({ reply, transfer }) => {
