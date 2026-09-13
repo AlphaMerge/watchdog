@@ -3,9 +3,9 @@
 - **Date**: 2026-09-13
 - **Where**: the Docker Desktop VM on the development Mac — 8 CPUs, 7,936 MiB, 1,023 MiB swap —
   shared with the rest of the dev stack and with other sessions' builds and test runs.
-- **What ran**: `main` at `f867878` (`P-205`), then the same with `SPAWN_CONCURRENCY`. The old
-  build's figure comes from the `ms-server` that was already running from the main checkout, built
-  before `P-205`.
+- **What ran**: `main` at `f867878` (`P-205`), then the same with `SPAWN_CONCURRENCY`, and — sampled
+  the same way, afterwards — `864e82b`, the commit before `P-205` (see
+  [the build before `P-205`, sampled](#the-build-before-p-205-sampled)).
 - **Load**: the dev database's 5,000 `port.tcp` sensors and one `icmp.ping`, one-minute interval,
   one local probe; the pool at its ceiling of 64 plus the query runner's one worker.
 - **Raw samples**: [`2026-09-13-probe-startup-memory.jsonl`](2026-09-13-probe-startup-memory.jsonl),
@@ -34,7 +34,9 @@ kill is what reclaim looks like with swap gone; that part is inference, and the 
 
 **`P-205` did not cause it.** The `ms-server` built before `P-205`, running the same load, showed a
 high-water mark of **3,763,872 kB (3,676 MiB)** while sitting at 1,960 MiB resident with nothing
-swapped: the same peak from the old code, which on that occasion found enough memory free.
+swapped: the same peak from the old code, which on that occasion found enough memory free. A
+sampled run of that build, [below](#the-build-before-p-205-sampled), has the same timeline as well
+as the same peak.
 
 ## The shape of the peak
 
@@ -55,6 +57,56 @@ plateau the 65 workers had committed about 2,500 MiB of heap and were using 1,44
 they had committed 1,093 and were using 974. The drop, when it comes, is V8 giving back pages it had
 been holding — nothing in the probe changes at that moment. The kill, about 75 seconds after the
 probe started, is inside the plateau.
+
+## The build before `P-205`, sampled
+
+`P-206` asked for the build before `P-205` to be run the same way, and the high-water mark above is
+one number from a probe nobody was watching. So `864e82b` — `P-205`'s parent — was built in its own
+worktree and run as `scripts/dev-services.sh` runs the core and probe, in one toolchain container
+with the main checkout's `dev/data` and `dev/tls` mounted in, the same sampler preloaded and
+`ms-server` stopped: 18:01:31 to 18:06:09 UTC, the same 5,001 sensors. The VM had 5,186 MiB available
+at the start, and **its swap was already full** — 3 MiB free of 1,023, left by the day's earlier runs,
+where the `P-205` run had 169 free.
+
+| Seconds | Before `P-205`: workers, resident (anon), worker heaps committed / used | `P-205` |
+| --- | --- | --- |
+| 5 | 35, 1,045 MiB, 754 / 501 | 38, 1,631 MiB, 1,176 / 705 |
+| 10 | 59, 3,084 MiB, 2,398 / 1,232 | 50, 2,348 MiB, 1,785 / 970 |
+| 20 | 65, 3,483 MiB, 2,747 / 1,425 | 65, 3,375 MiB, 2,657 / 1,442 |
+| 60 | 65, 3,499 MiB, 2,692 / 1,450 | 65, 3,418 MiB, 2,568 / 1,441 |
+| 100 | 65, 3,511 MiB, 2,597 / 1,440 | 65, 3,496 MiB, 2,480 / 1,433 |
+| 110 | 65, 2,685 MiB, 1,842 / 1,112 | 65, 3,134 MiB, 2,105 / 1,268 |
+| 120 | 65, 2,210 MiB, 1,359 / 976 | 65, 2,477 MiB, 1,478 / 1,008 |
+| 240 | 65, 1,869 MiB, 1,087 / 969 | 65, 1,975 MiB, 1,092 / 970 |
+| High-water mark | **3,565 MiB** | 3,567 MiB |
+| All 65 workers up | 13 s | 18 s |
+| Plateau above 3,300 MiB | 12 s – 109 s | 20 s – 105 s |
+
+**The same start-up, to within two megabytes at its peak.** The same 65 workers commit
+2,500 – 2,750 MiB of heap to use the same ~1,440, and V8 gives it back at the same moment, around
+110 seconds. The one difference is how fast the pool filled — the growth log has 60 steps from
+4 s to 13 s here, against 18 s for the pool to fill in the `P-205` run — and it moved the start of
+the plateau, not its height. **`P-205` did not change a probe's start-up memory**, which is now a
+sampled timeline rather than an inference from one high-water mark.
+
+The run also reproduced the defect `P-205` fixed. Stopped with `docker stop`, the probe logged
+"spool drain stopped" with 93 results pending and then **"the result spool is closed and cannot
+accept results" 25 times in 12 ms** — the old hook order refusing what the workers delivered, as on
+16:27 — where the `P-205` build's confirmation run logged none.
+
+**And it met the thing that killed the first probe.** From about 18:05 another session's `P-207`
+benchmark containers ran beside it — `docker stats` caught them at 2.5 and 2.6 GiB and up to 414%
+CPU — and the VM's available memory fell to **30 MiB at 18:05:53**, swap empty. `docker events`
+records the kernel killing one of those containers at that second (`oom`, exit 137); the session
+running them reports a second kill at about 18:05:04. This probe was past its plateau, at about
+1,900 MiB, and survived. The plateau figures above are from before any of that; the VM's memory in
+the samples after 210 s is not.
+
+The watchdog meant to stop this run below 400 MiB available did not act. It polled every two
+seconds with a `docker exec`, read 675 MiB at 18:05:47, and logged its next reading — 2,230 MiB —
+at 18:05:53, after the kill had freed the memory. The sampler inside the probe, which needs no new
+process to read `/proc/meminfo`, recorded the low. A guard that has to start a process to look is
+slowest exactly when memory is shortest.
 
 ## Why the heaps were that large: loading together
 
