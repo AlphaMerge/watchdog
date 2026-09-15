@@ -97,6 +97,11 @@ jobs:
       - name: shellcheck
         run: git ls-files '*.sh' | xargs shellcheck -S warning
 
+      # The dev container's supervisor, which once kept ms-server Up for ten hours with no core
+      # in it: a fake `node`, every way a process can stop, run both as a file and as `bash -c`.
+      - name: ms-server supervisor
+        run: bash scripts/test-ms-server-supervisor.sh
+
       # **The workflow is the one file nothing else checks**, and it is now five jobs across two
       # operating systems. A bad expression or an unknown runner costs a whole CI cycle to find
       # out about, and the Windows job in particular is expensive to discover a typo in.

@@ -4427,6 +4427,27 @@ because each is a decision rather than a defect:
       the platform cannot say. The same channel on Core Health is worth deciding in the same ticket.
 
 
+- [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
+      the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
+      before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;
+      `ms-server` came back, and its core died with `getaddrinfo ENOTFOUND postgres` 1.3 s in —
+      inside the supervisor's three-second pause, before `wait -n $core $probe` was reached. Bash
+      had already disposed of the core's job, printed `wait: 9: no such job`, and waited on the
+      probe alone: the container reported Up while the probe dialled a core that was not there
+      15,500 times. **It only happens under `bash -c`**, which is how `dev-services.sh` ran the
+      supervisor; the same lines run as a file returned from `wait -n` at once.
+
+      **Fixed.** The supervisor is its own file, `scripts/lib/ms-server-supervisor.sh`, run with
+      `exec`; it starts the probe only if the core is still alive after the pause, and polls both
+      with `kill -0` instead of `wait -n`, taking the status from `wait <pid>`.
+      `scripts/test-ms-server-supervisor.sh` runs it against a fake `node` — the core dying during
+      the pause, the core dying later, the probe exiting cleanly, and `docker stop` — each **both
+      as a file and as `bash -c`**, because a test run one way passed against the broken version;
+      it does fail against it, on the first case under `bash -c`, and CI now runs it beside
+      shellcheck. Live: with PostgreSQL stopped the container restarted 8 times in 45 s instead of
+      staying Up, and with PostgreSQL back it served the API again 21 s later without anybody
+      touching it; `docker stop` still shuts both down cleanly in about a second.
+
 - [x] **P-202 — a third of the shell scripts are shellchecked by nothing** · S · P-198 · The CI
       step spells its inputs out — `scripts/*.sh scripts/sizing/*.sh deploy/*.sh` — and that list
       reaches 24 of the repository's 36 shell scripts. The twelve it misses are not the harmless
