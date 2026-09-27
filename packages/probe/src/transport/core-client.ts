@@ -2,6 +2,7 @@ import { connect, type TLSSocket } from 'node:tls';
 import {
   capabilitiesFor,
   describeError,
+  healthForPeer,
   isProtocolCompatible,
   loadTlsMaterial,
   MessageConnection,
@@ -618,7 +619,11 @@ export class CoreClient {
         type: 'heartbeat',
         seq: this.#heartbeatSeq,
         sentAt: new Date().toISOString(),
-        ...(health === undefined ? {} : { health }),
+        // Gated since `P-208`: an older core's health schema refuses a field it does not know, and
+        // that would be every heartbeat rather than one.
+        ...(health === undefined
+          ? {}
+          : { health: healthForPeer(health, this.#coreProtocolVersion) }),
       });
     }, intervalMs);
     this.#heartbeatTimer.unref();

@@ -200,6 +200,10 @@ export class ProbeHealthService {
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,
       uptime: health?.uptimeSeconds ?? null,
+      // Absent from a probe older than protocol 17 and from one whose platform cannot say, and
+      // either way a gap: a zero here would be the error limit firing on nothing (`P-208`).
+      memoryAvailable: health?.memoryAvailablePercent ?? null,
+      memoryAvailableBytes: health?.memoryAvailableMb ?? null,
     };
 
     return {

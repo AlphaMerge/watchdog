@@ -155,6 +155,7 @@ alarm.
 | `ingestQueue` | Readings arriving faster than they are written. Warns at 40,000, errors at 100,000 |
 | `rollupLag` | Rollups falling behind. An hour is a warning; a day means graphs at wide ranges are wrong |
 | `diskFree` | Errors below 10%. See below — a full disk costs retention |
+| `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host |
 | `evictedChunks` | **Any value above zero is an error.** Data was dropped early to stay on disk |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
@@ -173,6 +174,7 @@ alarm.
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
+| `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17 and on any platform but Linux and Windows. The machine's figure, not the probe's cgroup: near `MemoryMax` in `ms-probe.service`, watch `memory` |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 
 These thresholds ship as **defaults, not policy**. They are written once when the channel is

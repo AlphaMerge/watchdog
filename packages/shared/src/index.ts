@@ -50,6 +50,7 @@ export {
   capabilitiesFor,
   describeSkew,
   explainSkew,
+  healthForPeer,
   missingCapabilities,
   versionFor,
 } from './protocol/capabilities.js';
@@ -83,6 +84,13 @@ export type {
   SweepJob,
 } from './protocol/messages.js';
 export { CpuMeter } from './process/cpu-meter.js';
+export { MachineMemoryWatch, parseMeminfo, readMachineMemory } from './process/machine-memory.js';
+export type {
+  MachineMemory,
+  MachineMemoryLow,
+  MachineMemorySources,
+  MachineMemoryWatchOptions,
+} from './process/machine-memory.js';
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 

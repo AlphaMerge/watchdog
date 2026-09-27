@@ -1,4 +1,4 @@
-import { MIN_PROTOCOL_VERSION, PROTOCOL_VERSION } from './messages.js';
+import { MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, type ProbeHealthReport } from './messages.js';
 
 /**
  * What a peer at a given protocol version can actually be asked to do (`R-06`).
@@ -64,6 +64,15 @@ export interface ProbeCapabilities {
    * test and carries `P-146`'s original skew problem.
    */
   resultSendTime: boolean;
+  /**
+   * Reports how much memory its *machine* has left, beside its own resident memory (`P-208`).
+   *
+   * The first health field added since `P-178` negotiated a newer probe down instead of refusing
+   * it, and so the first one that must be stripped rather than sent: the core's health schema is
+   * `additionalProperties: false`, and an older core would reject every heartbeat that carried it.
+   * Below this the two channels gap and Probe Health's message says why.
+   */
+  machineMemory: boolean;
 }
 
 /**
@@ -82,6 +91,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['onDemandQuery', 8],
   ['chunkedPushFinal', 16],
   ['resultSendTime', 16],
+  ['machineMemory', 17],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -94,6 +104,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   onDemandQuery: 'run a check on demand',
   chunkedPushFinal: 'be told which message completes a configuration push',
   resultSendTime: 'say when it sent a batch, so a replay can be told from live data',
+  machineMemory: 'report how much memory its machine has left',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -107,7 +118,26 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     onDemandQuery: has(8),
     chunkedPushFinal: has(16),
     resultSendTime: has(16),
+    machineMemory: has(17),
   };
+}
+
+/**
+ * The heartbeat's health with every field this peer's version does not know taken out (`P-208`).
+ *
+ * The heartbeat's own gate, and the only one it has needed: before `P-178` a probe never met a
+ * core older than itself, so no health field was ever gated. One function rather than a condition
+ * at the send, so the next health field is added here beside this one rather than found missing
+ * when an older core starts rejecting heartbeats.
+ */
+export function healthForPeer(health: ProbeHealthReport, peerVersion: number): ProbeHealthReport {
+  if (capabilitiesFor(peerVersion).machineMemory) return health;
+  const {
+    memoryAvailablePercent: _memoryAvailablePercent,
+    memoryAvailableMb: _memoryAvailableMb,
+    ...older
+  } = health;
+  return older;
 }
 
 /** The version a peer must speak for one capability — the number the gates used to inline. */

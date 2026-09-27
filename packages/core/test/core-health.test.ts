@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
-import type { CheckResult } from '@ms/shared';
+import type { CheckResult, MachineMemoryLow } from '@ms/shared';
 import {
   CoreHealthService,
   readingsFrom,
@@ -59,6 +59,7 @@ function sources(
     resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
+    machineMemory: MachineMemoryLow | null;
   }> = {},
 ): CoreHealthSources {
   return {
@@ -66,6 +67,8 @@ function sources(
     // other test in this file is in, and the one whose channels must be gaps rather than zeros.
     disk: () => overrides.disk ?? null,
     evictedChunks: () => overrides.evictedChunks ?? 0,
+    // Null by default too: a platform that cannot say, whose two channels must gap (`P-208`).
+    machineMemory: () => overrides.machineMemory ?? null,
     ingestion: () => ({
       queuedRows: overrides.queuedRows ?? 0,
       refusedRows: overrides.refusedRows ?? 0,
@@ -280,6 +283,21 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const reading = await service.read();
       assert.equal(reading['memory'], 256);
       assert.equal(reading['heap'], 64);
+    });
+
+    it('reports what the machine has left, and gaps where the platform cannot say', async () => {
+      // `P-208`: the machine's memory rather than the core's, so a core beside a database that has
+      // taken the rest is visible before the kernel picks something to kill.
+      const measured = await build({
+        machineMemory: { availablePercent: 8.5, availableBytes: 675 * 1024 * 1024 },
+      }).read();
+      assert.equal(measured['memoryAvailable'], 8.5);
+      assert.equal(measured['memoryAvailableBytes'], 675);
+
+      // A zero on this channel is its error limit, so an unknown must be a gap and never a zero.
+      const unknown = await build({ machineMemory: null }).read();
+      assert.equal(unknown['memoryAvailable'], null);
+      assert.equal(unknown['memoryAvailableBytes'], null);
     });
 
     it('passes each subsystem’s own number through unchanged', async () => {

@@ -6,6 +6,7 @@ import {
   bootstrap,
   coreConfigSchema,
   describeError,
+  MachineMemoryWatch,
   runConfigCheck,
   type CoreConfig,
   type Logger,
@@ -1190,6 +1191,25 @@ async function serve(): Promise<void> {
   // queue, a pool or a connection reports here. Built last because it reads all of them, and the
   // results go through `acceptResults` exactly as a probe's do — so Core Health has history,
   // limits, triggers and alarms with no special case anywhere downstream.
+  // How much this machine has left (`P-208`), on a two-second timer of its own: Core Health is
+  // read every thirty seconds, and `P-206` watched a machine go from 8.5% available to a kernel
+  // kill in six. Read in-process, because a guard that starts a process to look is slowest exactly
+  // when memory is shortest. The probe's copy is sampled at its heartbeat instead.
+  const machineMemory = new MachineMemoryWatch();
+  machineMemory.sample();
+  const machineMemoryTimer = setInterval(() => {
+    machineMemory.sample();
+  }, 2_000);
+  machineMemoryTimer.unref();
+  lifecycle.onShutdown({
+    name: 'machine-memory',
+    timeoutMs: 1_000,
+    run: () => {
+      clearInterval(machineMemoryTimer);
+      return Promise.resolve();
+    },
+  });
+
   const coreHealth = new CoreHealthService({
     db,
     logger,
@@ -1209,6 +1229,7 @@ async function serve(): Promise<void> {
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,
+      machineMemory: () => machineMemory.lowest(),
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       reports: () => {

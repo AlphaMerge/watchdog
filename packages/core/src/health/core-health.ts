@@ -5,6 +5,7 @@ import {
   type ChannelReading,
   type CheckResult,
   type Logger,
+  type MachineMemoryLow,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
@@ -89,6 +90,14 @@ export interface CoreHealthSources {
   disk: () => { freePercent: number; freeBytes: number; databaseBytes: number } | null;
   /** Chunks dropped ahead of the configured retention because the disk was filling (`S-17`). */
   evictedChunks: () => number;
+  /**
+   * How much this core's machine has left — the lowest in the last thirty seconds (`P-208`).
+   *
+   * Null where the platform cannot say, and before the first sample. A `MachineMemoryWatch`
+   * sampled on a timer of its own, because this service is only read every thirty seconds and a
+   * squeeze that ends in a kill can be shorter than that.
+   */
+  machineMemory: () => MachineMemoryLow | null;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -198,6 +207,7 @@ export class CoreHealthService {
     const queries = this.#sources.queries();
     const reports = this.#sources.reports();
     const disk = this.#sources.disk();
+    const machine = this.#sources.machineMemory();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
@@ -209,6 +219,9 @@ export class CoreHealthService {
       cpu: this.#cpuPercent(meter),
       memory: round(memory.rss / MB, 1),
       heap: round(memory.heapUsed / MB, 1),
+      // Gaps, not zeros, where the platform cannot say: a zero is this channel's error limit.
+      memoryAvailable: machine === null ? null : machine.availablePercent,
+      memoryAvailableBytes: machine === null ? null : round(machine.availableBytes / MB, 1),
       uptime: Math.round(this.#process.uptime()),
       rollupLag: queues.rollup,
       backfillQueue: queues.backfill,

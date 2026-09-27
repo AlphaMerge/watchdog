@@ -4,6 +4,7 @@ import {
   capabilitiesFor,
   describeSkew,
   explainSkew,
+  healthForPeer,
   isProtocolCompatible,
   missingCapabilities,
   negotiatedVersion,
@@ -38,6 +39,7 @@ describe('what a protocol version can do', () => {
       onDemandQuery: false,
       chunkedPushFinal: false,
       resultSendTime: false,
+      machineMemory: false,
     });
   });
 
@@ -186,5 +188,29 @@ describe('describing a version skew', () => {
     const skew = describeSkew(3);
     assert.equal(skew.kind, 'outdated');
     assert.match(explainSkew(skew), /, nor /, 'more than one gap reads as a sentence');
+  });
+});
+
+describe('the health a peer can be sent', () => {
+  // `P-208`. The first health field since `P-178` served a newer probe at an older core's version
+  // instead of refusing it, so the first time a probe has had to leave health fields out. An older
+  // core's schema is `additionalProperties: false`: a field it does not know is a rejected
+  // heartbeat, every two seconds, rather than an ignored key.
+  const health = { memoryMb: 210.4, memoryAvailablePercent: 23.4, memoryAvailableMb: 1_860 };
+
+  it('leaves the machine’s memory out for a core older than protocol 17', () => {
+    const sent = healthForPeer(health, 16);
+    assert.deepEqual(sent, { memoryMb: 210.4 });
+    assert.equal('memoryAvailablePercent' in sent, false);
+  });
+
+  it('sends everything to a core that knows it', () => {
+    assert.deepEqual(healthForPeer(health, 17), health);
+    assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
+  });
+
+  it('names the missing capability in words for an older probe', () => {
+    assert.ok(missingCapabilities(16).includes('report how much memory its machine has left'));
+    assert.equal(versionFor('machineMemory'), 17);
   });
 });

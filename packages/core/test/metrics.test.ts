@@ -75,6 +75,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       sources: {
         disk: () => null,
         evictedChunks: () => 0,
+        machineMemory: () => ({ availablePercent: 42.5, availableBytes: 3_400 * 1024 * 1024 }),
         ingestion: () => ({
           queuedRows: 41,
           refusedRows: 7,

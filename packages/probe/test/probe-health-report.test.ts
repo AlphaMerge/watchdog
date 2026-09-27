@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import type { MachineMemoryLow } from '@ms/shared';
 import { ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
@@ -89,6 +90,10 @@ function reporter(options: {
   elapsedNs?: number[];
   rss?: number;
   uptime?: number;
+  /** What the machine has left; `null` is a platform that cannot say. Defaults to that. */
+  machine?: MachineMemoryLow | null;
+  /** Counts how often the reporter samples the machine. */
+  onSample?: () => void;
 }): ProbeHealthReporter {
   let cpuCall = 0;
   let clockCall = 0;
@@ -102,6 +107,10 @@ function reporter(options: {
     ...(options.drain === false
       ? {}
       : { drain: () => ({ ...DRAIN, stalledForMs: options.stalledForMs ?? 0 }) }),
+    machineMemory: {
+      sample: () => options.onSample?.(),
+      lowest: () => options.machine ?? null,
+    },
     process: {
       cpuUsage: () => {
         cpu += options.cpuUs?.[cpuCall] ?? 0;
@@ -351,5 +360,35 @@ describe('the probe’s own health report', () => {
     const report = reporter({ rss: 220_200_960, uptime: 3_600.7 }).report();
     assert.equal(report.memoryMb, 210);
     assert.equal(report.uptimeSeconds, 3_601);
+  });
+
+  it('reports what the machine has left beside what the probe holds, in megabytes', () => {
+    // `P-208`. `memoryMb` is the probe's share; this is everybody else's too.
+    const report = reporter({
+      rss: 220_200_960,
+      machine: { availablePercent: 23.4, availableBytes: 1_950_351_360 },
+    }).report();
+    assert.equal(report.memoryMb, 210);
+    assert.equal(report.memoryAvailablePercent, 23.4);
+    assert.equal(report.memoryAvailableMb, 1_860);
+  });
+
+  it('samples the machine at every report, so the window is filled at the heartbeat’s rate', () => {
+    let samples = 0;
+    const health = reporter({
+      onSample: () => {
+        samples += 1;
+      },
+    });
+    health.report();
+    health.report();
+    health.report();
+    assert.equal(samples, 3);
+  });
+
+  it('leaves the machine’s memory out where the platform cannot say, rather than sending zero', () => {
+    const report = reporter({ machine: null }).report();
+    assert.equal('memoryAvailablePercent' in report, false);
+    assert.equal('memoryAvailableMb' in report, false);
   });
 });

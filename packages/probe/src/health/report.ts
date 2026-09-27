@@ -1,4 +1,9 @@
-import { CpuMeter, type ProbeHealthReport } from '@ms/shared';
+import {
+  CpuMeter,
+  MachineMemoryWatch,
+  type MachineMemoryLow,
+  type ProbeHealthReport,
+} from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
 import type { CheckFlowStats } from './check-flow.js';
 import type { ProcessRunnerStats } from '../runner/process-runner.js';
@@ -63,6 +68,12 @@ export interface ProbeHealthSources {
    * waiting, and only the drain knows whether any of it is moving.
    */
   drain?: () => DrainStats;
+  /**
+   * How much the machine has left (`P-208`), sampled at every report — which is every heartbeat,
+   * so the lowest of the last thirty seconds is the worst of fifteen readings rather than one.
+   * Injectable for the same reason `process` is.
+   */
+  machineMemory?: { sample: () => void; lowest: () => MachineMemoryLow | null };
   /** Injectable so a test does not measure the test runner. */
   process?: {
     cpuUsage: () => NodeJS.CpuUsage;
@@ -78,9 +89,11 @@ export class ProbeHealthReporter {
   readonly #sources: ProbeHealthSources;
   readonly #cpu = new CpuMeter();
   readonly #process: NonNullable<ProbeHealthSources['process']>;
+  readonly #machineMemory: NonNullable<ProbeHealthSources['machineMemory']>;
 
   constructor(sources: ProbeHealthSources) {
     this.#sources = sources;
+    this.#machineMemory = sources.machineMemory ?? new MachineMemoryWatch();
     this.#process = sources.process ?? {
       cpuUsage: () => process.cpuUsage(),
       memoryUsage: () => process.memoryUsage(),
@@ -101,6 +114,8 @@ export class ProbeHealthReporter {
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
+    this.#machineMemory.sample();
+    const machine = this.#machineMemory.lowest();
 
     return {
       scheduled: scheduler.tasks,
@@ -192,6 +207,14 @@ export class ProbeHealthReporter {
       ...(cpu === null ? {} : { cpuPercent: cpu }),
       memoryMb: Math.round((this.#process.memoryUsage().rss / MB) * 10) / 10,
       uptimeSeconds: Math.round(this.#process.uptime()),
+      // Absent where the platform cannot say how much is available, so both channels gap rather
+      // than read a zero — which on this channel is the alarm itself.
+      ...(machine === null
+        ? {}
+        : {
+            memoryAvailablePercent: machine.availablePercent,
+            memoryAvailableMb: Math.round((machine.availableBytes / MB) * 10) / 10,
+          }),
     };
   }
 }

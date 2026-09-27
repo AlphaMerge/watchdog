@@ -73,6 +73,27 @@ const CHANNELS: readonly ChannelDef[] = [
   // Separate from resident memory because it moves first: a leak in JavaScript shows in the heap
   // while the resident set is still flat, and the two diverging is the shape of a native one.
   { key: 'heap', name: 'Heap in use', unit: 'MB' },
+  // **How much the core's machine has left** (`P-208`), beside what the core holds. Probe Health
+  // carries the same pair, and on the default installation — a local probe beside the core — the
+  // two read the same machine. This one is for the core that has no probe beside it: every probe
+  // remote, and the host running PostgreSQL, which is the largest tenant of memory there is.
+  // `MemAvailable` on Linux, the lowest in the last thirty seconds, a gap where the platform
+  // cannot say; `packages/shared/src/process/machine-memory.ts` says why for each.
+  {
+    key: 'memoryAvailable',
+    name: 'Memory available',
+    unit: '%',
+    // The same limits as Probe Health's, for the same measured reasons: `P-206` saw 8.5% fall to a
+    // kernel kill in six seconds, so the error sits at 10%, and the runs that machine survived
+    // bottomed out between 9.9 and 23.4% with swap gone, so the warning sits at 20%.
+    limits: {
+      lowerWarning: 20,
+      lowerError: 10,
+      warningMessage: "the core's machine is running low on memory",
+      errorMessage: "the core's machine is nearly out of memory; the kernel may kill a process",
+    },
+  },
+  { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
   // In seconds so `M-11`'s threshold triggers can say "when uptime < 600", which is how `T-05`
   // established that a restart is detected. Transition detection would need the core to remember
   // a previous value and would miss a restart that happened while the sensor was Down.

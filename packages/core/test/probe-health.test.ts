@@ -70,6 +70,8 @@ const FULL: ProbeHealthReport = {
   cpuPercent: 18.5,
   memoryMb: 210.4,
   uptimeSeconds: 3_600,
+  memoryAvailablePercent: 23.4,
+  memoryAvailableMb: 1_860,
 };
 
 describe('the Probe Health sensor', { skip: available ? false : 'no database' }, () => {
@@ -200,6 +202,25 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['trapReceived'], 900);
       assert.equal(reading['trapRejected'], 412);
       assert.equal(reading['syslogMalformed'], 17);
+    });
+
+    it('carries what the probe’s machine has left, beside what the probe holds', () => {
+      // `P-208`: the two numbers `P-206` needed and had one of. The probe was the largest process
+      // on its VM when it was killed; what killed it was everything else, and only this says so.
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['memory'], 210.4);
+      assert.equal(reading['memoryAvailable'], 23.4);
+      assert.equal(reading['memoryAvailableBytes'], 1_860);
+    });
+
+    it('gaps the machine’s memory for a probe that does not send it, never reading it as zero', () => {
+      // A probe below protocol 17, or one on a platform that cannot say. A zero here is the error
+      // limit, so reading absence as zero would page somebody about a machine with memory to spare.
+      const { memoryAvailablePercent: _a, memoryAvailableMb: _b, ...older } = FULL;
+      const { reading } = build(() => connected({ health: older })).read(probeId);
+      assert.equal(reading['memoryAvailable'], null);
+      assert.equal(reading['memoryAvailableBytes'], null);
+      assert.equal(reading['memory'], 210.4, 'the probe’s own number is unaffected');
     });
 
     it('gaps a listener a probe does not run, rather than reading it as silent', () => {

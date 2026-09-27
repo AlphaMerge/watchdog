@@ -72,6 +72,26 @@ describe('protocol message validation', () => {
     );
   });
 
+  it('accepts what the probe’s machine has left, and refuses a percentage above a hundred', () => {
+    // `P-208`, protocol 17. A percentage over 100 is a bug at the sender, and a channel with a
+    // lower limit on it would read it as a machine with more memory than it has.
+    const health = parseProbeToCore({
+      type: 'heartbeat',
+      seq: 7,
+      sentAt: 'now',
+      health: { memoryMb: 210.4, memoryAvailablePercent: 23.4, memoryAvailableMb: 1_860 },
+    });
+    assert.equal(health.type === 'heartbeat' ? health.health?.memoryAvailablePercent : null, 23.4);
+    assert.throws(() =>
+      parseProbeToCore({
+        type: 'heartbeat',
+        seq: 8,
+        sentAt: 'now',
+        health: { memoryAvailablePercent: 100.5 },
+      }),
+    );
+  });
+
   it('refuses a negative count in the health payload', () => {
     assert.throws(() =>
       parseProbeToCore({ type: 'heartbeat', seq: 6, sentAt: 'now', health: { deferred: -1 } }),

@@ -91,6 +91,21 @@ const CORE_METRICS: readonly Metric[] = [
     name: 'ms_core_rollup_backfill_windows',
     help: 'Windows waiting to be rolled up again after late data arrived.',
   },
+  // The machine's memory, not the process's (`P-208`) — which is why these are exported when the
+  // core's own resident memory is not: `prom-client`'s defaults describe the process, and nothing
+  // standard in them says what the machine has left. Both the lowest of the last thirty seconds.
+  {
+    key: 'memoryAvailable',
+    name: 'ms_core_machine_memory_available_ratio',
+    help: "Memory the operating system says is available on the core's machine, as a fraction of its total; the lowest in the last 30 s.",
+    scale: PERCENT,
+  },
+  {
+    key: 'memoryAvailableBytes',
+    name: 'ms_core_machine_memory_available_bytes',
+    help: "Memory the operating system says is available on the core's machine; the lowest in the last 30 s.",
+    scale: MB,
+  },
   {
     key: 'diskFree',
     name: 'ms_core_disk_free_percent',
@@ -429,6 +444,18 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'memory',
     name: 'ms_probe_memory_bytes',
     help: 'Probe process resident memory.',
+    scale: MB,
+  },
+  {
+    key: 'memoryAvailable',
+    name: 'ms_probe_machine_memory_available_ratio',
+    help: "Memory the operating system says is available on the probe's machine, as a fraction of its total; the lowest in the last 30 s.",
+    scale: PERCENT,
+  },
+  {
+    key: 'memoryAvailableBytes',
+    name: 'ms_probe_machine_memory_available_bytes',
+    help: "Memory the operating system says is available on the probe's machine; the lowest in the last 30 s.",
     scale: MB,
   },
   { key: 'uptime', name: 'ms_probe_uptime_seconds', help: 'Seconds since the probe started.' },

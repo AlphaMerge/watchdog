@@ -4415,7 +4415,7 @@ because each is a decision rather than a defect:
       did. `docs/sizing.md`'s start-up peak is now 2,593 MB, and it says what a worker running
       heavy checks costs.
 
-- [ ] **P-208 — Probe Health cannot see the machine running out of memory** · S · P-206 · The
+- [x] **P-208 — Probe Health cannot see the machine running out of memory** · S · P-206 · The
       `memory` channel is the probe's own resident memory, which is half of what `P-206` needed:
       the probe was the largest process on the VM when it was killed, but it was killed because a
       lint run and PostgreSQL's shared buffers had taken the rest, and no channel on Probe Health
@@ -4425,6 +4425,39 @@ because each is a decision rather than a defect:
       (`MemAvailable` on Linux, not `MemFree`; the equivalent on Windows), measured to track it
       under load, with a default limit that has a stated reason, and a gap rather than a zero where
       the platform cannot say. The same channel on Core Health is worth deciding in the same ticket.
+
+      **Done.** `memoryAvailable` (%) and `memoryAvailableBytes` (MB) on **both** Probe Health and
+      Core Health — Core Health too, because a core whose probes are all remote has nothing else
+      watching the machine its database runs on. `MachineMemoryWatch` in `@ms/shared` reads
+      `MemAvailable` from `/proc/meminfo` on Linux and `os.freemem()` (`GlobalMemoryStatusEx`'s
+      available) on Windows, and is a **gap** on a kernel without `MemAvailable` and on any other
+      platform. Each channel is the **lowest of the last thirty seconds**, not the latest: the
+      probe samples at every heartbeat, the core on a two-second timer of its own. **Default
+      limits: warning below 20%, error below 10%**, both from `P-206`'s VM — 8.5% fell to a kernel
+      kill in six seconds, and the runs it survived bottomed out at 9.9–23.4% with swap gone.
+      Protocol 17, capability `machineMemory`; `healthForPeer` strips the two fields for an older
+      core — the first health field since `P-178`, so the first the heartbeat has had to gate.
+      Also exported to Prometheus as `ms_{probe,core}_machine_memory_available_{ratio,bytes}`.
+
+      **Measured** (`findings/2026-09-27-machine-memory-channel.md`): squeezing the dev VM to 15%
+      with `ms-server` running 5,000 sensors beside it, every squeeze held for 5, 20 or 70 s was
+      recorded within half a point of its true low, where a latest-value channel read ~55% for the
+      interval each one ended in. A 1-second squeeze read 23.0% against a true 15.6% — the bound of
+      two-second sampling — and a low reached in the last two seconds before a record lands one
+      record later. **Not measured live**: the path through a core sweep into `sample` (unit-tested;
+      no dev token could be minted because the generated admin password had been changed), and
+      Windows (`H-09`). The cgroup case is `P-210`.
+
+- [ ] **P-210 — a probe near its own cgroup ceiling is killed with memory to spare** · S · P-208 ·
+      `ms-probe.service` sets `MemoryHigh=4G` and `MemoryMax=6G`, and the kernel enforces those on
+      the probe's cgroup whatever the machine has left: on a 64 GiB host the probe can be killed at
+      6 GiB while `memoryAvailable` reads 80%. `memory` shows the probe's resident set, but not the
+      ceiling it is measured against, and resident memory is not what the cgroup counts (page cache
+      charged to it is). **Done when** Probe Health reports headroom to the probe's own cgroup limit
+      where there is one (`memory.max` and `memory.current` under cgroup v2 — the limit is what
+      `process.constrainedMemory()` returns, and the difference is `process.availableMemory()`) and a gap where there is none, with a default limit
+      that has a stated reason — or the ticket records why `memory` against the unit's figure is
+      enough. Core Health's `ms-core.service` has the same pair (`6G`/`8G`).
 
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15

@@ -293,6 +293,39 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'clockJumps', name: 'Clock jumps', unit: 'jumps', counter: { bits: 64 } },
   { key: 'cpu', name: 'CPU', unit: '%' },
   { key: 'memory', name: 'Memory (resident)', unit: 'MB' },
+  // **How much the machine has left, which is not how much the probe holds** (`P-208`). `P-206`'s
+  // probe was the largest process on its VM when the kernel killed it, but a lint run and
+  // PostgreSQL's shared buffers had taken the rest, and `memory` above could not have said so. On
+  // a machine the probe has to itself the two nearly agree; beside the core and its database —
+  // the default installation — they do not. `MemAvailable` on Linux, never `MemFree`, and the
+  // lowest in the last thirty seconds rather than the latest, because a squeeze that ends in a
+  // kill can be over inside one record interval.
+  //
+  // A **gap** where the platform cannot say, never a zero: a zero on this channel is the error.
+  //
+  // The machine's, not the probe's cgroup: a probe near its own `MemoryMax` in `ms-probe.service`
+  // shows on `memory`, against the figure in that unit, and is killed with plenty available here.
+  {
+    key: 'memoryAvailable',
+    name: 'Memory available',
+    unit: '%',
+    // Lower limits, from what `P-206` measured on a 7,936 MiB VM. **The error is at 10%** because
+    // that is where the fastest fall on record began: 675 MiB available (8.5%) to 30 MiB, and the
+    // kernel killing a process, in six seconds — below it there is no time left to act. **The
+    // warning is at 20%** because the three runs that machine survived bottomed out at 9.9, 17.0
+    // and 23.4% with swap already exhausted in each: one more process from a kill, and a warning
+    // at 20% would have said so for two of the three.
+    limits: {
+      lowerWarning: 20,
+      lowerError: 10,
+      warningMessage: "the probe's machine is running low on memory",
+      errorMessage: "the probe's machine is nearly out of memory; the kernel may kill a process",
+    },
+  },
+  // The same reading in megabytes, because "8% available" is not something an operator can act
+  // on without knowing of what. No limit: a threshold in megabytes is wrong on every machine but
+  // the one it was written for, which is `diskFreeBytes`' reason on Core Health too.
+  { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
   { key: 'uptime', name: 'Uptime', unit: 's' },
 ];
 

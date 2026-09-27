@@ -248,22 +248,11 @@ export function parseLoadAverage(output: string): LoadAverage | null {
   return null;
 }
 
-/** `/proc/meminfo`, as bytes. Every value there is in kB, and every line says so. */
-export function parseMeminfo(output: string): Map<string, number> {
-  const values = new Map<string, number>();
-  for (const line of output.split(/\r?\n/)) {
-    // "MemTotal:        8126756 kB" — the unit is on the line and is always kB in practice,
-    // but a line without one is a count (`HugePages_Total`) and must not be multiplied.
-    const match = /^([A-Za-z0-9_()]+):\s+(\d+)(?:\s+(\w+))?\s*$/.exec(line.trim());
-    if (match === null) continue;
-    const key = match[1];
-    const amount = Number(match[2]);
-    if (key === undefined || !Number.isFinite(amount)) continue;
-    const unit = match[3]?.toLowerCase();
-    values.set(key, unit === 'kb' ? amount * 1024 : amount);
-  }
-  return values;
-}
+/**
+ * `/proc/meminfo`, as bytes. In `@ms/shared` since `P-208`, because Probe Health and Core Health
+ * read the local machine's copy with the same parser this reads a remote one's with.
+ */
+export { parseMeminfo } from '@ms/shared';
 
 /** Device output can be long; a sensor message and an error are read by a person. */
 export function clip(text: string, limit = 200): string {

@@ -41,6 +41,13 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 17 adds `memoryAvailablePercent` and `memoryAvailableMb` to the heartbeat's health
+ * (`P-208`): how much the probe's *machine* has left, beside what the probe itself holds. **The
+ * first health field since `P-178`, so the first one the probe has to gate.** Every earlier health
+ * field was added when a newer probe was refused at the handshake by an older core, so a probe
+ * never met a core that did not know its fields; now it is served at the older version, and an
+ * ungated field would have that core reject every heartbeat. `healthForPeer` strips them.
+ *
  * Version 16 adds `final` on a chunked configuration push and `sentAt` on a results batch
  * (`P-168`, `P-169`) — both gated through `capabilitiesFor`, because `additionalProperties:
  * false` sits on the *receiver's* copy of every schema and an unknown field is a rejected
@@ -68,7 +75,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 
 /**
  * The oldest peer version this build still understands.
@@ -500,6 +507,15 @@ export interface ProbeHealthReport {
   cpuPercent?: number;
   memoryMb?: number;
   uptimeSeconds?: number;
+  /**
+   * The probe's *machine*: what the operating system says is available, as a percentage of its
+   * total and in megabytes — the lowest in the last thirty seconds, not the latest (`P-208`).
+   *
+   * Absent where the platform cannot say, so the channels gap: a kernel without `MemAvailable`,
+   * or anything but Linux and Windows. Since protocol 17, and stripped for an older core.
+   */
+  memoryAvailablePercent?: number;
+  memoryAvailableMb?: number;
 }
 
 export type ProbeToCoreMessage =
@@ -843,6 +859,8 @@ const PROBE_HEALTH_SCHEMA = {
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },
     uptimeSeconds: { type: 'number', minimum: 0 },
+    memoryAvailablePercent: { type: 'number', minimum: 0, maximum: 100 },
+    memoryAvailableMb: { type: 'number', minimum: 0 },
   },
 } as const;
 

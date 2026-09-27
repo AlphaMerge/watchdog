@@ -108,10 +108,13 @@ const ICMP_NEEDS_MB = 4_000;
 /**
  * What this machine could still hand out, in MB.
  *
- * `os.freemem()` is `MemFree` on Linux, which excludes reclaimable page cache and so understates
- * the answer by gigabytes on any machine that has been doing work. `MemAvailable` is the
- * kernel's own estimate of what a new allocation would actually get, which is the question being
- * asked. Falls back to `freemem()` where there is no Linux `/proc` to read.
+ * `MemAvailable` is the kernel's own estimate of what a new allocation would actually get, which
+ * is the question being asked; `MemFree` excludes reclaimable page cache and understates it by
+ * gigabytes on any machine that has been doing work. Read directly rather than through
+ * `os.freemem()`: libuv 1.45 and later do return `MemAvailable` there (measured on Node 24, libuv
+ * 1.52: 6,094 MiB against `MemAvailable`'s 6,096 and `MemFree`'s 1,485), but fall back to `MemFree`
+ * without saying so on a kernel that lacks it. Falls back to `freemem()` where there is no Linux
+ * `/proc` to read. Probe Health's own reading is `readMachineMemory` in `@ms/shared` (`P-208`).
  */
 function availableMemoryMb(): number {
   try {
