@@ -4459,6 +4459,35 @@ because each is a decision rather than a defect:
       that has a stated reason — or the ticket records why `memory` against the unit's figure is
       enough. Core Health's `ms-core.service` has the same pair (`6G`/`8G`).
 
+- [x] **P-211 — the report formatter's timeout test fails under a full `npm test`** · S · P-204 ·
+      Seen 2026-09-27: "ends a job that runs out of time, with its worker, and carries on" in
+      `packages/core/test/report-formatter.test.ts` failed once in a full `npm test --workspace
+      @ms/core` (2,634 tests; the test took 3,048 ms), then passed 3/3 alone. Its limit had already
+      gone from 300 ms to 1.5 s for the same reason: the pool's clock started when a job was handed
+      to a worker, and the healthy job after the hung one runs on a new worker, which loads `pdfkit`
+      and the rest of the renderer before it can begin.
+
+      **It was the formatter, and no number would have fixed the test**: the limit was measuring the
+      machine's load, not the report. In the dev toolchain container (eight CPUs) a format worker is
+      ready **0.44 s** after it is started at p50 with no load added, 0.77 s worst of 30; with
+      sixteen busy loops running, **3–5 s at p50 and 11.3 s worst** of 130 — and the old test failed
+      **10 runs in 10** under that load. The healthy job's real work, two rows of CSV, took **167 ms
+      at worst** under the same load. Production's limit is two minutes, so no report failed there
+      for this; but a limit that counts start-up means less the busier the core is.
+
+      **Fixed.** A format worker says `ready` once its imports have loaded, and the job's clock
+      (`timeoutMs`) starts then — the rule the check workers' pool already follows. Start-up gets a
+      clock of its own, `startTimeoutMs`, default two minutes (what a stuck start-up had before,
+      inside the job's two), so a worker that never finishes starting is still ended with the job it
+      was started for, and the queue behind it gets a new worker. The test's limit is now 1 s, six
+      times the worst CSV, and it **passed 10 runs in 10** under the load that failed the old one 10
+      in 10. In three full `npm test --workspace @ms/core` runs it passed taking 3.8, 5.7 and 3.5 s,
+      against the 3.0 s of the run that failed. **Two new tests, deterministic whatever the load**: `gated-format-worker.ts` stays in
+      start-up until the test opens a `BroadcastChannel` gate, so one holds a worker there past the
+      job's limit and sees the job succeed, and the other never opens it and sees both jobs ended by
+      the start-up clock. Each fails against the mutation it guards: the old clock, and no start-up
+      clock.
+
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day

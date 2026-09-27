@@ -35,6 +35,13 @@ import type { ReportDocument } from './table.js';
  *   visible, never silent), and `stats().refused` puts the count on Core Health.
  * - **A job over its time is ended, with its worker.** A formatter that hangs must not take a slot
  *   for ever, and the only way to stop a thread that is not listening is to terminate it.
+ * - **A job's clock starts when its worker says it is ready, not when the job is handed over.**
+ *   Every worker the pool starts is started for a job, and loads `pdfkit` and the rest of the
+ *   renderer before it can begin; charging that to the job made the limit a measure of the machine's
+ *   load rather than of the report, and timed out a healthy job on a cold worker (`P-211`). The
+ *   check workers' pool arms its timer on a ready worker for the same reason. Start-up has a limit
+ *   of its own, so a worker that never finishes starting still cannot hold a slot for ever: it is
+ *   ended with the job it was started for.
  * - **A crashed worker fails one job, not the pool.** It is replaced when there is next work.
  * - **A refusal crosses the thread as a refusal** — see `format-worker.ts`.
  */
@@ -69,14 +76,27 @@ export type FormatReply =
         | { readonly kind: 'other'; readonly message: string };
     };
 
+/** What a worker sends once, when it has loaded and can take a job. The job's clock starts here. */
+export interface FormatReady {
+  readonly type: 'ready';
+}
+
 export interface ReportFormatterOptions {
   readonly logger: Logger;
   /** Workers at most. Default 2 — `ReportRunner`'s own bound. */
   readonly size?: number;
   /** Jobs that may wait for a worker before another is refused. Default 8. */
   readonly maxQueued?: number;
-  /** A job taking longer than this is ended, with its worker. Default two minutes. */
+  /**
+   * A job taking longer than this is ended, with its worker. Default two minutes. Counted from when
+   * the worker is ready, so a cold worker's start-up is not the job's.
+   */
   readonly timeoutMs?: number;
+  /**
+   * A worker not ready this long after it was started is ended, with the job it was started for.
+   * Default two minutes.
+   */
+  readonly startTimeoutMs?: number;
   /** A worker idle this long is given back. Default a minute. */
   readonly idleMs?: number;
   /** The worker module. For tests that need a worker which crashes or hangs on purpose. */
@@ -108,6 +128,8 @@ interface Pending {
 
 interface Slot {
   readonly worker: Worker;
+  /** Said `ready`: its module graph has loaded and it is listening. */
+  ready: boolean;
   job: Pending | undefined;
   timer: NodeJS.Timeout | undefined;
   idle: NodeJS.Timeout | undefined;
@@ -116,6 +138,14 @@ interface Slot {
 const DEFAULT_SIZE = 2;
 const DEFAULT_MAX_QUEUED = 8;
 const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Two minutes, as a stuck start-up was given before it had a clock of its own — it ran inside the
+ * job's. Measured (`P-211`, the dev toolchain container, eight CPUs): a worker is ready 0.44 s
+ * after it is started at p50 with no load added, and 11.3 s at worst in 130 starts with sixteen
+ * busy loops running. Too short fails a healthy report on a loaded core; too long only keeps a
+ * stuck worker's slot a while longer.
+ */
+const DEFAULT_START_TIMEOUT_MS = 120_000;
 const DEFAULT_IDLE_MS = 60_000;
 
 export class ReportFormatter {
@@ -123,6 +153,7 @@ export class ReportFormatter {
   readonly #size: number;
   readonly #maxQueued: number;
   readonly #timeoutMs: number;
+  readonly #startTimeoutMs: number;
   readonly #idleMs: number;
   readonly #workerUrl: URL;
   readonly #workerData: FormatWorkerData;
@@ -141,6 +172,7 @@ export class ReportFormatter {
     this.#size = Math.max(1, options.size ?? DEFAULT_SIZE);
     this.#maxQueued = Math.max(0, options.maxQueued ?? DEFAULT_MAX_QUEUED);
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.#workerUrl = options.workerUrl ?? new URL('./format-worker.js', import.meta.url);
     this.#workerData = { fonts: (options.fonts ?? []).map((font) => ({ ...font })) };
@@ -234,10 +266,17 @@ export class ReportFormatter {
 
   #spawn(): Slot {
     const worker = new Worker(this.#workerUrl, { workerData: this.#workerData });
-    const slot: Slot = { worker, job: undefined, timer: undefined, idle: undefined };
+    const slot: Slot = { worker, ready: false, job: undefined, timer: undefined, idle: undefined };
     this.#slots.push(slot);
 
-    worker.on('message', (reply: FormatReply) => {
+    worker.on('message', (message: FormatReady | FormatReply) => {
+      if ('type' in message) {
+        slot.ready = true;
+        // The job it was started for has been waiting on the start-up clock; its own starts now.
+        if (slot.job !== undefined) this.#arm(slot);
+        return;
+      }
+      const reply = message;
       const pending = slot.job;
       if (pending?.request.id !== reply.id) return;
       this.#finish(slot, (job) => {
@@ -281,23 +320,41 @@ export class ReportFormatter {
     // Held open while it works, so a core shutting down waits for the report in hand; let go of
     // while idle, so an idle pool is never the reason a process — or a test — cannot exit.
     slot.worker.ref();
+    this.#arm(slot);
+    slot.worker.postMessage(pending.request);
+  }
+
+  /**
+   * Starts the clock on the slot's job: the start-up limit while its worker is loading, the job's
+   * own once it is ready. Whichever runs out ends the worker and fails the job.
+   */
+  #arm(slot: Slot): void {
+    if (slot.timer !== undefined) clearTimeout(slot.timer);
+    const starting = !slot.ready;
+    const limitMs = starting ? this.#startTimeoutMs : this.#timeoutMs;
     slot.timer = setTimeout(() => {
       this.#timedOut += 1;
       this.#logger.warn(
-        { reportName: pending.request.name, timeoutMs: this.#timeoutMs },
-        'a report took too long to format, and its worker was ended',
+        { reportName: slot.job?.request.name, timeoutMs: limitMs },
+        starting
+          ? 'a report format worker took too long to start, and was ended'
+          : 'a report took too long to format, and its worker was ended',
       );
+      const seconds = String(limitMs / 1_000);
       this.#finish(slot, (job) => {
         this.#failed += 1;
         job.reject(
-          new Error(`formatting this report took longer than ${String(this.#timeoutMs / 1_000)} s`),
+          new Error(
+            starting
+              ? `the report formatter did not start within ${seconds} s`
+              : `formatting this report took longer than ${seconds} s`,
+          ),
         );
       });
       this.#remove(slot);
       void slot.worker.terminate();
       this.#pump();
-    }, this.#timeoutMs);
-    slot.worker.postMessage(pending.request);
+    }, limitMs);
   }
 
   /** Settles the slot's job, if it has one, and marks the slot free. */

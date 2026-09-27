@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { configureWorker, formatJob } from '../../src/reports/format-job.js';
-import type { FormatRequest } from '../../src/reports/formatter.js';
+import type { FormatReady, FormatRequest } from '../../src/reports/formatter.js';
 
 /**
  * A format worker that does what it is told by the report's name (`P-204`).
@@ -20,3 +20,4 @@ port.on('message', (request: FormatRequest) => {
     port.postMessage(reply, transfer);
   });
 });
+port.postMessage({ type: 'ready' } satisfies FormatReady);

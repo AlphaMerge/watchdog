@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { configureWorker, formatJob } from './format-job.js';
-import type { FormatRequest } from './formatter.js';
+import type { FormatReady, FormatRequest } from './formatter.js';
 
 /**
  * A report formatting worker (`P-204`).
@@ -25,3 +25,5 @@ port.on('message', (request: FormatRequest) => {
     port.postMessage(reply, transfer);
   });
 });
+// Last, and only once: every import above has loaded, so the job's clock can start (`P-211`).
+port.postMessage({ type: 'ready' } satisfies FormatReady);

@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, describe, it } from 'node:test';
+import { BroadcastChannel } from 'node:worker_threads';
 import { ReportError } from '../src/reports/errors.js';
 import { renderOutputs } from '../src/reports/formats.js';
 import { BUNDLED_FALLBACK_FONT } from '../src/reports/fonts.js';
@@ -15,12 +16,35 @@ import { silent } from './support/tree.js';
  * `P-203` measured every format synchronous for its whole duration and two reports at once making
  * a concurrent request wait 2.6 s. This file proves the half of the fix a unit test can: that the
  * worker produces the same bytes the main thread would have, that the main thread stays free while
- * it does, and that a worker which refuses, crashes or hangs costs one job and says why. The other
+ * it does, and that a worker which refuses, crashes, hangs or never finishes starting costs one job
+ * and says why. The other
  * half — a real request's latency while real reports render — is `report-render-performance.test.ts`.
  */
 
 const HOUR = 3_600_000;
 const misbehaving = new URL('./support/misbehaving-format-worker.js', import.meta.url);
+const gated = new URL('./support/gated-format-worker.js', import.meta.url);
+
+/**
+ * Holds every `gated` worker in start-up until `open()` (`P-211`). A worker that starts after the
+ * gate has opened is let through as soon as it says it is waiting, so none can miss the word.
+ */
+function startGate(): { open: () => void; close: () => void } {
+  const channel = new BroadcastChannel('format-worker-gate');
+  let opened = false;
+  channel.onmessage = (event) => {
+    if (opened && event.data === 'waiting') channel.postMessage('open');
+  };
+  return {
+    open: () => {
+      opened = true;
+      channel.postMessage('open');
+    },
+    close: () => {
+      channel.close();
+    },
+  };
+}
 
 function document(name: string, sensors: number, hours: number): ReportDocument {
   const from = new Date('2026-08-01T00:00:00Z');
@@ -211,18 +235,64 @@ describe('the report formatter', () => {
   });
 
   it('ends a job that runs out of time, with its worker, and carries on', async () => {
-    // A second and a half, not less: the clock starts when a job is handed to a worker, and a fresh
-    // worker spends a few hundred milliseconds loading `pdfkit` before it can start. A 300 ms limit
-    // timed out the healthy job after the hung one, one run in six.
-    const pool = formatter({ logger: silent, size: 1, workerUrl: misbehaving, timeoutMs: 1_500 });
-    await assert.rejects(
-      () => pool.format('csv', document('hang', 1, 2)),
-      /took longer than 1.5 s/u,
-    );
+    // The healthy job after the hung one runs on a new worker, and until `P-211` its clock started
+    // before that worker had loaded `pdfkit` — so the limit was a race against the machine's load:
+    // 300 ms lost it one run in six, and 1.5 s still lost it under a full `npm test`. The clock now
+    // starts when the worker says ready, and what has to fit in the second is two rows of CSV:
+    // 167 ms at worst, measured with every CPU running two busy loops.
+    const pool = formatter({ logger: silent, size: 1, workerUrl: misbehaving, timeoutMs: 1_000 });
+    await assert.rejects(() => pool.format('csv', document('hang', 1, 2)), /took longer than 1 s/u);
     assert.equal(pool.stats().timedOut, 1);
+    assert.equal(pool.stats().workers, 0, 'and its worker went with it');
     const next = await pool.format('csv', document('fine', 1, 2));
     assert.ok(next.length > 0, 'the next report is formatted by a new worker');
   });
+
+  it('does not count a worker starting up against the job it was started for', async () => {
+    // `P-211`, without a race: the gate holds the worker in start-up for half as long again as the
+    // job's limit, however quiet the machine is. Timed from the hand-over, this job failed at 1 s.
+    const gate = startGate();
+    try {
+      const pool = formatter({ logger: silent, size: 1, workerUrl: gated, timeoutMs: 1_000 });
+      // Settled into a value, so a rejection during the wait is not an unhandled one.
+      const outcome = pool.format('csv', document('slow to start', 1, 2)).then(
+        (body) => (body.length > 0 ? 'formatted' : 'empty'),
+        (error: unknown) => String(error),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      assert.deepEqual(
+        { busy: pool.stats().busy, timedOut: pool.stats().timedOut },
+        { busy: 1, timedOut: 0 },
+        'still waiting on its worker, past the job limit',
+      );
+      gate.open();
+      assert.equal(await outcome, 'formatted');
+    } finally {
+      gate.close();
+    }
+  });
+
+  it(
+    'ends a worker that never finishes starting, with the job it was started for, and carries on',
+    // Were the start-up clock missing, this would wait for ever rather than fail.
+    { timeout: 10_000 },
+    async () => {
+      // Never opened: these workers are stuck starting, which the job clock alone would never see.
+      const pool = formatter({ logger: silent, size: 1, workerUrl: gated, startTimeoutMs: 250 });
+      const stuck = pool.format('csv', document('stuck', 1, 2));
+      const behind = pool.format('csv', document('behind it', 1, 2));
+      // Attached before anything is awaited, so this rejection can never go unhandled.
+      const behindFails = assert.rejects(behind, /did not start within 0.25 s/u);
+      await assert.rejects(stuck, /did not start within 0.25 s/u);
+      assert.deepEqual(
+        { workers: pool.stats().workers, busy: pool.stats().busy, queued: pool.stats().queued },
+        { workers: 1, busy: 1, queued: 0 },
+        'the job behind it has a worker of its own, not the stuck one',
+      );
+      await behindFails;
+      assert.equal(pool.stats().timedOut, 2);
+    },
+  );
 
   it('fails the one job a crashed worker had, and carries on', async () => {
     const pool = formatter({ logger: silent, size: 1, workerUrl: misbehaving });
