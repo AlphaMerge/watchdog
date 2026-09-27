@@ -11763,7 +11763,7 @@ because each is a decision rather than a defect:
       **Blocks `L-02`**: a library is one more list of sensors assembled across branches, and it
       should be built on the rule rather than become the seventh route to need it.
 
-- [ ] **A-13 — Any account can make a report render through anybody's eyes** · S · E-03 · Found
+- [x] **A-13 — Any account can make a report render through anybody's eyes** · S · E-03 · Found
       2026-09-27 while scoping `V2-04`, by reading the code; not yet reproduced over HTTP, so the
       first commit is the failing test. `POST /reports` accepts `runAs` in its body, and
       `ReportService.#resolveContext` checks only that the login exists. The creator's primary
@@ -11784,6 +11784,41 @@ because each is a decision rather than a defect:
       and a read-scoped token. That is the simplest rule that keeps the documented promise.
       Anything cleverer, such as "a caller who can already see everything the target can", is a
       comparison over the whole tree, and the ticket would have to justify it.
+
+      **A-13 outcome. Reproduced before it was fixed:** `author`, a `readwrite` account, sent
+      `POST /reports` with `runAs: "boss"` and a sensor its own group is walled off from, and got
+      201 and a report rendering as the administrator. The rule is now the one the ticket named,
+      in `ReportService.#resolveContext`, which create and `PATCH` both go through: a report may
+      name an account other than the caller's own only if the caller administers the installation.
+      `full` on the report is still what a `PATCH` of `runAs` needs, and is now enough only to
+      point it at yourself — which is also how a report whose account was deleted gets started
+      again by its owner.
+
+      **"Administers" is asked of the groups, the way `rightFor` asks it**, not of the role, so
+      removing somebody from the administrators group ends this with everything else. A token below
+      `full` is not an administrator's authority whoever holds it — the bar `ADMIN` sets for a
+      route. The role is not checked separately because migration 034 already refuses a read-only
+      account in an administrator group; a line checking it was written, could not be killed by
+      any test, and was taken out rather than kept as a guard nobody can exercise.
+
+      **The refusal comes before the account lookup, and that was the second hole.** Until now a
+      non-administrator naming a login got 404 `REPORT_USER_NOT_FOUND` for an invented one and a
+      report for a real one — a way to list the installation's accounts one guess at a time. Both
+      now answer the same 403 `REPORT_FORBIDDEN` in the same words, and only an administrator is
+      told a name is nobody. The one existing test that expected a `readwrite` 404 there now makes
+      that request as the administrator.
+
+      The fixtures that built reports through other accounts — four in the API tests, five in the
+      context tests, two in the service tests — now create as the author and have an
+      administrator repoint, which is the documented path. `administration.md`, both route
+      descriptions and the report settings form say who may name whom.
+
+      Tests: 4 new over HTTP in `reports-api.test.ts` (create and `PATCH` refused to `readwrite`,
+      `readonly` and an administrator's read-scoped token and allowed to the administrator; naming
+      yourself in any case allowed; an invented login refused in the same words as a real one) and
+      1 in `reports-service.test.ts`, plus the `full`-holder half of an existing one. Mutation 6/6:
+      no refusal, checked on update only, on create only, token scope ignored, own account not
+      exempt, and existence told before refusing — each killed by a named A-13 test.
 
 - [ ] **A-14 — Maps and reports accept writes from read-only accounts and read-scoped tokens** · S ·
       A-04, A-06, A-11 · Every map and report route declares `READS`. `routes/maps.ts` says why:

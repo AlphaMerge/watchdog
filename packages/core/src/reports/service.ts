@@ -163,6 +163,10 @@ export class ReportService {
    *
    * Otherwise the creator cannot see what they just made: access is per group and a new report has
    * no grants, so a non-administrator would create one and immediately lose it.
+   *
+   * **That grant is why `runAs` is checked here and not only in `update`** (`A-13`). A creator
+   * holds `full` a moment after this returns, so a rule enforced only on the edit is a rule the
+   * creator walks round by naming the account on the way in.
    */
   async create(viewer: ReportViewer, input: ReportInput, actor: string): Promise<ReportRow> {
     const name = validName(input.name);
@@ -175,7 +179,7 @@ export class ReportService {
 
     return this.#db.tx(async (tx) => {
       await this.#refuseDuplicateName(tx, name, null);
-      const runAs = await this.#resolveContext(tx, input.runAs ?? actor, null);
+      const runAs = await this.#resolveContext(tx, viewer, input.runAs ?? actor, null);
 
       const report = await this.#repository.create(tx, {
         name,
@@ -214,6 +218,9 @@ export class ReportService {
    * document; that one field decides whose data the output contains, so it is the same class of
    * act as granting access and is gated the same way. A `write` holder can change what the report
    * measures and cannot change who it measures it as.
+   *
+   * **And `full` is enough only to point it at yourself** (`A-13`): naming anybody else needs an
+   * administrator, the same rule `create` applies — see `#resolveContext`.
    */
   async update(
     viewer: ReportViewer,
@@ -245,7 +252,7 @@ export class ReportService {
 
       if (patch.runAs !== undefined && patch.runAs !== current.runAsLogin) {
         await this.require(viewer, id, 'full', tx);
-        next.runAs = await this.#resolveContext(tx, patch.runAs, id);
+        next.runAs = await this.#resolveContext(tx, viewer, patch.runAs, id);
       }
 
       if (next.name !== undefined && next.name.toLowerCase() !== current.name.toLowerCase()) {
@@ -315,9 +322,22 @@ export class ReportService {
    * looks configured and fails on a schedule at 03:00 — and because the account has to exist for
    * the id to be worth storing at all. The login is snapshotted as the account spells it, not as
    * the caller typed it, so the two halves agree about case.
+   *
+   * **Only an administrator names an account other than their own** (`A-13`). A report renders
+   * through its context, so naming somebody is reading as them — and before this, any account at
+   * all could create a report through an administrator and read every object it named. The rule
+   * is the simplest one that keeps `administration.md`'s promise: an administrator can already
+   * read everything, so the only caller who may borrow somebody's eyes is one who gains nothing
+   * by it. Anything cleverer ("may, if they can already see what the target can") is a
+   * comparison over the whole tree.
+   *
+   * **Refused before saying whether the login exists.** A non-administrator told 404 for an
+   * invented name and 403 for a real one could list the installation's accounts one guess at a
+   * time, so both answer the same 403 and only an administrator hears "there is no account".
    */
   async #resolveContext(
     q: Queryable,
+    viewer: ReportViewer,
     login: string,
     reportId: number | null,
   ): Promise<{ userId: number; login: string }> {
@@ -328,6 +348,13 @@ export class ReportService {
       });
     }
     const account = await this.#repository.findAccount(q, trimmed);
+    if (account?.id !== viewer.userId && !(await this.#administers(viewer, q))) {
+      throw new ReportError(
+        'REPORT_FORBIDDEN',
+        'only an administrator may make a report render through an account other than their own',
+        { context: { ...(reportId === null ? {} : { reportId }), phase: 'context' } },
+      );
+    }
     if (account === undefined) {
       throw new ReportError('REPORT_USER_NOT_FOUND', `there is no account "${trimmed}"`, {
         context: { ...(reportId === null ? {} : { reportId }), phase: 'context' },
@@ -350,6 +377,20 @@ export class ReportService {
         details: { name },
       });
     }
+  }
+
+  /**
+   * Whether this viewer is acting as an administrator (`A-13`).
+   *
+   * **Asked of the groups, as `rightFor` asks it**, not of the role: removing somebody from the
+   * administrators group has to end this along with everything else it confers (`GroupService.
+   * administers`). The role needs no check of its own, because migration 034 refuses a read-only
+   * account in an administrator group at the database. The token does: one below `full` is not
+   * an administrator's authority, whoever holds it, which is the bar `ADMIN` sets for a route.
+   */
+  async #administers(viewer: ReportViewer, q: Queryable): Promise<boolean> {
+    if (viewer.scope !== undefined && viewer.scope !== 'full') return false;
+    return this.#isAdmin(viewer.userId, q);
   }
 
   async #isAdmin(userId: number, q: Queryable): Promise<boolean> {

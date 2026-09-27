@@ -30,12 +30,15 @@ describe(
     let db: Database;
     let reports: ReportService;
     let harness: Awaited<ReturnType<typeof buildHarness>>;
+    /** The only kind of caller who may point a report at somebody else (`A-13`). */
+    let administrator: { id: number; login: string };
 
     before(async () => {
       scratch = await createScratchDatabase('reportsvc');
       db = scratch.db;
       harness = await buildHarness(db);
       reports = new ReportService({ db, repository: new ReportRepository(), logger: silent });
+      administrator = await makeUser([await makeGroup('r-administrators', true)], 'admin');
     });
 
     after(async () => {
@@ -89,6 +92,16 @@ describe(
     beforeEach(() => {
       seq += 1;
     });
+
+    /** Points a report at another account, as an administrator — nobody else may (`A-13`). */
+    const repoint = (report: { id: number; version: number }, login: string) =>
+      reports.update(
+        viewer(administrator.id, 'admin'),
+        report.id,
+        report.version,
+        { runAs: login },
+        administrator.login,
+      );
 
     describe('access, answered the same way a map answers it', () => {
       it('gives a creator’s primary group full access, so they keep what they made', async () => {
@@ -293,11 +306,13 @@ describe(
       });
 
       it('refuses a context naming nobody, at the write rather than at 3am on a schedule', async () => {
-        const user = await makeUser([await makeGroup(`r-ctx2-${String(seq)}`)]);
+        // An administrator, because only an administrator may name anybody but themselves
+        // (`A-13`) — and so only an administrator is told that the name they typed is nobody.
+        const user = administrator;
         await assert.rejects(
           () =>
             reports.create(
-              viewer(user.id),
+              viewer(user.id, 'admin'),
               { name: `ghost-${String(seq)}`, kind: 'table_only', runAs: 'nobody-at-all' },
               user.login,
             ),
@@ -310,12 +325,71 @@ describe(
         await assert.rejects(
           () =>
             reports.create(
-              viewer(user.id),
+              viewer(user.id, 'admin'),
               { name: `blank-${String(seq)}`, kind: 'table_only', runAs: '   ' },
               user.login,
             ),
           /needs an account to render through/,
         );
+      });
+
+      it('lets nobody but an administrator name an account other than their own', async () => {
+        // **`A-13`, at the one place it is decided.** A report renders through its `runAs`
+        // account, so naming somebody else is reading as them — and the creator holds `full` on a
+        // new report a moment later, which is how `update`'s `full` rule was walked round on the
+        // way in. Refused on create and on update alike, and before the account is looked up, so
+        // the refusal cannot be used to ask which logins exist.
+        const team = await makeGroup(`r-ctx6-team-${String(seq)}`);
+        const owner = await makeUser([team]);
+        const target = await makeUser([team]);
+
+        const refused = (error: unknown): boolean => {
+          assert.equal((error as { code: string }).code, 'REPORT_FORBIDDEN');
+          assert.equal((error as { status: number }).status, 403);
+          return true;
+        };
+        for (const runAs of [target.login, 'nobody-at-all']) {
+          await assert.rejects(
+            () =>
+              reports.create(
+                viewer(owner.id),
+                { name: `borrowed-${runAs}-${String(seq)}`, kind: 'table_only', runAs },
+                owner.login,
+              ),
+            refused,
+          );
+        }
+        // An administrator acting through a token below `full` is not acting as one.
+        await assert.rejects(
+          () =>
+            reports.create(
+              { userId: administrator.id, role: 'admin', scope: 'write' },
+              { name: `borrowed-token-${String(seq)}`, kind: 'table_only', runAs: target.login },
+              administrator.login,
+            ),
+          refused,
+        );
+
+        const report = await reports.create(
+          viewer(owner.id),
+          { name: `own-eyes-${String(seq)}`, kind: 'table_only', runAs: owner.login.toUpperCase() },
+          owner.login,
+        );
+        assert.equal(report.runAsUserId, owner.id, 'naming yourself is not borrowing anything');
+        await assert.rejects(
+          () =>
+            reports.update(
+              viewer(owner.id),
+              report.id,
+              report.version,
+              { runAs: target.login },
+              owner.login,
+            ),
+          refused,
+        );
+
+        const moved = await repoint(report, target.login);
+        assert.equal(moved.runAsUserId, target.id, 'and an administrator may');
       });
 
       it('needs full to change it — a write holder may change what, not as whom', async () => {
@@ -357,13 +431,20 @@ describe(
         // And it did not change underneath the refusal.
         assert.equal((await reports.get(viewer(owner.id), report.id)).runAsLogin, owner.login);
 
-        const moved = await reports.update(
-          viewer(owner.id),
-          report.id,
-          edited.version,
-          { runAs: writer.login },
-          owner.login,
+        // `full` is necessary and, for anybody but the holder's own account, not sufficient
+        // (`A-13`): the owner may not point it at the writer either. An administrator may.
+        await assert.rejects(
+          () =>
+            reports.update(
+              viewer(owner.id),
+              report.id,
+              edited.version,
+              { runAs: writer.login },
+              owner.login,
+            ),
+          /only an administrator/,
         );
+        const moved = await repoint(edited, writer.login);
         assert.equal(moved.runAsUserId, writer.id);
       });
 
@@ -375,10 +456,13 @@ describe(
         // from every object in the installation.
         const owner = await makeUser([await makeGroup(`r-ctx4-owner-${String(seq)}`)]);
         const doomed = await makeUser([await makeGroup(`r-ctx4-doomed-${String(seq)}`)]);
-        const report = await reports.create(
-          viewer(owner.id),
-          { name: `orphaned-${String(seq)}`, kind: 'table_only', runAs: doomed.login },
-          owner.login,
+        const report = await repoint(
+          await reports.create(
+            viewer(owner.id),
+            { name: `orphaned-${String(seq)}`, kind: 'table_only' },
+            owner.login,
+          ),
+          doomed.login,
         );
         assert.equal(report.runAsUserId, doomed.id);
 
@@ -398,10 +482,13 @@ describe(
       it('can be repointed at a live account once it is lost', async () => {
         const owner = await makeUser([await makeGroup(`r-ctx5-owner-${String(seq)}`)]);
         const doomed = await makeUser([await makeGroup(`r-ctx5-doomed-${String(seq)}`)]);
-        const report = await reports.create(
-          viewer(owner.id),
-          { name: `repointed-${String(seq)}`, kind: 'table_only', runAs: doomed.login },
-          owner.login,
+        const report = await repoint(
+          await reports.create(
+            viewer(owner.id),
+            { name: `repointed-${String(seq)}`, kind: 'table_only' },
+            owner.login,
+          ),
+          doomed.login,
         );
         await db.query(`DELETE FROM user_account WHERE id = $1`, [doomed.id]);
 

@@ -42,6 +42,8 @@ describe('a report’s security context', { skip: available ? false : 'no databa
   let salesGroup: number;
   let opsGroup: number;
   let adminGroup: number;
+  /** Who points a report at somebody other than its author — nobody else may (`A-13`). */
+  let administrator: { id: number; login: string };
 
   before(async () => {
     scratch = await createScratchDatabase('reportctx');
@@ -117,6 +119,7 @@ describe('a report’s security context', { skip: available ? false : 'no databa
     salesGroup = await makeGroup('sales');
     opsGroup = await makeGroup('ops');
     adminGroup = await makeGroup('admins', true);
+    administrator = await makeUser([adminGroup], 'admin');
     await db.query(
       `INSERT INTO object_access (object_id, group_id, right_) VALUES ($1, $2, 'read'), ($3, $4, 'read')`,
       [salesDeviceId, salesGroup, opsDeviceId, opsGroup],
@@ -160,22 +163,30 @@ describe('a report’s security context', { skip: available ? false : 'no databa
 
   const viewer = (userId: number): ReportViewer => ({ userId, role: 'readwrite' });
 
-  /** A report over every subject in the fixture, rendered as somebody. */
+  /**
+   * A report over every subject in the fixture, rendered as somebody.
+   *
+   * The owner creates it, so the owner's group holds `full` on it; when it is to render through
+   * anybody else, an administrator repoints it, because nobody else may (`A-13`).
+   */
   const reportAs = async (
     owner: { id: number; login: string },
     runAs: string,
     subjects: number[] = [salesSensorId, opsSensorId, credentialSensorId, deletedSensorId],
   ) => {
     seq += 1;
-    return reports.create(
+    const report = await reports.create(
       viewer(owner.id),
-      {
-        name: `scenario-${String(seq)}`,
-        kind: 'sensor_list',
-        subjects: { objectIds: subjects },
-        runAs,
-      },
+      { name: `scenario-${String(seq)}`, kind: 'sensor_list', subjects: { objectIds: subjects } },
       owner.login,
+    );
+    if (runAs === owner.login) return report;
+    return reports.update(
+      { userId: administrator.id, role: 'admin' },
+      report.id,
+      report.version,
+      { runAs },
+      administrator.login,
     );
   };
 

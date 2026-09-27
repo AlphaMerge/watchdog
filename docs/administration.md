@@ -62,7 +62,9 @@ own, and they exist because a report is read later, by somebody who was not in t
 - **A report names the account whose visibility it renders through**, which defaults to whoever
   created it. That is what decides which sensors appear in the output, so **changing it needs
   `full`, not `write`** — a colleague who may edit what a report measures cannot quietly make it
-  measure as you.
+  measure as you. **Naming anybody other than yourself needs an administrator**, on a new report
+  as on an existing one: the creator of a report holds `full` on it, so a rule about editing alone
+  would let anybody create a report that reads through an administrator's eyes.
 - **Granting somebody a report grants them everything that account can see.** This is the point of
   the feature and it is worth saying out loud: a colleague with `read` on a report gets the data
   its `runAs` account could reach, whatever their own rights are. **Grant a report the way you

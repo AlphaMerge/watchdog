@@ -542,7 +542,9 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
           'The creator’s primary group is granted full access in the same transaction, or a ' +
           'non-administrator would create a report and immediately lose sight of it. `runAs` ' +
           'defaults to the caller: a report renders through somebody’s eyes, and the person ' +
-          'making it is the only safe default.\n\n' +
+          'making it is the only safe default. **Naming any other account needs an ' +
+          'administrator**, and a login that does not exist is refused in the same words as ' +
+          'one that does, so the refusal cannot be used to list accounts.\n\n' +
           '`span` names a calendar period — `{ kind, offset, timezone }` for `day`, `week`, ' +
           '`month`, `quarter` and `year`, or `{ kind: "custom", from, to }` with ISO 8601 ' +
           'instants. **`offset` counts periods back and defaults to 1**, the last complete one: ' +
@@ -581,7 +583,8 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         description:
           '`If-Match` carries the version this edit was made against. Changing `runAs` needs ' +
           'full access rather than write: it decides whose data the output contains, which is ' +
-          'the same class of act as granting access.',
+          'the same class of act as granting access. **Full is enough only to point it at ' +
+          'yourself** — naming any other account needs an administrator, as it does on create.',
         body: { ...reportBody, required: [] },
         response: { 200: reportResponse },
       },

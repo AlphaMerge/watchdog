@@ -198,11 +198,12 @@ export function ReportSettings({
         {/*
           Said where it is set. Changing this needs full access rather than write, because it
           decides whose data the output contains — the same class of act as granting access
-          (`E-03`).
+          (`E-03`) — and naming anybody but yourself needs an administrator (`A-13`).
         */}
         <p className="-mt-3 text-xs text-text-muted">
-          A report contains what that account can see. Changing it needs full access, and granting
-          somebody this report grants them everything that account can see.
+          A report contains what that account can see. Changing it needs full access, only an
+          administrator may name somebody other than themselves, and granting somebody this report
+          grants them everything that account can see.
         </p>
 
         <fieldset className="space-y-2">

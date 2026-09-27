@@ -53,6 +53,10 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   let app: FastifyInstance;
   let author = '';
   let reader = '';
+  /** An administrator, a read-only account, and a read-scoped token the administrator holds. */
+  let boss = '';
+  let onlooker = '';
+  let bossReadToken = '';
   let readerGroupId: number;
   let reportRunner: ReportRunner;
   let reportRuns: ReportRunRepository;
@@ -245,8 +249,39 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     deletedId = doomed.id;
     await db.query('DELETE FROM object WHERE id = $1', [deletedId]);
 
+    // **The other two roles, and a token** (`A-13`). Everything above is `readwrite` on purpose;
+    // who may make a report borrow somebody else's eyes is a question about the role, so it needs
+    // one of each — and a read-scoped token held by the administrator, so the account's own role
+    // cannot be what refuses it.
+    const bossAccount = await accounts.create({
+      login: 'boss',
+      password: 'correct-horse-battery',
+      role: 'admin',
+    });
+    const administrators = (await groups.list()).find((group) => group.isAdmin);
+    assert.ok(administrators, 'the builtin administrators group');
+    await groups.addMember(administrators.id, bossAccount.id);
+    await accounts.create({
+      login: 'onlooker',
+      password: 'correct-horse-battery',
+      role: 'readonly',
+    });
+    await db.query(
+      `INSERT INTO user_group_member (group_id, user_id, is_primary)
+       SELECT $1, id, true FROM user_account WHERE login = 'onlooker'`,
+      [readerGroupId],
+    );
+    bossReadToken = (
+      await new TokenService({ db, logger: silent }).issue(
+        { userId: bossAccount.id, role: 'admin' },
+        { name: 'reports-read', scope: 'read' },
+      )
+    ).secret;
+
     author = await sessionFor('author');
     reader = await sessionFor('reader');
+    boss = await sessionFor('boss');
+    onlooker = await sessionFor('onlooker');
   });
 
   after(async () => {
@@ -291,15 +326,33 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     runAs: { login: string; available: boolean };
   }
 
+  /**
+   * A report `author` made, and so holds `full` on.
+   *
+   * A `runAs` naming anybody else is set afterwards by the administrator, because nobody else may
+   * point a report at another account (`A-13`) — `author` creating one through `temp` is exactly
+   * the request that is now refused.
+   */
   const makeReport = async (name: string, extra: Record<string, unknown> = {}): Promise<Wire> => {
+    const { runAs, ...rest } = extra;
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/reports',
       headers: as(author),
-      payload: { name, kind: 'table_only', ...extra },
+      payload: { name, kind: 'table_only', ...rest },
     });
     assert.equal(response.statusCode, 201, response.body);
-    return response.json<Wire>();
+    const made = response.json<Wire>();
+    if (runAs === undefined) return made;
+
+    const repointed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/reports/${String(made.id)}`,
+      headers: { ...as(boss), 'if-match': `W/"${String(made.version)}"` },
+      payload: { runAs },
+    });
+    assert.equal(repointed.statusCode, 200, repointed.body);
+    return repointed.json<Wire>();
   };
 
   it('serves the routes at all, which is what the maps API was missing for months', async () => {
@@ -373,10 +426,12 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     // replaced. These cases exist so the same omission cannot happen here quietly: each asserts
     // a status the service chose deliberately, and a 500 fails all of them.
     it('carries a refusal out with the status the service chose, not a 500', async () => {
+      // As the administrator: only an administrator may name another account at all (`A-13`), so
+      // only an administrator is told that the one they named does not exist.
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/reports',
-        headers: as(author),
+        headers: as(boss),
         payload: { name: 'ghost-context', kind: 'table_only', runAs: 'nobody-at-all' },
       });
       assert.equal(response.statusCode, 404);
@@ -664,6 +719,116 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: as(reader),
       });
       assert.equal(response.statusCode, 404, 'absent rather than forbidden, as everywhere else');
+    });
+  });
+
+  describe('whose eyes a report may borrow (A-13)', () => {
+    /**
+     * The attack, as it would be written: name a sensor the caller may not see, point the report
+     * at an administrator, then read it back through `/subjects`, a render or a run.
+     *
+     * **The create path is the one that mattered.** Changing `runAs` on an existing report needed
+     * `full` — `administration.md` promises a colleague "cannot quietly make it measure as you" —
+     * and whoever creates a report holds `full` on it a moment later, so the promise was kept on
+     * the edit and walked round on the way in. The rule is now the simplest one that keeps it:
+     * nobody but an administrator names an account other than their own.
+     */
+    const borrow = (headers: Record<string, string>, name: string, runAs: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers,
+        payload: { name, kind: 'table_only', runAs, subjects: { objectIds: [hiddenSensorId] } },
+      });
+
+    const exists = async (name: string): Promise<boolean> =>
+      (await db.query(`SELECT 1 FROM report WHERE name = $1`, [name])).length > 0;
+
+    /**
+     * Every principal that is not an administrator acting with its full authority, and an account
+     * that is somebody else to it — the token is the administrator's own, so it names `author`.
+     */
+    const outsiders = (): [string, Record<string, string>, string][] => [
+      ['readwrite', as(author), 'boss'],
+      ['readonly', as(onlooker), 'boss'],
+      ['read-token', { authorization: `Bearer ${bossReadToken}` }, 'author'],
+    ];
+
+    it('refuses to create one that renders through somebody else, unless an administrator asks', async () => {
+      for (const [who, headers, somebodyElse] of outsiders()) {
+        const name = `borrowed-by-${who}`;
+        const response = await borrow(headers, name, somebodyElse);
+        assert.equal(response.statusCode, 403, `${who}: ${response.body}`);
+        assert.equal(
+          await exists(name),
+          false,
+          `${who} created one through ${somebodyElse} anyway`,
+        );
+      }
+
+      // The one caller who may: an administrator can already read everything the report could.
+      const allowed = await borrow(as(boss), 'borrowed-by-admin', 'author');
+      assert.equal(allowed.statusCode, 201, allowed.body);
+      assert.deepEqual(allowed.json<Wire>().runAs, { login: 'author', available: true });
+    });
+
+    it('lets anybody name themselves, however they spell it', async () => {
+      const response = await borrow(as(author), 'my-own-eyes', 'AUTHOR');
+      assert.equal(response.statusCode, 201, response.body);
+      assert.equal(response.json<Wire>().runAs.login, 'author');
+    });
+
+    it('refuses a login that does not exist in the same words as one that does', async () => {
+      // Otherwise the refusal is a login oracle: 404 for an invented name and 403 for a real one
+      // tells a non-administrator which accounts exist, one guess at a time.
+      const real = await borrow(as(author), 'oracle-real', 'boss');
+      const invented = await borrow(as(author), 'oracle-invented', 'nobody-at-all');
+      const envelope = (body: string) => {
+        const { code, message } = (JSON.parse(body) as { error: { code: string; message: string } })
+          .error;
+        return { code, message };
+      };
+      assert.equal(real.statusCode, 403);
+      assert.equal(invented.statusCode, 403);
+      assert.deepEqual(envelope(invented.body), envelope(real.body));
+      assert.equal(envelope(real.body).code, 'REPORT_FORBIDDEN');
+    });
+
+    it('refuses to repoint one at somebody else, even for the holder of full', async () => {
+      const made = await makeReport('repoint-me', { subjects: { objectIds: [hiddenSensorId] } });
+      // `full` for the readers too, so the read-only account is refused by the rule and not only
+      // by having no grant.
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/reports/${String(made.id)}/access/${String(readerGroupId)}`,
+        headers: as(author),
+        payload: { right: 'full' },
+      });
+      const repoint = (headers: Record<string, string>, runAs: string) =>
+        app.inject({
+          method: 'PATCH',
+          url: `/api/v1/reports/${String(made.id)}`,
+          headers: { ...headers, 'if-match': `W/"${String(made.version)}"` },
+          payload: { runAs },
+        });
+
+      for (const [who, headers, somebodyElse] of outsiders()) {
+        const response = await repoint(
+          headers,
+          somebodyElse === 'author' ? 'reader' : somebodyElse,
+        );
+        assert.equal(response.statusCode, 403, `${who}: ${response.body}`);
+      }
+      const reread = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: as(author),
+      });
+      assert.deepEqual(reread.json<Wire>().runAs, { login: 'author', available: true });
+
+      const allowed = await repoint(as(boss), 'reader');
+      assert.equal(allowed.statusCode, 200, allowed.body);
+      assert.equal(allowed.json<Wire>().runAs.login, 'reader');
     });
   });
 
