@@ -225,8 +225,8 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
 
 ## What is not here
 
-**Reports** are `[V2]` and are not built. The map and dashboard designer was also `[V2]` and is
-now built — see the Maps section above. See [`CAPABILITIES.MD §6`](CAPABILITIES.MD) for the full
+**Libraries** are `[V2]` and are not built. Reports and the map and dashboard designer were also
+`[V2]` and are now built — see their sections above. See [`CAPABILITIES.MD §6`](CAPABILITIES.MD) for the full
 list and its markers; the remaining v2 candidates are in [TASKS.md](TASKS.md).
 
 For an installation that has no maps arranged yet, the Overview and the Alarms view are what a

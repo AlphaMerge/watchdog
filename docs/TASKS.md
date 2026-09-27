@@ -11685,6 +11685,114 @@ because each is a decision rather than a defect:
       so they were asserting against a wall of 403s that no credential could leak through.
       Mutation 4/4.
 
+- [ ] **A-12 — Lists, search, alarms, the state log and the stream ignore object rights** · L ·
+      A-03, A-11 · Found 2026-09-27 while scoping `V2-04`. `administration.md` says a right is
+      what a group may do to a branch and that `none` "carves a hole in a branch", and `A-03` built
+      `resolveMany` because "a list view would otherwise be one walk per row" — **but no list view
+      calls it.** Every route that returns *many* objects is declared `READS`, which `A-11`'s hook
+      reads as a role check with no object in it, and none of them hands the principal any further:
+
+      | Route | What a branch-restricted account gets |
+      | --- | --- |
+      | `GET /objects` (the tree's search and tag box) | every object's name, kind, tags, state and type — `ObjectService.list` takes no principal |
+      | `GET /alarms` | every sensor in an alarm state, with its message — `alarms.list` takes none |
+      | `GET /state-log` | every state change, with its message |
+      | `/api/v1/stream` | every state change as it happens, name and path included; `{"subscribe":{}}` is the whole installation |
+      | `GET /objects/:id/tree`, `GET /objects/:id/counts` | a `none` grant carved *below* the root is not honoured — `onObject('read')` checks the root only |
+      | a map's sensor-list widget | the same, one layer in: `MapResolver` resolves the widget's root, not the sensors under it |
+
+      So a `readonly` account granted one customer's branch reads every other customer's device and
+      sensor names, their states and their failure messages, live. Credentials are not exposed —
+      `A-10`'s sweep holds, because `#redact` is a boundary — but visibility is half of what
+      Phase 9 was for, and Phase 9's matrix could not see this: its rows go through single-object
+      routes, and its sweep of `GET` routes looks for a planted secret, not for an object the
+      caller should not have been told about. **An administrator sees no difference**, which is
+      why nobody has.
+
+      **Done when** an account granted one branch, with `none` everywhere else, learns nothing
+      outside it through any route that returns many objects — asserted by a sweep in the shape
+      of `A-10`'s (every registered `GET` that lists, plus the stream), not a list of routes somebody
+      remembered — and a `none` carved below a readable root is honoured by every subtree walk.
+      Hidden objects are **absent, not counted**: a total that included them would say how many
+      sensors match a filter in a branch the caller cannot see, the oracle `G-01` and `E-03` each
+      closed once already.
+
+      **The design half is the paging and the stream, not the rule.** `resolveManyFor` answers for
+      ids already in hand, so filtering a page after the query hands back 37 rows for `limit=100`
+      and a keyset cursor that skips; visibility has to be a condition *inside* each list query,
+      resolved by the same SQL `resolveMany` runs — one implementation, with `A-03`'s agreement
+      test extended to it — rather than a second walk that could disagree. The stream is the hard
+      one: a broadcaster that fans one event out to every socket has to know, per socket, whether
+      that socket may see it, and grants change while sockets stay open. Measure what the answer
+      costs at the v1 target — a snapshot is up to 20,000 sensors — and put the numbers in
+      `docs/findings/`.
+
+      While in those queries: the alarm chain, the stream's ancestry and snapshot walks, and the
+      map sensor-list CTE recurse with no depth bound, where the object repository and the state
+      log use `MAX_WALK_DEPTH`. `S-03`'s cycle prevention means they terminate today; the bound is
+      the defence for the day something else writes `parent_id`.
+
+      **Blocks `L-02`**: a library is one more list of sensors assembled across branches, and it
+      should be built on the rule rather than become the seventh route to need it.
+
+- [ ] **A-13 — Any account can make a report render through anybody's eyes** · S · E-03 · Found
+      2026-09-27 while scoping `V2-04`, by reading the code; not yet reproduced over HTTP, so the
+      first commit is the failing test. `POST /reports` accepts `runAs` in its body, and
+      `ReportService.#resolveContext` checks only that the login exists. The creator's primary
+      group is granted `full` on the new report in the same transaction. So any authenticated
+      principal — a `readwrite` account, a `readonly` one (`A-14`), a read-scoped token — can create
+      a report that renders through an administrator, name any object ids as its subjects, and read
+      them back through `GET /reports/:id/subjects`, a render or a run.
+
+      `administration.md` promises the opposite in as many words: changing `runAs` "needs `full`,
+      not `write` — a colleague who may edit what a report measures cannot quietly make it measure
+      as you". The PATCH path keeps that promise, and the create path walks round it, because
+      whoever creates a report holds `full` on it a moment later. Credentials stay safe — the
+      subject projection has no field for one (`E-03`) — so this is visibility escalated to the
+      whole installation, not credential exposure.
+
+      **Done when** a report renders through an account other than the caller's own only if the
+      caller is an administrator, on create and on PATCH, asserted over HTTP for all three roles
+      and a read-scoped token. That is the simplest rule that keeps the documented promise.
+      Anything cleverer, such as "a caller who can already see everything the target can", is a
+      comparison over the whole tree, and the ticket would have to justify it.
+
+- [ ] **A-14 — Maps and reports accept writes from read-only accounts and read-scoped tokens** · S ·
+      A-04, A-06, A-11 · Every map and report route declares `READS`. `routes/maps.ts` says why:
+      `onObject(...)` resolves against the object tree, so the real decision is made in the
+      service, and it is — for a right *on an existing* map or report. **Creating one has no right
+      to check and no other check**: `MapService.create` and `ReportService.create` read neither
+      the role nor the token's scope. So a `readonly` account, which "may look, never change",
+      creates maps and reports. A token issued with `scope: 'read'` does too, which is the exact
+      hole `A-11` closed for every other route. The creator's primary group is then granted `full`,
+      and so is any `readwrite` colleague who shares it.
+
+      **Nothing caught it because the sweep never saw these routes.** `access-matrix.test.ts`
+      builds its server without `maps` or `reports`, so "every non-`GET` route declares a bar
+      above read" never meets them — and they would fail it, declaring `READS`.
+
+      **Done when** creating anything, and every other mutation on maps and reports, refuses a
+      `readonly` role and a read-scoped token, and the matrix harness registers both services.
+      A route whose check lives in a service needs a declared way to say so, the way `COMPUTES`
+      says a `POST` is a read — not an exemption list. While in those files: a missing `If-Match`
+      answers `401 AUTH_REQUIRED` on maps and reports and `428` on objects (`preconditions.ts`),
+      and `maps/errors.ts` and `reports/errors.ts` say 404-for-invisible is "the same rule as the
+      object API", which answers 403 on purpose (`auth/access.ts`).
+
+- [ ] **A-15 — A map's author can ask whether any object id exists** · S · G-02 · `G-02` gives a
+      broken tile's reason, `object-deleted` or `not-visible`, to a viewer holding `full` on the
+      map, on the premise that a `full` holder is trusted. But `full` is what a map's creator gets
+      automatically (`G-01`), anybody with a login can create one (`A-14`), and a layout's ids are
+      not checked against its author's visibility when it is written. So: create a map, put
+      widgets on ids 1 to 10,000, open the view, and read which ids are deleted and which merely
+      hidden. That is the oracle `G-01` closed at the map level and `E-03` closed for reports,
+      reopened one layer in.
+
+      **Done when** that attack, written as a test, learns nothing. Either administrators alone
+      are told why a tile is unavailable, or nobody is, the bare `unavailable` `E-03` settled on
+      for reports. The ticket decides which; an administrator loses no information under either,
+      since an administrator can read every id anyway.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
@@ -14613,6 +14721,126 @@ did not cover — was the one follow-up it opened, and it has landed too.
 
       21 model tests and 13 rendered tests.
 
+## Phase 14 — Libraries (`V2-04`)
+
+The fourth v2 subsystem, scoped 2026-09-27 with Phase 13 complete and nothing built yet.
+`CAPABILITIES.MD §6` asks for "alternate device-tree views assembled from filter rules (by type,
+status, tag) across unrelated branches", whose sensors "don't double-count". §10 grants access to
+"tree, libraries, maps and reports" per group, and §1 says tags are "used for filtering and library
+rules".
+
+**The tickets use the `L-` prefix.**
+
+**Blocked, on purpose, behind `A-12`…`A-15`.** Scoping read the code this phase would build on and
+found that every route returning many objects ignores per-object rights (`A-12`). It also found
+three holes in the map and report entities whose shape a library copies (`A-13`, `A-14`, `A-15`).
+A library is one more list of sensors assembled across branches and one more flat entity with
+grants, so building it first would copy the holes into a third place. `L-01` starts once `A-14`
+has landed; `L-02` needs `A-12`.
+
+**No ADR, and the reason is worth stating.** Phases 12 and 13 were gated on decisions that changed
+the product's security posture or added a dependency: public links, custom HTML, a PDF without a
+browser, where a generated file lives. A library does neither. It is stored the way a map is,
+evaluated by queries that exist, and drawn by UI that exists. The four decisions it does need follow
+from rules already written, and are settled here so that no ticket re-derives them:
+
+1. **A library holds rules, never sensors.** A node names roots (objects, by id), sensor types,
+   tags and states, and what it shows is evaluated whenever it is read. Without a licence to count
+   against, that is what "don't double-count" means: a sensor in three libraries is checked once,
+   stored once and alarms once. `CLAUDE.md`'s "one outage, one alarm" holds by construction,
+   because nothing about a library reaches the scheduler, storage or notifications. It is also
+   why a sensor added under a linked group appears without anybody editing the library, and why a
+   moved root is followed rather than lost: rules refer to ids.
+2. **A library is evaluated through its viewer's eyes, and never acts as anyone.** `read` on a
+   library grants the arrangement, not the contents. It shows only sensors the viewer can read in
+   the tree, and says nothing about matches it withheld, not even a count, because "4 hidden" on a
+   node filtering for tag `customer-b` is the oracle `G-01` and `E-03` closed. That is the
+   opposite of a report, deliberately. A report is read later by people who were not in the room,
+   so it needs a fixed account (`E-03`); a library is looked at by whoever opens it.
+3. **Tags mean what the tree's tag box means**: effective (inherited from ancestors), compared
+   folded, several ANDed, and evaluated through `ObjectRepository.list`'s walk, not a new one. Tag
+   inheritance already lives in two places — that walk, and `notifications/context.ts`'s
+   `%objecttags`, which does not fold — and a library must not become the third. Types and states
+   are sets matched any-of, and the fields of a rule combine all-of.
+4. **A library view is the server's answer, and the stream only decides when to ask again**, the
+   rule the Alarms view already follows (`web-ui.md`). A node filtering on state changes as
+   sensors change state, and only the core can evaluate a rule with rights applied. The browser's
+   rollup (`tree/model.ts`) colours what it is given.
+
+- [ ] **L-01 — The library entity** · M · A-14 · Storage, a migration with the generic
+      forward-and-back rollback test, a CRUD API, and access by group: the shape `G-01` gave a map
+      and `E-01` a report. Three things are different this time:
+
+      - **The third copy of flat-entity access is where the copying stops.** `MapService` and
+        `ReportService` carry `rightFor`, `withRight`, the administrator check and the group
+        lookup line for line, with a third copy of the administrator query in `AccessService`.
+        `V2-17` records the rule for this: the third instance is where the shape becomes known.
+        Extract it, move maps and reports onto it, and build libraries on it, so that
+        `A-13`…`A-15`'s fixes live in one place.
+      - **Nodes are one `jsonb` document, capped in count and depth**, for `G-01`'s reason
+        unchanged. A root deleted under a node has to leave a node that says so, which neither
+        `ON DELETE CASCADE` nor `RESTRICT` allows. `MAX_WIDGETS` is the precedent for the cap.
+      - **Its mutations are audited.** Maps record nothing in the audit log and reports record
+        only `report.ran` — their create, edit, delete and grants are log lines — which is a gap
+        of its own. A third entity should not join it.
+
+      From the first commit: a `LibraryError` with its own branch in `api/errors.ts` (catalogue
+      entry 41), a stub in the API reference generator, and a place in the access-matrix harness,
+      which is the lesson of `A-14`.
+
+- [ ] **L-02 — Rules, and the resolver that evaluates them** · L · L-01, A-12 · The rule model, and
+      one resolver for all of a library's nodes. What it must do:
+
+      - **Refuse invalid rules at the boundary**: types must be registered in the catalogue,
+        states must be `sensor_state_kind` values, and tags must fit the objects' own limits.
+      - **Keep a type the catalogue later drops**: it matches nothing, and says so to anyone who
+        can write the library.
+      - **Resolve in a fixed, counted number of statements, whatever the node count** — `G-10`'s
+        lesson, counted rather than timed, with a fixture of distinct roots so the count means
+        something (catalogue entry 39).
+      - **Apply rights through `A-12`'s primitive**, never a second walk.
+      - **Bound each node**, and say `truncated` when it hits the bound.
+      - **Treat a root that is gone or unreadable as a broken node**, and follow whatever `A-15`
+        decides about telling the two apart. A library's author holds `full` on it, which is
+        exactly the position `A-15` is about.
+
+      `GET /libraries/:id/view`. Measure statements and latency for a library of twenty nodes over
+      the 5,000-sensor target, and put the numbers in `docs/findings/`.
+
+- [ ] **L-03 — The library view** · M · L-02 · `/libraries` and `/libraries/:id`:
+      - **A keyboard tree to the ARIA pattern**, with each node's sensors written out with their
+        path, the way the tree's search results are.
+      - **Each node coloured the worst of what it shows.**
+      - **Acknowledge, pause and resume from the row**, under the sensor's own rights, as the
+        Alarms view does.
+      - **One tree implementation, not two.** `TreeView`'s rows and keyboard handling are private
+        and hard-wired to `GET /objects?parentId=`; extract them so the device tree and a library
+        share them. Its pure pieces (`tree/model.ts`, `VirtualList`, `StatusBadge`) already
+        separate.
+
+      Live by decision 4 above. A navigation entry, a `web-ui.md` section, and WCAG 2.1 AA.
+
+- [ ] **L-04 — The library editor** · M · L-03 · Everything an editor has to do:
+      - **Arrange nodes**: add, remove, reorder and nest them.
+      - **A rule form**:
+        - roots from `ObjectPicker`, which offers only probe, group and device roots today, where
+          a node may name a single sensor;
+        - types from the catalogue;
+        - tags and states.
+      - **A preview of what a draft node matches before it is saved**, through a `COMPUTES` route,
+        the way the report form shows the period it works out to while it is still being edited.
+      - **An `If-Match` conflict that says so** rather than overwriting.
+      - **The grants UI maps and reports already have.**
+
+- [ ] **L-05 — From the tree into a library** · S · L-04 · PRTG builds a library by dragging
+      branches into it. Here that is "Add to library…" on a tree row and on an object's detail
+      page, creating a node rooted there. It is its own ticket because it is the only one that
+      changes the device tree's UI.
+
+**Not in this phase**: a library as a report's subjects or as the source of a map widget (both
+would reuse `L-02`'s resolver, and neither is §6's row); libraries in the Home menu, which §6 gives
+to maps; and PRTG's per-node display settings.
+
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
@@ -14620,7 +14848,7 @@ Ordered by expected value. Not scheduled.
 - ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
 - ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, and `E-12` (report fonts beyond DejaVu's coverage) landed the same day
-- **V2-04** Libraries (filter-rule alternate tree views)
+- ~~**V2-04** Libraries (filter-rule alternate tree views)~~ — **scoped 2026-09-27** into `L-01`…`L-05` under Phase 14 above, behind `A-12`…`A-15`
 - **V2-05** Ticket system (user, ToDo and notification tickets)
 - **V2-06** Failover clustering
 - **V2-07** LDAP/AD and OIDC single sign-on
