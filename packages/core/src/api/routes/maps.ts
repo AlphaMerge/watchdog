@@ -8,16 +8,22 @@ import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
 import { MapError } from '../../maps/errors.js';
 import { MAX_IMAGE_BYTES } from '../../maps/images.js';
-import { READS } from '../authorization.js';
+import { READS, writesIn } from '../authorization.js';
 
 /**
  * Maps (`G-01`, `CAPABILITIES.MD §6`).
  *
- * **Every route is `READS` and the real check happens in the service.** The route-level
+ * **The right on a map is decided in the service, and only that part.** The route-level
  * `onObject(...)` helper resolves rights against the *object tree*, and a map is not in it — so
  * pointing it at a map id would ask the wrong table a question it cannot answer. `MapService`
  * holds the one place that decides, which is also what `G-06`'s public route will need when it
  * arrives with no principal at all.
+ *
+ * **Every change still declares `write`, which the hook checks** (`A-14`). These routes used to
+ * declare `READS` throughout, and the service did decide — for a right on a map that exists.
+ * Creating one has no such right, so a read-only account and a read-scoped token made maps and
+ * were handed `full` on each. `MAP_WRITES` refuses both before anything is parsed, and says in its
+ * `rightsIn` where the rest of the decision is made.
  *
  * **A map the caller cannot read answers 404, not 403.** Deliberate, and the reasoning is in
  * `maps/errors.ts`: distinguishing the two turns the error into an oracle for enumerating ids.
@@ -35,6 +41,33 @@ export interface MapRouteOptions {
   resolver?: MapResolver;
   /** What an operator configured, if anything (`G-08`, `ADR-004` Decision 1). */
   tiles?: { urlTemplate: string; attribution: string };
+}
+
+/** Every change to a map: `write` here, and the right on the map itself in `MapService`. */
+const MAP_WRITES = writesIn('MapService');
+
+/**
+ * The version an edit was made against, from `If-Match`.
+ *
+ * `W/"3"`, `"3"` and a bare `3` are all accepted, because the web client sends the last. Missing
+ * is 428 and not a version is 400, as the object API answers them (`A-14`) — it was a 401, which
+ * told a signed-in caller to sign in.
+ */
+function expectedVersion(header: string | undefined, mapId: number): number {
+  if (header === undefined || header.trim() === '') {
+    throw new MapError(
+      'MAP_PRECONDITION_REQUIRED',
+      'this request requires an If-Match header carrying the version the edit was based on',
+      { context: { mapId, phase: 'precondition' } },
+    );
+  }
+  const version = Number(header.replace(/^W\/|"/g, ''));
+  if (!Number.isInteger(version)) {
+    throw new MapError('MAP_INVALID', `If-Match must carry a map version, got ${header}`, {
+      context: { mapId, phase: 'precondition' },
+    });
+  }
+  return version;
 }
 
 interface MapBody {
@@ -316,7 +349,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.post<{ Body: MapBody }>(
     '/maps',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Create a map',
@@ -338,28 +371,25 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.patch<{ Params: { id: string }; Body: Partial<MapBody>; Headers: { 'if-match'?: string } }>(
     '/maps/:id',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Change a map',
         description:
           '`If-Match` carries the version this edit was made against. Without it the request is ' +
-          'refused: a designer is a thing two people open at once, and last-write-wins there ' +
-          'means somebody’s afternoon disappears without a message.',
+          'refused with 428: a designer is a thing two people open at once, and last-write-wins ' +
+          'there means somebody’s afternoon disappears without a message.',
         body: { ...mapBody, required: [] },
         response: { 200: mapResponse },
       },
     },
     async (request) => {
       const viewer = viewerOf(request);
-      const expected = Number(request.headers['if-match']?.replace(/^W\/|"/g, ''));
-      if (!Number.isInteger(expected)) {
-        throw new AuthError('AUTH_REQUIRED', 'If-Match must carry the version being edited');
-      }
+      const id = Number(request.params.id);
       const updated = await maps.update(
         viewer,
-        Number(request.params.id),
-        expected,
+        id,
+        expectedVersion(request.headers['if-match'], id),
         request.body,
         request.principal?.login ?? '',
       );
@@ -396,7 +426,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.post<{ Params: { id: string }; Body: { label: string; expiresAt: string } }>(
     '/maps/:id/shares',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Make a public share link',
@@ -444,7 +474,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.delete<{ Params: { id: string; shareId: string } }>(
     '/maps/:id/shares/:shareId',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Revoke a share link',
@@ -472,7 +502,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.post<{ Params: { id: string } }>(
     '/maps/:id/background',
     {
-      config: READS,
+      config: MAP_WRITES,
       // Refused by the framework before a byte of it is buffered, rather than after. The service
       // checks the same ceiling against what it received, because a limit enforced in one place
       // is a limit that moves when somebody adds a second caller.
@@ -513,7 +543,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.delete<{ Params: { id: string } }>(
     '/maps/:id/background',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Take the background off a map',
@@ -534,7 +564,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.delete<{ Params: { id: string } }>(
     '/maps/:id',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Delete a map',
@@ -597,7 +627,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.put<{ Params: { id: string; groupId: string }; Body: { right: AccessRight } }>(
     '/maps/:id/access/:groupId',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Grant a group access to this map',
@@ -628,7 +658,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
   app.delete<{ Params: { id: string; groupId: string } }>(
     '/maps/:id/access/:groupId',
     {
-      config: READS,
+      config: MAP_WRITES,
       schema: {
         tags: ['maps'],
         summary: 'Take a group’s access away',

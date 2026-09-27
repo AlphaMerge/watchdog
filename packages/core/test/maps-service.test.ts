@@ -87,6 +87,35 @@ describe(
       assert.equal((await maps.get(viewer(user), map.id)).id, map.id);
     });
 
+    it('lets nobody create a map who could not change one', async () => {
+      // **`A-14`, at the service as well as at the route.** Creating has no map to hold a right
+      // on, so the role and the token's scope are the only ceilings there are — and they were not
+      // consulted, so a read-only account or a read-scoped token made maps and got `full` on
+      // them. The route refuses first over HTTP; this is the half that holds for any caller.
+      const group = await makeGroup(`not-creators-${String(seq)}`);
+      const user = await makeUser([group]);
+      for (const who of [
+        { userId: user, role: 'readonly' as const },
+        { userId: user, role: 'readwrite' as const, scope: 'read' as const },
+      ]) {
+        const name = `refused-${who.role}-${String(seq)}`;
+        await assert.rejects(
+          () => maps.create(who, { name }, 'tester'),
+          (error: unknown) => {
+            assert.equal((error as { code: string }).code, 'MAP_FORBIDDEN');
+            return true;
+          },
+        );
+        assert.equal((await db.query(`SELECT 1 FROM map WHERE name = $1`, [name])).length, 0);
+      }
+      // A `write` token is enough, because creating is a write.
+      await maps.create(
+        { userId: user, role: 'readwrite', scope: 'write' },
+        { name: `allowed-${String(seq)}` },
+        'tester',
+      );
+    });
+
     it('hides a map from an account with no grant, as absent rather than forbidden', async () => {
       // Answering 403 for a map that exists and 404 for one that does not is an oracle: anybody
       // could enumerate ids and learn how many maps an installation has.

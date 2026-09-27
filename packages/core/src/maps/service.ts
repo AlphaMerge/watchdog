@@ -145,12 +145,27 @@ export class MapService {
    * **Otherwise the creator cannot see what they just made.** Access is per group and a new map
    * has no grants, so a non-administrator would create a map and immediately lose it — which is
    * the kind of thing that gets discovered by a user rather than by a test.
+   *
+   * **Refused to anybody who could not change a map** (`A-14`). Every other write here asks for a
+   * right on the map, capped by the role and the token; a new map has no right to cap, so the
+   * ceilings are the whole check — and until this they were not consulted, so a read-only account
+   * and a read-scoped token created maps and were handed `full` on them. Asked before the input
+   * is read, so a caller who may not create learns nothing about what a map must look like.
    */
   async create(
     viewer: MapViewer,
     input: { name: string; description?: string; priority?: number; layout?: MapLayout },
     actor: string,
   ): Promise<MapRow> {
+    if (!atLeast(ceilingOf(viewer), 'write')) {
+      throw new MapError('MAP_FORBIDDEN', 'this account may not create maps', {
+        context: { phase: 'create' },
+        details: {
+          role: viewer.role,
+          ...(viewer.scope === undefined ? {} : { scope: viewer.scope }),
+        },
+      });
+    }
     const name = validName(input.name);
     const description = validDescription(input.description ?? '');
     const priority = validPriority(input.priority ?? 3);
@@ -513,6 +528,12 @@ const ORDER: Readonly<Record<AccessRight, number>> = { none: 0, read: 1, write: 
 
 function lowerOf(a: AccessRight, b: AccessRight): AccessRight {
   return ORDER[a] <= ORDER[b] ? a : b;
+}
+
+/** The most this viewer could hold on any map: the role's ceiling, lowered by a token's scope. */
+function ceilingOf(viewer: MapViewer): AccessRight {
+  const role = cappedBy(viewer.role, 'full');
+  return viewer.scope === undefined ? role : lowerOf(role, viewer.scope);
 }
 
 function validName(raw: string): string {

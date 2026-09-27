@@ -44,6 +44,9 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
   let built: ApiServer;
   let author = '';
   let reader = '';
+  /** A read-only account, and a read-scoped token `author` holds (`A-14`). */
+  let watcher = '';
+  let authorReadToken = '';
   let sensorId: number;
   let deletedId: number;
   let readerGroupId: number;
@@ -163,8 +166,31 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       [harness.rootId, readerGroupId, Number(authorGroup[0]?.id)],
     );
 
+    // **A role and a token that may look and never change** (`A-14`). The token is `author`'s,
+    // so the account's own role cannot be what refuses it.
+    await accounts.create({
+      login: 'watcher',
+      password: 'correct-horse-battery',
+      role: 'readonly',
+    });
+    await db.query(
+      `INSERT INTO user_group_member (group_id, user_id, is_primary)
+       SELECT $1, id, true FROM user_account WHERE login = 'watcher'`,
+      [readerGroupId],
+    );
+    const authorId = await db.query<{ id: string }>(
+      `SELECT id FROM user_account WHERE login = 'author'`,
+    );
+    authorReadToken = (
+      await new TokenService({ db, logger: silent }).issue(
+        { userId: Number(authorId[0]?.id), role: 'readwrite' },
+        { name: 'maps-read', scope: 'read' },
+      )
+    ).secret;
+
     author = await sessionFor('author');
     reader = await sessionFor('reader');
+    watcher = await sessionFor('watcher');
   });
 
   after(async () => {
@@ -270,6 +296,56 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     const response = await view(id, reader);
     assert.equal(response.statusCode, 404);
     assert.equal(response.json<{ error: { code: string } }>().error.code, 'MAP_NOT_FOUND');
+  });
+
+  describe('who may change a map at all (A-14)', () => {
+    it('refuses a read-only account and a read-scoped token, and creates nothing', async () => {
+      // **Creating had no right to check and so checked nothing.** Every other change to a map is
+      // gated on a right *on that map*, and that right is capped by the role and the token; a new
+      // map has no right to cap. So a read-only account — which "may look, never change" — made
+      // maps, and was handed `full` on each one.
+      for (const [who, headers] of [
+        ['readonly', as(watcher)],
+        ['read-token', { authorization: `Bearer ${authorReadToken}` }],
+      ] as const) {
+        const name = `not-yours-to-make-${who}`;
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/maps',
+          headers,
+          payload: { name },
+        });
+        assert.equal(response.statusCode, 403, `${who}: ${response.body}`);
+        const rows = await db.query(`SELECT 1 FROM map WHERE name = $1`, [name]);
+        assert.equal(rows.length, 0, `${who} created a map anyway`);
+      }
+    });
+
+    it('answers 428 for an edit that carries no version, as the object API does', async () => {
+      // It answered 401 `AUTH_REQUIRED` — "log in first" — to a caller who was logged in and had
+      // left out a header, which is also a status the mutating sweep counts as a refusal.
+      const id = await makeMap('unversioned', []);
+      const missing = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/maps/${String(id)}`,
+        headers: as(author),
+        payload: { description: 'no header' },
+      });
+      assert.equal(missing.statusCode, 428, missing.body);
+      assert.equal(
+        missing.json<{ error: { code: string } }>().error.code,
+        'MAP_PRECONDITION_REQUIRED',
+      );
+
+      const garbled = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/maps/${String(id)}`,
+        headers: { ...as(author), 'if-match': 'W/"soon"' },
+        payload: { description: 'bad header' },
+      });
+      assert.equal(garbled.statusCode, 400, garbled.body);
+      assert.equal(garbled.json<{ error: { code: string } }>().error.code, 'MAP_INVALID');
+    });
   });
 
   it('answers 404 for a map that does not exist, in the same words', async () => {

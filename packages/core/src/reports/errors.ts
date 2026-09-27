@@ -20,6 +20,7 @@ export type ReportErrorCode =
   | 'REPORT_NOT_FOUND'
   | 'REPORT_NAME_TAKEN'
   | 'REPORT_CHANGED'
+  | 'REPORT_PRECONDITION_REQUIRED'
   | 'REPORT_FORBIDDEN'
   | 'REPORT_GROUP_NOT_FOUND'
   | 'REPORT_USER_NOT_FOUND'
@@ -35,6 +36,9 @@ export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   REPORT_NAME_TAKEN: 409,
   // Well formed, and the state of the report is what refuses it: somebody else saved first.
   REPORT_CHANGED: 409,
+  // 428, as the object and map APIs answer it (`A-14`). It was 401 — "log in first" — to a
+  // caller who was logged in and had left out `If-Match`.
+  REPORT_PRECONDITION_REQUIRED: 428,
   REPORT_FORBIDDEN: 403,
   // **422, not 403 or 500.** The request is understood and the report is real; what is missing is
   // the account whose scope it renders through, and that is neither the caller's fault nor a
@@ -82,9 +86,10 @@ export function reportNotFound(id: number): ReportError {
 /**
  * A report the caller may not see reads as absent, not as forbidden.
  *
- * The same rule the object and map APIs follow: answering 403 for one that exists and 404 for one
- * that does not turns the error into an oracle for enumerating ids. A caller without the right is
- * told the same thing either way.
+ * The map API's rule: answering 403 for one that exists and 404 for one that does not turns the
+ * error into an oracle for enumerating ids. A caller without the right is told the same thing
+ * either way. **The object API answers 403 instead**, and `maps/errors.ts` says why both are
+ * sound: it resolves a right before reading the row, and this reads the row first.
  */
 export function invisible(id: number): ReportError {
   return reportNotFound(id);

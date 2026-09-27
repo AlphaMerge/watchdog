@@ -21,15 +21,17 @@ import type { Database } from '../../db/pool.js';
 import type { ReportFormatter } from '../../reports/formatter.js';
 import { MAX_PDF_PAGES } from '../../reports/pdf.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
-import { READS } from '../authorization.js';
+import { READS, writesIn } from '../authorization.js';
 
 /**
  * The report CRUD surface (`E-01`, `CAPABILITIES.MD §6`).
  *
- * Deliberately the same shape as `routes/maps.ts`: `READS` as the access marker with the right
- * decided per report inside the service, `If-Match` on the write, 404 rather than 403 for a report
- * the caller may not see, and 204 from the grant routes. Two first-class grantable things should
- * not have two different-feeling APIs.
+ * Deliberately the same shape as `routes/maps.ts`: the right decided per report inside the
+ * service, `If-Match` on the write, 404 rather than 403 for a report the caller may not see, and
+ * 204 from the grant routes. Two first-class grantable things should not have two
+ * different-feeling APIs. **And every change declares `write`, which the hook checks** (`A-14`),
+ * for the reason `routes/maps.ts` gives: `READS` everywhere let a read-only account and a
+ * read-scoped token create reports, because creating one has no report to hold a right on.
  *
  * **What this file does not do is run anything.** `E-08` adds "run now" and the schedule; `E-04`
  * adds the output. A report here is a saved intention.
@@ -55,6 +57,27 @@ export interface ReportRouteOptions {
    */
   formatter: ReportFormatter;
   db: Database;
+}
+
+/** Every change to a report: `write` here, and the right on the report in `ReportService`. */
+const REPORT_WRITES = writesIn('ReportService');
+
+/** `If-Match` read the way `routes/maps.ts` reads it: 428 when missing, 400 when not a version. */
+function expectedVersion(header: string | undefined, reportId: number): number {
+  if (header === undefined || header.trim() === '') {
+    throw new ReportError(
+      'REPORT_PRECONDITION_REQUIRED',
+      'this request requires an If-Match header carrying the version the edit was based on',
+      { context: { reportId, phase: 'precondition' } },
+    );
+  }
+  const version = Number(header.replace(/^W\/|"/g, ''));
+  if (!Number.isInteger(version)) {
+    throw new ReportError('REPORT_INVALID', `If-Match must carry a report version, got ${header}`, {
+      context: { reportId, phase: 'precondition' },
+    });
+  }
+  return version;
 }
 
 interface ReportBody {
@@ -534,7 +557,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   app.post<{ Body: ReportBody }>(
     '/reports',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Create a report',
@@ -576,12 +599,13 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   }>(
     '/reports/:id',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Change a report',
         description:
-          '`If-Match` carries the version this edit was made against. Changing `runAs` needs ' +
+          '`If-Match` carries the version this edit was made against, and is refused with 428 ' +
+          'when missing. Changing `runAs` needs ' +
           'full access rather than write: it decides whose data the output contains, which is ' +
           'the same class of act as granting access. **Full is enough only to point it at ' +
           'yourself** — naming any other account needs an administrator, as it does on create.',
@@ -590,14 +614,11 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request) => {
-      const expected = Number(request.headers['if-match']?.replace(/^W\/|"/g, ''));
-      if (!Number.isInteger(expected)) {
-        throw new AuthError('AUTH_REQUIRED', 'If-Match must carry the version being edited');
-      }
+      const id = Number(request.params.id);
       const updated = await reports.update(
         viewerOf(request),
-        Number(request.params.id),
-        expected,
+        id,
+        expectedVersion(request.headers['if-match'], id),
         request.body,
         request.principal?.login ?? '',
       );
@@ -608,7 +629,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   app.delete<{ Params: { id: string } }>(
     '/reports/:id',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Delete a report',
@@ -692,7 +713,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   app.post<{ Params: { id: string } }>(
     '/reports/:id/runs',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Run this report now',
@@ -785,7 +806,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   app.put<{ Params: { id: string; groupId: string }; Body: { right: AccessRight } }>(
     '/reports/:id/access/:groupId',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Grant a group access to this report',
@@ -816,7 +837,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
   app.delete<{ Params: { id: string; groupId: string } }>(
     '/reports/:id/access/:groupId',
     {
-      config: READS,
+      config: REPORT_WRITES,
       schema: {
         tags: ['reports'],
         summary: 'Take a group’s access away',

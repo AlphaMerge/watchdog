@@ -11820,7 +11820,7 @@ because each is a decision rather than a defect:
       no refusal, checked on update only, on create only, token scope ignored, own account not
       exempt, and existence told before refusing — each killed by a named A-13 test.
 
-- [ ] **A-14 — Maps and reports accept writes from read-only accounts and read-scoped tokens** · S ·
+- [x] **A-14 — Maps and reports accept writes from read-only accounts and read-scoped tokens** · S ·
       A-04, A-06, A-11 · Every map and report route declares `READS`. `routes/maps.ts` says why:
       `onObject(...)` resolves against the object tree, so the real decision is made in the
       service, and it is — for a right *on an existing* map or report. **Creating one has no right
@@ -11841,6 +11841,44 @@ because each is a decision rather than a defect:
       answers `401 AUTH_REQUIRED` on maps and reports and `428` on objects (`preconditions.ts`),
       and `maps/errors.ts` and `reports/errors.ts` say 404-for-invisible is "the same rule as the
       object API", which answers 403 on purpose (`auth/access.ts`).
+
+      **A-14 outcome. Reproduced before it was fixed:** over HTTP a `readonly` account and a
+      read-scoped token each created a map and a report and got 201. With both services
+      registered, the matrix's existing sweeps failed on all fifteen of their mutating routes —
+      every one declared `READS`.
+
+      **Every map and report mutation now declares `writesIn('MapService')` or
+      `writesIn('ReportService')`**: `write` as the role and token bar, which the hook enforces
+      before anything is parsed, plus `rightsIn`, which says in the route's own source that the
+      right on *this* map or report is decided by that service. `ApiServer.routes` carries the
+      declaration, and the object-grant sweep — a `readwrite` account holding nothing, which says
+      nothing about a map — skips exactly the routes that make it. That is the `COMPUTES` bargain:
+      no list in the test, and a claim a reviewer can check against the handler. A new matrix test
+      holds the claim to its one use: `rightsIn` only beside `write`, never on a `GET`, so it
+      cannot become a way to declare a weaker bar or to lift an object route out of the sweep.
+
+      **The services refuse too.** `MapService.create` and `ReportService.create` now ask the one
+      question a new map or report can be asked — could this viewer, after its role and its token,
+      hold `write` on anything — before reading the input. Over HTTP the route answers first, so
+      each has a service test of its own; without one, removing it would survive the whole suite.
+
+      **A missing `If-Match` is 428** (`MAP_PRECONDITION_REQUIRED`, `REPORT_PRECONDITION_REQUIRED`)
+      and one that is not a version is 400, as the object API answers them. The bare `3` the web
+      client sends is still accepted. The 401 it replaces was worse than a wrong code:
+      `web/src/api/client.ts` treats `401 AUTH_REQUIRED` as a lost session, so a save without the
+      header would have signed the operator out — and every mutating sweep counted it as a
+      refusal. The two `invisible` comments now say what is true: the object API answers 403 on
+      purpose and closes the same oracle differently, because its guard resolves a right before it
+      reads the row, and a missing object resolves to `none` exactly as a hidden one does.
+
+      Tests: 1 new in `access-matrix.test.ts` (the declaration's shape), and both services
+      registered, so the role, token and `may_acknowledge` sweeps now call fifteen more routes;
+      `POST /maps` and `POST /reports` join the harness's named routes, so an unwired service
+      fails by name. 2 over HTTP in `maps-api.test.ts` and 1 in `reports-api.test.ts` (create
+      refused to `readonly` and a read token with nothing stored; 428 and 400), 1 changed (the
+      report 401); 1 in each service suite. Mutation 10/10: either route set back to `READS`,
+      either service guard removed, either ceiling ignoring the token, either 428 back to 401, a
+      garbled `If-Match` read as version 0, and `rightsIn` not recorded by the server.
 
 - [ ] **A-15 — A map's author can ask whether any object id exists** · S · G-02 · `G-02` gives a
       broken tile's reason, `object-deleted` or `not-visible`, to a viewer holding `full` on the

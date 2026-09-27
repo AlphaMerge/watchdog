@@ -167,8 +167,21 @@ export class ReportService {
    * **That grant is why `runAs` is checked here and not only in `update`** (`A-13`). A creator
    * holds `full` a moment after this returns, so a rule enforced only on the edit is a rule the
    * creator walks round by naming the account on the way in.
+   *
+   * **Refused to anybody who could not change a report** (`A-14`), for the reason
+   * `MapService.create` gives: a new report has no right for the role and the token to cap, so
+   * they are the whole check, and they were not consulted.
    */
   async create(viewer: ReportViewer, input: ReportInput, actor: string): Promise<ReportRow> {
+    if (!atLeast(ceilingOf(viewer), 'write')) {
+      throw new ReportError('REPORT_FORBIDDEN', 'this account may not create reports', {
+        context: { phase: 'create' },
+        details: {
+          role: viewer.role,
+          ...(viewer.scope === undefined ? {} : { scope: viewer.scope }),
+        },
+      });
+    }
     const name = validName(input.name);
     const description = validDescription(input.description ?? '');
     const kind = validKind(input.kind);
@@ -416,6 +429,12 @@ const ORDER: Readonly<Record<AccessRight, number>> = { none: 0, read: 1, write: 
 
 function lowerOf(a: AccessRight, b: AccessRight): AccessRight {
   return ORDER[a] <= ORDER[b] ? a : b;
+}
+
+/** The most this viewer could hold on any report: the role's ceiling, lowered by a token's scope. */
+function ceilingOf(viewer: ReportViewer): AccessRight {
+  const role = cappedBy(viewer.role, 'full');
+  return viewer.scope === undefined ? role : lowerOf(role, viewer.scope);
 }
 
 function validName(raw: string): string {

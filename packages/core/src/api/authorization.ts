@@ -122,6 +122,20 @@ declare module 'fastify' {
      * nothing, which is a claim a reviewer can check against the handler three lines below.
      */
     changes?: boolean;
+    /**
+     * Where the right on this route's subject is decided, when the subject is not in the object
+     * tree — a map, a report (`A-14`).
+     *
+     * **The declared bar still applies and is still checked here**: `write` refuses a read-only
+     * account and a read-scoped token before anything is parsed. What the hook cannot answer is
+     * "may this caller change *this* map", because `onObject` resolves against the object tree
+     * and a map is not in it; the service that owns maps is the one place that decides, and this
+     * names it. Set in the route's own source, next to the handler that calls that service, so
+     * the claim is reviewed where it is made — the same bargain `changes: false` strikes — and
+     * read by the matrix, which skips the object-grant sweep for exactly these routes and no
+     * others. Never set on a route whose subject *is* in the tree: there, `onObject` is the check.
+     */
+    rightsIn?: string;
   }
 }
 
@@ -336,6 +350,18 @@ export const COMPUTES = { access: { kind: 'read' }, changes: false } as const sa
 export const WRITES = { access: { kind: 'write' } } as const satisfies { access: RouteAccess };
 export const ADMIN = { access: { kind: 'admin' } } as const satisfies { access: RouteAccess };
 export const SELF = { access: { kind: 'self' } } as const satisfies { access: RouteAccess };
+
+/**
+ * A change to something outside the object tree, whose own right is decided by `service` (`A-14`).
+ *
+ * `write` as a role and a token scope, checked by the hook like any `WRITES` — and a declaration
+ * of where the rest is checked. Maps and reports used `READS` for every route, on the reasoning
+ * that the service decides; it did, for a right on a map that exists, and creating one has no
+ * such right, so a read-only account and a read-scoped token both created them.
+ */
+export function writesIn(service: string): { access: RouteAccess; rightsIn: string } {
+  return { access: { kind: 'write' }, rightsIn: service };
+}
 
 /** A right on the object named by a route parameter. */
 export function onObject(needed: AccessRight, param = 'id'): { access: RouteAccess } {

@@ -13,6 +13,7 @@ export type MapErrorCode =
   | 'MAP_NOT_FOUND'
   | 'MAP_NAME_TAKEN'
   | 'MAP_CHANGED'
+  | 'MAP_PRECONDITION_REQUIRED'
   | 'MAP_FORBIDDEN'
   | 'MAP_GROUP_NOT_FOUND';
 
@@ -24,6 +25,10 @@ export const MAP_ERROR_STATUS: Readonly<Record<MapErrorCode, number>> = {
   // The request is well formed and the state of the map is what refuses it: somebody else saved
   // while this designer was open.
   MAP_CHANGED: 409,
+  // **428, as the object API answers it** (`A-14`). This was a 401 `AUTH_REQUIRED` — "log in
+  // first" — to a caller who was logged in and had left out a header, which also counted as a
+  // refusal in every sweep that asks whether a route turned a principal away.
+  MAP_PRECONDITION_REQUIRED: 428,
   MAP_FORBIDDEN: 403,
 };
 
@@ -57,10 +62,15 @@ export function mapNotFound(id: number): MapError {
 /**
  * A map the caller may not see reads as absent, not as forbidden.
  *
- * **Deliberate, and the same rule the object API follows.** Answering 403 for a map that exists
- * and 404 for one that does not turns the error into an oracle: anybody could enumerate ids and
- * learn how many maps an installation has and which ids are live, without holding a right on any
- * of them. A caller who cannot read it is told the same thing either way.
+ * **Deliberate.** Answering 403 for a map that exists and 404 for one that does not turns the
+ * error into an oracle: anybody could enumerate ids and learn how many maps an installation has
+ * and which ids are live, without holding a right on any of them. A caller who cannot read it is
+ * told the same thing either way.
+ *
+ * **Not the object API's answer, though it closes the same hole.** That API answers 403 on
+ * purpose (`auth/access.ts`), so an operator can ask why; it can, because its guard resolves a
+ * right before anything reads the row, and a missing object resolves to `none` exactly as a
+ * hidden one does. Here the row is read first, so the two would differ unless both say 404.
  */
 export function invisible(id: number): MapError {
   return mapNotFound(id);

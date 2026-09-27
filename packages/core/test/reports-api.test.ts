@@ -386,7 +386,8 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
   });
 
   describe('If-Match, because a report is edited by hand and read by a scheduler', () => {
-    it('refuses an edit that carries no version at all', async () => {
+    it('refuses an edit that carries no version at all, with 428 as the object API does', async () => {
+      // It was 401 `AUTH_REQUIRED` — "log in first" — for a caller who was logged in (`A-14`).
       const made = await makeReport('unversioned');
       const response = await app.inject({
         method: 'PATCH',
@@ -394,8 +395,19 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: as(author),
         payload: { description: 'no header' },
       });
-      assert.equal(response.statusCode, 401);
-      assert.match(response.json<{ error: { message: string } }>().error.message, /If-Match/);
+      assert.equal(response.statusCode, 428);
+      const error = response.json<{ error: { code: string; message: string } }>().error;
+      assert.equal(error.code, 'REPORT_PRECONDITION_REQUIRED');
+      assert.match(error.message, /If-Match/);
+
+      const garbled = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: { ...as(author), 'if-match': 'W/"soon"' },
+        payload: { description: 'bad header' },
+      });
+      assert.equal(garbled.statusCode, 400, garbled.body);
+      assert.equal(garbled.json<{ error: { code: string } }>().error.code, 'REPORT_INVALID');
     });
 
     it('accepts a weak entity tag, and answers 409 once the version has moved on', async () => {
@@ -719,6 +731,29 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: as(reader),
       });
       assert.equal(response.statusCode, 404, 'absent rather than forbidden, as everywhere else');
+    });
+  });
+
+  describe('who may change a report at all (A-14)', () => {
+    it('refuses a read-only account and a read-scoped token, and creates nothing', async () => {
+      // A report naming only its creator borrows nobody's eyes, so `A-13` has nothing to say
+      // about it — and creating one checked nothing else. A read-only account made reports and
+      // was handed `full` on each; so did a token issued to read.
+      for (const [who, headers] of [
+        ['readonly', as(onlooker)],
+        ['read-token', { authorization: `Bearer ${bossReadToken}` }],
+      ] as const) {
+        const name = `not-yours-to-make-${who}`;
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/reports',
+          headers,
+          payload: { name, kind: 'table_only' },
+        });
+        assert.equal(response.statusCode, 403, `${who}: ${response.body}`);
+        const rows = await db.query(`SELECT 1 FROM report WHERE name = $1`, [name]);
+        assert.equal(rows.length, 0, `${who} created a report anyway`);
+      }
     });
   });
 

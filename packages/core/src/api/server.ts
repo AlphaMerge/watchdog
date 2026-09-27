@@ -295,7 +295,13 @@ export class ApiServer {
    * decisions, and a boolean would have collapsed them into one.
    */
   readonly #unfiltered: { route: string; why: string }[] = [];
-  readonly #routes: { method: string; url: string; access: RouteAccess; changes: boolean }[] = [];
+  readonly #routes: {
+    method: string;
+    url: string;
+    access: RouteAccess;
+    changes: boolean;
+    rightsIn?: string;
+  }[] = [];
   /** Non-null while registering routes that are exempt, holding the reason. */
   #exempting: string | null = null;
   /**
@@ -388,8 +394,16 @@ export class ApiServer {
       if (access === undefined) return;
       // A route says so when it changes nothing; everything else is assumed to.
       const changes = route.config?.changes ?? true;
+      // And where the right on its subject is decided, when that is not the object tree (`A-14`).
+      const rightsIn = route.config?.rightsIn;
       for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
-        this.#routes.push({ method, url: route.url, access, changes });
+        this.#routes.push({
+          method,
+          url: route.url,
+          access,
+          changes,
+          ...(rightsIn === undefined ? {} : { rightsIn }),
+        });
       }
     });
   }
@@ -420,6 +434,7 @@ export class ApiServer {
     url: string;
     access: RouteAccess;
     changes: boolean;
+    rightsIn?: string;
   }[] {
     return this.#routes;
   }

@@ -808,7 +808,7 @@ A map this account may not read answers 404 rather than 403, so the error cannot
 
 Change a map
 
-`If-Match` carries the version this edit was made against. Without it the request is refused: a designer is a thing two people open at once, and last-write-wins there means somebody’s afternoon disappears without a message.
+`If-Match` carries the version this edit was made against. Without it the request is refused with 428: a designer is a thing two people open at once, and last-write-wins there means somebody’s afternoon disappears without a message.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1368,7 +1368,7 @@ A report this account may not read answers 404 rather than 403, so the error can
 
 Change a report
 
-`If-Match` carries the version this edit was made against. Changing `runAs` needs full access rather than write: it decides whose data the output contains, which is the same class of act as granting access. **Full is enough only to point it at yourself** — naming any other account needs an administrator, as it does on create.
+`If-Match` carries the version this edit was made against, and is refused with 428 when missing. Changing `runAs` needs full access rather than write: it decides whose data the output contains, which is the same class of act as granting access. **Full is enough only to point it at yourself** — naming any other account needs an administrator, as it does on create.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

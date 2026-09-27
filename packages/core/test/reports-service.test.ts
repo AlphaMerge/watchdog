@@ -117,6 +117,32 @@ describe(
         assert.equal((await reports.get(viewer(user.id), report.id)).id, report.id);
       });
 
+      it('lets nobody create a report who could not change one', async () => {
+        // **`A-14`, at the service as well as at the route**, for the reason `maps-service`
+        // gives: a new report has no right to cap, so the role and the token are the only
+        // ceilings — and they were not consulted.
+        const user = await makeUser([await makeGroup(`r-not-creators-${String(seq)}`)]);
+        for (const who of [
+          { userId: user.id, role: 'readonly' as const },
+          { userId: user.id, role: 'readwrite' as const, scope: 'read' as const },
+        ]) {
+          const name = `refused-${who.role}-${String(seq)}`;
+          await assert.rejects(
+            () => reports.create(who, { name, kind: 'table_only' }, user.login),
+            (error: unknown) => {
+              assert.equal((error as { code: string }).code, 'REPORT_FORBIDDEN');
+              return true;
+            },
+          );
+          assert.equal((await db.query(`SELECT 1 FROM report WHERE name = $1`, [name])).length, 0);
+        }
+        await reports.create(
+          { userId: user.id, role: 'readwrite', scope: 'write' },
+          { name: `allowed-${String(seq)}`, kind: 'table_only' },
+          user.login,
+        );
+      });
+
       it('hides a report from an account with no grant, as absent rather than forbidden', async () => {
         const owner = await makeUser([await makeGroup(`r-owner-${String(seq)}`)]);
         const report = await reports.create(

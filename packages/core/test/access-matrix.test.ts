@@ -23,6 +23,16 @@ import { ProbeQueryService } from '../src/probes/queries.js';
 import { ProbeConfigService } from '../src/probes/config.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
 import { NotificationTester } from '../src/notifications/test-send.js';
+import { MapRepository } from '../src/maps/repository.js';
+import { MapResolver } from '../src/maps/resolver.js';
+import { MapService } from '../src/maps/service.js';
+import { ReportRepository } from '../src/reports/repository.js';
+import { ReportService } from '../src/reports/service.js';
+import { ReportContext } from '../src/reports/context.js';
+import { ReportRenderer } from '../src/reports/render.js';
+import { ReportRunner, ReportRunRepository } from '../src/reports/runs.js';
+import { ReportOutputRepository } from '../src/reports/delivery.js';
+import { ReportFormatter } from '../src/reports/formatter.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -64,6 +74,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
   let discovery: DiscoveryService;
   let triggers: TriggerService;
   let rediscovery: RediscoveryService;
+  let formatter: ReportFormatter;
 
   let probeId = 0;
   let deviceId = 0;
@@ -107,6 +118,17 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       windowFor: () => Promise.resolve(null),
       provision: () => Promise.resolve(),
     });
+    const history = new HistoryService({ db, logger: silent });
+    const reportRepository = new ReportRepository();
+    const reportContext = new ReportContext({
+      db,
+      repository: reportRepository,
+      access,
+      logger: silent,
+    });
+    const reportRenderer = new ReportRenderer({ context: reportContext, history, logger: silent });
+    const reportRuns = new ReportRunRepository();
+    formatter = new ReportFormatter({ logger: silent });
     const messageContexts = new MessageContextLoader({
       settings: harness.resolver,
       publicUrl: 'https://monitoring.example.test',
@@ -124,10 +146,31 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       logger: silent,
       version: '9.9.9',
       service: harness.service,
-      history: new HistoryService({ db, logger: silent }),
+      history,
       db,
       audit: new AuditRepository(),
       catalogue: testCatalogue(),
+      // **Maps and reports as well** (`A-14`). Neither was here, so "every non-GET route
+      // declares a bar above read" never met them — and every one of their routes declared
+      // `READS`, so a read-only account and a read-scoped token created both. Their per-map and
+      // per-report rights are decided in their services, which is what `rightsIn` declares.
+      maps: new MapService({ db, repository: new MapRepository(), logger: silent }),
+      mapResolver: new MapResolver({ db, access, history }),
+      reports: {
+        service: new ReportService({ db, repository: reportRepository, logger: silent }),
+        context: reportContext,
+        renderer: reportRenderer,
+        runner: new ReportRunner({
+          db,
+          reports: reportRepository,
+          runs: reportRuns,
+          renderer: reportRenderer,
+          logger: silent,
+        }),
+        runs: reportRuns,
+        outputStore: new ReportOutputRepository(),
+        formatter,
+      },
       // **The library services are registered here on purpose** (`A-11`). Without them the
       // mutating sweep below covers only the object routes, and "no write is open to a
       // read-only account" would be a claim about a third of the API — which is how a build
@@ -275,6 +318,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
   });
 
   after(async () => {
+    await formatter.close();
     await scratch.drop();
   });
 
@@ -438,11 +482,21 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     const isRoleGoverned = (route: { method: string; url: string }): boolean =>
       ROLE_GOVERNED.has(`${route.method} ${route.url}`);
 
+    /**
+     * A route whose subject is not in the object tree, and which says in its own source where the
+     * right on that subject is decided (`A-14`) — `rightsIn`, the way `changes: false` says a
+     * `POST` is a read. Read off the declaration, so a map or report route added tomorrow is
+     * covered by writing it the same way, and nothing here is a list.
+     */
+    const decidesElsewhere = (route: { rightsIn?: string }): boolean =>
+      route.rightsIn !== undefined;
+
     const mutating = (): {
       method: string;
       url: string;
       access: { kind: string };
       changes: boolean;
+      rightsIn?: string;
     }[] =>
       server.routes.filter(
         (route) => route.method !== 'GET' && !isSelfService(route) && !isCompute(route),
@@ -495,6 +549,8 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         'POST /api/v1/probes/:gid/approve',
         'PUT /api/v1/triggers/:id',
         'POST /api/v1/schedules',
+        'POST /api/v1/maps',
+        'POST /api/v1/reports',
       ].filter((route) => !swept.has(route));
       assert.deepEqual(missing, [], 'these routes are not being swept — is a service unwired?');
     });
@@ -510,6 +566,20 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         })
         .map((route) => `${route.method} ${route.url}`);
       assert.deepEqual(weak, [], 'these routes change something but ask only for read');
+    });
+
+    it('lets a route say its right lives in a service only on top of write', () => {
+      // **The declaration moves one question and no others** (`A-14`). `rightsIn` exempts a route
+      // from the object-grant sweep below, because its subject is a map or a report and no object
+      // grant says anything about one. It must not also be a way to declare a weaker bar, or to
+      // take a route whose subject *is* an object out of the sweep that would catch it — so every
+      // route carrying it declares exactly `write`, the role and token bar the hook enforces.
+      const declared = server.routes.filter(decidesElsewhere);
+      assert.ok(declared.length >= 15, `only ${String(declared.length)} routes declare rightsIn`);
+      const odd = declared
+        .filter((route) => route.method === 'GET' || route.access.kind !== 'write')
+        .map((route) => `${route.method} ${route.url} (${route.access.kind})`);
+      assert.deepEqual(odd, [], 'rightsIn on a read, or beside a bar other than write');
     });
 
     it('refuses every one of them to a read-only account', async () => {
@@ -557,6 +627,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       const allowed: string[] = [];
       for (const route of mutating()) {
         if (isRoleGoverned(route)) continue;
+        // A map or a report: no object grant bears on it, so an account holding none proves
+        // nothing here. The route says so itself, and the test above holds it to `write`; the
+        // right on the map or report is asserted where it is decided, in `maps-api`,
+        // `reports-api` and the two service suites.
+        if (decidesElsewhere(route)) continue;
         const response = await app.inject({
           method: route.method as 'POST',
           url: fillWrite(route.url),
