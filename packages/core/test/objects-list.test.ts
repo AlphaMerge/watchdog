@@ -185,6 +185,39 @@ describe(
       );
     });
 
+    it('searches device hosts as a substring, not only names', async () => {
+      // `P-212`. The tree's search box says "Search names and hosts" and sends `q` alone, which
+      // matched names alone — an operator typing an address found nothing unless the device was
+      // named after it. No fixture name contains "10.1.0", so only the host can find this.
+      assert.deepEqual(
+        (await list({ q: '10.1.0' })).map((i) => i.name),
+        ['switch_01'],
+      );
+
+      // A fragment every host shares finds every device, and none of the sensors beneath them:
+      // a sensor has no host of its own, and its device is the match.
+      assert.deepEqual((await list({ q: '0.1' })).map((i) => i.name).sort(), [
+        'switch-07',
+        'switchX01',
+        'switch_01',
+      ]);
+    });
+
+    it('still ANDs a host search with the other filters', async () => {
+      // The OR inside `q` is parenthesised. Without that, `kind = … AND name ILIKE … OR host
+      // ILIKE …` binds as `(kind AND name) OR host`, and the host arm escapes every filter.
+      assert.equal((await list({ q: '10.1.0', kinds: ['group'] })).length, 0);
+      assert.equal((await list({ q: '10.1.0', tags: ['munich'] })).length, 0);
+      assert.deepEqual(
+        (await list({ q: '10.1.0', tags: ['berlin'] })).map((i) => i.name),
+        ['switch_01'],
+      );
+    });
+
+    it('keeps host as an exact filter, which a fragment does not satisfy', async () => {
+      assert.equal((await list({ host: '10.1.0' })).length, 0);
+    });
+
     it('filters by kind', async () => {
       const devices = await list({ kinds: ['device'] });
       assert.deepEqual(devices.map((i) => i.name).sort(), ['switch-07', 'switchX01', 'switch_01']);

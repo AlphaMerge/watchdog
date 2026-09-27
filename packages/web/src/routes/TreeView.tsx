@@ -375,7 +375,8 @@ function TreeRow({
 /**
  * Search, answered by the server.
  *
- * `q` matches names and hosts and `tag` filters, both already on `GET /objects` — and both have
+ * `q` matches names and device hosts as a substring (`P-212`; it matched names alone before,
+ * whatever the placeholder said) and `tag` filters, both already on `GET /objects` — and both have
  * to run there rather than here, because the tree is loaded a level at a time and a client-side
  * filter would only ever search the branches somebody had already opened.
  */
@@ -420,6 +421,10 @@ function SearchResults({
             <span className="shrink-0 text-xs uppercase tracking-wide text-text-muted">
               {object.kind}
             </span>
+            {/* A device found by an address shows it, or the row does not say why it matched. */}
+            {object.host !== undefined && (
+              <span className="truncate font-mono text-xs text-text-muted">{object.host}</span>
+            )}
             {object.tags.length > 0 && (
               <span className="truncate font-mono text-xs text-text-muted">
                 {object.tags.join(', ')}

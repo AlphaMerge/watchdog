@@ -870,6 +870,31 @@ describe(
       assert.equal(bad.statusCode, 400);
     });
 
+    it('finds a device by a fragment of its host through ?q=, as the tree search asks', async () => {
+      // `P-212`. `TreeView`'s search box says "Search names and hosts" and sends `q` and nothing
+      // else, with `limit=200` — so this is its request, and `q` used to match names alone.
+      const g = await createGroup(probeId, 'Edge');
+      const router = await createDevice(g, 'core-router', 'rtr1.Berlin.example.net');
+      const access = await createDevice(g, 'access-switch', '10.20.30.40');
+
+      const ids = async (url: string): Promise<number[]> => {
+        const res = await get(url);
+        assert.equal(res.statusCode, 200, res.body);
+        return res.json<{ items: { id: number }[] }>().items.map((item) => item.id);
+      };
+
+      // A hostname fragment in the other case from the stored one.
+      assert.deepEqual(await ids('/api/v1/objects?q=berlin.EXAMPLE&limit=200'), [router.id]);
+      // An address fragment, which is what somebody looking for a device usually has.
+      assert.deepEqual(await ids('/api/v1/objects?q=20.30&limit=200'), [access.id]);
+      // Names still match, as they always did.
+      assert.deepEqual(await ids('/api/v1/objects?q=ROUTER&limit=200'), [router.id]);
+
+      // `host` stays the exact lookup it was: a fragment is not a host.
+      assert.deepEqual(await ids('/api/v1/objects?host=20.30'), []);
+      assert.deepEqual(await ids('/api/v1/objects?host=10.20.30.40'), [access.id]);
+    });
+
     it('rejects a cursor whose id is not a usable position', async () => {
       const hostile = Buffer.from(
         JSON.stringify({ v: 1, sort: 'name', name: 'x', id: 1e308 }),

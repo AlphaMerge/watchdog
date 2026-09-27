@@ -195,8 +195,18 @@ const listQuery = {
     // handler has always called `asArray` on it. Found by `M-15`, which needed the same shape.
     kind: KIND_FILTER,
     tag: { type: ['string', 'array'], items: { type: 'string' }, maxLength: 100 },
-    q: { type: 'string', maxLength: 500 },
-    host: { type: 'string', maxLength: 255 },
+    q: {
+      type: 'string',
+      maxLength: 500,
+      description:
+        'Search: a case-insensitive substring of the name or, on a device, of its host. ' +
+        '`%` and `_` are literal.',
+    },
+    host: {
+      type: 'string',
+      maxLength: 255,
+      description: "A device's host exactly, case-insensitive. A substring is `q`'s job.",
+    },
     priorityMin: { type: 'integer', minimum: 1, maximum: 5 },
     sort: { enum: ['name', 'id', 'manual'], default: 'name' },
     effective: { type: ['string', 'array'], items: { type: 'string' } },
@@ -316,7 +326,9 @@ export async function objectRoutes(
         tags: ['objects'],
         querystring: listQuery,
         description:
-          'Flat filtered listing, keyset-paginated. Note: under sort=name an object renamed ' +
+          'Flat filtered listing, keyset-paginated. `q` searches names and device hosts as a ' +
+          'case-insensitive substring; `host` is an exact match on a device host. ' +
+          'Note: under sort=name an object renamed ' +
           'mid-pagination can be returned twice or missed — inherent to keyset paging and ' +
           'acceptable for a UI. Anything that must be exact (bulk selection, config export) ' +
           'must use sort=id, which is immutable.',

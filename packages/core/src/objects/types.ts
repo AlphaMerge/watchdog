@@ -399,7 +399,9 @@ export interface ObjectFilter {
   readonly kinds?: readonly ObjectKind[];
   /** Matched case-folded, per CAPABILITIES.MD §1. */
   readonly tags?: readonly string[];
+  /** A case-insensitive substring of the name or, on a device, of its host (`P-212`). */
   readonly q?: string;
+  /** A device's host exactly, case-folded — the lookup, where `q` is the search. */
   readonly host?: string;
   readonly priorityMin?: Priority;
 }

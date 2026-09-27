@@ -67,7 +67,8 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
 - **Virtualised**, so the 5,000-sensor target scrolls.
 - **Rollup colour**: a collapsed group shows the colour of the worst thing inside it, without its
   children ever having been loaded.
-- **Search** matches names and hosts, and there is a tag filter beside it. Results come back
+- **Search** matches names and device hosts, as a case-insensitive substring — `10.1.` or
+  `berlin.example` finds the device — and there is a tag filter beside it. Results come back
   flat, with the path written out — which is what somebody searching actually wants.
 - **Full keyboard navigation**, to the ARIA tree pattern: arrows move and expand, `Home`/`End`
   jump to the ends, `Enter` or `Space` opens the row. Collapsing a branch you were inside keeps

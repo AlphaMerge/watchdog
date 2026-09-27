@@ -1041,7 +1041,7 @@ Newest first, paged by `before` rather than by offset — notifications arrive w
 
 ### `GET /api/v1/objects`
 
-Flat filtered listing, keyset-paginated. Note: under sort=name an object renamed mid-pagination can be returned twice or missed — inherent to keyset paging and acceptable for a UI. Anything that must be exact (bulk selection, config export) must use sort=id, which is immutable.
+Flat filtered listing, keyset-paginated. `q` searches names and device hosts as a case-insensitive substring; `host` is an exact match on a device host. Note: under sort=name an object renamed mid-pagination can be returned twice or missed — inherent to keyset paging and acceptable for a UI. Anything that must be exact (bulk selection, config export) must use sort=id, which is immutable.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

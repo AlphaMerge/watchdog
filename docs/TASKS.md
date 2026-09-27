@@ -4488,6 +4488,34 @@ because each is a decision rather than a defect:
       the start-up clock. Each fails against the mutation it guards: the old clock, and no start-up
       clock.
 
+- [x] **P-212 — the tree search says "names and hosts" and searches names** · S · U-03 · The
+      search box's placeholder is "Search names and hosts", `TreeView`'s comment and
+      `web-ui.md` say the same, and the box sends `GET /objects?q=…` alone. `q` was `o.name ILIKE`
+      and nothing else; hosts were reachable only through `host`, an exact match the box never
+      sends. So typing an address or a hostname found nothing unless the device happened to be
+      named after it — and an address is what somebody looking for a device usually has.
+
+      **Fixed the behaviour, not the wording.** `q` is now `(o.name ILIKE p OR dc.host ILIKE p)`
+      with one escaped pattern. The listing already LEFT JOINs `device_config`, so on every row
+      that is not a device `dc.host` is null, the host arm is null, and the row is decided by its
+      name alone: groups, probes and sensors are found by name as before, and a sensor is **not**
+      found by its device's host — the device is the match. The parentheses matter: without them
+      the OR binds below the AND and the host arm escapes every other filter, which the new test
+      of `q` beside `kind` and `tag` catches. `host` stays the exact, case-folded lookup on the
+      `lower(host)` index. No new index: the name match was already an unindexed scan, and neither
+      column has a trigram index. The OpenAPI document describes `q` and `host`, and the route's
+      description says the same so `api-reference.md` does. The map designer's object picker
+      (`G-03`) sends the same `q`, so a sensor-list widget can now be pointed at a device by
+      address too. Search results show a device's host, or a match by address would not say why
+      it matched.
+
+      **Tests.** `objects-list.test.ts`: a host fragment finds its device and no sensor under it;
+      `q` with a host fragment still ANDs with `kind` and `tag`; `host` does not accept a
+      fragment. `api-routes.test.ts`: the tree's own request (`?q=…&limit=200`) finds a device by
+      a hostname fragment in the other case and by an address fragment, still by name, and `host`
+      stays exact. Mutated in `dist`: name-only fails three of them, an unparenthesised OR fails
+      the AND test.
+
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day

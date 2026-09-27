@@ -341,7 +341,17 @@ export class ObjectRepository {
       }
     }
     if (filter.q !== undefined && filter.q !== '') {
-      where.push(`o.name ILIKE ${add(`%${escapeLike(filter.q)}%`)}`);
+      // Names and hosts, because that is what the tree's search box promises and an address is
+      // what somebody looking for a device usually has (`P-212`). Only a device has a
+      // `device_config` row; everywhere else the LEFT JOIN leaves `dc.host` null, the second
+      // ILIKE is null, and `name OR null` is decided by the name alone — so groups, probes and
+      // sensors are still found by name and never by a host they do not have. A sensor is not
+      // found by its device's host: the device is the match, and the sensors are one level down.
+      //
+      // Unindexed, as the name match already was: neither column has a trigram index, and
+      // `device_config_host_idx` is on `lower(host)` for the exact `host` filter below.
+      const pattern = add(`%${escapeLike(filter.q)}%`);
+      where.push(`(o.name ILIKE ${pattern} OR dc.host ILIKE ${pattern})`);
     }
     if (filter.host !== undefined && filter.host !== '') {
       where.push(`lower(dc.host) = ${add(filter.host.toLowerCase())}`);
