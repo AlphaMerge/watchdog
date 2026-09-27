@@ -11880,7 +11880,7 @@ because each is a decision rather than a defect:
       either service guard removed, either ceiling ignoring the token, either 428 back to 401, a
       garbled `If-Match` read as version 0, and `rightsIn` not recorded by the server.
 
-- [ ] **A-15 — A map's author can ask whether any object id exists** · S · G-02 · `G-02` gives a
+- [x] **A-15 — A map's author can ask whether any object id exists** · S · G-02 · `G-02` gives a
       broken tile's reason, `object-deleted` or `not-visible`, to a viewer holding `full` on the
       map, on the premise that a `full` holder is trusted. But `full` is what a map's creator gets
       automatically (`G-01`), anybody with a login can create one (`A-14`), and a layout's ids are
@@ -11893,6 +11893,30 @@ because each is a decision rather than a defect:
       are told why a tile is unavailable, or nobody is, the bare `unavailable` `E-03` settled on
       for reports. The ticket decides which; an administrator loses no information under either,
       since an administrator can read every id anyway.
+
+      **A-15 outcome: nobody is told.** The attack is now a test over HTTP — a `readwrite` author
+      makes a map with tiles on a deleted id, an id in a branch carved out with `none`, and one
+      never issued, and opens the view. Before the fix it read `object-deleted` for the first and
+      `not-visible` for the second; now the three tiles are the same document apart from their own
+      ids.
+
+      **Why nobody rather than administrators.** For an administrator the reason carries nothing:
+      they can read every id, so an unavailable tile is always a deleted one. Keeping it for them
+      would have kept a trust field in `MapAudience` and a second place deciding who counts as an
+      administrator, to say something the caller already knows — and `E-03` settled on the same
+      bare `unavailable` for reports. So `holdsFull` is gone from the audience, the `reason` field
+      and `UnavailableReason` are gone from the widget type, deleted and hidden are one branch in
+      the resolver, and the view route reads the map with `get` rather than resolving a right it no
+      longer uses. The web board says "This widget cannot be drawn." to everybody, and its client
+      type has no field for a reason to arrive in.
+
+      Tests: 1 new over HTTP in `maps-api.test.ts` (the attack) with a walled-off sensor added to
+      its fixture, since every unavailable tile in that file had been a deleted one and a resolver
+      saying "deleted" on all of them would have passed; 1 changed there (the author is no longer
+      told); the resolver's "tells an author why" case now asserts a deleted and a hidden tile are
+      identical; two web cases folded into one. Mutation 2/2: the reason put back for everybody,
+      and a subtler leak marking only the hidden tile — each killed by the HTTP attack test and the
+      resolver case.
 
 ### Panel round two — notifications, schedules, triggers
 

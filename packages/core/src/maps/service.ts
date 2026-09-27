@@ -96,10 +96,10 @@ export class MapService {
   /**
    * The map, and what this viewer holds on it.
    *
-   * **One resolution, not two.** `G-10`'s view route needs the map *and* whether the caller holds
-   * `full` — the resolver tells only a `full` holder why a widget could not be drawn — and asking
-   * `require` and then `rightFor` would resolve the same access twice per request. `require` is
-   * this method with the right thrown away.
+   * **One resolution, not two**: a caller that needs the map *and* the right would otherwise ask
+   * `require` and then `rightFor`, resolving the same access twice. `require` is this method with
+   * the right thrown away. (`G-10`'s view route was that caller, to decide whether a broken tile
+   * said why; nobody is told why any more — `A-15`.)
    */
   async withRight(
     viewer: MapViewer,

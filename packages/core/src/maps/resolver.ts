@@ -37,10 +37,16 @@ import {
  * the canvas, and the test counts each of them rather than only the first.
  */
 
-/** Who is looking. `public` is `G-06`: the widget list itself is the authorisation. */
+/**
+ * Who is looking. `public` is `G-06`: the widget list itself is the authorisation.
+ *
+ * **No field says how far a viewer is trusted with a broken tile**, and there was one: `G-02`
+ * carried `holdsFull` so the map's `full` holders could be told why a tile was unavailable. But
+ * `full` is what a map's creator gets, and anybody who may write can create one, so the person
+ * told was anybody who asked (`A-15`).
+ */
 export type MapAudience =
-  | { readonly kind: 'viewer'; readonly viewer: MapViewer; readonly holdsFull: boolean }
-  | { readonly kind: 'public' };
+  { readonly kind: 'viewer'; readonly viewer: MapViewer } | { readonly kind: 'public' };
 
 export interface MapResolverOptions {
   readonly db: Database;
@@ -153,13 +159,10 @@ export class MapResolver {
         continue;
       }
 
+      // Deleted and not visible are one branch on purpose: see `#unavailable`.
       const object = objects.get(widget.objectId);
-      if (object === undefined) {
-        resolved.push(this.#unavailable(widget, audience, 'object-deleted'));
-        continue;
-      }
-      if (!visible.has(widget.objectId)) {
-        resolved.push(this.#unavailable(widget, audience, 'not-visible'));
+      if (object === undefined || !visible.has(widget.objectId)) {
+        resolved.push(this.#unavailable(widget));
         continue;
       }
       resolved.push({
@@ -177,26 +180,23 @@ export class MapResolver {
   }
 
   /**
-   * A widget that could not be drawn.
+   * A widget that could not be drawn, and **not why — to anybody** (`A-15`).
    *
-   * The reason rides along only for somebody holding `full` on the map — the person fixing it.
-   * A plain reader, and `G-06`'s public viewer, are told the tile is unavailable and nothing
-   * more: "deleted" against "you may not see it" is the difference between knowing an id is dead
-   * and knowing it is alive, which is exactly the oracle `G-01` closed.
+   * "Deleted" against "you may not see it" is the difference between knowing an id is dead and
+   * knowing it is alive, which is the oracle `G-01` closed for maps and `E-03` for reports. `G-02`
+   * told the reason to whoever held `full` on the map, as the person fixing it; but the creator
+   * of a map holds `full`, a layout's ids are not checked against its author when it is written,
+   * and so anybody who may write could put tiles on ids they were curious about and read the
+   * answer. Telling administrators alone would add nothing: they can read every id, so for them
+   * an unavailable tile is always a deleted one. `E-03` settled on the same bare answer.
    */
-  #unavailable(
-    widget: Widget,
-    audience: MapAudience,
-    reason: 'object-deleted' | 'not-visible',
-  ): ResolvedWidget {
-    const tell = audience.kind === 'viewer' && audience.holdsFull;
+  #unavailable(widget: Widget): ResolvedWidget {
     return {
       id: widget.id,
       kind: widget.kind,
       box: widget.box,
       title: widget.title,
       state: 'unavailable',
-      ...(tell ? { reason } : {}),
     };
   }
 

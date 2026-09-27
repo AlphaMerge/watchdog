@@ -260,8 +260,9 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
             'What a map draws, rather than the document it is stored as. A widget naming an ' +
             'object that has been deleted, or one this account may not see, comes back as ' +
             '`unavailable` and stays on the canvas — a dashboard that quietly stops mentioning ' +
-            'what failed is worse than one with a hole in it. Why it is unavailable is told ' +
-            'only to somebody holding full access on the map.',
+            'what failed is worse than one with a hole in it. **Which of the two it is, is told ' +
+            'to nobody**: anybody who may write can make a map, so telling its author would ' +
+            'answer "does this id exist?" for any id they chose.',
           response: {
             200: {
               type: 'object',
@@ -322,14 +323,8 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
       async (request) => {
         const viewer = viewerOf(request);
-        // One access resolution for both questions this route asks — may they read it, and do
-        // they hold `full`, which is what decides whether a broken tile says why.
-        const { map, right } = await maps.withRight(viewer, Number(request.params.id), 'read');
-        const resolved = await resolver.resolve(map.layout, {
-          kind: 'viewer',
-          viewer,
-          holdsFull: right === 'full',
-        });
+        const map = await maps.get(viewer, Number(request.params.id));
+        const resolved = await resolver.resolve(map.layout, { kind: 'viewer', viewer });
         return {
           map: serialise(map),
           widgets: resolved.widgets,

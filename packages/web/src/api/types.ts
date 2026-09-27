@@ -705,14 +705,12 @@ export type ResolvedWidget = {
 } & (
   | { state: 'ok'; data: ResolvedWidgetData }
   | {
-      state: 'unavailable';
       /**
-       * Why — and only for somebody holding full access on the map.
-       *
-       * Its absence is not a missing field: telling a plain reader "deleted" rather than "you
-       * may not see it" would say whether an id they already know is still alive (`G-02`).
+       * **And not why, to anybody.** "Deleted" against "you may not see it" says whether an id is
+       * still alive; it was told to a map's `full` holders, and every map's creator is one, so it
+       * answered that for any id anybody chose (`A-15`).
        */
-      reason?: 'object-deleted' | 'not-visible';
+      state: 'unavailable';
     }
   | { state: 'invalid'; problem: string }
 );

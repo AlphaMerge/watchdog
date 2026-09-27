@@ -841,7 +841,7 @@ Needs full access. The grants on it go with it.
 
 One map with its widgets filled in
 
-What a map draws, rather than the document it is stored as. A widget naming an object that has been deleted, or one this account may not see, comes back as `unavailable` and stays on the canvas — a dashboard that quietly stops mentioning what failed is worse than one with a hole in it. Why it is unavailable is told only to somebody holding full access on the map.
+What a map draws, rather than the document it is stored as. A widget naming an object that has been deleted, or one this account may not see, comes back as `unavailable` and stays on the canvas — a dashboard that quietly stops mentioning what failed is worse than one with a hole in it. **Which of the two it is, is told to nobody**: anybody who may write can make a map, so telling its author would answer "does this id exist?" for any id they chose.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

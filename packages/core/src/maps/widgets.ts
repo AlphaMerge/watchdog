@@ -75,8 +75,8 @@ export interface Widget {
  * **`unavailable` does not say why, and that is deliberate.** A widget can fail to resolve because
  * the object was deleted or because this viewer may not see it, and telling them apart tells a
  * reader whether an id they already know about still exists — the same oracle `G-01` refused when
- * it made an unreadable map answer 404. The reason is carried only for a viewer holding `full` on
- * the map, who is the person fixing it, and never for `G-06`'s public audience.
+ * it made an unreadable map answer 404. There is no field for the reason at all, for anybody: it
+ * used to ride along for a `full` holder on the map, and every map's creator is one (`A-15`).
  */
 export type ResolvedWidget =
   | {
@@ -97,7 +97,6 @@ export type ResolvedWidget =
       readonly at?: { readonly lat: number; readonly lon: number };
       readonly title: string;
       readonly state: 'unavailable';
-      readonly reason?: UnavailableReason;
     }
   | {
       readonly id: string;
@@ -109,8 +108,6 @@ export type ResolvedWidget =
       readonly state: 'invalid';
       readonly problem: string;
     };
-
-export type UnavailableReason = 'object-deleted' | 'not-visible';
 
 export type WidgetData =
   | {

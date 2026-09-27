@@ -210,16 +210,7 @@ describe(
     let userId: number;
     const many: number[] = [];
 
-    const asAuthor = (): MapAudience => ({
-      kind: 'viewer',
-      viewer: { userId, role: 'readwrite' },
-      holdsFull: true,
-    });
-    const asReader = (): MapAudience => ({
-      kind: 'viewer',
-      viewer: { userId, role: 'readwrite' },
-      holdsFull: false,
-    });
+    const asReader = (): MapAudience => ({ kind: 'viewer', viewer: { userId, role: 'readwrite' } });
     const asPublic = (): MapAudience => ({ kind: 'public' });
 
     before(async () => {
@@ -332,18 +323,16 @@ describe(
         assert.equal(widget.title, 'A tile', 'still where the author put it');
       });
 
-      it('tells an author why, and tells a reader nothing', async () => {
+      it('draws a deleted tile and a hidden one as the same document', async () => {
         // **The oracle this closes.** "Deleted" against "you may not see it" is the difference
         // between knowing an id is dead and knowing it is alive, which is what G-01 refused when
-        // it made an unreadable map answer 404.
-        const author = await resolver.resolve(layout(999_999), asAuthor());
-        const reader = await resolver.resolve(layout(999_999), asReader());
-        assert.equal(
-          (author.widgets[0] as { reason?: string }).reason,
-          'object-deleted',
-          'the person fixing it is told',
-        );
-        assert.equal((reader.widgets[0] as { reason?: string }).reason, undefined);
+        // it made an unreadable map answer 404. It used to be told to a `full` holder on the map,
+        // which every map's creator is (`A-15`), so it is told to nobody. The device is hidden:
+        // the case above grants the viewer its sensor and nothing above it.
+        const gone = await resolver.resolve(layout(999_999), asReader());
+        const hidden = await resolver.resolve(layout(deviceId), asReader());
+        assert.equal(hidden.widgets[0]?.state, 'unavailable', 'the fixture really is hidden');
+        assert.deepEqual(gone.widgets, hidden.widgets);
       });
 
       it('tells the public audience nothing either', async () => {

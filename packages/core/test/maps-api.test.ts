@@ -49,6 +49,8 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
   let authorReadToken = '';
   let sensorId: number;
   let deletedId: number;
+  /** A sensor that exists and that `author`'s group is explicitly denied (`A-15`). */
+  let hiddenId: number;
   let readerGroupId: number;
 
   before(async () => {
@@ -165,6 +167,27 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
        VALUES ($1, $2, 'read'), ($1, $3, 'read')`,
       [harness.rootId, readerGroupId, Number(authorGroup[0]?.id)],
     );
+    // **A device the author may not see**, carved out with `none` (`A-15`): the other half of the
+    // oracle. Without it every unavailable tile in this file is a deleted one, and a resolver that
+    // told the author "deleted" on every tile would look exactly like one that told nobody.
+    const walled = await harness.service.create(testActor, {
+      kind: 'device',
+      name: 'api-walled',
+      parentId: probe.id,
+      host: '10.0.0.3',
+    });
+    hiddenId = (
+      await harness.service.create(testActor, {
+        kind: 'sensor',
+        name: 'api-hidden',
+        parentId: walled.id,
+        sensorType: 'icmp.ping',
+      })
+    ).id;
+    await db.query(
+      `INSERT INTO object_access (object_id, group_id, right_) VALUES ($1, $2, 'none')`,
+      [walled.id, Number(authorGroup[0]?.id)],
+    );
 
     // **A role and a token that may look and never change** (`A-14`). The token is `author`'s,
     // so the account's own role cannot be what refuses it.
@@ -253,7 +276,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     assert.equal(drawn.data?.name, 'api-sensor');
   });
 
-  it('keeps a widget whose object is gone, and tells the author why', async () => {
+  it('keeps a widget whose object is gone, and does not say why — even to its author', async () => {
     const id = await makeMap('broken', [
       { id: 'w1', kind: 'status', objectId: deletedId, title: 'Was a sensor' },
     ]);
@@ -264,13 +287,34 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     assert.ok(tile);
     assert.equal(tile.state, 'unavailable');
     assert.equal(tile.title, 'Was a sensor', 'still where the author put it');
-    assert.equal(tile.reason, 'object-deleted');
+    assert.equal(tile.reason, undefined, 'the author holds full, and full is anybody (A-15)');
+  });
+
+  it('tells the author of a map nothing that separates a deleted id from a hidden one', async () => {
+    // **`A-15`'s attack, as the ticket wrote it.** `G-02` told a broken tile's reason to whoever
+    // held `full` on the map, on the premise that such a person is trusted — but `full` is what a
+    // map's creator gets, and anybody who may write can create one. So: put widgets on ids you
+    // are curious about, open the view, and read which are deleted and which merely hidden from
+    // you. Three ids here — gone, walled off, never issued — and every tile must be the same
+    // document apart from its own id.
+    const id = await makeMap('oracle', [
+      { id: 'gone', kind: 'status', objectId: deletedId, title: 'probe' },
+      { id: 'walled', kind: 'status', objectId: hiddenId, title: 'probe' },
+      { id: 'never', kind: 'status', objectId: 9_999_999, title: 'probe' },
+    ]);
+    const response = await view(id, author);
+    assert.equal(response.statusCode, 200, response.body);
+    const tiles = response.json<{ widgets: Record<string, unknown>[] }>().widgets;
+    assert.equal(tiles.length, 3);
+    const shapes = tiles.map(({ id: _id, ...rest }) => JSON.stringify(rest));
+    assert.equal(new Set(shapes).size, 1, `the tiles differ: ${shapes.join(' | ')}`);
+    assert.equal(tiles[0]?.['state'], 'unavailable');
   });
 
   it('tells a reader the tile is unavailable and not why', async () => {
-    // **The rule this route exists to enforce, and it only exists on the wire**: `holdsFull`
-    // comes from the caller's right on *this map*, so the same document answers two people
-    // differently. "Deleted" against "you may not see it" is an oracle for which ids are live.
+    // "Deleted" against "you may not see it" is an oracle for which ids are live. This case was
+    // about a reader being told less than the author; since `A-15` nobody is told, and the one
+    // above asserts it for the author.
     const id = await makeMap('shared', [
       { id: 'w1', kind: 'status', objectId: deletedId, title: 'Was a sensor' },
     ]);

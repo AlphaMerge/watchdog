@@ -120,24 +120,13 @@ describe('a map on screen', () => {
     expect(screen.queryByText('Up')).toBeNull();
   });
 
-  it('leaves a hole where a deleted object was, and says so', () => {
-    render(
-      <MapBoard
-        view={resolved(
-          widget({ state: 'unavailable', reason: 'object-deleted', data: undefined } as never),
-        )}
-      />,
-    );
-    expect(screen.getByText('Router')).toBeDefined();
-    expect(screen.getByText(/has been deleted/)).toBeDefined();
-  });
-
-  it('says only that it cannot be drawn when it is not told why', () => {
-    // A reader is not told "deleted" rather than "not visible": that difference is an oracle for
-    // which ids are alive, which is why the core withholds it from anybody without full access.
+  it('leaves a hole where the object was, and says only that it cannot be drawn', () => {
+    // Nobody is told "deleted" rather than "not visible": that difference is an oracle for which
+    // ids are alive, and the core no longer sends it to anybody (`A-15`).
     render(
       <MapBoard view={resolved(widget({ state: 'unavailable', data: undefined } as never))} />,
     );
+    expect(screen.getByText('Router')).toBeDefined();
     expect(screen.getByText('This widget cannot be drawn.')).toBeDefined();
     expect(screen.queryByText(/deleted/)).toBeNull();
     expect(screen.queryByText(/may not see/)).toBeNull();

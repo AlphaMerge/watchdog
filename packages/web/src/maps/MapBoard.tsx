@@ -202,18 +202,11 @@ function Tile({
       <Frame title={widget.title === '' ? 'Unavailable' : widget.title} broken>
         {/*
           **The hole in the dashboard, on purpose.** `G-01` chose a document over a foreign key
-          exactly so that deleting a sensor leaves a tile saying it is gone rather than a canvas
-          that quietly stopped mentioning what failed. The reason is present only for somebody
-          holding full access on the map — everyone else is told the tile cannot be drawn and
-          not whether the object is deleted or merely invisible to them.
+          exactly so that deleting a sensor leaves a tile saying it cannot be drawn rather than a
+          canvas that quietly stopped mentioning what failed. Whether the object is deleted or
+          merely invisible to this viewer is told to nobody, the map's author included (`A-15`).
         */}
-        <p className="text-xs text-text-muted">
-          {widget.reason === 'object-deleted'
-            ? 'The object this widget names has been deleted.'
-            : widget.reason === 'not-visible'
-              ? 'You may not see the object this widget names.'
-              : 'This widget cannot be drawn.'}
-        </p>
+        <p className="text-xs text-text-muted">This widget cannot be drawn.</p>
       </Frame>
     );
   }
