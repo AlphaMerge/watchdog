@@ -225,7 +225,16 @@ if (process.env.MS_PREFLIGHT === '1') {
     problems.push("the sampler did not find the probe's SonicBoom");
   }
   if (probeProcess(probeUnit.pid) === null) problems.push("the probe's /proc is unreadable");
-  emit({ kind: 'preflight', problems, lastSample, box: boxMemory(), reader: reader.state });
+  // The limits as the kernel holds them, and `free` as an operator would read it inside the box,
+  // for the findings: the balloon is sized to these, and nothing else stands between it and the VM.
+  const limits = {
+    memoryMax: readFileSync(`${BOX}/memory.max`, 'utf8').trim(),
+    swapMax: readFileSync(`${BOX}/memory.swap.max`, 'utf8').trim(),
+    free: sh('free', ['-m']),
+  };
+  if (limits.memoryMax === 'max') problems.push('the box has no memory.max');
+  if (limits.swapMax === 'max') problems.push('the box has no memory.swap.max');
+  emit({ kind: 'preflight', problems, limits, lastSample, box: boxMemory(), reader: reader.state });
   if (problems.length > 0) {
     console.error(`preflight failed: ${problems.join('; ')}`);
     process.exit(1);
