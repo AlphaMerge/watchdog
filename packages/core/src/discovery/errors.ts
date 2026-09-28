@@ -11,6 +11,7 @@ export type DiscoveryErrorCode =
   | 'DISCOVERY_RANGE_INVALID'
   | 'DISCOVERY_RUN_NOT_FOUND'
   | 'DISCOVERY_SCHEDULE_INVALID'
+  | 'DISCOVERY_PROBE_INVALID'
   | 'DISCOVERY_FAILED';
 
 export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>> = {
@@ -20,6 +21,9 @@ export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>
   // time zone this build has never heard of. The caller's mistake, and one they can only fix if
   // we say which value was wrong — a 500 would blame the server and hide the sentence.
   DISCOVERY_SCHEDULE_INVALID: 400,
+  // A probe that is not the one the group is under (`A-28`). One status for every wrong probe —
+  // hidden, foreign, not a probe, or not there — so the answer says nothing about which.
+  DISCOVERY_PROBE_INVALID: 400,
   DISCOVERY_FAILED: 500,
 };
 

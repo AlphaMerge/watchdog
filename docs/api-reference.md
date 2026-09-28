@@ -506,7 +506,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `scheduleId` | integer,null |  |
 | `enabled` | boolean |  |
 
-**201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, nextRunAt, description }
+**201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description }
 
 ### `POST /api/v1/discovery/schedules/{id}/enabled`
 
@@ -524,7 +524,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | --- | --- | --- |
 | `enabled` | boolean | **required** |
 
-**200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, nextRunAt, description }
+**200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description }
 
 ### `DELETE /api/v1/discovery/schedules/{id}`
 

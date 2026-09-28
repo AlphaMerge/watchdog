@@ -11,6 +11,7 @@ import type { DiscoveryLevel, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { DiscoveryError } from './errors.js';
+import { requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
 /**
@@ -227,6 +228,7 @@ export class DiscoveryService {
     // **`created_by` is filled at last** (`A-20`): the column has existed since migration 025 and
     // nothing wrote it. The audit entry is the durable answer; this is the one the run carries.
     const run = await this.#db.tx(async (q) => {
+      await requireGroupProbe(q, request.groupId, request.probeId);
       const rows = await q.query<Record<string, unknown>>(
         `INSERT INTO discovery_run
            (group_id, probe_id, range_text, total, timeout_ms, concurrency, rate_per_second,

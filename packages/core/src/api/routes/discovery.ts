@@ -710,6 +710,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         scheduleId: { type: ['integer', 'null'] },
         lastRunAt: { type: ['string', 'null'] },
         lastRunId: { type: ['integer', 'null'] },
+        lastProblem: {
+          type: 'string',
+          description:
+            'Why the last firing started nothing, or empty. A rule whose group has moved under ' +
+            'another probe is refused when it fires, and this is where that is said (`A-28`).',
+        },
         nextRunAt: { type: ['string', 'null'] },
         description: { type: 'string' },
       },

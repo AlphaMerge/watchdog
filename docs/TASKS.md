@@ -12716,6 +12716,26 @@ because each is a decision rather than a defect:
       and a socket whose grant is revoked while the counter is put back below the number it was
       resolved at is sent `overflow`, not the change. Mutation 2/2: the page length, and `<`.
 
+- [ ] **A-28 — A branch writer can run discovery from any probe** · M · A-12, A-20 · Found
+      2026-09-28 by the `A-12` triage, and upheld as **high** by both verifiers. `POST /discovery`
+      and `POST /discovery/schedules` check write on `groupId` and nothing on `probeId`, and
+      `DiscoveryService.start` stores and dispatches to whatever probe it is given. So a writer on
+      customer A's group names customer B's probe and sweeps B's network from it: reads the hosts,
+      the plan and the summary under their own group, provisions them into it, puts the sweep on
+      a rediscovery timer, and holds B's probe busy while it runs. The web UI already assumes the
+      core refuses this (`DiscoveryView.tsx` clears the group when the probe changes), and
+      `administration.md` says a branch account never reaches a probe.
+
+      **Done when:**
+
+      - `probeId` must be the probe `groupId` is under, of kind `probe`, **checked in the
+        service** so that every path is covered — a run started by hand, a schedule when it is
+        written, when it is switched on, and when it fires, since the group may have moved.
+      - The refusal is one answer for a probe that is somebody else's, one the caller cannot see,
+        something that is not a probe, and nothing at all (`A-15`, `A-16`).
+      - `scheduleId` on `/discovery/schedules` is looked at as well; the triage did not verify it.
+      - The refusal has tests of its own, not a place in the audit sweep.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

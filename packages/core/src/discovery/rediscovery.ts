@@ -9,9 +9,10 @@ import {
   type Cadence,
   type CadenceSpec,
 } from '../schedules/cadence.js';
-import type { Database } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, RediscoveryScheduleAudit } from '../objects/audit.js';
 import { DiscoveryError } from './errors.js';
+import { requireGroupProbe } from './scope.js';
 import type { DiscoveryService } from './service.js';
 
 /**
@@ -55,6 +56,11 @@ export interface RediscoverySchedule {
   scheduleId: number | null;
   lastRunAt: string | null;
   lastRunId: number | null;
+  /**
+   * Why the last firing started nothing, or empty (`A-28`). A rule fires unattended, so a refusal
+   * then reaches nobody unless it is kept here — the page would go on showing it enabled and due.
+   */
+  lastProblem: string;
   nextRunAt: string | null;
   /** `every Sunday at 03:00`. Computed, never stored — one place decides how it reads. */
   description: string;
@@ -142,6 +148,8 @@ export class RediscoveryService {
       input.enabled === true ? await this.#nextFor(spec, input.scheduleId ?? null) : null;
 
     return this.#db.tx(async (q) => {
+      await requireGroupProbe(q, input.groupId, input.probeId);
+      await this.#requireWindow(q, input.scheduleId ?? null);
       const rows = await q.query<Record<string, unknown>>(
         `INSERT INTO discovery_schedule
          (group_id, probe_id, name, enabled, range_text, level, templates, snmp_community,
@@ -215,6 +223,10 @@ export class RediscoveryService {
       );
       const beforeRow = before[0];
       if (beforeRow === undefined) return null;
+      // Switching one on is when it will next send packets, so it is asked again here: the group
+      // may have moved under another probe since the schedule was written (`A-28`). Firing asks
+      // too, through `DiscoveryService.start`.
+      if (enabled) await requireGroupProbe(q, current.groupId, current.probeId);
       const rows = await q.query<Record<string, unknown>>(
         `UPDATE discovery_schedule SET enabled = $2, next_run_at = $3, updated_at = now()
          WHERE id = $1 RETURNING *`,
@@ -341,7 +353,8 @@ export class RediscoveryService {
           SCHEDULER,
         );
         await this.#db.query(
-          `UPDATE discovery_schedule SET last_run_at = now(), last_run_id = $2 WHERE id = $1`,
+          `UPDATE discovery_schedule SET last_run_at = now(), last_run_id = $2, last_problem = ''
+           WHERE id = $1`,
           [schedule.id, run.id],
         );
         this.#fired += 1;
@@ -357,6 +370,27 @@ export class RediscoveryService {
           { scheduleId: schedule.id, err: error instanceof Error ? error.message : 'unknown' },
           'a rediscovery could not be started',
         );
+        // **And the rule says so** (`A-28`). A refusal's own sentence is written for the caller
+        // and names nothing they were not given; anything else is the core's to explain, in the
+        // log line above, so the rule points there rather than repeating a database error.
+        const problem =
+          error instanceof DiscoveryError
+            ? error.message
+            : 'the last run could not be started; the core’s log has the reason';
+        await this.#db
+          .query(`UPDATE discovery_schedule SET last_problem = $2 WHERE id = $1`, [
+            schedule.id,
+            problem.slice(0, 1_000),
+          ])
+          .catch((recording: unknown) => {
+            this.#logger.error(
+              {
+                scheduleId: schedule.id,
+                err: recording instanceof Error ? recording.message : 'unknown',
+              },
+              'the reason a rediscovery did not start could not be recorded',
+            );
+          });
       }
     }
     return started;
@@ -393,6 +427,24 @@ export class RediscoveryService {
   }
 
   /** The next firing, honouring a permission window when one is attached. */
+  /**
+   * A permission window that exists, or a refusal that says which (`A-28`).
+   *
+   * Schedules are readable by every account, so naming one reveals nothing; a missing one used to
+   * reach the foreign key and come back as a 409 with a constraint name in it.
+   */
+  async #requireWindow(q: Queryable, scheduleId: number | null): Promise<void> {
+    if (scheduleId === null) return;
+    const rows = await q.query(`SELECT 1 FROM schedule WHERE id = $1`, [scheduleId]);
+    if (rows.length === 0) {
+      throw new DiscoveryError(
+        'DISCOVERY_SCHEDULE_INVALID',
+        `there is no schedule ${String(scheduleId)} to use as a permitted window`,
+        { context: { scheduleId } },
+      );
+    }
+  }
+
   async #nextFor(
     spec: CadenceSpec,
     scheduleId: number | null,
@@ -461,6 +513,7 @@ function read(row: Record<string, unknown>): RediscoverySchedule {
     scheduleId: row['schedule_id'] == null ? null : Number(row['schedule_id']),
     lastRunAt: row['last_run_at'] == null ? null : iso(row['last_run_at']),
     lastRunId: row['last_run_id'] == null ? null : Number(row['last_run_id']),
+    lastProblem: typeof row['last_problem'] === 'string' ? row['last_problem'] : '',
     nextRunAt: row['next_run_at'] == null ? null : iso(row['next_run_at']),
     description: describeCadence(spec),
   };
