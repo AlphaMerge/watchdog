@@ -121,6 +121,12 @@ export interface HousekeeperOptions {
    * retention by age and nothing else, which is what a build with no disk to watch should do.
    */
   disk?: DiskWatcher;
+  /**
+   * Whether to prune stored reports (`E-10`). False in a build that has no reporting (`H-12`):
+   * the v1 profile constructs none of it, so its housekeeper does not run the step either.
+   * Defaults to true, which is every build before that one.
+   */
+  reports?: boolean;
   /** Injectable so an eviction test does not have to wait out a real clock. */
   now?: () => Date;
 }
@@ -151,6 +157,7 @@ export class Housekeeper {
   readonly #logger: Logger;
   readonly #config: HousekeepingConfig;
   readonly #disk: DiskWatcher | undefined;
+  readonly #pruneReportsEnabled: boolean;
   readonly #now: () => Date;
   #lastDisk: DiskReading | null = null;
   #evictedChunks = 0;
@@ -178,6 +185,7 @@ export class Housekeeper {
     this.#store = options.store ?? new SqlTimeSeriesStore();
     this.#audit = options.auditRepository ?? new AuditRepository();
     this.#disk = options.disk;
+    this.#pruneReportsEnabled = options.reports ?? true;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -360,7 +368,9 @@ export class Housekeeper {
     // Its own step, after the audit prune: the two are unrelated, and a failure in either must
     // not stop the other. Last because it is the cheapest to miss for one pass — a report kept
     // five minutes too long costs disk, and every other step here is protecting correctness.
-    await this.#step(report, 'report-retention', () => this.#pruneReports(report));
+    if (this.#pruneReportsEnabled) {
+      await this.#step(report, 'report-retention', () => this.#pruneReports(report));
+    }
   }
 
   async #step(report: HousekeepingReport, step: string, run: () => Promise<void>): Promise<void> {

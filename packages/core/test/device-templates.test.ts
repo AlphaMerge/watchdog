@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { classify, type Evidence, type Fingerprint } from '@ms/shared';
-import { standardCatalogue } from '@ms/sensors';
+import { sensorTypesFor, standardCatalogue, withheldReason } from '@ms/sensors';
 import {
   applicableSensors,
   BUILT_IN_DEVICE_TEMPLATES,
@@ -697,6 +697,69 @@ describe('loading an operator’s own templates', () => {
     });
     assert.deepEqual(held.problems(), []);
     assert.equal(held.all().length, BUILT_IN_DEVICE_TEMPLATES.length);
+  });
+
+  describe('in a v1 build (`H-12`)', () => {
+    const v1 = standardCatalogue(sensorTypesFor('v1'));
+    const options = {
+      logger: silent,
+      knownSensorType: (id: string): boolean => v1.has(id),
+      withheld: (id: string): string | undefined => withheldReason('v1', id),
+    };
+
+    it('keeps the Windows server template, with its ping and without the WMI set', async () => {
+      // Refused whole, it would take the ping with it and log an error on every v1 start.
+      const held = await loadDeviceTemplates(options);
+      assert.deepEqual(held.problems(), []);
+      assert.deepEqual(
+        held.get('ms.windows')?.sensors.map((spec) => spec.type),
+        ['icmp.ping'],
+      );
+      assert.equal(held.all().length, BUILT_IN_DEVICE_TEMPLATES.length);
+    });
+
+    it('leaves the full build’s template whole', async () => {
+      const held = await loadDeviceTemplates({ logger: silent, knownSensorType: known });
+      assert.deepEqual(
+        held.get('ms.windows')?.sensors.map((spec) => spec.type),
+        ['icmp.ping', 'windows.cpu', 'windows.memory', 'windows.volume'],
+      );
+    });
+
+    it('trims an operator’s template the same way, and still refuses a type nobody built', async () => {
+      const v1Directory = mkdtempSync(join(tmpdir(), 'ms-templates-v1-'));
+      try {
+        writeFileSync(
+          join(v1Directory, 'ours.json'),
+          JSON.stringify([
+            {
+              id: 'acme.windows',
+              name: 'Our Windows boxes',
+              description: '',
+              match: {},
+              sensors: [{ type: 'icmp.ping' }, { type: 'windows.service' }],
+            },
+            {
+              id: 'acme.typo',
+              name: 'Typo',
+              description: '',
+              match: {},
+              sensors: [{ type: 'icmp.ping' }, { type: 'windows.cpuu' }],
+            },
+          ]),
+          'utf8',
+        );
+        const held = await loadDeviceTemplates({ ...options, directory: v1Directory });
+        assert.deepEqual(
+          held.get('acme.windows')?.sensors.map((spec) => spec.type),
+          ['icmp.ping'],
+        );
+        assert.equal(held.get('acme.typo'), null);
+        assert.ok(held.problems().some((one) => one.id === 'acme.typo'));
+      } finally {
+        rmSync(v1Directory, { recursive: true, force: true });
+      }
+    });
   });
 
   it('is sealed, so nothing can register a template after boot', async () => {

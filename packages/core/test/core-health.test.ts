@@ -365,6 +365,31 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['reportFormatsRefused'], 11);
     });
 
+    it('gaps the reports’ channels in a build that has no reporting (`H-12`)', async () => {
+      // The v1 profile constructs no reporting, so there is no source. A zero would say nothing
+      // failed, which is a claim about a subsystem that is not running.
+      const { reports: _reports, ...withoutReports } = sources();
+      const reading = await new CoreHealthService({
+        db,
+        logger: silent,
+        sources: withoutReports,
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [] }),
+      }).read();
+      for (const key of [
+        'reportsDeferred',
+        'reportsFailed',
+        'reportsUndelivered',
+        'reportFormatsWaiting',
+        'reportFormatsRefused',
+      ]) {
+        assert.ok(key in reading, `${key} should still be a channel`);
+        assert.equal(reading[key], null, `${key} should be a gap`);
+      }
+      // And only those: everything else still reads.
+      assert.equal(reading['ingestQueue'], 0);
+    });
+
     it('reports the alarm sweep as overdue only once it actually is', async () => {
       // `P-22`. Zero is the answer almost always — a scheduler asleep with a wake ahead of it is
       // on time, and so is one that has never armed anything. Reporting "minus forty seconds" or

@@ -198,6 +198,43 @@ else
   failed=1
 fi
 
+echo "==> asserting a v1 build carries nothing v1 leaves out"
+# `H-12`. Of the running core, not of the manifest: a stamp that says v1 over a core that built
+# maps anyway is the defect, and only the core can show it. The five withheld types by name, so
+# that putting one back fails here; the three subsystems as the core reports what it built; and
+# two of their routes, because a route that answers is what an operator would actually meet —
+# reports among them, the heavier subsystem and the one with a formatter pool behind it.
+if matches '"profile":"v1"' printf '%s' "${installed}"; then
+  types="$(ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/sensor-types 2>/dev/null || true)"
+  carried=""
+  for id in flow.netflow windows.cpu windows.memory windows.service windows.volume; do
+    if matches "\"id\":\"${id}\"" printf '%s' "${types}"; then carried="${carried} ${id}"; fi
+  done
+  maps_status="$(ms_docker_curl "${container}" -s -o /dev/null -w '%{http_code}' \
+    http://127.0.0.1:8080/api/v1/maps 2>/dev/null || true)"
+  reports_status="$(ms_docker_curl "${container}" -s -o /dev/null -w '%{http_code}' \
+    http://127.0.0.1:8080/api/v1/reports 2>/dev/null || true)"
+  if [ -z "${types}" ]; then
+    echo "    v1: FAILED — GET /api/v1/sensor-types did not answer" >&2
+    failed=1
+  elif [ -n "${carried}" ]; then
+    echo "    v1: FAILED — the catalogue carries${carried}" >&2
+    failed=1
+  elif ! matches '"subsystems":{"maps":false,"reports":false,"libraries":false}' printf '%s' "${served}"; then
+    echo "    v1: FAILED — the core built v2 subsystems: '${served}'" >&2
+    failed=1
+  elif [ "${maps_status}" != "404" ] || [ "${reports_status}" != "404" ]; then
+    echo "    v1: FAILED — GET /api/v1/maps answered ${maps_status} and /reports" \
+      "${reports_status}, not 404" >&2
+    failed=1
+  else
+    echo "    v1: no flow or Windows types, no maps, reports or libraries;" \
+      "/maps and /reports are 404"
+  fi
+else
+  echo "    not a v1 build — nothing is withheld"
+fi
+
 echo "==> asserting the core serves the web UI"
 # The UI is built by package.sh, staged into the tarball and pointed at by api.webRoot. This is
 # the only place that proves the whole chain — a build that never ran, a path install.sh did not

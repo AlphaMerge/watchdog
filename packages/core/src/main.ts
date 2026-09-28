@@ -14,7 +14,7 @@ import {
   type CoreConfig,
   type Logger,
 } from '@ms/shared';
-import { standardCatalogue } from '@ms/sensors';
+import { sensorTypesFor, standardCatalogue, withheldReason } from '@ms/sensors';
 import { ApiServer } from './api/server.js';
 import { runMigrateCommand, type MigrateAction } from './commands/migrate.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/store.js';
@@ -26,7 +26,6 @@ import {
   libraryAuditSinks,
   mapAuditSinks,
   objectAuditSinks,
-  reportAuditSinks,
   scheduleAuditSinks,
   triggerAuditSinks,
   type AuditSinkSet,
@@ -100,18 +99,11 @@ import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
 import { AccessService } from './auth/access.js';
 import { MapRepository } from './maps/repository.js';
-import { ReportRepository } from './reports/repository.js';
 import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
 import { LibraryRepository } from './libraries/repository.js';
 import { LibraryService } from './libraries/service.js';
-import { ReportService } from './reports/service.js';
-import { ReportContext } from './reports/context.js';
-import { ReportRenderer } from './reports/render.js';
-import { ReportRunner, ReportRunRepository } from './reports/runs.js';
-import { ReportDelivery, ReportOutputRepository } from './reports/delivery.js';
-import { ReportFormatter } from './reports/formatter.js';
-import { checkReportFonts, configureReportFonts } from './reports/fonts.js';
+import { startReporting, type Reporting } from './reports/wiring.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -253,8 +245,9 @@ async function serve(): Promise<void> {
   // has to remember to tell the probes about itself (R-04).
   const configNotifier = new ConfigChangeNotifier({ logger });
   // Registered once, then sealed: a type appearing later would mean two probes disagreeing
-  // about what a sensor is.
-  const catalogue = standardCatalogue();
+  // about what a sensor is. This build's profile of the built-in set (`H-12`), the one its probes
+  // carry, so a v1 core offers no type a v1 probe would refuse.
+  const catalogue = standardCatalogue(sensorTypesFor(BUILD.profile));
 
   // The vault, before anything that can write a credential. A key file that is unreadable, too
   // permissive or absent-with-`create:false` stops the core here rather than at the first write
@@ -296,6 +289,8 @@ async function serve(): Promise<void> {
       const outcome = catalogue.validate(id, params);
       return outcome.valid ? [] : outcome.problems.map((one) => one.message);
     },
+    // A v1 build's Windows server template keeps its ping and leaves out the WMI set (`H-12`).
+    withheld: (id) => withheldReason(BUILD.profile, id),
   });
 
   // Built here rather than beside the ingestion service, because the audit sink below has to
@@ -849,148 +844,53 @@ async function serve(): Promise<void> {
   const mfa = new TotpService({ db, logger });
   const loginThrottle = new LoginThrottle({ db, logger });
 
+  // **The v2 subsystems, and only in the full build profile** (`H-12`). The v1 build — the
+  // release candidate — constructs none of them: no maps, libraries or reports, so no routes, no
+  // report sweep, no `recover()` and no formatter pool. `ApiServer` already registers nothing for
+  // a service it is not given, so leaving them out is the whole of the API's half.
+  const full = BUILD.profile === 'full';
+
   // **The maps API, which `G-01` wrote and nothing mounted.** `ApiServer` takes the service as an
   // option and simply does not register the routes without it — a build with no maps has no maps
   // API, which is a different statement from having no maps. That was the right shape and the
   // wrong wiring: until here, the only caller passing one was a test, so every route `G-01`
   // shipped answered 404 in the service somebody actually runs.
-  const maps = new MapService({
-    db,
-    repository: new MapRepository(),
-    audit: new CompositeAuditSink(mapAuditSinks(auditSinks)),
-    logger,
-  });
+  const maps = full
+    ? new MapService({
+        db,
+        repository: new MapRepository(),
+        audit: new CompositeAuditSink(mapAuditSinks(auditSinks)),
+        logger,
+      })
+    : undefined;
   // Reads through the same `AccessService` the object API uses and the same `HistoryService`
   // the sensor pages use: a widget must not become a second, more permissive way to read a
   // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
-  const mapResolver = new MapResolver({ db, access: objectAccess, history });
+  const mapResolver = full ? new MapResolver({ db, access: objectAccess, history }) : undefined;
 
   // Mounted with the routes, for the reason the maps note above gives (`L-01`).
-  const libraries = new LibraryService({
-    db,
-    repository: new LibraryRepository(),
-    audit: new CompositeAuditSink(libraryAuditSinks(auditSinks)),
-    logger,
-  });
-
-  // Mounted here at the same time the routes were written, rather than a phase later: the maps
-  // note directly above is the record of what happens otherwise.
-  const reportRepository = new ReportRepository();
-  // Reads through the same `AccessService` the object API uses, for the reason the map resolver
-  // does: a report must not become a second, more permissive way to read a sensor (`E-03`).
-  const reportContext = new ReportContext({
-    db,
-    repository: reportRepository,
-    access: objectAccess,
-    logger,
-  });
-  const reportRenderer = new ReportRenderer({ context: reportContext, history, logger });
-  const reportAudit = new CompositeAuditSink(reportAuditSinks(auditSinks));
-  const reportRuns = new ReportRunRepository();
-  const reportOutputs = new ReportOutputRepository();
-  // `N-07`'s transport, not a second one — a report is an attachment, not a new channel (`E-09`).
-  // Formatting runs in worker threads, not on the loop every request waits on (`P-204`): `P-203`
-  // measured two reports formatting at once making a concurrent request wait 2.6 s. Started on first
-  // use, so an installation that never renders a report never starts a worker.
-  // The fonts a PDF draws with beyond the bundled two (`E-12`). Checked once here so a path that
-  // is wrong is said at startup, by name, rather than as a worse-looking PDF weeks later — and
-  // configured on this thread too, for anything that renders a PDF without the pool.
-  for (const { source, problem } of checkReportFonts(config.reports.pdfFonts)) {
-    logger.error(
-      { path: source.path, face: source.face, problem },
-      'a configured report font cannot be used; PDFs will draw with the next font that can',
-    );
-  }
-  configureReportFonts(config.reports.pdfFonts);
-  const reportFormatter = new ReportFormatter({ logger, fonts: config.reports.pdfFonts });
-  lifecycle.onShutdown({
-    name: 'report formatter',
-    timeoutMs: 5_000,
-    run: () => reportFormatter.close(),
-  });
-  const reportDelivery = new ReportDelivery({
-    db,
-    outputs: reportOutputs,
-    email,
-    formatter: reportFormatter,
-    logger,
-  });
-  const reportRunner = new ReportRunner({
-    db,
-    reports: reportRepository,
-    runs: reportRuns,
-    renderer: reportRenderer,
-    delivery: reportDelivery,
-    logger,
-    // The act-as `E-03` deferred: an audit row for a report that actually ran, naming both who
-    // asked and whose visibility it used.
-    audit: async (event) => {
-      await reportAudit.record(
+  const libraries = full
+    ? new LibraryService({
         db,
-        event.requestedBy === ''
-          ? { kind: 'system', component: 'report-scheduler' }
-          : { kind: 'user', userId: 0, login: event.requestedBy },
-        [
-          {
-            action: 'report.ran',
-            objectId: null,
-            reportId: event.reportId,
-            runId: event.runId,
-            reportName: event.reportName,
-            trigger: event.trigger,
-            requestedBy: event.requestedBy,
-            runAs: event.runAs,
-            spanLabel: event.spanLabel,
-            outcome: event.outcome,
-            errorCode: event.errorCode,
-          },
-        ],
-        new Date(),
-      );
-    },
-  });
-  const reports = {
-    service: new ReportService({ db, repository: reportRepository, audit: reportAudit, logger }),
-    context: reportContext,
-    // And through the same `HistoryService` the sensor pages use, so a report and the graph an
-    // operator checks it against cannot disagree about an hour (`E-04`).
-    renderer: reportRenderer,
-    runner: reportRunner,
-    runs: reportRuns,
-    outputStore: reportOutputs,
-    formatter: reportFormatter,
-  };
+        repository: new LibraryRepository(),
+        audit: new CompositeAuditSink(libraryAuditSinks(auditSinks)),
+        logger,
+      })
+    : undefined;
 
-  // **Runs abandoned by a core that stopped mid-render are cleared once, here.** `running` is a
-  // claim about a process that no longer exists, and the partial unique index would otherwise keep
-  // that report unrunnable for ever (`E-08`).
-  await reportRunner.recover();
-
-  // A report is the longest-running thing this system does, so it runs on its own sweep and never
-  // anywhere near the timing wheel — `CLAUDE.md`: nothing blocks the scheduler. A minute, because
-  // that is the resolution a cadence has, and the same period the rediscovery sweep uses.
-  const reportSweep = new PeriodicSweep({
-    logger,
-    component: 'report-sweep',
-    what: 'a report sweep failed',
-    run: async () => {
-      // Rendering first, then delivering: a report that just rendered goes out on this same pass
-      // rather than waiting a minute, and a delivery backlog cannot starve the renders because
-      // each half is separately bounded.
-      await reportRunner.tick();
-      await reportDelivery.tick();
-    },
-    intervalMs: 60_000,
-  });
-  reportSweep.start();
-  lifecycle.onShutdown({
-    name: 'report-sweep',
-    timeoutMs: 2_000,
-    run: () => {
-      reportSweep.stop();
-      return Promise.resolve();
-    },
-  });
+  // Reports, from their own module so that "not constructed" is this one line (`E-01`…`E-12`).
+  const reporting: Reporting | undefined = full
+    ? await startReporting({
+        db,
+        logger,
+        lifecycle,
+        config: config.reports,
+        access: objectAccess,
+        history,
+        auditSinks,
+        email,
+      })
+    : undefined;
 
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
@@ -1074,10 +974,11 @@ async function serve(): Promise<void> {
       // sentence in a file rather than a constant nobody revisits.
       required: config.api.requireAuthentication,
     },
-    maps,
-    reports,
-    mapResolver,
-    libraries,
+    // Absent in the v1 profile, which is how their routes come to be absent (`H-12`).
+    ...(maps === undefined ? {} : { maps }),
+    ...(reporting === undefined ? {} : { reports: reporting.api }),
+    ...(mapResolver === undefined ? {} : { mapResolver }),
+    ...(libraries === undefined ? {} : { libraries }),
     mapTiles: {
       urlTemplate: config.maps.tileUrl,
       attribution: config.maps.tileAttribution,
@@ -1117,6 +1018,8 @@ async function serve(): Promise<void> {
     config: config.housekeeping,
     store,
     disk,
+    // No reports to prune in a build that has none (`H-12`).
+    reports: full,
   });
   housekeeper.start();
   lifecycle.onShutdown({
@@ -1266,16 +1169,8 @@ async function serve(): Promise<void> {
       limitMemory: () => limitMemory.lowest(),
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
-      reports: () => {
-        const stats = reportRunner.stats();
-        return {
-          deferred: stats.deferred,
-          failed: stats.failed,
-          undelivered: reportDelivery.stats().pending,
-          formatsWaiting: reportFormatter.stats().queued,
-          formatsRefused: reportFormatter.stats().refused,
-        };
-      },
+      // Gaps in the v1 profile, which has no reporting to count (`H-12`).
+      ...(reporting === undefined ? {} : { reports: reporting.stats }),
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {

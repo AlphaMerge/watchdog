@@ -13,6 +13,16 @@ export interface LoadDeviceTemplatesOptions {
   knownSensorType: (id: string) => boolean;
   /** And so one naming a type it cannot supply the required parameters for is refused too. */
   validateParams?: (id: string, params: Readonly<Record<string, unknown>>) => string[];
+  /**
+   * Why this build leaves a sensor type out, or undefined when it carries it (`H-12`).
+   *
+   * **Withheld is not unknown.** A v1 build has no Windows types, and the shipped Windows server
+   * template names three of them beside its ping. Refused whole, that template would take the
+   * ping with it and log an error on every start of every v1 installation. So a withheld type's
+   * sensors are left out of the template, and said so; a type nobody ever built is still
+   * refused by name.
+   */
+  withheld?: (id: string) => string | undefined;
 }
 
 /**
@@ -33,10 +43,14 @@ export async function loadDeviceTemplates(
   const catalogue = new DeviceTemplateCatalogue(options.knownSensorType, options.validateParams);
   const logger = options.logger.child({ component: 'device-templates' });
 
-  for (const template of BUILT_IN_DEVICE_TEMPLATES) catalogue.register(template, 'built-in');
+  const register = (template: DeviceTemplate, source: string): void => {
+    catalogue.register(withoutWithheld(template, source, options.withheld, logger), source);
+  };
+
+  for (const template of BUILT_IN_DEVICE_TEMPLATES) register(template, 'built-in');
 
   if (options.directory !== undefined && options.directory !== '') {
-    await loadDirectory(catalogue, options.directory, logger);
+    await loadDirectory(register, options.directory, logger);
   }
 
   const problems = catalogue.problems();
@@ -55,8 +69,40 @@ export async function loadDeviceTemplates(
   return catalogue.seal();
 }
 
+/** `template` without the sensors of any type this build withholds, and a line saying which. */
+function withoutWithheld(
+  template: DeviceTemplate,
+  source: string,
+  withheld: ((id: string) => string | undefined) | undefined,
+  logger: Logger,
+): DeviceTemplate {
+  // A file's template has not been validated yet; one without a sensor list is the catalogue's
+  // to refuse, with the reason, and nothing here to trim.
+  if (withheld === undefined || !Array.isArray(template.sensors)) return template;
+  // Nor are its specs: one that is not an object with a type is likewise left for the catalogue.
+  const typeOf = (spec: unknown): string | undefined =>
+    typeof spec === 'object' && spec !== null && 'type' in spec && typeof spec.type === 'string'
+      ? spec.type
+      : undefined;
+  const leftOut = template.sensors
+    .map((spec: unknown) => typeOf(spec))
+    .filter((type): type is string => type !== undefined && withheld(type) !== undefined);
+  if (leftOut.length === 0) return template;
+  logger.info(
+    { id: template.id, source, left: leftOut, because: [...new Set(leftOut.map(withheld))] },
+    'a device template leaves out sensor types this build does not carry',
+  );
+  return {
+    ...template,
+    sensors: template.sensors.filter((spec: unknown) => {
+      const type = typeOf(spec);
+      return type === undefined || withheld(type) === undefined;
+    }),
+  };
+}
+
 async function loadDirectory(
-  catalogue: DeviceTemplateCatalogue,
+  register: (template: DeviceTemplate, source: string) => void,
   directory: string,
   logger: Logger,
 ): Promise<void> {
@@ -79,14 +125,14 @@ async function loadDirectory(
     try {
       parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
     } catch (error) {
-      catalogue.register({ id: '', name: '', description: '', match: {}, sensors: [] }, path);
+      register({ id: '', name: '', description: '', match: {}, sensors: [] }, path);
       logger.error({ ...describeError(error), path }, 'a device template file is not JSON');
       continue;
     }
     // An array so one file can hold a related set, which is how anybody writes them: a vendor's
     // switches, routers and firewalls belong together.
     for (const one of Array.isArray(parsed) ? (parsed as unknown[]) : [parsed]) {
-      catalogue.register(one as DeviceTemplate, path);
+      register(one as DeviceTemplate, path);
     }
   }
 }

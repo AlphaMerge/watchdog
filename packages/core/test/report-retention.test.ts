@@ -146,6 +146,22 @@ describe('report retention', { skip: available ? false : 'no database' }, () => 
     assert.ok(await runs.find(db, old), 'the run row survived its document');
   });
 
+  it('does not run in a build that has no reporting (`H-12`)', async () => {
+    // The v1 profile constructs no reporting, and its housekeeper does not reach for the tables.
+    // Rows left by a full build are kept, not pruned by a subsystem that is not running.
+    const old = await makeRun(800);
+    const report = await new Housekeeper({
+      db,
+      logger: silent,
+      config: housekeeping(90, 730),
+      reports: false,
+    }).runOnce();
+    assert.equal(report.prunedReportOutputs, 0);
+    assert.equal(report.prunedReportRuns, 0);
+    assert.ok(await runs.find(db, old), 'the run is still there');
+    assert.equal(await outputCount(old), 1);
+  });
+
   it('deletes a run past its own horizon, taking any document with it', async () => {
     const ancient = await makeRun(800);
     const report = await sweep(90, 730);

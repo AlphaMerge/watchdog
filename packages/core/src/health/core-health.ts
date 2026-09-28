@@ -55,8 +55,12 @@ export interface CoreHealthSources {
    * where the report is. `undelivered` is `E-09`'s half of the same rule: a report that rendered
    * and is still waiting on a mail relay is neither a success nor yet a failure, and a gauge is
    * the only shape that says "this is piling up" while it still is.
+   *
+   * **Absent in a build that has no reporting** (`H-12`): the v1 profile constructs none of it,
+   * and its five channels are gaps there rather than zeros — a zero would say that nothing failed,
+   * which is a claim about a subsystem that is not running.
    */
-  reports: () => {
+  reports?: () => {
     deferred: number;
     failed: number;
     undelivered: number;
@@ -210,7 +214,7 @@ export class CoreHealthService {
     const probes = this.#sources.probes();
     const alarms = this.#sources.alarms();
     const queries = this.#sources.queries();
-    const reports = this.#sources.reports();
+    const reports = this.#sources.reports?.() ?? null;
     const disk = this.#sources.disk();
     const machine = this.#sources.machineMemory();
     const limit = this.#sources.limitMemory();
@@ -257,11 +261,11 @@ export class CoreHealthService {
       alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
       alarmsFired: alarms.fired,
       queriesRefused: queries.refused,
-      reportsDeferred: reports.deferred,
-      reportsFailed: reports.failed,
-      reportsUndelivered: reports.undelivered,
-      reportFormatsWaiting: reports.formatsWaiting,
-      reportFormatsRefused: reports.formatsRefused,
+      reportsDeferred: reports === null ? null : reports.deferred,
+      reportsFailed: reports === null ? null : reports.failed,
+      reportsUndelivered: reports === null ? null : reports.undelivered,
+      reportFormatsWaiting: reports === null ? null : reports.formatsWaiting,
+      reportFormatsRefused: reports === null ? null : reports.formatsRefused,
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
       reactionsDeferred: ingestion.deferredReactions,
     };
