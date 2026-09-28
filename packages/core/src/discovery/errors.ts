@@ -12,6 +12,8 @@ export type DiscoveryErrorCode =
   | 'DISCOVERY_RUN_NOT_FOUND'
   | 'DISCOVERY_SCHEDULE_INVALID'
   | 'DISCOVERY_PROBE_INVALID'
+  | 'DISCOVERY_SCHEDULE_CHANGED'
+  | 'DISCOVERY_PRECONDITION_REQUIRED'
   | 'DISCOVERY_FAILED';
 
 export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>> = {
@@ -24,6 +26,12 @@ export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>
   // A probe that is not the one the group is under (`A-28`). One status for every wrong probe —
   // hidden, foreign, not a probe, or not there — so the answer says nothing about which.
   DISCOVERY_PROBE_INVALID: 400,
+  // An edit made against a version of a rule that is no longer current (`D-11`). 412, as HTTP
+  // defines a failed `If-Match` and as an object's edit answers: two people editing one rule
+  // must not have the second silently undo the first.
+  DISCOVERY_SCHEDULE_CHANGED: 412,
+  // An edit that did not say which version it was made against.
+  DISCOVERY_PRECONDITION_REQUIRED: 428,
   DISCOVERY_FAILED: 500,
 };
 

@@ -3,6 +3,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
+import { DiscoveryError } from '../src/discovery/errors.js';
 import type { ScheduleDefinition } from '../src/schedules/definition.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -172,6 +173,18 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       );
     });
 
+    it('refuses a range the parser refuses, in the parser’s words, before it is saved', async () => {
+      // It used to be saved and fail at its first firing, unattended, the sentence lost to a log.
+      await assert.rejects(
+        () => create({ range: '10.0.0.0/8' }),
+        (error: unknown) =>
+          error instanceof DiscoveryError &&
+          error.code === 'DISCOVERY_RANGE_INVALID' &&
+          /addresses/.test(error.message),
+      );
+      assert.equal((await rediscovery.list(Visibility.EVERYTHING)).length, 0);
+    });
+
     it('refuses a time zone the system does not know', async () => {
       await assert.rejects(
         () => create({ timezone: 'Mars/Olympus' }),
@@ -237,7 +250,12 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
     it('books the next run even when the start fails', async () => {
       // The failure that matters: a schedule whose booking did not move would be retried every
       // minute for ever, turning one bad configuration into a sweep that never stops asking.
-      const created = await create({ enabled: true, range: '10.0.0.0/8' });
+      const created = await create({ enabled: true });
+      // A range the parser refuses. Refused when a rule is written since `D-11`, so it is put
+      // there directly — the state of a rule written before, which a firing still has to survive.
+      await db.query(`UPDATE discovery_schedule SET range_text = '10.0.0.0/8' WHERE id = $1`, [
+        created.id,
+      ]);
       now = new Date('2026-08-31T03:00:00Z');
       assert.equal(await rediscovery.tick(), 0, 'nothing started');
 
@@ -332,6 +350,162 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
 
     it('reports nothing for a run that is not there', async () => {
       assert.equal(await rediscovery.runFinished(999_999), false);
+    });
+  });
+
+  describe('editing (`D-11`)', () => {
+    const entries = async (id: number) =>
+      db.query<{ diff: { field: string; before: unknown; after: unknown }[] }>(
+        `SELECT diff FROM audit_log
+         WHERE action = 'discovery.schedule.updated' AND (summary->>'scheduleId')::bigint = $1
+         ORDER BY id`,
+        [id],
+      );
+
+    const changedTo = (code: string) => (error: unknown) =>
+      error instanceof DiscoveryError && error.code === code;
+
+    it('changes what it is given, keeps the rest, and counts a version', async () => {
+      const created = await create({ enabled: true, snmpCommunity: 'kept-community' });
+      assert.equal(created.version, 1);
+
+      const edited = await rediscovery.update(
+        created.id,
+        1,
+        { name: 'Nightly, later', cadenceMinute: 4 * 60, level: 'detailed' },
+        testActor,
+      );
+      assert.ok(edited !== null);
+      assert.equal(edited.version, 2);
+      assert.equal(edited.name, 'Nightly, later');
+      assert.equal(edited.level, 'detailed');
+      assert.equal(edited.range, '10.0.0.0/29', 'untouched');
+      assert.equal(edited.snmpCommunity, 'kept-community', 'an absent community is kept');
+      assert.equal(edited.enabled, true, 'whether it is on is not the edit’s');
+      // Rebooked by the new cadence, because it is on.
+      assert.equal(edited.description, 'every day at 04:00');
+      assert.equal(edited.nextRunAt, '2026-08-31T04:00:00.000Z');
+
+      const [entry] = await entries(created.id);
+      assert.deepEqual(
+        entry?.diff.map((change) => change.field),
+        ['discovery.schedule.name', 'discovery.schedule.level', 'discovery.schedule.cadence'],
+      );
+    });
+
+    it('refuses an edit made against a version that is no longer current', async () => {
+      const created = await create();
+      await rediscovery.update(created.id, 1, { name: 'First' }, testActor);
+      await assert.rejects(
+        () => rediscovery.update(created.id, 1, { name: 'Second' }, testActor),
+        changedTo('DISCOVERY_SCHEDULE_CHANGED'),
+      );
+      assert.equal((await mustGet(created.id)).name, 'First', 'the first edit stands');
+      assert.equal((await entries(created.id)).length, 1);
+    });
+
+    it('counts switching it on and off as a change, and a firing as none', async () => {
+      const created = await create();
+      await rediscovery.setEnabled(created.id, true, testActor);
+      assert.equal((await mustGet(created.id)).version, 2);
+      await rediscovery.setEnabled(created.id, true, testActor);
+      assert.equal((await mustGet(created.id)).version, 2, 'the state it was already in');
+
+      // An editor must not be refused because the rule did what it was told meanwhile.
+      now = new Date('2026-08-31T03:00:00Z');
+      assert.equal(await rediscovery.tick(), 1);
+      assert.equal((await mustGet(created.id)).version, 2);
+      assert.ok(await rediscovery.update(created.id, 2, { name: 'After firing' }, testActor));
+    });
+
+    it('writes nothing, and keeps its version, for an edit that changes nothing', async () => {
+      const created = await create();
+      const same = await rediscovery.update(
+        created.id,
+        1,
+        { name: created.name, range: created.range },
+        testActor,
+      );
+      assert.equal(same?.version, 1);
+      assert.equal((await entries(created.id)).length, 0);
+    });
+
+    it('says a community was replaced or cleared, and never what it was', async () => {
+      const created = await create({ snmpCommunity: 'first-community-3b1e' });
+      await rediscovery.update(
+        created.id,
+        1,
+        { snmpCommunity: 'second-community-3b1e' },
+        testActor,
+      );
+      await rediscovery.update(created.id, 2, { snmpCommunity: '' }, testActor);
+      assert.equal((await mustGet(created.id)).snmpCommunity, '');
+
+      const [replaced, cleared] = await entries(created.id);
+      assert.deepEqual(replaced?.diff, [
+        { field: 'discovery.schedule.community', before: 'set', after: 'replaced' },
+      ]);
+      assert.deepEqual(cleared?.diff, [
+        { field: 'discovery.schedule.community', before: true, after: false },
+      ]);
+      const everything = JSON.stringify(
+        await db.query(`SELECT summary, diff FROM audit_log WHERE action LIKE 'discovery.%'`),
+      );
+      assert.ok(!everything.includes('community-3b1e'), 'no community is ever written down');
+    });
+
+    it('asks what a new rule is asked: the range, the cadence and the probe', async () => {
+      const created = await create();
+      await assert.rejects(
+        () => rediscovery.update(created.id, 1, { range: '10.0.0.0/8' }, testActor),
+        changedTo('DISCOVERY_RANGE_INVALID'),
+      );
+      await assert.rejects(
+        () => rediscovery.update(created.id, 1, { cadenceMinute: 2_000 }, testActor),
+        changedTo('DISCOVERY_SCHEDULE_INVALID'),
+      );
+      const elsewhere = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `elsewhere-${String(process.hrtime.bigint())}`,
+      });
+      await assert.rejects(
+        () => rediscovery.update(created.id, 1, { probeId: elsewhere.id }, testActor),
+        changedTo('DISCOVERY_PROBE_INVALID'),
+      );
+      await assert.rejects(
+        () => rediscovery.update(created.id, 1, { scheduleId: 999_999 }, testActor),
+        changedTo('DISCOVERY_SCHEDULE_INVALID'),
+      );
+      assert.equal((await mustGet(created.id)).version, 1, 'and nothing was changed');
+    });
+
+    it('is how a rule refused on firing is put right, and the refusal goes with the fix', async () => {
+      // The group moves under another probe; the rule's firing is refused and says so (`A-28`).
+      const created = await create({ enabled: true });
+      const other = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `other-${String(process.hrtime.bigint())}`,
+      });
+      await harness.service.move(testActor, groupId, other.id, { kind: 'none' });
+      now = new Date('2026-08-31T03:00:00Z');
+      assert.equal(await rediscovery.tick(), 0);
+      const refused = await mustGet(created.id);
+      assert.notEqual(refused.lastProblem, '');
+
+      const fixed = await rediscovery.update(
+        created.id,
+        refused.version,
+        { probeId: other.id },
+        testActor,
+      );
+      assert.equal(fixed?.probeId, other.id);
+      assert.equal(fixed.lastProblem, '');
+    });
+
+    it('reports nothing for a rule that is not there', async () => {
+      assert.equal(await rediscovery.update(999_999, 1, { name: 'x' }, testActor), null);
     });
   });
 

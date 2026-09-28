@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-163 routes.
+164 routes.
 
 ## Conventions
 
@@ -506,7 +506,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `scheduleId` | integer,null |  |
 | `enabled` | boolean |  |
 
-**201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description }
+**201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
 
 ### `POST /api/v1/discovery/schedules/{id}/enabled`
 
@@ -524,7 +524,39 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | --- | --- | --- |
 | `enabled` | boolean | **required** |
 
-**200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description }
+**200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
+
+### `PATCH /api/v1/discovery/schedules/{id}`
+
+Change a schedule
+
+`If-Match` carries the version the edit was made against (`W/"3"`, from the rule’s `version` or the `ETag` of the answer that returned it). Without it the request is refused with 428, and against a version that is no longer current with 412: two people editing one rule must not have the second silently undo the first. Whether it is on has its own route. The group cannot change — a rule in another group is another rule — and the probe must be the one the group is under. `snmpCommunity` left out keeps the stored one, and an empty one clears it; it is never returned. An edit that changes something clears `lastProblem`, and one that changes nothing keeps its version.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | integer | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `probeId` | integer |  |
+| `name` | string |  |
+| `range` | string |  |
+| `cadence` | `hourly` · `daily` · `weekly` |  |
+| `cadenceMinute` | integer |  |
+| `cadenceWeekday` | integer |  |
+| `timezone` | string,null |  |
+| `level` | `ping` · `standard` · `detailed` |  |
+| `templates` | string[] |  |
+| `snmpCommunity` | string |  |
+| `timeoutMs` | integer |  |
+| `concurrency` | integer |  |
+| `ratePerSecond` | number |  |
+| `autoProvision` | boolean |  |
+| `scheduleId` | integer,null |  |
+
+**200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
 
 ### `DELETE /api/v1/discovery/schedules/{id}`
 

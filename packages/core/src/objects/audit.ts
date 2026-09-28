@@ -578,6 +578,12 @@ export type Mutation =
       scheduleId: number;
       before: RediscoveryScheduleAudit;
       after: RediscoveryScheduleAudit;
+      /**
+       * One community replaced by another (`D-11`). `community` says only whether there is one,
+       * so a replacement is `true` on both sides and would leave no trace; this says it happened
+       * without saying what either was.
+       */
+      communityReplaced?: boolean;
     }
   | {
       action: 'discovery.schedule.deleted';

@@ -470,6 +470,21 @@ const FIXTURES: Record<string, Fixture> = {
       payload: { enabled: true },
     };
   },
+  'PATCH /api/v1/discovery/schedules/:id': async (k) => {
+    const schedule = await k.post('/api/v1/discovery/schedules', {
+      groupId: k.groupId,
+      probeId: k.probeId,
+      name: k.name('rediscovery'),
+      range: '192.0.2.20/30',
+      cadence: 'daily',
+    });
+    // The community again, replacing none: an edit is the other place a rule takes one.
+    return {
+      url: `/api/v1/discovery/schedules/${id(schedule.id)}`,
+      headers: { 'if-match': 'W/"1"' },
+      payload: { name: k.name('rediscovery'), snmpCommunity: PLANTED_SECRET },
+    };
+  },
   'DELETE /api/v1/discovery/schedules/:id': async (k) => {
     const schedule = await k.post('/api/v1/discovery/schedules', {
       groupId: k.groupId,

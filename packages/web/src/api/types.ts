@@ -671,6 +671,46 @@ export interface DiscoverySummary {
   };
 }
 
+export type RediscoveryCadence = 'hourly' | 'daily' | 'weekly';
+
+/**
+ * A rediscovery rule (`D-07`, `D-11`): a stencil for runs, fired on a cadence.
+ *
+ * No `snmpCommunity`: it is a credential, and the core never returns one (`P-55`). An edit
+ * that leaves it out keeps the stored one.
+ */
+export interface RediscoveryRule {
+  id: number;
+  groupId: number;
+  probeId: number;
+  name: string;
+  enabled: boolean;
+  range: string;
+  level: DiscoveryLevel;
+  templates: string[];
+  timeoutMs: number;
+  concurrency: number;
+  ratePerSecond: number;
+  cadence: RediscoveryCadence;
+  /** Past the hour for `hourly`, past midnight otherwise. */
+  cadenceMinute: number;
+  /** 0 is Monday. Read only for `weekly`. */
+  cadenceWeekday: number;
+  timezone: string | null;
+  autoProvision: boolean;
+  /** An `M-09` schedule used as a permission window, or null. */
+  scheduleId: number | null;
+  lastRunAt: string | null;
+  lastRunId: number | null;
+  /** Why the last firing started nothing, or empty (`A-28`). */
+  lastProblem: string;
+  nextRunAt: string | null;
+  /** `every Sunday at 03:00`, in the core's words. */
+  description: string;
+  /** What `If-Match` carries back on an edit. */
+  version: number;
+}
+
 export interface DeviceTemplateSummary {
   id: string;
   name: string;

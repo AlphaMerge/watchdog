@@ -681,7 +681,12 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         ...base,
         objectKind: null,
         summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
-        diff: changed(REDISCOVERY_FIELDS, mutation.before, mutation.after, 'discovery.schedule'),
+        diff: [
+          ...changed(REDISCOVERY_FIELDS, mutation.before, mutation.after, 'discovery.schedule'),
+          ...(mutation.communityReplaced === true
+            ? [{ field: 'discovery.schedule.community', before: 'set', after: 'replaced' }]
+            : []),
+        ],
       };
 
     case 'discovery.schedule.deleted':

@@ -689,7 +689,12 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
           headers: asRole('readwrite'),
           payload,
         });
-        if (response.statusCode !== 401 && response.statusCode !== 403) {
+        // A derived route that finds its row through the caller's visibility answers a row they
+        // cannot see as absent (`D-11`; every derived route, once `A-37` lands). That is the
+        // refusal and not a gap: `idFor` fills these with rows that exist, so a route with no
+        // guard would have changed the row, not failed to find it.
+        const hidden = response.statusCode === 404 && route.access.kind === 'derived';
+        if (response.statusCode !== 401 && response.statusCode !== 403 && !hidden) {
           allowed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
         }
       }

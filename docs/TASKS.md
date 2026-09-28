@@ -11092,6 +11092,74 @@ because each is a decision rather than a defect:
       by the high end reported a /16 standard sweep as "0.3–2.3 hours" where `D-06` measured it
       as 17–136 minutes — the same number, said worse.
 
+- [x] **D-11 — Rediscovery rules in the web, and an edit that keeps their history** · M · D-07,
+      D-10, A-28 · Filed 2026-09-28 by WatchDog, after `A-28` gave a rule a `lastProblem` that
+      nothing shows. Scheduled rediscovery is `[V1]` (`CAPABILITIES.MD` §7). The API has had it
+      since `D-07`, but the web can do nothing with a rule: it cannot show one, create one,
+      switch one on or off, edit one or delete one. The API has no edit either, so a rule can
+      only be deleted and made again, which loses its runs' link to it and splits its audit
+      trail in two.
+
+      **Done when:**
+
+      - **`PATCH /discovery/schedules/:id`**, on the precondition pattern objects use:
+        `If-Match` required, 428 without it and 412 on a stale version (migration 057 adds the
+        version). It is audited as `discovery.schedule.updated` in its own transaction, re-asks
+        `A-28`'s probe check and the window check, and keeps the SNMP community write-only: an
+        absent community keeps the stored one. Its refusals name nothing the caller cannot see
+        (`A-16`), and the access matrix, the audit sweep and `object-visibility.test.ts` all
+        reach it. The three routes addressed by a rule's id find it through the caller's
+        visibility first, so a hidden rule is not found rather than forbidden; the `derived`
+        guard's own 403 for a hidden object, on every other route that declares it, is `A-37`.
+      - **A rediscovery section on `/discovery`** lists the rules the caller can see, with the
+        cadence, whether it is on, whether it provisions, its last run and `lastProblem`. Rules
+        can be created there (off by default, as `D-07` decided), switched on and off, edited
+        and deleted.
+      - WCAG 2.1 AA, vitest for the model and the section, and a `web-ui.md` section.
+
+      **D-11 outcome.** Migration 057 gives a rule a `version`. `RediscoveryService.update` locks
+      the row and refuses a stale version as `DISCOVERY_SCHEDULE_CHANGED` (412). It then asks
+      everything `create` asks, against the rule as it will be. A change clears `lastProblem`
+      and counts a version; an edit that changes nothing writes nothing and keeps the version.
+
+      - **What counts as a version.** A person's change does, including switching the rule on
+        or off. A firing does not, so an editor is never refused because the rule ran while
+        their form was open.
+      - **The group cannot be edited; the probe can.** A rule in another group is another rule.
+        But when a group moves under another probe, editing the probe is how a rule refused on
+        firing is put right, and a test does exactly that.
+      - **The community stays write-only.** An absent community keeps the stored one, and an
+        empty one clears it. A replacement is audited as `set` → `replaced`, because `community`
+        only says whether one exists, so a swap would otherwise leave no trace. No entry holds
+        either value.
+      - **Found on the way: a rule's range was never checked when the rule was written.** It was
+        saved as given and refused at its first firing, unattended, with the parser's sentence
+        lost to a log. `create` and `update` now refuse it with that sentence.
+      - **A hidden rule is not found, rather than forbidden.** `enabled`, the edit and the
+        delete look the rule up through the caller's visibility, by the rule `list` uses, before
+        the guard is asked. A rule in another branch gets the same 404 as an unused id, apart
+        from the id the caller sent. The access matrix accepts that 404 from a `derived` route,
+        because the rows it fills in exist, so a route with no guard would have changed them.
+        The guard's own 403 on every other derived route is `A-37`.
+
+      The web section lives on `/discovery`, under the scan form. Its status line puts a refused
+      firing first. Switching a rule on or off is a button on its row, deleting asks first, and
+      a new rule is created off, with nothing in the request that could switch it on. The edit
+      form sends only what changed, with `If-Match`. It treats 409 and 412 alike, so it is ready
+      for `L-06`, and it offers the rule as it now is when somebody else saved first. The
+      community is keep, replace or clear, because the form is never shown it. The form's
+      shared controls moved to `discovery-fields.tsx`, so the scan form and the rule form cannot
+      drift apart on the accessible-name details `D-10` found.
+
+      Tests: `rediscovery.test.ts` gained 9 cases (8 on editing, and the range refused at create);
+      `discovery-scope.test.ts` 3 over HTTP; `object-visibility.test.ts` 1; the audit sweep has
+      a PATCH fixture that plants the community; the migrator test takes 057 up and back down;
+      and there are vitests for the model (26) and the rendered section (9). Mutation 5/5: the rule found without visibility, the version
+      not checked, the probe not asked on edit, a replacement not recorded, and an edit sending
+      every field. The browser check stopped at the dev instance's login, whose only account's
+      password is generated state, not a test value; the rendered vitests are what cover the
+      page.
+
 ## Phase 8 — Remote probes
 
 - [x] **R-01 — Probe identity and approval** · L · F-09 · GID generation, access keys,

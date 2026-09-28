@@ -359,6 +359,33 @@ describe(
       }
     });
 
+    it('adds and takes back a rule’s version, starting every existing rule at 1 (057)', async () => {
+      // `D-11`: an edit says which version it was made against. A rule written before this has
+      // never been edited, so it starts where a new one does.
+      const fresh = await createScratchDatabase('ruleversion');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 57),
+        );
+        await all.up();
+        const column = async (): Promise<string[]> =>
+          (
+            await fresh.db.query<{ name: string }>(
+              `SELECT data_type || ' ' || is_nullable || ' ' || column_default AS name
+               FROM information_schema.columns
+               WHERE table_name = 'discovery_schedule' AND column_name = 'version'`,
+            )
+          ).map((one) => one.name);
+        assert.deepEqual(await column(), ['bigint NO 1']);
+
+        await all.down(1);
+        assert.deepEqual(await column(), []);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

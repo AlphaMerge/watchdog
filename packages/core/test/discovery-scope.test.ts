@@ -315,5 +315,115 @@ describe(
         assert.equal(response.statusCode, 201, response.body);
       });
     });
+
+    describe('a rule addressed by its id, for a writer on one branch (`D-11`)', () => {
+      const call = (
+        method: 'PATCH' | 'POST' | 'DELETE',
+        url: string,
+        payload?: unknown,
+        ifMatch?: string,
+      ) =>
+        app.inject({
+          method,
+          url,
+          headers: { cookie, ...(ifMatch === undefined ? {} : { 'if-match': ifMatch }) },
+          ...(payload === undefined ? {} : { payload: payload as never }),
+        });
+
+      const rule = async (groupId: number, probeId: number, name: string): Promise<number> =>
+        (
+          await rediscovery.create(
+            { groupId, probeId, name, range: '10.0.3.0/29', cadence: 'daily' },
+            testActor,
+          )
+        ).id;
+
+      it('answers a rule in a branch it cannot see exactly as an id nobody used', async () => {
+        // The guard answers a caller without the right with a 403 naming the object, which for a
+        // rule in another branch would be its group's id — where an unused id answers 404.
+        const hidden = await rule(groupB, probeB, 'customer B nightly');
+        const unused = 999_999;
+        const routes: [string, 'PATCH' | 'POST' | 'DELETE', (id: number) => string, unknown][] = [
+          [
+            'switch',
+            'POST',
+            (id) => `/api/v1/discovery/schedules/${String(id)}/enabled`,
+            { enabled: true },
+          ],
+          [
+            'edit',
+            'PATCH',
+            (id) => `/api/v1/discovery/schedules/${String(id)}`,
+            { name: 'mine now' },
+          ],
+          ['delete', 'DELETE', (id) => `/api/v1/discovery/schedules/${String(id)}`, undefined],
+        ];
+        for (const [what, method, url, payload] of routes) {
+          const answers = [];
+          for (const id of [hidden, unused]) {
+            const response = await call(method, url(id), payload, 'W/"1"');
+            const body = response.json<{ error: Record<string, unknown> }>();
+            answers.push(
+              JSON.stringify({
+                status: response.statusCode,
+                ...body.error,
+                // The id asked about is echoed back, as the caller's own input; nothing else is.
+                message: String(body.error['message']).replace(String(id), '<id>'),
+                context: { ...(body.error['context'] as object), id: '<id>' },
+                correlationId: undefined,
+              }),
+            );
+          }
+          assert.equal(answers[0], answers[1], `${what}: ${answers.join(' / ')}`);
+          assert.match(answers[0] ?? '', /"status":404/, what);
+        }
+        const untouched = await rediscovery.get(hidden);
+        assert.equal(untouched?.name, 'customer B nightly');
+        assert.equal(untouched.enabled, false);
+      });
+
+      it('edits a rule it may write, on the version it read, and not on any other', async () => {
+        const id = await rule(groupA, probeA, 'customer A nightly');
+        const url = `/api/v1/discovery/schedules/${String(id)}`;
+
+        const bare = await call('PATCH', url, { name: 'no version' });
+        assert.equal(bare.statusCode, 428, bare.body);
+        const garbled = await call('PATCH', url, { name: 'no version' }, 'yesterday');
+        assert.equal(garbled.statusCode, 400, garbled.body);
+
+        const edited = await call('PATCH', url, { name: 'customer A, later' }, 'W/"1"');
+        assert.equal(edited.statusCode, 200, edited.body);
+        assert.equal(edited.headers['etag'], 'W/"2"');
+        const body = edited.json<Record<string, unknown>>();
+        assert.equal(body['version'], 2);
+        assert.equal(body['snmpCommunity'], undefined, 'a community is never returned');
+
+        const stale = await call('PATCH', url, { name: 'on the old version' }, 'W/"1"');
+        assert.equal(stale.statusCode, 412, stale.body);
+        assert.equal(
+          stale.json<{ error: { code: string } }>().error.code,
+          'DISCOVERY_SCHEDULE_CHANGED',
+        );
+        assert.equal((await rediscovery.get(id))?.name, 'customer A, later');
+
+        // The probe is asked as it is when a rule is written (`A-28`), with the same one answer.
+        const borrowed = await call('PATCH', url, { probeId: probeB }, 'W/"2"');
+        assert.equal(borrowed.statusCode, 400, borrowed.body);
+        assert.equal(
+          borrowed.json<{ error: { code: string } }>().error.code,
+          'DISCOVERY_PROBE_INVALID',
+        );
+      });
+
+      it('refuses an id that is not one as a 400, not a database error', async () => {
+        const response = await call(
+          'PATCH',
+          '/api/v1/discovery/schedules/abc',
+          { name: 'x' },
+          'W/"1"',
+        );
+        assert.equal(response.statusCode, 400, response.body);
+      });
+    });
   },
 );

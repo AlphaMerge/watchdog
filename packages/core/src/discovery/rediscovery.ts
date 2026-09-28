@@ -1,6 +1,6 @@
 import type { Visibility } from '../auth/access.js';
-import type { Logger } from '@ms/shared';
-import type { DiscoveryLevel } from '@ms/shared';
+import { IpRangeError, parseIpRange } from '@ms/shared';
+import type { DiscoveryLevel, Logger } from '@ms/shared';
 import { isActiveAt, type ScheduleDefinition } from '../schedules/definition.js';
 import {
   cadenceProblems,
@@ -64,6 +64,12 @@ export interface RediscoverySchedule {
   nextRunAt: string | null;
   /** `every Sunday at 03:00`. Computed, never stored — one place decides how it reads. */
   description: string;
+  /**
+   * How many times a person has changed it (`D-11`), which `If-Match` carries back on an edit.
+   * A firing books its next run and records its last one without counting: an editor should not
+   * be refused because the rule did what it was told while their form was open.
+   */
+  version: number;
 }
 
 /**
@@ -108,6 +114,34 @@ export interface ScheduleInput {
   enabled?: boolean;
 }
 
+/**
+ * What an edit may change (`D-11`): everything but the group, and whether it is on.
+ *
+ * **Not the group**, because the group is what the route checks `write` on and what the rule's
+ * runs and audit history are filed under; moving a rule to another group is a different rule.
+ * **Not `enabled`**, which has its own route and its own booking rules. The probe may change —
+ * it has to be the probe the group is under, and when the group moves, editing the probe is how
+ * a rule refused on firing (`A-28`) is put right.
+ */
+export interface SchedulePatch {
+  probeId?: number;
+  name?: string;
+  range?: string;
+  cadence?: Cadence;
+  cadenceMinute?: number;
+  cadenceWeekday?: number;
+  timezone?: string | null;
+  level?: DiscoveryLevel;
+  templates?: readonly string[];
+  /** Absent keeps the stored community and empty clears it; it is never read back (`P-55`). */
+  snmpCommunity?: string;
+  timeoutMs?: number;
+  concurrency?: number;
+  ratePerSecond?: number;
+  autoProvision?: boolean;
+  scheduleId?: number | null;
+}
+
 export class RediscoveryService {
   readonly #db: Database;
   readonly #audit: AuditSink;
@@ -136,12 +170,8 @@ export class RediscoveryService {
 
   async create(input: ScheduleInput, actor: Actor): Promise<RediscoverySchedule> {
     const spec = specOf(input);
-    const problems = cadenceProblems(spec);
-    if (problems.length > 0) {
-      throw new DiscoveryError('DISCOVERY_SCHEDULE_INVALID', problems.join('; '), {
-        context: { cadence: spec.cadence },
-      });
-    }
+    requireCadence(spec);
+    requireRange(input.range);
     // Computed before the insert so a schedule is never enabled with no next run — a row the
     // sweep would ignore for ever while the UI said it was on.
     const next =
@@ -227,8 +257,11 @@ export class RediscoveryService {
       // may have moved under another probe since the schedule was written (`A-28`). Firing asks
       // too, through `DiscoveryService.start`.
       if (enabled) await requireGroupProbe(q, current.groupId, current.probeId);
+      // A person switching it counts as a change of version; rebooking the same state does not.
       const rows = await q.query<Record<string, unknown>>(
-        `UPDATE discovery_schedule SET enabled = $2, next_run_at = $3, updated_at = now()
+        `UPDATE discovery_schedule
+         SET enabled = $2, next_run_at = $3, updated_at = now(),
+             version = version + CASE WHEN enabled = $2 THEN 0 ELSE 1 END
          WHERE id = $1 RETURNING *`,
         [id, enabled, next],
       );
@@ -258,10 +291,135 @@ export class RediscoveryService {
     });
   }
 
+  /**
+   * Changes a rule, refusing when it has moved on since the caller read it (`D-11`).
+   *
+   * Asks what `create` asks — the cadence, the range, the probe the group is under (`A-28`) and
+   * the window — against the rule as it will be, because a rule's group may have moved since it
+   * was written. A change clears `lastProblem`: the problem described the rule as it was, and
+   * the next firing says again if it is still refused. An edit that changes nothing writes
+   * nothing and keeps its version.
+   *
+   * @returns null when there is no such rule.
+   */
+  async update(
+    id: number,
+    expectedVersion: number,
+    patch: SchedulePatch,
+    actor: Actor,
+  ): Promise<RediscoverySchedule | null> {
+    return this.#db.tx(async (q) => {
+      const locked = await q.query<Record<string, unknown>>(
+        `SELECT * FROM discovery_schedule WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      const lockedRow = locked[0];
+      if (lockedRow === undefined) return null;
+      const current = read(lockedRow);
+      if (current.version !== expectedVersion) {
+        throw new DiscoveryError(
+          'DISCOVERY_SCHEDULE_CHANGED',
+          `this rule has changed since version ${String(expectedVersion)} was read; it is at ` +
+            `version ${String(current.version)}, so read it again and make the change there`,
+          { context: { scheduleId: id, phase: 'precondition' } },
+        );
+      }
+
+      const merged = { ...current, ...definedOf(patch) };
+      const spec = specOf(merged);
+      // The sentence is computed from the cadence, so it is computed again: the audit compares
+      // it, and a rule moved from 03:00 to 04:00 would otherwise read as unchanged.
+      const next: RediscoverySchedule = { ...merged, description: describeCadence(spec) };
+      requireCadence(spec);
+      requireRange(next.range);
+      await requireGroupProbe(q, current.groupId, next.probeId);
+      await this.#requireWindow(q, next.scheduleId);
+
+      const communityReplaced =
+        patch.snmpCommunity !== undefined &&
+        current.snmpCommunity !== '' &&
+        patch.snmpCommunity !== '' &&
+        patch.snmpCommunity !== current.snmpCommunity;
+      const before = auditOf(current);
+      const after = auditOf(next);
+      const moved = (Object.keys(before) as (keyof RediscoveryScheduleAudit)[]).some(
+        (field) => before[field] !== after[field],
+      );
+      if (!moved && !communityReplaced) return current;
+
+      const nextRunAt = current.enabled ? await this.#nextFor(spec, next.scheduleId) : null;
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE discovery_schedule
+         SET probe_id = $2, name = $3, range_text = $4, level = $5, templates = $6,
+             snmp_community = $7, timeout_ms = $8, concurrency = $9, rate_per_second = $10,
+             cadence = $11, cadence_minute = $12, cadence_weekday = $13, timezone = $14,
+             auto_provision = $15, schedule_id = $16, next_run_at = $17, last_problem = '',
+             version = version + 1, updated_at = now()
+         WHERE id = $1 RETURNING *`,
+        [
+          id,
+          next.probeId,
+          next.name,
+          next.range,
+          next.level,
+          [...next.templates],
+          next.snmpCommunity,
+          next.timeoutMs,
+          next.concurrency,
+          next.ratePerSecond,
+          next.cadence,
+          next.cadenceMinute,
+          next.cadenceWeekday,
+          next.timezone,
+          next.autoProvision,
+          next.scheduleId,
+          nextRunAt,
+        ],
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      const updated = read(row);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'discovery.schedule.updated',
+            objectId: updated.groupId,
+            scheduleId: id,
+            before,
+            after: auditOf(updated),
+            ...(communityReplaced ? { communityReplaced } : {}),
+          },
+        ],
+        this.#now(),
+      );
+      return updated;
+    });
+  }
+
   async get(id: number): Promise<RediscoverySchedule | null> {
     const rows = await this.#db.query<Record<string, unknown>>(
       `SELECT * FROM discovery_schedule WHERE id = $1`,
       [id],
+    );
+    const row = rows[0];
+    return row === undefined ? null : read(row);
+  }
+
+  /**
+   * One rule, if its group is one the reader can see (`D-11`), by the rule `list` uses.
+   *
+   * A rule in a branch the reader cannot see is absent, not forbidden: the routes addressed by a
+   * rule's id answer it exactly as they answer an id that was never used, so trying ids learns
+   * nothing about another branch (`A-16`).
+   */
+  async find(id: number, visibility: Visibility): Promise<RediscoverySchedule | null> {
+    const values: unknown[] = [id];
+    const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
+    const rows = await this.#db.query<Record<string, unknown>>(
+      `SELECT * FROM discovery_schedule WHERE id = $1 AND ${visible}`,
+      values,
     );
     const row = rows[0];
     return row === undefined ? null : read(row);
@@ -426,7 +584,6 @@ export class RediscoveryService {
     return true;
   }
 
-  /** The next firing, honouring a permission window when one is attached. */
   /**
    * A permission window that exists, or a refusal that says which (`A-28`).
    *
@@ -445,6 +602,7 @@ export class RediscoveryService {
     }
   }
 
+  /** The next firing, honouring a permission window when one is attached. */
   async #nextFor(
     spec: CadenceSpec,
     scheduleId: number | null,
@@ -469,6 +627,44 @@ export class RediscoveryService {
       )?.toISOString() ?? null
     );
   }
+}
+
+/** A cadence the calendar can fire, or the refusal that says which value is wrong (`D-07`). */
+function requireCadence(spec: CadenceSpec): void {
+  const problems = cadenceProblems(spec);
+  if (problems.length > 0) {
+    throw new DiscoveryError('DISCOVERY_SCHEDULE_INVALID', problems.join('; '), {
+      context: { cadence: spec.cadence },
+    });
+  }
+}
+
+/**
+ * A range the parser accepts, asked when the rule is written (`D-11`) rather than when it fires.
+ *
+ * A rule used to take any text and fail at its first firing, unattended, with the parser's
+ * sentence lost to the log. The sentence is the refusal now, while somebody is at the form.
+ */
+function requireRange(text: string): void {
+  try {
+    parseIpRange(text);
+  } catch (error) {
+    if (error instanceof IpRangeError) {
+      throw new DiscoveryError('DISCOVERY_RANGE_INVALID', error.message, {
+        context: { phase: 'validate' },
+      });
+    }
+    throw error;
+  }
+}
+
+/** The fields a patch sets, and none it leaves out — a spread of `undefined` would erase. */
+function definedOf(patch: SchedulePatch): Partial<RediscoverySchedule> {
+  const out: Partial<Record<keyof SchedulePatch, unknown>> = {};
+  for (const [key, value] of Object.entries(patch) as [keyof SchedulePatch, unknown][]) {
+    if (value !== undefined) out[key] = key === 'templates' ? [...(value as string[])] : value;
+  }
+  return out as Partial<RediscoverySchedule>;
 }
 
 function specOf(input: {
@@ -516,6 +712,7 @@ function read(row: Record<string, unknown>): RediscoverySchedule {
     lastProblem: typeof row['last_problem'] === 'string' ? row['last_problem'] : '',
     nextRunAt: row['next_run_at'] == null ? null : iso(row['next_run_at']),
     description: describeCadence(spec),
+    version: Number(row['version'] ?? 1),
   };
 }
 

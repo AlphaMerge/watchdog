@@ -12,7 +12,8 @@ import { DiscoveryError } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
-import type { RediscoveryService } from '../../discovery/rediscovery.js';
+import type { RediscoveryService, SchedulePatch } from '../../discovery/rediscovery.js';
+import { etagFor } from '../preconditions.js';
 import {
   COMPUTES,
   onBodyObject,
@@ -697,8 +698,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         // Removing the property is the whole fix rather than the start of one: this schema is
         // `additionalProperties: false`, so Fastify now strips the field on the way out even
         // though the service still carries it, which is exactly what the probe needs it to do.
-        // Nothing reads it back — there is no update route for a schedule, and the web form's
-        // draft starts empty rather than from a fetched value.
+        // Nothing reads it back. The edit (`D-11`) takes a community without being shown one:
+        // absent keeps the stored value, which is how a form that never had it saves.
         timeoutMs: { type: 'integer' },
         concurrency: { type: 'integer' },
         ratePerSecond: { type: 'number' },
@@ -718,8 +719,32 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         },
         nextRunAt: { type: ['string', 'null'] },
         description: { type: 'string' },
+        version: {
+          type: 'integer',
+          description: 'What `If-Match` carries back on an edit; also the `ETag` (`D-11`).',
+        },
       },
     } as const;
+
+    /**
+     * The group a rule provisions into, for the routes addressed by a rule's id (`D-11`).
+     *
+     * **Found through the caller's visibility, and absent when it is outside it** (`A-16`). The
+     * guard answers a caller without the right with a 403 naming the object, which is right for
+     * a rule they can see and an oracle for one they cannot: a hidden rule's id would answer 403
+     * with its group's id where an unused one answers 404. So a hidden rule is not found, in the
+     * words an unused id gets, before the guard is asked anything.
+     *
+     * Runs before the params are validated, so an id that is not one is left for validation to
+     * refuse as the 400 it is rather than reaching the database as text.
+     */
+    const ruleGroup = onDerivedObject('write', 'this schedule', async (request) => {
+      const id = Number((request.params as { id?: unknown }).id);
+      if (!Number.isSafeInteger(id) || id < 1) return null;
+      const rule = await rediscovery.find(id, await visibilityOf(request));
+      if (rule === null) throw noSuchRule(id);
+      return rule.groupId;
+    });
 
     app.get(
       '/discovery/schedules',
@@ -833,7 +858,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           request.body as Parameters<RediscoveryService['create']>[0],
           actorFor(request),
         );
-        await reply.code(201).send(created);
+        await reply.code(201).header('ETag', etagFor(created.version)).send(created);
         return reply;
       },
     );
@@ -843,12 +868,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       {
         // Enabling a schedule with `autoProvision` set is how objects start appearing in a
         // group on their own, so it is guarded on that group (`G05`).
-        config: {
-          ...onDerivedObject('write', 'this schedule', async (request) => {
-            const schedule = await rediscovery.get((request.params as { id: number }).id);
-            return schedule?.groupId ?? null;
-          }),
-        },
+        config: ruleGroup,
         schema: {
           tags: ['discovery'],
           summary: 'Turn a schedule on or off',
@@ -865,32 +885,79 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           response: { 200: scheduleSchema },
         },
       },
-      async (request: FastifyRequest) => {
+      async (request: FastifyRequest, reply) => {
         const { id } = request.params as { id: number };
         const { enabled } = request.body as { enabled: boolean };
         const updated = await rediscovery.setEnabled(id, enabled, actorFor(request));
-        if (updated === null) {
-          throw new DiscoveryError(
-            'DISCOVERY_RUN_NOT_FOUND',
-            `there is no rediscovery schedule ${String(id)}`,
-            {
-              context: { id },
+        if (updated === null) throw noSuchRule(id);
+        await reply.header('ETag', etagFor(updated.version)).send(updated);
+        return reply;
+      },
+    );
+
+    app.patch(
+      '/discovery/schedules/:id',
+      {
+        // `write` on the rule's group, found through the caller's visibility (`ruleGroup`), and
+        // any new probe checked against that group in the service (`A-28`).
+        config: ruleGroup,
+        schema: {
+          tags: ['discovery'],
+          summary: 'Change a schedule',
+          description:
+            '`If-Match` carries the version the edit was made against (`W/"3"`, from the rule’s ' +
+            '`version` or the `ETag` of the answer that returned it). Without it the request is ' +
+            'refused with 428, and against a version that is no longer current with 412: two ' +
+            'people editing one rule must not have the second silently undo the first. Whether ' +
+            'it is on has its own route. The group cannot change — a rule in another group is ' +
+            'another rule — and the probe must be the one the group is under. `snmpCommunity` ' +
+            'left out keeps the stored one, and an empty one clears it; it is never returned. ' +
+            'An edit that changes something clears `lastProblem`, and one that changes nothing ' +
+            'keeps its version.',
+          params: idParams,
+          body: {
+            type: 'object',
+            additionalProperties: false,
+            minProperties: 1,
+            properties: {
+              probeId: { type: 'integer', minimum: 1 },
+              name: { type: 'string', minLength: 1, maxLength: 200 },
+              range: { type: 'string', minLength: 1, maxLength: 4000 },
+              cadence: { type: 'string', enum: ['hourly', 'daily', 'weekly'] },
+              cadenceMinute: { type: 'integer', minimum: 0, maximum: 1439 },
+              cadenceWeekday: { type: 'integer', minimum: 0, maximum: 6 },
+              timezone: { type: ['string', 'null'] },
+              level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
+              templates: { type: 'array', items: { type: 'string' } },
+              snmpCommunity: { type: 'string', maxLength: 128 },
+              timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
+              concurrency: { type: 'integer', minimum: 1, maximum: 512 },
+              ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000 },
+              autoProvision: { type: 'boolean' },
+              scheduleId: { type: ['integer', 'null'] },
             },
-          );
-        }
-        return updated;
+          },
+          response: { 200: scheduleSchema },
+        },
+      },
+      async (request: FastifyRequest, reply) => {
+        const { id } = request.params as { id: number };
+        const updated = await rediscovery.update(
+          id,
+          expectedVersion(request.headers['if-match'], id),
+          request.body as SchedulePatch,
+          actorFor(request),
+        );
+        if (updated === null) throw noSuchRule(id);
+        await reply.header('ETag', etagFor(updated.version)).send(updated);
+        return reply;
       },
     );
 
     app.delete(
       '/discovery/schedules/:id',
       {
-        config: {
-          ...onDerivedObject('write', 'this schedule', async (request) => {
-            const schedule = await rediscovery.get((request.params as { id: number }).id);
-            return schedule?.groupId ?? null;
-          }),
-        },
+        config: ruleGroup,
         schema: {
           tags: ['discovery'],
           summary: 'Delete a schedule',
@@ -900,20 +967,46 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request, reply) => {
         const { id } = request.params as { id: number };
-        if (!(await rediscovery.remove(id, actorFor(request)))) {
-          throw new DiscoveryError(
-            'DISCOVERY_RUN_NOT_FOUND',
-            `there is no rediscovery schedule ${String(id)}`,
-            {
-              context: { id },
-            },
-          );
-        }
+        if (!(await rediscovery.remove(id, actorFor(request)))) throw noSuchRule(id);
         await reply.code(204).send();
         return reply;
       },
     );
   }
+}
+
+/** One answer for a rule that is not there and one the caller cannot see (`A-16`). */
+function noSuchRule(id: number): DiscoveryError {
+  return new DiscoveryError(
+    'DISCOVERY_RUN_NOT_FOUND',
+    `there is no rediscovery schedule ${String(id)}`,
+    {
+      context: { id },
+    },
+  );
+}
+
+/**
+ * The version an edit was made against, from `If-Match` (`D-11`) — `W/"3"`, as `etagFor` writes
+ * it, or a bare `"3"`. Missing is 428 and not a version is 400, as an object's edit answers.
+ */
+function expectedVersion(header: string | undefined, id: number): number {
+  if (header === undefined || header.trim() === '') {
+    throw new DiscoveryError(
+      'DISCOVERY_PRECONDITION_REQUIRED',
+      'this request requires an If-Match header carrying the version the edit was based on',
+      { context: { scheduleId: id, phase: 'precondition' } },
+    );
+  }
+  const match = /^(?:W\/)?"(\d{1,15})"$/.exec(header.trim());
+  if (match === null) {
+    throw new DiscoveryError(
+      'DISCOVERY_SCHEDULE_INVALID',
+      `If-Match must be an ETag of the form W/"<version>", got ${header}`,
+      { context: { scheduleId: id, phase: 'precondition' } },
+    );
+  }
+  return Number(match[1]);
 }
 
 /** The parser's own sentence reaches the operator, rather than "invalid range". */

@@ -305,7 +305,7 @@ build does not construct them (`H-12`).
 | `/api/v1/discovery` | POST | 401 |
 | `/api/v1/discovery/preview` | POST | 401 |
 | `/api/v1/discovery/schedules` | GET · POST | 401 |
-| `/api/v1/discovery/schedules/{id}` | DELETE | 401 |
+| `/api/v1/discovery/schedules/{id}` | PATCH · DELETE | 401 |
 | `/api/v1/discovery/schedules/{id}/enabled` | POST | 401 |
 | `/api/v1/discovery/{id}` | GET | 401 |
 | `/api/v1/discovery/{id}/cancel` | POST | 401 |

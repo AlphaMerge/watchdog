@@ -99,6 +99,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   let lonelyDeviceId = 0;
   let lonelySensorId = 0;
   let otherGroupId = 0;
+  let hiddenRuleId = 0;
   let otherDeviceId = 0;
   let otherSensorId = 0;
   let templateId = 0;
@@ -356,16 +357,18 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     hiddenRunId = (
       await discovery.start({ groupId: otherGroupId, probeId, range: '10.9.0.0/30' }, testActor)
     ).id;
-    await rediscovery.create(
-      {
-        groupId: otherGroupId,
-        probeId,
-        name: `${MARK}-rediscovery`,
-        range: '10.9.0.0/30',
-        cadence: 'daily',
-      },
-      testActor,
-    );
+    hiddenRuleId = (
+      await rediscovery.create(
+        {
+          groupId: otherGroupId,
+          probeId,
+          name: `${MARK}-rediscovery`,
+          range: '10.9.0.0/30',
+          cadence: 'daily',
+        },
+        testActor,
+      )
+    ).id;
 
     // ── the account, and exactly one branch granted to it ────────────────────────────────────
     teamId = (await groups.create({ name: 'Customer A team' }, testActor)).id;
@@ -1311,6 +1314,39 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           [users],
         );
       }
+    });
+
+    it('answers a hidden rediscovery rule as an id nobody used, on every route that takes one', async () => {
+      // `D-11`. A writer on the branch, so the guard's 403 — which names the object — is what a
+      // hidden rule would get if it were found, and an unused id gets the handler's 404.
+      const routes: [string, 'POST' | 'PATCH' | 'DELETE', string, unknown][] = [
+        ['switch', 'POST', '/enabled', { enabled: true }],
+        ['edit', 'PATCH', '', { name: 'taken over' }],
+        ['delete', 'DELETE', '', undefined],
+      ];
+      for (const [what, method, suffix, payload] of routes) {
+        const answers = [];
+        for (const id of [hiddenRuleId, 999_999]) {
+          const response = await app.inject({
+            method,
+            url: `/api/v1/discovery/schedules/${String(id)}${suffix}`,
+            headers: { ...as('operator'), 'if-match': 'W/"1"' },
+            ...(payload === undefined ? {} : { payload: payload as never }),
+          });
+          const error = response.json<{ error: Record<string, unknown> }>().error;
+          answers.push(
+            `${String(response.statusCode)} ${String(error['code'])} ` +
+              String(error['message']).replace(String(id), '<id>'),
+          );
+        }
+        assert.equal(answers[0], answers[1], what);
+        assert.match(answers[0] ?? '', /^404 /, what);
+      }
+      const rows = await db.query<{ name: string }>(
+        `SELECT name FROM discovery_schedule WHERE id = $1`,
+        [hiddenRuleId],
+      );
+      assert.equal(rows[0]?.name, `${MARK}-rediscovery`, 'and the rule is as it was');
     });
 
     it('refuses a scope naming an object outside the branch', async () => {

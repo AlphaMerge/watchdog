@@ -110,6 +110,23 @@ level costs on *this* range, so you can pick a detailed scan on a /24 knowing it
 minute, and decline it on a /16 knowing it is hours. Progress is polled while a run is alive and
 stops the moment it finishes.
 
+**Rediscovery rules** sit under the scan form. A rule runs a discovery every hour, day or week,
+and can be limited to the times a schedule allows ("weekly, but not during the change freeze").
+The list shows the rules for the groups you can see: where each one scans into, when it runs
+next, whether it creates what it finds, and when it last ran.
+
+- **A new rule is off**, and **creating devices is a separate switch that is also off**. So a
+  rule you switch on first sweeps and leaves a plan for somebody to review. Switching a rule on
+  or off is a button on its row, not a field in its form.
+- **A rule refused when it fired says so first.** If a rule's group has moved under another
+  probe, the rule is refused every time it is due, and its row says why. Editing the rule's probe
+  to the group's new one puts it right.
+- **An edit changes a rule, not its group.** For another group, write another rule. The edit
+  sends only what you changed, with the version you opened. If somebody else saved first, the
+  form says so and offers the rule as it now is, rather than saving over their change.
+- **The SNMP community is never shown**, not even to an administrator. When you edit a rule you
+  choose to keep the stored community, replace it or remove it. Keeping is the default.
+
 ### Templates
 
 Notification templates — what a message says, who receives it, and when it is allowed to send.
