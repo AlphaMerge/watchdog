@@ -55,6 +55,8 @@ const unusable = new Proxy(
     },
   },
 );
+// Never called, for the same reason: every service that records a change needs somewhere to.
+const noAudit = { record: () => Promise.resolve() };
 
 const catalogue = standardCatalogue();
 const resolver = new InheritanceResolver({ db: unusable, logger: silent });
@@ -125,17 +127,13 @@ const server = new ApiServer({
   probeHealth: () => undefined,
   metrics: () => undefined,
   auth: {
-    accounts: new AccountService({ db: unusable, logger: silent }),
+    accounts: new AccountService({ db: unusable, audit: noAudit, logger: silent }),
     sessions: new SessionService({ db: unusable, logger: silent }),
     throttle: new LoginThrottle({ db: unusable, logger: silent, sleep: () => Promise.resolve() }),
-    groups: new GroupService({ db: unusable, logger: silent }),
-    access: new AccessService({
-      db: unusable,
-      audit: { record: () => Promise.resolve() },
-      logger: silent,
-    }),
-    tokens: new TokenService({ db: unusable, logger: silent }),
-    totp: new TotpService({ db: unusable, logger: silent }),
+    groups: new GroupService({ db: unusable, audit: noAudit, logger: silent }),
+    access: new AccessService({ db: unusable, audit: noAudit, logger: silent }),
+    tokens: new TokenService({ db: unusable, audit: noAudit, logger: silent }),
+    totp: new TotpService({ db: unusable, audit: noAudit, logger: silent }),
     required: true,
   },
 });

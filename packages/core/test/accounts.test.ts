@@ -15,6 +15,7 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
+import { testActor } from './support/tree.js';
 
 /**
  * Accounts, sessions and login throttling (`A-01`).
@@ -50,17 +51,20 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
     await db.query('DELETE FROM user_session');
     await db.query('DELETE FROM login_attempt');
     await db.query('DELETE FROM user_account');
-    accounts = new AccountService({ db, logger: silentLogger });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
     sessions = new SessionService({ db, logger: silentLogger });
   });
 
   const makeAccount = async (over: Partial<Parameters<AccountService['create']>[0]> = {}) =>
-    accounts.create({
-      login: 'ops',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-      ...over,
-    });
+    accounts.create(
+      {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+        ...over,
+      },
+      testActor,
+    );
 
   describe('passwords', () => {
     it('accepts the right one and refuses the wrong one', async () => {
@@ -124,7 +128,7 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // Order matters: answering "disabled" before verifying would be faster for a disabled
       // account than for an enabled one, which says whether the login exists.
       const account = await makeAccount();
-      await accounts.update(account.id, { disabled: true });
+      await accounts.update(account.id, { disabled: true }, testActor);
       const outcome = await accounts.authenticate('ops', 'correct-horse-battery');
       assert.equal(outcome.kind, 'rejected');
       assert.equal(outcome.reason, 'disabled');
@@ -133,10 +137,13 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
     it('requires the current password to change it, unless an administrator resets it', async () => {
       const account = await makeAccount();
       await assert.rejects(
-        () => accounts.changePassword(account.id, 'a-brand-new-password', { current: 'wrong' }),
+        () =>
+          accounts.changePassword(account.id, 'a-brand-new-password', testActor, {
+            current: 'wrong',
+          }),
         /not accepted/,
       );
-      await accounts.changePassword(account.id, 'a-brand-new-password', {
+      await accounts.changePassword(account.id, 'a-brand-new-password', testActor, {
         current: 'correct-horse-battery',
       });
       assert.equal((await accounts.authenticate('ops', 'a-brand-new-password')).kind, 'ok');
@@ -146,7 +153,9 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // The password an administrator chose must not outlive the conversation it was
       // communicated in.
       const account = await makeAccount();
-      await accounts.changePassword(account.id, 'temporary-for-now', { byAdministrator: true });
+      await accounts.changePassword(account.id, 'temporary-for-now', testActor, {
+        byAdministrator: true,
+      });
       const stored = await accounts.get(account.id);
       assert.equal(stored?.mustChangePassword, true);
     });
@@ -261,7 +270,7 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // Disabling an account has to take effect now, not when its sessions happen to expire.
       const account = await makeAccount();
       const { token } = await sessions.start(account, context);
-      await accounts.update(account.id, { disabled: true });
+      await accounts.update(account.id, { disabled: true }, testActor);
       assert.equal(await sessions.resolve(token), null);
     });
 

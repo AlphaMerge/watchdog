@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { AppError, type Logger } from '@ms/shared';
 import { AuthError } from './errors.js';
 import type { Database, Queryable } from '../db/pool.js';
+import type { AccountAudit, Actor, AuditSink } from '../objects/audit.js';
 import { hashPassword, needsRehash, verifyPassword, spendVerificationTime } from './passwords.js';
 
 /**
@@ -53,62 +54,91 @@ export type AuthOutcome =
 
 export interface AccountServiceOptions {
   db: Database;
+  /**
+   * Where every change to an account is recorded, inside the change's own transaction (`A-18`).
+   *
+   * Required, as `AccessService`'s is: a role change is an escalation, and a sink that could be
+   * left out is how accounts went unaudited from `A-01` until `A-18`.
+   */
+  audit: AuditSink;
   logger: Logger;
   now?: () => Date;
 }
+
+/** Who made the first administrator: nobody, at start-up. */
+const FIRST_ADMINISTRATOR: Actor = { kind: 'system', component: 'first-administrator' };
 
 const LOGIN_PATTERN = /^[A-Za-z0-9._@-]+$/;
 
 export class AccountService {
   readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   readonly #now: () => Date;
 
   constructor(options: AccountServiceOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'accounts' });
     this.#now = options.now ?? ((): Date => new Date());
   }
 
-  async create(request: CreateAccountRequest): Promise<Account> {
-    const login = request.login.trim();
-    if (!LOGIN_PATTERN.test(login) || login.length > 64) {
-      throw new AuthError(
-        'ACCOUNT_LOGIN_INVALID',
-        'a login may contain only letters, digits, dot, underscore, at and dash',
-      );
-    }
-    if (request.password.length < 12) {
-      throw new AuthError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
-    }
-
+  /** Creates an account, audited in the same transaction (`A-18`). */
+  async create(request: CreateAccountRequest, actor: Actor): Promise<Account> {
+    const login = checked(request);
+    // Hashed before the transaction opens: argon2 is slow on purpose, and a transaction held open
+    // for it is a connection held for nothing.
     const hash = await hashPassword(request.password);
     try {
-      const rows = await this.#db.query<AccountRow>(
-        `INSERT INTO user_account (login, display_name, email, password_hash, role,
-                                   must_change_password)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING ${COLUMNS}`,
-        [
-          login,
-          request.displayName ?? login,
-          request.email ?? '',
-          hash,
-          request.role,
-          request.mustChangePassword ?? false,
-        ],
-      );
-      const row = rows[0];
-      if (row === undefined)
-        throw new AppError('ACCOUNT_NOT_CREATED', 'the account was not created');
+      const account = await this.#db.tx(async (q) => this.#insert(q, login, request, hash, actor));
       this.#logger.info({ login, role: request.role }, 'account created');
-      return read(row);
+      return account;
     } catch (error: unknown) {
       if (isUniqueViolation(error)) {
         throw new AuthError('ACCOUNT_EXISTS', `an account named ${login} already exists`);
       }
       throw error;
     }
+  }
+
+  async #insert(
+    q: Queryable,
+    login: string,
+    request: CreateAccountRequest,
+    hash: string,
+    actor: Actor,
+  ): Promise<Account> {
+    const rows = await q.query<AccountRow>(
+      `INSERT INTO user_account (login, display_name, email, password_hash, role,
+                                 must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING ${COLUMNS}`,
+      [
+        login,
+        request.displayName ?? login,
+        request.email ?? '',
+        hash,
+        request.role,
+        request.mustChangePassword ?? false,
+      ],
+    );
+    const row = rows[0];
+    if (row === undefined) throw new AppError('ACCOUNT_NOT_CREATED', 'the account was not created');
+    const account = read(row);
+    await this.#audit.record(
+      q,
+      actor,
+      [
+        {
+          action: 'account.created',
+          objectId: null,
+          accountId: account.id,
+          after: auditOf(account),
+        },
+      ],
+      this.#now(),
+    );
+    return account;
   }
 
   /**
@@ -191,9 +221,9 @@ export class AccountService {
    * be guessing at intent in the one place where guessing is worst. The database refuses it too
    * (`A-04`'s trigger); this is what turns that into a sentence.
    */
-  async update(id: number, request: UpdateAccountRequest): Promise<Account> {
+  async update(id: number, request: UpdateAccountRequest, actor: Actor): Promise<Account> {
     try {
-      return await this.#update(id, request);
+      return await this.#db.tx(async (q) => this.#update(q, id, request, actor));
     } catch (error: unknown) {
       if (isReadonlyAdminViolation(error)) {
         throw new AuthError(
@@ -207,8 +237,31 @@ export class AccountService {
     }
   }
 
-  async #update(id: number, request: UpdateAccountRequest): Promise<Account> {
-    const rows = await this.#db.query<AccountRow>(
+  /**
+   * The change and its entry, in one transaction (`A-18`).
+   *
+   * **The role is the field this is for**, and the entry carries it before and after beside
+   * everything else an administrator can set. The row is locked before it is read, so the `before`
+   * is the one this change replaced rather than one a concurrent change already had. An update that
+   * changed nothing writes nothing, as a revoke that found nothing does.
+   */
+  async #update(
+    q: Queryable,
+    id: number,
+    request: UpdateAccountRequest,
+    actor: Actor,
+  ): Promise<Account> {
+    const current = await q.query<AccountRow>(
+      `SELECT ${COLUMNS} FROM user_account WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    const existing = current[0];
+    if (existing === undefined) {
+      throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+    }
+    const before = auditOf(read(existing));
+
+    const rows = await q.query<AccountRow>(
       `UPDATE user_account
        SET display_name    = COALESCE($2, display_name),
            email           = COALESCE($3, email),
@@ -231,7 +284,17 @@ export class AccountService {
     if (row === undefined) {
       throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
     }
-    return read(row);
+    const account = read(row);
+    const after = auditOf(account);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      await this.#audit.record(
+        q,
+        actor,
+        [{ action: 'account.updated', objectId: null, accountId: id, before, after }],
+        this.#now(),
+      );
+    }
+    return account;
   }
 
   /**
@@ -241,10 +304,14 @@ export class AccountService {
    * changing your own password and resetting somebody else's. A reset always sets
    * `must_change_password`, so the password an administrator chose does not outlive the
    * conversation in which they communicated it.
+   *
+   * **Audited as having happened, and nothing more** (`A-18`): the entry names the account and
+   * whether it was a reset, never the password or its hash.
    */
   async changePassword(
     id: number,
     next: string,
+    actor: Actor,
     options: { current?: string; byAdministrator?: boolean } = {},
   ): Promise<void> {
     if (next.length < 12) {
@@ -269,30 +336,61 @@ export class AccountService {
       }
     }
 
-    await this.#db.query(
-      `UPDATE user_account
-       SET password_hash = $2, must_change_password = $3, failed_attempts = 0,
-           locked_until = NULL, updated_at = now()
-       WHERE id = $1`,
-      [id, await hashPassword(next), options.byAdministrator === true],
-    );
+    const hash = await hashPassword(next);
+    const reset = options.byAdministrator === true;
+    await this.#db.tx(async (q) => {
+      const changed = await q.query<{ login: string }>(
+        `UPDATE user_account
+         SET password_hash = $2, must_change_password = $3, failed_attempts = 0,
+             locked_until = NULL, updated_at = now()
+         WHERE id = $1
+         RETURNING login`,
+        [id, hash, reset],
+      );
+      const login = changed[0]?.login;
+      if (login === undefined) {
+        throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+      }
+      await this.#audit.record(
+        q,
+        actor,
+        [{ action: 'account.passwordChanged', objectId: null, accountId: id, login, reset }],
+        this.#now(),
+      );
+    });
     this.#logger.info(
       { accountId: id, byAdministrator: options.byAdministrator === true },
       'password changed',
     );
   }
 
-  async delete(id: number): Promise<void> {
+  async delete(id: number, actor: Actor): Promise<void> {
     // Disabling is what the UI offers; this exists for an account created by mistake, before it
     // has done anything. The audit log holds the actor's login as text, so removing the row does
-    // not erase who did what.
-    const rows = await this.#db.query<{ id: string }>(
-      `DELETE FROM user_account WHERE id = $1 RETURNING id::text AS id`,
-      [id],
-    );
-    if (rows[0] === undefined) {
-      throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
-    }
+    // not erase who did what — and the entry this writes keeps what the account was (`A-18`).
+    await this.#db.tx(async (q) => {
+      const rows = await q.query<AccountRow>(
+        `DELETE FROM user_account WHERE id = $1 RETURNING ${COLUMNS}`,
+        [id],
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        throw new AuthError('ACCOUNT_NOT_FOUND', `no account with id ${String(id)}`);
+      }
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'account.deleted',
+            objectId: null,
+            accountId: id,
+            before: auditOf(read(row)),
+          },
+        ],
+        this.#now(),
+      );
+    });
   }
 
   async count(q: Queryable = this.#db): Promise<number> {
@@ -331,22 +429,50 @@ export class AccountService {
   ): Promise<{ login: string; password: string } | null> {
     if ((await this.count()) > 0) return null;
     const password = randomBytes(18).toString('base64url');
-    const account = await this.create({
+    const request: CreateAccountRequest = {
       login,
       password,
       role: 'admin',
       displayName: 'Administrator',
       mustChangePassword: true,
-    });
+    };
+    const checkedLogin = checked(request);
+    const hash = await hashPassword(password);
 
-    // The builtin group, by its flags rather than by its name: a name is a label an operator may
-    // change, and this has to find the group that actually confers administration.
-    await this.#db.query(
-      `INSERT INTO user_group_member (group_id, user_id, is_primary)
-       SELECT g.id, $1, true FROM user_group g WHERE g.is_builtin AND g.is_admin
-       ON CONFLICT DO NOTHING`,
-      [account.id],
-    );
+    // **The account and its membership are one change, and so one transaction** (`A-18`): an
+    // administrator created with no record of how it came to administer is the gap this closes.
+    await this.#db.tx(async (q) => {
+      const account = await this.#insert(q, checkedLogin, request, hash, FIRST_ADMINISTRATOR);
+
+      // The builtin group, by its flags rather than by its name: a name is a label an operator may
+      // change, and this has to find the group that actually confers administration.
+      const joined = await q.query<{ id: string; name: string }>(
+        `WITH admins AS (SELECT id, name FROM user_group WHERE is_builtin AND is_admin),
+         joined AS (
+           INSERT INTO user_group_member (group_id, user_id, is_primary)
+           SELECT id, $1, true FROM admins
+           ON CONFLICT DO NOTHING
+           RETURNING group_id
+         )
+         SELECT admins.id::text AS id, admins.name FROM admins JOIN joined ON joined.group_id = admins.id`,
+        [account.id],
+      );
+      await this.#audit.record(
+        q,
+        FIRST_ADMINISTRATOR,
+        joined.map((group) => ({
+          action: 'group.memberAdded' as const,
+          objectId: null,
+          groupId: Number(group.id),
+          groupName: group.name,
+          administers: true,
+          accountId: account.id,
+          login: account.login,
+          primary: true,
+        })),
+        this.#now(),
+      );
+    });
 
     return { login, password };
   }
@@ -367,6 +493,34 @@ interface AccountRow {
   locked_until: Date | null;
   last_login_at: Date | null;
   created_at: Date;
+}
+
+/** The login a request would create, or the refusal it gets. */
+function checked(request: CreateAccountRequest): string {
+  const login = request.login.trim();
+  if (!LOGIN_PATTERN.test(login) || login.length > 64) {
+    throw new AuthError(
+      'ACCOUNT_LOGIN_INVALID',
+      'a login may contain only letters, digits, dot, underscore, at and dash',
+    );
+  }
+  if (request.password.length < 12) {
+    throw new AuthError('ACCOUNT_PASSWORD_WEAK', 'a password must be at least 12 characters');
+  }
+  return login;
+}
+
+/** What the audit log keeps of an account: what an administrator sets, nothing that signs in. */
+function auditOf(account: Account): AccountAudit {
+  return {
+    login: account.login,
+    displayName: account.displayName,
+    email: account.email,
+    role: account.role,
+    disabled: account.disabled,
+    mayAcknowledge: account.mayAcknowledge,
+    mustChangePassword: account.mustChangePassword,
+  };
 }
 
 function read(row: AccountRow): Account {

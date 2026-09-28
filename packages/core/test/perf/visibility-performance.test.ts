@@ -12,7 +12,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from '../support/database.js';
-import { actorNamed, buildHarness, silent, type Harness } from '../support/tree.js';
+import { actorNamed, buildHarness, silent, type Harness, testActor } from '../support/tree.js';
 
 const available = await databaseAvailable();
 
@@ -71,8 +71,8 @@ describe(
       access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
       alarms = new AlarmService({ db, logger: silent });
       stream = new StateBroadcaster({ logger: silent });
-      const accounts = new AccountService({ db, logger: silent });
-      const groups = new GroupService({ db, logger: silent });
+      const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
+      const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
 
       // ── the tree, a level per statement ──────────────────────────────────────────────────
       const probes = await db.query<{ id: string }>(
@@ -134,16 +134,19 @@ describe(
         admin = false,
       ): Promise<void> => {
         const login = name.replace(/[^a-z]+/g, '-');
-        const account = await accounts.create({
-          login,
-          password: 'correct-horse-battery',
-          role: admin ? 'admin' : 'readonly',
-        });
+        const account = await accounts.create(
+          {
+            login,
+            password: 'correct-horse-battery',
+            role: admin ? 'admin' : 'readonly',
+          },
+          testActor,
+        );
         const group = admin
           ? (await groups.list()).find((one) => one.isAdmin)
-          : await groups.create({ name: `${login} team` });
+          : await groups.create({ name: `${login} team` }, testActor);
         assert.ok(group !== undefined);
-        await groups.addMember(group.id, account.id);
+        await groups.addMember(group.id, account.id, testActor);
         for (const [objectId, right] of grants) {
           await access.grant(objectId, group.id, right, actorNamed('perf'));
         }

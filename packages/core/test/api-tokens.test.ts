@@ -56,19 +56,22 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     await db.query('DELETE FROM user_account');
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
 
-    tokens = new TokenService({ db, logger: silentLogger });
-    accounts = new AccountService({ db, logger: silentLogger });
-    groups = new GroupService({ db, logger: silentLogger });
+    tokens = new TokenService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
 
-    const account = await accounts.create({
-      login: 'ops',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-    });
+    const account = await accounts.create(
+      {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
     userId = account.id;
-    teamId = (await groups.create({ name: 'Team' })).id;
-    await groups.addMember(teamId, userId);
+    teamId = (await groups.create({ name: 'Team' }, testActor)).id;
+    await groups.addMember(teamId, userId, testActor);
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -89,7 +92,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
 
   describe('issuing', () => {
     it('returns the secret once and stores only its hash', async () => {
-      const { token, secret } = await tokens.issue(ownerOf(), { name: 'backup script' });
+      const { token, secret } = await tokens.issue(ownerOf(), { name: 'backup script' }, testActor);
       assert.ok(secret.startsWith('mst_'), 'greppable in a log somebody is about to regret');
       assert.ok(secret.length > 30);
 
@@ -104,27 +107,31 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     });
 
     it('refuses a second live token of the same name', async () => {
-      await tokens.issue(ownerOf(), { name: 'backup script' });
-      await assert.rejects(() => tokens.issue(ownerOf(), { name: 'Backup Script' }), /already has/);
+      await tokens.issue(ownerOf(), { name: 'backup script' }, testActor);
+      await assert.rejects(
+        () => tokens.issue(ownerOf(), { name: 'Backup Script' }, testActor),
+        /already has/,
+      );
     });
 
     it('releases the name once the token is revoked', async () => {
       // A token replaced after a leak usually wants the name of the one it replaced.
-      const { token } = await tokens.issue(ownerOf(), { name: 'backup script' });
-      await tokens.revoke(userId, token.id, 'ops');
-      const again = await tokens.issue(ownerOf(), { name: 'backup script' });
+      const { token } = await tokens.issue(ownerOf(), { name: 'backup script' }, testActor);
+      await tokens.revoke(userId, token.id, actorNamed('ops'));
+      const again = await tokens.issue(ownerOf(), { name: 'backup script' }, testActor);
       assert.equal(again.token.name, 'backup script');
     });
 
     it('refuses an expiry in the past', async () => {
       await assert.rejects(
-        () => tokens.issue(ownerOf(), { name: 'stale', expiresAt: new Date('2020-01-01') }),
+        () =>
+          tokens.issue(ownerOf(), { name: 'stale', expiresAt: new Date('2020-01-01') }, testActor),
         /expire in the past/,
       );
     });
 
     it('defaults to read, because a token that can write should be asked for', async () => {
-      const { token } = await tokens.issue(ownerOf(), { name: 'reader' });
+      const { token } = await tokens.issue(ownerOf(), { name: 'reader' }, testActor);
       assert.equal(token.scope, 'read');
     });
   });
@@ -132,21 +139,29 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
   describe('a token is never more than its owner', () => {
     it('lowers a scope above the account’s role at creation', async () => {
       // Not refused: the request is coherent, and the answer is "that is as much as you have".
-      const readonly = await accounts.create({
-        login: 'viewer',
-        password: 'correct-horse-battery',
-        role: 'readonly',
-      });
+      const readonly = await accounts.create(
+        {
+          login: 'viewer',
+          password: 'correct-horse-battery',
+          role: 'readonly',
+        },
+        testActor,
+      );
       const { token } = await tokens.issue(
         { userId: readonly.id, role: 'readonly' },
         { name: 'wishful', scope: 'full' },
+        testActor,
       );
       assert.equal(token.scope, 'read');
     });
 
     it('caps the resolved right at the token’s scope', async () => {
       // The account's groups grant `full` on this device; the token says `read`.
-      const { secret } = await tokens.issue(ownerOf(), { name: 'reader', scope: 'read' });
+      const { secret } = await tokens.issue(
+        ownerOf(),
+        { name: 'reader', scope: 'read' },
+        testActor,
+      );
       const principal = await tokens.resolve(secret);
       assert.ok(principal);
 
@@ -159,7 +174,11 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     });
 
     it('does not cap when the scope is as wide as the account', async () => {
-      const { secret } = await tokens.issue(ownerOf(), { name: 'writer', scope: 'full' });
+      const { secret } = await tokens.issue(
+        ownerOf(),
+        { name: 'writer', scope: 'full' },
+        testActor,
+      );
       const principal = await tokens.resolve(secret);
       assert.ok(principal);
       const resolved = await access.resolveFor(
@@ -177,7 +196,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
         parentId: harness.rootId,
         name: `other-${String(process.hrtime.bigint())}`,
       });
-      const { secret } = await tokens.issue(ownerOf(), { name: 'wide', scope: 'full' });
+      const { secret } = await tokens.issue(ownerOf(), { name: 'wide', scope: 'full' }, testActor);
       const principal = await tokens.resolve(secret);
       assert.ok(principal);
       const resolved = await access.resolveFor(
@@ -188,15 +207,19 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     });
 
     it('applies both ceilings, role first then scope', async () => {
-      const readonly = await accounts.create({
-        login: 'viewer',
-        password: 'correct-horse-battery',
-        role: 'readonly',
-      });
-      await groups.addMember(teamId, readonly.id);
+      const readonly = await accounts.create(
+        {
+          login: 'viewer',
+          password: 'correct-horse-battery',
+          role: 'readonly',
+        },
+        testActor,
+      );
+      await groups.addMember(teamId, readonly.id, testActor);
       const { secret } = await tokens.issue(
         { userId: readonly.id, role: 'readonly' },
         { name: 'both', scope: 'full' },
+        testActor,
       );
       const principal = await tokens.resolve(secret);
       assert.ok(principal);
@@ -210,7 +233,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
 
   describe('resolving', () => {
     it('resolves the token it issued', async () => {
-      const { secret } = await tokens.issue(ownerOf(), { name: 'one' });
+      const { secret } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
       const principal = await tokens.resolve(secret);
       assert.equal(principal?.login, 'ops');
       assert.equal(principal.role, 'readwrite');
@@ -225,18 +248,27 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     });
 
     it('refuses a revoked token', async () => {
-      const { token, secret } = await tokens.issue(ownerOf(), { name: 'one' });
-      await tokens.revoke(userId, token.id, 'ops');
+      const { token, secret } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      await tokens.revoke(userId, token.id, actorNamed('ops'));
       assert.equal(await tokens.resolve(secret), null);
     });
 
     it('refuses an expired one', async () => {
       let clock = new Date('2026-08-28T09:00:00.000Z');
-      const expiring = new TokenService({ db, logger: silentLogger, now: () => clock });
-      const { secret } = await expiring.issue(ownerOf(), {
-        name: 'short',
-        expiresAt: new Date('2026-08-28T10:00:00.000Z'),
+      const expiring = new TokenService({
+        audit: new DatabaseAuditSink(),
+        db,
+        logger: silentLogger,
+        now: () => clock,
       });
+      const { secret } = await expiring.issue(
+        ownerOf(),
+        {
+          name: 'short',
+          expiresAt: new Date('2026-08-28T10:00:00.000Z'),
+        },
+        testActor,
+      );
       assert.ok(await expiring.resolve(secret));
       clock = new Date('2026-08-28T11:00:00.000Z');
       assert.equal(await expiring.resolve(secret), null);
@@ -244,16 +276,16 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
 
     it('stops every token the moment the account is disabled', async () => {
       // Nobody should have to revoke them one at a time during an incident.
-      const first = await tokens.issue(ownerOf(), { name: 'one' });
-      const second = await tokens.issue(ownerOf(), { name: 'two' });
-      await accounts.update(userId, { disabled: true });
+      const first = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      const second = await tokens.issue(ownerOf(), { name: 'two' }, testActor);
+      await accounts.update(userId, { disabled: true }, testActor);
       assert.equal(await tokens.resolve(first.secret), null);
       assert.equal(await tokens.resolve(second.secret), null);
     });
 
     it('goes away with the account', async () => {
-      const { secret } = await tokens.issue(ownerOf(), { name: 'one' });
-      await accounts.delete(userId);
+      const { secret } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      await accounts.delete(userId, testActor);
       assert.equal(await tokens.resolve(secret), null);
       assert.equal((await db.query('SELECT id FROM api_token')).length, 0);
     });
@@ -261,7 +293,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
 
   describe('last used', () => {
     it('is recorded', async () => {
-      const { token, secret } = await tokens.issue(ownerOf(), { name: 'one' });
+      const { token, secret } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
       assert.equal(token.lastUsedAt, null);
       await tokens.resolve(secret);
       const listed = await tokens.listFor(userId);
@@ -273,12 +305,13 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
       // column nobody reads at that resolution.
       const clock = new Date('2026-08-28T09:00:00.000Z');
       const coarse = new TokenService({
+        audit: new DatabaseAuditSink(),
         db,
         logger: silentLogger,
         now: () => clock,
         lastUsedResolutionMs: 60_000,
       });
-      const { secret } = await coarse.issue(ownerOf(), { name: 'busy' });
+      const { secret } = await coarse.issue(ownerOf(), { name: 'busy' }, testActor);
       await coarse.resolve(secret);
       const first = (await coarse.listFor(userId))[0]?.lastUsedAt;
 
@@ -293,12 +326,13 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     it('is written again once the window has passed', async () => {
       let clock = new Date('2026-08-28T09:00:00.000Z');
       const coarse = new TokenService({
+        audit: new DatabaseAuditSink(),
         db,
         logger: silentLogger,
         now: () => clock,
         lastUsedResolutionMs: 60_000,
       });
-      const { secret } = await coarse.issue(ownerOf(), { name: 'busy' });
+      const { secret } = await coarse.issue(ownerOf(), { name: 'busy' }, testActor);
       await coarse.resolve(secret);
       const first = (await coarse.listFor(userId))[0]?.lastUsedAt;
 
@@ -311,32 +345,35 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
   describe('revoking', () => {
     it('refuses to revoke somebody else’s token', async () => {
       // A token id is a small integer; without the owner check this is one guess away.
-      const stranger = await accounts.create({
-        login: 'stranger',
-        password: 'correct-horse-battery',
-        role: 'readwrite',
-      });
-      const { token, secret } = await tokens.issue(ownerOf(), { name: 'mine' });
-      assert.equal(await tokens.revoke(stranger.id, token.id, 'stranger'), false);
+      const stranger = await accounts.create(
+        {
+          login: 'stranger',
+          password: 'correct-horse-battery',
+          role: 'readwrite',
+        },
+        testActor,
+      );
+      const { token, secret } = await tokens.issue(ownerOf(), { name: 'mine' }, testActor);
+      assert.equal(await tokens.revoke(stranger.id, token.id, actorNamed('stranger')), false);
       assert.ok(await tokens.resolve(secret), 'and it still works');
     });
 
     it('is idempotent', async () => {
-      const { token } = await tokens.issue(ownerOf(), { name: 'one' });
-      assert.equal(await tokens.revoke(userId, token.id, 'ops'), true);
-      assert.equal(await tokens.revoke(userId, token.id, 'ops'), false);
+      const { token } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      assert.equal(await tokens.revoke(userId, token.id, actorNamed('ops')), true);
+      assert.equal(await tokens.revoke(userId, token.id, actorNamed('ops')), false);
     });
 
     it('revokes every token at once, which is what a compromise needs', async () => {
-      await tokens.issue(ownerOf(), { name: 'one' });
-      await tokens.issue(ownerOf(), { name: 'two' });
-      assert.equal(await tokens.revokeAllFor(userId, 'admin'), 2);
+      await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      await tokens.issue(ownerOf(), { name: 'two' }, testActor);
+      assert.equal(await tokens.revokeAllFor(userId, actorNamed('admin')), 2);
       assert.deepEqual(await tokens.listFor(userId), []);
     });
 
     it('keeps revoked tokens on the record, and can show them', async () => {
-      const { token } = await tokens.issue(ownerOf(), { name: 'one' });
-      await tokens.revoke(userId, token.id, 'ops');
+      const { token } = await tokens.issue(ownerOf(), { name: 'one' }, testActor);
+      await tokens.revoke(userId, token.id, actorNamed('ops'));
       assert.deepEqual(await tokens.listFor(userId), []);
       const withRevoked = await tokens.listFor(userId, true);
       assert.equal(withRevoked.length, 1);

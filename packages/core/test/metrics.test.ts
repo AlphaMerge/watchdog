@@ -398,13 +398,13 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         catalogue: testCatalogue(),
         ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
         auth: {
-          accounts: new AccountService({ db, logger: silent }),
+          accounts: new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           sessions: new SessionService({ db, logger: silent }),
           throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
-          groups: new GroupService({ db, logger: silent }),
+          groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
-          tokens: new TokenService({ db, logger: silent }),
-          totp: new TotpService({ db, logger: silent }),
+          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           required: options.required,
         },
       });

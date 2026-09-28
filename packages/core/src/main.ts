@@ -22,6 +22,7 @@ import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
   grantAuditSinks,
+  identityAuditSinks,
   objectAuditSinks,
   scheduleAuditSinks,
   triggerAuditSinks,
@@ -859,16 +860,20 @@ async function serve(): Promise<void> {
 
   // Accounts and sessions (`A-01`). Built before the API, because the API's authentication hook
   // asks the session service on every request.
-  const accounts = new AccountService({ db, logger });
+  // Every account, group, membership, password, second factor and token change is recorded in
+  // its own transaction (`A-18`), by one sink set so no identity service can compose a different
+  // one.
+  const identityAudit = new CompositeAuditSink(identityAuditSinks(auditSinks));
+  const accounts = new AccountService({ db, audit: identityAudit, logger });
   const sessions = new SessionService({ db, logger });
-  const userGroups = new GroupService({ db, logger });
+  const userGroups = new GroupService({ db, audit: identityAudit, logger });
   const objectAccess = new AccessService({
     db,
     audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
     logger,
   });
-  const apiTokens = new TokenService({ db, logger });
-  const mfa = new TotpService({ db, logger });
+  const apiTokens = new TokenService({ db, audit: identityAudit, logger });
+  const mfa = new TotpService({ db, audit: identityAudit, logger });
   const loginThrottle = new LoginThrottle({ db, logger });
 
   // **The v2 subsystems, and only in the full build profile** (`H-12`). The v1 build — the

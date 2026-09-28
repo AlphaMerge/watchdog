@@ -13,6 +13,8 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
+import { testActor } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 /**
  * TOTP multi-factor authentication (`A-07`).
@@ -55,15 +57,23 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
     await db.query('DELETE FROM user_account');
 
     clock = new Date('2026-08-28T09:00:00.000Z');
-    totp = new TotpService({ db, logger: silentLogger, now: () => clock });
-    accounts = new AccountService({ db, logger: silentLogger });
-    groups = new GroupService({ db, logger: silentLogger });
-
-    const account = await accounts.create({
-      login: 'ops',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
+    totp = new TotpService({
+      audit: new DatabaseAuditSink(),
+      db,
+      logger: silentLogger,
+      now: () => clock,
     });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+
+    const account = await accounts.create(
+      {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
     userId = account.id;
   });
 
@@ -79,7 +89,7 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
 
   const enrol = async () => {
     const { secret } = await totp.beginEnrolment(userId, 'ops');
-    const { recoveryCodes } = await totp.confirmEnrolment(userId, codeFor(secret));
+    const { recoveryCodes } = await totp.confirmEnrolment(userId, codeFor(secret), testActor);
     return { secret, recoveryCodes };
   };
 
@@ -105,7 +115,10 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
 
     it('refuses to confirm with a wrong code', async () => {
       await totp.beginEnrolment(userId, 'ops');
-      await assert.rejects(() => totp.confirmEnrolment(userId, '000000'), /not accepted/);
+      await assert.rejects(
+        () => totp.confirmEnrolment(userId, '000000', testActor),
+        /not accepted/,
+      );
       assert.equal(await totp.isEnrolled(userId), false);
     });
 
@@ -139,7 +152,7 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
       // And the abandoned one is dead. Awaited — an unawaited `assert.rejects` is an assertion
       // that never runs, which is worse than not writing it.
       await assert.rejects(
-        () => totp.confirmEnrolment(userId, codeFor(first.secret)),
+        () => totp.confirmEnrolment(userId, codeFor(first.secret), testActor),
         /not accepted/,
       );
     });
@@ -252,14 +265,14 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
 
     it('can be reissued, and the old ones stop working', async () => {
       const { recoveryCodes } = await enrol();
-      const fresh = await totp.regenerateRecoveryCodes(userId);
+      const fresh = await totp.regenerateRecoveryCodes(userId, testActor);
       assert.equal(fresh.length, 10);
       assert.equal(await totp.verify(userId, recoveryCodes[0] ?? ''), false, 'the old set is dead');
       assert.equal(await totp.verify(userId, fresh[0] ?? ''), true);
     });
 
     it('cannot be reissued for an account without MFA', async () => {
-      await assert.rejects(() => totp.regenerateRecoveryCodes(userId), /does not have/);
+      await assert.rejects(() => totp.regenerateRecoveryCodes(userId, testActor), /does not have/);
     });
 
     it('are counted, because zero left is a lockout waiting to happen', async () => {
@@ -273,7 +286,7 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
   describe('disabling', () => {
     it('takes the recovery codes with it', async () => {
       const { secret, recoveryCodes } = await enrol();
-      await totp.disable(userId);
+      await totp.disable(userId, testActor);
       assert.equal(await totp.isEnrolled(userId), false);
       assert.equal(await totp.verify(userId, codeFor(secret)), false);
       assert.equal(await totp.verify(userId, recoveryCodes[0] ?? ''), false);
@@ -282,7 +295,7 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
 
     it('lets the account enrol again afterwards', async () => {
       await enrol();
-      await totp.disable(userId);
+      await totp.disable(userId, testActor);
       const again = await totp.beginEnrolment(userId, 'ops');
       assert.ok(again.secret);
     });
@@ -294,37 +307,37 @@ describe('totp', { skip: available ? false : 'no database' }, () => {
     });
 
     it('is on for a member of a group that requires it', async () => {
-      const secure = await groups.create({ name: 'Change managers' });
+      const secure = await groups.create({ name: 'Change managers' }, testActor);
       await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
-      await groups.addMember(secure.id, userId);
+      await groups.addMember(secure.id, userId, testActor);
       assert.equal(await totp.isRequired(userId), true);
     });
 
     it('is on if *any* group requires it, so joining never relaxes it', async () => {
       // The same "highest wins" shape A-03 gives to rights, and for the same reason: being added
       // to a group must not quietly drop a requirement.
-      const relaxed = await groups.create({ name: 'Everyone' });
-      const secure = await groups.create({ name: 'Change managers' });
+      const relaxed = await groups.create({ name: 'Everyone' }, testActor);
+      const secure = await groups.create({ name: 'Change managers' }, testActor);
       await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
-      await groups.addMember(secure.id, userId);
-      await groups.addMember(relaxed.id, userId);
+      await groups.addMember(secure.id, userId, testActor);
+      await groups.addMember(relaxed.id, userId, testActor);
       assert.equal(await totp.isRequired(userId), true);
     });
 
     it('stops being required once the account leaves that group', async () => {
-      const secure = await groups.create({ name: 'Change managers' });
+      const secure = await groups.create({ name: 'Change managers' }, testActor);
       await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
-      await groups.addMember(secure.id, userId);
-      await groups.removeMember(secure.id, userId);
+      await groups.addMember(secure.id, userId, testActor);
+      await groups.removeMember(secure.id, userId, testActor);
       assert.equal(await totp.isRequired(userId), false);
     });
 
     it('reports required and enrolled separately, because the gap is the interesting state', async () => {
       // Required but not enrolled is the account that has to be walked through setup before it
       // can do anything — a client cannot tell that from one boolean.
-      const secure = await groups.create({ name: 'Change managers' });
+      const secure = await groups.create({ name: 'Change managers' }, testActor);
       await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
-      await groups.addMember(secure.id, userId);
+      await groups.addMember(secure.id, userId, testActor);
 
       const status = await totp.status(userId);
       assert.equal(status.required, true);

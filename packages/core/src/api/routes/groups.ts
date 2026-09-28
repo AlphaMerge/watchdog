@@ -1,8 +1,8 @@
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { GroupService } from '../../auth/groups.js';
-import { requireRole } from '../authentication.js';
-import { ADMIN, auditGap } from '../authorization.js';
+import { actorFor, requireRole } from '../authentication.js';
+import { ADMIN } from '../authorization.js';
 
 export interface GroupRoutesOptions {
   groups: GroupService;
@@ -91,7 +91,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.post<{ Body: { name: string; description?: string; isAdmin?: boolean } }>(
     '/groups',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -110,7 +110,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
       },
     },
     async (request, reply) => {
-      const created = await groups.create(request.body);
+      const created = await groups.create(request.body, actorFor(request));
       return reply.status(201).send(created);
     },
   );
@@ -121,7 +121,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   }>(
     '/groups/:id',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -142,13 +142,13 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
         response: { 200: groupSchema },
       },
     },
-    async (request) => groups.update(request.params.id, request.body),
+    async (request) => groups.update(request.params.id, request.body, actorFor(request)),
   );
 
   app.delete<{ Params: { id: number } }>(
     '/groups/:id',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -162,7 +162,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
       },
     },
     async (request, reply) => {
-      await groups.delete(request.params.id);
+      await groups.delete(request.params.id, actorFor(request));
       return reply.status(204).send();
     },
   );
@@ -206,7 +206,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.put<{ Params: { id: number; userId: number }; Body: { primary?: boolean } }>(
     '/groups/:id/members/:userId',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -240,7 +240,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
     },
     async (request) => {
       const { id, userId } = request.params;
-      await groups.addMember(id, userId, request.body.primary ?? false);
+      await groups.addMember(id, userId, actorFor(request), request.body.primary ?? false);
       return { items: await groups.membershipsOf(userId) };
     },
   );
@@ -248,7 +248,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.delete<{ Params: { id: number; userId: number } }>(
     '/groups/:id/members/:userId',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -274,7 +274,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
     },
     async (request) => {
       const { id, userId } = request.params;
-      await groups.removeMember(id, userId);
+      await groups.removeMember(id, userId, actorFor(request));
       return { items: await groups.membershipsOf(userId) };
     },
   );
@@ -304,7 +304,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
   app.put<{ Params: { id: number; groupId: number } }>(
     '/accounts/:id/primary-group/:groupId',
     {
-      config: { ...ADMIN, ...auditGap('A-18') },
+      config: ADMIN,
       ...adminOnly,
       schema: {
         tags: ['groups'],
@@ -333,7 +333,7 @@ export function groupRoutes(app: FastifyInstance, options: GroupRoutesOptions): 
     },
     async (request) => {
       const { id, groupId } = request.params;
-      await groups.setPrimary(groupId, id);
+      await groups.setPrimary(groupId, id, actorFor(request));
       return { items: await groups.membershipsOf(id) };
     },
   );

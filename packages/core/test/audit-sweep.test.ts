@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import * as OTPAuth from 'otpauth';
 import { ApiServer } from '../src/api/server.js';
 import { AccessService } from '../src/auth/access.js';
 import { AccountService } from '../src/auth/accounts.js';
@@ -76,6 +77,13 @@ interface Call {
   headers?: Record<string, string>;
 }
 
+/** Somebody other than the sweeper, for the routes that change the account making the call. */
+interface Person {
+  readonly id: number;
+  readonly login: string;
+  readonly password: string;
+}
+
 /** The ids and helpers a fixture draws on. Each fixture makes what it will change, fresh. */
 interface Kit {
   readonly probeId: number;
@@ -87,6 +95,16 @@ interface Kit {
   readonly pingSensor: () => Promise<number>;
   readonly downSensor: () => Promise<number>;
   readonly post: (url: string, payload: unknown) => Promise<{ id: number; version: number }>;
+  /** A fresh account, and a user group it can be put in (`A-18`). */
+  readonly person: () => Promise<Person>;
+  readonly userGroup: () => Promise<number>;
+  readonly join: (groupId: number, userId: number) => Promise<void>;
+  /** A session for somebody, and a POST made in it, for the routes that act on their caller. */
+  readonly signIn: (person: Person) => Promise<string>;
+  readonly as: <T>(cookie: string, url: string, payload?: unknown) => Promise<T>;
+  readonly totpCode: (secret: string) => string;
+  /** Everything a fixture handled that signs somebody in; no audit row may contain any of it. */
+  readonly planted: string[];
 }
 
 type Fixture = (kit: Kit) => Promise<Call>;
@@ -396,7 +414,101 @@ const FIXTURES: Record<string, Fixture> = {
     });
     return { url: `/api/v1/discovery/${id(run.id)}/provision`, payload: {} };
   },
+
+  // ------------------------------------------------------------------------------ identity
+  // `A-18`. The routes that change the account making the call — a password, a second factor, a
+  // token — are called in a session of somebody made for the purpose, so the sweeper's own session
+  // is never the thing a fixture changes out from under the rest of the sweep.
+  'POST /api/v1/groups': (k) =>
+    Promise.resolve({ url: '/api/v1/groups', payload: { name: k.name('Sweep group') } }),
+  'PUT /api/v1/groups/:id': async (k) => ({
+    url: `/api/v1/groups/${id(await k.userGroup())}`,
+    payload: { name: k.name('Renamed group') },
+  }),
+  'DELETE /api/v1/groups/:id': async (k) => ({ url: `/api/v1/groups/${id(await k.userGroup())}` }),
+  'PUT /api/v1/groups/:id/members/:userId': async (k) => ({
+    url: `/api/v1/groups/${id(k.teamId)}/members/${id((await k.person()).id)}`,
+    payload: {},
+  }),
+  'DELETE /api/v1/groups/:id/members/:userId': async (k) => {
+    const person = await k.person();
+    await k.join(k.teamId, person.id);
+    return { url: `/api/v1/groups/${id(k.teamId)}/members/${id(person.id)}` };
+  },
+  'PUT /api/v1/accounts/:id/primary-group/:groupId': async (k) => {
+    const person = await k.person();
+    const other = await k.userGroup();
+    await k.join(k.teamId, person.id);
+    await k.join(other, person.id);
+    return { url: `/api/v1/accounts/${id(person.id)}/primary-group/${id(other)}` };
+  },
+  'POST /api/v1/auth/tokens': async (k) => {
+    const person = await k.person();
+    return {
+      url: '/api/v1/auth/tokens',
+      headers: { cookie: await k.signIn(person) },
+      payload: { name: k.name('token'), scope: 'read' },
+    };
+  },
+  'DELETE /api/v1/auth/tokens/:id': async (k) => {
+    const person = await k.person();
+    const cookie = await k.signIn(person);
+    const issued = await k.as<{ token: { id: number }; secret: string }>(
+      cookie,
+      '/api/v1/auth/tokens',
+      { name: k.name('token') },
+    );
+    k.planted.push(issued.secret);
+    return { url: `/api/v1/auth/tokens/${id(issued.token.id)}`, headers: { cookie } };
+  },
+  'POST /api/v1/auth/password': async (k) => {
+    const person = await k.person();
+    const next = `${person.password}-next`;
+    k.planted.push(next);
+    return {
+      url: '/api/v1/auth/password',
+      headers: { cookie: await k.signIn(person) },
+      payload: { currentPassword: person.password, newPassword: next },
+    };
+  },
+  'POST /api/v1/auth/mfa/confirm': async (k) => {
+    const person = await k.person();
+    const cookie = await k.signIn(person);
+    const { secret } = await k.as<{ secret: string }>(cookie, '/api/v1/auth/mfa/enrol');
+    k.planted.push(secret);
+    return {
+      url: '/api/v1/auth/mfa/confirm',
+      headers: { cookie },
+      payload: { code: k.totpCode(secret) },
+    };
+  },
+  'POST /api/v1/auth/mfa/disable': async (k) => {
+    const { person, cookie } = await enrolled(k);
+    return {
+      url: '/api/v1/auth/mfa/disable',
+      headers: { cookie },
+      payload: { password: person.password },
+    };
+  },
+  'POST /api/v1/auth/mfa/recovery-codes': async (k) => ({
+    url: '/api/v1/auth/mfa/recovery-codes',
+    headers: { cookie: (await enrolled(k)).cookie },
+  }),
 };
+
+/** Somebody signed in with a confirmed second factor, whose secret and codes are planted. */
+async function enrolled(k: Kit): Promise<{ person: Person; cookie: string }> {
+  const person = await k.person();
+  const cookie = await k.signIn(person);
+  const { secret } = await k.as<{ secret: string }>(cookie, '/api/v1/auth/mfa/enrol');
+  const { recoveryCodes } = await k.as<{ recoveryCodes: string[] }>(
+    cookie,
+    '/api/v1/auth/mfa/confirm',
+    { code: k.totpCode(secret) },
+  );
+  k.planted.push(secret, ...recoveryCodes, ...recoveryCodes.map((code) => code.replace('-', '')));
+  return { person, cookie };
+}
 
 describe(
   'every change is audited, or says why not',
@@ -409,6 +521,7 @@ describe(
     let harness: Harness;
     let formatter: ReportFormatter;
     let kit: Kit;
+    const planted: string[] = [];
 
     before(async () => {
       scratch = await createScratchDatabase('auditsweep');
@@ -420,9 +533,9 @@ describe(
       // they go to the table as well, through the transaction they were recorded in.
       harness.audit.also = new DatabaseAuditSink();
 
-      const accounts = new AccountService({ db, logger: silent });
+      const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const access = new AccessService({ db, audit: harness.audit, logger: silent });
-      const groups = new GroupService({ db, logger: silent });
+      const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const discovery = new DiscoveryService({
         db,
         logger: silent,
@@ -561,8 +674,8 @@ describe(
           throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
           groups,
           access,
-          tokens: new TokenService({ db, logger: silent }),
-          totp: new TotpService({ db, logger: silent }),
+          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           required: true,
         },
       });
@@ -585,18 +698,21 @@ describe(
         parentId: probe.id,
         name: 'sweep-group',
       });
-      const team = await groups.create({ name: 'Sweep team' });
+      const team = await groups.create({ name: 'Sweep team' }, testActor);
 
       // An administrator: the sweep is about whether a change that *happens* is recorded, so the
       // caller must be one every route lets through.
-      const account = await accounts.create({
-        login: 'sweeper',
-        password: 'correct-horse-battery',
-        role: 'admin',
-      });
+      const account = await accounts.create(
+        {
+          login: 'sweeper',
+          password: 'correct-horse-battery',
+          role: 'admin',
+        },
+        testActor,
+      );
       const admins = (await groups.list()).find((one) => one.isAdmin);
       assert.ok(admins);
-      await groups.addMember(admins.id, account.id);
+      await groups.addMember(admins.id, account.id, testActor);
       const login = await app.inject({
         method: 'POST',
         url: '/api/v1/auth/login',
@@ -624,12 +740,59 @@ describe(
           })
         ).id;
 
+      const signIn = async (person: Person): Promise<string> => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/login',
+          payload: { login: person.login, password: person.password },
+        });
+        assert.equal(response.statusCode, 200, `${person.login} could not sign in`);
+        const header = response.headers['set-cookie'];
+        const value = (Array.isArray(header) ? (header[0] ?? '') : (header ?? '')).split(';')[0];
+        assert.ok(value !== undefined && value !== '');
+        return value;
+      };
+
       kit = {
         probeId: probe.id,
         groupId: group.id,
         teamId: team.id,
         cookie,
         name,
+        person: async () => {
+          const who = name('person');
+          const password = `${who}-planted-password`;
+          planted.push(password);
+          const created = await accounts.create(
+            { login: who, password, role: 'readwrite' },
+            testActor,
+          );
+          return { id: created.id, login: who, password };
+        },
+        userGroup: async () => (await groups.create({ name: name('Sweep group') }, testActor)).id,
+        join: (groupId, userId) => groups.addMember(groupId, userId, testActor),
+        signIn,
+        as: async <T>(session: string, url: string, payload?: unknown): Promise<T> => {
+          const response = await app.inject({
+            method: 'POST',
+            url,
+            headers: { cookie: session },
+            ...(payload === undefined ? {} : { payload: payload as never }),
+          });
+          assert.ok(
+            response.statusCode < 300,
+            `arranging ${url} answered ${String(response.statusCode)}: ${response.body}`,
+          );
+          return response.json<T>();
+        },
+        totpCode: (secret) =>
+          new OTPAuth.TOTP({
+            algorithm: 'SHA1',
+            digits: 6,
+            period: 30,
+            secret: OTPAuth.Secret.fromBase32(secret),
+          }).generate(),
+        planted,
         group: async (parentId = group.id) =>
           (await harness.service.create(testActor, { kind: 'group', parentId, name: name('g') }))
             .id,
@@ -759,8 +922,42 @@ describe(
       );
       assert.deepEqual(leaked, []);
       // And the plant happened, so the absence above means something.
-      const planted = await db.query(`SELECT 1 FROM audit_log WHERE action = 'credential.set'`);
-      assert.ok(planted.length > 0, 'no credential was set, so the redaction check proved nothing');
+      const set = await db.query(`SELECT 1 FROM audit_log WHERE action = 'credential.set'`);
+      assert.ok(set.length > 0, 'no credential was set, so the redaction check proved nothing');
+    });
+
+    it('never records a password, token, TOTP secret or recovery code a route handled', async () => {
+      // `A-18`: what the identity fixtures sent and were sent back, in every rendering a careless
+      // serialiser could give it.
+      const rows = await db.query<{ row: string }>(
+        `SELECT concat_ws(' ', actor_label, summary::text, diff::text) AS row FROM audit_log`,
+      );
+      const text = rows.map((one) => one.row).join('\n');
+      const leaks: string[] = [];
+      for (const secret of new Set(planted)) {
+        const bytes = Buffer.from(secret);
+        for (const [how, form] of [
+          ['text', secret],
+          ['base64', bytes.toString('base64')],
+          ['hex', bytes.toString('hex')],
+          ['bytes', JSON.stringify([...bytes]).slice(1, -1)],
+        ] as const) {
+          if (text.includes(form)) leaks.push(`${secret.slice(0, 6)}… as ${how}`);
+        }
+      }
+      assert.deepEqual(leaks, []);
+      const kinds = new Set(
+        (await db.query<{ action: string }>(`SELECT DISTINCT action FROM audit_log`)).map(
+          (one) => one.action,
+        ),
+      );
+      for (const action of ['account.passwordChanged', 'account.mfaEnabled', 'token.revoked']) {
+        assert.ok(
+          kinds.has(action),
+          `no ${action} entry, so its absence of secrets proves nothing`,
+        );
+      }
+      assert.ok(planted.length > 20, `only ${String(planted.length)} secrets were planted`);
     });
   },
 );

@@ -97,11 +97,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     db = scratch.db;
     harness = await buildHarness(db);
 
-    const accounts = new AccountService({ db, logger: silent });
+    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
     const throttle = new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() });
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
-    groups = new GroupService({ db, logger: silent });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
 
     discovery = new DiscoveryService({
       db,
@@ -244,8 +244,8 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         throttle,
         groups,
         access,
-        tokens: new TokenService({ db, logger: silent }),
-        totp: new TotpService({ db, logger: silent }),
+        tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+        totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
     });
@@ -304,25 +304,28 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       })
     ).id;
 
-    teamId = (await groups.create({ name: 'Team' })).id;
+    teamId = (await groups.create({ name: 'Team' }, testActor)).id;
 
     // One account per role, all in the same group, so the only variable in the matrix is the
     // role and the grant.
     for (const role of ['admin', 'readwrite', 'readonly'] as const) {
-      const account = await accounts.create({
-        login: role,
-        password: 'correct-horse-battery',
-        role,
-      });
+      const account = await accounts.create(
+        {
+          login: role,
+          password: 'correct-horse-battery',
+          role,
+        },
+        testActor,
+      );
       userIds.set(role, account.id);
       // The administrator goes in the admin group; the others in the ordinary one. A read-only
       // account cannot be in an admin group at all (`A-04`).
       if (role === 'admin') {
         const admins = (await groups.list()).find((g) => g.isAdmin);
         assert.ok(admins);
-        await groups.addMember(admins.id, account.id);
+        await groups.addMember(admins.id, account.id, testActor);
       } else {
-        await groups.addMember(teamId, account.id);
+        await groups.addMember(teamId, account.id, testActor);
       }
 
       const response = await app.inject({
@@ -889,13 +892,13 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
         auth: {
-          accounts: new AccountService({ db, logger: silent }),
+          accounts: new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           sessions: new SessionService({ db, logger: silent }),
           throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
           groups,
           access,
-          tokens: new TokenService({ db, logger: silent }),
-          totp: new TotpService({ db, logger: silent }),
+          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           required: false,
         },
       });
@@ -933,10 +936,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // into `resolveFor` — correctly — and `resolveFor` was called by no route, so a token
       // scoped to `read` performed every write in the installation. Held by an administrator
       // here on purpose: the account's own role must not be what refuses this.
-      const tokens = new TokenService({ db, logger: silent });
+      const tokens = new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const issued = await tokens.issue(
         { userId: userIds.get('admin') ?? 0, role: 'admin' },
         { name: 'sweep-read', scope: 'read' },
+        testActor,
       );
       const headers = { authorization: `Bearer ${issued.secret}` };
 

@@ -6,8 +6,8 @@ import { AuthError } from '../../auth/errors.js';
 import type { SessionService } from '../../auth/sessions.js';
 import type { LoginThrottle } from '../../auth/throttle.js';
 import type { TotpService } from '../../auth/totp.js';
-import { SESSION_COOKIE, sessionTokenFrom } from '../authentication.js';
-import { PUBLIC, READS, SELF, auditGap, notAudited } from '../authorization.js';
+import { SESSION_COOKIE, actorFor, sessionTokenFrom } from '../authentication.js';
+import { PUBLIC, READS, SELF, notAudited } from '../authorization.js';
 
 export interface AuthRoutesOptions {
   accounts: AccountService;
@@ -351,7 +351,12 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post(
     '/auth/mfa/enrol',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: {
+        ...SELF,
+        ...notAudited(
+          'stores a secret that does nothing until /auth/mfa/confirm, which is audited (A-18)',
+        ),
+      },
       schema: {
         tags: ['auth'],
         summary: 'Begin enrolment',
@@ -384,7 +389,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post<{ Body: { code: string } }>(
     '/auth/mfa/confirm',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Confirm enrolment with a code, and receive recovery codes',
@@ -413,14 +418,14 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       if (totp === undefined) {
         throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
       }
-      return totp.confirmEnrolment(principal.userId, request.body.code);
+      return totp.confirmEnrolment(principal.userId, request.body.code, actorFor(request));
     },
   );
 
   app.post<{ Body: { password: string } }>(
     '/auth/mfa/disable',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Turn off multi-factor authentication',
@@ -445,7 +450,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       if (confirmed.kind !== 'ok') {
         throw new AuthError('ACCOUNT_PASSWORD_WRONG', 'that password was not accepted');
       }
-      await totp.disable(principal.userId);
+      await totp.disable(principal.userId, actorFor(request));
       return reply.status(204).send();
     },
   );
@@ -453,7 +458,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
   app.post(
     '/auth/mfa/recovery-codes',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Issue a fresh set of recovery codes',
@@ -473,14 +478,16 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       if (totp === undefined) {
         throw new AuthError('MFA_NOT_ENROLLED', 'this build has no multi-factor authentication');
       }
-      return { recoveryCodes: await totp.regenerateRecoveryCodes(principal.userId) };
+      return {
+        recoveryCodes: await totp.regenerateRecoveryCodes(principal.userId, actorFor(request)),
+      };
     },
   );
 
   app.post<{ Body: { currentPassword: string; newPassword: string } }>(
     '/auth/password',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Change your own password',
@@ -513,7 +520,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       if (principal === undefined) {
         throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
       }
-      await accounts.changePassword(principal.userId, request.body.newPassword, {
+      await accounts.changePassword(principal.userId, request.body.newPassword, actorFor(request), {
         current: request.body.currentPassword,
       });
       const ended = await sessions.endAllFor(principal.userId, principal.sessionId);

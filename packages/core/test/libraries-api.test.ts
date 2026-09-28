@@ -19,7 +19,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent } from './support/tree.js';
+import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -50,7 +50,7 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
     scratch = await createScratchDatabase('libapi');
     db = scratch.db;
     const harness = await buildHarness(db);
-    const accounts = new AccountService({ db, logger: silent });
+    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
 
     const server = new ApiServer({
@@ -78,10 +78,10 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
         accounts,
         sessions: new SessionService({ db, logger: silent }),
         throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
-        groups: new GroupService({ db, logger: silent }),
+        groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         access,
-        tokens: new TokenService({ db, logger: silent }),
-        totp: new TotpService({ db, logger: silent }),
+        tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+        totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
     });
@@ -95,7 +95,7 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
       ['stranger', 'readwrite'],
       ['watcher', 'readonly'],
     ] as const) {
-      await accounts.create({ login, password: 'correct-horse-battery', role });
+      await accounts.create({ login, password: 'correct-horse-battery', role }, testActor);
       const group = await db.query<{ id: string }>(
         `INSERT INTO user_group (name) VALUES ($1) RETURNING id`,
         [`${login}s`],
@@ -111,9 +111,10 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
       `SELECT id FROM user_account WHERE login = 'author'`,
     );
     authorReadToken = (
-      await new TokenService({ db, logger: silent }).issue(
+      await new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }).issue(
         { userId: Number(authorId[0]?.id), role: 'readwrite' },
         { name: 'libraries-read', scope: 'read' },
+        testActor,
       )
     ).secret;
 

@@ -11,6 +11,8 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
+import { testActor } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 /**
  * User groups and the primary group (`A-02`).
@@ -46,13 +48,16 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
     await db.query('DELETE FROM user_group_member');
     await db.query('DELETE FROM user_group WHERE NOT is_builtin');
     await db.query('DELETE FROM user_account');
-    groups = new GroupService({ db, logger: silentLogger });
-    accounts = new AccountService({ db, logger: silentLogger });
-    const account = await accounts.create({
-      login: 'ops',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-    });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    const account = await accounts.create(
+      {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
     userId = account.id;
   });
 
@@ -85,18 +90,28 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
     it('refuses to delete a built-in group', async () => {
       // Deleting the administrators group is a one-way door out of your own installation.
       const admins = await builtin('Administrators');
-      await assert.rejects(() => groups.delete(admins.id), /built-in/);
+      await assert.rejects(() => groups.delete(admins.id, testActor), /built-in/);
     });
 
     it('refuses to rename one, or to change what it grants', async () => {
       const admins = await builtin('Administrators');
-      await assert.rejects(() => groups.update(admins.id, { name: 'Nobodies' }), /built-in/);
-      await assert.rejects(() => groups.update(admins.id, { isAdmin: false }), /built-in/);
+      await assert.rejects(
+        () => groups.update(admins.id, { name: 'Nobodies' }, testActor),
+        /built-in/,
+      );
+      await assert.rejects(
+        () => groups.update(admins.id, { isAdmin: false }, testActor),
+        /built-in/,
+      );
     });
 
     it('still lets one be described, which locks nobody out', async () => {
       const admins = await builtin('Administrators');
-      const updated = await groups.update(admins.id, { description: 'The people on call' });
+      const updated = await groups.update(
+        admins.id,
+        { description: 'The people on call' },
+        testActor,
+      );
       assert.equal(updated.description, 'The people on call');
     });
   });
@@ -106,7 +121,7 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       // A user with groups and no primary is a state nothing else is prepared for: object
       // ownership would have nothing to answer with.
       const users = await builtin('Users');
-      await groups.addMember(users.id, userId);
+      await groups.addMember(users.id, userId, testActor);
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships.length, 1);
       assert.equal(memberships[0]?.isPrimary, true);
@@ -114,9 +129,9 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
 
     it('does not move the primary when a second group is joined', async () => {
       const users = await builtin('Users');
-      const oncall = await groups.create({ name: 'On call' });
-      await groups.addMember(users.id, userId);
-      await groups.addMember(oncall.id, userId);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.addMember(oncall.id, userId, testActor);
 
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships.length, 2);
@@ -126,10 +141,10 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
 
     it('moves it when asked to', async () => {
       const users = await builtin('Users');
-      const oncall = await groups.create({ name: 'On call' });
-      await groups.addMember(users.id, userId);
-      await groups.addMember(oncall.id, userId);
-      await groups.setPrimary(oncall.id, userId);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.setPrimary(oncall.id, userId, testActor);
 
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships.filter((m) => m.isPrimary).length, 1);
@@ -140,31 +155,34 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       // The rule the schema cannot express. A foreign key from the account to a group could not
       // say "and they must be a member of it", and the two rules would drift the first time
       // somebody was removed from a group.
-      const oncall = await groups.create({ name: 'On call' });
-      await assert.rejects(() => groups.setPrimary(oncall.id, userId), /already belongs to/);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      await assert.rejects(
+        () => groups.setPrimary(oncall.id, userId, testActor),
+        /already belongs to/,
+      );
     });
 
     it('is idempotent: joining twice is joining once', async () => {
       const users = await builtin('Users');
-      await groups.addMember(users.id, userId);
-      await groups.addMember(users.id, userId);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.addMember(users.id, userId, testActor);
       assert.equal((await groups.membershipsOf(userId)).length, 1);
     });
 
     it('never demotes an existing primary by re-adding the member', async () => {
       const users = await builtin('Users');
-      await groups.addMember(users.id, userId);
-      await groups.addMember(users.id, userId, false);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.addMember(users.id, userId, testActor, false);
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships[0]?.isPrimary, true, 're-adding must not leave them without one');
     });
 
     it('gives a new primary when the current one is left', async () => {
       const users = await builtin('Users');
-      const oncall = await groups.create({ name: 'On call' });
-      await groups.addMember(users.id, userId);
-      await groups.addMember(oncall.id, userId);
-      await groups.removeMember(users.id, userId);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.removeMember(users.id, userId, testActor);
 
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships.length, 1);
@@ -174,21 +192,21 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
     it('lets the last membership go, because belonging to nothing is a real state', async () => {
       // It is what a suspended operator looks like: no rights beyond their account role.
       const users = await builtin('Users');
-      await groups.addMember(users.id, userId);
-      await groups.removeMember(users.id, userId);
+      await groups.addMember(users.id, userId, testActor);
+      await groups.removeMember(users.id, userId, testActor);
       assert.deepEqual(await groups.membershipsOf(userId), []);
     });
 
     it('gives a new primary when the primary group is deleted', async () => {
       // The cascade removes the membership row; nothing in the schema notices that it was the
       // primary one. This is the sideways route to a user with groups and no primary.
-      const oncall = await groups.create({ name: 'On call' });
-      const relief = await groups.create({ name: 'Relief' });
-      await groups.addMember(oncall.id, userId);
-      await groups.addMember(relief.id, userId);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      const relief = await groups.create({ name: 'Relief' }, testActor);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.addMember(relief.id, userId, testActor);
       assert.equal((await groups.membershipsOf(userId))[0]?.name, 'On call');
 
-      await groups.delete(oncall.id);
+      await groups.delete(oncall.id, testActor);
       const memberships = await groups.membershipsOf(userId);
       assert.equal(memberships.length, 1);
       assert.equal(memberships[0]?.name, 'Relief');
@@ -196,25 +214,31 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
     });
 
     it('does not delete the members with the group', async () => {
-      const oncall = await groups.create({ name: 'On call' });
-      await groups.addMember(oncall.id, userId);
-      await groups.delete(oncall.id);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.delete(oncall.id, testActor);
       assert.ok(await accounts.get(userId), 'the account survives its group');
     });
 
     it('refuses to add a member to a group that does not exist', async () => {
-      await assert.rejects(() => groups.addMember(999_999, userId), /no such group or account/);
+      await assert.rejects(
+        () => groups.addMember(999_999, userId, testActor),
+        /no such group or account/,
+      );
     });
 
     it('counts its members', async () => {
-      const oncall = await groups.create({ name: 'On call' });
-      const second = await accounts.create({
-        login: 'ops2',
-        password: 'correct-horse-battery',
-        role: 'readonly',
-      });
-      await groups.addMember(oncall.id, userId);
-      await groups.addMember(oncall.id, second.id);
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      const second = await accounts.create(
+        {
+          login: 'ops2',
+          password: 'correct-horse-battery',
+          role: 'readonly',
+        },
+        testActor,
+      );
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.addMember(oncall.id, second.id, testActor);
       assert.equal((await groups.get(oncall.id))?.memberCount, 2);
       assert.deepEqual(
         (await groups.membersOf(oncall.id)).map((m) => m.login),
@@ -230,9 +254,9 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       // without anybody remembering to change their role too.
       const admins = await builtin('Administrators');
       assert.equal(await groups.administers(userId), false);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(admins.id, userId, testActor);
       assert.equal(await groups.administers(userId), true);
-      await groups.removeMember(admins.id, userId);
+      await groups.removeMember(admins.id, userId, testActor);
       assert.equal(await groups.administers(userId), false);
     });
 
@@ -240,38 +264,38 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       // **The mutant this exists to kill**: drop the `is_admin` filter and every test that only
       // ever adds people to Administrators still passes, because they are in nothing else. Then
       // belonging to any group at all administers the installation.
-      const oncall = await groups.create({ name: 'On call' });
-      const relief = await groups.create({ name: 'Relief' });
+      const oncall = await groups.create({ name: 'On call' }, testActor);
+      const relief = await groups.create({ name: 'Relief' }, testActor);
       const users = await builtin('Users');
-      await groups.addMember(oncall.id, userId);
-      await groups.addMember(relief.id, userId);
-      await groups.addMember(users.id, userId);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.addMember(relief.id, userId, testActor);
+      await groups.addMember(users.id, userId, testActor);
       assert.equal(await groups.administers(userId), false);
     });
 
     it('is true for somebody in an admin group *and* ordinary ones', async () => {
-      const oncall = await groups.create({ name: 'On call' });
+      const oncall = await groups.create({ name: 'On call' }, testActor);
       const admins = await builtin('Administrators');
-      await groups.addMember(oncall.id, userId);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(oncall.id, userId, testActor);
+      await groups.addMember(admins.id, userId, testActor);
       assert.equal(await groups.administers(userId), true);
     });
 
     it('is true through any admin group, not only the built-in one', async () => {
-      const extra = await groups.create({ name: 'Senior operators', isAdmin: true });
-      await groups.addMember(extra.id, userId);
+      const extra = await groups.create({ name: 'Senior operators', isAdmin: true }, testActor);
+      await groups.addMember(extra.id, userId, testActor);
       assert.equal(await groups.administers(userId), true);
     });
   });
 
   describe('creating groups', () => {
     it('refuses a duplicate name, whatever its case', async () => {
-      await groups.create({ name: 'On call' });
-      await assert.rejects(() => groups.create({ name: 'ON CALL' }), /already exists/);
+      await groups.create({ name: 'On call' }, testActor);
+      await assert.rejects(() => groups.create({ name: 'ON CALL' }, testActor), /already exists/);
     });
 
     it('refuses an empty name', async () => {
-      await assert.rejects(() => groups.create({ name: '   ' }), /between 1 and 100/);
+      await assert.rejects(() => groups.create({ name: '   ' }, testActor), /between 1 and 100/);
     });
   });
 
@@ -279,11 +303,14 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
     it('put every account that already existed into a group', async () => {
       // An upgrade must not leave anybody belonging to nothing — the migration matches them by
       // the role A-01 already gave them.
-      const admin = await accounts.create({
-        login: 'existing-admin',
-        password: 'correct-horse-battery',
-        role: 'admin',
-      });
+      const admin = await accounts.create(
+        {
+          login: 'existing-admin',
+          password: 'correct-horse-battery',
+          role: 'admin',
+        },
+        testActor,
+      );
       // Re-run the migration's own statement against the accounts created since.
       await db.query(
         `INSERT INTO user_group_member (group_id, user_id, is_primary)

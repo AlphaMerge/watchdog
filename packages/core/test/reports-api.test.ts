@@ -77,9 +77,9 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     scratch = await createScratchDatabase('reportsapi');
     db = scratch.db;
     const harness = await buildHarness(db);
-    const accounts = new AccountService({ db, logger: silent });
+    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
-    const groups = new GroupService({ db, logger: silent });
+    const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const history = new HistoryService({ db, logger: silent });
     const reportRepository = new ReportRepository();
@@ -156,8 +156,8 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
         groups,
         access,
-        tokens: new TokenService({ db, logger: silent }),
-        totp: new TotpService({ db, logger: silent }),
+        tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+        totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
     });
@@ -167,7 +167,10 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     // Both `readwrite`: an administrator short-circuits every grant and would make the access
     // half of this file assert nothing.
     for (const login of ['author', 'reader', 'temp', 'temp2', 'temp3']) {
-      await accounts.create({ login, password: 'correct-horse-battery', role: 'readwrite' });
+      await accounts.create(
+        { login, password: 'correct-horse-battery', role: 'readwrite' },
+        testActor,
+      );
     }
     const authorGroup = await db.query<{ id: string }>(
       `INSERT INTO user_group (name) VALUES ('authors') RETURNING id`,
@@ -258,28 +261,35 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     // who may make a report borrow somebody else's eyes is a question about the role, so it needs
     // one of each — and a read-scoped token held by the administrator, so the account's own role
     // cannot be what refuses it.
-    const bossAccount = await accounts.create({
-      login: 'boss',
-      password: 'correct-horse-battery',
-      role: 'admin',
-    });
+    const bossAccount = await accounts.create(
+      {
+        login: 'boss',
+        password: 'correct-horse-battery',
+        role: 'admin',
+      },
+      testActor,
+    );
     const administrators = (await groups.list()).find((group) => group.isAdmin);
     assert.ok(administrators, 'the builtin administrators group');
-    await groups.addMember(administrators.id, bossAccount.id);
-    await accounts.create({
-      login: 'onlooker',
-      password: 'correct-horse-battery',
-      role: 'readonly',
-    });
+    await groups.addMember(administrators.id, bossAccount.id, testActor);
+    await accounts.create(
+      {
+        login: 'onlooker',
+        password: 'correct-horse-battery',
+        role: 'readonly',
+      },
+      testActor,
+    );
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
        SELECT $1, id, true FROM user_account WHERE login = 'onlooker'`,
       [readerGroupId],
     );
     bossReadToken = (
-      await new TokenService({ db, logger: silent }).issue(
+      await new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }).issue(
         { userId: bossAccount.id, role: 'admin' },
         { name: 'reports-read', scope: 'read' },
+        testActor,
       )
     ).secret;
 

@@ -76,8 +76,8 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
 
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
-    accounts = new AccountService({ db, logger: silentLogger });
-    groups = new GroupService({ db, logger: silentLogger });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -107,21 +107,24 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     });
     sensorId = sensor.id;
 
-    const alpha = await groups.create({ name: 'Alpha' });
-    const beta = await groups.create({ name: 'Beta' });
-    const gamma = await groups.create({ name: 'Gamma' });
+    const alpha = await groups.create({ name: 'Alpha' }, testActor);
+    const beta = await groups.create({ name: 'Beta' }, testActor);
+    const gamma = await groups.create({ name: 'Gamma' }, testActor);
     alphaId = alpha.id;
     betaId = beta.id;
     gammaId = gamma.id;
 
-    const account = await accounts.create({
-      login: 'ops',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-    });
+    const account = await accounts.create(
+      {
+        login: 'ops',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
     userId = account.id;
-    await groups.addMember(alphaId, userId);
-    await groups.addMember(betaId, userId);
+    await groups.addMember(alphaId, userId, testActor);
+    await groups.addMember(betaId, userId, testActor);
   });
 
   const rightAt = async (objectId: number): Promise<AccessRight> =>
@@ -271,16 +274,19 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       await access.grant(deviceId, alphaId, 'full', actorNamed('test'));
       assert.equal(await rightAt(deviceId), 'full');
 
-      await groups.removeMember(alphaId, userId);
+      await groups.removeMember(alphaId, userId, testActor);
       assert.equal(await rightAt(deviceId), 'none', 'leaving the group takes the right with it');
     });
 
     it('gives nothing to an account in no groups at all', async () => {
-      const stranger = await accounts.create({
-        login: 'stranger',
-        password: 'correct-horse-battery',
-        role: 'readwrite',
-      });
+      const stranger = await accounts.create(
+        {
+          login: 'stranger',
+          password: 'correct-horse-battery',
+          role: 'readwrite',
+        },
+        testActor,
+      );
       await access.grant(probeId, alphaId, 'full', actorNamed('test'));
       assert.equal((await access.resolve(stranger.id, sensorId)).right, 'none');
     });
@@ -293,7 +299,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       // how an installation locks itself out by deleting it.
       const admins = (await groups.list()).find((g) => g.isAdmin);
       assert.ok(admins);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(admins.id, userId, testActor);
 
       const resolved = await access.resolve(userId, sensorId);
       assert.equal(resolved.right, 'full');
@@ -303,7 +309,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('are not overridden by an explicit none', async () => {
       const admins = (await groups.list()).find((g) => g.isAdmin);
       assert.ok(admins);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(admins.id, userId, testActor);
       await access.grant(sensorId, alphaId, 'none', actorNamed('test'));
       assert.equal((await access.resolve(userId, sensorId)).right, 'full');
     });
@@ -395,7 +401,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('gives an administrator full on everything, in bulk too', async () => {
       const admins = (await groups.list()).find((g) => g.isAdmin);
       assert.ok(admins);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(admins.id, userId, testActor);
       const many = await access.resolveMany(userId, [probeId, sensorId]);
       assert.equal(many.get(probeId), 'full');
       assert.equal(many.get(sensorId), 'full');
@@ -587,7 +593,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('sees everything as an administrator, and nothing through a none-scoped token', async () => {
       const admins = (await groups.list()).find((g) => g.isAdmin);
       assert.ok(admins);
-      await groups.addMember(admins.id, userId);
+      await groups.addMember(admins.id, userId, testActor);
 
       const everything = await access.visibilityFor({ userId, role: 'admin' });
       assert.equal(everything.everything, true);
@@ -634,7 +640,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       assert.ok((await epoch()) > before, 'a grant did not move it');
       before = await epoch();
 
-      await groups.addMember(gammaId, userId);
+      await groups.addMember(gammaId, userId, testActor);
       assert.ok((await epoch()) > before, 'joining a group did not move it');
       before = await epoch();
 

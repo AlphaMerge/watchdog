@@ -19,7 +19,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent } from './support/tree.js';
+import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -47,7 +47,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     scratch = await createScratchDatabase('authapi');
     db = scratch.db;
     const harness = await buildHarness(db);
-    accounts = new AccountService({ db, logger: silent });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
     const throttle = new LoginThrottle({
       db,
@@ -80,10 +80,10 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           accounts,
           sessions,
           throttle,
-          groups: new GroupService({ db, logger: silent }),
+          groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
-          tokens: new TokenService({ db, logger: silent }),
-          totp: new TotpService({ db, logger: silent }),
+          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           required,
         },
       });
@@ -110,7 +110,10 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     await db.query('DELETE FROM user_group WHERE NOT is_builtin');
     await db.query('UPDATE user_group SET requires_mfa = false');
     await db.query('DELETE FROM user_account');
-    await accounts.create({ login: 'ops', password: 'correct-horse-battery', role: 'readwrite' });
+    await accounts.create(
+      { login: 'ops', password: 'correct-horse-battery', role: 'readwrite' },
+      testActor,
+    );
   });
 
   const login = async (
@@ -192,7 +195,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
 
     it('refuses a disabled account without saying that is why', async () => {
       const account = await accounts.byLogin('ops');
-      await accounts.update(account?.id ?? 0, { disabled: true });
+      await accounts.update(account?.id ?? 0, { disabled: true }, testActor);
       const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
       assert.equal(response.statusCode, 401);
       assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_REJECTED');
@@ -406,12 +409,15 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       // Nothing on the core refuses a request because `must_change_password` is set. If the
       // client does not act on it, the generated password stays live for the life of the
       // installation — so this route is the only place that flag is ever heard.
-      await accounts.create({
-        login: 'fresh',
-        password: 'generated-for-them',
-        role: 'readwrite',
-        mustChangePassword: true,
-      });
+      await accounts.create(
+        {
+          login: 'fresh',
+          password: 'generated-for-them',
+          role: 'readwrite',
+          mustChangePassword: true,
+        },
+        testActor,
+      );
       const session = await login(guarded, { login: 'fresh', password: 'generated-for-them' });
       const response = await guarded.inject({
         method: 'GET',
@@ -486,11 +492,10 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     const demandMfa = async (): Promise<number> => {
       const account = await accounts.byLogin('ops');
       const id = account?.id ?? 0;
-      const secure = await new GroupService({ db, logger: silent }).create({
-        name: 'Change managers',
-      });
+      const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
+      const secure = await groups.create({ name: 'Change managers' }, testActor);
       await db.query(`UPDATE user_group SET requires_mfa = true WHERE id = $1`, [secure.id]);
-      await new GroupService({ db, logger: silent }).addMember(secure.id, id);
+      await groups.addMember(secure.id, id, testActor);
       return id;
     };
 
@@ -511,9 +516,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
 
     it('says the account IS enrolled, which is what tells a client to ask for a code', async () => {
       const id = await demandMfa();
-      const totp = new TotpService({ db, logger: silent });
+      const totp = new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const { secret } = await totp.beginEnrolment(id, 'ops');
-      await totp.confirmEnrolment(id, codeFor(secret));
+      await totp.confirmEnrolment(id, codeFor(secret), testActor);
 
       const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
 
@@ -536,9 +541,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       // already seen — correctly, because that is replay protection. Generating another code in
       // the same window would be testing the replay guard by accident.
       const id = await demandMfa();
-      const totp = new TotpService({ db, logger: silent });
+      const totp = new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const { secret } = await totp.beginEnrolment(id, 'ops');
-      const { recoveryCodes } = await totp.confirmEnrolment(id, codeFor(secret));
+      const { recoveryCodes } = await totp.confirmEnrolment(id, codeFor(secret), testActor);
 
       const response = await login(app, {
         login: 'ops',

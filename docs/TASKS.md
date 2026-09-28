@@ -12410,7 +12410,7 @@ because each is a decision rather than a defect:
       declares their routes as a known gap under `A-18`, in each route's own source beside its
       `changes` flag, and `A-18` removes the declarations.
 
-- [ ] **A-18 — Identity changes leave no audit entry** · M · A-17 · Found 2026-09-28 while drafting
+- [x] **A-18 — Identity changes leave no audit entry** · M · A-17 · Found 2026-09-28 while drafting
       `A-17`, and built on it: its sweep and its `AuditSink` pattern are what this uses. Nothing
       durable records who changed who may do what. No audit sink is called by any of these, in the
       service or in its route:
@@ -12440,6 +12440,67 @@ because each is a decision rather than a defect:
       next to administrator-group membership added and removed. Plant a password, a token, a TOTP
       secret and a recovery code, then assert that no audit row contains any of them in any
       encoding, as `A-10` does for credentials.
+
+      **Landed.** The four services take a required `audit` sink, and every method that changes
+      identity takes the `Actor` doing it. Each writes its entry in its own transaction, through
+      `identityAuditSinks` — the record and nothing else, for a grant's reason: a membership's own
+      statement already bumps the visibility epoch (`A-12`), and no probe scans anything an identity
+      change touches. Three new categories, `account`, `group` and `token`, have chips in the Logs
+      view to match. None of these entries names an object, so they appear only in the
+      installation-wide log, which is for administrators.
+
+      - **Accounts:** `account.created`, `.updated` and `.deleted` carry what an administrator sets
+        (login, name, email, **role**, disabled, may-acknowledge, must-change-password) before and
+        after. The row is locked before it is read, so `before` is the value this change replaced.
+        `account.passwordChanged` records the account and whether it was an administrator's reset,
+        and nothing about the password. An update that changed nothing writes nothing.
+      - **The first administrator** is created at start-up with its Administrators membership in
+        one transaction, and both are recorded, as `system:first-administrator`.
+      - **Groups:** `group.created`, `.updated` and `.deleted`, with `isAdmin` in the diff, because
+        turning it on promotes every member at once. A deleted group's entry names its members,
+        since the cascade removes the rows that said who they were.
+      - **Membership:** `group.memberAdded` and `.memberRemoved` carry `administers`, so the
+        largest escalation this system has reads as one in the entry itself. `group.primarySet`
+        records a primary group that moves, including the repairs that follow a removal or a group
+        deletion. Adding a member who is already there writes nothing.
+      - **Tokens:** `token.issued` and `.revoked` carry the prefix, name, scope and owner, never
+        the token. `revoked_by` now comes from the actor, as `granted_by` does. `revokeAllFor`
+        writes one entry per token, and a revoke that found nothing writes nothing.
+      - **TOTP:** `account.mfaEnabled` and `account.recoveryCodesRegenerated` carry a count;
+        `account.mfaDisabled` is written only when a *confirmed* factor went. Starting an
+        enrolment stores a secret that does nothing until it is confirmed, so its route carries
+        `notAudited` instead, and confirming it is the audited act.
+
+      The twelve `auditGap('A-18')` declarations are gone, and the sweep calls every one of those
+      routes. The password, TOTP and token routes are called in the session of an account made for
+      the purpose, so no fixture changes the sweeper's own session under the rest of the run. The
+      sweep also collects every password, token, TOTP secret and recovery code those routes handled,
+      and finds none of them in any row as text, base64, hex or a byte array.
+
+      **Tests.** `identity-audit.test.ts` (new, 19 tests) covers:
+      - a role change, asserted before and after as a diff holding only what moved, with who made
+        it, beside a no-op update that writes nothing, and a role change `A-04`'s trigger refuses
+        that writes nothing either;
+      - joining and leaving Administrators, with `administers`;
+      - a member added twice, and primary groups that move, including the repair;
+      - a group's admin flag, and a deleted group's members;
+      - a token issued by someone other than its owner, with a revoke that finds nothing;
+      - MFA turned on, its codes regenerated, and turned off twice;
+      - the first administrator, recorded as the system.
+
+      Seven changes are each made to fail after their entry was written: an account created,
+      updated and re-passworded, a member added, a group deleted, a token issued, and MFA confirmed.
+      Each leaves neither the entry nor the change. The last test plants every password, token, TOTP
+      secret, recovery code (displayed and normalised) and stored hash the file made, and finds none
+      of them in any row in five encodings.
+
+      Core 2829/2829, `audit-sweep` 6/6, and the Logs view's vitest 7/7. **Mutation 5/5**, each
+      killed by the test that guards it:
+      - a role change that records nothing;
+      - a membership recorded outside its transaction;
+      - `administers` hard-coded false;
+      - a token entry carrying the token where its prefix belongs;
+      - leaving a group that records nothing, which the sweep also catches, by route.
 
 - [ ] **A-20 — Probe trust and rediscovery rules change without an audit entry** · M · A-17 ·
       Found by `A-17`'s sweep, which declares these routes against this ticket. `ProbeRegistry`

@@ -119,9 +119,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     db = scratch.db;
     harness = await buildHarness(db, { states: true });
 
-    const accounts = new AccountService({ db, logger: silent });
+    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
-    groups = new GroupService({ db, logger: silent });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
     stream = new StateBroadcaster({ logger: silent });
 
     const discovery = new DiscoveryService({
@@ -227,8 +227,8 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
         groups,
         access,
-        tokens: new TokenService({ db, logger: silent }),
-        totp: new TotpService({ db, logger: silent }),
+        tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+        totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
     });
@@ -355,7 +355,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     });
 
     // ── the account, and exactly one branch granted to it ────────────────────────────────────
-    teamId = (await groups.create({ name: 'Customer A team' })).id;
+    teamId = (await groups.create({ name: 'Customer A team' }, testActor)).id;
     for (const [login, role] of [
       ['branch', 'readonly'],
       // The same grants as `branch`, for the tests after the sweep: the limit is per account,
@@ -364,13 +364,16 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       ['operator', 'readwrite'],
       ['admin', 'admin'],
     ] as const) {
-      const account = await accounts.create({ login, password: 'correct-horse-battery', role });
+      const account = await accounts.create(
+        { login, password: 'correct-horse-battery', role },
+        testActor,
+      );
       if (role === 'admin') {
         const admins = (await groups.list()).find((g) => g.isAdmin);
         assert.ok(admins);
-        await groups.addMember(admins.id, account.id);
+        await groups.addMember(admins.id, account.id, testActor);
       } else {
-        await groups.addMember(teamId, account.id);
+        await groups.addMember(teamId, account.id, testActor);
       }
       const response = await app.inject({
         method: 'POST',

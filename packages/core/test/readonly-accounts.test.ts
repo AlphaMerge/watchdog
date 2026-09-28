@@ -53,8 +53,8 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
     await db.query('DELETE FROM user_account');
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
 
-    accounts = new AccountService({ db, logger: silentLogger });
-    groups = new GroupService({ db, logger: silentLogger });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
+    groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silentLogger });
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
 
     const probe = await harness.service.create(testActor, {
@@ -69,11 +69,11 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       host: '127.0.0.1',
     });
     deviceId = device.id;
-    teamId = (await groups.create({ name: 'Team' })).id;
+    teamId = (await groups.create({ name: 'Team' }, testActor)).id;
   });
 
   const makeAccount = async (role: AccountRole, login = 'someone') =>
-    accounts.create({ login, password: 'correct-horse-battery', role });
+    accounts.create({ login, password: 'correct-horse-battery', role }, testActor);
 
   const adminGroup = async () => {
     const found = (await groups.list()).find((g) => g.isAdmin);
@@ -86,7 +86,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // The whole ticket in one test. Somebody made this account read-only on purpose, and a
       // group membership is not a way to undo that.
       const account = await makeAccount('readonly');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       await access.grant(deviceId, teamId, 'full', actorNamed('test'));
 
       assert.equal(
@@ -102,7 +102,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
     it('says the cap is why, rather than leaving it inexplicable', async () => {
       // "You have full on this device and may not edit it" is incomprehensible without this.
       const account = await makeAccount('readonly');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       await access.grant(deviceId, teamId, 'full', actorNamed('test'));
 
       await assert.rejects(
@@ -118,7 +118,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
 
     it('does not cap a read-write account', async () => {
       const account = await makeAccount('readwrite');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       await access.grant(deviceId, teamId, 'full', actorNamed('test'));
       const resolved = await access.resolveFor({ userId: account.id, role: 'readwrite' }, deviceId);
       assert.equal(resolved.right, 'full');
@@ -128,7 +128,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
     it('never *raises* a right — the ceiling only lowers', async () => {
       // A read-write account with no grant has nothing, and the ceiling must not invent one.
       const account = await makeAccount('readwrite');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       const resolved = await access.resolveFor({ userId: account.id, role: 'readwrite' }, deviceId);
       assert.equal(resolved.right, 'none');
     });
@@ -155,7 +155,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       const account = await makeAccount('readonly');
       const admins = await adminGroup();
       await assert.rejects(
-        () => groups.addMember(admins.id, account.id),
+        () => groups.addMember(admins.id, account.id, testActor),
         /read-only and cannot join a group that administers/,
       );
     });
@@ -166,10 +166,10 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // things, and picking one would be guessing at intent where guessing is worst.
       const account = await makeAccount('readwrite');
       const admins = await adminGroup();
-      await groups.addMember(admins.id, account.id);
+      await groups.addMember(admins.id, account.id, testActor);
 
       await assert.rejects(
-        () => accounts.update(account.id, { role: 'readonly' }),
+        () => accounts.update(account.id, { role: 'readonly' }, testActor),
         (error: unknown) => {
           const app = error as { code: string };
           assert.equal(app.code, 'ACCOUNT_READONLY_ADMIN');
@@ -182,22 +182,22 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
     it('allows it once the account has left the admin group', async () => {
       const account = await makeAccount('readwrite');
       const admins = await adminGroup();
-      await groups.addMember(admins.id, account.id);
-      await groups.removeMember(admins.id, account.id);
-      const updated = await accounts.update(account.id, { role: 'readonly' });
+      await groups.addMember(admins.id, account.id, testActor);
+      await groups.removeMember(admins.id, account.id, testActor);
+      const updated = await accounts.update(account.id, { role: 'readonly' }, testActor);
       assert.equal(updated.role, 'readonly');
     });
 
     it('lets a read-only account join an ordinary group', async () => {
       const account = await makeAccount('readonly');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       assert.equal((await groups.membershipsOf(account.id)).length, 1);
     });
 
     it('refuses a group being made administrative under a read-only member', async () => {
       // The third route: leave the account and the membership alone, and change the *group*.
       const account = await makeAccount('readonly');
-      await groups.addMember(teamId, account.id);
+      await groups.addMember(teamId, account.id, testActor);
       await assert.rejects(
         () => db.query(`UPDATE user_group SET is_admin = true WHERE id = $1`, [teamId]),
         /read-only|check/i,
@@ -216,22 +216,22 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // 3am; "silence this, I am dealing with it" is a note on an alarm, not a change to the
       // monitored estate.
       const account = await makeAccount('readonly');
-      const updated = await accounts.update(account.id, { mayAcknowledge: true });
+      const updated = await accounts.update(account.id, { mayAcknowledge: true }, testActor);
       assert.equal(updated.mayAcknowledge, true);
       assert.equal((await accounts.get(account.id))?.mayAcknowledge, true);
     });
 
     it('survives an unrelated update', async () => {
       const account = await makeAccount('readonly');
-      await accounts.update(account.id, { mayAcknowledge: true });
-      const updated = await accounts.update(account.id, { displayName: 'Night shift' });
+      await accounts.update(account.id, { mayAcknowledge: true }, testActor);
+      const updated = await accounts.update(account.id, { displayName: 'Night shift' }, testActor);
       assert.equal(updated.mayAcknowledge, true, 'a COALESCE that dropped this would be silent');
     });
 
     it('can be taken away again', async () => {
       const account = await makeAccount('readonly');
-      await accounts.update(account.id, { mayAcknowledge: true });
-      const updated = await accounts.update(account.id, { mayAcknowledge: false });
+      await accounts.update(account.id, { mayAcknowledge: true }, testActor);
+      const updated = await accounts.update(account.id, { mayAcknowledge: false }, testActor);
       assert.equal(updated.mayAcknowledge, false);
     });
   });

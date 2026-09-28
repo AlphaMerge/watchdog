@@ -103,6 +103,18 @@ export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging];
 }
 
+/**
+ * Changing an account, a user group, a membership, a password, a second factor or an API token
+ * (`A-18`).
+ *
+ * **The record and nothing else**, for a grant's reason: who may see what is resolved when they
+ * ask, and a membership's own statement bumps the visibility epoch that tells every cached answer
+ * it is stale (`A-12`, migration 052). No probe scans anything an identity change touches.
+ */
+export function identityAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
 /** Editing the trigger library, which changes who is notified and not what is scanned. */
 export function triggerAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging, all.triggerSync];

@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import * as OTPAuth from 'otpauth';
 import type { Logger } from '@ms/shared';
-import type { Database } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
+import type { Actor, AuditSink } from '../objects/audit.js';
 import { AuthError } from './errors.js';
 import { hashPassword, verifyPassword } from './passwords.js';
 
@@ -46,17 +47,25 @@ export interface TotpStatus {
 
 export interface TotpServiceOptions {
   db: Database;
+  /**
+   * Where a second factor being turned on or off, and its recovery codes being replaced, is
+   * recorded (`A-18`). Required: turning MFA off is exactly what somebody with a stolen password
+   * wants to do next. The entries carry counts, never the secret and never a code.
+   */
+  audit: AuditSink;
   logger: Logger;
   now?: () => Date;
 }
 
 export class TotpService {
   readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   readonly #now: () => Date;
 
   constructor(options: TotpServiceOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'totp' });
     this.#now = options.now ?? ((): Date => new Date());
   }
@@ -108,8 +117,13 @@ export class TotpService {
    * Confirms enrolment with a code, and issues recovery codes.
    *
    * The recovery codes are returned once and never again, for the same reason an API token is.
+   * The audit entry counts them (`A-18`).
    */
-  async confirmEnrolment(userId: number, code: string): Promise<{ recoveryCodes: string[] }> {
+  async confirmEnrolment(
+    userId: number,
+    code: string,
+    actor: Actor,
+  ): Promise<{ recoveryCodes: string[] }> {
     const row = await this.#row(userId);
     if (row === null)
       throw new AuthError('MFA_NOT_ENROLLED', 'this account has not started enrolment');
@@ -139,6 +153,7 @@ export class TotpService {
           await hashPassword(normaliseRecoveryCode(code)),
         ]);
       }
+      await this.#record(q, actor, userId, 'account.mfaEnabled', codes.length);
     });
 
     this.#logger.info({ userId }, 'totp enrolment confirmed');
@@ -197,17 +212,28 @@ export class TotpService {
     return false;
   }
 
-  /** Turns MFA off, and takes the recovery codes with it. */
-  async disable(userId: number): Promise<void> {
+  /**
+   * Turns MFA off, and takes the recovery codes with it.
+   *
+   * Audited when a *confirmed* factor went (`A-18`). Discarding an enrolment nobody finished
+   * changes how nobody signs in, so it writes nothing.
+   */
+  async disable(userId: number, actor: Actor): Promise<void> {
     await this.#db.tx(async (q) => {
       await q.query(`DELETE FROM user_recovery_code WHERE user_id = $1`, [userId]);
-      await q.query(`DELETE FROM user_totp WHERE user_id = $1`, [userId]);
+      const removed = await q.query<{ confirmed: boolean }>(
+        `DELETE FROM user_totp WHERE user_id = $1 RETURNING confirmed_at IS NOT NULL AS confirmed`,
+        [userId],
+      );
+      if (removed[0]?.confirmed === true) {
+        await this.#record(q, actor, userId, 'account.mfaDisabled', 0);
+      }
     });
     this.#logger.warn({ userId }, 'totp disabled');
   }
 
-  /** Issues a fresh set of recovery codes, invalidating the old ones. */
-  async regenerateRecoveryCodes(userId: number): Promise<string[]> {
+  /** Issues a fresh set of recovery codes, invalidating the old ones. Audited by count (`A-18`). */
+  async regenerateRecoveryCodes(userId: number, actor: Actor): Promise<string[]> {
     const row = await this.#row(userId);
     if (row === null || row.confirmed_at == null) {
       throw new AuthError(
@@ -224,8 +250,37 @@ export class TotpService {
           await hashPassword(normaliseRecoveryCode(code)),
         ]);
       }
+      await this.#record(q, actor, userId, 'account.recoveryCodesRegenerated', codes.length);
     });
     return codes;
+  }
+
+  /**
+   * The entry for a change to this account's second factor, in the change's own transaction.
+   *
+   * The login is read here rather than passed in, so the entry names the account as it is now and
+   * no caller can hand it a different one. Never the secret, never a code: `recoveryCodes` is a
+   * count.
+   */
+  async #record(
+    q: Queryable,
+    actor: Actor,
+    userId: number,
+    action: 'account.mfaEnabled' | 'account.mfaDisabled' | 'account.recoveryCodesRegenerated',
+    recoveryCodes: number,
+  ): Promise<void> {
+    const rows = await q.query<{ login: string }>(`SELECT login FROM user_account WHERE id = $1`, [
+      userId,
+    ]);
+    const login = rows[0]?.login ?? '';
+    const at = this.#now();
+    const base = { objectId: null, accountId: userId, login } as const;
+    await this.#audit.record(
+      q,
+      actor,
+      [action === 'account.mfaDisabled' ? { ...base, action } : { ...base, action, recoveryCodes }],
+      at,
+    );
   }
 
   async status(userId: number): Promise<TotpStatus> {

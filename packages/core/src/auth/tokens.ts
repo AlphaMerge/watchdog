@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import type { Logger } from '@ms/shared';
-import type { Database } from '../db/pool.js';
-import { cappedBy, type AccessRight } from './access.js';
+import type { Database, Queryable } from '../db/pool.js';
+import type { Actor, AuditSink } from '../objects/audit.js';
+import { cappedBy, grantedByLabel, type AccessRight } from './access.js';
 import type { AccountRole } from './accounts.js';
 import { AuthError } from './errors.js';
 import { sessionIdFor } from './passwords.js';
@@ -51,6 +52,12 @@ export interface TokenPrincipal {
 
 export interface TokenServiceOptions {
   db: Database;
+  /**
+   * Where issuing and revoking are recorded, in the change's own transaction (`A-18`). Required:
+   * a token is a credential that outlives the session that made it, and one issued for somebody
+   * else's account is a way into that account.
+   */
+  audit: AuditSink;
   logger: Logger;
   now?: () => Date;
   /** How stale `last_used_at` may be before a use writes it. */
@@ -61,12 +68,14 @@ const DEFAULT_LAST_USED_MS = 60_000;
 
 export class TokenService {
   readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   readonly #now: () => Date;
   readonly #lastUsedMs: number;
 
   constructor(options: TokenServiceOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'api-tokens' });
     this.#now = options.now ?? ((): Date => new Date());
     this.#lastUsedMs = options.lastUsedResolutionMs ?? DEFAULT_LAST_USED_MS;
@@ -80,10 +89,14 @@ export class TokenService {
    * read-only, and leave a token in somebody's script that *looks* like it still writes — the
    * list would say `full` and the behaviour would be `read`. Capping only at creation would let
    * a later demotion be escaped entirely. Both, because they answer different questions.
+   *
+   * **Audited with the prefix, never the token** (`A-18`), in the same transaction: the entry names
+   * the owner, which need not be the actor, and the scope it was capped to.
    */
   async issue(
     owner: { userId: number; role: AccountRole },
     request: { name: string; scope?: AccessRight; expiresAt?: Date },
+    actor: Actor,
   ): Promise<{ token: ApiToken; secret: string }> {
     const name = request.name.trim();
     if (name === '' || name.length > 100) {
@@ -98,16 +111,41 @@ export class TokenService {
     const prefix = secret.slice(0, PREFIX_LENGTH);
 
     try {
-      const rows = await this.#db.query<TokenRow>(
-        `INSERT INTO api_token (user_id, name, token_hash, prefix, scope, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING ${COLUMNS}`,
-        [owner.userId, name, sessionIdFor(secret), prefix, scope, request.expiresAt ?? null],
-      );
-      const row = rows[0];
-      if (row === undefined) throw new AuthError('TOKEN_INVALID', 'the token was not created');
+      const token = await this.#db.tx(async (q) => {
+        const rows = await q.query<TokenRow & { login: string }>(
+          `WITH issued AS (
+             INSERT INTO api_token (user_id, name, token_hash, prefix, scope, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING ${COLUMNS}
+           )
+           SELECT issued.*, a.login FROM issued JOIN user_account a ON a.id = issued.user_id`,
+          [owner.userId, name, sessionIdFor(secret), prefix, scope, request.expiresAt ?? null],
+        );
+        const row = rows[0];
+        if (row === undefined) throw new AuthError('TOKEN_INVALID', 'the token was not created');
+        const issued = read(row);
+        await this.#audit.record(
+          q,
+          actor,
+          [
+            {
+              action: 'token.issued',
+              objectId: null,
+              tokenId: issued.id,
+              accountId: issued.userId,
+              login: row.login,
+              name: issued.name,
+              prefix: issued.prefix,
+              scope: issued.scope,
+              expiresAt: row.expires_at,
+            },
+          ],
+          this.#now(),
+        );
+        return issued;
+      });
       this.#logger.info({ userId: owner.userId, name, scope }, 'api token issued');
-      return { token: read(row), secret };
+      return { token, secret };
     } catch (error: unknown) {
       if (isUniqueViolation(error)) {
         throw new AuthError('TOKEN_EXISTS', `this account already has a token named ${name}`);
@@ -185,25 +223,52 @@ export class TokenService {
    *
    * Scoped to its owner by the caller passing `userId`: without that, a token id is a guessable
    * integer and revoking somebody else's would be one request away.
+   *
+   * `revoked_by` is the actor's login, as a grant's `granted_by` is. A revoke that found no live
+   * token changes nothing and writes no entry (`A-18`).
    */
-  async revoke(userId: number, tokenId: number, revokedBy: string): Promise<boolean> {
-    const rows = await this.#db.query<{ id: string }>(
-      `UPDATE api_token SET revoked_at = $3, revoked_by = $4
-       WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
-       RETURNING id::text AS id`,
-      [tokenId, userId, this.#now(), revokedBy.slice(0, 64)],
+  async revoke(userId: number, tokenId: number, actor: Actor): Promise<boolean> {
+    const revoked = await this.#db.tx(async (q) =>
+      this.#revoke(q, `t.id = $1 AND t.user_id = $2`, [tokenId, userId], actor),
     );
-    if (rows.length > 0) this.#logger.info({ tokenId, userId, revokedBy }, 'api token revoked');
-    return rows.length > 0;
+    if (revoked > 0) this.#logger.info({ tokenId, userId, actor }, 'api token revoked');
+    return revoked > 0;
   }
 
-  /** Revokes every token an account holds — what a compromised account needs. */
-  async revokeAllFor(userId: number, revokedBy: string): Promise<number> {
-    const rows = await this.#db.query<{ id: string }>(
-      `UPDATE api_token SET revoked_at = $2, revoked_by = $3
-       WHERE user_id = $1 AND revoked_at IS NULL
-       RETURNING id::text AS id`,
-      [userId, this.#now(), revokedBy.slice(0, 64)],
+  /** Revokes every token an account holds — what a compromised account needs. One entry each. */
+  async revokeAllFor(userId: number, actor: Actor): Promise<number> {
+    return this.#db.tx(async (q) => this.#revoke(q, `t.user_id = $1`, [userId], actor));
+  }
+
+  async #revoke(q: Queryable, which: string, values: unknown[], actor: Actor): Promise<number> {
+    const at = this.#now();
+    const rows = await q.query<{
+      id: string;
+      user_id: string;
+      name: string;
+      prefix: string;
+      login: string;
+    }>(
+      `UPDATE api_token t SET revoked_at = $${String(values.length + 1)},
+                              revoked_by = $${String(values.length + 2)}
+       FROM user_account a
+       WHERE ${which} AND t.revoked_at IS NULL AND a.id = t.user_id
+       RETURNING t.id::text AS id, t.user_id::text AS user_id, t.name, t.prefix, a.login`,
+      [...values, at, grantedByLabel(actor)],
+    );
+    await this.#audit.record(
+      q,
+      actor,
+      rows.map((row) => ({
+        action: 'token.revoked' as const,
+        objectId: null,
+        tokenId: Number(row.id),
+        accountId: Number(row.user_id),
+        login: row.login,
+        name: row.name,
+        prefix: row.prefix,
+      })),
+      at,
     );
     return rows.length;
   }

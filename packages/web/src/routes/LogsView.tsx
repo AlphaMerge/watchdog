@@ -52,6 +52,9 @@ const CATEGORIES = [
   'library',
   'map',
   'grant',
+  'account',
+  'group',
+  'token',
 ] as const;
 
 const STATES: readonly SensorState[] = [

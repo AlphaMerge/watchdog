@@ -491,6 +491,170 @@ export type Mutation =
       objectId: null;
       reportId: number;
       before: ReportAudit;
+    }
+  | {
+      /**
+       * An account was created, changed or removed (`A-18`).
+       *
+       * **The role is the change this exists for.** A `readonly` account made `readwrite` can now
+       * change the tree, and until `A-18` that left no record anywhere durable; `before` and
+       * `after` carry the role beside everything else an administrator can set. Never a password
+       * or its hash — those are `account.passwordChanged`, which records only that one happened.
+       *
+       * `objectId` is null: an account is not a tree object, and its entries are found by
+       * `accountId` in the summary or by filtering on the `account` category.
+       */
+      action: 'account.created';
+      objectId: null;
+      accountId: number;
+      after: AccountAudit;
+    }
+  | {
+      action: 'account.updated';
+      objectId: null;
+      accountId: number;
+      before: AccountAudit;
+      after: AccountAudit;
+    }
+  | {
+      action: 'account.deleted';
+      objectId: null;
+      accountId: number;
+      before: AccountAudit;
+    }
+  | {
+      /**
+       * A password was replaced — by its owner, or reset by an administrator (`reset`).
+       *
+       * **That it happened, and nothing about it.** Not the password, not the hash, not its
+       * length: a hash in the audit log is a hash in every backup of the audit log, and an offline
+       * guess against it needs nothing else.
+       */
+      action: 'account.passwordChanged';
+      objectId: null;
+      accountId: number;
+      login: string;
+      reset: boolean;
+    }
+  | {
+      /**
+       * A second factor was confirmed, and with it the first set of recovery codes (`A-18`).
+       *
+       * The count of codes, never a code and never the TOTP secret: either one is a way in.
+       */
+      action: 'account.mfaEnabled';
+      objectId: null;
+      accountId: number;
+      login: string;
+      recoveryCodes: number;
+    }
+  | {
+      action: 'account.mfaDisabled';
+      objectId: null;
+      accountId: number;
+      login: string;
+    }
+  | {
+      /** A fresh set of recovery codes replaced the old one. The count, never the codes. */
+      action: 'account.recoveryCodesRegenerated';
+      objectId: null;
+      accountId: number;
+      login: string;
+      recoveryCodes: number;
+    }
+  | {
+      /**
+       * A user group was created, changed or removed (`A-18`).
+       *
+       * `isAdmin` is in the diff because turning it on makes every member an administrator of the
+       * installation at once — the same escalation as adding each of them to Administrators.
+       */
+      action: 'group.created';
+      objectId: null;
+      groupId: number;
+      after: GroupAudit;
+    }
+  | {
+      action: 'group.updated';
+      objectId: null;
+      groupId: number;
+      before: GroupAudit;
+      after: GroupAudit;
+    }
+  | {
+      /** Its members are named, because the cascade takes their memberships with it. */
+      action: 'group.deleted';
+      objectId: null;
+      groupId: number;
+      before: GroupAudit;
+      members: readonly string[];
+    }
+  | {
+      /**
+       * An account joined a group (`A-18`).
+       *
+       * **Adding an account to an administrator group is the largest escalation this system has**,
+       * so `administers` says so in the entry itself: nobody reading the log afterwards should have
+       * to know which group ids confer administration. `primary` is whether the group became the
+       * account's primary one.
+       */
+      action: 'group.memberAdded';
+      objectId: null;
+      groupId: number;
+      groupName: string;
+      administers: boolean;
+      accountId: number;
+      login: string;
+      primary: boolean;
+    }
+  | {
+      action: 'group.memberRemoved';
+      objectId: null;
+      groupId: number;
+      groupName: string;
+      administers: boolean;
+      accountId: number;
+      login: string;
+      wasPrimary: boolean;
+    }
+  | {
+      /**
+       * An account's primary group moved — which group owns what it creates. `before` is null when
+       * it had none.
+       */
+      action: 'group.primarySet';
+      objectId: null;
+      accountId: number;
+      login: string;
+      before: GroupRef | null;
+      after: GroupRef;
+    }
+  | {
+      /**
+       * An API token was issued (`A-18`).
+       *
+       * **The prefix, never the token**, the rule `map.share.created` follows: the prefix is what
+       * the owner sees in their list and is not enough to authenticate with. `accountId` is the
+       * owner, which need not be the actor.
+       */
+      action: 'token.issued';
+      objectId: null;
+      tokenId: number;
+      accountId: number;
+      login: string;
+      name: string;
+      prefix: string;
+      scope: AccessRight;
+      expiresAt: Date | null;
+    }
+  | {
+      action: 'token.revoked';
+      objectId: null;
+      tokenId: number;
+      accountId: number;
+      login: string;
+      name: string;
+      prefix: string;
     };
 
 /** What a grant is on (`A-17`). */
@@ -565,6 +729,33 @@ export interface ScheduleAudit {
   readonly polarity: 'active' | 'inactive';
   readonly timezone: string | null;
   readonly periods: string;
+}
+
+/**
+ * An account as the audit log records it (`A-18`): everything an administrator can set on one,
+ * and nothing that authenticates. No password, no hash, no lock-out counters.
+ */
+export interface AccountAudit {
+  readonly login: string;
+  readonly displayName: string;
+  readonly email: string;
+  readonly role: string;
+  readonly disabled: boolean;
+  readonly mayAcknowledge: boolean;
+  readonly mustChangePassword: boolean;
+}
+
+/** A user group as the audit log records it (`A-18`). */
+export interface GroupAudit {
+  readonly name: string;
+  readonly description: string;
+  readonly isAdmin: boolean;
+}
+
+/** A group by id and by the name it had at the time, which a later rename does not rewrite. */
+export interface GroupRef {
+  readonly groupId: number;
+  readonly groupName: string;
 }
 
 export interface AuditSink {
@@ -808,5 +999,67 @@ function summarise(mutation: Mutation): Record<string, unknown> {
       };
     case 'report.updated':
       return { action: mutation.action, reportId: mutation.reportId, name: mutation.after.name };
+    case 'account.created':
+    case 'account.deleted':
+      return {
+        action: mutation.action,
+        accountId: mutation.accountId,
+        login: 'after' in mutation ? mutation.after.login : mutation.before.login,
+      };
+    case 'account.updated':
+      return {
+        action: mutation.action,
+        accountId: mutation.accountId,
+        login: mutation.after.login,
+        roleBefore: mutation.before.role,
+        roleAfter: mutation.after.role,
+      };
+    case 'account.passwordChanged':
+      return {
+        action: mutation.action,
+        accountId: mutation.accountId,
+        login: mutation.login,
+        reset: mutation.reset,
+      };
+    case 'account.mfaEnabled':
+    case 'account.mfaDisabled':
+    case 'account.recoveryCodesRegenerated':
+      return { action: mutation.action, accountId: mutation.accountId, login: mutation.login };
+    case 'group.created':
+    case 'group.deleted':
+      return {
+        action: mutation.action,
+        groupId: mutation.groupId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'group.updated':
+      return {
+        action: mutation.action,
+        groupId: mutation.groupId,
+        name: mutation.after.name,
+        isAdmin: mutation.after.isAdmin,
+      };
+    case 'group.memberAdded':
+    case 'group.memberRemoved':
+      return {
+        action: mutation.action,
+        groupId: mutation.groupId,
+        accountId: mutation.accountId,
+        administers: mutation.administers,
+      };
+    case 'group.primarySet':
+      return {
+        action: mutation.action,
+        accountId: mutation.accountId,
+        groupId: mutation.after.groupId,
+      };
+    case 'token.issued':
+    case 'token.revoked':
+      return {
+        action: mutation.action,
+        tokenId: mutation.tokenId,
+        accountId: mutation.accountId,
+        prefix: mutation.prefix,
+      };
   }
 }

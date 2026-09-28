@@ -57,9 +57,9 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     scratch = await createScratchDatabase('mapsapi');
     db = scratch.db;
     const harness = await buildHarness(db);
-    const accounts = new AccountService({ db, logger: silent });
+    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
-    const groups = new GroupService({ db, logger: silent });
+    const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const history = new HistoryService({ db, logger: silent });
 
@@ -94,8 +94,8 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
         throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
         groups,
         access,
-        tokens: new TokenService({ db, logger: silent }),
-        totp: new TotpService({ db, logger: silent }),
+        tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+        totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
     });
@@ -137,16 +137,22 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
 
     // Two accounts in two groups. Both `readwrite`, because an administrator short-circuits
     // every grant and would make the access half of this file assert nothing.
-    await accounts.create({
-      login: 'author',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-    });
-    await accounts.create({
-      login: 'reader',
-      password: 'correct-horse-battery',
-      role: 'readwrite',
-    });
+    await accounts.create(
+      {
+        login: 'author',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
+    await accounts.create(
+      {
+        login: 'reader',
+        password: 'correct-horse-battery',
+        role: 'readwrite',
+      },
+      testActor,
+    );
     const authorGroup = await db.query<{ id: string }>(
       `INSERT INTO user_group (name) VALUES ('authors') RETURNING id`,
     );
@@ -196,11 +202,14 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
 
     // **A role and a token that may look and never change** (`A-14`). The token is `author`'s,
     // so the account's own role cannot be what refuses it.
-    await accounts.create({
-      login: 'watcher',
-      password: 'correct-horse-battery',
-      role: 'readonly',
-    });
+    await accounts.create(
+      {
+        login: 'watcher',
+        password: 'correct-horse-battery',
+        role: 'readonly',
+      },
+      testActor,
+    );
     await db.query(
       `INSERT INTO user_group_member (group_id, user_id, is_primary)
        SELECT $1, id, true FROM user_account WHERE login = 'watcher'`,
@@ -210,9 +219,10 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       `SELECT id FROM user_account WHERE login = 'author'`,
     );
     authorReadToken = (
-      await new TokenService({ db, logger: silent }).issue(
+      await new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }).issue(
         { userId: Number(authorId[0]?.id), role: 'readwrite' },
         { name: 'maps-read', scope: 'read' },
+        testActor,
       )
     ).secret;
 

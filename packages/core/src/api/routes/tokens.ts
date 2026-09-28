@@ -2,8 +2,8 @@ import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { TokenService } from '../../auth/tokens.js';
-import type { RequestPrincipal } from '../authentication.js';
-import { SELF, auditGap } from '../authorization.js';
+import { actorFor, type RequestPrincipal } from '../authentication.js';
+import { SELF } from '../authorization.js';
 
 export interface TokenRoutesOptions {
   tokens: TokenService;
@@ -90,7 +90,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
   }>(
     '/auth/tokens',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Issue an API token',
@@ -143,6 +143,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
             ? {}
             : { expiresAt: new Date(request.body.expiresAt) }),
         },
+        actorFor(request),
       );
       return reply.status(201).send(issued);
     },
@@ -151,7 +152,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
   app.delete<{ Params: { id: number } }>(
     '/auth/tokens/:id',
     {
-      config: { ...SELF, ...auditGap('A-18') },
+      config: SELF,
       schema: {
         tags: ['auth'],
         summary: 'Revoke one of this account’s tokens',
@@ -169,7 +170,7 @@ export function tokenRoutes(app: FastifyInstance, options: TokenRoutesOptions): 
     },
     async (request, reply) => {
       const principal = principalOf(request);
-      const revoked = await tokens.revoke(principal.userId, request.params.id, principal.login);
+      const revoked = await tokens.revoke(principal.userId, request.params.id, actorFor(request));
       if (!revoked) {
         throw new AuthError('TOKEN_NOT_FOUND', 'no live token of yours with that id');
       }

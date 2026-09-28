@@ -1,7 +1,9 @@
 import type { Queryable } from '../db/pool.js';
 import type {
+  AccountAudit,
   Actor,
   AuditSink,
+  GroupAudit,
   LibraryAudit,
   MapAudit,
   MapBackgroundAudit,
@@ -74,6 +76,9 @@ export const AUDIT_CATEGORIES = [
   'library',
   'map',
   'grant',
+  'account',
+  'group',
+  'token',
 ] as const;
 
 /**
@@ -609,6 +614,178 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: deleted(REPORT_FIELDS, mutation.before, 'report'),
       };
 
+    case 'account.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { accountId: mutation.accountId, login: mutation.after.login },
+        diff: created(ACCOUNT_FIELDS, mutation.after, 'account'),
+      };
+
+    case 'account.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { accountId: mutation.accountId, login: mutation.after.login },
+        diff: changed(ACCOUNT_FIELDS, mutation.before, mutation.after, 'account'),
+      };
+
+    case 'account.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { accountId: mutation.accountId, login: mutation.before.login },
+        diff: deleted(ACCOUNT_FIELDS, mutation.before, 'account'),
+      };
+
+    case 'account.passwordChanged':
+      return {
+        ...base,
+        objectKind: null,
+        // That it happened, by whom and to whom. Nothing about the password: see the mutation.
+        summary: { accountId: mutation.accountId, login: mutation.login, reset: mutation.reset },
+        diff: [],
+      };
+
+    case 'account.mfaEnabled':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          accountId: mutation.accountId,
+          login: mutation.login,
+          recoveryCodes: mutation.recoveryCodes,
+        },
+        diff: [{ field: 'account.mfa', before: false, after: true }],
+      };
+
+    case 'account.mfaDisabled':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { accountId: mutation.accountId, login: mutation.login },
+        diff: [{ field: 'account.mfa', before: true, after: false }],
+      };
+
+    case 'account.recoveryCodesRegenerated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          accountId: mutation.accountId,
+          login: mutation.login,
+          recoveryCodes: mutation.recoveryCodes,
+        },
+        diff: [],
+      };
+
+    case 'group.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { groupId: mutation.groupId, name: mutation.after.name },
+        diff: created(GROUP_FIELDS, mutation.after, 'group'),
+      };
+
+    case 'group.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { groupId: mutation.groupId, name: mutation.after.name },
+        diff: changed(GROUP_FIELDS, mutation.before, mutation.after, 'group'),
+      };
+
+    case 'group.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          groupId: mutation.groupId,
+          name: mutation.before.name,
+          members: [...mutation.members],
+        },
+        diff: deleted(GROUP_FIELDS, mutation.before, 'group'),
+      };
+
+    case 'group.memberAdded':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          groupId: mutation.groupId,
+          group: mutation.groupName,
+          administers: mutation.administers,
+          accountId: mutation.accountId,
+          login: mutation.login,
+          primary: mutation.primary,
+        },
+        diff: [{ field: 'group.member', before: null, after: mutation.login }],
+      };
+
+    case 'group.memberRemoved':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          groupId: mutation.groupId,
+          group: mutation.groupName,
+          administers: mutation.administers,
+          accountId: mutation.accountId,
+          login: mutation.login,
+          wasPrimary: mutation.wasPrimary,
+        },
+        diff: [{ field: 'group.member', before: mutation.login, after: null }],
+      };
+
+    case 'group.primarySet':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          accountId: mutation.accountId,
+          login: mutation.login,
+          groupId: mutation.after.groupId,
+        },
+        diff: [
+          {
+            field: 'account.primaryGroup',
+            before: mutation.before?.groupName ?? null,
+            after: mutation.after.groupName,
+          },
+        ],
+      };
+
+    case 'token.issued':
+      return {
+        ...base,
+        objectKind: null,
+        // The prefix, never the token (`A-18`), as a share link's entry carries its prefix.
+        summary: {
+          tokenId: mutation.tokenId,
+          accountId: mutation.accountId,
+          login: mutation.login,
+          name: mutation.name,
+          prefix: mutation.prefix,
+          scope: mutation.scope,
+          expiresAt: mutation.expiresAt === null ? null : mutation.expiresAt.toISOString(),
+        },
+        diff: [],
+      };
+
+    case 'token.revoked':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          tokenId: mutation.tokenId,
+          accountId: mutation.accountId,
+          login: mutation.login,
+          name: mutation.name,
+          prefix: mutation.prefix,
+        },
+        diff: [],
+      };
+
     case 'setting.set':
       return {
         ...base,
@@ -813,6 +990,23 @@ const REPORT_FIELDS = [
   'schedule',
   'runAs',
 ] as const satisfies readonly (keyof ReportAudit)[];
+
+/** Everything an administrator sets on an account, in the order a person reads them (`A-18`). */
+const ACCOUNT_FIELDS = [
+  'login',
+  'displayName',
+  'email',
+  'role',
+  'disabled',
+  'mayAcknowledge',
+  'mustChangePassword',
+] as const satisfies readonly (keyof AccountAudit)[];
+
+const GROUP_FIELDS = [
+  'name',
+  'description',
+  'isAdmin',
+] as const satisfies readonly (keyof GroupAudit)[];
 
 /**
  * The diff of a flat entity, in the three shapes every one of them has (`A-17`).
