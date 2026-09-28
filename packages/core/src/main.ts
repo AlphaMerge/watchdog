@@ -68,7 +68,7 @@ import { DeliveryHealthReader } from './notifications/health.js';
 import { TemplateActivation } from './notifications/activation.js';
 import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
 import { CoreHealthService } from './health/core-health.js';
-import { ProbeHealthService } from './health/probe-health.js';
+import { ProbeHealthService, ProbeHealthTargets } from './health/probe-health.js';
 import { MetricsExporter } from './metrics/exporter.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
@@ -115,6 +115,7 @@ import { SessionService } from './auth/sessions.js';
 import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
 import { ClockFreeze } from './probes/clock-freeze.js';
+import { ProbeEpisodeIndex } from './probes/episodes.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
@@ -389,6 +390,16 @@ async function serve(): Promise<void> {
   // The same arrangement for delivery: the engine queues a notification and the loop that sends
   // it is built later, so the reference is filled in the moment it exists (N-07).
   const wakeDelivery = { poke: (): void => {} };
+  // A lost or frozen probe's sensors are held behind its Probe Health, per trigger (`M-22`).
+  // Which probe each Probe Health reports on is known from here on: resolved from the tree before
+  // the boot reconciliation below, and republished by every sweep. The other two sources are
+  // built much later, so they are read through the late references.
+  const probeHealthTargets = new ProbeHealthTargets();
+  const episodes = new ProbeEpisodeIndex({
+    lost: () => reachabilityRef,
+    frozen: () => clockFreezeRef,
+    alarms: () => probeHealthTargets,
+  });
   const alarms = new AlarmEngine({
     logger,
     onArmed: () => {
@@ -397,6 +408,7 @@ async function serve(): Promise<void> {
     onQueued: () => {
       wakeDelivery.poke();
     },
+    episodes,
   });
   // Live state changes for the UI (U-02). Published after the commit, from `writeStateHistory`
   // — the one function every state change in the system goes through — so ingestion, a pause,
@@ -700,6 +712,10 @@ async function serve(): Promise<void> {
     .then(async (rows) => {
       const rootId = Number(rows[0]?.id ?? 0);
       if (rootId === 0) return;
+      // Before the pass, so a probe that was lost before the restart has its alarm to hold its
+      // sensors behind: they still read Unknown/`probe`, and without it the pass would arm a
+      // trigger on Unknown once for each of them (`M-22`).
+      await probeHealthTargets.refresh(db);
       // **Armed from now, not from the sensor's `since`** (`P-181`). The population this pass
       // exists for is sensors whose outage began before the restart, so their `since` is as old
       // as the outage — and every deadline computed from it, initial and escalation and repeat,
@@ -1198,6 +1214,8 @@ async function serve(): Promise<void> {
     // the probe it reports on, and without the exclusion the outage it exists to raise would be
     // the thing that silenced it.
     coreEvaluatedTypes,
+    // And reconciled with the sensors it holds, so a trigger's view of it moves with them (`M-22`).
+    probeAlarms: (probeObjectId) => probeHealthTargets.reportingOn(probeObjectId),
   });
   reachabilityRef = reachability;
 
@@ -1320,6 +1338,7 @@ async function serve(): Promise<void> {
     dependencies: dependencyPauses,
     links: probeEndpoint,
     coreEvaluatedTypes,
+    probeAlarms: (probeObjectId) => probeHealthTargets.reportingOn(probeObjectId),
   });
   clockFreezeRef = clockFreeze;
   const clockFreezeSweep = new PeriodicSweep({
@@ -1343,6 +1362,7 @@ async function serve(): Promise<void> {
     db,
     logger,
     vouching,
+    targets: probeHealthTargets,
     sources: {
       link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
       timeRefusals: (gid) => ingestion.timeRefusals(gid),

@@ -600,6 +600,30 @@ Two further notes for whoever picks those up:
   sent again cannot be told from one measured after, and applying it would put the watermark
   back and freeze the sensor again. Kept across a disconnect, and decided only once the new
   session's offset is known, so a probe that returns still behind never shows a stale reading.
+- **A trigger on Unknown sees a probe's live Probe Health as Unknown while the probe is lost or
+  frozen; nothing else does** (`M-22`). A lost, silent or frozen probe's sensors are Unknown with
+  cause `probe`, and the one alarm for that is the probe's Probe Health, which reads Down in all
+  three cases. A carried sensor's alarm under a trigger is **held** only when that trigger
+  covers a live Probe Health reporting on the probe. "Live" means not paused and not withheld
+  (`A-29`). While it is held, nothing arms, and a standing alarm is suspended rather than
+  cancelled or recovered, so the return is no wave of Ups. A trigger that does not cover the
+  probe's Probe Health, such as one on a group below the probe, or a probe with none, notifies
+  per sensor as before, so holding never takes the last route away from any trigger. The
+  trigger on Unknown would otherwise have none: Probe Health is Down, not Unknown. So it alone
+  sees Probe Health as Unknown for the episode, raises one alarm on it, armed from the episode's
+  start, and says which probe and how many sensors. **The view is an input to the alarm
+  engine's decision and to its sweep's standing check, and to nothing else.** `sensor_state`,
+  uptime, `GET /sensors/:id/state`, the stream and the UI all read Probe Health as Down, and a
+  test holds the history and the read equal with and without such a trigger. After a core
+  restart the lost and frozen sets are empty until the grace has run out, but the carried
+  sensors still read Unknown/`probe` in the table. So the hold finds their probe from the tree,
+  and Probe Health's targets are resolved before the boot pass. Within the same grace the
+  delivery watch waits out before it marks a probe lost, Probe Health sends nothing for a probe
+  that has not connected since boot. That is a gap, not `connected` 0, so a probe that redials
+  inside the grace pages nobody. **A withheld sensor's Unknown,
+  cause `access` (`A-29`), is never held**, for three reasons. No sensor stands for it as one
+  alarm. It is bounded by what one account wrote, not by what one probe carries. And the trigger
+  over those sensors reaches the people who can fix them.
 - **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
   and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
   configuration versions. A scan is not a configuration change, and if it were, `R-04` would

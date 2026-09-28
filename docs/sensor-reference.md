@@ -1076,7 +1076,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `resultsFutureDated` | Results refused as future-dated (5 min) | results | default limits: warn above 0.5 |
 | `resultsPastDated` | Results refused as too old (5 min) | results | default limits: warn above 0.5 |
 | `clockOffset` | Clock behind the core | s | default limits: warn below -60, warn above 60 |
-| `sensorsFrozen` | Sensors frozen by the clock | sensors | default limits: warn above 0.5 |
+| `sensorsFrozen` | Sensors frozen by the clock | sensors | default limits: error above 0.5 |
 | `cpu` | CPU | % | — |
 | `memory` | Memory (resident) | MB | — |
 | `memoryAvailable` | Memory available | % | default limits: error below 10, warn below 20 |

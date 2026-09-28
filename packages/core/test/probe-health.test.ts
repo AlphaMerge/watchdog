@@ -10,6 +10,7 @@ import {
 } from '@ms/shared';
 import {
   ProbeHealthService,
+  ProbeHealthTargets,
   readingsFrom,
   type ProbeHealthSources,
 } from '../src/health/probe-health.js';
@@ -760,10 +761,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(again.state, 'warning', 'one refused result is enough');
     });
 
-    it('warns on a clock a minute out either way, and on any sensor it froze (`P-232`)', async () => {
-      // Two warnings for two cases. The offset catches a probe behind or ahead; the frozen count
+    it('warns on a clock a minute out either way, and is Down on any sensor it froze (`P-232`)', async () => {
+      // Two limits for two cases. The offset catches a probe behind or ahead; the frozen count
       // catches NTP correcting a clock that was fast, which leaves the offset near zero and the
-      // sensors frozen for as long as it was fast.
+      // sensors frozen for as long as it was fast. The frozen count is an error (`M-22`): the
+      // sensors are Unknown exactly as a lost probe's are, and a lost probe reads Down.
       let offsetMs: number | null = 0;
       let frozen = 0;
       const sweep = await sweeper((at) => ({
@@ -787,7 +789,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
 
       frozen = 1;
       const stuck = await sweep();
-      assert.equal(stuck.state, 'warning', 'one frozen sensor is enough');
+      assert.equal(stuck.state, 'down', 'one frozen sensor is enough');
       assert.match(stuck.message, /cannot accept results until its clock passes/u);
 
       frozen = 0;
@@ -797,6 +799,87 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
   });
 
   describe('the sweep', () => {
+    it('publishes which probe each sensor reports on, before its results go in (`M-22`)', async () => {
+      // The alarm engine holds a lost probe's sensors behind these, and it reacts to the results
+      // this sweep sends: published after them, the first reaction would find no probe alarm.
+      const targets = new ProbeHealthTargets();
+      let atIngest: readonly number[] = [];
+      await new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        targets,
+        sources: { link: () => connected() },
+        ingest: () => {
+          atIngest = targets.reportingOn(probeId);
+          return Promise.resolve();
+        },
+      }).sweep();
+      assert.deepEqual(
+        [...atIngest].sort((a, b) => a - b),
+        [sensorId, orphanId].sort((a, b) => a - b),
+      );
+      assert.equal(targets.reportsOn(orphanId), probeId, 'the probe it names, not the one above');
+      assert.equal(targets.reportsOn(sensorId), probeId, 'the probe above it');
+    });
+
+    it('sends nothing for a probe the core has not heard from since it started, and still knows it reports on it (`M-22`)', async () => {
+      // A gap, not a reading: `connected` 0 for a probe that redials forty seconds after a core
+      // upgrade would page every Down trigger over it once per restart.
+      const targets = new ProbeHealthTargets();
+      let awaiting = true;
+      let sent: readonly number[] = [];
+      const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        targets,
+        sources: { link: () => ({ connected: false }) },
+        delivery: { verdictFor: () => null, awaitingFirstConnect: () => awaiting },
+        ingest: (results) => {
+          sent = results.map((result) => result.sensorId);
+          return Promise.resolve();
+        },
+      });
+
+      await service.sweep();
+      assert.deepEqual(sent, [], 'nothing about the probe until the grace has run out');
+      assert.equal(targets.reportsOn(sensorId), probeId, 'the hold can still find it');
+
+      awaiting = false;
+      await service.sweep();
+      assert.deepEqual(
+        [...sent].sort((a, b) => a - b),
+        [sensorId, orphanId].sort((a, b) => a - b),
+        'and the reading it would have sent, once it has',
+      );
+    });
+
+    it('leaves out a sensor it withholds, which raises nothing and so holds nothing (`M-22`)', async () => {
+      const targets = new ProbeHealthTargets();
+      await new ProbeHealthService({
+        vouching: {
+          refusals: () => Promise.resolve(new Map([[sensorId, 'revoked']])),
+          settle: () => Promise.resolve(0),
+        },
+        db,
+        logger: silent,
+        targets,
+        sources: { link: () => connected() },
+        ingest: () => Promise.resolve(),
+      }).sweep();
+      assert.equal(targets.reportsOn(sensorId), undefined);
+      assert.deepEqual(targets.reportingOn(probeId), [orphanId]);
+    });
+
+    it('resolves them from the tree before any sweep has run, for the boot pass (`M-22`)', async () => {
+      const targets = new ProbeHealthTargets();
+      assert.deepEqual(targets.reportingOn(probeId), []);
+      await targets.refresh(db);
+      assert.equal(targets.reportsOn(sensorId), probeId);
+      assert.equal(targets.reportsOn(orphanId), probeId);
+    });
+
     it('finds the probe a sensor sits under, however deep', async () => {
       const batches: CheckResult[][] = [];
       const seen: number[] = [];

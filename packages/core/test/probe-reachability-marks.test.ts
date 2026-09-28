@@ -4,6 +4,8 @@ import { ProbeReachability } from '../src/probes/reachability.js';
 import type { Database } from '../src/db/pool.js';
 import { silentLogger } from './support/database.js';
 
+const STARTED = new Date('2026-09-29T10:00:00.000Z');
+
 /**
  * What `ProbeReachability` records, as opposed to what it decides (`P-80`).
  *
@@ -14,7 +16,9 @@ import { silentLogger } from './support/database.js';
  * that only ever exercised the happy path.
  */
 
-function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } = {}) {
+function reachabilityOver(
+  options: { txFails?: boolean; sensorIds?: number[]; probeAlarms?: readonly number[] } = {},
+) {
   // Mutable, so one instance can succeed at marking a probe lost and then fail at clearing it —
   // which is the only way to reach `#online`'s rollback at all.
   const failing = { now: options.txFails === true };
@@ -45,6 +49,8 @@ function reachabilityOver(options: { txFails?: boolean; sensorIds?: number[] } =
     // This file drives the marking with a stub database; the dependency settle is exercised
     // against a real one in `probe-offline.test.ts`.
     dependencies: { recompute: () => Promise.resolve({ moved: 0 }) },
+    probeAlarms: () => options.probeAlarms ?? [],
+    now: () => STARTED,
   });
   return { service, reevaluated, failing };
 }
@@ -116,5 +122,39 @@ describe('what reachability records', () => {
     await service.lost(9, 'link');
     assert.equal(service.stats().probesDown, 1);
     assert.equal(service.stats().probesSilent, 1);
+  });
+
+  it('says which probe holds which sensor, since when, and only while it does (`M-22`)', async () => {
+    const { service, failing } = reachabilityOver();
+    assert.equal(service.carrierOf(1), undefined);
+
+    await service.lost(7, 'link');
+    assert.equal(service.carrierOf(2), 7);
+    assert.deepEqual(service.heldBy(7), { sensorIds: [1, 2, 3], reason: 'link', since: STARTED });
+
+    failing.now = true;
+    await service.found(7);
+    assert.equal(service.carrierOf(2), 7, 'a clearing that did not land clears nothing');
+
+    failing.now = false;
+    await service.found(7);
+    assert.equal(service.carrierOf(2), undefined);
+    assert.equal(service.heldBy(7), undefined);
+
+    const rejected = reachabilityOver({ txFails: true });
+    await rejected.service.lost(7, 'link');
+    assert.equal(rejected.service.carrierOf(1), undefined, 'nor does a marking');
+  });
+
+  it('re-evaluates the probe’s own alarm with the sensors it carries, both ways (`M-22`)', async () => {
+    // So the alarm engine reconciles Probe Health in the same transaction, and a trigger on
+    // Unknown sees the episode begin and end when the sensors do.
+    const { service, reevaluated } = reachabilityOver({ probeAlarms: [70] });
+    await service.lost(7, 'link');
+    await service.found(7);
+    assert.deepEqual(reevaluated, [
+      [1, 2, 3, 70],
+      [1, 2, 3, 70],
+    ]);
   });
 });

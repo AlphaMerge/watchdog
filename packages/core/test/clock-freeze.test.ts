@@ -534,7 +534,8 @@ describe(
             .filter(([key]) => key.startsWith('unknown:initial:'))
             .reduce((sum, [, n]) => sum + n, 0),
           COUNT,
-          'not two empty answers: one Unknown per sensor, which is what `M-22` is for',
+          'not two empty answers: this engine has no episode index, so one Unknown per sensor, ' +
+            'which is what `M-22` holds behind Probe Health when it has one',
         );
 
         // The lift.
@@ -581,5 +582,49 @@ describe('a freeze whose write does not land (`P-232`)', () => {
     assert.equal(await rejected.sweep(), 0);
     assert.equal(rejected.frozenSensors().size, 0);
     assert.equal(rejected.frozenOn(9), 0);
+    assert.equal(rejected.frozenBy(9), undefined, 'nor an episode for the alarm engine (`M-22`)');
+    assert.equal(rejected.carrierOf(5), undefined);
+  });
+});
+
+describe('what a freeze tells the alarm engine (`M-22`)', () => {
+  it('says which probe froze which sensor, since when, and re-evaluates the probe’s alarm', async () => {
+    let frozen = ['5', '6'];
+    let clock = new Date('2026-09-29T10:00:00.000Z');
+    const reevaluated: number[][] = [];
+    const freeze = new ClockFreeze({
+      db: {
+        query: () => Promise.resolve(frozen.map((id) => ({ id }))),
+        tx: <T>(fn: (q: unknown) => Promise<T>) => fn({}),
+      } as unknown as ClockFreezeOptions['db'],
+      logger: silent,
+      states: {
+        reevaluate: (_q, ids) => {
+          reevaluated.push([...ids]);
+          return Promise.resolve(ids.length);
+        },
+      },
+      dependencies: { recompute: () => Promise.resolve({ moved: 0 }) },
+      links: { connectedProbeIds: () => [9], linkFor: () => link(HOUR) },
+      probeAlarms: () => [70],
+      now: () => clock,
+    });
+
+    await freeze.sweep();
+    const since = clock;
+    assert.equal(freeze.carrierOf(5), 9);
+    assert.deepEqual(freeze.frozenBy(9), { sensorIds: new Set([5, 6]), since });
+    assert.deepEqual(reevaluated, [[5, 6], [70]]);
+
+    // One more sensor later: the same freeze, from the same start.
+    clock = new Date(clock.getTime() + MINUTE);
+    frozen = ['5', '6', '7'];
+    await freeze.sweep();
+    assert.equal(freeze.frozenBy(9)?.since, since);
+
+    frozen = [];
+    await freeze.sweep();
+    assert.equal(freeze.frozenBy(9), undefined);
+    assert.equal(freeze.carrierOf(5), undefined);
   });
 });

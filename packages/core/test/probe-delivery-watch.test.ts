@@ -195,6 +195,34 @@ describe('the probe delivery sweep', () => {
     assert.deepEqual(calls, [], 'inside the 120 s grace');
   });
 
+  it('tells Probe Health a probe is not yet missing for exactly as long as it will not mark it (`M-22`)', async () => {
+    // One grace, read from one place, so Probe Health cannot page for a probe the watch has not
+    // yet called lost, nor stay quiet about one it has.
+    const clock = { uptimeMs: 0 };
+    const links = new Map<number, ProbeLink>([
+      [7, { connected: false }],
+      [8, link()],
+    ]);
+    const { watch, calls, reasons } = watchOver(links, clock);
+    for (const uptimeMs of [0, 60_000, 119_999]) {
+      clock.uptimeMs = uptimeMs;
+      assert.equal(watch.awaitingFirstConnect(7), true, `${String(uptimeMs)} ms in`);
+      await watch.settle();
+      assert.deepEqual(calls, [], `${String(uptimeMs)} ms in`);
+    }
+    assert.equal(watch.awaitingFirstConnect(8), false, 'connected');
+
+    clock.uptimeMs = 120_000;
+    assert.equal(watch.awaitingFirstConnect(7), false, 'the grace has run out');
+    await watch.settle();
+    assert.deepEqual(calls, ['lost:7:link'], 'and the same instant the watch marks it');
+
+    // A probe that dropped during the grace was marked lost as it went: it is missing, not late.
+    clock.uptimeMs = 30_000;
+    reasons.set(9, 'link');
+    assert.equal(watch.awaitingFirstConnect(9), false);
+  });
+
   it('does not mark a disconnected probe twice', async () => {
     // `#handleClose` marks on the way out, so the ordinary disconnect is already held by the
     // time a sweep sees it. This is a backstop for the case nothing else covers, not a second

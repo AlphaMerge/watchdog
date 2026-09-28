@@ -469,9 +469,9 @@ Core Health and probe reconnection → verify a sample of sensors resumed.
 
 | Failure                     | Expected behaviour                                                                                            |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Core server restarts        | Paused states persist; sensors resume on their next due tick; probes reconnect and replay their spools        |
+| Core server restarts        | Paused states persist; sensors resume on their next due tick; probes reconnect and replay their spools. A probe that has not reconnected is marked lost, and its Probe Health read, only once the 120 s delivery grace has run out, the same grace for both, so a restart pages nobody for a probe that redials inside it. The price is that a probe genuinely dead at boot is named that much later (`P-110`, `M-22`) |
 | Database unavailable        | Checks continue, results spool locally, ingestion resumes on recovery; Core Health goes Down                  |
-| Probe unreachable           | Probe Health goes Down; its sensors go Unknown (not Down — we don't know); a single alarm, not one per sensor |
+| Probe unreachable           | Probe Health goes Down; its sensors go Unknown (not Down — we don't know); a single alarm, not one per sensor, for every trigger that covers Probe Health. A trigger that cannot see it, or a probe with none, still hears per sensor rather than nothing (`M-22`) |
 | Probe connected but sending no results | Same answer, and it has to be: the sensors are equally unasked. Detected from *arrival* times, never the probe's own timestamps, so a spool replay cannot trip it (`P-74`) |
 | Notification delivery fails | Logged, retried with backoff, surfaced on Core Health; the alarm itself is not lost                           |
 | A check type hangs          | Killed at timeout; the worker is recycled; scheduler unaffected                                               |

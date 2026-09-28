@@ -1,5 +1,5 @@
 import type { Queryable } from '../db/pool.js';
-import type { SensorState } from '../state/tables.js';
+import type { SensorState, SensorStateCause } from '../state/tables.js';
 import type { AlarmPhase, NotificationReason } from './chain.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 
@@ -7,6 +7,8 @@ import { MAX_WALK_DEPTH } from '../db/walk.js';
 export interface SensorStanding {
   readonly sensorId: number;
   readonly state: SensorState;
+  /** Why it is in that state. `probe` is what a carried sensor reads (`M-22`). */
+  readonly cause: SensorStateCause | null;
   readonly since: Date;
   readonly message: string;
   /**
@@ -48,6 +50,7 @@ export interface DueAlarm extends AlarmRow {
   readonly triggerSettings: Record<string, unknown>;
   /** The sensor's state *now* — which may no longer be the one that armed the alarm. */
   readonly currentState: SensorState;
+  readonly currentCause: SensorStateCause | null;
   readonly message: string;
 }
 
@@ -189,11 +192,13 @@ export class AlarmRepository {
     const rows = await q.query<{
       object_id: string;
       state: SensorState;
+      cause: SensorStateCause | null;
       since: Date;
       message: string;
       consecutive_failures: number;
     }>(
-      `SELECT r.object_id::text AS object_id, r.state, r.since, r.message, r.consecutive_failures
+      `SELECT r.object_id::text AS object_id, r.state, r.cause, r.since, r.message,
+              r.consecutive_failures
        FROM sensor_runtime r
        WHERE r.object_id = ANY($1::bigint[])`,
       [sensorIds],
@@ -203,6 +208,7 @@ export class AlarmRepository {
       out.set(sensorId, {
         sensorId,
         state: row.state,
+        cause: row.cause,
         since: row.since,
         message: row.message,
         consecutiveFailures: row.consecutive_failures,
@@ -251,10 +257,12 @@ export class AlarmRepository {
       AlarmRowShape & {
         settings: Record<string, unknown>;
         current_state: SensorState;
+        current_cause: SensorStateCause | null;
         message: string;
       }
     >(
-      `SELECT ${ALARM_COLUMNS}, t.settings, r.state AS current_state, r.message
+      `SELECT ${ALARM_COLUMNS}, t.settings, r.state AS current_state, r.cause AS current_cause,
+              r.message
        FROM notification_alarm a
        JOIN notification_trigger t ON t.id = a.trigger_id AND t.enabled
        JOIN sensor_runtime r ON r.object_id = a.sensor_id
@@ -274,8 +282,51 @@ export class AlarmRepository {
       ...toAlarm(row),
       triggerSettings: row.settings,
       currentState: row.current_state,
+      currentCause: row.current_cause,
       message: row.message,
     }));
+  }
+
+  /**
+   * The probe above each sensor, for the ones no episode in memory accounts for (`M-22`).
+   *
+   * A carried sensor's Unknown/`probe` is persisted, and the lost and frozen sets are not. After
+   * a core restart the sensors of a probe that was lost before it still read Unknown/`probe`,
+   * while nothing in memory says which probe holds them until the delivery watch's grace has run
+   * out. Without this, the boot reconciliation armed a trigger on Unknown once per such sensor,
+   * which is the wave the hold exists to prevent, produced by the restart.
+   */
+  async probesAbove(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, number>> {
+    const out = new Map<number, number>();
+    if (sensorIds.length === 0) return out;
+    const rows = await q.query<{ sensor_id: string; probe_id: string }>(
+      `WITH RECURSIVE up AS (
+         SELECT o.id AS sensor_id, o.parent_id, 0 AS depth
+         FROM object o WHERE o.id = ANY($1::bigint[])
+         UNION ALL
+         SELECT up.sensor_id, parent.parent_id, up.depth + 1
+         FROM object parent JOIN up ON parent.id = up.parent_id
+         WHERE parent.kind <> 'probe' AND up.depth < ${String(MAX_WALK_DEPTH)}
+       )
+       SELECT up.sensor_id::text AS sensor_id, parent.id::text AS probe_id
+       FROM up JOIN object parent ON parent.id = up.parent_id
+       WHERE parent.kind = 'probe'`,
+      [sensorIds],
+    );
+    for (const row of rows) out.set(Number(row.sensor_id), Number(row.probe_id));
+    return out;
+  }
+
+  /** Object names, for the words an episode alarm carries (`M-22`). */
+  async namesOf(q: Queryable, objectIds: readonly number[]): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    if (objectIds.length === 0) return out;
+    const rows = await q.query<{ id: string; name: string }>(
+      'SELECT id::text AS id, name FROM object WHERE id = ANY($1::bigint[])',
+      [objectIds],
+    );
+    for (const row of rows) out.set(Number(row.id), row.name);
+    return out;
   }
 
   /** When the earliest waiting alarm falls due, so `N-04` can sleep until then instead of polling. */

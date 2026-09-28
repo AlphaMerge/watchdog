@@ -379,13 +379,19 @@ const CHANNELS: readonly ChannelDef[] = [
   // reads now, so they can accept nothing it sends until it catches up, and they read Unknown
   // meanwhile. The alarm for the case the offset misses: NTP correcting a fast clock leaves the
   // offset near zero and the sensors frozen for as long as it was fast.
+  //
+  // **An error, not a warning** (`M-22`). A frozen probe's sensors are Unknown with cause `probe`,
+  // exactly as a lost probe's are, and their notifications are held behind this sensor's alarm
+  // on the same terms. A lost probe reads Down, so a frozen one has to as well: as a warning, an
+  // installation with only a Down trigger would hear nothing about it once the per-sensor
+  // Unknowns were held.
   {
     key: 'sensorsFrozen',
     name: 'Sensors frozen by the clock',
     unit: 'sensors',
     limits: {
-      upperWarning: 0.5,
-      warningMessage:
+      upperError: 0.5,
+      errorMessage:
         'sensors on this probe cannot accept results until its clock passes their last one',
     },
   },

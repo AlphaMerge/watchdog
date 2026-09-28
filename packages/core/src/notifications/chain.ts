@@ -242,6 +242,14 @@ export function templateFor(
  *
  * Reconciliation rather than event handling: the answer depends only on the present, so a missed
  * reaction is corrected by the next one and a restart needs no replay.
+ *
+ * **`held`: the sensor's state is its probe's, and this trigger hears about the probe from the
+ * probe's own alarm** (`M-22`). The engine decides it per trigger, so a trigger that cannot see
+ * the probe's alarm is never held. While it holds, nothing arms and a standing alarm is suspended.
+ * It is never cancelled or recovered, whatever state it was about. That includes an alarm about
+ * being Up, which `endsAlarm` would otherwise cancel on the way into Unknown and arm afresh on the
+ * way back, once per sensor the probe carries. Suspended, the return takes `resume`, which is one
+ * outage and one alarm.
  */
 export function reconcile(
   alarm: Alarm | null,
@@ -249,7 +257,16 @@ export function reconcile(
   since: Date,
   settings: StateTriggerSettings,
   now: Date,
+  held = false,
 ): Reconciliation {
+  if (held) {
+    if (alarm === null) return { kind: 'idle' };
+    // Retargeted while held: the old alarm is about a state nobody is watching, and the new one
+    // is not armed, because the probe's alarm is saying it.
+    if (alarm.state !== settings.state) return { kind: 'cancel' };
+    return alarm.suppressed ? { kind: 'hold' } : { kind: 'suppress' };
+  }
+
   if (alarm === null) {
     if (current !== settings.state) return { kind: 'idle' };
     // Armed from the state's own beginning, so a sensor that has been Down for an hour when the

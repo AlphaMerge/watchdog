@@ -60,6 +60,11 @@ export interface ClockFreezeOptions {
   };
   /** Sensor types the core evaluates, stamped by the core's clock: never frozen by a probe's. */
   readonly coreEvaluatedTypes?: readonly string[];
+  /**
+   * The sensors that are a probe's own alarm, re-evaluated with the ones it freezes or thaws, as
+   * `ProbeReachability` does for a lost probe (`M-22`).
+   */
+  readonly probeAlarms?: (probeObjectId: number) => readonly number[];
   readonly now?: () => Date;
 }
 
@@ -102,12 +107,17 @@ export class ClockFreeze {
   readonly #dependencies: DependencyRecomputer;
   readonly #links: ClockFreezeOptions['links'];
   readonly #coreEvaluatedTypes: readonly string[];
+  readonly #probeAlarms: (probeObjectId: number) => readonly number[];
   readonly #now: () => Date;
 
   /** Every frozen sensor. What the state service lays over the facts. */
   readonly #frozen = new Set<number>();
   /** Which probe froze which sensors, so one probe's answer never clears another's. */
   readonly #byProbe = new Map<number, ReadonlySet<number>>();
+  /** When each probe's clock first froze something, while it still does (`M-22`). */
+  readonly #since = new Map<number, Date>();
+  /** Which probe froze each sensor. */
+  readonly #carrier = new Map<number, number>();
   #sweeps = 0;
 
   constructor(options: ClockFreezeOptions) {
@@ -117,6 +127,7 @@ export class ClockFreeze {
     this.#dependencies = options.dependencies;
     this.#links = options.links;
     this.#coreEvaluatedTypes = options.coreEvaluatedTypes ?? [];
+    this.#probeAlarms = options.probeAlarms ?? ((): readonly number[] => []);
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -127,6 +138,18 @@ export class ClockFreeze {
   /** How many of one probe's sensors are frozen, for its Probe Health. */
   frozenOn(probeObjectId: number): number {
     return this.#byProbe.get(probeObjectId)?.size ?? 0;
+  }
+
+  /** What this probe's clock freezes, and since when, while it freezes anything (`M-22`). */
+  frozenBy(probeObjectId: number): { sensorIds: ReadonlySet<number>; since: Date } | undefined {
+    const sensorIds = this.#byProbe.get(probeObjectId);
+    const since = this.#since.get(probeObjectId);
+    return sensorIds === undefined || since === undefined ? undefined : { sensorIds, since };
+  }
+
+  /** The probe whose clock froze this sensor, while it is frozen (`M-22`). */
+  carrierOf(sensorId: number): number | undefined {
+    return this.#carrier.get(sensorId);
   }
 
   stats(): ClockFreezeStats {
@@ -168,13 +191,25 @@ export class ClockFreeze {
     const left = [...before].filter((id) => !next.has(id));
     if (entered.length === 0 && left.length === 0) return 0;
 
-    const apply = (frozen: ReadonlySet<number>, thawed: readonly number[]): void => {
-      for (const id of thawed) this.#frozen.delete(id);
-      for (const id of frozen) this.#frozen.add(id);
-      if (frozen.size === 0) this.#byProbe.delete(probeObjectId);
-      else this.#byProbe.set(probeObjectId, frozen);
+    const since = this.#since.get(probeObjectId);
+    const apply = (frozen: ReadonlySet<number>, thawed: readonly number[], at?: Date): void => {
+      for (const id of thawed) {
+        this.#frozen.delete(id);
+        this.#carrier.delete(id);
+      }
+      for (const id of frozen) {
+        this.#frozen.add(id);
+        this.#carrier.set(id, probeObjectId);
+      }
+      if (frozen.size === 0) {
+        this.#byProbe.delete(probeObjectId);
+        this.#since.delete(probeObjectId);
+      } else {
+        this.#byProbe.set(probeObjectId, frozen);
+        this.#since.set(probeObjectId, at ?? since ?? this.#now());
+      }
     };
-    apply(next, left);
+    apply(next, left, since);
 
     try {
       const moved = await this.#db.tx(async (q) => {
@@ -185,6 +220,11 @@ export class ClockFreeze {
         }
         if (left.length > 0) {
           count += await this.#states.reevaluate(q, left, at, { message: THAWED_MESSAGE });
+        }
+        // The probe's own alarm, so what a trigger sees on it moves with them (`M-22`).
+        const alarms = this.#probeAlarms(probeObjectId);
+        if (alarms.length > 0) {
+          await this.#states.reevaluate(q, alarms, at, { message: THAWED_MESSAGE });
         }
         // As for a lost probe (`P-135`): a master that is Unknown is not Down, so whatever it
         // held is released, and one that is thawed may hold them again.
@@ -199,7 +239,7 @@ export class ClockFreeze {
       );
       return moved;
     } catch (error) {
-      apply(before, entered);
+      apply(before, entered, since);
       this.#logger.error(
         { probeObjectId, sensors: entered.length + left.length, err: describeError(error) },
         'could not move the sensors a probe clock froze or thawed; the next sweep tries again',

@@ -5533,7 +5533,7 @@ because each is a decision rather than a defect:
 
       Mutations caught: 21 of 21. Each was applied alone, built, and run against its own tests.
 
-- [ ] **M-22 — a trigger on Unknown notifies once per sensor of a lost or frozen probe** · M ·
+- [x] **M-22 — a trigger on Unknown notifies once per sensor of a lost or frozen probe** · L ·
       P-232, P-135, P-105 · Found writing `P-232`. The state service moves a lost probe's
       sensors to Unknown with cause `probe` (`WORKFLOW.MD` §13), and `P-232` moves a frozen
       probe's the same way. Down alarms are suspended and resume without a second wave, but
@@ -5567,6 +5567,118 @@ because each is a decision rather than a defect:
       - **A-29's Unknown/`access` stays per sensor**, argued here: nothing is its one alarm, it is
         bounded by what one account wrote, and the trigger over those sensors is who needs to
         know.
+
+      **Done: held in `reconcile`, per trigger, and a trigger on Unknown sees the probe's alarm as
+      Unknown.**
+      - **The literal rule held nothing for the trigger that pages.** "Its state is the one Probe
+        Health takes" is Down, so a root trigger on Unknown only was never held. It is the trigger
+        that pages 150 times, and it would go on paging 150 times. The rule that shipped is:
+        a carried sensor's alarm under trigger T is held when T covers a *live* Probe Health
+        reporting on the probe. Live means not paused and not Unknown/`access`. And a trigger on
+        Unknown sees that Probe Health as Unknown for as long as the probe holds sensors. So T
+        hears about the probe once, from the probe's own sensor, whatever state T watches.
+        `state-machine.md` §7 says it in one sentence: "a trigger on Unknown sees a probe's live
+        Probe Health as Unknown while the probe is lost or frozen; nothing else does."
+      - **The view is for notifications only.** Nothing else reads it. Probe Health's state
+        history and what `GET /sensors/:id/state` returns are identical with and without a trigger
+        on Unknown over it, and a test compares the two.
+      - **While held,** `reconcile` arms nothing and suspends a standing alarm. It never cancels
+        or recovers, including an alarm on Up, so the lift takes `resume`: one outage, one alarm.
+        A trigger retargeted while held cancels its old alarm and arms nothing. The sweep checks
+        the hold again and parks a held alarm rather than firing it. That is the last defence
+        against a stale row, and it is not only defence: resuming a paused Probe Health mid-loss
+        re-decides that one sensor, so the alarms its sensors armed while it was paused are
+        stopped nowhere else. A scenario case covers it.
+      - **One episode, one alarm, in the probe's words.** `ProbeEpisodeIndex` joins the lost and
+        frozen sets into one episode per probe. It has a start, a cause (`lost`, `silent` or
+        `frozen`) and a size, the union of what the two sets hold. It stays one episode while the
+        cause changes, and is filed as ended when no cause it saw is left. The episode alarm is
+        armed from the episode's start. Its message names the probe and the size: "probe Site A is
+        lost: the 312 sensors it carries are Unknown, held as this one alarm". Its recovery says
+        the probe is back. N comes from the same sets as the hold. A recovery is matched to its
+        episode by the alarm's `since`.
+      - **Moved in the same transaction.** `ProbeReachability` and `ClockFreeze` re-evaluate the
+        probe's Probe Health ids alongside the sensors they move, through an injected
+        `probeAlarms`, with no type-id check in the engine. `ProbeHealthTargets` holds which
+        sensor reports on which probe. The Probe Health sweep publishes it before ingesting, so a
+        reaction to its own result already knows. It is also refreshed before the boot reconcile.
+        The first sweep is thirty seconds in, and without that refresh the boot pass holds
+        nothing and pages the wave.
+      - **Across a core restart,** the carried sensors are still Unknown/`probe` in the table, and
+        nothing in memory says why until the delivery grace runs out. The hold finds their probe
+        by walking the tree (`probesAbove`) and holds them all the same. Restart cases:
+        - every probe reconnects within the grace: zero notifications on every triggerable state,
+          and no episode is opened or closed;
+        - a restart during a real loss: no second Unknown, and one lift.
+        The recovery after such a restart carries Probe Health's own message rather than the
+        episode's. The index that knew the episode's start is gone, so nothing matches it. This
+        degradation is accepted and documented.
+      - **Probe Health waits out the boot grace too.** Before this, the first Probe Health sweep
+        after a restart, at thirty seconds, read `connected` 0 for every probe that had not
+        redialled yet. Every Down trigger over them paged once, then recovered. That predates
+        this ticket, but it is the restart case this ticket names. Now, during the delivery
+        watch's grace, the sweep sends nothing for a probe that has not connected since boot and
+        is not marked lost. It is a gap, not a synthetic reading. The grace and the uptime are
+        the watch's own (`awaitingFirstConnect`), so the two cannot disagree. After the grace it
+        reads as before. The cost: a probe genuinely dead at core boot is named up to the grace
+        (120 s) later, exactly as late as the watch's lost mark. `WORKFLOW.MD` §13 says so on the
+        restart row.
+      - **`sensorsFrozen` is an error limit.** A frozen probe's Probe Health is Down, like a lost
+        one's.
+      - **A-29's Unknown/`access` stays per sensor.** Nothing is its one alarm: no sensor stands
+        for "this account wrote a sensor it cannot vouch for". It is bounded by what one account
+        wrote, not by what one probe carries. And the trigger over those sensors is who needs to
+        know, because that trigger is what fixes it. A withheld Probe Health is not live, so it
+        holds nothing either. `administration.md` says so beside the probe table.
+      - `state-machine.md` §7, `administration.md` ("A lost or frozen probe, and who is told",
+        and the `sensorsFrozen` row) and `WORKFLOW.MD` §13 say it.
+
+      **Re-sized from M to L.** Four things made it bigger:
+      - The per-trigger view the literal rule was missing.
+      - The restart handling: targets refreshed at boot, and the tree fallback for a carrier
+        nobody remembers.
+      - `ProbeHealthTargets`, pulled out of the Probe Health sweep so the reachability, freeze
+        and engine paths share one answer.
+      - The episode index that keeps one start across a change of cause.
+      - Probe Health's boot grace, which the restart criterion needed.
+
+      **The scenario** (`probe-episode-scenario.test.ts`, 150 pings per probe, every fifth Down,
+      an email and a webhook template per trigger, counted as `notification_request` rows):
+
+      | Case | On the loss | On the lift |
+      | --- | --- | --- |
+      | Down trigger covering Probe Health | 1 Down per method, from Probe Health | 1 recovery per method, no wave |
+      | Unknown-only trigger covering it | 1 Unknown per method, message asserted | 1 recovery per method, message asserted; a later Unknown of Probe Health's own is not called the probe coming back |
+      | Up trigger covering it | nothing | 1 Up per method, not 150 |
+      | Unknown trigger on a group below the probe, beside a Down trigger on the probe | 150 per method from the group's; 1 Down from Probe Health, the pings held under it | 120 recoveries per method; 1 Down recovery, no second wave |
+      | Probe with no Probe Health | 150, as before | 120 recoveries, 120 Ups |
+      | Paused Probe Health | 150, as before; nothing armed on Probe Health | 120 recoveries |
+      | Probe Health resumed mid-loss | the 150 armed alarms parked, 1 Unknown from Probe Health | 1 recovery, nothing per sensor |
+      | Frozen probe, Down/Unknown/Up triggers | 1 Down, 1 Unknown in its own words | 1 of each back, in its own words |
+      | Guard 1 | history and API read equal with and without the view | — |
+      | Restart, reconnected at +60 s after a sweep, every state | 0, no episode | — |
+      | Restart, never reconnected, Down and Unknown triggers | 0 inside the grace; after it, 1 Down and 1 Unknown per method, in the probe's words | 1 recovery each |
+      | Restart during a loss | 0 more after the boot pass and the re-mark | 1 Down recovery, 1 Unknown recovery, 1 Up |
+
+      Tests:
+      - `probe-episode-scenario.test.ts`: the table above.
+      - `probe-episodes.test.ts`: the index, the view and the messages.
+      - `notification-chain.test.ts`: `reconcile` held, every V1 state × phase × suppression.
+      - `probe-reachability-marks.test.ts` and `clock-freeze.test.ts`: the carrier, the start
+        and the probe alarm re-evaluated, both ways and on rollback.
+      - `probe-health.test.ts`: targets published before ingest, a withheld sensor left out,
+        refresh before any sweep, nothing sent for a probe inside the boot grace, and Down on a
+        frozen sensor.
+      - `probe-delivery-watch.test.ts`: `awaitingFirstConnect` ends at the instant the watch
+        marks, and never covers a connected probe or one already marked lost.
+
+      Mutations caught: 38 of 38. Each was applied alone, built, and run against its own tests.
+      `main.ts`'s wiring is not among them, since the scenario builds the same wiring itself. A 39th
+      mutant survived. It showed that adding the probe's own alarm to every carried sensor's batch
+      was redundant: whatever moves an episode already re-evaluates that alarm. The code was
+      removed rather than tested. Three more survived the first pass and were killed by stronger
+      cases: a group trigger beside a probe trigger, a later Unknown of Probe Health's own, and a
+      paused Probe Health arming nothing.
 
 - [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
       Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.

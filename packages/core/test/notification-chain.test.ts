@@ -544,3 +544,76 @@ describe('a trigger retargeted onto another state', () => {
     assert.deepEqual(reconcile(standing, 'up', at(60), settings(), at(60)), { kind: 'cancel' });
   });
 });
+
+// -------------------------------------------------------------------------------------------
+// A sensor held behind its probe's own alarm (`M-22`).
+// -------------------------------------------------------------------------------------------
+
+describe('a sensor held behind its probe’s own alarm (`M-22`)', () => {
+  // Every state a trigger can watch, every phase, suppressed or not, and the states a carried
+  // sensor can be read in. Held, the answer never depends on the sensor's state: nothing arms,
+  // and a standing alarm is suspended. It is never cancelled and never recovered, which is what
+  // keeps the probe's return from paging once per sensor.
+  const phases = ['pending', 'notified', 'escalated'] as const;
+
+  for (const watched of V1_STATES) {
+    const config = settings({ state: watched, initialLatencySeconds: 300 });
+    for (const current of V1_STATES) {
+      it(`arms nothing for a trigger on ${watched} while the sensor reads ${current}`, () => {
+        assert.deepEqual(reconcile(null, current, at(60), config, at(60), true), {
+          kind: 'idle',
+        });
+      });
+      for (const phase of phases) {
+        for (const suppressed of [false, true]) {
+          const standing = alarm({ state: watched, phase, suppressed });
+          it(`suspends a ${phase}${suppressed ? ', suppressed,' : ''} ${watched} alarm while the sensor reads ${current}`, () => {
+            assert.deepEqual(
+              reconcile(standing, current, at(60), config, at(60), true),
+              suppressed ? { kind: 'hold' } : { kind: 'suppress' },
+            );
+          });
+        }
+      }
+    }
+  }
+
+  it('stands down an alarm about a state the trigger no longer watches, and arms no other', () => {
+    const standing = alarm({ state: 'warning', phase: 'notified' });
+    assert.deepEqual(
+      reconcile(standing, 'unknown', at(60), settings({ state: 'unknown' }), at(60), true),
+      {
+        kind: 'cancel',
+      },
+    );
+  });
+
+  it('suspends an Up alarm that unheld would be cancelled, so the return is one alarm', () => {
+    // The row this exists for: unheld, leaving Up ends an Up alarm (`P-113`) and the return arms
+    // a fresh one per sensor. Held, it is suspended, and the return resumes it.
+    const up = settings({ state: 'up' });
+    const standing = alarm({ state: 'up', phase: 'notified', nextDueAt: null });
+    assert.deepEqual(reconcile(standing, 'unknown', at(60), up, at(60)), { kind: 'cancel' });
+    assert.deepEqual(reconcile(standing, 'unknown', at(60), up, at(60), true), {
+      kind: 'suppress',
+    });
+    const suspended = alarm({ state: 'up', phase: 'notified', nextDueAt: null, suppressed: true });
+    assert.deepEqual(reconcile(suspended, 'up', at(120), up, at(120)), {
+      kind: 'resume',
+      nextDueAt: null,
+    });
+  });
+
+  it('leaves an unheld decision exactly as it was', () => {
+    for (const watched of V1_STATES) {
+      for (const current of V1_STATES) {
+        const config = settings({ state: watched });
+        const standing = alarm({ state: watched, phase: 'notified' });
+        assert.deepEqual(
+          reconcile(standing, current, at(60), config, at(60), false),
+          reconcile(standing, current, at(60), config, at(60)),
+        );
+      }
+    }
+  });
+});

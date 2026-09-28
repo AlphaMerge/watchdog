@@ -7,7 +7,7 @@ import {
   type CheckResult,
   type Logger,
 } from '@ms/shared';
-import type { Database } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import type { TimeRefusals } from '../ingestion/service.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
@@ -60,7 +60,14 @@ export interface ProbeHealthServiceOptions {
    * Optional so the two channels gap rather than read a confident "delivering" on a core that is
    * not watching — absent is absent, the same rule the probe-reported channels follow.
    */
-  readonly delivery?: { verdictFor: (probeObjectId: number) => DeliveryVerdict | null };
+  readonly delivery?: {
+    verdictFor: (probeObjectId: number) => DeliveryVerdict | null;
+    /**
+     * True while the core has yet to learn whether this probe is missing (`M-22`). The sweep
+     * sends nothing for it meanwhile: a gap, never a synthetic reading.
+     */
+    awaitingFirstConnect?: (probeObjectId: number) => boolean;
+  };
   readonly ingest: (results: readonly CheckResult[]) => Promise<void>;
   /**
    * Asked before a sensor is read, whether whoever vouched for it may still read the probe it
@@ -68,6 +75,11 @@ export interface ProbeHealthServiceOptions {
    * sensor must not go on publishing it to a branch its voucher lost.
    */
   readonly vouching: VoucherCheck;
+  /**
+   * Where the sweep publishes which probe each sensor reports on (`M-22`). Shared with the alarm
+   * engine, which is built long before this service. Absent, the service keeps its own.
+   */
+  readonly targets?: ProbeHealthTargets;
   readonly now?: () => Date;
 }
 
@@ -96,6 +108,83 @@ interface SensorRow {
   vouched_by_user: string | null;
 }
 
+/** Every Probe Health sensor, with what decides the probe it reports on. */
+async function readHealthSensors(q: Queryable): Promise<SensorRow[]> {
+  return q.query<SensorRow>(
+    `WITH RECURSIVE up AS (
+       SELECT o.id AS sensor_id, o.id, o.parent_id, o.kind, 0 AS depth
+       FROM object o
+       JOIN sensor_config sc ON sc.object_id = o.id
+       WHERE sc.type = $1
+       UNION ALL
+       SELECT up.sensor_id, parent.id, parent.parent_id, parent.kind, up.depth + 1
+       FROM object parent JOIN up ON parent.id = up.parent_id
+       WHERE up.depth < ${String(MAX_WALK_DEPTH)}
+     )
+     SELECT sc.object_id::text AS id,
+            sc.params AS params,
+            sc.vouched_by,
+            sc.vouched_by_user::text AS vouched_by_user,
+            (SELECT up.id::text FROM up WHERE up.sensor_id = sc.object_id AND up.kind = 'probe'
+               LIMIT 1) AS probe_id
+     FROM sensor_config sc
+     WHERE sc.type = $1`,
+    [HEALTH_TYPE],
+  );
+}
+
+/** The probe a Probe Health sensor reports on: the one it names, or the one above it. */
+function targetOf(row: SensorRow): number | undefined {
+  const named = row.params['probeId'];
+  const probeId = typeof named === 'number' ? named : Number(row.probe_id ?? Number.NaN);
+  return Number.isInteger(probeId) && probeId > 0 ? probeId : undefined;
+}
+
+/**
+ * Which probe each Probe Health sensor reports on (`M-22`).
+ *
+ * The alarm engine holds a lost or frozen probe's sensors behind these, so it has to know them
+ * from the moment it can react. That includes the boot reconciliation, which runs long before
+ * the first sweep. `refresh` resolves them from the tree for that, and every sweep publishes what
+ * it actually read. A sensor it withheld or could not resolve is left out, because it raises
+ * nothing.
+ */
+export class ProbeHealthTargets {
+  #reportsOn: ReadonlyMap<number, number> = new Map();
+  #reporting: ReadonlyMap<number, readonly number[]> = new Map();
+
+  /** The Probe Health sensors reporting on this probe. */
+  reportingOn(probeObjectId: number): readonly number[] {
+    return this.#reporting.get(probeObjectId) ?? [];
+  }
+
+  /** The probe this Probe Health sensor reports on. */
+  reportsOn(sensorId: number): number | undefined {
+    return this.#reportsOn.get(sensorId);
+  }
+
+  /** From the tree, for a core that has not swept yet. */
+  async refresh(q: Queryable): Promise<void> {
+    const reportsOn = new Map<number, number>();
+    for (const row of await readHealthSensors(q)) {
+      const probe = targetOf(row);
+      if (probe !== undefined) reportsOn.set(Number(row.id), probe);
+    }
+    this.publish(reportsOn);
+  }
+
+  publish(reportsOn: ReadonlyMap<number, number>): void {
+    const reporting = new Map<number, number[]>();
+    for (const [sensorId, probeObjectId] of reportsOn) {
+      const list = reporting.get(probeObjectId) ?? [];
+      list.push(sensorId);
+      reporting.set(probeObjectId, list);
+    }
+    this.#reportsOn = reportsOn;
+    this.#reporting = reporting;
+  }
+}
+
 export class ProbeHealthService {
   readonly #db: Database;
   readonly #logger: Logger;
@@ -109,6 +198,7 @@ export class ProbeHealthService {
   #evaluated = 0;
   #unresolved = 0;
   #withheld = 0;
+  readonly #targets: ProbeHealthTargets;
 
   constructor(options: ProbeHealthServiceOptions) {
     this.#db = options.db;
@@ -117,7 +207,13 @@ export class ProbeHealthService {
     this.#delivery = options.delivery;
     this.#ingest = options.ingest;
     this.#vouching = options.vouching;
+    this.#targets = options.targets ?? new ProbeHealthTargets();
     this.#now = options.now ?? ((): Date => new Date());
+  }
+
+  /** Which probe each of these sensors reported on at the last sweep (`M-22`). */
+  get targets(): ProbeHealthTargets {
+    return this.#targets;
   }
 
   stats(): ProbeHealthStats {
@@ -277,27 +373,7 @@ export class ProbeHealthService {
    */
   async sweep(): Promise<number> {
     this.#sweeps += 1;
-    const sensors = await this.#db.query<SensorRow>(
-      `WITH RECURSIVE up AS (
-         SELECT o.id AS sensor_id, o.id, o.parent_id, o.kind, 0 AS depth
-         FROM object o
-         JOIN sensor_config sc ON sc.object_id = o.id
-         WHERE sc.type = $1
-         UNION ALL
-         SELECT up.sensor_id, parent.id, parent.parent_id, parent.kind, up.depth + 1
-         FROM object parent JOIN up ON parent.id = up.parent_id
-         WHERE up.depth < ${String(MAX_WALK_DEPTH)}
-       )
-       SELECT sc.object_id::text AS id,
-              sc.params AS params,
-              sc.vouched_by,
-              sc.vouched_by_user::text AS vouched_by_user,
-              (SELECT up.id::text FROM up WHERE up.sensor_id = sc.object_id AND up.kind = 'probe'
-                 LIMIT 1) AS probe_id
-       FROM sensor_config sc
-       WHERE sc.type = $1`,
-      [HEALTH_TYPE],
-    );
+    const sensors = await readHealthSensors(this.#db);
     // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
     // go rather than held Unknown for ever.
     const withheld = await this.#vouching.refusals(
@@ -310,7 +386,11 @@ export class ProbeHealthService {
       })),
     );
     await this.#vouching.settle('probe-health', withheld);
-    if (sensors.length === 0) return 0;
+    const reportsOn = new Map<number, number>();
+    if (sensors.length === 0) {
+      this.#targets.publish(reportsOn);
+      return 0;
+    }
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
@@ -321,9 +401,8 @@ export class ProbeHealthService {
         this.#withheld += 1;
         continue;
       }
-      const named = row.params['probeId'];
-      const probeId = typeof named === 'number' ? named : Number(row.probe_id ?? Number.NaN);
-      if (!Number.isInteger(probeId) || probeId <= 0) {
+      const probeId = targetOf(row);
+      if (probeId === undefined) {
         // A sensor with no probe above it and none named. Not a silent gap: an operator who put
         // this sensor somewhere it cannot answer needs to be told, and the sentence says how.
         this.#unresolved += 1;
@@ -340,6 +419,14 @@ export class ProbeHealthService {
         continue;
       }
 
+      reportsOn.set(sensorId, probeId);
+      // **Not yet a probe that is gone** (`M-22`). A core that has just started has not heard
+      // from any probe, and reading `connected` 0 for one that redials forty seconds in pages
+      // every Down trigger over it once per restart. Nothing is sent until the delivery grace
+      // has run out, the same one after which the watch marks the probe lost, so the sensor
+      // keeps the state it had. The price: a probe genuinely dead at boot is named that much
+      // later, exactly as late as the lost mark.
+      if (this.#delivery?.awaitingFirstConnect?.(probeId) === true) continue;
       try {
         const { reading, message } = this.read(probeId);
         results.push({
@@ -367,6 +454,8 @@ export class ProbeHealthService {
       }
     }
 
+    // Before the results go in, because they are what the alarm engine reacts to (`M-22`).
+    this.#targets.publish(reportsOn);
     await this.#ingest(results);
     return results.length;
   }

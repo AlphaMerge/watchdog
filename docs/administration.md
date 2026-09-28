@@ -385,7 +385,7 @@ alarm.
 
 | Channel | Watch it because |
 | --- | --- |
-| `connected` | The link to the core |
+| `connected` | The link to the core. For a probe that has not connected since the core started, nothing is recorded until the two-minute delivery grace has run out (`M-22`) |
 | `schedulerLag` | Checks starting later than scheduled. Warns at 1 s, errors at 5 s — this is the first sign of an overloaded probe |
 | `poolUsage` | Worker pool saturation, sampled at the heartbeat rather than averaged — on a bursty workload it under-reads badly (4.7% measured while every worker was saturated once a second, `findings/2026-09-04-live-probe-check.md`), so do not size down from a low reading. Warns at 80%. Since `P-34` the probe raises its own ceiling from the checks it was assigned, so sustained saturation means either `workerPoolSize` is pinned or the workload outgrew what a probe derives for itself — see the troubleshooting runbook, and note that a pool below its floor accumulates rather than refusing |
 | `poolCeiling`, `poolMemoryCap`, `poolHeldBack` | How far the worker pool may grow, and whether memory is what stops it (`P-236`). `poolCeiling` is the ceiling in force; `poolMemoryCap` is how many workers the memory the probe may use can hold; `poolHeldBack` is how many the ceiling would allow and memory does not. No limits: memory holding the pool back is not an outage by itself, and when it costs checks, `poolUsage` and `refused` are the alarm. Read these to see that the remedy is memory rather than `workerPoolSize` — see [a probe held back by memory](#a-probe-held-back-by-memory). A gap for a probe older than protocol 19, and `poolMemoryCap` also where memory cannot be read |
@@ -399,7 +399,7 @@ alarm.
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `clockOffset` | How far the probe's clock is behind the core's, in seconds; negative is ahead. Measured by the core from the send time on every heartbeat and batch, the smallest of five minutes, so a delayed message cannot make a probe look behind. **Warns beyond a minute either way.** A gap until the session has sent one. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
-| `sensorsFrozen` | **Any value above zero is a warning.** Sensors whose last result is later than the probe's clock reads now, so they can accept nothing it sends until it catches up. They read Unknown meanwhile, like a lost probe's. The alarm when NTP pulls a fast clock back, which leaves `clockOffset` near zero |
+| `sensorsFrozen` | **Any value above zero is an error**, so a frozen probe reads Down as a lost one does (`M-22`). Sensors whose last result is later than the probe's clock reads now, so they can accept nothing it sends until it catches up. They read Unknown meanwhile, like a lost probe's. The alarm when NTP pulls a fast clock back, which leaves `clockOffset` near zero |
 | `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `reportsRefused` | Everything the core refused from this probe because it was not the probe's to report: a result for a sensor not under it, an answer to a query put to another probe, a message about another probe's discovery run. A counter with no limit, because most refusals are ordinary — a probe whose spool still holds results for sensors that were moved away from it or deleted. See [a probe reporting on work it was not given](#a-probe-reporting-on-work-it-was-not-given) |
 | `reportsForeign` | **Any value above zero is a warning.** The part of the above no correct probe sends: work that was never this probe's. A count over the last five minutes, so it sees the first report after a restart or a reconnect and clears five minutes after the last one |
@@ -442,6 +442,41 @@ The bound behind is deliberately that long. A probe's spool is bounded by size, 
 probe cut off for a month replays a month. Past the raw retention, its readings still fill the
 rollup tiers where they are empty, and its states still count towards uptime. A shorter bound
 would throw that away at the door.
+
+### A lost or frozen probe, and who is told
+
+A probe that loses its link, stops sending results or has its clock step back leaves every
+sensor it carries **Unknown**, cause `probe`. Its Probe Health reads **Down** in all three cases.
+The notifications follow one rule (`M-22`): **a trigger that covers the probe's Probe Health
+hears about the probe once, from that sensor, and not once per sensor the probe carries.**
+
+| The trigger | While the probe is away | When it is back |
+| --- | --- | --- |
+| On Down, covering Probe Health | One notification, for Probe Health | One recovery |
+| On Unknown, covering Probe Health | One notification, for Probe Health, saying which probe and how many sensors: *probe Site A is lost: the 312 sensors it carries are Unknown, held as this one alarm* | One recovery: *probe Site A is answering again: its sensors are no longer held* |
+| On Up, covering Probe Health | Nothing | One notification, for Probe Health, not one per sensor |
+| Not covering Probe Health, such as a team's trigger on a group below the probe | One per sensor, as before | One per sensor |
+| Any, on a probe with no Probe Health, or one that is paused or withheld (`A-29`) | One per sensor, as before | One per sensor |
+
+A sensor that was Down before its probe went resumes where it was: no second page, and no
+recovery until it really recovers.
+
+- **A trigger covers a sensor when it applies to it**: on the sensor itself or on anything above
+  it. A trigger on the root covers every probe's Probe Health.
+- **For a team to get the one alarm**, rather than one per sensor, give it a Probe Health it
+  covers. A Probe Health that names the probe (its *Probe* parameter) can sit in the team's own
+  group.
+- **The Unknown notification is about Probe Health**, which the UI shows as Down. Its status reads
+  `unknown` and its message explains; nothing else, not the history, uptime, the API or the UI,
+  ever shows Probe Health as Unknown for it.
+- **A sensor withheld for want of a voucher** (Unknown, `A-29`) is not held by any of this. It
+  is not its probe's doing, and the trigger over it reaches whoever can vouch for it.
+- **Across a core restart** a probe that is still away stays held from the first moment, and
+  nothing is sent twice. For the first two minutes (the delivery grace) a probe that has not
+  reconnected yet is neither marked lost nor read by Probe Health. One that redials inside that
+  time was never lost, and nobody is told anything. The cost is that a probe genuinely dead
+  when the core starts is named two minutes later. A recovery that follows a restart carries Probe Health's own message
+  rather than the one above.
 
 ### A probe reporting on work it was not given
 

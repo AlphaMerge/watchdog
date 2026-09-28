@@ -73,6 +73,16 @@ export interface ProbeReachabilityOptions {
    * still green is a wiring line that will be.
    */
   dependencies: DependencyRecomputer;
+  /**
+   * The sensors that are a probe's own alarm: its Probe Health (`M-22`).
+   *
+   * Re-evaluated with the sensors the probe carries, on the way out and on the way back, so the
+   * alarm engine reconciles them in the same transaction. A trigger on Unknown sees a lost
+   * probe's live Probe Health as Unknown, and that view has to move when the carried sensors do.
+   * Probe Health may have gone Down at its own sweep before the probe was declared lost, and
+   * then it has no transition left to react on. Absent, nothing is added.
+   */
+  probeAlarms?: (probeObjectId: number) => readonly number[];
   now?: () => Date;
 }
 
@@ -96,6 +106,7 @@ export class ProbeReachability {
   readonly #states: StateReevaluator;
   readonly #dependencies: DependencyRecomputer;
   readonly #coreEvaluatedTypes: readonly string[];
+  readonly #probeAlarms: (probeObjectId: number) => readonly number[];
   readonly #now: () => Date;
 
   /**
@@ -118,7 +129,12 @@ export class ProbeReachability {
    * *disconnected* probe is fine again just because it has stopped expecting results from it.
    * `found` is the link's, `resumed` is the sweep's, and neither undoes the other's work.
    */
-  readonly #byProbe = new Map<number, { sensorIds: number[]; reason: OfflineReason }>();
+  readonly #byProbe = new Map<
+    number,
+    { sensorIds: number[]; reason: OfflineReason; since: Date }
+  >();
+  /** Which probe holds each sensor in `#unreachable`, for the alarm engine's hold (`M-22`). */
+  readonly #carrier = new Map<number, number>();
   #outages = 0;
 
   constructor(options: ProbeReachabilityOptions) {
@@ -127,6 +143,7 @@ export class ProbeReachability {
     this.#states = options.states;
     this.#coreEvaluatedTypes = options.coreEvaluatedTypes ?? [];
     this.#dependencies = options.dependencies;
+    this.#probeAlarms = options.probeAlarms ?? ((): readonly number[] => []);
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -200,8 +217,12 @@ export class ProbeReachability {
     }
 
     this.#unreachable.clear();
-    for (const held of this.#byProbe.values()) {
-      for (const id of held.sensorIds) this.#unreachable.add(id);
+    this.#carrier.clear();
+    for (const [probeObjectId, held] of this.#byProbe) {
+      for (const id of held.sensorIds) {
+        this.#unreachable.add(id);
+        this.#carrier.set(id, probeObjectId);
+      }
     }
 
     // Both directions: sensors that left an offline probe go back to what their last reading
@@ -260,6 +281,18 @@ export class ProbeReachability {
     return this.#unreachable;
   }
 
+  /** What this probe's absence holds, and since when, while it does (`M-22`). */
+  heldBy(
+    probeObjectId: number,
+  ): { sensorIds: readonly number[]; reason: OfflineReason; since: Date } | undefined {
+    return this.#byProbe.get(probeObjectId);
+  }
+
+  /** The probe whose absence holds this sensor Unknown, while one does (`M-22`). */
+  carrierOf(sensorId: number): number | undefined {
+    return this.#carrier.get(sensorId);
+  }
+
   /**
    * A probe stopped answering.
    *
@@ -287,8 +320,8 @@ export class ProbeReachability {
       return 0;
     }
 
-    this.#byProbe.set(probeObjectId, { sensorIds, reason });
-    for (const id of sensorIds) this.#unreachable.add(id);
+    this.#byProbe.set(probeObjectId, { sensorIds, reason, since: this.#now() });
+    this.#hold(probeObjectId, sensorIds);
     this.#outages += 1;
     if (sensorIds.length === 0) return 0;
 
@@ -305,12 +338,17 @@ export class ProbeReachability {
     let moved: number;
     try {
       moved = await this.#db.tx(async (q) => {
-        const count = await this.#states.reevaluate(q, sensorIds, this.#now(), {
-          message:
-            reason === 'link'
-              ? 'the probe carrying this sensor stopped answering'
-              : 'the probe carrying this sensor is connected but has stopped sending results',
-        });
+        const count = await this.#states.reevaluate(
+          q,
+          [...sensorIds, ...this.#probeAlarms(probeObjectId)],
+          this.#now(),
+          {
+            message:
+              reason === 'link'
+                ? 'the probe carrying this sensor stopped answering'
+                : 'the probe carrying this sensor is connected but has stopped sending results',
+          },
+        );
         // **The dependents of a master under this probe** (`P-135`). The master is Unknown now,
         // not Down, so nothing is holding them — and nothing else was ever going to notice: the
         // dependency reaction runs on the transitions a result batch produced, and a probe that
@@ -320,7 +358,7 @@ export class ProbeReachability {
       });
     } catch (error) {
       this.#byProbe.delete(probeObjectId);
-      for (const id of sensorIds) this.#unreachable.delete(id);
+      this.#release(sensorIds);
       this.#outages -= 1;
       // Returned rather than rethrown, for the reason the `#sensorsUnder` failure above gives:
       // one probe the database would not answer for must not abort the sweep over the others.
@@ -367,7 +405,7 @@ export class ProbeReachability {
     if (only !== undefined && entry.reason !== only) return 0;
     const sensorIds = entry.sensorIds;
     this.#byProbe.delete(probeObjectId);
-    for (const id of sensorIds) this.#unreachable.delete(id);
+    this.#release(sensorIds);
     if (sensorIds.length === 0) return 0;
 
     // The mirror of `lost`'s rollback, and it was missing (`P-90`). The overlay is dropped
@@ -383,16 +421,19 @@ export class ProbeReachability {
     let moved: number;
     try {
       moved = await this.#db.tx(async (q) => {
-        const count = await this.#states.reevaluate(q, sensorIds, this.#now(), {
-          message: 'the probe carrying this sensor is answering again',
-        });
+        const count = await this.#states.reevaluate(
+          q,
+          [...sensorIds, ...this.#probeAlarms(probeObjectId)],
+          this.#now(),
+          { message: 'the probe carrying this sensor is answering again' },
+        );
         // And the other direction: a master that is Down again holds what it should.
         await this.#dependencies.recompute(q, this.#now());
         return count;
       });
     } catch (error) {
       this.#byProbe.set(probeObjectId, entry);
-      for (const id of sensorIds) this.#unreachable.add(id);
+      this.#hold(probeObjectId, sensorIds);
       this.#logger.error(
         { probeObjectId, sensors: sensorIds.length, err: describeError(error) },
         'could not clear a returning probe’s sensors; leaving them marked so the next pass retries',
@@ -404,6 +445,20 @@ export class ProbeReachability {
       'a probe came back; its sensors returned to their last reading',
     );
     return moved;
+  }
+
+  #hold(probeObjectId: number, sensorIds: readonly number[]): void {
+    for (const id of sensorIds) {
+      this.#unreachable.add(id);
+      this.#carrier.set(id, probeObjectId);
+    }
+  }
+
+  #release(sensorIds: readonly number[]): void {
+    for (const id of sensorIds) {
+      this.#unreachable.delete(id);
+      this.#carrier.delete(id);
+    }
   }
 
   /**

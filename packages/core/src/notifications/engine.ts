@@ -1,9 +1,19 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { SensorState, SensorStateCause } from '../state/tables.js';
 import { STATE_TRIGGER, THRESHOLD_TRIGGER, triggerKinds } from '../triggers/definition.js';
 import type { EffectiveTrigger } from '../triggers/repository.js';
 import { TriggerRepository } from '../triggers/repository.js';
 import { fire, reconcile, stillStanding, type Alarm, type StateTriggerSettings } from './chain.js';
+import {
+  episodeEndedMessage,
+  episodeMessage,
+  isCarried,
+  isLive,
+  seenBy,
+  type ProbeEpisode,
+  type ProbeEpisodes,
+} from './episodes.js';
 import {
   AlarmRepository,
   type AlarmAdvance,
@@ -64,7 +74,44 @@ export interface AlarmEngineOptions {
    * the loop's idle heartbeat.
    */
   onQueued?: () => void;
+  /**
+   * Which probe holds which sensors, and which sensors are its own alarm (`M-22`).
+   *
+   * Absent, a lost or frozen probe's sensors notify one by one, as they did before it existed.
+   */
+  episodes?: ProbeEpisodes;
 }
+
+/** A sensor as the hold reads it: its id, and its state and why. */
+interface Held {
+  readonly sensorId: number;
+  readonly state: SensorState;
+  readonly cause: SensorStateCause | null;
+}
+
+/**
+ * Which probe holds each carried sensor, and which triggers hear about that probe from its own
+ * alarm (`M-22`).
+ */
+interface Holds {
+  readonly carrier: ReadonlyMap<number, number>;
+  /** By probe: the state triggers that cover one of its live probe-alarm sensors. */
+  readonly covering: ReadonlyMap<number, ReadonlySet<number>>;
+}
+
+const NO_HOLDS: Holds = { carrier: new Map(), covering: new Map() };
+
+/** What one (sensor, state trigger) pair sees, beyond the sensor's own row (`M-22`). */
+interface Seen {
+  readonly held: boolean;
+  /** The episode this sensor stands for, when it is a live probe-alarm sensor. */
+  readonly episode: ProbeEpisode | undefined;
+  /** The last episode it stood for that has ended. A recovery closing it says so. */
+  readonly ended: ProbeEpisode | undefined;
+  readonly names: ReadonlyMap<number, string>;
+}
+
+const PLAIN: Seen = { held: false, episode: undefined, ended: undefined, names: new Map() };
 
 /** What a reaction did. Every field is a counter Core Health will want (`M-18`, `N-13`). */
 export interface AlarmReaction {
@@ -123,6 +170,7 @@ export class AlarmEngine {
   readonly #valueLookbackMs: number;
   readonly #onArmed: (() => void) | undefined;
   readonly #onQueued: (() => void) | undefined;
+  readonly #episodes: ProbeEpisodes | undefined;
   #queued = 0;
   #fired = 0;
   /**
@@ -144,6 +192,7 @@ export class AlarmEngine {
     this.#valueLookbackMs = options.valueLookbackMs ?? DEFAULT_VALUE_LOOKBACK_MS;
     this.#onArmed = options.onArmed;
     this.#onQueued = options.onQueued;
+    this.#episodes = options.episodes;
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -193,6 +242,11 @@ export class AlarmEngine {
     // contract above says so — and a client is one wire: `Promise.all` bought no parallelism,
     // only pg's "already executing a query" deprecation, which `N-15`'s scenario test surfaced.
     const standing = await this.#alarms.standingOf(q, sensorIds);
+    // Which of these a probe holds, and under which triggers (`M-22`). The probe's own alarm is
+    // not added to the batch: whatever moves an episode, lost or found, frozen or thawed,
+    // re-evaluates it in the same transaction as the sensors it carries.
+    const holds = await this.#holds(q, standing.values());
+    const names = await this.#episodeNames(q, sensorIds);
     const existing = await this.#alarms.alarmsFor(q, sensorIds);
     const effective = await this.#triggers.effectiveForMany(q, sensorIds);
 
@@ -217,6 +271,13 @@ export class AlarmEngine {
       // No runtime row means no sensor, or one that has never been decided. Either way there is
       // nothing to reconcile against, and any alarm for it went with the object's cascade.
       if (sensor === undefined) continue;
+      const carrier = holds.carrier.get(sensorId);
+      const covering = carrier === undefined ? undefined : holds.covering.get(carrier);
+      const episode =
+        this.#episodes !== undefined && isLive(sensor)
+          ? this.#episodes.episodeOf(sensorId)
+          : undefined;
+      const ended = this.#episodes?.endedEpisodeOf(sensorId);
 
       const readings = values.get(sensorId);
       const alarms = new Map(
@@ -237,7 +298,11 @@ export class AlarmEngine {
           alarms.delete(trigger.id);
           const settings = readSettings(trigger, this.#logger);
           if (settings === null) continue;
-          this.#apply(sensor, trigger, alarm, settings, now, out, options);
+          const seen: Seen =
+            covering === undefined && episode === undefined && ended === undefined
+              ? PLAIN
+              : { held: covering?.has(trigger.id) === true, episode, ended, names };
+          this.#apply(sensor, trigger, alarm, settings, now, out, options, seen);
           continue;
         }
 
@@ -348,6 +413,20 @@ export class AlarmEngine {
   async sweep(q: Queryable, now: Date): Promise<{ fired: number; queued: number }> {
     const due = await this.#alarms.due(q, now, this.#maxPerSweep);
     if (due.length === 0) return { fired: 0, queued: 0 };
+    const holds = await this.#holds(
+      q,
+      due
+        .filter((alarm) => alarm.kind === 'state')
+        .map((alarm) => ({
+          sensorId: alarm.sensorId,
+          state: alarm.currentState,
+          cause: alarm.currentCause,
+        })),
+    );
+    const names = await this.#episodeNames(
+      q,
+      due.map((alarm) => alarm.sensorId),
+    );
 
     const advance: AlarmAdvance[] = [];
     const parked: AlarmAdvance[] = [];
@@ -401,12 +480,27 @@ export class AlarmEngine {
         continue;
       }
 
+      // **Held: parked, not fired** (`M-22`). The reaction suspends a carried sensor's alarm under
+      // a trigger that hears about its probe from the probe's own alarm; this checks rather than
+      // assumes, for the reason the staleness check below gives. Parked is what suspended means.
+      const carrier = holds.carrier.get(alarm.sensorId);
+      if (carrier !== undefined && holds.covering.get(carrier)?.has(alarm.triggerId) === true) {
+        this.#park(alarm, parked);
+        continue;
+      }
+      const episode =
+        this.#episodes !== undefined &&
+        isLive({ state: alarm.currentState, cause: alarm.currentCause })
+          ? this.#episodes.episodeOf(alarm.sensorId)
+          : undefined;
+      const current = seenBy(settings.state, alarm.currentState, episode !== undefined);
+
       // The alarm fell due for a state the sensor is no longer in. `react` should have stood it
       // down already, and does in every path that goes through a transaction — but the sweep is
       // the last thing between a stale row and a page at 3 a.m., so it checks rather than
       // assumes. Standing it down silently is right: nothing recovered that anybody was told
       // about, or `react` would have sent the recovery when it cleared it.
-      if (alarm.state === null || !stillStanding(alarm.state, alarm.currentState)) {
+      if (alarm.state === null || !stillStanding(alarm.state, current)) {
         clear.push(alarm.id);
         continue;
       }
@@ -424,7 +518,12 @@ export class AlarmEngine {
         // acknowledgement landed between the due time and the sweep, and the message is about
         // the outage, not about the acknowledgement.
         state: armedState,
-        message: alarm.message,
+        // An episode alarm says which probe and how many sensors (`M-22`): the recipient's UI
+        // shows Probe Health Down, not Unknown, and the sensor's own message is about the link.
+        message:
+          episode !== undefined && armedState === 'unknown'
+            ? episodeMessage(episode, probeName(names, episode.probeObjectId))
+            : alarm.message,
       });
       advance.push({
         id: alarm.id,
@@ -505,6 +604,7 @@ export class AlarmEngine {
       result: AlarmReaction;
     },
     options: ReactionOptions,
+    seen: Seen,
   ): void {
     const view: Alarm | null =
       alarm === null || alarm.state === null
@@ -541,8 +641,16 @@ export class AlarmEngine {
     // written to repair a missed alarm. Armed from `now` instead, the alarm still happens — the
     // hole `P-177` closes stays closed — and it happens once, after its normal latency, by which
     // time a drain has usually said whether the outage is still real.
-    const armFrom = options.armFrom === 'now' ? now : sensor.since;
-    const decision = reconcile(view, sensor.state, armFrom, settings, now);
+    //
+    // **What this trigger sees, which is the sensor's state except in one place** (`M-22`). A
+    // trigger on Unknown sees a probe's live Probe Health as Unknown while the probe's sensors are
+    // held, and its alarm is armed from the episode's start rather than the sensor's. Nothing
+    // outside this decision and the sweep's standing check ever reads it.
+    const onEpisode = seen.episode !== undefined && settings.state === 'unknown';
+    const current = seenBy(settings.state, sensor.state, seen.episode !== undefined);
+    const since = onEpisode ? seen.episode.since : sensor.since;
+    const armFrom = options.armFrom === 'now' ? now : since;
+    const decision = reconcile(view, current, armFrom, settings, now, seen.held);
 
     switch (decision.kind) {
       case 'idle':
@@ -557,7 +665,7 @@ export class AlarmEngine {
           state: settings.state,
           channelKey: null,
           observed: null,
-          since: sensor.since,
+          since,
           nextDueAt: decision.nextDueAt,
         });
         out.result.armed += 1;
@@ -598,7 +706,7 @@ export class AlarmEngine {
           templateId: settings.recoveryTemplateId,
           reason: 'recovery',
           state: sensor.state,
-          message: sensor.message,
+          message: recoveryMessage(alarm, seen) ?? sensor.message,
         });
         out.clear.push(alarm.id);
         out.result.cleared += 1;
@@ -624,12 +732,70 @@ export class AlarmEngine {
           state: settings.state,
           channelKey: null,
           observed: null,
-          since: sensor.since,
+          since,
           nextDueAt: decision.nextDueAt,
         });
         out.result.armed += 1;
         return;
     }
+  }
+
+  /**
+   * Which probe holds each carried sensor, and which triggers hear about that probe from its own
+   * alarm (`M-22`).
+   *
+   * **Free unless something is carried.** An ordinary batch reads nothing here. The probe holding
+   * a sensor comes from the lost and frozen sets, and from the tree for a carried sensor they do
+   * not account for, which after a core restart is all of them until the grace has run out.
+   */
+  async #holds(q: Queryable, sensors: Iterable<Held>): Promise<Holds> {
+    const episodes = this.#episodes;
+    if (episodes === undefined) return NO_HOLDS;
+    const carrier = new Map<number, number>();
+    const unaccounted: number[] = [];
+    for (const sensor of sensors) {
+      if (!isCarried(sensor)) continue;
+      const probe = episodes.carrierOf(sensor.sensorId);
+      if (probe === undefined) unaccounted.push(sensor.sensorId);
+      else carrier.set(sensor.sensorId, probe);
+    }
+    for (const [sensorId, probe] of await this.#alarms.probesAbove(q, unaccounted)) {
+      carrier.set(sensorId, probe);
+    }
+    if (carrier.size === 0) return NO_HOLDS;
+
+    const byProbe = new Map<number, readonly number[]>();
+    for (const probe of new Set(carrier.values())) byProbe.set(probe, episodes.alarmsFor(probe));
+    const candidates = [...new Set([...byProbe.values()].flat())];
+    const standing = await this.#alarms.standingOf(q, candidates);
+    const alarms = candidates.filter((id) => {
+      const row = standing.get(id);
+      return row !== undefined && isLive(row);
+    });
+    const effective = await this.#triggers.effectiveForMany(q, alarms);
+    const covering = new Map<number, ReadonlySet<number>>();
+    for (const [probe, ids] of byProbe) {
+      const triggers = new Set<number>();
+      for (const id of ids) {
+        for (const trigger of effective.get(id) ?? []) {
+          if (trigger.enabled && trigger.kind === STATE_TRIGGER.id) triggers.add(trigger.id);
+        }
+      }
+      covering.set(probe, triggers);
+    }
+    return { carrier, covering };
+  }
+
+  /** The names of the probes these sensors stand for, or stood for, in an episode (`M-22`). */
+  async #episodeNames(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, string>> {
+    const episodes = this.#episodes;
+    if (episodes === undefined) return new Map();
+    const probes = new Set<number>();
+    for (const id of sensorIds) {
+      const episode = episodes.episodeOf(id) ?? episodes.endedEpisodeOf(id);
+      if (episode !== undefined) probes.add(episode.probeObjectId);
+    }
+    return this.#alarms.namesOf(q, [...probes]);
   }
 
   /**
@@ -810,6 +976,24 @@ function readThreshold(
     );
     return null;
   }
+}
+
+/** A probe's name as an episode's words give it. */
+function probeName(names: ReadonlyMap<number, string>, probeObjectId: number): string {
+  return names.get(probeObjectId) ?? `#${String(probeObjectId)}`;
+}
+
+/**
+ * The words of a recovery that closes an episode alarm, or undefined for any other (`M-22`).
+ *
+ * Known by its `since`: an episode alarm is armed from the episode's start, so an alarm on
+ * Unknown armed at exactly that instant is the one that stood for it.
+ */
+function recoveryMessage(alarm: AlarmRow, seen: Seen): string | undefined {
+  const ended = seen.ended;
+  if (ended === undefined || alarm.state !== 'unknown') return undefined;
+  if (alarm.since.getTime() !== ended.since.getTime()) return undefined;
+  return episodeEndedMessage(ended, probeName(seen.names, ended.probeObjectId));
 }
 
 /**

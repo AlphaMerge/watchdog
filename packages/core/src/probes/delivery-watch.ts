@@ -130,6 +130,21 @@ export class ProbeDeliveryWatch {
   }
 
   /**
+   * Whether this core has yet to learn if a probe is missing (`M-22`): the probe has not
+   * connected since the core started, nothing has marked it lost, and the grace is still running.
+   *
+   * The same grace and the same uptime as the sweep below, so Probe Health and the lost mark
+   * cannot disagree about when a probe that never came back is named. Until then it is a probe
+   * that has not reconnected *yet*. A core upgrade would otherwise page once per remote probe
+   * that took forty seconds to redial.
+   */
+  awaitingFirstConnect(probeObjectId: number): boolean {
+    if (this.#options.linkFor(probeObjectId).connected) return false;
+    if (this.#options.reachability.offlineReason(probeObjectId) !== undefined) return false;
+    return this.#uptimeMs() < this.#settings.graceSeconds * 1_000;
+  }
+
+  /**
    * One pass over every probe.
    *
    * Never throws: a sweep that cannot read the object table is not a reason to decide anything
