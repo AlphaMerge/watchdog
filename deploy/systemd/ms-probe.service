@@ -69,7 +69,15 @@ MemoryDenyWriteExecute=no
 SystemCallFilter=@system-service
 
 # --- Resource limits ---------------------------------------------------------------------
-MemoryHigh=4G
+# One memory ceiling, and it kills. No MemoryHigh (P-213): past it the kernel does not refuse or
+# kill, it throttles, and with no swap a throttled probe was measured at a standstill within 17 s
+# and killed by the watchdog below within 25 — then restarted into the same ceiling, stalled
+# again, and never gave up, with nothing saying why. Past MemoryMax the kernel kills at once —
+# measured with swap configured as well as without — and systemd records `oom-kill`. A probe whose
+# work does not fit is killed at every restart for as long as nothing changes (P-215). Probe
+# Health's `memoryLimitUsage` warns at 80% of it — early enough for a probe that has settled high
+# or is leaking, not for a start-up surge, which crosses the last 20% in seconds. Raise it with
+# `systemctl set-property ms-probe MemoryMax=…`, which survives upgrades.
 MemoryMax=6G
 TasksMax=8192
 LimitNOFILE=65536

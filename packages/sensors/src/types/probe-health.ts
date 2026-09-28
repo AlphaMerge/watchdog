@@ -328,11 +328,12 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
   // **How close the probe is to the ceiling its own service sets** (`P-210`), which the machine's
   // figure above cannot say: `ms-probe.service` caps the probe whatever the host has left. The
-  // ceiling is the lower of `MemoryHigh` and `MemoryMax`, because the lower one acts first — and on
-  // the stock unit that is `MemoryHigh`, where the kernel does not kill the probe but throttles it
-  // to a standstill. Measured against the working set, not `memory.current`, because page cache
-  // fills a cgroup to its ceiling on purpose; `packages/shared/src/process/limit-memory.ts` has the
-  // measurements. The highest of the last thirty seconds, and above 100 past the ceiling.
+  // ceiling is the lower of `MemoryHigh` and `MemoryMax`, because the lower one acts first. The
+  // stock unit sets only `MemoryMax`, where the kernel kills (`P-213`); a `MemoryHigh` an operator
+  // sets below it is where the kernel throttles the probe to a standstill instead. Measured against
+  // the working set, not `memory.current`, because page cache fills a cgroup to its ceiling on
+  // purpose; `packages/shared/src/process/limit-memory.ts` has the measurements. The highest of the
+  // last thirty seconds, and above 100 only past a `MemoryHigh`, which a cgroup can stand above.
   //
   // A **gap** where there is no ceiling — no limit, cgroup v1, or not Linux — never a zero, which
   // would say the probe is using none of a limit it does not have.
@@ -340,19 +341,24 @@ const CHANNELS: readonly ChannelDef[] = [
     key: 'memoryLimitUsage',
     name: 'Memory used of its limit',
     unit: '%',
-    // **The error is past 100%** because that is where the kernel acts: past `MemoryHigh` with no
-    // swap, the probe under the shipped unit was stalled on memory 73% of the time within 17
-    // seconds, and its unit's watchdog killed it within 25 (`P-213`). **But it is the warning that
-    // does the work**: a probe that far past its ceiling rarely gets out the heartbeat that would
-    // report it, and the core sees the link drop instead. **The warning is at 80%** because the probe's own start-up grew 856 MiB in five seconds
-    // (`P-206`), 21% of the stock 4 GiB `MemoryHigh`: from 80%, one pool growing — which a
-    // configuration push can start at any time (`P-34`) — reaches the ceiling before anybody has
-    // read the warning.
+    // **The warning is at 80%, and it is the limit that does the work.** On the stock unit it is
+    // the only one that can fire: the kernel kills at `MemoryMax`, so the reading after 100% is a
+    // gap and what the core sees is the link drop (`P-213`). 80% because the probe's own start-up
+    // grew 856 MiB in five seconds (`P-206`) — 14% of the stock 6 GiB — and from 80% one such
+    // surge, which a configuration push can start at any time (`P-34`), still fits under the
+    // ceiling; from 90% it would not. **What it catches is a probe that has settled high or is
+    // leaking, not a surge in flight**: a surge crosses the last 20% in about seven seconds, and a
+    // warning reaches the sensor about half a minute after the crossing (a heartbeat, a sweep). A
+    // threshold that caught one would sit at a level the probe's own start-up passes through.
+    // **The error is past 100%**, for a unit given a `MemoryHigh`:
+    // past it with no swap the probe was stalled on memory 73% of the time within 17 seconds and
+    // killed by its unit's watchdog within 25, and a probe that far gone rarely gets out the
+    // heartbeat that would say so.
     limits: {
       upperWarning: 80,
       upperError: 100,
       warningMessage: 'the probe is nearing its memory limit',
-      errorMessage: 'the probe is past its memory limit; the kernel is throttling or killing it',
+      errorMessage: 'the probe is past its memory limit; the kernel is throttling it',
     },
   },
   // The ceiling itself, so "92% of its limit" says of what.

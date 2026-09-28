@@ -393,16 +393,16 @@ describe('the probe’s own health report', () => {
   });
 
   it('reports its working set against its own ceiling, and the ceiling', () => {
-    // `P-210`: 1 GiB of headroom left under a 4 GiB MemoryHigh is 75% used.
+    // `P-210`: 1.5 GiB of headroom left under the stock unit's 6 GiB MemoryMax is 75% used.
     const report = reporter({
-      limit: { availablePercent: 25, availableBytes: 1_073_741_824, totalBytes: 4_294_967_296 },
+      limit: { availablePercent: 25, availableBytes: 1_610_612_736, totalBytes: 6_442_450_944 },
     }).report();
     assert.equal(report.memoryLimitUsagePercent, 75);
-    assert.equal(report.memoryLimitMb, 4_096);
+    assert.equal(report.memoryLimitMb, 6_144);
   });
 
   it('reports usage past 100% when the probe stands above its ceiling', () => {
-    // Throttled, not stopped: the reading the error limit exists for.
+    // Throttled past an operator's MemoryHigh, not stopped: what the error limit exists for.
     const report = reporter({
       limit: { availablePercent: -17, availableBytes: -35_651_584, totalBytes: 209_715_200 },
     }).report();

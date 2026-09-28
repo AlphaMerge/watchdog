@@ -308,16 +308,16 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     });
 
     it('reports how close the core is to its own ceiling, and gaps where it has none', async () => {
-      // `P-210`: 1.5 GiB left under the stock unit's 6 GiB MemoryHigh is 75% used.
+      // `P-210`: 2 GiB left under the stock unit's 8 GiB MemoryMax is 75% used.
       const limited = await build({
         limitMemory: {
           availablePercent: 25,
-          availableBytes: 1_536 * 1024 * 1024,
-          totalBytes: 6_144 * 1024 * 1024,
+          availableBytes: 2_048 * 1024 * 1024,
+          totalBytes: 8_192 * 1024 * 1024,
         },
       }).read();
       assert.equal(limited['memoryLimitUsage'], 75);
-      assert.equal(limited['memoryLimit'], 6_144);
+      assert.equal(limited['memoryLimit'], 8_192);
 
       const unlimited = await build({ limitMemory: null }).read();
       assert.equal(unlimited['memoryLimitUsage'], null);

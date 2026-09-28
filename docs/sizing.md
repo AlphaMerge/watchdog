@@ -223,6 +223,14 @@ the probe derives is memory you have to have; to read `workerPoolSize` when some
 and because auto-sizing is bounded at 256 workers, past which the probe logs what it needed and
 waits for you.
 
+**The unit's memory ceiling is part of the box.** `ms-probe.service` sets `MemoryMax=6G`, which by
+the formula above holds about 170 workers once settled and about 155 through the start-up peak —
+well short of the 256 auto-sizing may reach. Past it the kernel kills the probe, and the probe
+restarts into the same workload and is killed again (`P-213`). Probe Health's `memoryLimitUsage`
+warns at 80% of it; raise it before a workload that needs more, with
+`systemctl set-property ms-probe MemoryMax=…` (`administration.md`, "A service at its memory
+ceiling").
+
 **Setting `workerPoolSize` to anything non-zero turns this off** and fixes the ceiling there,
 because the setting is a statement about how much memory the probe may use and a derived number
 must not overrule it. Set it when you know your workload, or when the box is smaller than the

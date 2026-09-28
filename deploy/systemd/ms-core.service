@@ -68,8 +68,11 @@ MemoryDenyWriteExecute=no
 
 # --- Resource limits ---------------------------------------------------------------------
 # Sized for the v1 target of 5,000 sensors on 8 cores / 16 GB (CAPABILITIES.MD §13).
-# Raise on larger installations; MemoryMax is a hard stop, MemoryHigh throttles first.
-MemoryHigh=6G
+# One memory ceiling, and it kills: no MemoryHigh, for the reason ms-probe.service gives (P-213) —
+# a throttled service stalls until the watchdog kills it, and restarts into the same stall. Core
+# Health's `memoryLimitUsage` warns at 80% of it, which catches a core that has settled high or
+# is leaking. Raise it on larger installations with `systemctl set-property ms-core MemoryMax=…`,
+# which survives upgrades.
 MemoryMax=8G
 TasksMax=4096
 LimitNOFILE=65536

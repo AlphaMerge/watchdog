@@ -4,23 +4,24 @@ import type { AvailableMemory } from './memory-watch.js';
 /**
  * How close this process's cgroup is to the memory ceiling the kernel enforces on it (`P-210`).
  *
- * **Not the machine's memory, which `P-208` reports.** `ms-probe.service` sets `MemoryHigh=4G` and
- * `MemoryMax=6G`, and the kernel applies those to the service's cgroup whatever the machine has
- * left: on a 64 GiB host the probe reaches its ceiling with `memoryAvailable` reading 80%.
+ * **Not the machine's memory, which `P-208` reports.** `ms-probe.service` sets `MemoryMax=6G`, and
+ * the kernel applies it to the service's cgroup whatever the machine has left: on a 64 GiB host
+ * the probe reaches its ceiling with `memoryAvailable` reading 80%.
  *
  * **The ceiling is the lower of `memory.high` and `memory.max`, because the lower one acts
- * first.** Past `memory.high` the kernel throttles every allocation, and past `memory.max` it
- * kills. On the stock unit that makes the probe's ceiling 4 GiB, not 6 — and throttled is not a
- * milder kind of working: measured under the shipped unit with no swap, the probe was stalled on
- * memory 73% of the time within 17 seconds and its own watchdog killed it within 25, 2 GiB short of
- * where the kernel would have (`docs/findings/2026-09-27-memory-limit.md`).
+ * first.** Past `memory.max` the kernel kills; past `memory.high` it throttles every allocation,
+ * and throttled is not a milder kind of working — measured with no swap, the probe was stalled on
+ * memory 73% of the time within 17 seconds and its own watchdog killed it within 25
+ * (`docs/findings/2026-09-27-memory-limit.md`). That is why the stock units have set no
+ * `MemoryHigh` since `P-213`, but an operator's drop-in may, and where one does it is the ceiling.
  *
  * **Measured against the working set — `memory.current` less `inactive_file` — never
  * `memory.current`.** The kernel lets page cache fill a cgroup up to `memory.high` on purpose and
  * reclaims it there for almost nothing: writing 400 MB through a 200 MiB `memory.high` held
  * `memory.current` at 198 MiB and counted 425 `high` events, with a working set of 6 MiB and the
- * cgroup never stalled (`docs/findings/2026-09-27-cgroup-high-behaviour.jsonl`). A probe replaying its spool would read "at its ceiling" on
- * `memory.current` while perfectly well. The working set is also what Kubernetes evicts on.
+ * cgroup never stalled (`docs/findings/2026-09-27-cgroup-high-behaviour.jsonl`). A probe
+ * replaying its spool would read "at its ceiling" on `memory.current` while perfectly well. The
+ * working set is also what Kubernetes evicts on.
  *
  * **Every level up to the root, and the tightest wins.** A limit on `system.slice` binds the probe
  * as surely as one on its own unit, and each level's `memory.current` already includes everything

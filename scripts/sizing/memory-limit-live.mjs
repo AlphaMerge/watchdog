@@ -1,14 +1,18 @@
-// Probe Health's `memoryLimitUsage` on a real systemd install, for `P-210`. Runs *inside* the box
-// `scripts/smoke-install.sh` builds — started by `scripts/sizing/memory-limit-live.sh`, which says
-// how — as root, with MS_TOKEN set.
+// Probe Health's `memoryLimitUsage` on a real systemd install, and what the installed unit does to
+// a probe past its ceiling (`P-210`, `P-213`). Runs *inside* the box `scripts/smoke-install.sh`
+// builds — started by `scripts/sizing/memory-limit-live.sh`, which says how — as root, with
+// MS_TOKEN set.
 //
 // It approves the probe, gives it a Probe Health and a Core Health sensor, and then moves the
-// probe's ceiling under it with `systemctl set-property --runtime` — the stock `MemoryHigh=4G` is
-// far above what an idle probe uses, so the ceiling is brought to the probe rather than the probe
-// to the ceiling. Four stages, each held for a minute: at the stock unit; with `MemoryHigh` set so
-// the working set is 85% of it (the warning); with `MemoryHigh` below the working set and swap
-// available, which is the stock unit on a host with swap; and the same with `MemorySwapMax=0`,
-// held for two, followed by the stock ceiling again to see whether the probe comes back.
+// probe's ceiling under it with `systemctl set-property --runtime` — the installed ceiling is far
+// above what an idle probe uses, so the ceiling is brought to the probe rather than the probe to
+// the ceiling. The ceiling it moves is the one that binds first in the installed unit file:
+// `MemoryHigh` where it sets one, `MemoryMax` where it does not; each restore puts back the unit
+// file's own figures. Four stages, each held for a minute: at the installed unit; with the ceiling
+// set so the working set is 85% of it (the warning); with the ceiling below the working set and
+// swap available, which is the installed unit on a host with swap; and the same with
+// `MemorySwapMax=0`, held for two, followed by the installed ceiling again to see whether the
+// probe comes back.
 // Every five seconds it records what systemd and the kernel say about the service, what the core's
 // live route says, and the sensor's state; at the end, what the sweep stored in `sample`.
 import { execFileSync } from 'node:child_process';
@@ -132,9 +136,26 @@ function setProperty(property) {
   emit({ kind: 'set', property });
 }
 
+// The VM's load as the run begins: kills and stalls do not depend on it, but every time here does.
+emit({
+  kind: 'conditions',
+  cpus: Number(sh('nproc', [])),
+  loadavg: readFileSync('/proc/loadavg', 'utf8').split(' ').slice(0, 3).join(' '),
+});
+
+// ---- The installed unit's memory settings, which every restore puts back. ----
+const unitFile = sh('systemctl', ['show', '-p', 'FragmentPath', '--value', 'ms-probe']);
+const unitText = readFileSync(unitFile, 'utf8');
+const configured = (name) => new RegExp(`^${name}=(\\S+)`, 'm').exec(unitText)?.[1] ?? 'infinity';
+const INSTALLED = { MemoryHigh: configured('MemoryHigh'), MemoryMax: configured('MemoryMax') };
+/** The property that binds first, and so the one the stages move. */
+const CEILING = INSTALLED.MemoryHigh === 'infinity' ? 'MemoryMax' : 'MemoryHigh';
+const restore = () => setProperty(`${CEILING}=${INSTALLED[CEILING]}`);
+
 // ---- Set up: approve the probe, and give it the two health sensors. ----
-// From the stock unit, whatever a previous run left behind.
-setProperty('MemoryHigh=4G');
+// From the installed unit, whatever a previous run left behind.
+setProperty(`MemoryHigh=${INSTALLED.MemoryHigh}`);
+setProperty(`MemoryMax=${INSTALLED.MemoryMax}`);
 setProperty('MemorySwapMax=infinity');
 const root = await api('GET', '/objects/root');
 // A rerun in the same box finds the probe already approved and reuses it.
@@ -185,6 +206,9 @@ lastCgroup = serviceCgroup(pid);
 if (lastCgroup === null) throw new Error(`the probe is not running (main process ${String(pid)})`);
 emit({
   kind: 'setup',
+  unitFile,
+  installed: INSTALLED,
+  ceiling: CEILING,
   probeObjectId: probeObject.id,
   probeHealthSensorId: probeHealth.id,
   coreHealthSensorId: coreHealth.id,
@@ -242,18 +266,18 @@ const workingSet = () => {
     throw new Error(`cannot read the probe's cgroup: ${now.unreadable}`);
   return now.workingSetBytes;
 };
-setProperty(`MemoryHigh=${String(Math.ceil(workingSet() / 0.85))}`);
+setProperty(`${CEILING}=${String(Math.ceil(workingSet() / 0.85))}`);
 await stage('ceiling at 85%', HOLD_MS);
-setProperty(`MemoryHigh=${String(Math.floor(workingSet() * 0.9))}`);
+setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
 await stage('ceiling below the working set, swap available', HOLD_MS);
-setProperty('MemoryHigh=4G');
+restore();
 await stage('restored', 30_000);
 setProperty('MemorySwapMax=0');
-setProperty(`MemoryHigh=${String(Math.floor(workingSet() * 0.9))}`);
-// Twice as long: a probe with nowhere to put its pages stalls, stops pinging the unit's 30 s
-// watchdog and is killed by it, and the question is what the restart does under the same ceiling.
+setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
+// Twice as long: a probe with nowhere to put its pages is throttled or killed — which, is the
+// installed unit's choice — and the question is what the restart does under the same ceiling.
 await stage('ceiling below the working set, no swap', 2 * HOLD_MS);
-setProperty('MemoryHigh=4G');
+restore();
 setProperty('MemorySwapMax=infinity');
 await stage('restored', HOLD_MS);
 
@@ -280,5 +304,29 @@ for (const row of stored.split('\n').filter(Boolean)) {
     key,
     time,
     value: Number(value),
+  });
+}
+
+// ---- What systemd said about the probe: every kill, restart and readiness, in its own words. ----
+const journal = sh('journalctl', [
+  '-u',
+  'ms-probe',
+  '--no-pager',
+  '--output=short-unix',
+  '--since',
+  `@${String(Math.floor(start / 1_000))}`,
+]);
+for (const entry of journal.split('\n')) {
+  const match = /^(\d+\.\d+) \S+ ([^:]+): (.*)$/.exec(entry);
+  if (
+    match === null ||
+    !/oom|OOM|watchdog|Watchdog|result|restart|killed|Started|Main process/.test(match[3])
+  )
+    continue;
+  emit({
+    kind: 'journal',
+    at: Math.round((Number(match[1]) * 1_000 - start) / 100) / 10,
+    from: match[2],
+    message: match[3],
   });
 }

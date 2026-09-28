@@ -4548,7 +4548,7 @@ because each is a decision rather than a defect:
       stays exact. Mutated in `dist`: name-only fails three of them, an unparenthesised OR fails
       the AND test.
 
-- [ ] **P-213 — a probe past its `MemoryHigh` is killed by its own watchdog, and restarts into the
+- [x] **P-213 — a probe past its `MemoryHigh` is killed by its own watchdog, and restarts into the
       same ceiling for ever** · S · P-210 · Measured in `P-210`, under the shipped `ms-probe.service`
       with no swap: past `MemoryHigh` the kernel throttles the probe — stalled on memory 73% of the
       time within 17 s — the probe cannot fork the `systemd-notify` that answers `WatchdogSec=30`,
@@ -4562,6 +4562,36 @@ because each is a decision rather than a defect:
       — drop `MemoryHigh`, so that `MemoryMax` kills at once and says `oom_kill`; keep it and make
       the loop end where an operator will see it; or keep both and say that the 80% warning is the
       signal — and `administration.md` says what a probe in that state looks like, and what to raise.
+
+      **Done: `MemoryHigh` is gone from both units, and `MemoryMax` is the one ceiling.**
+      `ms-probe.service` keeps `MemoryMax=6G` and `ms-core.service` `MemoryMax=8G`, each with a
+      comment saying why there is no `MemoryHigh`. **Measured** under the shipped unit
+      (`findings/2026-09-28-memory-ceiling.md`): a ceiling set below the probe's working set
+      killed it **in the same second**, and systemd said why in words — *killed by the OOM killer*,
+      *Failed with result 'oom-kill'* — where `P-210`'s probe stalled for 25 s and died of
+      *Watchdog timeout*. Under a ceiling its start-up could not fit, it was killed 4.7–8.8 s into
+      each of five restarts, six kills in 59 s, Down on the link with the channel a gap in `sample`.
+      Raising the ceiling ended that by itself. Under a ceiling its start-up did fit, it ran at 98%
+      with no stall, at a warning. **Swap was not a cushion at `MemoryMax`**: with swap configured
+      the probe was killed all the same, where at `MemoryHigh` swap had kept it working. On this
+      VM, with its swap mostly taken, reclaim made no progress; a host with free, fast swap was not
+      measured. Nothing is given up that was worth having: the probe gets 6 GiB of ordinary memory
+      before anything happens instead of 4 and then a stall, and the spool loses no more to a
+      `SIGKILL` than it did to the old `SIGABRT` — at most one torn line, counted as
+      `spoolCorrupt`, and neither ran `P-205`'s drain.
+
+      **The loop still never ends, and that is `P-215`.** A start limit counts every failed start,
+      and `ms-core` relies on restarting to wait out PostgreSQL at boot. `administration.md` has
+      "A service at its memory ceiling": what an operator sees, and
+      `systemctl set-property ms-probe MemoryMax=…` to raise it. That survives upgrades, where
+      editing the unit does not. It also says not to add a `MemoryHigh` back. `sizing.md` notes that
+      6 GiB holds about 170 workers by its own formula, against the 256 auto-sizing may reach.
+      **The 80% warning now catches a leak rather than a surge**: the room behind it fell from
+      2,867 MiB to 1,229, which one surge crosses in about seven seconds against half a minute for
+      the warning to arrive. That is said wherever the warning is. The
+      error past 100% is now reachable only past an operator's `MemoryHigh`, and its message says
+      "throttling" alone. `memory-limit-live.sh` moves whichever ceiling binds first in the
+      installed unit and records the probe's journal.
 
 - [x] **P-214 — tree search results promised the path and showed a name** · S · U-03, P-212 ·
       `web-ui.md` said search results "come back flat, with the path written out", and so did
@@ -4612,6 +4642,30 @@ because each is a decision rather than a defect:
       Seen in the browser against this branch's core on a scratch database: four `Ping`s, four
       paths, wrapping at 375 px with no horizontal scroll, one request.
 
+
+- [ ] **P-215 — a probe past its `MemoryMax` is killed and restarted for ever** · S · P-213 ·
+      Measured in `P-213`: a probe whose start-up does not fit under its ceiling is killed by the
+      kernel 4.7–8.8 s into every start, restarted 5 s later, and goes round every 10–14 s until
+      somebody raises the ceiling. The loop is now fast and says why (`oom-kill`), but nothing ends
+      it. `Restart=on-failure` with `RestartSec=5s` and no `StartLimit*` leaves systemd's default of
+      five starts in ten seconds, which starts at least 5 s apart can never reach, at any loop speed.
+      **The obvious fix is dangerous**: a start limit counts every failed start, not only kills.
+      `ms-core` exits on any database error during its start-up migration (`migrateOnStart`,
+      `fatal` → `process.exit(1)`), so at boot it is `Restart=on-failure` that waits out a
+      PostgreSQL still in crash recovery. `StartLimitIntervalSec=120` would leave the core `failed`
+      after about 30 s of that, on the box that runs everything. A window of a couple of minutes
+      only catches a service that cannot start at all, which never fixes itself, while a leak that
+      kills once every few hours goes on restarting as it should. So it may be right for the probe
+      and wrong for the core, or right for both once the core waits for its database. **The
+      flapping has an alarm side too**: state triggers default `initialLatencySeconds` to 0, and
+      `alarm-storm.test.ts` covers a dependency storm but not a probe that gets a heartbeat out on
+      each round. **Done when** every way each service exits during start is listed as transient or
+      permanent; the units either end the loop where an operator sees it (`failed`, *start request
+      repeated too quickly*, with `StartLimitIntervalSec=` in `[Unit]`, where it has lived since
+      systemd 229) or keep it, with the reason in the unit comment; the choice is measured with
+      `scripts/sizing/memory-limit-live.sh`; and a scenario test shows a restarting probe raising
+      one alarm. `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and
+      RHEL 9 ship 252.
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day

@@ -95,21 +95,23 @@ const CHANNELS: readonly ChannelDef[] = [
   },
   { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
   // **How close the core is to the ceiling its own service sets** (`P-210`): the lower of
-  // `ms-core.service`'s `MemoryHigh` and `MemoryMax`, against the working set. Probe Health's pair
-  // argues each choice; `packages/shared/src/process/limit-memory.ts` has the measurements.
+  // `ms-core.service`'s `MemoryHigh` and `MemoryMax` — `MemoryMax=8G` alone on the stock unit
+  // (`P-213`) — against the working set. Probe Health's pair argues each choice;
+  // `packages/shared/src/process/limit-memory.ts` has the measurements.
   {
     key: 'memoryLimitUsage',
     name: 'Memory used of its limit',
     unit: '%',
-    // **Past 100% is the error for the same measured reason as Probe Health's**: past `MemoryHigh`
-    // the kernel throttles the core to a standstill. **The warning is Probe Health's 80% too**, and
-    // the reason is weaker here, so it is stated as such: the probe's start-up surge is the only one
-    // measured, and nobody has measured the core's — a second number would be a guess.
+    // **Past 100% is the error for the same measured reason as Probe Health's**, and only a
+    // `MemoryHigh` an operator has set can be stood above: the kernel throttles the core there to
+    // a standstill. At the stock `MemoryMax` it kills. **The warning is Probe Health's 80% too**,
+    // and the reason is weaker here, so it is stated as such: the probe's start-up surge is the
+    // only one measured, and nobody has measured the core's — a second number would be a guess.
     limits: {
       upperWarning: 80,
       upperError: 100,
       warningMessage: 'the core is nearing its memory limit',
-      errorMessage: 'the core is past its memory limit; the kernel is throttling or killing it',
+      errorMessage: 'the core is past its memory limit; the kernel is throttling it',
     },
   },
   { key: 'memoryLimit', name: 'Memory limit', unit: 'MB' },

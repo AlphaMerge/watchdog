@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Probe Health's memory-limit channel on a real systemd install (`P-210`).
+# Probe Health's memory-limit channel on a real systemd install, and what the shipped unit does to
+# a probe past its ceiling (`P-210`, `P-213`).
 #
 #     scripts/sizing/memory-limit-live.sh [out.jsonl]
 #
 # Builds and installs the release into the smoke test's clean systemd box (`MS_SMOKE_KEEP=1`), so
-# the probe runs under the shipped `ms-probe.service` — its `MemoryHigh`, `MemoryMax` and
+# the probe runs under the shipped `ms-probe.service` — its memory ceiling, its watchdog and
 # `ProtectControlGroups` included — and then runs `memory-limit-live.mjs` inside it, which moves
-# the probe's ceiling under it and records what the kernel, the core and the sensor say. About
-# ten minutes, most of it the smoke test. The box is removed at the end.
+# the probe's ceiling under it and records what systemd, the kernel, the core and the sensor say.
+# About fifteen minutes, half of it the smoke test. The box is removed at the end.
 #
 # Development only. It throttles the probe in that box on purpose; nothing outside it is touched.
 set -euo pipefail

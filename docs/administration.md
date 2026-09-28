@@ -158,7 +158,7 @@ alarm.
 | `rollupLag` | Rollups falling behind. An hour is a warning; a day means graphs at wide ranges are wrong |
 | `diskFree` | Errors below 10%. See below — a full disk costs retention |
 | `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host |
-| `memoryLimitUsage` | The core's working set against its own ceiling — the lower of `MemoryHigh` and `MemoryMax` in `ms-core.service`. Warns above 80%, errors above 100%: past `MemoryHigh` the kernel throttles the core rather than killing it, and a throttled core is a stalled one — a probe in that state was measured killed by its unit's watchdog within 25 s, and the core has the same watchdog. A gap where there is no limit, on cgroup v1 and on Windows |
+| `memoryLimitUsage` | The core's working set against its own ceiling — `MemoryMax=8G` in `ms-core.service`. Warns above 80%, and the warning is the one to act on: at 100% the kernel kills the core. See [a service at its memory ceiling](#a-service-at-its-memory-ceiling). A gap where there is no limit, on cgroup v1 and on Windows |
 | `evictedChunks` | **Any value above zero is an error.** Data was dropped early to stay on disk |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
@@ -178,12 +178,48 @@ alarm.
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
 | `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17 and on any platform but Linux and Windows. The machine's figure, not the probe's own ceiling — that is the next row |
-| `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — the lower of `MemoryHigh` and `MemoryMax`, which on the stock `ms-probe.service` is `MemoryHigh=4G`. Warns above 80%, errors above 100%. **Act on the warning.** Past the ceiling with no swap, the kernel throttles the probe to a standstill, the unit's 30 s watchdog kills it, and it restarts into the same ceiling and stalls again — which the core sees as a link that keeps dropping, because a stalled probe cannot send the heartbeat that would report 100% (`P-213`). With swap the kernel holds it just under the ceiling, working, at a warning. Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB — raise the unit's figures (`systemctl edit ms-probe`), not this threshold |
+| `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 
 These thresholds ship as **defaults, not policy**. They are written once when the channel is
 created and never again — change or clear one and it is yours from then on, because a default
 that reappeared after somebody deliberately removed it would be worse than no default at all.
+
+### A service at its memory ceiling
+
+Each service has one memory ceiling, `MemoryMax` in its unit — 6 GiB for `ms-probe`, 8 GiB for
+`ms-core` — and the kernel enforces it whatever the machine has left. `memoryLimitUsage` on Probe
+Health and Core Health says how close each one is. **The warning at 80% is the one to act on**,
+because on the stock units it is the last thing that channel will say. It catches a service that
+has settled high or is growing slowly — a leak, a workload added over weeks. It cannot catch a
+surge already under way: the probe's start-up grew 856 MiB in five seconds (`P-206`), which
+crosses the last 20% of 6 GiB in about seven, and a warning reaches the sensor up to half a minute
+after the crossing. At 80% there is still room for one such surge; past about 86% there is not.
+
+- **Past the ceiling, the kernel kills the service** — measured with swap configured as well as
+  without — and systemd records why. The journal says *A process of this unit has been killed by
+  the OOM killer* and *Failed with result 'oom-kill'*, and `systemctl status ms-probe` shows the
+  result.
+- **It restarts five seconds later**, and if the same work needs the same memory it is killed
+  again, for as long as nothing changes — systemd never gives up at this pace (`P-215`).
+  `systemctl show -p NRestarts ms-probe` counts the rounds. The core shows the probe Down with
+  "Link to the core is 0", and `memoryLimitUsage` as a gap, not as 100%.
+- **Raising the ceiling ends it.** The next restart comes up under the new one without anybody
+  starting it.
+
+To raise a ceiling, set it with `systemctl`, which applies it at once, keeps it across reboots and
+leaves the shipped unit file alone for the next upgrade to replace:
+
+```
+systemctl set-property ms-probe MemoryMax=8G
+```
+
+**Do not add a `MemoryHigh` below it.** Past `MemoryHigh` the kernel does not stop a service or
+kill it — it throttles it, and with no swap a probe was measured at a standstill within 17 seconds,
+killed by its own 30-second watchdog within 25, and restarted into the same standstill for as long
+as nobody intervened (`P-213`, `docs/findings/2026-09-28-memory-ceiling.md`). Where a unit does
+set one, `memoryLimitUsage` measures against it, and can read past 100% — which is what its error
+limit is for.
 
 ### Prometheus
 

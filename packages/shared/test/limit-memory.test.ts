@@ -39,11 +39,11 @@ function stat(inactiveFile: number): string {
   ].join('\n');
 }
 
-/** The stock `ms-probe.service` on a systemd host: `MemoryHigh=4G`, `MemoryMax=6G`. */
+/** The stock `ms-probe.service` since `P-213`: `MemoryMax=6G`, and no `MemoryHigh`. */
 function stockUnit(current: number, inactiveFile = 0): Record<string, string> {
   return {
     '/proc/self/cgroup': '0::/system.slice/ms-probe.service\n',
-    [`${SERVICE}/memory.high`]: `${String(4 * GIB)}\n`,
+    [`${SERVICE}/memory.high`]: 'max\n',
     [`${SERVICE}/memory.max`]: `${String(6 * GIB)}\n`,
     [`${SERVICE}/memory.current`]: `${String(current)}\n`,
     [`${SERVICE}/memory.stat`]: stat(inactiveFile),
@@ -56,17 +56,27 @@ function stockUnit(current: number, inactiveFile = 0): Record<string, string> {
 }
 
 describe('reading how close a cgroup is to its ceiling', () => {
-  it('measures the stock unit against MemoryHigh, which acts before MemoryMax', () => {
-    // Past memory.high the kernel throttles; past memory.max it kills. The lower acts first.
+  it('measures the stock unit against MemoryMax, its only ceiling', () => {
     const memory = readLimitMemory(cgroups(stockUnit(3 * GIB)));
-    assert.deepEqual(memory, { availableBytes: 1 * GIB, totalBytes: 4 * GIB });
+    assert.deepEqual(memory, { availableBytes: 3 * GIB, totalBytes: 6 * GIB });
+  });
+
+  it('takes a MemoryHigh below MemoryMax as the ceiling, because it acts first', () => {
+    // Past memory.high the kernel throttles; past memory.max it kills. The stock units set no
+    // MemoryHigh (`P-213`), but an operator's drop-in may, and the probe stops working there.
+    const files = stockUnit(3 * GIB);
+    files[`${SERVICE}/memory.high`] = `${String(4 * GIB)}\n`;
+    assert.deepEqual(readLimitMemory(cgroups(files)), {
+      availableBytes: 1 * GIB,
+      totalBytes: 4 * GIB,
+    });
   });
 
   it('measures the working set, not memory.current, because page cache fills to the ceiling', () => {
     // Measured: 400 MB written through a 200 MiB memory.high held memory.current at 198 MiB with a
     // working set of 6 MiB and the cgroup never stalled.
     const memory = readLimitMemory(cgroups(stockUnit(4 * GIB, 3.5 * GIB)));
-    assert.deepEqual(memory, { availableBytes: 3.5 * GIB, totalBytes: 4 * GIB });
+    assert.deepEqual(memory, { availableBytes: 5.5 * GIB, totalBytes: 6 * GIB });
   });
 
   it('reads past the ceiling as negative, because a throttled cgroup stands above it', () => {
@@ -80,15 +90,6 @@ describe('reading how close a cgroup is to its ceiling', () => {
     assert.deepEqual(readLimitMemory(cgroups(files)), {
       availableBytes: -34 * MIB,
       totalBytes: 200 * MIB,
-    });
-  });
-
-  it('uses MemoryMax where no MemoryHigh is set', () => {
-    const files = stockUnit(3 * GIB);
-    files[`${SERVICE}/memory.high`] = 'max\n';
-    assert.deepEqual(readLimitMemory(cgroups(files)), {
-      availableBytes: 3 * GIB,
-      totalBytes: 6 * GIB,
     });
   });
 
@@ -119,7 +120,6 @@ describe('reading how close a cgroup is to its ceiling', () => {
 
   it('is a gap where nothing up the tree has a limit', () => {
     const files = stockUnit(1 * GIB);
-    files[`${SERVICE}/memory.high`] = 'max\n';
     files[`${SERVICE}/memory.max`] = 'max\n';
     assert.equal(readLimitMemory(cgroups(files)), null);
   });
