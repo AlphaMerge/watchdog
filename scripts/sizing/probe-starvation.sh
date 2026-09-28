@@ -14,7 +14,12 @@
 #   backlog, its event-loop delay and its GC time every second;
 # - `--heapsnapshot-signal=SIGUSR2`, so the peak can be attributed (`MS_HEAP_SNAPSHOT=1`).
 #
-# Then `probe-starvation.mjs` runs inside the box: it gives the probe 5,000 `port.tcp` sensors,
+# Then `probe-starvation.mjs` runs inside the box: it gives the probe 5,000 `port.tcp` sensors
+# against a local port that never answers (`blackhole.pl`), so each check waits out its 5 s timeout
+# and the pool fills and refuses, as it did in the incident. The first run pointed them at the
+# core's own port, which answers in under a millisecond, and the pool never filled
+# (`docs/findings/2026-09-29-probe-starvation.md`).
+#
 # and holds stages of a CPU hog, a memory balloon sized to the box's own limit, and a stalled
 # stdout, recording what `watchdog-under-load.mjs` records beside the probe's own numbers.
 # `MS_STAGES` (`cpu:seconds[:leaveMiB[:stall]]`) shapes it, and `MS_START_WHEN=<file>` holds the
@@ -88,10 +93,18 @@ echo "==> sending the probe's output through a FIFO, and loading the sampler int
 docker exec "${box}" mkdir -p /opt/ms-starvation
 docker cp "${repo_root}/scripts/sizing/probe-memory-sampler.mjs" \
   "${box}:/opt/ms-starvation/probe-memory-sampler.mjs"
+docker cp "${repo_root}/scripts/sizing/blackhole.pl" "${box}:/opt/ms-starvation/blackhole.pl"
+target_port="${MS_TARGET_PORT:-9999}"
 docker exec "${box}" bash -c '
   set -e
   chmod 755 /opt/ms-starvation
-  chmod 644 /opt/ms-starvation/probe-memory-sampler.mjs
+  chmod 644 /opt/ms-starvation/probe-memory-sampler.mjs /opt/ms-starvation/blackhole.pl
+  cat >/etc/systemd/system/ms-blackhole.service <<EOF
+[Unit]
+Description=A local TCP port that never answers (P-216 harness)
+[Service]
+ExecStart=/usr/bin/perl /opt/ms-starvation/blackhole.pl '"${target_port}"'
+EOF
   mkdir -p /var/lib/ms-starvation
   # Restarted whenever cat sees EOF, which is every time the probe restarts and closes its end.
   cat >/etc/systemd/system/ms-stdout-reader.service <<EOF
@@ -115,7 +128,7 @@ Environment=MS_PROBE_MEMORY_OUT=/var/lib/ms-probe/memory.ndjson
 Environment="NODE_OPTIONS=--import=/opt/ms-starvation/probe-memory-sampler.mjs --heapsnapshot-signal=SIGUSR2"
 EOF
   systemctl daemon-reload
-  systemctl start ms-stdout-reader
+  systemctl start ms-stdout-reader ms-blackhole
 '
 
 echo "==> starting the services again (the smoke test ends by stopping them)"
@@ -145,7 +158,8 @@ done
 # reader, and the sampler's lines from inside the probe. A run that would fail on one of those
 # fails here, before the window is booked, rather than inside it.
 echo "==> preflight"
-docker exec -e MS_TOKEN="${token}" -e MS_PREFLIGHT=1 "${box}" node /tmp/probe-starvation.mjs
+docker exec -e MS_TOKEN="${token}" -e MS_PREFLIGHT=1 -e MS_TARGET_PORT="${target_port}" \
+  "${box}" node /tmp/probe-starvation.mjs
 
 # With MS_START_WHEN set, everything up to here happens, and then the run waits for that file.
 if [ -n "${MS_START_WHEN:-}" ]; then
@@ -155,7 +169,7 @@ fi
 
 echo "==> measuring into ${out_dir}"
 status=0
-docker exec -e MS_TOKEN="${token}" -e MS_BOX_LIMIT_MIB="${limit_mib}" \
+docker exec -e MS_TOKEN="${token}" -e MS_BOX_LIMIT_MIB="${limit_mib}" -e MS_TARGET_PORT="${target_port}" \
   ${MS_STAGES:+-e MS_STAGES="${MS_STAGES}"} \
   ${MS_SENSORS:+-e MS_SENSORS="${MS_SENSORS}"} \
   ${MS_HEAP_SNAPSHOT:+-e MS_HEAP_SNAPSHOT="${MS_HEAP_SNAPSHOT}"} \

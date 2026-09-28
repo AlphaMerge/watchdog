@@ -8,8 +8,9 @@
 // This holds the probe under load through stages that add, one at a time:
 //
 // - **CPU**, `cpu × nproc` busy loops in a unit of their own, as `P-220` did;
-// - **memory**, a balloon filling all but `leaveMiB` of the *box's* limit (never the VM's), marked
-//   to be the OOM killer's first choice;
+// - **memory**, a balloon filling all but `leaveMiB` of the *box's* limit (never the VM's) less its
+//   anonymous memory, so page cache cannot absorb it, touched so it is resident, and marked to be
+//   the OOM killer's first choice;
 // - **a stalled log**: the unit that drains the probe's stdout FIFO is stopped with SIGSTOP, as a
 //   starved journald would be, and the probe keeps writing into a pipe nobody reads.
 //
@@ -21,6 +22,7 @@
 // At the end, what each service sent to `systemd-notify` and what PID 1 logged about it.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, createReadStream, existsSync, openSync, readFileSync, statSync } from 'node:fs';
+import { connect } from 'node:net';
 import { createInterface } from 'node:readline';
 
 const API = 'http://127.0.0.1:8080/api/v1';
@@ -30,7 +32,7 @@ if (!TOKEN) {
   process.exit(2);
 }
 /** `cpu:seconds[:leaveMiB[:stall]]`. Baseline, CPU, CPU and memory, all three, then recovery. */
-const STAGES = (process.env.MS_STAGES ?? '0:120,6:240,6:300:300,6:300:300:1,0:180')
+const STAGES = (process.env.MS_STAGES ?? '0:120,6:240,6:300:300,6:300:150:1,0:180')
   .split(',')
   .map((spec) => {
     const [cpu, seconds, leaveMiB, stall] = spec.split(':');
@@ -42,6 +44,8 @@ const STAGES = (process.env.MS_STAGES ?? '0:120,6:240,6:300:300,6:300:300:1,0:18
     };
   });
 const SENSORS = Number(process.env.MS_SENSORS ?? '5000');
+/** `blackhole.pl`'s port: a connect there waits out the check's 5 s timeout. */
+const TARGET_PORT = Number(process.env.MS_TARGET_PORT ?? '9999');
 const HEAP_SNAPSHOT = process.env.MS_HEAP_SNAPSHOT === '1';
 const UNITS = ['ms-core', 'ms-probe'];
 const READER = 'ms-stdout-reader';
@@ -145,9 +149,20 @@ const readNumber = (path) => {
 
 function boxMemory() {
   if (BOX === null) return null;
+  let stat = '';
+  try {
+    stat = readFileSync(`${BOX}/memory.stat`, 'utf8');
+  } catch {
+    // Reported as NaN below.
+  }
+  const field = (key) => Number(new RegExp(`^${key} (\\d+)$`, 'm').exec(stat)?.[1] ?? NaN);
   return {
     currentMiB: mib(readNumber(`${BOX}/memory.current`) ?? NaN),
     maxMiB: mib(readNumber(`${BOX}/memory.max`) ?? NaN),
+    // What the page cache cannot give back: the first run sized the balloon against
+    // `memory.current`, which counts cache, and the kernel simply dropped cache.
+    anonMiB: mib(field('anon')),
+    fileMiB: mib(field('file')),
     swapMiB: mib(readNumber(`${BOX}/memory.swap.current`) ?? NaN),
     psi: psi(`${BOX}/memory.pressure`),
   };
@@ -225,6 +240,31 @@ if (process.env.MS_PREFLIGHT === '1') {
     problems.push("the sampler did not find the probe's SonicBoom");
   }
   if (probeProcess(probeUnit.pid) === null) problems.push("the probe's /proc is unreadable");
+  // The target must hang, not refuse and not answer, or the pool never fills. The first connect or
+  // two land in the listener's queue; the ones after must time out.
+  const outcomes = [];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    outcomes.push(
+      await new Promise((resolve) => {
+        const socket = connect({ host: '127.0.0.1', port: TARGET_PORT });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          resolve('timeout');
+        }, 1_500);
+        socket.once('connect', () => {
+          clearTimeout(timer);
+          resolve('connected');
+        });
+        socket.once('error', (error) => {
+          clearTimeout(timer);
+          resolve(error.code ?? 'error');
+        });
+      }),
+    );
+  }
+  if (outcomes.at(-1) !== 'timeout') {
+    problems.push(`127.0.0.1:${String(TARGET_PORT)} does not hang: ${outcomes.join(', ')}`);
+  }
   // The limits as the kernel holds them, and `free` as an operator would read it inside the box,
   // for the findings: the balloon is sized to these, and nothing else stands between it and the VM.
   const limits = {
@@ -234,7 +274,15 @@ if (process.env.MS_PREFLIGHT === '1') {
   };
   if (limits.memoryMax === 'max') problems.push('the box has no memory.max');
   if (limits.swapMax === 'max') problems.push('the box has no memory.swap.max');
-  emit({ kind: 'preflight', problems, limits, lastSample, box: boxMemory(), reader: reader.state });
+  emit({
+    kind: 'preflight',
+    problems,
+    limits,
+    target: { port: TARGET_PORT, connects: outcomes },
+    lastSample,
+    box: boxMemory(),
+    reader: reader.state,
+  });
   if (problems.length > 0) {
     console.error(`preflight failed: ${problems.join('; ')}`);
     process.exit(1);
@@ -267,7 +315,7 @@ if (probeObjectId === null) {
 }
 const provisioned = spawnSync(
   process.execPath,
-  ['/tmp/provision.mjs', '--sensors', String(SENSORS), '--api', API],
+  ['/tmp/provision.mjs', '--sensors', String(SENSORS), '--api', API, '--port', String(TARGET_PORT)],
   { encoding: 'utf8', env: { ...process.env, MS_TOKEN: TOKEN } },
 );
 if (provisioned.status !== 0) {
@@ -303,13 +351,16 @@ function hog(factor) {
 }
 
 const BALLOON = 'ms-balloon';
-/** Fills all but `leaveMiB` of the box's limit, or releases it. Touched, so it is resident. */
+/**
+ * Fills all but `leaveMiB` of the box's limit less its anonymous memory, or releases it. Touched,
+ * so it is resident rather than promised, and first in line for the OOM killer.
+ */
 function balloon(leaveMiB) {
   tryCtl(['stop', BALLOON]);
   tryCtl(['reset-failed', BALLOON]);
   if (leaveMiB === null) return 0;
   const memory = boxMemory();
-  const sizeMiB = memory.maxMiB - memory.currentMiB - leaveMiB;
+  const sizeMiB = memory.maxMiB - memory.anonMiB - leaveMiB;
   if (sizeMiB <= 0) return 0;
   sh('systemd-run', [
     `--unit=${BALLOON}`,

@@ -4883,6 +4883,16 @@ because each is a decision rather than a defect:
       Probe Health can say what state a probe in that condition is in. Needs heavy VM time, booked
       with whoever is scheduling the machine.
 
+      **First run: the conditions were not reached** (2026-09-28,
+      `docs/findings/2026-09-29-probe-starvation.md`). 5,000 `port.tcp` sensors in the smoke box
+      through CPU, a memory balloon and a stalled stdout: no kill, and no growth past the 2,542 MiB
+      start-up peak. But the balloon was sized against `memory.current`, so page cache absorbed it
+      (memory pressure 0), and checks against a local listening port were too cheap to fill the
+      pool (queued 0, refused 0), so no refusal flood reached the stalled log. It did measure a
+      2.3–2.5 s main-thread loop delay under CPU starvation, and 65 workers holding 1.1–1.6 GiB
+      against a main heap of 55 MiB or less. **Next**: the sensors aim at `blackhole.pl`, a local
+      port that never answers, and the balloon is sized against anonymous memory.
+
 - [ ] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
       toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs
       with other sessions' suites beside it: the probe, scheduling no sensors, killed at *Watchdog
