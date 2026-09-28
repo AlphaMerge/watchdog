@@ -65,6 +65,12 @@ A few consequences are worth knowing before somebody reports them as bugs:
 - **The installation's own health is not a branch's.** Core Health, notification health and
   `/metrics` need `read` on the root; the list of probes needs an administrator; a probe's health
   needs `read` on that probe.
+- **A public share link shows what its maker can see, now.** Somebody with the URL needs no
+  login, so the link carries the rights of the account that made it: a tile on an object that
+  account cannot see is drawn as unavailable, and a map's designer refuses a new tile on one.
+  Revoking the maker's grant, or disabling the account, narrows or blanks every link it made. A
+  link made before this rule existed, by a login that has since been renamed or deleted, is blank
+  after the upgrade for the same reason: nobody is left to see through. Make a new one.
 - **The history of a deleted sensor is visible to administrators only.** Nothing records which
   branch it was in, so there is no grant left to read it through.
 - **A change of grant reaches an open page at the next state change.** The live stream checks for

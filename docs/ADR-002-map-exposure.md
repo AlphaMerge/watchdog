@@ -122,6 +122,39 @@ map's *graph* widgets show their channels' current readings rather than a chart.
 would mean an unauthenticated range query per graph tile, which is precisely the work the fourth
 consequence above asks to be bounded. A viewer who needs the history signs in.
 
+## Amendment, 2026-09-28 (`A-22`): a shared map is its link maker's view
+
+**Decision 1's premise stopped being true, and this is where it is made true again.** "The blast
+radius of a leaked link is exactly what the person who made the link was looking at" held while
+every author could see every object. `A-12` gave accounts a branch of the tree, and nothing about a
+map's layout was ever checked against its author: an account granted one customer could put the
+root on a canvas as a sensor list, share it, and publish every sensor's name, state and failure
+message to anybody with the URL, no login needed. "The widget list is the authorisation" was
+authorising objects its author had never been shown.
+
+**A public view is now resolved through the account that made the link, as that account stands
+when the link is opened** — its grants, its groups, its role, re-read on every poll. A tile on an
+object the maker cannot see is `unavailable`, exactly as it is for a signed-in viewer, and a sensor
+list holds only the sensors the maker could list. What the stored widget list still decides is
+which tiles there are; it no longer decides what they may show.
+
+**Why the maker's current view and not a snapshot taken when the link was made.** A link is a
+delegation, and a delegation should not outlive the right it was made from: when a grant is
+revoked, a group is left or an account is disabled, every link that account made shrinks with it,
+without anybody having to find the links. A snapshot would also have to be re-checked anyway — a
+sensor list shows sensors added under its root after the link was made. The cost is one visibility
+resolution per poll, measured at 1–1.5 ms at the v1 target (`findings/2026-09-28-object-visibility.md`).
+
+**A link whose maker is gone publishes nothing** — every tile unavailable, every list empty. That
+includes links made before this amendment whose maker's login no longer matches an account (the
+migration that records makers can only go by the login it was given), which go dark on upgrade
+rather than keep publishing on nobody's authority.
+
+**And on save**, since `A-22`, a layout may not *add* a tile on an object its saver cannot read —
+refused in the same words for a hidden id and an id never issued, so the save does not reopen the
+oracle `A-15` closed on the view. Tiles already on a map stay, so a map with one stale tile can
+still be saved. That keeps the document honest; the view is what keeps the link honest.
+
 ## Decision 3 — Geographical maps are deferred, not designed here
 
 `G-08` needs map tiles, and every way of getting them argues with `CLAUDE.md`'s third hard

@@ -250,6 +250,20 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     return response.json<{ id: number }>().id;
   };
 
+  /**
+   * A map holding tiles its author could not save today (`A-22`): on an object deleted since it
+   * was saved, or on one hidden from its author and stored before the save check existed. Written
+   * into the row, because the service refuses both now — and the view still has to cope.
+   */
+  const storedMap = async (name: string, widgets: unknown[]): Promise<number> => {
+    const id = await makeMap(name, []);
+    await db.query(`UPDATE map SET layout = $2::jsonb WHERE id = $1`, [
+      id,
+      JSON.stringify({ widgets }),
+    ]);
+    return id;
+  };
+
   const view = async (id: number, cookie: string) =>
     app.inject({ method: 'GET', url: `/api/v1/maps/${String(id)}/view`, headers: as(cookie) });
 
@@ -282,7 +296,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
   });
 
   it('keeps a widget whose object is gone, and does not say why — even to its author', async () => {
-    const id = await makeMap('broken', [
+    const id = await storedMap('broken', [
       { id: 'w1', kind: 'status', objectId: deletedId, title: 'Was a sensor' },
     ]);
     const body = (await view(id, author)).json<{
@@ -302,11 +316,33 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     // are curious about, open the view, and read which are deleted and which merely hidden from
     // you. Three ids here — gone, walled off, never issued — and every tile must be the same
     // document apart from its own id.
-    const id = await makeMap('oracle', [
+    //
+    // **Since `A-22` the save refuses all three**, in the same words — so the attack now fails at
+    // the first step, and asking which of the three a save refused is the oracle again unless the
+    // answers agree.
+    const probes = [
       { id: 'gone', kind: 'status', objectId: deletedId, title: 'probe' },
       { id: 'walled', kind: 'status', objectId: hiddenId, title: 'probe' },
       { id: 'never', kind: 'status', objectId: 9_999_999, title: 'probe' },
-    ]);
+    ];
+    const refusals: string[] = [];
+    for (const widget of probes) {
+      const refused = await app.inject({
+        method: 'POST',
+        url: '/api/v1/maps',
+        headers: as(author),
+        payload: { name: `oracle-${widget.id}`, layout: { widgets: [widget] } },
+      });
+      assert.equal(refused.statusCode, 403, refused.body);
+      const { error } = refused.json<{ error: { code: string; message: string } }>();
+      refusals.push(`${error.code}: ${error.message}`);
+    }
+    assert.equal(new Set(refusals).size, 1, `the refusals differ: ${refusals.join(' | ')}`);
+
+    // **And the view still hides what a stored map names** — a map saved before the check, whose
+    // tiles are all three. The save is the first line; this is the one a row from before it
+    // meets.
+    const id = await storedMap('oracle', probes);
     const response = await view(id, author);
     assert.equal(response.statusCode, 200, response.body);
     const tiles = response.json<{ widgets: Record<string, unknown>[] }>().widgets;
@@ -320,7 +356,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     // "Deleted" against "you may not see it" is an oracle for which ids are live. This case was
     // about a reader being told less than the author; since `A-15` nobody is told, and the one
     // above asserts it for the author.
-    const id = await makeMap('shared', [
+    const id = await storedMap('shared', [
       { id: 'w1', kind: 'status', objectId: deletedId, title: 'Was a sensor' },
     ]);
     const granted = await app.inject({

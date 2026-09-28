@@ -51,6 +51,7 @@ import { migration050 } from './050-report-xml.js';
 import { migration051 } from './051-report-pdf.js';
 import { migration052 } from './052-access-epoch.js';
 import { migration053 } from './053-libraries.js';
+import { migration054 } from './054-map-share-maker.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -113,6 +114,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration051,
   migration052,
   migration053,
+  migration054,
 ];
 
 export type { Migration } from './types.js';

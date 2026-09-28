@@ -1,12 +1,13 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import { atLeast, grantedByLabel, type AccessRight } from '../auth/access.js';
+import { AccessService, atLeast, grantedByLabel, type AccessRight } from '../auth/access.js';
 import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
 import type { Actor, AuditSink, MapAudit, MapBackgroundAudit } from '../objects/audit.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
 import { createHash } from 'node:crypto';
 import { readImage } from './images.js';
 import { mintShareToken, shareTokenHash } from './shares.js';
+import { readWidgets } from './widgets.js';
 import {
   MAP_GRANTS,
   type MapBackground,
@@ -53,6 +54,8 @@ export class MapService {
   readonly #db: Database;
   readonly #repository: MapRepository;
   readonly #access: FlatAccess;
+  /** What a saver may put on a canvas: the object tree's rights, not the map's (`A-22`). */
+  readonly #objects: AccessService;
   readonly #audit: AuditSink;
   readonly #logger: Logger;
 
@@ -61,6 +64,12 @@ export class MapService {
     this.#repository = options.repository;
     this.#audit = options.audit;
     this.#access = new FlatAccess(MAP_GRANTS, options.audit);
+    // Read here and never written through, but built whole: `A-17` made the audit sink required.
+    this.#objects = new AccessService({
+      db: options.db,
+      audit: options.audit,
+      logger: options.logger,
+    });
     this.#logger = options.logger.child({ component: 'maps' });
   }
 
@@ -158,6 +167,7 @@ export class MapService {
     const layout = input.layout ?? { widgets: [] };
 
     return this.#db.tx(async (tx) => {
+      await this.#mayPlace(viewer, layout, null, tx, 'create');
       const existing = await tx.query<{ id: string }>(
         `SELECT id FROM map WHERE lower(name) = lower($1)`,
         [name],
@@ -209,7 +219,10 @@ export class MapService {
       if (patch.name !== undefined) next.name = validName(patch.name);
       if (patch.description !== undefined) next.description = validDescription(patch.description);
       if (patch.priority !== undefined) next.priority = validPriority(patch.priority);
-      if (patch.layout !== undefined) next.layout = patch.layout;
+      if (patch.layout !== undefined) {
+        await this.#mayPlace(viewer, patch.layout, current.layout, tx, 'update', id);
+        next.layout = patch.layout;
+      }
 
       if (next.name !== undefined && next.name.toLowerCase() !== current.name.toLowerCase()) {
         const clash = await tx.query<{ id: string }>(
@@ -331,6 +344,9 @@ export class MapService {
         prefix: minted.prefix,
         expiresAt: request.expiresAt,
         createdBy: grantedByLabel(actor),
+        // The viewer, not the actor: the account whose rights were checked is the one a public
+        // view is resolved through (`A-22`).
+        createdByUser: viewer.userId,
       });
       await this.#audit.record(
         tx,
@@ -388,6 +404,57 @@ export class MapService {
   }
 
   /**
+   * Refuses a layout that adds a widget on an object the saver cannot read (`A-22`).
+   *
+   * **What a link publishes is bounded by its maker's visibility when it is viewed** — see
+   * `MapResolver` — so this is not what keeps a share honest. It keeps the document honest: a map
+   * built by an account granted one branch names only that branch, so what the author sees on the
+   * canvas and what anybody given the map sees agree about what it is a picture of.
+   *
+   * **Only the ids the layout adds.** One already on the map stays however it got there — an
+   * object since deleted, or placed by somebody who can see more — or a map with one stale tile
+   * could never be saved again, by anybody.
+   *
+   * **A hidden id and an id never issued are refused in the same words**, with the ids the caller
+   * sent and nothing else, so a save is not the existence oracle `A-15` closed on the view.
+   */
+  async #mayPlace(
+    viewer: MapViewer,
+    layout: unknown,
+    stored: unknown,
+    q: Queryable,
+    phase: 'create' | 'update',
+    mapId?: number,
+  ): Promise<void> {
+    const named = (document: unknown): number[] =>
+      readWidgets(document)
+        .widgets.map((widget) => widget.objectId)
+        .filter((id): id is number => id !== null);
+    const before = new Set(stored === null ? [] : named(stored));
+    const added = [...new Set(named(layout))].filter((id) => !before.has(id));
+    if (added.length === 0) return;
+
+    const rights = await this.#objects.resolveManyFor(
+      {
+        userId: viewer.userId,
+        role: viewer.role,
+        ...(viewer.scope === undefined ? {} : { scope: viewer.scope }),
+      },
+      added,
+      q,
+    );
+    const refused = added.filter((id) => {
+      const right = rights.get(id);
+      return right === undefined || !atLeast(right, 'read');
+    });
+    if (refused.length === 0) return;
+    throw new MapError('MAP_FORBIDDEN', 'a widget names an object this account may not read', {
+      context: { phase, ...(mapId === undefined ? {} : { mapId }) },
+      details: { objectIds: refused },
+    });
+  }
+
+  /**
    * What a presented token opens — **the one method here that takes no viewer**.
    *
    * `ADR-002` Decision 1: the token *is* the authorisation, and it authorises exactly one map's
@@ -395,8 +462,12 @@ export class MapService {
    * and that asymmetry is deliberate: the public surface is one function, and it is this one.
    *
    * Expiry and revocation are decided by the query, so a row coming back is a link that works.
+   * It comes back with the link's maker as the maker stands now — `null` when the account is
+   * gone or disabled — because a public view is that account's view (`A-22`).
    */
-  async openShare(token: string): Promise<{ mapId: number; map: MapRow } | undefined> {
+  async openShare(
+    token: string,
+  ): Promise<{ mapId: number; map: MapRow; maker: MapViewer | null } | undefined> {
     if (token.length < 16 || token.length > 100) return undefined;
     return this.#db.tx(async (tx) => {
       const found = await this.#repository.shareByToken(tx, shareTokenHash(token));
@@ -407,7 +478,7 @@ export class MapService {
       /* c8 ignore next */
       if (map === undefined) return undefined;
       await this.#repository.touchShare(tx, found.shareId);
-      return { mapId: found.mapId, map };
+      return { mapId: found.mapId, map, maker: found.maker };
     });
   }
 

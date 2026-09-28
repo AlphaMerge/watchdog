@@ -202,12 +202,21 @@ describe(
 
     describe('maps', () => {
       it('records what moved on an edit, and the layout one item to a line', async () => {
+        // A tile on an object the editor may read, since a save may not add one it cannot
+        // (`A-22`). Granted in SQL so that the grant is not itself one of the rows read below.
+        const objectId = rootId;
+        await db.query(
+          `INSERT INTO object_access (object_id, group_id, right_)
+           SELECT $1, id, 'read' FROM user_group WHERE name = 'auditors'
+           ON CONFLICT DO NOTHING`,
+          [objectId],
+        );
         const map = await maps.create(owner, { name: name('edited') }, actor);
         await maps.update(
           owner,
           map.id,
           map.version,
-          { layout: { widgets: [{ id: 'w1', kind: 'status', objectId: 7 }] } },
+          { layout: { widgets: [{ id: 'w1', kind: 'status', objectId }] } },
           actor,
         );
         const [entry] = await rows(`action = 'map.updated' AND (summary->>'mapId')::bigint = $1`, [
@@ -217,7 +226,7 @@ describe(
           {
             field: 'map.layout',
             before: 'widgets: []',
-            after: 'widgets: {"id":"w1","kind":"status","objectId":7}',
+            after: `widgets: {"id":"w1","kind":"status","objectId":${String(objectId)}}`,
           },
         ]);
       });

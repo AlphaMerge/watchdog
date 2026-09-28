@@ -12366,6 +12366,62 @@ because each is a decision rather than a defect:
       hidden changes, and it carries on across a resubscription), and `state-stream.test.ts`'s
       "numbers its events" is now "numbers nothing". Both fail against the code before the fix.
 
+- [x] **A-22 — A public share link publishes whatever its map names** · M · A-12, G-06 · Found
+      2026-09-28 in `A-12`'s review, by two readers independently. `ADR-002` made a map's stored
+      widget list the whole authorisation for its public view, on the premise that the list is
+      "exactly what the person who made the link was looking at" — and nothing ever checked that.
+      `MapResolver.#visible` returned every id for the public audience and its sensor lists ran
+      with `Visibility.EVERYTHING`, and `MapService.create`/`update` accepted any id. So a
+      `readwrite` account granted one customer, or nothing, could put the root on a canvas as a
+      sensor list, share it (its creator holds `full`), and hand every sensor's name, state and
+      failure message, holes included, to anybody with the URL. `A-12`'s sweep called
+      `/public/maps/none`, a 404, and proved nothing about the route.
+
+      **Done when** a share can only ever publish what its maker could see, asserted by the sweep
+      over a real link; a save refuses a tile on an object its saver cannot read, without becoming
+      the existence oracle `A-15` closed; a map stored before the fix, naming a hidden object,
+      still renders that tile unavailable; and the ticket says what a later revocation does to a
+      link already made.
+
+      **A-22 outcome: a public view is its link maker's view, as the maker stands when it is
+      opened.** Migration 054 records each link's maker as an account (`map_share.created_by_user`,
+      `ON DELETE SET NULL`), and `shareByToken` returns the maker's current role with the link, in
+      the statement that decides the link works — `null` when the account is gone or disabled.
+      The resolver treats the public audience as that account viewing: tiles it cannot see are
+      `unavailable`, sensor lists hold only what it could list, and no maker publishes nothing.
+      **Re-resolved on every view, not snapshotted**, because a link is a delegation and should not
+      outlive the right it was made from — a revoked grant or a disabled account narrows or blanks
+      every link without anybody hunting for them — and a snapshot would still need a live check
+      for sensors added under a list's root later. It costs one resolution per poll, 1–1.5 ms at
+      the v1 target. **On save**, an object id the layout *adds* must be readable by the saver;
+      a hidden id and one never issued are refused in the same words, and ids already on the map
+      stay, so a map with a stale tile can still be saved. The backfill matches `created_by` by
+      login, folded; **a link whose login matches nobody has no maker after the upgrade and goes
+      blank**, which the findings, `administration.md` and an amendment to `ADR-002` say where an
+      operator will look.
+
+      Tests: in `object-visibility.test.ts` the sweep now reads a real link, made by the operator
+      to a map holding a tile on a hidden sensor written straight into the row as a pre-054 map
+      would hold it, and a new case sets an administrator's link to the same map beside it (names
+      the sensor) and has the save refuse two hidden ids and a never-issued one identically while
+      keeping the stored tile; 3 new resolver cases (the maker's view, a maker who may not see,
+      no maker); a migrator case for 054's backfill and rollback; `A-15`'s attack in
+      `maps-api.test.ts` now asserts the three refusals agree *and* that the view still hides a
+      stored map's three tiles, with its two sibling cases reading stored maps. Mutation 4/4:
+      the public audience seeing every widget, its lists unfiltered, no save check, and a link with
+      no maker.
+
+- [ ] **A-23 — `POST /objects/:id/as-template` lists sensors inside a carved hole** · S · A-12 ·
+      Found 2026-09-28 in `A-12`'s review. The route is `computesOn(onObject('read'))` on the
+      device, which is right, and `sensorsOfDevice` then reads `WHERE o.parent_id = $1 AND
+      o.kind = 'sensor'` with no visibility condition — so a sensor carved `none` under a readable
+      device comes back with its name, type and parameters. `A-12`'s sweep calls `GET`s, and this
+      is a `COMPUTES` `POST`, so it never reached it.
+
+      **Done when** the template drafted from a device holds only the sensors its caller can see,
+      asserted in `object-visibility.test.ts`, and the sweep calls every `COMPUTES` route
+      (`changes: false`) it can build a body for, so the next one is not found by reading.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

@@ -39,7 +39,11 @@ import {
  */
 
 /**
- * Who is looking. `public` is `G-06`: the widget list itself is the authorisation.
+ * Who is looking. `public` is `G-06`, a link holder with no login — **seeing through the link's
+ * maker** (`A-22`), as the maker stands now, or seeing nothing when the maker is gone. `ADR-002`
+ * made the widget list the authorisation on the premise that it is what the maker was looking at;
+ * after `A-12` an author granted one branch can name any id, so the premise is enforced here
+ * rather than assumed.
  *
  * **No field says how far a viewer is trusted with a broken tile**, and there was one: `G-02`
  * carried `holdsFull` so the map's `full` holders could be told why a tile was unavailable. But
@@ -47,7 +51,8 @@ import {
  * told was anybody who asked (`A-15`).
  */
 export type MapAudience =
-  { readonly kind: 'viewer'; readonly viewer: MapViewer } | { readonly kind: 'public' };
+  | { readonly kind: 'viewer'; readonly viewer: MapViewer }
+  | { readonly kind: 'public'; readonly maker: MapViewer | null };
 
 export interface MapResolverOptions {
   readonly db: Database;
@@ -220,20 +225,21 @@ export class MapResolver {
   /**
    * Which of these the audience may see.
    *
-   * **A public map's widget list is its own authorisation** (`ADR-002` Decision 1): the author
-   * chose what is on the canvas and the route serves that and nothing else, so there is nobody to
-   * resolve rights for. An authenticated viewer is checked against the object tree exactly as any
-   * other read would be — a widget must not become a way to read a sensor the viewer has no right
-   * to.
+   * Checked against the object tree exactly as any other read would be — a widget must not become
+   * a way to read a sensor the viewer has no right to. **A public view is its link maker's view**
+   * (`A-22`): the stored widget list said what the author chose, and until this it was also the
+   * whole authorisation, so a `readwrite` account granted one branch could put the root on a
+   * canvas, share it, and publish every sensor to anybody with the URL. A stored map that names
+   * objects its maker cannot see — saved before `A-22`, or since the maker lost a grant — draws
+   * those tiles `unavailable`.
    */
   async #visible(
     audience: MapAudience,
     ids: readonly number[],
     q: Queryable,
   ): Promise<Set<number>> {
-    if (audience.kind === 'public') return new Set(ids);
-
-    const { viewer } = audience;
+    const viewer = viewerOf(audience);
+    if (viewer === null) return new Set();
     const rights = await this.#access.resolveManyFor(
       {
         userId: viewer.userId,
@@ -262,8 +268,8 @@ export class MapResolver {
    * **A `none` carved below the root is honoured** (`A-12`). `#visible` checked the widget's root
    * and nothing under it, so a viewer who could read a group read every sensor in it, holes
    * included — names, states and failure messages. The viewer's visibility is a condition in the
-   * ranking, so the hundred are a hundred the viewer may see. A public map resolves against
-   * nobody (`ADR-002`: its widget list is its authorisation).
+   * ranking, so the hundred are a hundred the viewer may see; for a public map, a hundred its
+   * link's maker may see (`A-22`).
    */
   async #sensorLists(
     q: Queryable,
@@ -273,14 +279,15 @@ export class MapResolver {
     const lists = new Map<number, SensorLine[]>();
     if (roots.length === 0) return lists;
 
+    const viewer = viewerOf(audience);
     const visibility =
-      audience.kind === 'public'
-        ? Visibility.EVERYTHING
+      viewer === null
+        ? Visibility.nothing(null)
         : await this.#access.visibilityFor(
             {
-              userId: audience.viewer.userId,
-              role: audience.viewer.role,
-              ...(audience.viewer.scope === undefined ? {} : { scope: audience.viewer.scope }),
+              userId: viewer.userId,
+              role: viewer.role,
+              ...(viewer.scope === undefined ? {} : { scope: viewer.scope }),
             },
             q,
           );
@@ -386,4 +393,9 @@ export class MapResolver {
 
     return { kind: 'table', objectId, name: object.name, channels };
   }
+}
+
+/** Whose rights decide what this audience sees: the viewer's, or a public link's maker's. */
+function viewerOf(audience: MapAudience): MapViewer | null {
+  return audience.kind === 'viewer' ? audience.viewer : audience.maker;
 }

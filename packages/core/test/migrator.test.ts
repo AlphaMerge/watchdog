@@ -269,6 +269,62 @@ describe(
       }
     });
 
+    it('names each share link’s maker, and leaves a link nobody can vouch for dark (054)', async () => {
+      // `A-22` resolves a public map through the account that made the link. Links made before
+      // it carry only a login, so 054 matches it — folded, as the login index compares — and a
+      // login that matches nobody leaves the link with no maker, which publishes nothing.
+      const fresh = await createScratchDatabase('sharemaker');
+      try {
+        const before = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 53),
+        );
+        await before.up();
+        const user = await fresh.db.query<{ id: string }>(
+          `INSERT INTO user_account (login, password_hash, role)
+           VALUES ('Operator', 'x', 'readwrite') RETURNING id`,
+        );
+        const map = await fresh.db.query<{ id: string }>(
+          `INSERT INTO map (name) VALUES ('wall') RETURNING id`,
+        );
+        for (const [label, by] of [
+          ['theirs', 'operator'],
+          ['renamed', 'somebody-since-renamed'],
+          ['anonymous', ''],
+        ] as const) {
+          await fresh.db.query(
+            `INSERT INTO map_share (map_id, label, token_hash, prefix, expires_at, created_by)
+             VALUES ($1, $2, repeat($3, 64), 'p', now() + interval '1 day', $4)`,
+            [map[0]?.id, label, label.slice(0, 1), by],
+          );
+        }
+
+        const all = migrator(fresh.db, MIGRATIONS);
+        await all.up();
+        const makers = await fresh.db.query<{ label: string; maker: string | null }>(
+          `SELECT label, created_by_user::text AS maker FROM map_share ORDER BY label`,
+        );
+        assert.deepEqual(makers, [
+          { label: 'anonymous', maker: null },
+          { label: 'renamed', maker: null },
+          { label: 'theirs', maker: user[0]?.id },
+        ]);
+
+        // Back, and the column goes with it; the login the link was made under stays.
+        await all.down(MIGRATIONS.length - 53);
+        const columns = await fresh.db.query<{ name: string }>(
+          `SELECT column_name AS name FROM information_schema.columns
+           WHERE table_name = 'map_share' AND column_name LIKE 'created_by%' ORDER BY 1`,
+        );
+        assert.deepEqual(
+          columns.map((one) => one.name),
+          ['created_by'],
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

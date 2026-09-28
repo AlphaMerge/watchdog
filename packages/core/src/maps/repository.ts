@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import type { AccountRole } from '../auth/accounts.js';
 import { grantedTo, type FlatGrant, type GrantTable } from '../auth/flat-access.js';
 
 /**
@@ -306,14 +307,25 @@ export class MapRepository {
       prefix: string;
       expiresAt: Date;
       createdBy: string;
+      /** The account a public view is resolved through (`A-22`). */
+      createdByUser: number;
     },
   ): Promise<MapShare> {
     const rows = await q.query<RawShare>(
-      `INSERT INTO map_share (map_id, label, token_hash, prefix, expires_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO map_share
+         (map_id, label, token_hash, prefix, expires_at, created_by, created_by_user)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id::text AS id, label, prefix, expires_at, last_used_at, revoked_at,
                  created_at, created_by`,
-      [mapId, share.label, share.tokenHash, share.prefix, share.expiresAt, share.createdBy],
+      [
+        mapId,
+        share.label,
+        share.tokenHash,
+        share.prefix,
+        share.expiresAt,
+        share.createdBy,
+        share.createdByUser,
+      ],
     );
     const row = rows[0];
     /* c8 ignore next -- an INSERT ... RETURNING either throws or returns its row */
@@ -337,20 +349,48 @@ export class MapRepository {
    * **Expiry and revocation are in the `WHERE` clause**, not checked by the caller afterwards.
    * A row that comes back is a link that works; there is no second step somebody can forget, and
    * no window where a revoked token resolves because two queries disagreed.
+   *
+   * **With its maker, as the maker stands now** (`A-22`): the account and its current role, or
+   * `null` when the account is gone, disabled, or was never known. A public view is resolved
+   * through exactly this, so it is read in the same statement that decides the link works.
    */
   async shareByToken(
     q: Queryable,
     tokenHash: string,
-  ): Promise<{ shareId: number; mapId: number; lastUsedAt: Date | null } | undefined> {
-    const rows = await q.query<{ id: string; map_id: string; last_used_at: Date | null }>(
-      `SELECT id::text AS id, map_id::text AS map_id, last_used_at
-       FROM map_share
-       WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()`,
+  ): Promise<
+    | {
+        shareId: number;
+        mapId: number;
+        lastUsedAt: Date | null;
+        maker: { userId: number; role: AccountRole } | null;
+      }
+    | undefined
+  > {
+    const rows = await q.query<{
+      id: string;
+      map_id: string;
+      last_used_at: Date | null;
+      maker_id: string | null;
+      maker_role: AccountRole | null;
+    }>(
+      `SELECT s.id::text AS id, s.map_id::text AS map_id, s.last_used_at,
+              u.id::text AS maker_id, u.role AS maker_role
+       FROM map_share s
+       LEFT JOIN user_account u ON u.id = s.created_by_user AND NOT u.disabled
+       WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
       [tokenHash],
     );
     const row = rows[0];
     if (row === undefined) return undefined;
-    return { shareId: Number(row.id), mapId: Number(row.map_id), lastUsedAt: row.last_used_at };
+    return {
+      shareId: Number(row.id),
+      mapId: Number(row.map_id),
+      lastUsedAt: row.last_used_at,
+      maker:
+        row.maker_id === null || row.maker_role === null
+          ? null
+          : { userId: Number(row.maker_id), role: row.maker_role },
+    };
   }
 
   /** At most one write a minute per link, whatever a wall display's polling interval is. */

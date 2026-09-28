@@ -150,8 +150,11 @@ export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOpt
 
       // **`kind: 'public'`, which is a choice made here and nowhere else.** The resolver's
       // audience is a discriminated union precisely so this cannot happen by forgetting to pass
-      // a principal (`G-02`).
-      const resolved = await resolver.resolve(opened.map.layout, { kind: 'public' });
+      // a principal (`G-02`) — and it carries the link's maker, whose view it is (`A-22`).
+      const resolved = await resolver.resolve(opened.map.layout, {
+        kind: 'public',
+        maker: opened.maker,
+      });
       const background = await maps.sharedBackground(token);
       // **`ADR-004` Decision 4, as one condition rather than two places.** A stranger's browser
       // fetches tiles from a third party, telling it that this installation exists and which

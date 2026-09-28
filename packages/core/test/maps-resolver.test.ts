@@ -209,10 +209,15 @@ describe(
     let deviceId: number;
     let groupId: number;
     let userId: number;
+    let adminId: number;
     const many: number[] = [];
 
     const asReader = (): MapAudience => ({ kind: 'viewer', viewer: { userId, role: 'readwrite' } });
-    const asPublic = (): MapAudience => ({ kind: 'public' });
+    /** A link an administrator made, which is what every public case here was before `A-22`. */
+    const asPublic = (): MapAudience => ({
+      kind: 'public',
+      maker: { userId: adminId, role: 'admin' },
+    });
 
     before(async () => {
       scratch = await createScratchDatabase('mapres');
@@ -270,6 +275,18 @@ describe(
         `INSERT INTO user_group_member (group_id, user_id, is_primary) VALUES ($1, $2, true)`,
         [groupId, userId],
       );
+      const admins = await db.query<{ id: string }>(
+        `INSERT INTO user_group (name, is_admin) VALUES ('res-admins', true) RETURNING id`,
+      );
+      const admin = await db.query<{ id: string }>(
+        `INSERT INTO user_account (login, display_name, password_hash, role)
+         VALUES ('res-admin', 'res', 'x', 'admin') RETURNING id`,
+      );
+      adminId = Number(admin[0]?.id);
+      await db.query(
+        `INSERT INTO user_group_member (group_id, user_id, is_primary) VALUES ($1, $2, true)`,
+        [Number(admins[0]?.id), adminId],
+      );
     });
 
     after(async () => {
@@ -280,17 +297,35 @@ describe(
       widgets: [{ id: 'w1', kind, objectId, title: 'A tile', box: { x: 0, y: 0, w: 4, h: 3 } }],
     });
 
-    describe('the public audience, which has no principal at all', () => {
-      it('resolves without one — the widget list is the authorisation', async () => {
-        // ADR-002 Decision 1: the author chose what is on the canvas and the route serves that.
+    describe('the public audience, which sees through the link’s maker (A-22)', () => {
+      it('draws what the maker may see', async () => {
         const { widgets } = await resolver.resolve(layout(sensorId), asPublic());
         assert.equal(widgets[0]?.state, 'ok');
       });
 
+      it('draws nothing the maker may not see, whatever the stored map names', async () => {
+        // The canvas is a document; before `A-22` it was also the whole authorisation, so a map
+        // naming the device — saved before the save check existed, or by an author who has since
+        // lost the grant — published every sensor on it to anybody with the link.
+        const maker = { userId, role: 'readwrite' as const };
+        const audience: MapAudience = { kind: 'public', maker };
+        const tile = await resolver.resolve(layout(sensorId), audience);
+        assert.equal(tile.widgets[0]?.state, 'unavailable');
+        const list = await resolver.resolve(layout(deviceId, 'sensor-list'), audience);
+        assert.equal(list.widgets[0]?.state, 'unavailable');
+      });
+
+      it('draws nothing at all when the maker is gone', async () => {
+        const audience: MapAudience = { kind: 'public', maker: null };
+        const { widgets } = await resolver.resolve(layout(sensorId), audience);
+        assert.equal(widgets[0]?.state, 'unavailable');
+      });
+
       it('is a choice at the call site, not an absent principal', () => {
         // The failure this shape prevents: a resolver where `principal === undefined` quietly
-        // means "no checks", so any caller that forgets to pass one reads everything.
-        const audience: MapAudience = { kind: 'public' };
+        // means "no checks", so any caller that forgets to pass one reads everything. The maker
+        // is a field that has to be written, and `null` is an answer, not an omission.
+        const audience: MapAudience = { kind: 'public', maker: null };
         assert.equal(audience.kind, 'public');
       });
     });
@@ -479,13 +514,14 @@ describe(
         const valueReads = watch.seen.filter((text) => text.includes('FROM sample'));
         assert.equal(channelReads.length, 1, 'one channel lookup for forty tables');
         assert.equal(valueReads.length, 1, 'one newest-per-channel scan for forty tables');
-        // **Four, named**, rather than a generous bound: the object lookup, the channel lookup,
-        // the effective interval for every sensor at once, and one newest-per-channel scan. The
-        // public audience resolves no rights, so an authenticated viewer costs a fifth. Before
-        // `G-10` this canvas cost 1 + 40 × 3 = 121, sequentially.
+        // **Five, named**, rather than a generous bound: the object lookup, the audience's rights
+        // over every widget at once, the channel lookup, the effective interval for every sensor
+        // at once, and one newest-per-channel scan. The rights were not read for a public view
+        // until `A-22` made it its link maker's view. Before `G-10` this canvas cost
+        // 1 + 40 × 3 = 121, sequentially.
         assert.equal(
           watch.seen.length,
-          4,
+          5,
           `forty tables cost ${String(watch.seen.length)} statements`,
         );
       });

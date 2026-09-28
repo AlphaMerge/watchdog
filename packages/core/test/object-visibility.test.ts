@@ -102,6 +102,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   let templateId = 0;
   let mapId = 0;
   let libraryId = 0;
+  let shareToken = 'none';
   let hiddenLibraryId = 0;
   let visibleRunId = 0;
   let hiddenRunId = 0;
@@ -384,30 +385,45 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     mapId = (
       await maps.create(
         { userId: operator.id, role: 'readwrite' },
-        {
-          name: 'Customer A wall',
-          layout: {
-            widgets: [
-              {
-                id: 'list',
-                kind: 'sensor-list',
-                objectId: branchId,
-                title: 'Everything of ours',
-                box: { x: 0, y: 0, w: 4, h: 3 },
-              },
-              {
-                id: 'theirs',
-                kind: 'status',
-                objectId: otherSensorId,
-                title: 'Somebody else',
-                box: { x: 4, y: 0, w: 4, h: 3 },
-              },
-            ],
-          },
-        },
+        { name: 'Customer A wall' },
         actorNamed('operator'),
       )
     ).id;
+    // **Its tiles written straight into the row**, one on the branch and one on a hidden sensor:
+    // the way a map saved before `A-22` holds them. Saving the second through the service is
+    // refused now (and the grants that let the first through are `beforeEach`'s, not yet made);
+    // the views still have to hide it, the signed-in one and the public one alike.
+    await db.query(`UPDATE map SET layout = $2::jsonb WHERE id = $1`, [
+      mapId,
+      JSON.stringify({
+        widgets: [
+          {
+            id: 'list',
+            kind: 'sensor-list',
+            objectId: branchId,
+            title: 'Everything of ours',
+            box: { x: 0, y: 0, w: 4, h: 3 },
+          },
+          {
+            id: 'theirs',
+            kind: 'status',
+            objectId: otherSensorId,
+            title: 'Somebody else',
+            box: { x: 4, y: 0, w: 4, h: 3 },
+          },
+        ],
+      }),
+    ]);
+    // And shared, by the operator who holds `full` on it: the public view is the operator's view
+    // (`A-22`), so it may name the branch and nothing outside it.
+    shareToken = (
+      await maps.createShare(
+        { userId: operator.id, role: 'readwrite' },
+        mapId,
+        { label: 'wall', expiresAt: new Date(Date.now() + 86_400_000) },
+        actorNamed('operator'),
+      )
+    ).token;
 
     // Two libraries (`L-01`): the team's, which the operator's primary group is granted by making
     // it, and an administrator's the team was never given — marked, so the sweep sees it if any
@@ -609,7 +625,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         url
           .replaceAll(':id', id)
           .replaceAll(':templateId', 'ms.linux')
-          .replaceAll(':token', 'none'),
+          .replaceAll(':token', shareToken),
       );
       return [...new Set(filled)].flatMap((one) => queries.map((query) => `${one}${query}`));
     }
@@ -628,6 +644,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         'GET /api/v1/notification-requests',
         'GET /api/v1/templates/:id/used-by',
         'GET /api/v1/maps/:id/view',
+        'GET /api/v1/public/maps/:token',
         'GET /api/v1/libraries',
         'GET /api/v1/discovery/schedules',
         'GET /api/v1/probes',
@@ -678,6 +695,68 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.ok(answered.size > 25, `only ${String(answered.size)} GET routes answered 200`);
       for (const name of VISIBLE) assert.ok(bodies.includes(name), `nothing ever named ${name}`);
       assert.ok(bodies.includes('Customer A library'), 'the team’s own library was never listed');
+    });
+
+    it('publishes through a share link only what the link’s maker can see (A-22)', async () => {
+      // The sweep above reads the operator's link to a map that names a hidden sensor — written
+      // into the row as a map from before `A-22` would hold it — and finds nothing outside the
+      // branch. The control: an administrator's link to the very same map does name it, so the
+      // difference is whose link it is, not what the map says.
+      const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
+      const shared = await app.inject({
+        method: 'POST',
+        url: `/api/v1/maps/${String(mapId)}/shares`,
+        headers: as('admin'),
+        payload: { label: 'the admin’s wall', expiresAt },
+      });
+      assert.equal(shared.statusCode, 201, shared.body);
+      const publicView = (token: string) =>
+        app.inject({ method: 'GET', url: `/api/v1/public/maps/${token}` });
+      const theirs = await publicView(shared.json<{ token: string }>().token);
+      assert.equal(theirs.statusCode, 200);
+      assert.ok(theirs.body.includes(MARK), 'an administrator’s link names the hidden sensor');
+      const ours = await publicView(shareToken);
+      assert.equal(ours.statusCode, 200);
+      assert.ok(!ours.body.includes(MARK), 'the operator’s link names the hidden sensor');
+      assert.ok(ours.body.includes('a-ping'), 'and it still shows the branch');
+
+      // **On save**, a widget the layout adds must be on an object the saver can read — refused
+      // in the same words for a hidden object and for an id never issued, so a save is not the
+      // existence oracle `A-15` closed on the view.
+      const tile = (objectId: number) => ({
+        id: `on-${String(objectId)}`,
+        kind: 'status',
+        objectId,
+        title: 'A tile',
+        box: { x: 0, y: 4, w: 4, h: 3 },
+      });
+      const current = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(mapId)}`,
+        headers: as('operator'),
+      });
+      const map = current.json<{ version: number; layout: { widgets: unknown[] } }>();
+      const save = (widgets: unknown[], version = map.version) =>
+        app.inject({
+          method: 'PATCH',
+          url: `/api/v1/maps/${String(mapId)}`,
+          headers: { ...as('operator'), 'if-match': String(version) },
+          payload: { layout: { widgets } },
+        });
+      // Hidden ids the map does not name yet — `otherSensorId` is already on it, so it is not one
+      // the layout adds — and an id never issued.
+      const refusals = [];
+      for (const objectId of [lonelySensorId, carvedSensorId, 2_000_000_000]) {
+        const refused = await save([...map.layout.widgets, tile(objectId)]);
+        assert.equal(refused.statusCode, 403, `a tile on ${String(objectId)} was saved`);
+        refusals.push(refused.json<{ error: { message: string } }>().error.message);
+      }
+      assert.equal(new Set(refusals).size, 1, 'a hidden object and a missing one read differently');
+      // A new tile on something the operator can see is saved, and the hidden tile already on
+      // the map is kept: a map with a stale tile has to stay saveable.
+      const saved = await save([...map.layout.widgets, tile(pingId)]);
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.ok(saved.body.includes(String(otherSensorId)), 'the stored tile was dropped');
     });
 
     it('shows an administrator everything, so the markers are reachable', async () => {

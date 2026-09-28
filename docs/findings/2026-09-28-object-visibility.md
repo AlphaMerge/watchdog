@@ -168,10 +168,11 @@ echoes the rendered message, `%probe` and all. `A-16` is those.
 - **Credentials.** `A-10`'s sweep holds; `#redact` is a boundary and stays the only one.
 - **A report's `runAs`.** A report renders through its account's visibility by design
   (`administration.md`), and since `A-13` only an administrator may point it at anybody else.
-- **A public map.** `ADR-002` makes the widget list its own authorisation, so a public view is
-  not resolved against anybody. A signed-in viewer's sensor-list widgets are filtered like any
-  other list; a tile on an object the viewer cannot see is `unavailable`, and since `A-15` it does
-  not say why.
+- **A public map — which this said, and was wrong about.** It read: "`ADR-002` makes the widget
+  list its own authorisation, so a public view is not resolved against anybody." That was the
+  largest leak left, found in review and fixed as `A-22`; see the last section. A signed-in
+  viewer's sensor-list widgets are filtered like any other list; a tile on an object the viewer
+  cannot see is `unavailable`, and since `A-15` it does not say why.
 
 ## What it costs
 
@@ -234,3 +235,33 @@ measurement of the change.
 
 Nothing here contradicts `ADR-001`: no new service, no cache to invalidate, and the rule stays in
 PostgreSQL, in the query that returns the rows.
+
+## What review found after it landed
+
+`A-12` landed as `91c4ead`; review found three more ways out, each filed on its own number with
+a test shown to fail before its fix.
+
+- **`A-22` — a public share link published whatever its map named.** The sweep had called
+  `/public/maps/none`, a 404, and so proved nothing about the route. A `readwrite` account granted
+  one branch could put the root on a canvas, share it, and hand the whole installation to anybody
+  with the URL. A public view is now resolved through the account that made the link, as it stands
+  when the link is opened; a save may not add a tile on an object its saver cannot read. The
+  reasoning is an amendment to `ADR-002`. **Migration 054 records each link's maker as an
+  account.** Links made before it carry only a login, which it matches; **a link whose login
+  matches nobody — renamed or deleted since — has no maker after the upgrade and publishes
+  nothing**, every tile unavailable. That is deliberate, and it is what an operator who sees a
+  shared wall go blank after upgrading should read: make a new link.
+- **`A-21` — `seq` counted every change in the installation.** One process-wide counter numbered
+  every published state change before any filtering, and every socket was sent it; a branch
+  account seeing its sequence jump by 3,000 between two of its own events had learned the size and
+  timing of an outage in somebody else's branch. Each socket now numbers the `state` frames it has
+  been sent, so a gap still means a lost frame and nothing else.
+- **`A-23` — `POST /objects/:id/as-template` read the sensors under a device without asking which
+  the caller could see.** A `COMPUTES` route, so the sweep of `GET`s could not reach it; the
+  device check was right and the walk under it had no condition.
+
+**Reported, and not this ticket's:** a change that commits while a subscriber's snapshot is being
+read is sent *before* the snapshot frame, and the client replaces its state wholesale on a
+snapshot — so that sensor shows its older state until it next changes. It predates `A-12` (`U-02`
+ordered attach-then-snapshot for exactly this, and the order on the wire undoes it).
+
