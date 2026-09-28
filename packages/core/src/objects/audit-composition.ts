@@ -68,6 +68,17 @@ export function reportAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging];
 }
 
+/**
+ * Editing a library (`L-01`).
+ *
+ * **The record and nothing else**, for the reason a report's is: a library holds rules about what
+ * people are shown, and no probe, cache, schedule or alarm chain reads one. What a library shows
+ * is evaluated when somebody reads it (`L-02`), so there is nothing downstream to bring up to date.
+ */
+export function libraryAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
 /** Editing the trigger library, which changes who is notified and not what is scanned. */
 export function triggerAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging, all.triggerSync];

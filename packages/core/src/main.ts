@@ -21,6 +21,7 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
+  libraryAuditSinks,
   objectAuditSinks,
   reportAuditSinks,
   scheduleAuditSinks,
@@ -99,6 +100,8 @@ import { MapRepository } from './maps/repository.js';
 import { ReportRepository } from './reports/repository.js';
 import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
+import { LibraryRepository } from './libraries/repository.js';
+import { LibraryService } from './libraries/service.js';
 import { ReportService } from './reports/service.js';
 import { ReportContext } from './reports/context.js';
 import { ReportRenderer } from './reports/render.js';
@@ -848,6 +851,14 @@ async function serve(): Promise<void> {
   // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
   const mapResolver = new MapResolver({ db, access: objectAccess, history });
 
+  // Mounted with the routes, for the reason the maps note above gives (`L-01`).
+  const libraries = new LibraryService({
+    db,
+    repository: new LibraryRepository(),
+    audit: new CompositeAuditSink(libraryAuditSinks(auditSinks)),
+    logger,
+  });
+
   // Mounted here at the same time the routes were written, rather than a phase later: the maps
   // note directly above is the record of what happens otherwise.
   const reportRepository = new ReportRepository();
@@ -1051,6 +1062,7 @@ async function serve(): Promise<void> {
     maps,
     reports,
     mapResolver,
+    libraries,
     mapTiles: {
       urlTemplate: config.maps.tileUrl,
       attribution: config.maps.tileAttribution,

@@ -1,5 +1,5 @@
 import type { Queryable } from '../db/pool.js';
-import type { Actor, AuditSink, Mutation, ScheduleAudit } from '../objects/audit.js';
+import type { Actor, AuditSink, LibraryAudit, Mutation, ScheduleAudit } from '../objects/audit.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { ChannelProcessing } from '../objects/types.js';
 import type { ObjectKind } from '../objects/types.js';
@@ -62,6 +62,7 @@ export const AUDIT_CATEGORIES = [
   'schedule',
   'sensor',
   'report',
+  'library',
 ] as const;
 
 /**
@@ -437,6 +438,46 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         })),
       };
 
+    case 'library.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { libraryId: mutation.libraryId, name: mutation.after.name },
+        diff: LIBRARY_FIELDS.map((field) => ({
+          field: `library.${field}`,
+          before: null,
+          after: mutation.after[field],
+        })),
+      };
+
+    case 'library.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { libraryId: mutation.libraryId, name: mutation.after.name },
+        // Only what moved, for the reason a schedule's diff gives: renaming a library and
+        // narrowing what it shows are different events.
+        diff: LIBRARY_FIELDS.filter(
+          (field) => mutation.before[field] !== mutation.after[field],
+        ).map((field) => ({
+          field: `library.${field}`,
+          before: mutation.before[field],
+          after: mutation.after[field],
+        })),
+      };
+
+    case 'library.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { libraryId: mutation.libraryId, name: mutation.before.name },
+        diff: LIBRARY_FIELDS.map((field) => ({
+          field: `library.${field}`,
+          before: mutation.before[field],
+          after: null,
+        })),
+      };
+
     case 'setting.set':
       return {
         ...base,
@@ -608,6 +649,13 @@ const SCHEDULE_FIELDS = [
   'timezone',
   'periods',
 ] as const satisfies readonly (keyof ScheduleAudit)[];
+
+const LIBRARY_FIELDS = [
+  'name',
+  'description',
+  'priority',
+  'nodes',
+] as const satisfies readonly (keyof LibraryAudit)[];
 
 const LIMIT_FIELDS = [
   'enabled',

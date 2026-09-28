@@ -69,6 +69,7 @@ export {
 } from './support/syslog/parse.js';
 
 export {
+  SENSOR_TYPE_ID,
   SensorCatalogue,
   SensorTypeError,
   type ParamProblem,

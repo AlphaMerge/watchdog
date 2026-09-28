@@ -11,8 +11,13 @@ import type {
   SensorTypeDeclaration,
 } from './contract.js';
 
-/** `snmp.traffic`, `http.advanced`, `exe.script-advanced`. */
-const SENSOR_TYPE_ID = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
+/**
+ * `snmp.traffic`, `http.advanced`, `exe.script-advanced`.
+ *
+ * Exported so a library rule naming a type (`L-01`) is held to the same shape the catalogue
+ * registers, rather than to a second copy of it.
+ */
+export const SENSOR_TYPE_ID = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
 
 /** Subschema keywords the redactor cannot follow. See `assertWriteOnlyIsReachable`. */
 const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'items'] as const;

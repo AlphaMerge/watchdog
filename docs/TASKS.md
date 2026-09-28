@@ -15042,7 +15042,7 @@ from rules already written, and are settled here so that no ticket re-derives th
    sensors change state, and only the core can evaluate a rule with rights applied. The browser's
    rollup (`tree/model.ts`) colours what it is given.
 
-- [ ] **L-01 — The library entity** · M · A-14 · Storage, a migration with the generic
+- [x] **L-01 — The library entity** · M · A-14 · Storage, a migration with the generic
       forward-and-back rollback test, a CRUD API, and access by group: the shape `G-01` gave a map
       and `E-01` a report. Three things are different this time:
 
@@ -15062,6 +15062,50 @@ from rules already written, and are settled here so that no ticket re-derives th
       From the first commit: a `LibraryError` with its own branch in `api/errors.ts` (catalogue
       entry 41), a stub in the API reference generator, and a place in the access-matrix harness,
       which is the lesson of `A-14`.
+
+      **L-01 outcome.** Migration 053 (`library`, `library_access`), `packages/core/src/libraries/`,
+      `auth/flat-access.ts`, and seven routes under `/libraries`. What is worth knowing:
+
+      **The extraction found that only the error varies.** `FlatAccess` holds the administrator
+      short-circuit, both ceilings (`A-04`, `A-06`), `A-13`'s "an administrator is a group, and a
+      token below `full` is not one", the creator's grant, and the grant SQL, keyed by a closed
+      union of three table names so the identifiers it interpolates cannot be anything else. Maps
+      and reports moved onto it in their own commit with their suites unchanged. **The third copy
+      of the administrator query, in `AccessService`, was left where it is**: `A-12` is rewriting
+      `auth/access.ts`, and editing it under that ticket would be merging into a moving file.
+      When `A-12` lands, `FlatAccess.#isAdmin` should ask whatever it exposes.
+
+      **A library is refused at the write, where a map is not.** A map keeps a widget it cannot
+      parse as a broken tile (`G-02`); a library node that did not parse would not look broken, it
+      would answer a different question — a misspelt `rule` reads as a heading, a string where
+      `states` wants a list reads as every state. So `validateNodes` refuses the whole document
+      and names the node (`nodes[1].children[0].id`). The JSON Schema is built from the same
+      exported limits and says what a schema can; the validator says the rest (count across
+      levels, depth, an id used twice, a tag listed twice in different case). Nodes are capped at
+      200 and six levels. Rules are checked for shape only: whether a type is registered and
+      whether a root still exists is `L-02`'s to report at read time.
+
+      **Audited from the first commit, in the transaction.** `library.created`, `.updated` and
+      `.deleted`, under a new `library` category, with the nodes rendered one line per node —
+      `Customer A › Routers: types snmp.traffic; states down` — because a person reads the diff.
+      `libraryAuditSinks` is the database and the log and nothing else, asserted beside
+      `reportAuditSinks`, which had no assertion either. A refused edit writes no row, and a test
+      says so. **Grants are logged and not audited**, as every grant is: closing that for one
+      entity of four would be a fourth inconsistency, so it is `A-17`'s, which also takes map and
+      report create, edit and delete.
+
+      **Found in passing:** the doc comments above `report.ran` and `schedule.created` in
+      `objects/audit.ts` had been swapped; they are back where they belong.
+
+      Tests: `library-nodes` (table-driven, every refusal naming its path), `libraries-service`
+      (the map service's access cases asked of a third entity, plus the audit), and
+      `libraries-api` over HTTP — a 404 rather than a 403 or a 500 on every route for an account
+      that cannot read, 428 and 409 on `If-Match`, the validator's 400 reaching the wire, and
+      every level of a nested document surviving the response schema. The access matrix sweeps
+      the new routes, and `POST /libraries` joins its list of routes an unwired module would take
+      with it. The web Logs view's category chips do not list `library` yet — nor `report` or
+      `credential`, which the server already has — and `L-03` adds the navigation it would sit
+      beside.
 
 - [ ] **L-02 — Rules, and the resolver that evaluates them** · L · L-01, A-12 · The rule model, and
       one resolver for all of a library's nodes. What it must do:

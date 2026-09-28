@@ -39,6 +39,7 @@ import { sensorTypeRoutes } from './routes/sensor-types.js';
 import { lookupRoutes } from './routes/lookups.js';
 import { mapBackgroundRoute, mapRoutes } from './routes/maps.js';
 import { reportDownloadRoute, reportRenderRoute, reportRoutes } from './routes/reports.js';
+import { libraryRoutes } from './routes/libraries.js';
 import {
   PUBLIC_MAP_PREFIX,
   publicMapBackgroundRoute,
@@ -70,6 +71,7 @@ import type { ProbeConfigService } from '../probes/config.js';
 import { LookupCatalogue } from '../lookups/catalogue.js';
 import type { MapResolver } from '../maps/resolver.js';
 import type { MapService } from '../maps/service.js';
+import type { LibraryService } from '../libraries/service.js';
 import type { ReportService } from '../reports/service.js';
 import type { ReportContext } from '../reports/context.js';
 import type { ReportRenderer } from '../reports/render.js';
@@ -87,6 +89,7 @@ import type { TriggerService } from '../triggers/service.js';
 import { LOOKUP_SCHEMAS } from './schemas/lookups.js';
 import { PAUSE_SCHEMAS } from './schemas/pause.js';
 import { SCHEDULE_SCHEMAS } from './schemas/schedules.js';
+import { LIBRARY_SCHEMAS } from './schemas/libraries.js';
 import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
@@ -123,6 +126,13 @@ export interface ApiServerOptions {
   mapTiles?: { urlTemplate: string; attribution: string };
   /** Fills a map's widgets in for the view route (`G-10`). */
   mapResolver?: MapResolver;
+  /**
+   * Libraries (`L-01`).
+   *
+   * Optional on the same terms as `maps`: absent, the routes are not registered at all, because a
+   * build with no libraries API and an installation with no libraries are different answers.
+   */
+  libraries?: LibraryService;
   /**
    * Reports (`E-01`), and the security context they render through (`E-03`).
    *
@@ -261,6 +271,7 @@ export class ApiServer {
   readonly #lookups: LookupCatalogue;
   readonly #maps: MapService | undefined;
   readonly #mapResolver: MapResolver | undefined;
+  readonly #libraries: LibraryService | undefined;
   /** Per share link, because the global limiter already bounds per address (`G-06`). */
   readonly #shareLimit = new ShareRateLimit();
   readonly #mapTiles: { urlTemplate: string; attribution: string } | undefined;
@@ -327,6 +338,7 @@ export class ApiServer {
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#maps = options.maps;
     this.#mapResolver = options.mapResolver;
+    this.#libraries = options.libraries;
     this.#mapTiles = options.mapTiles;
     this.#reports = options.reports;
     this.#schedules = options.schedules;
@@ -449,6 +461,7 @@ export class ApiServer {
       ...LOOKUP_SCHEMAS,
       ...PAUSE_SCHEMAS,
       ...SCHEDULE_SCHEMAS,
+      ...LIBRARY_SCHEMAS,
       ...STATE_LOG_SCHEMAS,
       ...TRIGGER_SCHEMAS,
       ...TEMPLATE_SCHEMAS,
@@ -651,6 +664,9 @@ export class ApiServer {
           reportRenderRoute(scope, wired);
           reportDownloadRoute(scope, wired);
           this.#exempting = null;
+        }
+        if (this.#libraries !== undefined) {
+          libraryRoutes(scope, { libraries: this.#libraries });
         }
         if (this.#schedules !== undefined) {
           await scope.register(scheduleRoutes, { schedules: this.#schedules });

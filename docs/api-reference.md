@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-152 routes.
+160 routes.
 
 ## Conventions
 
@@ -742,6 +742,120 @@ How one probe is doing, right now
 | `id` | path | integer | **required** |
 
 **200** { at, probeId, message, channels } · **503** { error }
+
+## libraries
+
+### `GET /api/v1/libraries`
+
+The libraries this account may see
+
+Highest priority first, then by name. An administrator sees every library; everybody else sees the ones a group they belong to has been granted.
+
+**200** { items }
+
+### `POST /api/v1/libraries`
+
+Create a library
+
+The creator’s primary group is granted full access in the same transaction — access is per group and a new library has no grants, so otherwise the person who made it could not see it. At most 200 nodes, six levels deep, each id used once: a document that does not fit is refused whole, naming the node that is wrong.
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string | **required** |
+| `description` | string |  |
+| `priority` | integer |  |
+| `nodes` | object[] |  |
+
+**201** { id, name, description, priority, nodes, version, createdAt, updatedAt }
+
+### `GET /api/v1/libraries/{id}`
+
+One library, with its nodes and their rules
+
+The document, not what it shows: each node’s rule is evaluated when the library is viewed, through the viewer’s own rights. A library this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
+
+### `PATCH /api/v1/libraries/{id}`
+
+Change a library
+
+`If-Match` carries the version this edit was made against, and without it the request is refused with 428: two people arranging one library is two people in a designer. `nodes`, when sent, replaces every node — there is no merging of one tree into another.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | string |  |
+| `description` | string |  |
+| `priority` | integer |  |
+| `nodes` | object[] |  |
+
+**200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
+
+### `DELETE /api/v1/libraries/{id}`
+
+Delete a library
+
+Needs full access. The grants on it go with it; no sensor does, because a library holds rules and never sensors.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**204**
+
+### `GET /api/v1/libraries/{id}/access`
+
+Which groups may see this library
+
+Needs full access: who else can see a thing is not a read.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+
+**200** { items }
+
+### `PUT /api/v1/libraries/{id}/access/{groupId}`
+
+Grant a group access to this library
+
+Needs full access, so a write holder may arrange the nodes without deciding who else sees them. Granting twice replaces rather than failing: it is a correction.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |
+
+**204**
+
+### `DELETE /api/v1/libraries/{id}/access/{groupId}`
+
+Take a group’s access away
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string | **required** |
+| `groupId` | path | string | **required** |
+
+**204**
 
 ## lookups
 

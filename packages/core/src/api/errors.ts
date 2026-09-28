@@ -3,6 +3,7 @@ import { DatabaseError } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { MapError } from '../maps/errors.js';
 import { ReportError } from '../reports/errors.js';
+import { LibraryError } from '../libraries/errors.js';
 import { SettingError } from '../settings/registry.js';
 import { InheritanceError } from '../settings/inheritance.js';
 import { DiscoveryError } from '../discovery/errors.js';
@@ -92,6 +93,19 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     // `If-Match`, and — worst — `REPORT_NO_CONTEXT`'s 422 would all reach the client as "the
     // request could not be completed". A report whose account was deleted has to say so; that is
     // the entire reason migration 047 keeps the login.
+    return envelope(
+      error.status,
+      error.code,
+      error.message,
+      { ...error.context },
+      { ...error.details },
+    );
+  }
+
+  if (error instanceof LibraryError) {
+    // From the first commit this time (`L-01`), rather than after an HTTP test went looking — the
+    // map branch above says what its absence cost. A library's 404 is what keeps an unreadable one
+    // from being told apart from a missing one, and without this branch it would be a 500.
     return envelope(
       error.status,
       error.code,

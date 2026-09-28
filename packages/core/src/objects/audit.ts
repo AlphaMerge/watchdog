@@ -286,15 +286,20 @@ export type Mutation =
   | { action: 'credential.deleted'; objectId: ObjectId; credentialKind: string }
   | {
       /**
-       * A schedule was created, changed or removed (`M-09`).
+       * A report was rendered through somebody's visibility scope (`E-08`).
        *
-       * `objectId` is null because a schedule is not in the object tree: it is a library object
-       * that many objects reference and none contains. The audit column is nullable for exactly
-       * this, and the schedule's own id travels in the summary.
+       * **The auditable fact is the act-as, not the render.** `§6` lets a report run under a named
+       * account's scope, which means data that account can see leaves the building on a schedule,
+       * started by nobody. `requestedBy` is who asked and `runAs` is whose eyes it used; they are
+       * routinely different accounts, and the second is the one that decides what the document
+       * contains.
        *
-       * Auditable because editing a schedule silently changes when several thousand sensors are
-       * watched — a wider blast radius than most single-object edits, and one nobody would
-       * think to look for after the fact.
+       * `E-03` deferred this here because until something ran a report there was no event:
+       * resolving a security context on an API read is not one.
+       *
+       * `objectId` is null for the reason a schedule's is — a report is not a tree object
+       * (`E-01`) — and the subjects it covered live in the report rather than being copied into
+       * every audit row it writes.
        */
       action: 'report.ran';
       objectId: null;
@@ -312,20 +317,15 @@ export type Mutation =
     }
   | {
       /**
-       * A report was rendered through somebody's visibility scope (`E-08`).
+       * A schedule was created, changed or removed (`M-09`).
        *
-       * **The auditable fact is the act-as, not the render.** `§6` lets a report run under a named
-       * account's scope, which means data that account can see leaves the building on a schedule,
-       * started by nobody. `requestedBy` is who asked and `runAs` is whose eyes it used; they are
-       * routinely different accounts, and the second is the one that decides what the document
-       * contains.
+       * `objectId` is null because a schedule is not in the object tree: it is a library object
+       * that many objects reference and none contains. The audit column is nullable for exactly
+       * this, and the schedule's own id travels in the summary.
        *
-       * `E-03` deferred this here because until something ran a report there was no event:
-       * resolving a security context on an API read is not one.
-       *
-       * `objectId` is null for the reason a schedule's is — a report is not a tree object
-       * (`E-01`) — and the subjects it covered live in the report rather than being copied into
-       * every audit row it writes.
+       * Auditable because editing a schedule silently changes when several thousand sensors are
+       * watched — a wider blast radius than most single-object edits, and one nobody would
+       * think to look for after the fact.
        */
       action: 'schedule.created';
       objectId: null;
@@ -344,7 +344,52 @@ export type Mutation =
       objectId: null;
       scheduleId: number;
       before: ScheduleAudit;
+    }
+  | {
+      /**
+       * A library was created, changed or removed (`L-01`).
+       *
+       * `objectId` is null for the reason a schedule's is: a library is not a tree object, and the
+       * objects its rules name live in the library rather than being copied into every row.
+       *
+       * Audited because a library decides what a group of people are shown. Somebody narrowing a
+       * node's rule has decided that a class of sensor stops appearing in front of whoever works
+       * from that library — the change nobody notices until the day a failure is not on the
+       * screen. Maps and reports are not audited at all, which `L-01` records as a gap rather
+       * than widening. Grants are logged and not audited, as every grant in this system is.
+       */
+      action: 'library.created';
+      objectId: null;
+      libraryId: number;
+      after: LibraryAudit;
+    }
+  | {
+      action: 'library.updated';
+      objectId: null;
+      libraryId: number;
+      before: LibraryAudit;
+      after: LibraryAudit;
+    }
+  | {
+      action: 'library.deleted';
+      objectId: null;
+      libraryId: number;
+      before: LibraryAudit;
     };
+
+/**
+ * A library as the audit log records it.
+ *
+ * The nodes as text, one line each, rather than as the stored document: a diff is read by a
+ * person, and "Customer A › Routers: types snmp.traffic; states down" is a change somebody can
+ * recognise where a `jsonb` blob is not. `L-01`'s `describeNodes` writes it.
+ */
+export interface LibraryAudit {
+  readonly name: string;
+  readonly description: string;
+  readonly priority: number;
+  readonly nodes: string;
+}
 
 /**
  * A schedule as the audit log records it.
@@ -537,6 +582,21 @@ function summarise(mutation: Mutation): Record<string, unknown> {
       return {
         action: mutation.action,
         scheduleId: mutation.scheduleId,
+        name: mutation.after.name,
+      };
+    // The name and nothing else: a library's nodes are a paragraph each, and the database row
+    // holds them for whoever needs the diff.
+    case 'library.created':
+    case 'library.deleted':
+      return {
+        action: mutation.action,
+        libraryId: mutation.libraryId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'library.updated':
+      return {
+        action: mutation.action,
+        libraryId: mutation.libraryId,
         name: mutation.after.name,
       };
   }

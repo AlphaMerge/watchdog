@@ -202,7 +202,13 @@ describe(
       // claim is checked rather than only written down.
       const fresh = await createScratchDatabase('enumdown');
       try {
-        const m = migrator(fresh.db, MIGRATIONS);
+        // **The set that ends at 051, not the whole list.** `down(2)` takes back the two newest,
+        // and this test is about two particular migrations: built from every migration, it broke
+        // the day 053 was appended (`L-01`), because 053 had become one of the two.
+        const m = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 51),
+        );
         await m.up();
 
         // Where the value sits in the type, which is the order PostgreSQL sorts the column by:

@@ -26,6 +26,8 @@ import { NotificationTester } from '../src/notifications/test-send.js';
 import { MapRepository } from '../src/maps/repository.js';
 import { MapResolver } from '../src/maps/resolver.js';
 import { MapService } from '../src/maps/service.js';
+import { LibraryRepository } from '../src/libraries/repository.js';
+import { LibraryService } from '../src/libraries/service.js';
 import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService } from '../src/reports/service.js';
 import { ReportContext } from '../src/reports/context.js';
@@ -156,6 +158,14 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // per-report rights are decided in their services, which is what `rightsIn` declares.
       maps: new MapService({ db, repository: new MapRepository(), logger: silent }),
       mapResolver: new MapResolver({ db, access, history }),
+      // **Libraries from their first commit** (`L-01`), which is the lesson `A-14` taught: a
+      // route group the harness does not pass is one the sweeps below never call.
+      libraries: new LibraryService({
+        db,
+        repository: new LibraryRepository(),
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      }),
       reports: {
         service: new ReportService({ db, repository: reportRepository, logger: silent }),
         context: reportContext,
@@ -551,6 +561,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         'POST /api/v1/schedules',
         'POST /api/v1/maps',
         'POST /api/v1/reports',
+        'POST /api/v1/libraries',
       ].filter((route) => !swept.has(route));
       assert.deepEqual(missing, [], 'these routes are not being swept — is a service unwired?');
     });
