@@ -251,110 +251,6 @@ Update the checkbox when a task lands. Add new tasks rather than expanding exist
       line each, `main()` still has no test file, and closing it properly means extracting the
       composition into something a test can build. The gap is smaller and it is not gone.
 
-- [ ] **S-11 — Resolve TimescaleDB on Windows** · M · S-06 · Spike: install and benchmark on
-      Windows Server. Decide TimescaleDB vs plain-Postgres fallback and record the outcome in
-      ADR-001. _Blocks the Windows release story._
-
-      **The decision half is answered and does not need a Windows host** —
-      `docs/findings/2026-09-03-timescaledb-on-windows.md`. TimescaleDB publishes current Windows
-      builds (2.29.2 ships `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, and the eight
-      most recent releases all do), and the PostgreSQL 17 package contains
-      **`timescaledb-tsl-2.29.2.dll`** — the licensed module where compression lives — plus every
-      function this project uses: `create_hypertable`, `time_bucket`, `drop_chunks`,
-      `compress_chunk`, `add_compression_policy`. **So no `PlainPostgresEngine` fallback is
-      required on availability grounds**, and the cost `S-12` priced does not have to be paid.
-
-      What is left is what actually needs the host: the benchmark, and whether `setup.exe`
-      composes with how an operator installs PostgreSQL on Windows — there is no Windows
-      counterpart to `scripts/smoke/provision-postgres.sh`.
-
-      **Writing that counterpart blind was considered on 2026-09-04 and deliberately not done.**
-      The Linux script is 38 lines and the shape transfers — preload `timescaledb`, set the licence,
-      restart, wait, create the role and database, `CREATE EXTENSION`. What does not transfer is
-      every particular it depends on: the data directory, the service name, and whether
-      `setup.exe` places the extension where a running server will find it. The finding above says
-      in as many words that this is unverified, so a `.ps1` written now would be a guess at paths
-      and service names that reads like progress and proves nothing — and `P-53` would parse-check
-      it, which makes it look checked. Write it on the host, where the first run says whether it is
-      right.
-
-      **Re-checked 2026-09-09, and it holds.** 2.30.0 was published the day before and ships
-      `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, as do the nine releases behind it;
-      the PostgreSQL 17 package still carries `timescaledb-tsl-2.30.0.dll` and every symbol this
-      project uses. The channel does drop versions — PostgreSQL 15 had a Windows build through
-      2.28.3 and none since 2.29.0 — which is the argument for re-running the check rather than
-      believing it.
-
-      **What the re-check actually found was in our own documents.** The finding's dependency
-      table was five functions; the code asks for eleven symbols, and one of the five —
-      `add_compression_policy` — this project never calls, because compaction is driven by the
-      housekeeping loop precisely so the Timescale Licence stays accepted for native compression
-      and nothing else. `storage-engine.test.ts` could not have noticed: it pins *where* an
-      engine-specific function may appear, not *which* ones are used. It now asserts the surface
-      in both directions and fails on seven named TSL features the licence note refuses —
-      catalogue entry 42.
-
-      **"Needs a Windows host" was the wrong framing, and `H-06` had already found that out.**
-      `windows-latest` on GitHub Actions *is* Windows Server 2022 — `H-06`'s `windows-install` job
-      installs the MSI there — so the machine has existed all along and the missing thing is a
-      job. What that runner can and cannot answer is not the same for both halves of what is left:
-
-      - **Provisioning composes, and a runner can prove it.** Install PostgreSQL, run `setup.exe`,
-        set `shared_preload_libraries`, restart, `CREATE EXTENSION`, compress a chunk. That is a
-        pass/fail question and a hosted runner answers it exactly as well as a bare-metal one.
-      - **The benchmark is not a question a hosted runner can answer.** It is a shared VM with
-        neighbours nobody can see, which is the same reason `CLAUDE.md` says to stop `ms-server`
-        before `test:perf` and why `P-192` prints the conditions with the numbers. A figure
-        measured there would be a number, not a measurement, and committing it would be worse
-        than having none.
-
-      **And the "it would be a guess" objection is now mostly answered** (2026-09-09): `setup.exe`
-      is a Go binary whose own strings give the flags — `-pgconfig`, `-quiet`, `-no-tune` — and say
-      it copies the extension to `pg_config --pkglibdir` / `--sharedir`, asked of *that server's*
-      `pg_config`. So it does not guess a path, and neither would a script driving it. What is
-      left unproven is that any of it runs, which is what the job would settle.
-
-      **Both are now written, and neither has run.** `scripts/windows/provision-postgres.ps1` is
-      the Windows counterpart of `scripts/smoke/provision-postgres.sh` — find `pg_config`, fetch
-      the asset for *that* major version, `setup.exe -pgconfig … -quiet -no-tune`, add
-      `shared_preload_libraries` and `timescaledb.license`, restart, wait, create the role and the
-      database, `CREATE EXTENSION`. Every path is discovered and every failure names which
-      assumption broke, because the first run is where those get settled. CI's
-      `windows-timescaledb` job runs it on `windows-latest` and asserts the three claims `S-11`
-      rests on, in the order they would fail: the extension loads, `timescaledb.license` is
-      `timescale` — migration 004 refuses to apply otherwise — and a chunk actually compresses,
-      which is the one Timescale-Licence feature `CLAUDE.md` accepts the licence for. A green
-      `CREATE EXTENSION` with compression that throws would be the worst thing to ship, because
-      it looks like a pass.
-
-      **Tick this only when that job goes green.** It has still never run, but the reason changed
-      on 2026-09-09: CI runs again, on a self-hosted runner (`P-198`), and every Linux job in it
-      is green. What is missing now is a *Windows machine* — the job is skipped by
-      `if: vars.CI_RUNNER_WINDOWS != ''` rather than failing. Register a runner on any Windows
-      box, set that variable to its label, and this runs. Until then what exists is a proposal
-      that parses. `P-53`'s check covers the script, and a parse check is not a run; the
-      danger of writing it now is precisely that it *looks* checked, which is why this paragraph
-      is here.
-
-      **Still needs a real host after that:** the benchmark. A hosted runner is a shared VM, and
-      the number it produced would not be a measurement.
-
-      Writing the job found the gap it fell into: **nothing in this repository parsed the
-      workflow.** Embedding PowerShell in a YAML block scalar broke `ci.yml` — a here-string must
-      close at column zero and a block scalar has no column zero — and with CI switched off,
-      nothing would have said so until somebody turned it back on and needed it. The ordinary
-      suite now parses every workflow and asserts each job has steps, for `P-53`'s reason.
-
-      Re-check the availability finding
-      before a Windows release; an upstream that stopped publishing Windows builds would flip it.
-      **Added by S-12:** if the answer is a fallback, the work is bounded and half-measured
-      already. A `PlainPostgresEngine` needs four methods — `date_bin` for bucketing (verified
-      identical to `time_bucket`), partition introspection, a no-op compaction reporting
-      `compaction: false`, and `DROP TABLE` on a partition — plus a **second migration list**,
-      because migrations are checksummed and cannot be parameterised by engine without making
-      every existing installation look drifted. Creating partitions ahead of time is the only
-      genuinely new work, and it belongs in the housekeeping loop. See
-      `docs/findings/2026-08-25-storage-engine-boundary.md`.
 - [x] **S-12 — Time-series repository interface** · M · S-08 · All time-series access behind one
       interface so the storage engine can be swapped without touching callers.
       **S-12 outcome:** `TimeSeriesStore` is the interface callers depend on;
@@ -13373,65 +13269,6 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       x86_64 would be a test that did not run. What a *package* owns is files, users, PKI and
       scriptlet semantics; that the services then reach `active` is `smoke-install.sh`, and since
       all three installers now run the same `ms-setup`, proving it there proves it everywhere.
-- [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and
-      an upgrade path.
-
-      **Built, structurally verified, and not installed.** `scripts/package-msi.sh` produces
-      `ms-<version>-x64.msi` and `ms-probe-<version>-x64.msi` with `wixl` — msitools' WiX
-      compiler, which runs on Linux, so the MSI comes off the same staged tree as the tarball,
-      the `.deb` and the `.rpm`. `deploy/windows/ms-setup.ps1` is the Windows counterpart of
-      `setup.sh` and does what H-06 asks for: registers the WinSW services, **opens the firewall
-      for the two ports the core actually listens on, read from the configuration rather than
-      hardcoded**, keeps an existing configuration with a timestamped backup, and runs
-      `config check` before restarting anything. `ms-teardown.ps1` is the uninstall half and
-      leaves ProgramData alone, for the reason the Linux packages leave `/etc/ms` alone.
-
-      **What is not done is the half that needs Windows**: nothing here has installed the MSI.
-      Service registration, the firewall rules, the upgrade path and the uninstall all execute on
-      Windows and are unproven. The build prints that in place of a success message, and this
-      ticket stays open for it.
-
-      **But "needs hardware nobody has" was wrong, and that mattered.** `windows-latest` on GitHub
-      Actions *is* Windows Server 2022 — the missing thing was a job, not a machine. CI now has a
-      `windows-install` job that downloads the MSI the Linux job built, installs it with
-      `msiexec /qn`, and asserts what H-06 actually asks for: the files land and `app.zip` was
-      expanded (which is the proof the custom action ran at all), both services registered, both
-      firewall rules exist, an upgrade over it keeps an edited configuration and leaves a backup,
-      and an uninstall removes the services while leaving ProgramData. The three `msiexec` logs
-      are uploaded whatever happens, because the first failure on a machine nobody has tested is
-      exactly when the log *is* the finding.
-
-      It also parse-checks every `.ps1`. A parse error in `ms-setup.ps1` would break every Windows
-      install, and for a while nothing anywhere would have caught it: PowerShell publishes no arm64
-      container, the amd64 one dies under QEMU on an Apple Silicon machine, and the `dotnet tool`
-      package is broken — three routes tried, all dead.
-
-      **A fourth route works, and the check no longer depends on this job** (`P-53`). `P-51` put
-      the official `linux-arm64` PowerShell tarball in the toolchain image, so the parse check runs
-      in the ordinary test suite on every machine, disabled CI or not. All three scripts parse.
-      That is not this job's other assertions — installing, the services, the firewall, the upgrade
-      — which still need Windows and still keep this ticket open.
-
-      **The job has never run**, and as of 2026-09-09 the reason is no longer CI. The workflow is
-      enabled and green on a self-hosted runner (`P-198`); this job is *skipped*, by
-      `if: vars.CI_RUNNER_WINDOWS != ''`, because there is no Windows machine registered. That is
-      now the whole of the blocker: a runner on a Windows box and one repository variable brings
-      back this job, `S-11`'s provisioning job, and the `release-artifacts` upload they need.
-      Tick H-06 when it goes green, not before.
-
-      Three things the build taught, all recorded in the script:
-
-      - **wixl segfaults above about ten thousand components** (a hundred compile instantly), so
-        the application ships as one `app.zip` that `ms-setup.ps1` expands. The cost is named:
-        Windows Installer no longer tracks the application file by file, so its repair cannot
-        restore one file and the teardown script removes the tree instead.
-      - **wixl drops a custom action it cannot compile and still writes an MSI, with exit status
-        zero.** A `Directory`-form action produced a GLib assertion on stderr and a package that
-        installs files and registers nothing — the exact shape of a defect that ships. The build
-        now asserts both actions exist and are sequenced, and fails if either is missing;
-        `Property` is the form wixl implements, `Directory` and `BinaryKey` are not.
-      - **Backticks in an interpolating heredoc are command substitution**, which is how a
-        prose comment mentioning `Directory` became "command not found" mid-build.
 - [x] **H-07 — Documentation set** · L · — · Installation, administration, sensor reference,
       API reference generated from OpenAPI, troubleshooting runbook.
 
@@ -13542,6 +13379,352 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       minutes, with the core logging only "link to core closed". Twenty-four hours of soak with
       the same 5,047 sensors never saw it, because the probe never restarted. Anything that only
       breaks on restart is invisible to every other test here.
+
+      **Split and scoped on 2026-09-28 (`H-10`).** 1.0 is Linux-only, so this is the Linux field
+      test and is ticked on Linux evidence alone. The Windows Server half is `H-17`, under Release
+      1.1 below, and `H-06` went with it. The candidate it tests is a tag on `main` built with the
+      v1 profile (`H-12`), and a build that cannot say which commit it is (`H-11`) is not one to
+      test.
+
+      **What it still needs — all of it missing today, and nothing else is** (the proposal's §6,
+      where each item is argued):
+
+      1. **A core host.** Ubuntu 24.04 LTS, x86_64, 4 cores, 8 GB, a 100 GB SSD, running the
+         core, the local probe and PostgreSQL 17 with TimescaleDB. x86_64 on its own account:
+         `H-08` did not measure it, and `H-14` is the first build for it.
+      2. **A remote-probe host.** Any small Linux machine, 2 cores and 2 GB, on another network
+         segment, dialling out to the core. Without one, enrolment, approval, the mTLS link and the
+         spool across a real network are left to the smoke tests.
+      3. **100 real devices**, each a distinct host, in a spread the v1 catalogue reaches from
+         Linux: SNMP gear (some on v3 with authentication and privacy, one with a slow agent),
+         Linux servers over SSH, Windows servers by ping, port, HTTP, TLS and SNMP (not WMI, which
+         is 1.1), web endpoints, a few mail and database servers, one device behind a firewall
+         that drops rather than refuses, and one taken down and up again on a schedule written
+         before the week starts.
+      4. **Network access** from each probe to what it monitors — ICMP, the sensors' TCP ports,
+         UDP 161 — and the credentials, entered once.
+      5. **Mail delivery**: an SMTP relay the core may send through, and one mailbox a person
+         reads.
+      6. **168 consecutive hours** from the end of the runbook's step 2, with nobody touching
+         either host. Anything scheduled before the start is not an intervention: the device that
+         goes down and up, and a firewall rule that cuts the remote probe's link for half an hour
+         twice in the week — the only way the spool and replay meet a real outage.
+
+      Blocked on hardware, not on work. `H-15`'s dress rehearsal proves the runbook and is never
+      evidence for this ticket.
+
+- [x] **H-10 — What the v1 release candidate is** · S · H-09 · `H-09` could not start because
+      nothing said what it tests: `main` is v1 plus flow, maps and reports, there is no tag, and
+      every build ever made said `0.1.0`. The proposal is
+      `docs/findings/2026-09-28-v1-release-candidate.md`; it is written for the day hardware
+      exists, because there is none — no Windows machine, and no Ubuntu one either.
+
+      **Decided 2026-09-28** by Roman:
+
+      - **The candidate is a tag on `main`, `v1.0.0-rc.N`, packaged with a v1 build profile** in
+        which the v2 subsystems are not constructed — not a branch at `8182e1e`, which would need
+        32 backports, two of them the memory fixes (`P-208`, `P-210`) merged by hand, and not an
+        operator setting, which the `MS_*` overlay puts one environment variable from "on".
+      - **1.0 is Linux-only, and says so.** Windows is 1.1 (below).
+      - **The four `windows.*` sensor types leave the 1.0 catalogue.** They run PowerShell's CIM
+        cmdlets from a probe *on* Windows, and no `Get-CimInstance` has ever run against Windows
+        (`T-09`). Deferred to 1.1, not removed: the code stays in the tree and in the full build.
+      - **A remote-probe host goes on `H-09`'s hardware list.**
+
+      The work it produced is `H-11`…`H-16`, the Release 1.1 section (`H-17`, `T-25`, `R-10`, and
+      `S-11` and `H-06` moved there), `B-07`, and `H-09`'s hardware list. Ticked when all of them
+      existed, which was its own done-when.
+
+- [ ] **H-11 — Build provenance** · S · H-10 · Every build said `0.1.0`, so two builds a month
+      apart were one build to an operator, a bug report and the runbook. **Done when** every build
+      carries its version and the full commit it was packaged from, `GET /api/v1/build` answers
+      with them, and the cache validator that is salted with the build (`S-13`) is salted with the
+      commit — **a correctness bug, not bookkeeping**: an upgrade between two `0.1.0` builds that
+      changed a registry default served a `304` for the old value. Test first.
+
+- [ ] **H-12 — The v1 build profile** · M · H-11 · Option C of the proposal: a build profile
+      stamped by `package.sh` beside the version and commit, not a key in `core.json`. **Done
+      when**, under the v1 profile: the map, public-map and report routes are not registered
+      (`ApiServer` already skips them when their services are absent) and the public prefix is not
+      exempted; the report sweep, `recover()`, the housekeeper's report step and the Core Health
+      source are not constructed, and `CoreHealthSources.reports` becomes optional with its
+      channels gapping; **the catalogue is
+      v1-only through `standardCatalogue(types)`, in the core and the probe — without
+      `flow.netflow` and without the four `windows.*` types**; the web UI asks
+      `GET /api/v1/build` what exists and hides the rest; and a missing stamp is refused, never
+      read as the full profile. Migrations 044–051 stay in the v1 build, so one migration history
+      serves both profiles. Making the report imports lazy, so `pdfkit` and `fontkit` load only in
+      the full profile, is worth doing here and does not block.
+
+- [ ] **H-13 — The candidate's surface, tested** · M · H-12 · A table of the v1 candidate's
+      surface in `docs/runbook-field-test.md`, beside step 3's, parsed and compared **in both
+      directions** against a v1-profile server built without a database, the way
+      `scripts/docs/api-reference.mjs` builds one. **Done when** it asserts, of the running
+      server and never of a flag or a document: the routes that answer, by `inject` — not the
+      OpenAPI document, which `@fastify/websocket` already hides a real route from; the
+      unauthenticated set, by requesting every `/api/` route and `/metrics` with no credential
+      (v1: `/api/v1/auth/{login,logout,session}` and nothing else); **the catalogue a v1 server
+      reports** — `flow.netflow` and the four `windows.*` types absent, so that re-adding any one
+      of them fails; and a v1 probe refusing a `flow.netflow` assignment by name. Not "binds no
+      UDP socket": `main` satisfies that today with v2 fully on, because the collector was never
+      wired (`B-07`), and a check the defect passes is catalogue entry 43. Mutated from both sides:
+      the table (a v2 route added, a v1 route dropped, a v2 type marked v1) and the code (a map
+      route under the profile, a route hidden from OpenAPI that still answers, the prefix exempted
+      without its routes, a v1 route lost to the profile, a `windows.*` type put back,
+      `FlowListener` wired under the profile, a missing stamp read as full).
+
+- [ ] **H-14 — An x86_64 build, proven once** · S · — · Every package so far was built on
+      this project's Apple Silicon machine, so every `.deb` has been `arm64`, and `package.sh` says
+      native addons must be built on the target's architecture. The field host will almost
+      certainly be x86_64. `argon2` ships a `linux-x64` prebuild and `ssh2`'s `cpu-features` is
+      optional, so it looks feasible, and it is unproven. **Done when** an `amd64` `.deb` has been
+      built — under emulation, or on an x86_64 runner — and installed by the smoke test, or the
+      reason it cannot be is written down with what the field host must do instead.
+
+- [ ] **H-15 — The field-test dress rehearsal** · M · H-11, H-12, H-13, H-14 ·
+      `docs/runbook-field-test.md` end to end on the smoke-install Ubuntu 24.04 box, against the
+      simulators in `docker-compose.dev.yml` (`snmpsim`, the syslog sender, GreenMail, MariaDB,
+      MSSQL, the in-house HTTP, SSH and mail servers) with MailHog as the relay: install from the
+      `.deb`, the token, step 3's triggers, the start reading, step 2's restart-everything-once,
+      the "24 h" and "end" readings compressed to hours, and a write-up in step 6's shape. The
+      runbook has been wrong in three places once already; the next one should cost an afternoon.
+      **It proves the procedure and nothing about the product.** Simulators are not "100 real
+      devices", and what this VM can show about endurance `H-01`'s 24-hour soak at 5,047 sensors
+      already showed. **Never tick `H-09` from it.** A heavy run on the shared machine — announce
+      it, and run it when the machine is quiet.
+
+- [ ] **H-16 — The Linux-only 1.0 documentation** · S · H-10 · 1.0 is Linux-only (decided
+      2026-09-28), and four places still promise Windows. **Done when** each says plainly that 1.0
+      does not run on Windows and that Windows is 1.1:
+      - `docs/installation.md:18` — the requirements row "Linux with systemd, or Windows with
+        WinSW";
+      - `README.md:6-7` — "systemd on Linux, WinSW on Windows" as the description of production;
+      - `docs/PLAN.md` Phase 10 — split the exit criterion into 1.0 (Ubuntu) and 1.1 (Windows
+        Server), with the MSI deliverable moving to 1.1;
+      - `docs/CAPABILITIES.MD` §3.5 — the four Windows rows stay in scope and say "not in 1.0:
+        needs a Windows probe, 1.1" (a new `[V1.1]` marker was the alternative, and adds a fourth
+        marker to a legend `CLAUDE.md` refers to);
+      - and `docs/runbook-field-test.md`'s Windows steps move to a 1.1 section, not deleted.
+
+      `CLAUDE.md`'s first hard constraint does not change: it constrains what is built, and
+      Windows is still built for. Nor do `ADR-001`'s decisions.
+
+---
+
+## Release 1.1 — Windows
+
+**Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is
+abandoned and none of its code leaves the tree. What has been missing all along is not code but a
+Windows machine, and every ticket below is blocked on one — a Windows Server host, or a runner
+registered under `CI_RUNNER_WINDOWS`, which brings back `H-06`'s and `S-11`'s CI jobs with no code
+change. The reasoning is `findings/2026-09-28-v1-release-candidate.md` §5.
+
+**The four `windows.*` sensor types are 1.1 as well** — `windows.cpu`, `windows.memory`,
+`windows.volume` and `windows.service` (`T-10`). They run PowerShell's CIM cmdlets from a probe
+*on* Windows, so a Linux probe can only fail them, and no `Get-CimInstance` in them has ever run
+against Windows. The v1 build profile leaves them out of its catalogue (`H-12`, asserted of a
+running server by `H-13`). They stay in the full build, and come back into the profile once `T-25`
+has run them.
+
+`S-11` and `H-06` were moved here whole on 2026-09-28, from Phases 1 and 10, and keep their names:
+other tickets cite them, which is why `P-24` kept its name when it became `V2-17`.
+
+- [ ] **S-11 — Resolve TimescaleDB on Windows** · M · S-06 · Spike: install and benchmark on
+      Windows Server. Decide TimescaleDB vs plain-Postgres fallback and record the outcome in
+      ADR-001. _Blocks the Windows release story._
+
+      **The decision half is answered and does not need a Windows host** —
+      `docs/findings/2026-09-03-timescaledb-on-windows.md`. TimescaleDB publishes current Windows
+      builds (2.29.2 ships `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, and the eight
+      most recent releases all do), and the PostgreSQL 17 package contains
+      **`timescaledb-tsl-2.29.2.dll`** — the licensed module where compression lives — plus every
+      function this project uses: `create_hypertable`, `time_bucket`, `drop_chunks`,
+      `compress_chunk`, `add_compression_policy`. **So no `PlainPostgresEngine` fallback is
+      required on availability grounds**, and the cost `S-12` priced does not have to be paid.
+
+      What is left is what actually needs the host: the benchmark, and whether `setup.exe`
+      composes with how an operator installs PostgreSQL on Windows — there is no Windows
+      counterpart to `scripts/smoke/provision-postgres.sh`.
+
+      **Writing that counterpart blind was considered on 2026-09-04 and deliberately not done.**
+      The Linux script is 38 lines and the shape transfers — preload `timescaledb`, set the licence,
+      restart, wait, create the role and database, `CREATE EXTENSION`. What does not transfer is
+      every particular it depends on: the data directory, the service name, and whether
+      `setup.exe` places the extension where a running server will find it. The finding above says
+      in as many words that this is unverified, so a `.ps1` written now would be a guess at paths
+      and service names that reads like progress and proves nothing — and `P-53` would parse-check
+      it, which makes it look checked. Write it on the host, where the first run says whether it is
+      right.
+
+      **Re-checked 2026-09-09, and it holds.** 2.30.0 was published the day before and ships
+      `timescaledb-postgresql-{16,17,18}-windows-amd64.zip`, as do the nine releases behind it;
+      the PostgreSQL 17 package still carries `timescaledb-tsl-2.30.0.dll` and every symbol this
+      project uses. The channel does drop versions — PostgreSQL 15 had a Windows build through
+      2.28.3 and none since 2.29.0 — which is the argument for re-running the check rather than
+      believing it.
+
+      **What the re-check actually found was in our own documents.** The finding's dependency
+      table was five functions; the code asks for eleven symbols, and one of the five —
+      `add_compression_policy` — this project never calls, because compaction is driven by the
+      housekeeping loop precisely so the Timescale Licence stays accepted for native compression
+      and nothing else. `storage-engine.test.ts` could not have noticed: it pins *where* an
+      engine-specific function may appear, not *which* ones are used. It now asserts the surface
+      in both directions and fails on seven named TSL features the licence note refuses —
+      catalogue entry 42.
+
+      **"Needs a Windows host" was the wrong framing, and `H-06` had already found that out.**
+      `windows-latest` on GitHub Actions *is* Windows Server 2022 — `H-06`'s `windows-install` job
+      installs the MSI there — so the machine has existed all along and the missing thing is a
+      job. What that runner can and cannot answer is not the same for both halves of what is left:
+
+      - **Provisioning composes, and a runner can prove it.** Install PostgreSQL, run `setup.exe`,
+        set `shared_preload_libraries`, restart, `CREATE EXTENSION`, compress a chunk. That is a
+        pass/fail question and a hosted runner answers it exactly as well as a bare-metal one.
+      - **The benchmark is not a question a hosted runner can answer.** It is a shared VM with
+        neighbours nobody can see, which is the same reason `CLAUDE.md` says to stop `ms-server`
+        before `test:perf` and why `P-192` prints the conditions with the numbers. A figure
+        measured there would be a number, not a measurement, and committing it would be worse
+        than having none.
+
+      **And the "it would be a guess" objection is now mostly answered** (2026-09-09): `setup.exe`
+      is a Go binary whose own strings give the flags — `-pgconfig`, `-quiet`, `-no-tune` — and say
+      it copies the extension to `pg_config --pkglibdir` / `--sharedir`, asked of *that server's*
+      `pg_config`. So it does not guess a path, and neither would a script driving it. What is
+      left unproven is that any of it runs, which is what the job would settle.
+
+      **Both are now written, and neither has run.** `scripts/windows/provision-postgres.ps1` is
+      the Windows counterpart of `scripts/smoke/provision-postgres.sh` — find `pg_config`, fetch
+      the asset for *that* major version, `setup.exe -pgconfig … -quiet -no-tune`, add
+      `shared_preload_libraries` and `timescaledb.license`, restart, wait, create the role and the
+      database, `CREATE EXTENSION`. Every path is discovered and every failure names which
+      assumption broke, because the first run is where those get settled. CI's
+      `windows-timescaledb` job runs it on `windows-latest` and asserts the three claims `S-11`
+      rests on, in the order they would fail: the extension loads, `timescaledb.license` is
+      `timescale` — migration 004 refuses to apply otherwise — and a chunk actually compresses,
+      which is the one Timescale-Licence feature `CLAUDE.md` accepts the licence for. A green
+      `CREATE EXTENSION` with compression that throws would be the worst thing to ship, because
+      it looks like a pass.
+
+      **Tick this only when that job goes green.** It has still never run, but the reason changed
+      on 2026-09-09: CI runs again, on a self-hosted runner (`P-198`), and every Linux job in it
+      is green. What is missing now is a *Windows machine* — the job is skipped by
+      `if: vars.CI_RUNNER_WINDOWS != ''` rather than failing. Register a runner on any Windows
+      box, set that variable to its label, and this runs. Until then what exists is a proposal
+      that parses. `P-53`'s check covers the script, and a parse check is not a run; the
+      danger of writing it now is precisely that it *looks* checked, which is why this paragraph
+      is here.
+
+      **Still needs a real host after that:** the benchmark. A hosted runner is a shared VM, and
+      the number it produced would not be a measurement.
+
+      Writing the job found the gap it fell into: **nothing in this repository parsed the
+      workflow.** Embedding PowerShell in a YAML block scalar broke `ci.yml` — a here-string must
+      close at column zero and a block scalar has no column zero — and with CI switched off,
+      nothing would have said so until somebody turned it back on and needed it. The ordinary
+      suite now parses every workflow and asserts each job has steps, for `P-53`'s reason.
+
+      Re-check the availability finding
+      before a Windows release; an upstream that stopped publishing Windows builds would flip it.
+      **Added by S-12:** if the answer is a fallback, the work is bounded and half-measured
+      already. A `PlainPostgresEngine` needs four methods — `date_bin` for bucketing (verified
+      identical to `time_bucket`), partition introspection, a no-op compaction reporting
+      `compaction: false`, and `DROP TABLE` on a partition — plus a **second migration list**,
+      because migrations are checksummed and cannot be parameterised by engine without making
+      every existing installation look drifted. Creating partitions ahead of time is the only
+      genuinely new work, and it belongs in the housekeeping loop. See
+      `docs/findings/2026-08-25-storage-engine-boundary.md`.
+
+      **Moved here on 2026-09-28** from Phase 1, with 1.0 Linux-only (`H-10`).
+
+- [ ] **H-06 — Windows MSI** · L · F-06 · Installer with service registration, firewall rules and
+      an upgrade path.
+
+      **Built, structurally verified, and not installed.** `scripts/package-msi.sh` produces
+      `ms-<version>-x64.msi` and `ms-probe-<version>-x64.msi` with `wixl` — msitools' WiX
+      compiler, which runs on Linux, so the MSI comes off the same staged tree as the tarball,
+      the `.deb` and the `.rpm`. `deploy/windows/ms-setup.ps1` is the Windows counterpart of
+      `setup.sh` and does what H-06 asks for: registers the WinSW services, **opens the firewall
+      for the two ports the core actually listens on, read from the configuration rather than
+      hardcoded**, keeps an existing configuration with a timestamped backup, and runs
+      `config check` before restarting anything. `ms-teardown.ps1` is the uninstall half and
+      leaves ProgramData alone, for the reason the Linux packages leave `/etc/ms` alone.
+
+      **What is not done is the half that needs Windows**: nothing here has installed the MSI.
+      Service registration, the firewall rules, the upgrade path and the uninstall all execute on
+      Windows and are unproven. The build prints that in place of a success message, and this
+      ticket stays open for it.
+
+      **But "needs hardware nobody has" was wrong, and that mattered.** `windows-latest` on GitHub
+      Actions *is* Windows Server 2022 — the missing thing was a job, not a machine. CI now has a
+      `windows-install` job that downloads the MSI the Linux job built, installs it with
+      `msiexec /qn`, and asserts what H-06 actually asks for: the files land and `app.zip` was
+      expanded (which is the proof the custom action ran at all), both services registered, both
+      firewall rules exist, an upgrade over it keeps an edited configuration and leaves a backup,
+      and an uninstall removes the services while leaving ProgramData. The three `msiexec` logs
+      are uploaded whatever happens, because the first failure on a machine nobody has tested is
+      exactly when the log *is* the finding.
+
+      It also parse-checks every `.ps1`. A parse error in `ms-setup.ps1` would break every Windows
+      install, and for a while nothing anywhere would have caught it: PowerShell publishes no arm64
+      container, the amd64 one dies under QEMU on an Apple Silicon machine, and the `dotnet tool`
+      package is broken — three routes tried, all dead.
+
+      **A fourth route works, and the check no longer depends on this job** (`P-53`). `P-51` put
+      the official `linux-arm64` PowerShell tarball in the toolchain image, so the parse check runs
+      in the ordinary test suite on every machine, disabled CI or not. All three scripts parse.
+      That is not this job's other assertions — installing, the services, the firewall, the upgrade
+      — which still need Windows and still keep this ticket open.
+
+      **The job has never run**, and as of 2026-09-09 the reason is no longer CI. The workflow is
+      enabled and green on a self-hosted runner (`P-198`); this job is *skipped*, by
+      `if: vars.CI_RUNNER_WINDOWS != ''`, because there is no Windows machine registered. That is
+      now the whole of the blocker: a runner on a Windows box and one repository variable brings
+      back this job, `S-11`'s provisioning job, and the `release-artifacts` upload they need.
+      Tick H-06 when it goes green, not before.
+
+      Three things the build taught, all recorded in the script:
+
+      - **wixl segfaults above about ten thousand components** (a hundred compile instantly), so
+        the application ships as one `app.zip` that `ms-setup.ps1` expands. The cost is named:
+        Windows Installer no longer tracks the application file by file, so its repair cannot
+        restore one file and the teardown script removes the tree instead.
+      - **wixl drops a custom action it cannot compile and still writes an MSI, with exit status
+        zero.** A `Directory`-form action produced a GLib assertion on stderr and a package that
+        installs files and registers nothing — the exact shape of a defect that ships. The build
+        now asserts both actions exist and are sequenced, and fails if either is missing;
+        `Property` is the form wixl implements, `Directory` and `BinaryKey` are not.
+      - **Backticks in an interpolating heredoc are command substitution**, which is how a
+        prose comment mentioning `Directory` became "command not found" mid-build.
+
+      **Moved here on 2026-09-28** from Phase 10, with 1.0 Linux-only (`H-10`).
+
+- [ ] **H-17 — Release candidate field test, the Windows half** · L · H-06, S-11, T-25 · Split
+      from `H-09` on 2026-09-28, so that `H-09` can be ticked for Linux on its own evidence. A
+      clean install on Windows Server from the MSI, monitoring real devices — Windows servers over
+      WMI among them, which the Linux test cannot reach — for a week without intervention, by
+      `docs/runbook-field-test.md`, whose Windows steps move to a 1.1 section under `H-16`.
+      **Done when** that week has run clean on a 1.1 candidate and the write-up says what it
+      covered and what it did not. A hosted runner can install an MSI and cannot run a week, so
+      this needs a Windows Server host.
+
+- [ ] **T-25 — The Windows queries, run against Windows** · M · T-09, T-10 · `T-10` says it in
+      so many words: **no `Get-CimInstance` has run against a Windows machine.** The transport, the
+      wrapper and the parsing are proved, the wrapper against a real PowerShell 7, and the four
+      queries are written against recorded output. That was `T-09`'s and `T-10`'s stated open
+      item, and it had no ticket of its own. **Done when** each `windows.*` type has scanned a real
+      Windows Server from a Windows probe, over `Get-CimInstance -CimSession` to a second machine
+      (that is how one probe monitors many), under PowerShell 5.1, the version a Windows Server
+      ships; the readings agree with what the machine says of itself; and the machine with one
+      volume, which `asRows` exists for, is one of them. Anything found is fixed in the type, with
+      a test against the fake PowerShell that replays what Windows actually sent.
+
+- [ ] **R-10 — The Windows probe installer, run** · S · R-07 · `R-07` shipped
+      `install-probe.ps1` beside `install-probe.sh`. The shell script is proved across two boxes
+      by `smoke-enrol.sh`; the PowerShell one has only ever been parse-checked (`P-53`), and a
+      parse check is not a run. **Done when** a bundle issued by a Linux core has been installed on a Windows host with
+      `install-probe.ps1`, the probe crossed the network and arrived pending under the name it was
+      enrolled with, was approved and scanned; and a second bundle kept `probe.json` while
+      updating the endpoint and key, as the script claims to.
 
 ---
 
@@ -13867,6 +14050,34 @@ analysis". `F-` is Phase 0.
       skipped, a fixed 20-byte IPv4 header, an IPv6 agent address skipped as four bytes, the
       sensor's scaling removed, and a fragment's payload read as ports. 25 tests here and 31 on the
       sensor; the full suite is green at 3,669.
+
+- [ ] **B-07 — The flow collector has never run in a shipped probe** · M · B-02, B-06 ·
+      **Phase 11 is not complete, whatever `B-05` says.** Found on 2026-09-28 while scoping the
+      release candidate (`H-10`). `packages/probe/src/main.ts` constructs `TrapListener` and
+      `SyslogListener` and nothing else. `FlowListener` is referenced by its own test and by a type
+      import in `probe/src/health/report.ts`, and `git log -S FlowListener --
+      packages/probe/src/main.ts` is empty: it was never wired, rather than wired and removed. The
+      probe's configuration has no `flowListener` key, and its root is `additionalProperties:
+      false`, so an operator cannot add one. `flow.netflow` is registered regardless, so a flow
+      sensor can be created, and every scan of it fails with "enable `flowListener` in the probe's
+      configuration" — advice naming a key that does not exist. Probe Health's five `flow*`
+      channels gap, because nothing sends them. `B-01`…`B-06` are each right as far as they go,
+      and none of them had to start the probe: `P-61` again.
+
+      **Gate the health fields first.** `B-02` added `flowReceived`, `flowRejected`,
+      `flowMalformed`, `flowMissed` and `flowUndecodable` to `ProbeHealthReport` and its JSON
+      Schema at protocol 16 with no capability, and `healthForPeer` does not strip them. That
+      schema is `additionalProperties: false`, so the day a probe sends them, any core that does
+      not know them rejects every heartbeat. `P-208`'s comment calls its own field "the first health
+      field since `P-178`", which is how this went unnoticed.
+
+      **Done when** the probe constructs `FlowListener` behind a `flowListener` configuration key,
+      the way traps and syslog are (off by default, binding nothing until an operator turns it
+      on); the five fields have a capability and a version, and `healthForPeer` strips them for a
+      peer without it; the sensor's error names a key that exists; and a test starts the *probe*,
+      not the listener, sends it a datagram and sees a reading. Not a 1.0 blocker, because flow
+      is not in the v1 profile (`H-12`) and `H-13` asserts a v1 probe refuses a flow assignment by
+      name. Needed for v2 regardless, near the front of its queue.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
@@ -15246,7 +15457,7 @@ to maps; and PRTG's per-node display settings.
 
 Ordered by expected value. Not scheduled.
 
-- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above
+- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above, **and never started by a shipped probe** — `B-07`, found 2026-09-28
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
 - ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, and `E-12` (report fonts beyond DejaVu's coverage) landed the same day
 - ~~**V2-04** Libraries (filter-rule alternate tree views)~~ — **scoped 2026-09-27** into `L-01`…`L-05` under Phase 14 above, behind `A-12`…`A-15`
