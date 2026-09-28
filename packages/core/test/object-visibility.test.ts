@@ -1105,6 +1105,47 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.deepEqual(regranted?.pathNames, ['Customer A', 'a-regranted']);
     });
 
+    it('counts a schedule’s users among what the editor can see (A-25)', async () => {
+      // Every hour marked, so assigning it pauses nothing the later tests scan.
+      const input = {
+        name: 'a-visible schedule',
+        grid: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => true)),
+      };
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/schedules',
+        headers: { ...as('operator'), 'content-type': 'application/json' },
+        payload: input,
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const scheduleId = created.json<{ id: number }>().id;
+      const users = [pingId, otherSensorId];
+      await db.query(
+        `INSERT INTO object_setting (object_id, key, value)
+         SELECT unnest($1::bigint[]), 'schedule.id', to_jsonb($2::bigint)`,
+        [users, scheduleId],
+      );
+      try {
+        const usedBy = async (login: string): Promise<number> => {
+          const response = await app.inject({
+            method: 'PUT',
+            url: `/api/v1/schedules/${String(scheduleId)}`,
+            headers: { ...as(login), 'content-type': 'application/json' },
+            payload: input,
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          return response.json<{ usedBy: number }>().usedBy;
+        };
+        assert.equal(await usedBy('operator'), 1, 'a-ping, and not the sensor in the other branch');
+        assert.equal(await usedBy('admin'), 2, 'the control: both are there to be counted');
+      } finally {
+        await db.query(
+          `DELETE FROM object_setting WHERE key = 'schedule.id' AND object_id = ANY($1::bigint[])`,
+          [users],
+        );
+      }
+    });
+
     it('refuses a scope naming an object outside the branch', async () => {
       for (const url of [
         `/api/v1/alarms?objectId=${String(probeId)}`,
@@ -1209,6 +1250,41 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       } finally {
         branch.terminate();
         admin.terminate();
+      }
+    });
+
+    it('notices a counter that went backwards, the way a restore puts it (A-25)', async () => {
+      // A known state before subscribing, so that the failure below is a change to publish.
+      await scan([pingId], true);
+      const branch = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      const frames: string[] = [];
+      branch.on('message', (raw: Buffer) => frames.push(raw.toString('utf8')));
+      try {
+        branch.send(JSON.stringify({ subscribe: {} }));
+        await waitFor(branch, frames, 'snapshot');
+        const [counter] = await db.query<{ value: string }>(
+          'SELECT value::text AS value FROM access_epoch',
+        );
+        const resolvedAt = Number(counter?.value);
+        assert.ok(resolvedAt > 0, 'the fixture’s grants have moved the counter');
+
+        // A restore from a backup taken before the branch was granted: the grant is gone, and the
+        // counter is back below the number the socket was resolved at. Older-than would never
+        // look at this socket again until the counter climbed past it.
+        await access.grant(branchId, teamId, 'none', actorNamed('visibility'));
+        await db.query('UPDATE access_epoch SET value = $1', [resolvedAt - 1]);
+        const mark = frames.length;
+        await scan([pingId], false);
+
+        const overflow = await waitFor(branch, frames, 'overflow', mark);
+        assert.match(String(overflow['reason']), /may see has changed/);
+        assert.equal(
+          frames.slice(mark).some((frame) => frame.includes('"type":"state"')),
+          false,
+          'a change was streamed to a socket that may no longer see it',
+        );
+      } finally {
+        branch.terminate();
       }
     });
   });

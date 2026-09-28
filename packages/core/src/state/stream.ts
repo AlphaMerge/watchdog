@@ -275,7 +275,7 @@ export class StateBroadcaster {
 
     // **Grants change while sockets stay open** (`A-12`). The epoch came back with the ancestry,
     // so noticing costs no round trip; only a batch published after a grant change pays for
-    // re-resolving, and only for the subscribers whose answer is older than it.
+    // re-resolving, and only for the subscribers whose answer was read at another epoch.
     if (epoch !== null) await this.#catchUp(epoch);
 
     let sent = 0;
@@ -384,7 +384,7 @@ export class StateBroadcaster {
   }
 
   /**
-   * Re-resolves every subscriber whose visibility is older than `epoch`, and sends back to the
+   * Re-resolves every subscriber whose visibility was read at another epoch, and sends back to the
    * start any whose answer changed.
    *
    * **A changed view is a resync, not a quiet swap.** The client has already painted sensors it
@@ -399,7 +399,10 @@ export class StateBroadcaster {
   async #catchUp(epoch: number): Promise<void> {
     const stale = [...this.#attached].filter((attached) => {
       const seen = attached.sight.visibility.epoch;
-      return seen !== null && seen < epoch;
+      // Different, not older (`A-25`): the counter only rises in a running database, but a
+      // restore or a rollback can put it back, and a socket resolved at the higher number would
+      // then never be told again until the counter passed it.
+      return seen !== null && seen !== epoch;
     });
     if (stale.length === 0) return;
 

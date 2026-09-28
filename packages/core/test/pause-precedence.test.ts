@@ -22,6 +22,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -520,10 +521,15 @@ describe(
       // schedule. This edit reaches `ScheduleSync`, which recomputes at the mutation's own
       // timestamp — the real clock — so a window chosen only to be closed at `OUTSIDE` would
       // leave the master running for ten hours a week (`P-184`).
-      await schedules.update(testActor, window, {
-        name: 'master-window',
-        periods: CLOSED_PERIODS,
-      });
+      await schedules.update(
+        testActor,
+        window,
+        {
+          name: 'master-window',
+          periods: CLOSED_PERIODS,
+        },
+        Visibility.EVERYTHING,
+      );
 
       assert.equal((await flagsOf(masterId)).state, 'paused', 'the master is switched off');
       assert.deepEqual(

@@ -12480,6 +12480,30 @@ because each is a decision rather than a defect:
       answer; granted `write` on the device whose only sensor is hidden, the acknowledgement is
       refused and the sensor untouched. Mutation 2/2: either walk without the condition.
 
+- [x] **A-25 — A schedule edit counts every branch's users, and the stream trusts a rising
+      counter** · S · A-12 · Found 2026-09-28 in `A-12`'s review. Two leftovers of the same
+      ticket. `PUT /schedules/:id` answered with `usedBy` as the length of `usedBy`'s page over
+      the whole tree — `A-12` fixed `get` and `list` to count among what the reader can see, and
+      the edit's answer still counted a sensor in a branch the editor cannot see. And
+      `StateBroadcaster` re-resolved a socket only when `access_epoch` had risen *past* the number
+      it was resolved at: a restore or a rolled-back counter puts it below, and a socket resolved
+      at the higher number was then never looked at again until the counter climbed past it,
+      however much its grants changed meanwhile.
+
+      **Done when** the edit's `usedBy` is `get`'s count, and a socket is re-resolved when the
+      counter differs from the one it was resolved at, each asserted by a test that fails against
+      the code before the fix.
+
+      **A-25 outcome.** `ScheduleService.update` takes the caller's visibility and answers with
+      `usageCounts`, as `get` does. `#catchUp` compares with `!==`: a socket resolved at another
+      epoch is re-resolved, older or newer, and one whose answer is unchanged is left alone as
+      before. The cost of "newer" is a batch whose ancestry was read just before a grant change
+      re-resolving the sockets that subscribed just after it — one resolution per account, in a
+      race that needs both. Tests: 2 new in `object-visibility.test.ts` — the operator's edit of a
+      schedule used by `a-ping` and a sensor in the other branch answers 1, an administrator's 2;
+      and a socket whose grant is revoked while the counter is put back below the number it was
+      resolved at is sent `overflow`, not the change. Mutation 2/2: the page length, and `<`.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

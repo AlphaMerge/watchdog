@@ -626,10 +626,15 @@ describe(
 
     it('seeds the built-ins once, and never overwrites an edit to one', async () => {
       const id = await officeHours();
-      await schedules.update(testActor, id, {
-        name: 'Office hours (Mon–Fri 08:00–18:00)',
-        periods: 'mo:09:00-mo:17:00',
-      });
+      await schedules.update(
+        testActor,
+        id,
+        {
+          name: 'Office hours (Mon–Fri 08:00–18:00)',
+          periods: 'mo:09:00-mo:17:00',
+        },
+        Visibility.EVERYTHING,
+      );
 
       assert.equal(await schedules.seedBuiltIns(), 0, 'a second seed inserts nothing');
       const again = await schedules.get(id, Visibility.EVERYTHING);
@@ -637,12 +642,17 @@ describe(
       assert.equal(again.builtIn, true);
 
       // Put it back for the tests below.
-      await schedules.update(testActor, id, {
-        name: 'Office hours (Mon–Fri 08:00–18:00)',
-        periods:
-          'mo:08:00-mo:18:00 tu:08:00-tu:18:00 we:08:00-we:18:00 th:08:00-th:18:00 ' +
-          'fr:08:00-fr:18:00',
-      });
+      await schedules.update(
+        testActor,
+        id,
+        {
+          name: 'Office hours (Mon–Fri 08:00–18:00)',
+          periods:
+            'mo:08:00-mo:18:00 tu:08:00-tu:18:00 we:08:00-we:18:00 th:08:00-th:18:00 ' +
+            'fr:08:00-fr:18:00',
+        },
+        Visibility.EVERYTHING,
+      );
     });
 
     // -------------------------------------------------------------------------------------
@@ -697,11 +707,16 @@ describe(
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'replacing the PSU');
 
       // The window opens — the schedule stops applying, the operator's pause does not.
-      await schedules.update(testActor, closed, {
-        name: 'Patching window',
-        periods: aroundNow(),
-        polarity: 'active',
-      });
+      await schedules.update(
+        testActor,
+        closed,
+        {
+          name: 'Patching window',
+          periods: aroundNow(),
+          polarity: 'active',
+        },
+        Visibility.EVERYTHING,
+      );
       await recompute(new Date());
 
       const held = await flagsOf(sensorId);
@@ -854,6 +869,7 @@ describe(
         testActor,
         id,
         { name: 'Editable', periods: 'mo:09:00-mo:17:00' },
+        Visibility.EVERYTHING,
         OUTSIDE,
       );
       assert.equal((await flagsOf(sensorId)).schedule, true, 'the edit paused it in its own tx');
@@ -1227,7 +1243,12 @@ describe(
       const id = (
         await schedules.create(testActor, { name: 'Audited', periods: 'mo:09:00-mo:17:00' })
       ).id;
-      await schedules.update(testActor, id, { name: 'Audited', periods: 'mo:10:00-mo:16:00' });
+      await schedules.update(
+        testActor,
+        id,
+        { name: 'Audited', periods: 'mo:10:00-mo:16:00' },
+        Visibility.EVERYTHING,
+      );
 
       const rows = await db.query<{ action: string; diff: { field: string; after: unknown }[] }>(
         `SELECT action, diff FROM audit_log WHERE action = 'schedule.updated'

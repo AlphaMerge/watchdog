@@ -104,7 +104,13 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
         response: { 200: { $ref: 'ms:schedule' } },
       },
     },
-    async (request) => schedules.update(actorFor(request), request.params.id, request.body),
+    async (request) =>
+      schedules.update(
+        actorFor(request),
+        request.params.id,
+        request.body,
+        await visibilityOf(request),
+      ),
   );
 
   app.delete<{ Params: { id: number } }>(

@@ -169,11 +169,16 @@ export class ScheduleService {
    * Whole-document, not a patch: a schedule is five fields and a period list, and a partial
    * update of a period list is a merge nobody can define — is a period that is absent removed,
    * or unmentioned? The editor holds the whole thing anyway.
+   *
+   * `usedBy` in the answer is `get`'s count, among what the caller can see (`A-25`). It was the
+   * length of `usedBy`'s fifty-row page over every branch — the mistake `P-129` fixed for the
+   * delete refusal and `A-12` fixed for `get`, left here.
    */
   async update(
     actor: Actor,
     id: number,
     input: ScheduleInput,
+    visibility: Visibility,
     now = new Date(),
   ): Promise<ScheduleView> {
     const write = this.#parse(input);
@@ -199,8 +204,8 @@ export class ScheduleService {
 
       const after = await this.#repo.get(q, id);
       if (after === null) throw notFound(id);
-      const usage = await this.#repo.usedBy(q, id);
-      return toView(after, usage.length, now);
+      const usage = await this.#repo.usageCounts(q, visibility);
+      return toView(after, usage.get(id) ?? 0, now);
     });
   }
 
