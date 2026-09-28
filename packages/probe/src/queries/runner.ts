@@ -135,7 +135,7 @@ export class QueryRunner {
     // a probe that cannot run this sensor at all, not a target that answered badly.
     const named = NOT_A_CHECK_FAILURE[meta.phase];
     if (named !== undefined) {
-      this.#answer({ queryId, failure: named.failure, message: named.message });
+      this.#answer({ queryId, failure: named.failure, message: named.message(result) });
       return;
     }
 
@@ -148,15 +148,19 @@ export class QueryRunner {
 
 /** Phases where the probe, not the target, is the reason there is no reading. */
 const NOT_A_CHECK_FAILURE: Readonly<
-  Partial<Record<string, { failure: QueryFailure; message: string }>>
+  Partial<Record<string, { failure: QueryFailure; message: (result: CheckResult) => string }>>
 > = {
   'pool-stopped': {
     failure: 'offline',
-    message: 'the probe stopped before the check finished',
+    message: () => 'the probe stopped before the check finished',
   },
+  // **The registry's own words, not a fixed guess** (`H-13`). They name the type and, when this
+  // build left it out on purpose, say why: "the v1 profile leaves it out, because flow monitoring
+  // is v2". A fixed line saying the probe is probably older than the core sent an operator to
+  // upgrade a probe that was already the newest build there is.
   'unknown-type': {
     failure: 'unsupported',
-    message: 'this probe has no such sensor type — it is probably older than the core',
+    message: (result) => result.message,
   },
 };
 

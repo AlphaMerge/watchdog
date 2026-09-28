@@ -32,13 +32,13 @@ that gets run badly or not at all.
 **What this runbook adds is what those cannot reach**: real devices that answer in ways a
 simulator does not, and a week of unattended running.
 
-> **Say which build you are testing, and mean it.** This runbook was written when `main` was v1
-> plus `H-06`. It is not any more: flow monitoring (Phase 11) and maps (Phase 12) have landed on
-> the same branch, there is no v1 tag, and a build cut from `main` today carries a UDP listener
-> and a public share-link surface that the Phase 10 exit criterion never contemplated. Either cut
-> the release candidate from a commit you can name and field-test *that*, or accept the v2
-> subsystems into the test and read the extra section in step 3. Field-testing "whatever `main`
-> was that morning" is how a week produces a result nobody can attribute.
+> **Say which build you are testing, and mean it.** `main` carries v2 work beside the candidate:
+> flow monitoring, maps, reports and libraries. The candidate is `main` packaged with the v1
+> profile, which constructs none of them (`H-12`). `scripts/package.sh` builds that profile unless
+> told otherwise, and stamps each build with its profile and commit (`H-11`); step 4 records both.
+> The appendix lists everything the candidate answers and every sensor type it carries.
+> Field-testing "whatever `main` was that morning" is how a week produces a result nobody can
+> attribute.
 
 ---
 
@@ -125,6 +125,8 @@ state trigger will ever see it.
 
 ### If the build carries flow monitoring (Phase 11)
 
+The v1 candidate does not, so skip this section when testing it.
+
 Adding a `flow.netflow` sensor starts the probe's collector, and five counters on Probe Health
 come with it: `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed` and `flowUndecodable`.
 **None of them has a declared limit**, so none of them will ever move a sensor's state — they need
@@ -150,8 +152,8 @@ past their bound rather than fail a check — the right trade, and one nothing c
 ## 4. Run for a week, and record
 
 Take a reading at the start, at 24 h, and at the end. **The API needs a token** — every route
-but the public map prefix does — so make one first, from a signed-in session, and keep it for the
-week:
+but the three that log you in does — so make one first, from a signed-in session, and keep it
+for the week:
 
 ```bash
 # POST /api/v1/auth/tokens {"name":"field-test","scope":"read"} → { token, secret }
@@ -255,3 +257,181 @@ Get-NetFirewallRule -DisplayName 'MonitoringSystem *'
 
 Repeat step 2 on Windows: restart both services once the devices are added, and check Probe
 Health the same way. Anything that only breaks on restart is invisible to every other test.
+
+---
+
+## Appendix: the candidate’s surface
+
+**What the v1 candidate is, and what this runbook is a test of** (`H-13`). The two tables are
+compared with a v1 core in both directions by `packages/core/test/candidate-surface.test.ts`.
+A build that answers a route not listed here fails that test, and so does one that no longer
+answers a route that is listed. The same goes for sensor types. Change the build and this table
+together, or the suite goes red.
+
+**The routes**, found by asking a v1 core, not by reading the OpenAPI document (which does not
+list `/api/v1/stream`). *Without a credential* is what that core answers to a request with no
+session and no token: `401`, or **public** for the three routes that let a user log in. Nothing
+under `/api/` or at `/metrics` answers anything else. The web UI's own files are also served
+without a credential; they are public by design, carry no data, and are not listed. A
+`{parameter}` is part of the path.
+
+There are no maps, reports, libraries or `/api/v1/public/` routes. Those are v2, and the v1
+build does not construct them (`H-12`).
+
+| Route | Methods | Without a credential |
+| --- | --- | --- |
+| `/api/v1/accounts/{id}/groups` | GET | 401 |
+| `/api/v1/accounts/{id}/primary-group/{groupId}` | PUT | 401 |
+| `/api/v1/alarms` | GET | 401 |
+| `/api/v1/audit` | GET | 401 |
+| `/api/v1/auth/login` | POST | **public** |
+| `/api/v1/auth/logout` | POST | **public** |
+| `/api/v1/auth/me` | GET | 401 |
+| `/api/v1/auth/mfa` | GET | 401 |
+| `/api/v1/auth/mfa/confirm` | POST | 401 |
+| `/api/v1/auth/mfa/disable` | POST | 401 |
+| `/api/v1/auth/mfa/enrol` | POST | 401 |
+| `/api/v1/auth/mfa/recovery-codes` | POST | 401 |
+| `/api/v1/auth/password` | POST | 401 |
+| `/api/v1/auth/session` | GET | **public** |
+| `/api/v1/auth/tokens` | GET · POST | 401 |
+| `/api/v1/auth/tokens/{id}` | DELETE | 401 |
+| `/api/v1/build` | GET | 401 |
+| `/api/v1/core-health` | GET | 401 |
+| `/api/v1/credential-kinds` | GET | 401 |
+| `/api/v1/device-templates` | GET | 401 |
+| `/api/v1/device-templates/plan` | POST | 401 |
+| `/api/v1/device-templates/{templateId}` | GET | 401 |
+| `/api/v1/discovery` | POST | 401 |
+| `/api/v1/discovery/preview` | POST | 401 |
+| `/api/v1/discovery/schedules` | GET · POST | 401 |
+| `/api/v1/discovery/schedules/{id}` | DELETE | 401 |
+| `/api/v1/discovery/schedules/{id}/enabled` | POST | 401 |
+| `/api/v1/discovery/{id}` | GET | 401 |
+| `/api/v1/discovery/{id}/cancel` | POST | 401 |
+| `/api/v1/discovery/{id}/hosts` | GET | 401 |
+| `/api/v1/discovery/{id}/plan` | GET | 401 |
+| `/api/v1/discovery/{id}/problems` | GET | 401 |
+| `/api/v1/discovery/{id}/provision` | POST | 401 |
+| `/api/v1/discovery/{id}/summary` | GET | 401 |
+| `/api/v1/groups` | GET · POST | 401 |
+| `/api/v1/groups/{id}` | PUT · DELETE | 401 |
+| `/api/v1/groups/{id}/members` | GET | 401 |
+| `/api/v1/groups/{id}/members/{userId}` | PUT · DELETE | 401 |
+| `/api/v1/lookups` | GET | 401 |
+| `/api/v1/lookups/{id}` | GET | 401 |
+| `/api/v1/notification-health` | GET | 401 |
+| `/api/v1/notification-methods` | GET | 401 |
+| `/api/v1/notification-placeholders` | GET | 401 |
+| `/api/v1/notification-requests` | GET | 401 |
+| `/api/v1/objects` | GET · POST | 401 |
+| `/api/v1/objects/bulk` | POST | 401 |
+| `/api/v1/objects/counts` | GET | 401 |
+| `/api/v1/objects/root` | GET | 401 |
+| `/api/v1/objects/tops` | GET | 401 |
+| `/api/v1/objects/tree` | POST | 401 |
+| `/api/v1/objects/{id}` | GET · PATCH · DELETE | 401 |
+| `/api/v1/objects/{id}/access` | GET | 401 |
+| `/api/v1/objects/{id}/access/effective` | GET | 401 |
+| `/api/v1/objects/{id}/access/{groupId}` | PUT · DELETE | 401 |
+| `/api/v1/objects/{id}/acknowledge` | POST · DELETE | 401 |
+| `/api/v1/objects/{id}/ancestors` | GET | 401 |
+| `/api/v1/objects/{id}/as-template` | POST | 401 |
+| `/api/v1/objects/{id}/audit` | GET | 401 |
+| `/api/v1/objects/{id}/channels` | GET | 401 |
+| `/api/v1/objects/{id}/channels/{key}` | PATCH | 401 |
+| `/api/v1/objects/{id}/clone` | POST | 401 |
+| `/api/v1/objects/{id}/counts` | GET | 401 |
+| `/api/v1/objects/{id}/credentials` | GET | 401 |
+| `/api/v1/objects/{id}/credentials/{kind}` | PUT · DELETE | 401 |
+| `/api/v1/objects/{id}/dependency` | PUT | 401 |
+| `/api/v1/objects/{id}/discovery` | GET | 401 |
+| `/api/v1/objects/{id}/move` | POST | 401 |
+| `/api/v1/objects/{id}/order` | POST | 401 |
+| `/api/v1/objects/{id}/pause` | GET · POST · DELETE | 401 |
+| `/api/v1/objects/{id}/settings` | GET | 401 |
+| `/api/v1/objects/{id}/settings/{key}` | PUT · DELETE | 401 |
+| `/api/v1/objects/{id}/simulate-error` | POST · DELETE | 401 |
+| `/api/v1/objects/{id}/tree` | GET | 401 |
+| `/api/v1/objects/{id}/triggers` | GET · POST | 401 |
+| `/api/v1/openapi.json` | GET | 401 |
+| `/api/v1/probes` | GET | 401 |
+| `/api/v1/probes/{gid}` | DELETE | 401 |
+| `/api/v1/probes/{gid}/allow-from` | PUT | 401 |
+| `/api/v1/probes/{gid}/approve` | POST | 401 |
+| `/api/v1/probes/{gid}/revoke` | POST | 401 |
+| `/api/v1/probes/{id}/health` | GET | 401 |
+| `/api/v1/schedules` | GET · POST | 401 |
+| `/api/v1/schedules/{id}` | GET · PUT · DELETE | 401 |
+| `/api/v1/sensor-types` | GET | 401 |
+| `/api/v1/sensor-types/{id}/preview` | POST | 401 |
+| `/api/v1/sensors/{id}/check` | POST | 401 |
+| `/api/v1/sensors/{id}/history` | GET | 401 |
+| `/api/v1/sensors/{id}/state` | GET | 401 |
+| `/api/v1/sensors/{id}/values` | GET | 401 |
+| `/api/v1/setting-definitions` | GET | 401 |
+| `/api/v1/state-log` | GET | 401 |
+| `/api/v1/stream` | GET | 401 |
+| `/api/v1/summarisation-modes` | GET | 401 |
+| `/api/v1/templates` | GET · POST | 401 |
+| `/api/v1/templates/preview` | POST | 401 |
+| `/api/v1/templates/{id}` | GET · PUT · DELETE | 401 |
+| `/api/v1/templates/{id}/preview` | GET | 401 |
+| `/api/v1/templates/{id}/test` | POST | 401 |
+| `/api/v1/templates/{id}/used-by` | GET | 401 |
+| `/api/v1/trigger-kinds` | GET | 401 |
+| `/api/v1/triggers/{id}` | PUT · DELETE | 401 |
+| `/metrics` | GET | 401 |
+
+**The sensor types.** Every built-in type is listed, with whether the candidate carries it.
+`flow.netflow` is not carried because flow monitoring is v2 (`V2-01`). The four `windows.*` types
+are not carried because they run PowerShell on a Windows probe, and 1.0 is Linux-only: Windows is
+release 1.1. A core offers only what it carries, and a v1 probe assigned a type it does not carry
+refuses it by name.
+
+| Sensor type | In the candidate |
+| --- | --- |
+| `core.factory` | yes |
+| `db.mssql` | yes |
+| `db.mysql` | yes |
+| `db.postgresql` | yes |
+| `dns.blocklist` | yes |
+| `dns.record` | yes |
+| `exe.script` | yes |
+| `exe.script.advanced` | yes |
+| `flow.netflow` | **no** |
+| `http.advanced` | yes |
+| `http.content` | yes |
+| `http.request` | yes |
+| `http.transaction` | yes |
+| `icmp.jitter` | yes |
+| `icmp.ping` | yes |
+| `mail.imap` | yes |
+| `mail.pop3` | yes |
+| `mail.roundtrip` | yes |
+| `mail.smtp` | yes |
+| `ms.core.health` | yes |
+| `ms.probe.health` | yes |
+| `port.range` | yes |
+| `port.tcp` | yes |
+| `rest.custom` | yes |
+| `snmp.cpu` | yes |
+| `snmp.custom` | yes |
+| `snmp.custom.string` | yes |
+| `snmp.diskfree` | yes |
+| `snmp.memory` | yes |
+| `snmp.table` | yes |
+| `snmp.traffic` | yes |
+| `snmp.trap` | yes |
+| `snmp.uptime` | yes |
+| `ssh.diskfree` | yes |
+| `ssh.load` | yes |
+| `ssh.meminfo` | yes |
+| `ssh.script` | yes |
+| `syslog.receiver` | yes |
+| `tls.certificate` | yes |
+| `tls.security` | yes |
+| `windows.cpu` | **no** |
+| `windows.memory` | **no** |
+| `windows.service` | **no** |
+| `windows.volume` | **no** |

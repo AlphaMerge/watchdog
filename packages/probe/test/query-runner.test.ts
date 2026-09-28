@@ -200,6 +200,7 @@ describe('the probe’s query runner', () => {
     const answer = answers[0];
     assert.ok(answer !== undefined);
     assert.equal(answer.failure, 'unsupported');
-    assert.match(answer.message ?? '', /no such sensor type/);
+    // In the registry's own words, which name the type and, from a real one, why it is missing.
+    assert.equal(answer.message, 'no such check type: test.does-not-exist');
   });
 });

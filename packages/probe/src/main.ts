@@ -33,7 +33,7 @@ import { LIVE_SOURCES } from './discovery/sources.js';
 import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
-import { probeCatalogue } from './catalogue.js';
+import { dispatchTables } from './catalogue.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -224,23 +224,9 @@ async function main(): Promise<void> {
     run: () => processRunner.stop(),
   });
 
-  // Which sensor types are fed by a listener rather than by polling (`T-06`), asked of the
-  // catalogue rather than matched on an id here: `T-20`'s syslog receiver is already the second
-  // one, and a probe with a hardcoded type id would need editing for each.
-  //
-  // Building the catalogue in this thread is cheap and does not load a protocol stack: a type's
-  // heavy imports live inside `execute`, which only a worker ever calls.
-  const listenerFor = new Map<string, string>();
-  // And which run in a process of their own (`P-03`), asked the same way and for the same reason.
-  const isolated = new Set<string>();
-  // This build's catalogue (`H-12`), the one its workers run, so a v1 probe maps no listener to a
-  // type it does not carry.
-  const catalogue = probeCatalogue();
-  for (const summary of catalogue.summaries()) {
-    const declaration = catalogue.declaration(summary.id);
-    if (declaration.listener !== undefined) listenerFor.set(summary.id, declaration.listener);
-    if (declaration.isolation === 'process') isolated.add(summary.id);
-  }
+  // Which sensor types a listener feeds and which run in a process of their own, from this
+  // build's catalogue (`H-12`) — the one its workers run.
+  const { listenerFor, isolated } = dispatchTables();
 
   const trapListener = config.trapListener.enabled
     ? new TrapListener({

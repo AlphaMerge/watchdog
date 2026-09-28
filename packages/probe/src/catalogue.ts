@@ -35,7 +35,38 @@ export function missingTypeError(
   return new SensorTypeError(
     'UNKNOWN_SENSOR_TYPE',
     reason === undefined
-      ? `no sensor type "${id}" is registered`
+      ? `no sensor type "${id}" is registered in this probe, which is probably older than the core`
       : `sensor type "${id}" is not in this build: the ${profile} profile leaves it out, because ${reason}`,
   );
+}
+
+/** How the wheel routes a due sensor of each type, where it does not go straight to the pool. */
+export interface DispatchTables {
+  /** Sensor type to the id of the listener that feeds it (`T-06`). */
+  readonly listenerFor: ReadonlyMap<string, string>;
+  /** Sensor types that run in a child process of their own (`P-03`). */
+  readonly isolated: ReadonlySet<string>;
+}
+
+/**
+ * The dispatch tables for a catalogue, asked of each type's declaration rather than matched on an
+ * id: `T-20`'s syslog receiver was already the second listener, and a probe with a hardcoded type
+ * id would need editing for each.
+ *
+ * **Built from this build's catalogue, so a v1 probe maps no listener to a type it does not
+ * carry** (`H-12`). A flow listener wired into a v1 probe would then be fed by nothing; a
+ * `flow.netflow` assignment goes to the pool, which refuses it by name.
+ *
+ * Building the catalogue in the main thread is cheap and loads no protocol stack: a type's heavy
+ * imports live inside `execute`, which only a worker ever calls.
+ */
+export function dispatchTables(catalogue: SensorCatalogue = probeCatalogue()): DispatchTables {
+  const listenerFor = new Map<string, string>();
+  const isolated = new Set<string>();
+  for (const summary of catalogue.summaries()) {
+    const declaration = catalogue.declaration(summary.id);
+    if (declaration.listener !== undefined) listenerFor.set(summary.id, declaration.listener);
+    if (declaration.isolation === 'process') isolated.add(summary.id);
+  }
+  return { listenerFor, isolated };
 }

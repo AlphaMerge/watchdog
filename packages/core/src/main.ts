@@ -15,7 +15,7 @@ import {
   type Lifecycle,
   type Logger,
 } from '@ms/shared';
-import { sensorTypesFor, standardCatalogue, withheldReason } from '@ms/sensors';
+import { withheldReason } from '@ms/sensors';
 import { ApiServer } from './api/server.js';
 import { runMigrateCommand, type MigrateAction } from './commands/migrate.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from './audit/store.js';
@@ -24,8 +24,6 @@ import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
   grantAuditSinks,
-  libraryAuditSinks,
-  mapAuditSinks,
   objectAuditSinks,
   scheduleAuditSinks,
   triggerAuditSinks,
@@ -100,12 +98,7 @@ import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
 import { AccessService } from './auth/access.js';
-import { MapRepository } from './maps/repository.js';
-import { MapResolver } from './maps/resolver.js';
-import { MapService } from './maps/service.js';
-import { LibraryRepository } from './libraries/repository.js';
-import { LibraryService } from './libraries/service.js';
-import { startReporting, type Reporting } from './reports/wiring.js';
+import { coreCatalogue, startV2Subsystems, v2ApiOptions } from './profile.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
@@ -282,10 +275,8 @@ async function serve(): Promise<void> {
   // Rides the audit sink, which every mutation already goes through, so no new mutation path
   // has to remember to tell the probes about itself (R-04).
   const configNotifier = new ConfigChangeNotifier({ logger });
-  // Registered once, then sealed: a type appearing later would mean two probes disagreeing
-  // about what a sensor is. This build's profile of the built-in set (`H-12`), the one its probes
-  // carry, so a v1 core offers no type a v1 probe would refuse.
-  const catalogue = standardCatalogue(sensorTypesFor(BUILD.profile));
+  // This build's profile of the built-in set (`H-12`), sealed once registered.
+  const catalogue = coreCatalogue(BUILD.profile);
 
   // The vault, before anything that can write a credential. A key file that is unreadable, too
   // permissive or absent-with-`create:false` stops the core here rather than at the first write
@@ -883,52 +874,18 @@ async function serve(): Promise<void> {
   const loginThrottle = new LoginThrottle({ db, logger });
 
   // **The v2 subsystems, and only in the full build profile** (`H-12`). The v1 build — the
-  // release candidate — constructs none of them: no maps, libraries or reports, so no routes, no
-  // report sweep, no `recover()` and no formatter pool. `ApiServer` already registers nothing for
-  // a service it is not given, so leaving them out is the whole of the API's half.
-  const full = BUILD.profile === 'full';
-
-  // **The maps API, which `G-01` wrote and nothing mounted.** `ApiServer` takes the service as an
-  // option and simply does not register the routes without it — a build with no maps has no maps
-  // API, which is a different statement from having no maps. That was the right shape and the
-  // wrong wiring: until here, the only caller passing one was a test, so every route `G-01`
-  // shipped answered 404 in the service somebody actually runs.
-  const maps = full
-    ? new MapService({
-        db,
-        repository: new MapRepository(),
-        audit: new CompositeAuditSink(mapAuditSinks(auditSinks)),
-        logger,
-      })
-    : undefined;
-  // Reads through the same `AccessService` the object API uses and the same `HistoryService`
-  // the sensor pages use: a widget must not become a second, more permissive way to read a
-  // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
-  const mapResolver = full ? new MapResolver({ db, access: objectAccess, history }) : undefined;
-
-  // Mounted with the routes, for the reason the maps note above gives (`L-01`).
-  const libraries = full
-    ? new LibraryService({
-        db,
-        repository: new LibraryRepository(),
-        audit: new CompositeAuditSink(libraryAuditSinks(auditSinks)),
-        logger,
-      })
-    : undefined;
-
-  // Reports, from their own module so that "not constructed" is this one line (`E-01`…`E-12`).
-  const reporting: Reporting | undefined = full
-    ? await startReporting({
-        db,
-        logger,
-        lifecycle,
-        config: config.reports,
-        access: objectAccess,
-        history,
-        auditSinks,
-        email,
-      })
-    : undefined;
+  // release candidate — constructs no maps, libraries or reports; `profile.ts` says why, and is
+  // the one place that decides it.
+  const v2 = await startV2Subsystems(BUILD.profile, {
+    db,
+    logger,
+    lifecycle,
+    config: config.reports,
+    access: objectAccess,
+    history,
+    auditSinks,
+    email,
+  });
 
   // **An installation with no accounts cannot be administered, and one with a known default
   // password is worse than one with none.** So the first administrator is created here with a
@@ -1013,10 +970,7 @@ async function serve(): Promise<void> {
       required: config.api.requireAuthentication,
     },
     // Absent in the v1 profile, which is how their routes come to be absent (`H-12`).
-    ...(maps === undefined ? {} : { maps }),
-    ...(reporting === undefined ? {} : { reports: reporting.api }),
-    ...(mapResolver === undefined ? {} : { mapResolver }),
-    ...(libraries === undefined ? {} : { libraries }),
+    ...v2ApiOptions(v2),
     mapTiles: {
       urlTemplate: config.maps.tileUrl,
       attribution: config.maps.tileAttribution,
@@ -1057,7 +1011,7 @@ async function serve(): Promise<void> {
     store,
     disk,
     // No reports to prune in a build that has none (`H-12`).
-    reports: full,
+    reports: v2.reporting !== undefined,
   });
   housekeeper.start();
   lifecycle.onShutdown({
@@ -1208,7 +1162,7 @@ async function serve(): Promise<void> {
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).
-      ...(reporting === undefined ? {} : { reports: reporting.stats }),
+      ...(v2.reporting === undefined ? {} : { reports: v2.reporting.stats }),
     },
     ingest: async (results) => {
       await ingestion.acceptResults('core-health', {
