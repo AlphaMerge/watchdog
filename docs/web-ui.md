@@ -240,6 +240,22 @@ spike filter rejected — records nothing either. The line breaks; it never draw
 are looking at a gap and want to know which kind it is, [troubleshooting.md](troubleshooting.md)
 has "Graphs have gaps" and "Graphs are wrong only at wide time ranges".
 
+## Signed out while a page is open
+
+The live updates travel over a WebSocket that is signed in once, when the page opens, and the
+core closes it when the session behind it ends. That can be a logout in another tab, a password
+change, an administrator disabling the account, or the idle timeout. The page then goes to the
+login form and says why ("You were signed out: this session has expired; sign in again").
+
+**It does not try to reconnect.** A reconnect would be refused, and a browser cannot tell a
+refused connection from a dropped network, so it would retry for ever while the header still said
+somebody was signed in. Signing in again puts you back where you were, because the address bar
+never changed.
+
+The stream itself does not keep a session alive, so a page that asks the core for nothing else is
+signed out at the idle timeout. [administration.md](administration.md#sessions-and-screens-left-open)
+says which pages ask and what to use for a screen that must stay up.
+
 ## Accessibility
 
 The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration

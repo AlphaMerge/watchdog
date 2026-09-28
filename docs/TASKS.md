@@ -13184,6 +13184,73 @@ because each is a decision rather than a defect:
       named, a superseded snapshot sent, a failure detaching the replacement, a held change sent
       before the snapshot, and each of the three bounds removed.
 
+- [x] **A-34 — An open state stream outlives logout, token revocation and account disable** · M ·
+      A-01, A-06, A-30 · Found 2026-09-28 while scoping V2-07. Every ordinary request resolves its
+      session or token again, and that lookup refuses an ended or expired session, a revoked token
+      and a disabled account. The stream's WebSocket is authorised once, at the upgrade; after that
+      its sight re-resolved only *what* the account may see, never *whether* it was still signed
+      in. So a stream opened before a logout, a password change, a token revocation or an account
+      disable went on sending the installation's state to whoever held the socket — and one whose
+      session reached its idle timeout did too, since the stream never touches `last_seen_at`.
+
+      **Done when** each of the four causes closes every socket that credential opened, with a
+      close code the web client does not reconnect on; another account's socket stays open; the
+      check is one place and batched, not one query per socket, and costs nothing with
+      authentication off; closures are counted per reason on Core Health, with the checks that
+      failed, and a failed check closes nothing; `administration.md` and `web-ui.md` say that an
+      open stream is not activity and what happens on the page; and the web client's handling of
+      the close has a test showing it does not loop.
+
+      **A-34 outcome.**
+      - **Pull, not push, and asked with the lookup's own condition.** `SessionService.lapsed` and
+        `TokenService.lapsed` ask, by id, the question `resolve` asks — the `WHERE` is one function
+        in each file, used by both — and say why: `ended`, `expired`, `revoked` or `disabled`,
+        disabled first. So a session deleted in `psql` closes its socket like a logout, expiry needs
+        nothing to announce it, and no identity service's signature changed. `credentialCheck`
+        (`auth/credentials.ts`) combines the two; asking does not extend a session.
+      - **Asked before every delivery, and on a sweep.** Each published batch asks about every
+        open signed-in socket, in one query beside the ancestry read so it costs the batch no time,
+        and before anything is delivered — so nothing committed after a logout reaches the socket
+        it ended. A sweep asks every five seconds when nothing is published: at `P-15`'s scale with
+        a few hundred sockets that is a few hundred primary-key probes, well under a millisecond,
+        and the timer runs only while a signed-in socket is open. A snapshot is asked about after
+        it is read, before it is sent.
+      - **Only when authentication is required.** `credentialOf` is set by the authorisation hook
+        beside the sight, and is null with authentication off — anybody may open the same socket
+        anonymously there, so closing one protects nothing and nothing is asked.
+      - **`4401`, with the reason.** The route closes the socket, detaching its subscription
+        synchronously so the batch that asked delivers nothing to it. The web client stops rather
+        than reconnecting — a refused upgrade is a 1006 to a browser, so a retry would spin for
+        ever — and goes to the login form, which says why ("You were signed out: this session has
+        expired; sign in again").
+      - **Counted, and a failed check closes nothing.** Core Health gains `streamEnded`,
+        `streamExpired`, `streamRevoked`, `streamDisabled` and `streamCheckFailures`, each on
+        `/metrics` too. A check that cannot answer is counted and logged; the sockets stay open and
+        the batch is delivered, until a check can say.
+      - **An open stream is not activity**, and `administration.md` says so with what to do about
+        it: a page that asks for nothing for 12 hours is signed out, and a screen meant to stay up
+        uses a map's public share link where the build has maps. **The idle and absolute timeouts
+        are not settings** (12 hours and 7 days, in `SessionService`), so "a longer idle timeout" is
+        not advice this installation can take; that is its own ticket if it is wanted.
+
+      Tests: `stream-sign-out.test.ts`, 9 cases against real sockets — logout (and another
+      account's socket keeps streaming), a revoked token (and the same account's session socket
+      stays), a disabled account (a token socket and two session tabs close together), idle
+      expiry with the checks leaving `last_seen_at` alone, a change published after a logout with
+      no sweep, a snapshot read across a logout, a check that fails (nothing closes, both failures
+      counted, the change delivered, and the next check closes it), authentication off, and what
+      each service says lapsed. `core-health.test.ts`: the five channels, and all five declared as
+      counters. Web: `state-stream.test.ts` — a 4401 schedules nothing and reports the reason,
+      any other close reconnects as before, a late 4401 from a replaced socket is ignored;
+      `auth-gate.test.tsx` — the login form shows the reason.
+
+      Mutation 11/11: no check per batch, no check before a snapshot, a sweep that checks nothing,
+      a session's expiry not checked, a failed check signing everyone out, `ended` or `revoked`
+      ranked above `disabled`, a session presented as another account's accepted, a socket checked
+      with authentication off, a Core Health reason mislabelled, and a web client that reconnects
+      on 4401. The first expiry mutant dropped the query's parameters and was killed by the error
+      that caused, not by the test; rewritten to keep them, only the expiry test fails.
+
 - [x] **A-35 — A delete, a move or a clone takes the holes beneath what it names** · M · A-12 ·
       Found 2026-09-28 in `A-12`'s second review round. `DELETE /objects/:id` checked `write` on
       the object it was given and then destroyed everything beneath it, so an operator with

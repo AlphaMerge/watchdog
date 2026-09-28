@@ -988,6 +988,11 @@ cost: **light** · evaluated by the core, never by a probe
 | `notifyOldest` | Oldest undelivered notification | s | default limits: warn above 900, error above 3600 |
 | `notifyFailed` | Notifications given up on (1 h) | notifications | — |
 | `streamCutoffs` | Live subscribers cut off | subscribers | 64-bit counter → rate |
+| `streamEnded` | Live sockets signed out: session ended | sockets | 64-bit counter → rate |
+| `streamExpired` | Live sockets signed out: expired | sockets | 64-bit counter → rate |
+| `streamRevoked` | Live sockets signed out: token revoked | sockets | 64-bit counter → rate |
+| `streamDisabled` | Live sockets signed out: account disabled | sockets | 64-bit counter → rate |
+| `streamCheckFailures` | Live socket sign-in checks failed | checks | 64-bit counter → rate |
 | `dependencyPauses` | Dependency pauses | sensors | 64-bit counter → rate |
 | `probesDown` | Probes not connected | probes | — |
 | `probesSilent` | Probes not delivering | probes | — |

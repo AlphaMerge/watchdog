@@ -97,10 +97,20 @@ export class ApiError extends Error {
  * A single listener rather than a set: there is one session in a tab, and a second subscriber
  * would be a second thing deciding what "logged out" looks like.
  */
-let sessionLost: (() => void) | undefined;
+let sessionLost: ((ended?: string) => void) | undefined;
 
-export function onSessionLost(listener: (() => void) | undefined): void {
+/** `ended`, when given, is why — in the core's words — for the login form to say (`A-34`). */
+export function onSessionLost(listener: ((ended?: string) => void) | undefined): void {
   sessionLost = listener;
+}
+
+/**
+ * The core closed the live stream because this browser's session no longer authenticates, and
+ * said why (`A-34`). The one report of a lost session that carries its reason: every other one is
+ * a 401 or a question asked afterwards, and neither can say what happened.
+ */
+export function sessionEnded(reason: string): void {
+  sessionLost?.(reason);
 }
 
 /**

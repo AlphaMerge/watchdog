@@ -205,6 +205,42 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'subscribers',
     counter: { bits: 64 },
   },
+  // **Live sockets closed because what authenticated them no longer does** (`A-34`), one channel
+  // per reason, because the reasons mean different things to whoever reads them: sessions ending
+  // and expiring are an ordinary day, while a burst of revoked tokens or disabled accounts is
+  // somebody responding to an incident — and this is where they see it reach the open screens.
+  {
+    key: 'streamEnded',
+    name: 'Live sockets signed out: session ended',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'streamExpired',
+    name: 'Live sockets signed out: expired',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'streamRevoked',
+    name: 'Live sockets signed out: token revoked',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'streamDisabled',
+    name: 'Live sockets signed out: account disabled',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  // The check that closes them, failing (`A-34`). A failed check closes nothing, so without this
+  // a stream that has stopped being checked looks exactly like one where nobody signed out.
+  {
+    key: 'streamCheckFailures',
+    name: 'Live socket sign-in checks failed',
+    unit: 'checks',
+    counter: { bits: 64 },
+  },
   // A count that climbs steadily means a master is flapping — the alarm storm dependencies exist
   // to prevent, showing up as churn instead (`M-11`).
   {

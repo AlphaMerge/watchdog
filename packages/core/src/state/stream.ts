@@ -2,6 +2,12 @@ import { describeError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Visibility } from '../auth/access.js';
+import {
+  credentialKey,
+  type Credential,
+  type CredentialCheck,
+  type Lapse,
+} from '../auth/credentials.js';
 import type { ObjectId } from '../objects/types.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
@@ -90,6 +96,19 @@ export interface StreamStats {
    * client the core stopped serving to protect everybody else.
    */
   readonly severed: number;
+  /**
+   * Sockets closed because what authenticated them no longer does (`A-34`), by why: a session
+   * ended or expired, a token revoked, an account disabled. Each is a stream that would otherwise
+   * have gone on serving whoever held it.
+   */
+  readonly signedOut: Readonly<Record<Lapse, number>>;
+  /**
+   * Checks of those credentials that could not be made. **A failed check closes nothing** — it
+   * is not an answer, and treating it as "signed out" would close every socket in the
+   * installation because the database blinked — so this is the number that says the check is not
+   * happening.
+   */
+  readonly credentialCheckFailures: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -102,6 +121,8 @@ export interface StateBroadcasterOptions {
   backlogLimitBytes?: number;
   /** How many sensors a snapshot may carry. */
   snapshotLimit?: number;
+  /** How often every admitted socket's credential is checked when nothing is published. */
+  credentialSweepMs?: number;
 }
 
 /**
@@ -114,6 +135,18 @@ export interface StateBroadcasterOptions {
  */
 const DEFAULT_BACKLOG_LIMIT_BYTES = 1024 * 1024;
 const DEFAULT_SNAPSHOT_LIMIT = 20_000;
+
+/**
+ * Five seconds between checks of every open socket's credential (`A-34`).
+ *
+ * The sweep is for the quiet installation; a busy one checks on every published batch. Its cost is
+ * one query per sweep however many sockets are open: at `P-15`'s scale, with a few hundred
+ * sockets, that is a few hundred primary-key probes into `user_session` and `user_account` — well
+ * under a millisecond of database time every five seconds. Five seconds is how long a stream can
+ * outlive a logout on an installation where nothing changed state, which is also a stream with
+ * nothing new to say.
+ */
+const DEFAULT_CREDENTIAL_SWEEP_MS = 5_000;
 
 /** What a subscriber does with an event, and what it is told when it falls behind. */
 export interface StateSubscriber {
@@ -147,6 +180,31 @@ export interface StreamSight {
   visibility: Visibility;
   readonly key: string;
   readonly resolve: () => Promise<Visibility>;
+}
+
+/**
+ * An open stream socket, and what authenticated it (`A-34`).
+ *
+ * The socket rather than the subscription, because a socket with no subscription is still a
+ * signed-in connection — one refused a hidden object, or between an overflow and its resubscribe —
+ * and "every socket that principal opened" is the promise.
+ */
+export interface StreamSocket {
+  readonly credential: Credential;
+  /** Its credential no longer authenticates anything. Close it, saying why. */
+  signOut(lapse: Lapse): void;
+}
+
+/** A socket's place in the credential sweep, handed back by `admit`. */
+export interface Admission {
+  /**
+   * Whether the credential still authenticates, asked now; the socket is signed out if not. For a
+   * frame about to be sent that no published batch has vouched for — a snapshot. Rejects when it
+   * cannot tell, which closes nothing.
+   */
+  confirm(): Promise<boolean>;
+  /** The socket has closed. */
+  release(): void;
 }
 
 interface Attached {
@@ -195,10 +253,22 @@ export class StateBroadcaster {
   #resynced = 0;
   #severed = 0;
 
+  readonly #sweepMs: number;
+  /**
+   * Every open socket something authenticated (`A-34`), subscribed or not, and what to ask about
+   * it. One check in a running core — the API server's — so one query however many sockets.
+   */
+  readonly #admitted = new Map<StreamSocket, CredentialCheck>();
+  #sweeper: ReturnType<typeof setInterval> | undefined;
+  #sweeping = false;
+  readonly #signedOut: Record<Lapse, number> = { ended: 0, expired: 0, revoked: 0, disabled: 0 };
+  #credentialCheckFailures = 0;
+
   constructor(options: StateBroadcasterOptions) {
     this.#logger = options.logger.child({ component: 'stream' });
     this.#backlogLimit = options.backlogLimitBytes ?? DEFAULT_BACKLOG_LIMIT_BYTES;
     this.#snapshotLimit = options.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT;
+    this.#sweepMs = options.credentialSweepMs ?? DEFAULT_CREDENTIAL_SWEEP_MS;
   }
 
   get stats(): StreamStats {
@@ -210,12 +280,119 @@ export class StateBroadcaster {
       unwatched: this.#unwatched,
       resynced: this.#resynced,
       severed: this.#severed,
+      signedOut: { ...this.#signedOut },
+      credentialCheckFailures: this.#credentialCheckFailures,
     };
   }
 
   /** Counts a socket the stream route closed to protect the core (`A-30`). See `StreamStats`. */
   severed(): void {
     this.#severed += 1;
+  }
+
+  /**
+   * Puts an open socket under `check` (`A-34`): asked on every published batch before anything is
+   * delivered, and on a sweep when nothing is published, so a quiet installation still closes it.
+   * Signed out — its `signOut` called, once — when the credential lapses.
+   */
+  admit(socket: StreamSocket, check: CredentialCheck): Admission {
+    this.#admitted.set(socket, check);
+    // Unreferenced, so an open browser tab never holds the process up; and only while there is a
+    // socket to sweep, so an installation nobody is watching pays nothing.
+    this.#sweeper ??= setInterval(() => {
+      void this.sweep();
+    }, this.#sweepMs).unref();
+    return {
+      confirm: async () => {
+        if (!this.#admitted.has(socket)) return false;
+        await this.#examine([socket]);
+        return this.#admitted.has(socket);
+      },
+      release: () => {
+        this.#admitted.delete(socket);
+        if (this.#admitted.size === 0 && this.#sweeper !== undefined) {
+          clearInterval(this.#sweeper);
+          this.#sweeper = undefined;
+        }
+      },
+    };
+  }
+
+  /**
+   * Checks every admitted socket's credential, and signs out those that lapsed (`A-34`). What the
+   * timer runs; public so a test can run one without waiting for it.
+   *
+   * **Never rejects, and a failure closes nothing.** It is counted and logged, and the sockets stay
+   * open until a check can answer — a database that blinked is not a reason to sign everybody out.
+   */
+  async sweep(): Promise<void> {
+    // One at a time: a sweep still waiting on a slow database is not joined by another.
+    if (this.#sweeping || this.#admitted.size === 0) return;
+    this.#sweeping = true;
+    try {
+      await this.#vet();
+    } finally {
+      this.#sweeping = false;
+    }
+  }
+
+  /** `#examine` for every admitted socket, never rejecting. See `sweep`. */
+  async #vet(): Promise<void> {
+    if (this.#admitted.size === 0) return;
+    try {
+      await this.#examine([...this.#admitted.keys()]);
+    } catch (error: unknown) {
+      this.#logger.warn(
+        { err: describeError(error), sockets: this.#admitted.size },
+        'could not check whether open stream sockets are still signed in; they stay open until a ' +
+          'check can say',
+      );
+    }
+  }
+
+  /**
+   * Asks each check once about these sockets' credentials, however many sockets share one, and
+   * signs out every socket whose credential lapsed. Rejects, each failure counted, when a check
+   * cannot answer — after signing out whatever the others said had lapsed.
+   */
+  async #examine(sockets: readonly StreamSocket[]): Promise<void> {
+    const asking = new Map<CredentialCheck, Map<string, Credential>>();
+    for (const socket of sockets) {
+      const check = this.#admitted.get(socket);
+      if (check === undefined) continue;
+      const asked = asking.get(check) ?? new Map<string, Credential>();
+      asked.set(credentialKey(socket.credential), socket.credential);
+      asking.set(check, asked);
+    }
+    const answers = new Map<CredentialCheck, ReadonlyMap<string, Lapse>>();
+    const failures: unknown[] = [];
+    await Promise.all(
+      [...asking].map(async ([check, asked]) => {
+        try {
+          answers.set(check, await check.lapsed([...asked.values()]));
+        } catch (error: unknown) {
+          this.#credentialCheckFailures += 1;
+          failures.push(error);
+        }
+      }),
+    );
+    for (const socket of sockets) {
+      const check = this.#admitted.get(socket);
+      // Released while the check was out — closed by its client, or signed out by another check.
+      if (check === undefined) continue;
+      const lapse = answers.get(check)?.get(credentialKey(socket.credential));
+      if (lapse === undefined) continue;
+      this.#admitted.delete(socket);
+      this.#signedOut[lapse] += 1;
+      // Synchronous, and it detaches the socket's subscription: a batch waiting on this check
+      // delivers to nobody it signed out.
+      socket.signOut(lapse);
+    }
+    if (this.#admitted.size === 0 && this.#sweeper !== undefined) {
+      clearInterval(this.#sweeper);
+      this.#sweeper = undefined;
+    }
+    if (failures.length > 0) throw failures[0];
   }
 
   /** Whether anything is listening. The guard every publish path checks first. */
@@ -295,6 +472,11 @@ export class StateBroadcaster {
       return 0;
     }
 
+    // **Every socket's credential, asked after this batch committed and before any of it is
+    // delivered** (`A-34`), so nothing committed after a logout reaches the socket it ended. Beside
+    // the ancestry read rather than after it, so it costs this batch no time; and never rejecting,
+    // so a check that fails delivers as before and is counted — see `sweep`.
+    const vetting = this.#vet();
     let ancestry: Map<ObjectId, { name: string; path: ObjectId[] }>;
     let epoch: number | null;
     try {
@@ -307,8 +489,10 @@ export class StateBroadcaster {
         { states: changes.length, err: describeError(error) },
         'could not read the ancestry of committed state changes; the live stream is behind',
       );
+      await vetting;
       return 0;
     }
+    await vetting;
 
     // **Grants change while sockets stay open** (`A-12`). The epoch came back with the ancestry,
     // so noticing costs no round trip; only a batch published after a grant change pays for

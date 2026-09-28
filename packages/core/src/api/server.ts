@@ -44,6 +44,7 @@ import type { AccessService, Visibility } from '../auth/access.js';
 import type { TokenService } from '../auth/tokens.js';
 import type { TotpService } from '../auth/totp.js';
 import type { SessionService } from '../auth/sessions.js';
+import { credentialCheck } from '../auth/credentials.js';
 import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
@@ -812,6 +813,11 @@ export class ApiServer {
             db: this.#db,
             stream: this.#stream,
             limits: this.#streamLimits,
+            // **Every signed-in socket keeps being asked whether it still is** (`A-34`), with the
+            // question the authentication hook asks of every request.
+            ...(this.#auth === undefined
+              ? {}
+              : { credentials: credentialCheck(this.#auth.sessions, this.#auth.tokens) }),
           });
         }
         if (this.#deliveryHealth !== undefined) {

@@ -59,10 +59,14 @@ export function SessionProvider({ children }: { children: ReactNode }): React.JS
    * unchanged rather than assumed: what the core last said is better evidence than a guess.
    */
   useEffect(() => {
-    onSessionLost(() => {
+    onSessionLost((ended) => {
       setSession((current) =>
         current.kind === 'signed-in'
-          ? { kind: 'anonymous', requireAuthentication: current.requireAuthentication }
+          ? {
+              kind: 'anonymous',
+              requireAuthentication: current.requireAuthentication,
+              ...(ended === undefined ? {} : { ended }),
+            }
           : current,
       );
     });

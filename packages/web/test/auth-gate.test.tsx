@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
-import { confirmSession, onSessionLost, request, send } from '../src/api/client';
+import { confirmSession, onSessionLost, request, send, sessionEnded } from '../src/api/client';
 
 /**
  * What stands in front of the application, and when (`U-17`).
@@ -204,6 +204,23 @@ describe('a session that goes away underneath the operator', () => {
     });
 
     await screen.findByRole('heading', { name: 'Log in' });
+  });
+
+  it('says why when the live stream was signed out, and goes to the login form', async () => {
+    // The core closes the stream with the reason (`A-34`); somebody whose session expired on a
+    // wall display should be told that, not left to wonder what they did.
+    stubFetch({ [SESSION]: signedIn(false) });
+    mount();
+    await screen.findByRole('link', { name: 'Skip to content' });
+
+    act(() => {
+      sessionEnded('this session has expired; sign in again');
+    });
+
+    await screen.findByRole('heading', { name: 'Log in' });
+    expect(screen.getByRole('status').textContent).toBe(
+      'You were signed out: this session has expired; sign in again.',
+    );
   });
 
   it('ends the session at the core when the operator logs out, not only here', async () => {

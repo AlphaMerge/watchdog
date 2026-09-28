@@ -162,6 +162,36 @@ const CORE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'streamEnded',
+    name: 'ms_core_stream_signed_out_ended_total',
+    help: 'Live-state sockets closed because their session ended.',
+    counter: true,
+  },
+  {
+    key: 'streamExpired',
+    name: 'ms_core_stream_signed_out_expired_total',
+    help: 'Live-state sockets closed because their session or token expired.',
+    counter: true,
+  },
+  {
+    key: 'streamRevoked',
+    name: 'ms_core_stream_signed_out_revoked_total',
+    help: 'Live-state sockets closed because their token was revoked.',
+    counter: true,
+  },
+  {
+    key: 'streamDisabled',
+    name: 'ms_core_stream_signed_out_disabled_total',
+    help: 'Live-state sockets closed because their account was disabled or removed.',
+    counter: true,
+  },
+  {
+    key: 'streamCheckFailures',
+    name: 'ms_core_stream_credential_check_failures_total',
+    help: 'Checks of whether live-state sockets are still signed in that could not be made.',
+    counter: true,
+  },
+  {
     key: 'dependencyPauses',
     name: 'ms_core_dependency_pauses_total',
     help: 'Sensors paused or released because a master sensor moved.',

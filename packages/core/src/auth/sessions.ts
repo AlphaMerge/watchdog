@@ -2,6 +2,7 @@ import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { newSessionToken, sessionIdFor } from './passwords.js';
 import type { Account, AccountRole } from './accounts.js';
+import type { Lapse } from './credentials.js';
 
 /**
  * Server-side sessions (`A-01`, `ADR-001`).
@@ -127,9 +128,7 @@ export class SessionService {
        FROM user_account a
        WHERE s.id = $1
          AND a.id = s.user_id
-         AND s.expires_at > $2
-         AND s.created_at + $4::interval > $2
-         AND a.disabled = false
+         AND ${live('s', 'a', '$2', '$4')}
        RETURNING s.id, s.user_id::text AS user_id, a.login, a.role, a.must_change_password,
                  a.may_acknowledge, a.disabled`,
       [
@@ -150,6 +149,47 @@ export class SessionService {
       mayAcknowledge: row.may_acknowledge,
       sessionId: row.id,
     };
+  }
+
+  /**
+   * Which of these sessions no longer authenticate, and why (`A-34`).
+   *
+   * **`resolve`'s question, for sessions that are not presenting themselves.** A stream socket was
+   * authenticated once, at its upgrade, and lives for days; this is how it is asked again, with
+   * the condition `resolve` uses — `live`, below — so the two cannot disagree.
+   *
+   * **Asking does not extend the session**, and that is a decision rather than an omission. An
+   * open stream is not activity: if it were, a browser left on a dashboard would never reach the
+   * idle timeout, and the timeout would mean nothing for exactly the unattended screen it exists
+   * for. A display meant to stay up uses a public share link, or a longer idle timeout.
+   *
+   * The account is joined by the id the socket was opened as, not through the session, so a
+   * disabled account reads `disabled` whether or not its sessions are still there.
+   */
+  async lapsed(
+    sessions: readonly { readonly id: string; readonly userId: number }[],
+  ): Promise<Map<string, Lapse>> {
+    if (sessions.length === 0) return new Map();
+    const rows = await this.#db.query<{ id: string; lapse: Lapse }>(
+      `SELECT c.id,
+              CASE WHEN a.id IS NULL OR a.disabled THEN 'disabled'
+                   WHEN s.id IS NULL THEN 'ended'
+                   ELSE 'expired'
+              END AS lapse
+       FROM unnest($1::text[], $2::bigint[]) AS c(id, user_id)
+       LEFT JOIN user_account a ON a.id = c.user_id
+       LEFT JOIN user_session s ON s.id = c.id AND s.user_id = c.user_id
+       -- COALESCE: an answer Postgres cannot give is not "still signed in".
+       WHERE NOT COALESCE(s.id IS NOT NULL AND a.id IS NOT NULL
+                          AND ${live('s', 'a', '$3', '$4')}, false)`,
+      [
+        sessions.map((session) => session.id),
+        sessions.map((session) => session.userId),
+        this.#now(),
+        `${String(Math.round(this.#absoluteMs / 1000))} seconds`,
+      ],
+    );
+    return new Map(rows.map((row) => [row.id, row.lapse]));
   }
 
   /** Ends one session — a logout. Idempotent: logging out twice is not an error. */
@@ -208,4 +248,18 @@ export class SessionService {
     );
     return rows.length;
   }
+}
+
+/**
+ * Whether session row `s` of account row `a` still authenticates at `now`: under both timeouts,
+ * and the account not disabled. One text, used by `resolve` and `lapsed` alike (`A-34`).
+ *
+ * The absolute ceiling is checked here as well as being folded into `expires_at` on every use,
+ * because a ceiling lowered in configuration applies to sessions that were extended under the old
+ * one.
+ */
+function live(s: string, a: string, now: string, absolute: string): string {
+  return `${s}.expires_at > ${now}
+         AND ${s}.created_at + ${absolute}::interval > ${now}
+         AND ${a}.disabled = false`;
 }

@@ -43,6 +43,8 @@ function sources(
     p95: number;
     overflowed: number;
     severed: number;
+    signedOut: { ended: number; expired: number; revoked: number; disabled: number };
+    credentialCheckFailures: number;
     probesDown: number;
     probesSilent: number;
     pending: number;
@@ -80,7 +82,12 @@ function sources(
       deferredReactions: overrides.deferredReactions ?? 0,
       writeMs: { p95: overrides.p95 ?? 0 },
     }),
-    stream: () => ({ overflowed: overrides.overflowed ?? 0, severed: overrides.severed ?? 0 }),
+    stream: () => ({
+      overflowed: overrides.overflowed ?? 0,
+      severed: overrides.severed ?? 0,
+      signedOut: overrides.signedOut ?? { ended: 0, expired: 0, revoked: 0, disabled: 0 },
+      credentialCheckFailures: overrides.credentialCheckFailures ?? 0,
+    }),
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
       nextWakeAt: overrides.nextWakeAt ?? null,
@@ -346,6 +353,18 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // And a socket the route closed outright is one more client the core stopped serving (`A-30`).
       const closedToo = await build({ overflowed: 2, severed: 3 }).read();
       assert.equal(closedToo['streamCutoffs'], 5);
+      // Signed out, one channel per reason, and the checks that could not say — which are not
+      // cut-offs: a signed-out socket is one the core stopped serving *on purpose* (`A-34`).
+      const signedOut = await build({
+        signedOut: { ended: 4, expired: 3, revoked: 2, disabled: 1 },
+        credentialCheckFailures: 6,
+      }).read();
+      assert.equal(signedOut['streamEnded'], 4);
+      assert.equal(signedOut['streamExpired'], 3);
+      assert.equal(signedOut['streamRevoked'], 2);
+      assert.equal(signedOut['streamDisabled'], 1);
+      assert.equal(signedOut['streamCheckFailures'], 6);
+      assert.equal(signedOut['streamCutoffs'], 0);
       assert.equal(reading['probesDown'], 1);
       assert.equal(reading['notifyPending'], 9);
       assert.equal(reading['notifyFailed'], 4);
@@ -525,6 +544,11 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const readings = readingsFrom({
         ingestRefused: 12,
         streamCutoffs: 1,
+        streamEnded: 8,
+        streamExpired: 7,
+        streamRevoked: 2,
+        streamDisabled: 1,
+        streamCheckFailures: 3,
         dependencyPauses: 4,
         alarmsFired: 217,
         queriesRefused: 5,
@@ -538,15 +562,26 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 6);
+      assert.equal(readings.length, 11);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
-      // says and would go on passing if a channel quietly stopped being a counter. These four
+      // says and would go on passing if a channel quietly stopped being a counter. These
       // only ever climb, and a monotonic number sent as a gauge is a graph of a running total
       // where somebody wanted a rate.
       assert.deepEqual(
         readings.filter((reading) => reading.counter !== undefined).map((reading) => reading.key),
-        ['ingestRefused', 'streamCutoffs', 'dependencyPauses', 'alarmsFired', 'queriesRefused'],
+        [
+          'ingestRefused',
+          'streamCutoffs',
+          'streamEnded',
+          'streamExpired',
+          'streamRevoked',
+          'streamDisabled',
+          'streamCheckFailures',
+          'dependencyPauses',
+          'alarmsFired',
+          'queriesRefused',
+        ],
       );
     });
 

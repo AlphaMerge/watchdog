@@ -98,9 +98,19 @@ export function LoginView(): React.JSX.Element {
   };
 
   const optional = session.kind === 'anonymous' && !session.requireAuthentication;
+  // Why the last session went away, when the core said (`A-34`).
+  const ended = session.kind === 'anonymous' ? session.ended : undefined;
 
   return (
     <AuthPage title="Log in">
+      {ended !== undefined && (
+        <p
+          role="status"
+          className="mt-2 border border-control bg-surface px-3 py-2 text-sm text-text"
+        >
+          You were signed out: {ended}.
+        </p>
+      )}
       <p className="mt-2 text-sm text-text-muted">
         {optional
           ? 'This installation does not require a login. Signing in names you in the audit log.'

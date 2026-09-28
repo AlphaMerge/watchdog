@@ -40,7 +40,16 @@ export interface SessionReply {
 export type Session =
   | { readonly kind: 'unknown' }
   | { readonly kind: 'unreachable'; readonly error: ApiError }
-  | { readonly kind: 'anonymous'; readonly requireAuthentication: boolean }
+  | {
+      readonly kind: 'anonymous';
+      readonly requireAuthentication: boolean;
+      /**
+       * Why the session this tab had went away, in the core's words, when it said (`A-34`): the
+       * live stream is closed with the reason, and the login form shows it, so somebody whose
+       * session expired on a wall display is not left wondering what they did.
+       */
+      readonly ended?: string;
+    }
   | {
       readonly kind: 'signed-in';
       readonly requireAuthentication: boolean;

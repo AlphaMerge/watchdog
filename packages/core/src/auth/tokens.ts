@@ -4,6 +4,7 @@ import type { Database, Queryable } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { cappedBy, grantedByLabel, type AccessRight } from './access.js';
 import type { AccountRole } from './accounts.js';
+import type { Lapse } from './credentials.js';
 import { AuthError } from './errors.js';
 import { sessionIdFor } from './passwords.js';
 
@@ -178,10 +179,7 @@ export class TokenService {
       `SELECT t.id::text AS id, t.user_id::text AS user_id, a.login, a.role,
               a.must_change_password, a.may_acknowledge, t.scope, t.last_used_at
        FROM api_token t JOIN user_account a ON a.id = t.user_id
-       WHERE t.token_hash = $1
-         AND t.revoked_at IS NULL
-         AND (t.expires_at IS NULL OR t.expires_at > $2)
-         AND a.disabled = false`,
+       WHERE t.token_hash = $1 AND ${live('t', 'a', '$2')}`,
       [sessionIdFor(secret), now],
     );
 
@@ -205,6 +203,34 @@ export class TokenService {
       tokenId: Number(row.id),
       scope: row.scope,
     };
+  }
+
+  /**
+   * Which of these tokens no longer authenticate, and why (`A-34`).
+   *
+   * `resolve`'s question — the condition in `live`, below — for tokens that are not presenting
+   * themselves: a stream socket opened with a token was authenticated once, at its upgrade. Asked
+   * by id, since the secret is long gone, and joined to the account the socket was opened as, so
+   * a disabled owner reads `disabled` rather than whatever its tokens say.
+   */
+  async lapsed(
+    tokens: readonly { readonly id: number; readonly userId: number }[],
+  ): Promise<Map<number, Lapse>> {
+    if (tokens.length === 0) return new Map();
+    const rows = await this.#db.query<{ id: string; lapse: Lapse }>(
+      `SELECT c.id::text AS id,
+              CASE WHEN a.id IS NULL OR a.disabled THEN 'disabled'
+                   WHEN t.id IS NULL OR t.revoked_at IS NOT NULL THEN 'revoked'
+                   ELSE 'expired'
+              END AS lapse
+       FROM unnest($1::bigint[], $2::bigint[]) AS c(id, user_id)
+       LEFT JOIN user_account a ON a.id = c.user_id
+       LEFT JOIN api_token t ON t.id = c.id AND t.user_id = c.user_id
+       -- COALESCE: an answer Postgres cannot give is not "still valid".
+       WHERE NOT COALESCE(t.id IS NOT NULL AND a.id IS NOT NULL AND ${live('t', 'a', '$3')}, false)`,
+      [tokens.map((token) => token.id), tokens.map((token) => token.userId), this.#now()],
+    );
+    return new Map(rows.map((row) => [Number(row.id), row.lapse]));
   }
 
   /** An account's own tokens, newest first. Never the secrets — they no longer exist here. */
@@ -272,6 +298,16 @@ export class TokenService {
     );
     return rows.length;
   }
+}
+
+/**
+ * Whether token row `t` of account row `a` still authenticates at `now`: not revoked, not expired,
+ * and its owner not disabled. One text, used by `resolve` and `lapsed` alike (`A-34`).
+ */
+function live(t: string, a: string, now: string): string {
+  return `${t}.revoked_at IS NULL
+         AND (${t}.expires_at IS NULL OR ${t}.expires_at > ${now})
+         AND ${a}.disabled = false`;
 }
 
 const COLUMNS = `id, user_id, name, prefix, scope, expires_at, last_used_at, revoked_at, created_at`;

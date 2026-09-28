@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AccessRight, AccessService } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
+import type { Credential } from '../auth/credentials.js';
 import { AuthError } from '../auth/errors.js';
 import { atLeast, lower, Visibility } from '../auth/access.js';
 import type { Writer } from '../objects/sensor-reads.js';
@@ -243,7 +244,10 @@ function objectIdFor(
  * build with no accounts at all — which is the one case where "everything" is the truth rather
  * than a default.
  */
-const sights = new WeakMap<FastifyRequest, { once: () => Promise<Visibility>; fresh: Sight }>();
+const sights = new WeakMap<
+  FastifyRequest,
+  { once: () => Promise<Visibility>; fresh: Sight; credential: Credential | null }
+>();
 
 /** Resolves what a principal may see, afresh each time it is called. */
 export interface Sight {
@@ -322,6 +326,16 @@ export function sightOf(request: FastifyRequest): Sight {
 }
 
 /**
+ * What authenticated this request, for a connection that must keep asking whether it still does
+ * (`A-34`). Null when there is nothing to ask about: authentication is not required — anybody may
+ * open the same connection anonymously, so closing one on a logout protects nothing — or the
+ * route is public.
+ */
+export function credentialOf(request: FastifyRequest): Credential | null {
+  return sights.get(request)?.credential ?? null;
+}
+
+/**
  * Refuses a request whose account, role or token does not reach the declared bar.
  *
  * Registered once, globally, and reads the declaration off the route — so it runs for routes
@@ -353,11 +367,11 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
           ),
         { key: 'nobody' },
       );
-      sights.set(request, { once: nobody, fresh: nobody });
+      sights.set(request, { once: nobody, fresh: nobody, credential: null });
       return;
     }
     if (!options.required) {
-      sights.set(request, { once: EVERYONE, fresh: EVERYONE });
+      sights.set(request, { once: EVERYONE, fresh: EVERYONE, credential: null });
       return;
     }
 
@@ -370,7 +384,11 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
       key: `${String(principal.userId)}:${principal.role}:${principal.scope ?? ''}`,
     });
     let resolved: Promise<Visibility> | undefined;
-    sights.set(request, { once: () => (resolved ??= fresh()), fresh });
+    const credential: Credential =
+      principal.tokenId === undefined
+        ? { kind: 'session', id: principal.sessionId, userId: principal.userId }
+        : { kind: 'token', id: principal.tokenId, userId: principal.userId };
+    sights.set(request, { once: () => (resolved ??= fresh()), fresh, credential });
 
     await enforce(options.access, request, principal, declared);
   });

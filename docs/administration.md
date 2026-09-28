@@ -93,6 +93,31 @@ A few consequences are worth knowing before somebody reports them as bugs:
   one each time it has something to deliver, and a page whose view has changed is told to start
   again — which it does, on its own, with what it may see now.
 
+### Sessions, and screens left open
+
+A browser session ends after **12 hours without a request**, and after **7 days** however active;
+neither is a setting yet. A logout, a password change (which ends the account's other sessions),
+a revoked token and a disabled account each take effect on the next request.
+
+**And on an open page, within seconds.** A page's live updates arrive over a WebSocket that is
+signed in once, when it opens, and the core keeps asking whether what opened it still
+authenticates: before it delivers each state change, and every five seconds when nothing changes.
+When the answer is no, the socket is closed with `4401` and the page goes to the login form and
+says why. Nothing that changed after the logout is sent. Core Health counts these by reason
+(`streamEnded`, `streamExpired`, `streamRevoked`, `streamDisabled`), and `streamCheckFailures`
+counts checks that could not be made. **A check that fails closes nothing**: a database that
+blinked is not a reason to sign everybody out, so a climbing `streamCheckFailures` means sockets
+are not being checked.
+
+**An open stream is not activity.** The stream asking does not extend the session. If it did, a
+browser left on a dashboard would never time out, and the idle timeout would mean nothing for the
+unattended screen it exists for. A page that makes requests of its own keeps its session: the
+alarm list asks again after each change, and a sensor's page re-reads its channels every 15
+seconds. A page that makes none for 12 hours, such as a tree on a quiet installation, is signed
+out, and every page is signed out at 7 days. A screen meant to stay up unattended can show a
+**public share link** of a map, which needs no session (see above), in a build that has maps
+(`H-12`). A script uses an API token, which has no idle timeout.
+
 ### API tokens
 
 A token carries **the rights of the account that owns it, never more**, and can be given less. It

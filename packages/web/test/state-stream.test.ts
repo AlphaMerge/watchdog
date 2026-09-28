@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { StateStream, type SocketLike } from '../src/api/stream';
+import { STREAM_SIGNED_OUT, StateStream, type CloseLike, type SocketLike } from '../src/api/stream';
 
 /**
  * A socket a test drives by hand: nothing opens until it is told to.
@@ -16,7 +16,7 @@ class FakeSocket implements SocketLike {
   /** Counted, not a flag: closing a socket twice is how one that opened late is reclaimed. */
   closes = 0;
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: CloseLike) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
 
@@ -40,13 +40,18 @@ class FakeSocket implements SocketLike {
   deliver(frame: unknown): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
-  drop(): void {
-    this.onclose?.();
+  /** Closed from the far end: by default the 1006 of a dropped network or a refused upgrade. */
+  drop(code = 1006, reason = ''): void {
+    this.onclose?.({ code, reason });
   }
 }
 
 /** A stream whose sockets and timers the test owns. */
-function harness(retryMs: readonly number[] = [10, 20], onStuck?: () => void) {
+function harness(
+  retryMs: readonly number[] = [10, 20],
+  onStuck?: () => void,
+  onSignedOut?: (reason: string) => void,
+) {
   const sockets: FakeSocket[] = [];
   const timers: { fn: () => void; ms: number }[] = [];
   const stream = new StateStream({
@@ -60,6 +65,7 @@ function harness(retryMs: readonly number[] = [10, 20], onStuck?: () => void) {
     schedule: (fn, ms) => timers.push({ fn, ms }),
     cancel: () => undefined,
     ...(onStuck === undefined ? {} : { onStuck }),
+    ...(onSignedOut === undefined ? {} : { onSignedOut }),
   });
   const latest = (): FakeSocket => {
     const socket = sockets.at(-1);
@@ -462,5 +468,72 @@ describe('a stream that stays down', () => {
     h.latest().open();
     h.latest().drop();
     expect(asked).toBe(1);
+  });
+});
+
+/**
+ * Signed out by the core (`A-34`).
+ *
+ * The core closes a stream with 4401 when the session behind it has ended, and says why. A client
+ * that treated it like any other close would reconnect, be refused at the upgrade — which the
+ * browser reports as a 1006, the same as a pulled cable — and retry for ever at the ceiling of its
+ * backoff, with the header still saying somebody is signed in. So it stops, and says so.
+ */
+describe('a stream the core signed out', () => {
+  it('stops, schedules nothing, and says why', () => {
+    const reasons: string[] = [];
+    let asked = 0;
+    const h = harness(
+      [10, 20],
+      () => {
+        asked += 1;
+      },
+      (reason) => reasons.push(reason),
+    );
+    h.stream.subscribe(null);
+    h.latest().open();
+    h.latest().deliver(SNAPSHOT);
+
+    h.latest().drop(STREAM_SIGNED_OUT, 'this session has expired; sign in again');
+
+    expect(reasons).toEqual(['this session has expired; sign in again']);
+    expect(h.timers).toHaveLength(0);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.stream.status).toBe('offline');
+    // Told outright, so there is nothing to ask.
+    expect(asked).toBe(0);
+    // And what it last showed stays until the login form replaces it.
+    expect(h.stream.states.size).toBe(2);
+  });
+
+  it('reconnects as before on any other close', () => {
+    const reasons: string[] = [];
+    const h = harness([10, 20], undefined, (reason) => reasons.push(reason));
+    h.stream.subscribe(null);
+    h.latest().open();
+
+    h.latest().drop(1011, 'internal error');
+
+    expect(reasons).toEqual([]);
+    expect(h.timers).toHaveLength(1);
+    h.fire();
+    expect(h.sockets).toHaveLength(2);
+  });
+
+  it('ignores a sign-out from a socket it has already moved on from', () => {
+    const reasons: string[] = [];
+    const h = harness([10, 20], undefined, (reason) => reasons.push(reason));
+    h.stream.subscribe(null);
+    const first = h.latest();
+    first.open();
+    first.drop();
+    h.fire();
+    h.latest().open();
+
+    // The old socket's close arriving late says nothing about the session the new one is on.
+    first.drop(STREAM_SIGNED_OUT, 'this session has ended; sign in again');
+
+    expect(reasons).toEqual([]);
+    expect(h.stream.status).toBe('live');
   });
 });

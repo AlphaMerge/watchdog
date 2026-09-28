@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
-import { confirmSession } from './client';
+import { confirmSession, sessionEnded } from './client';
 import type { SensorState } from './types';
 
 /** One sensor's state, as the stream last reported it. */
@@ -24,12 +24,24 @@ export interface LiveState {
 
 export type StreamStatus = 'connecting' | 'live' | 'offline';
 
+/**
+ * The close code the core sends when this socket's session, token or account stopped
+ * authenticating (`A-34`). Mirrors `STREAM_SIGNED_OUT` in the core's stream route.
+ */
+export const STREAM_SIGNED_OUT = 4401;
+
+/** What a close says: the half of `CloseEvent` this reads. */
+export interface CloseLike {
+  readonly code: number;
+  readonly reason: string;
+}
+
 /** The half of `WebSocket` this uses, so a test can drive one without a server. */
 export interface SocketLike {
   send(data: string): void;
   close(): void;
   onopen: (() => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((event: CloseLike) => void) | null;
   onerror: (() => void) | null;
   onmessage: ((event: { data: string }) => void) | null;
 }
@@ -52,6 +64,13 @@ export interface StateStreamOptions {
    * framework-free and drivable without a server.
    */
   onStuck?: () => void;
+  /**
+   * Called when the core closed the socket because the session behind it ended (`A-34`), with the
+   * reason it gave. **The stream does not reconnect after it**: the upgrade would be refused, and a
+   * browser reports a refused upgrade as the same 1006 a dropped network gives, so retrying would
+   * spin at the ceiling of the backoff with the header still saying somebody is signed in.
+   */
+  onSignedOut?: (reason: string) => void;
 }
 
 const DEFAULT_RETRY_MS = [500, 1_000, 2_000, 5_000, 10_000] as const;
@@ -110,6 +129,7 @@ export class StateStream {
   readonly #schedule: (fn: () => void, ms: number) => number;
   readonly #cancel: (handle: number) => void;
   readonly #onStuck: (() => void) | undefined;
+  readonly #onSignedOut: ((reason: string) => void) | undefined;
 
   readonly #listeners = new Set<() => void>();
   #states: ReadonlyMap<number, LiveState> = new Map();
@@ -141,6 +161,7 @@ export class StateStream {
         clearTimeout(handle);
       });
     this.#onStuck = options.onStuck;
+    this.#onSignedOut = options.onSignedOut;
   }
 
   get status(): StreamStatus {
@@ -218,8 +239,9 @@ export class StateStream {
       if (socket !== this.#socket) return;
       this.#apply(event.data);
     };
-    socket.onclose = () => {
-      this.#dropped(socket);
+    socket.onclose = (event) => {
+      if (event.code === STREAM_SIGNED_OUT) this.#signedOut(socket, event.reason);
+      else this.#dropped(socket);
     };
     socket.onerror = () => {
       this.#dropped(socket);
@@ -247,6 +269,20 @@ export class StateStream {
       this.#timer = undefined;
       this.#connect();
     }, wait);
+  }
+
+  /**
+   * Signed out by the core (`A-34`): stop, and say so. No reconnection is scheduled — see
+   * `onSignedOut` — and the states are left as they were, for the moment before the login form
+   * replaces them.
+   */
+  #signedOut(socket: SocketLike, reason: string): void {
+    if (this.#closed || socket !== this.#socket) return;
+    this.#closed = true;
+    this.#socket = undefined;
+    this.#opened = false;
+    this.#setStatus('offline');
+    this.#onSignedOut?.(reason);
   }
 
   #send(): void {
@@ -362,6 +398,10 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
         // the gate that puts the login form up needs to know nothing about sockets.
         onStuck: () => {
           void confirmSession();
+        },
+        // Told outright, so nothing needs asking: straight to the login form, saying why.
+        onSignedOut: (reason) => {
+          sessionEnded(reason === '' ? 'this session has ended; sign in again' : reason);
         },
       }),
     [url, open],

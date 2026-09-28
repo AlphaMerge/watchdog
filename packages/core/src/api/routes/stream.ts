@@ -5,20 +5,28 @@ import '@fastify/websocket';
 import { Ajv } from 'ajv';
 import type { FastifyInstance } from 'fastify';
 import { describeError } from '@ms/shared';
+import type { CredentialCheck, Lapse } from '../../auth/credentials.js';
 import type { Database } from '../../db/pool.js';
 import type {
+  Admission,
   StateBroadcaster,
   StateEvent,
   StateSnapshot,
   StreamSight,
 } from '../../state/stream.js';
-import { READS, sightOf } from '../authorization.js';
+import { credentialOf, READS, sightOf } from '../authorization.js';
 
 export interface StreamRouteOptions {
   db: Database;
   stream: StateBroadcaster;
   /** The bounds below, narrowed by a test that needs to reach them (`A-30`). */
   limits?: Partial<StreamLimits>;
+  /**
+   * How to ask whether a socket's session or token still authenticates (`A-34`). Present whenever
+   * the server has accounts; asked only about sockets that presented a credential, which is only
+   * when authentication is required.
+   */
+  credentials?: CredentialCheck;
 }
 
 /**
@@ -50,6 +58,25 @@ export const STREAM_LIMITS: StreamLimits = {
   socketBytes: 16 * 1024 * 1024,
   subscribesPerMinute: 30,
   problems: 5,
+};
+
+/**
+ * The close code for a socket whose session, token or account no longer authenticates (`A-34`).
+ *
+ * In the range RFC 6455 leaves to applications, and chosen to read as the 401 it is. **A client
+ * must not reconnect on it**: the upgrade would be refused, and a browser hides a refused upgrade
+ * behind the same 1006 a pulled cable produces, so a client that treated this like any other close
+ * would retry for ever with the header still saying somebody is signed in. The web client goes to
+ * the login form instead.
+ */
+export const STREAM_SIGNED_OUT = 4401;
+
+/** What the close frame says, by why. Under the 123 bytes a close reason may hold. */
+const SIGNED_OUT: Readonly<Record<Lapse, string>> = {
+  ended: 'this session has ended; sign in again',
+  expired: 'this session has expired; sign in again',
+  revoked: 'this token has been revoked',
+  disabled: 'this account can no longer sign in',
 };
 
 /** What a client sends. Anything else is answered with a `problem` frame and ignored. */
@@ -239,7 +266,12 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           `${String(STREAM_LIMITS.subscribesPerMinute)} times in a minute, or sends more than ` +
           `${String(STREAM_LIMITS.problems)} frames the stream cannot use — each of those is ` +
           'answered with `problem` — and closed outright when it stops reading and ' +
-          `${String(STREAM_LIMITS.socketBytes / 1024 / 1024)} MiB queue up unsent.`,
+          `${String(STREAM_LIMITS.socketBytes / 1024 / 1024)} MiB queue up unsent.` +
+          `\n\nA socket is closed with ${String(STREAM_SIGNED_OUT)} when what authenticated it ` +
+          'no longer does — its session ended or expired, its token was revoked or expired, or ' +
+          'its account was disabled — within seconds, and before anything that changed after it ' +
+          'is sent. Do not reconnect on it: sign in again. An open stream does not count as ' +
+          'activity, so a session used for nothing else reaches its idle timeout.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -263,6 +295,35 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         detach?.();
         detach = undefined;
       };
+
+      /**
+       * Closes a socket whose credential lapsed (`A-34`). Called synchronously from the check, and
+       * detaching here is what keeps the batch that ran the check from delivering to it.
+       */
+      const signOut = (lapse: Lapse): void => {
+        if (closed) return;
+        closed = true;
+        unsubscribe();
+        request.log.info(
+          { login: request.principal?.login, lapse },
+          'a stream socket was signed out',
+        );
+        socket.close(STREAM_SIGNED_OUT, SIGNED_OUT[lapse]);
+      };
+      // Absent when there is nothing to check: authentication is off, or the route is public.
+      const credential = credentialOf(request);
+      // **Never admitted unchecked.** A signed-in socket with nothing to ask about it is exactly the
+      // stream that outlives a logout, so a server wired that way closes the socket instead.
+      if (credential !== null && options.credentials === undefined) {
+        request.log.error('a signed-in stream socket has no credential check to answer for it');
+        closed = true;
+        socket.close(1011, 'internal error');
+        return;
+      }
+      const admission: Admission | undefined =
+        credential === null || options.credentials === undefined
+          ? undefined
+          : stream.admit({ credential, signOut }, options.credentials);
 
       /**
        * Stops serving this socket, and counts it on Core Health (`A-30`). `terminate` when it is not
@@ -399,6 +460,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           return;
         }
         if (gone()) return;
+        // Signed out while the snapshot was read (`A-34`). No published batch vouches for a
+        // snapshot, and the sweep may be seconds away; asked here, it is closed and not sent.
+        if (admission !== undefined && !(await admission.confirm())) return;
+        if (gone()) return;
         // Numbered once it has been read: every `state` frame sent before it is counted in it, and
         // every one after it — the held ones first — carries a higher number.
         const frame = { type: 'snapshot' as const, seq: numbered, ...snapshot };
@@ -469,6 +534,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       const hang = (): void => {
         closed = true;
         unsubscribe();
+        admission?.release();
       };
 
       // This socket, and only this socket: whatever went wrong, the next frame on it cannot be

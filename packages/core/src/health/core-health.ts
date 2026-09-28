@@ -36,8 +36,16 @@ export interface CoreHealthSources {
     deferredReactions: number;
     writeMs: { p95: number };
   };
-  /** `StateBroadcaster.stats()` — subscribers cut off for falling behind. */
-  stream: () => { overflowed: number; severed: number };
+  /**
+   * `StateBroadcaster.stats()` — subscribers cut off for falling behind, sockets closed to protect
+   * the core (`A-30`), sockets signed out and the checks that could not say (`A-34`).
+   */
+  stream: () => {
+    overflowed: number;
+    severed: number;
+    signedOut: Readonly<Record<'ended' | 'expired' | 'revoked' | 'disabled', number>>;
+    credentialCheckFailures: number;
+  };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
   /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
@@ -254,6 +262,12 @@ export class CoreHealthService {
       // Subscribers cut off, and sockets closed outright (`A-30`): a client the core stopped
       // serving either way.
       streamCutoffs: stream.overflowed + stream.severed,
+      // Signed out, by why, and the checks that could not say (`A-34`).
+      streamEnded: stream.signedOut.ended,
+      streamExpired: stream.signedOut.expired,
+      streamRevoked: stream.signedOut.revoked,
+      streamDisabled: stream.signedOut.disabled,
+      streamCheckFailures: stream.credentialCheckFailures,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,
