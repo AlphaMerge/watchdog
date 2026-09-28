@@ -13635,19 +13635,60 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       all package what `package.sh` staged, so they carry the same manifest, but no package
       format other than the tarball has been installed with it.
 
-- [ ] **H-12 — The v1 build profile** · M · H-11 · Option C of the proposal: a build profile
+- [x] **H-12 — The v1 build profile** · M · H-11 · Option C of the proposal: a build profile
       stamped by `package.sh` beside the version and commit, not a key in `core.json`. **Done
       when**, under the v1 profile: the map, public-map and report routes are not registered
       (`ApiServer` already skips them when their services are absent) and the public prefix is not
       exempted; the report sweep, `recover()`, the housekeeper's report step and the Core Health
       source are not constructed, and `CoreHealthSources.reports` becomes optional with its
-      channels gapping; **the catalogue is
-      v1-only through `standardCatalogue(types)`, in the core and the probe — without
-      `flow.netflow` and without the four `windows.*` types**; the web UI asks
-      `GET /api/v1/build` what exists and hides the rest; and a missing stamp is refused, never
-      read as the full profile. Migrations 044–051 stay in the v1 build, so one migration history
-      serves both profiles. Making the report imports lazy, so `pdfkit` and `fontkit` load only in
-      the full profile, is worth doing here and does not block.
+      channels gapping; **the catalogue is v1-only through `standardCatalogue(types)`, in the core
+      and the probe — without `flow.netflow` and without the four `windows.*` types**; the web UI
+      asks `GET /api/v1/build` what exists and hides the rest; and a missing stamp is refused,
+      never read as the full profile. Migrations 044–051 stay in the v1 build, so one migration
+      history serves both profiles. Making the report imports lazy, so `pdfkit` and `fontkit` load
+      only in the full profile, is worth doing here and does not block.
+
+      **H-12 outcome**, in three commits: `2422b56`, `8892dba`, `6e4ed88`.
+
+      **The stamp.** `build.json` carries `profile`, `v1` or `full`, beside `H-11`'s version and
+      commit. `package.sh` defaults to `v1`, so cutting a candidate needs nobody to remember a
+      flag, and `MS_BUILD_PROFILE=full` packages everything. A manifest without a profile is
+      refused rather than read as `full`. `MS_BUILD_PROFILE` is read only when there is no
+      manifest, so no environment variable can change what a package contains. A working tree
+      builds everything.
+
+      **The catalogue.** `@ms/sensors` keeps one list of what v1 leaves out, each with its reason
+      — `flow.netflow` (v2) and the four `windows.*` types (1.1) — and `sensorTypesFor(profile)`.
+      The core, the probe's worker registry and the probe's main thread all build from it. A v1
+      probe asked for a withheld type refuses it by name, as `unknown-type`, and says why. The
+      test drives the real registry in a running pool under both profiles. The shipped "Windows
+      server" device template keeps its ping under v1 and leaves out the WMI set, logged by name;
+      refused whole, it would have logged an error on every start of every v1 installation.
+
+      **The core.** Under v1, `main.ts` constructs no maps, libraries or reports: no routes, no
+      public-map prefix, no report sweep, no `recover()`, no formatter pool. The housekeeper skips
+      report retention, and Core Health's five report channels gap. The report wiring moved
+      unchanged to `reports/wiring.ts`, so "not constructed" is one line.
+
+      **The web UI** asks `GET /api/v1/build`, which now reports the profile and the subsystems
+      the server actually constructed, not what the profile says it should have. Maps and Reports
+      links appear once confirmed; their routes send a bookmark home once the core says they are
+      absent; a core that cannot answer is treated as having everything.
+
+      **Proved in a package**, 2026-09-28, at `6e4ed88`: `MS_SMOKE_DISTRO=ubuntu
+      scripts/smoke-install.sh` on a freshly built default package passed. The box answered
+      `GET /api/v1/build` with `"profile":"v1"` and every subsystem `false`; its `/sensor-types`
+      carried none of the five withheld types; `/api/v1/maps` and `/api/v1/reports` answered
+      `404`; and every earlier assertion held.
+
+      Mutations caught: the worker registry ignoring the profile; the nav, the route guard and the
+      Overview each ignoring the answer; the housekeeper, Core Health and the template loader each
+      ignoring theirs.
+
+      **Not done, and said so:** `pdfkit` and `fontkit` still load under v1. The report routes and
+      the housekeeper import `delivery.ts` and `pdf.ts` directly, so a lazy import in `main.ts`
+      alone would not keep them out; the ticket said this does not block. Migrations 044–051 stay
+      in the v1 build, so one migration history serves both profiles.
 
 - [ ] **H-13 — The candidate's surface, tested** · M · H-12 · A table of the v1 candidate's
       surface in `docs/runbook-field-test.md`, beside step 3's, parsed and compared **in both
