@@ -140,6 +140,21 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       assert.match(header, /^ms_session=/);
     });
 
+    it('keeps the cookie as long as the session could last, not until its first idle deadline', async () => {
+      // The server ends a session; the cookie only has to outlive it (`A-38`). Written once, at
+      // login, a cookie that expired at the first idle deadline was dropped by the browser twelve
+      // hours after signing in however busy the operator was, and the rolling expiry never rolled.
+      const before = Date.now();
+      const response = await login(app, { login: 'ops', password: 'correct-horse-battery' });
+      const setCookie = response.headers['set-cookie'];
+      const header = Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '');
+      const expires = Date.parse(/Expires=([^;]+)/.exec(header)?.[1] ?? '');
+      const week = 7 * 24 * 60 * 60_000;
+      // `Expires` is whole seconds.
+      assert.ok(expires >= before + week - 1_000, header);
+      assert.ok(expires <= Date.now() + week, header);
+    });
+
     it('marks the cookie HttpOnly, so an injected script cannot read the session', async () => {
       // The whole of what an XSS is worth is what it can read. A token in localStorage is
       // readable by any script that gets onto the page; this one is not readable at all.

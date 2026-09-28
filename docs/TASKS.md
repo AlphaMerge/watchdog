@@ -13462,6 +13462,66 @@ because each is a decision rather than a defect:
       answered 400 "body must be object", although the route's own comment says a bodiless clone
       is legitimate. `{}` works.
 
+- [x] **A-38 — How long a session lasts is not a setting, so a v1 wall display cannot stay
+      signed in** · S · A-01, A-34 · Found 2026-09-28 by `A-34`, which made it visible. A session
+      ends after 12 hours idle and 7 days at most, both constants in `SessionService`. An open
+      stream is not activity (`A-34`), so a display showing the tree on a quiet installation is
+      signed out at 12 hours, and the one answer that needs no session — a map's public share
+      link — needs maps, which the v1 build does not have.
+
+      **Done when** the idle and absolute timeouts are settings, validated within sane bounds and
+      defaulting to 12 hours and 7 days; `config check` refuses an idle timeout longer than the
+      absolute one; `administration.md` gives the wall-display recipe; and a test with an injected
+      clock shows a raised idle timeout keeping a stream open past 12 hours.
+
+      **A-38 outcome.**
+      - **Two settings, in a `sessions` section of their own, with the unit in the name.**
+        `sessions.idleTimeoutMinutes` (5 minutes to 30 days, default 720) and
+        `sessions.absoluteTimeoutHours` (1 hour to 90 days, default 168), so an existing
+        `core.json` means what it meant before. Like every setting they take a file value or an
+        environment override (`MS_SESSIONS__ABSOLUTE_TIMEOUT_HOURS`); `main.ts` hands them to
+        `SessionService`, whose constructor already took both.
+      - **Rules across fields are declared beside the schema and applied in `loadConfig`.** JSON
+        Schema cannot say "this field is no larger than that one", so `schema.ts` keeps a rule list
+        per schema (`crossFieldProblems`), and `loadConfig` asks it once every field has a value of
+        the right type. Boot, `migrate` and `config check` all load through it, so none of them can
+        be the one that forgets. The one rule: an idle timeout longer than the absolute one is
+        refused with both named, because the absolute one would always end the session first and
+        the setting would be read as doing something it cannot. Equal is accepted.
+      - **The session cookie expired at the first idle deadline — fixed.** `start` returned the
+        idle expiry and the login route wrote it into the cookie, once. `resolve` rolls the idle
+        expiry forward on every request, but the browser had already been told to drop the cookie
+        twelve hours after login, so a busy operator was signed out at 12 hours regardless, and
+        raising the idle timeout would have changed nothing a browser could see. The cookie now
+        lives until the absolute ceiling (`lastsUntil`), and the server decides when the session
+        ends. `administration.md` says a session started before a change is still on the old
+        cookie and has to sign in again.
+      - **The recipe, and what it costs.** `administration.md` gives the settings, their bounds,
+        the `config check` rule, and a four-step wall display: an account of its own, `readonly`;
+        a page that asks for things on its own (the alarm list or a sensor page), so only the
+        absolute timeout ends it; for a tree, an idle timeout longer than the quietest stretch,
+        with the warning that it applies to every browser in the installation; and signing in
+        again after the change. A map's public share link remains the answer where the build has
+        maps. `deploy/examples/core.json` shows the section.
+
+      Tests: `config.test.ts` — the defaults, a file value and an environment override, each bound
+      refused, the cross-field rule naming both settings and accepting equal, and **every shipped
+      example config loads**, so an example that drifts from the schema fails the unit suite
+      rather than waiting for the install smoke test to boot with it. `config-check.test.ts` — the command exits 1 on an idle
+      timeout longer than the absolute one. `auth-api.test.ts` — the login cookie's `Expires` is the
+      absolute ceiling, seven days out, not twelve hours. `stream-sign-out.test.ts` — with a
+      three-day idle timeout on the injected clock, a stream is still open and nothing counted as
+      expired 13 hours in, and is closed `4401 expired` at three days.
+
+      Mutation 4/4: no cross-field rule, the idle floor lowered, the cookie back at the first idle
+      deadline, the configured idle timeout ignored. The last survived its first run: the test
+      asserted on the client socket's `readyState`, which lags a server close under `injectWS`, so
+      a stream the server had already closed read as open. It asserts on the server's
+      `signedOut` count now, and the `A-34` expiry test that had the same shape was changed with
+      it. **Not tested:** the two lines in `main.ts` that pass the settings to `SessionService` —
+      `main.ts` has no test of its own, and the path from `core.json` to the constructor is read,
+      not run.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

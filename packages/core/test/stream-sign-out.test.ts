@@ -55,6 +55,9 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
   let app: FastifyInstance;
   let open: StateBroadcaster;
   let openApp: FastifyInstance;
+  /** Sessions with the idle timeout raised to three days, as a wall display's would be (`A-38`). */
+  let lasting: StateBroadcaster;
+  let lastingApp: FastifyInstance;
   const servers: ApiServer[] = [];
   let sensorId = 0;
   /** The sessions' clock, moved by the expiry test. */
@@ -72,7 +75,11 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
     tokens = new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
 
-    const build = async (required: boolean, broadcaster: StateBroadcaster) => {
+    const build = async (
+      required: boolean,
+      broadcaster: StateBroadcaster,
+      using: SessionService = sessions,
+    ) => {
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -91,7 +98,7 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
         stream: broadcaster,
         auth: {
           accounts,
-          sessions,
+          sessions: using,
           throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
           groups,
           access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
@@ -110,6 +117,17 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
     app = await build(true, stream);
     open = new StateBroadcaster({ logger: silent, credentialSweepMs: 3_600_000 });
     openApp = await build(false, open);
+    lasting = new StateBroadcaster({ logger: silent, credentialSweepMs: 3_600_000 });
+    lastingApp = await build(
+      true,
+      lasting,
+      new SessionService({
+        db,
+        logger: silent,
+        idleTimeoutMs: 3 * 24 * 60 * 60_000,
+        now: () => new Date(clock),
+      }),
+    );
 
     const probe = await h.service.create(testActor, {
       kind: 'probe',
@@ -331,8 +349,10 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       // An hour on: still well inside the twelve-hour idle timeout, and checking it did not
       // touch it — the socket being open is not the operator being there.
       clock += 60 * 60_000;
+      const early = signedOut('expired');
       await stream.sweep();
-      assert.equal(watcher.socket.readyState, watcher.socket.OPEN);
+      // The count, not `readyState`, which lags a close the core has just sent.
+      assert.equal(signedOut('expired'), early, 'signed out inside the idle timeout');
       assert.equal(await seen(), lastSeen, 'checking the session extended it');
 
       // Past it, with nothing but the stream open all that time.
@@ -344,6 +364,37 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
         reason: 'this session has expired; sign in again',
       });
       assert.equal(signedOut('expired'), before + 1);
+    });
+  });
+
+  describe('with the idle timeout raised (A-38)', () => {
+    it('keeps a stream open past twelve hours, and still ends it at the raised one', async () => {
+      // A wall display: signed in once, nothing asked of the core but the stream. With the
+      // default it is signed out at twelve hours; raised to three days, it is not.
+      const response = await lastingApp.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login: 'watcher', password: PASSWORD },
+      });
+      assert.equal(response.statusCode, 200);
+      const setCookie = response.headers['set-cookie'];
+      const cookie = (Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '')).split(
+        ';',
+      )[0];
+      const display = await watching({ cookie: cookie ?? '' }, lastingApp);
+
+      // The broadcaster's own count, not the client's `readyState`: a close the core sends reaches
+      // the client a moment later, so a socket signed out by this sweep still reads open here.
+      clock += 13 * 60 * 60_000;
+      await lasting.sweep();
+      assert.equal(lasting.stats.signedOut.expired, 0, 'signed out at the default');
+
+      clock += 3 * 24 * 60 * 60_000;
+      await lasting.sweep();
+      assert.deepEqual(await closedWith(display.closed), {
+        code: STREAM_SIGNED_OUT,
+        reason: 'this session has expired; sign in again',
+      });
     });
   });
 

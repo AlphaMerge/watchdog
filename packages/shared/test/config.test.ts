@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { loadConfig } from '../src/config/load.js';
 import { coreConfigSchema, probeConfigSchema } from '../src/config/schema.js';
@@ -153,6 +154,20 @@ describe('loadConfig', () => {
     );
   });
 
+  it('loads the shipped examples under this build', () => {
+    // `deploy/examples` is what an operator copies. An example this build refuses is a first
+    // start that fails — and nothing else reads them.
+    const example = (name: string): string =>
+      fileURLToPath(new URL(`../../../../deploy/examples/${name}`, import.meta.url));
+    const core = loadConfig({
+      schema: coreConfigSchema,
+      env: {},
+      argv: ['--config', example('core.json')],
+    });
+    assert.equal(core.config.sessions.idleTimeoutMinutes, 720);
+    loadConfig({ schema: probeConfigSchema, env: {}, argv: ['--config', example('probe.json')] });
+  });
+
   it('loads the probe schema with its own defaults', () => {
     const { config } = loadConfig({
       schema: probeConfigSchema,
@@ -165,6 +180,55 @@ describe('loadConfig', () => {
     assert.equal(config.core.port, 23560);
     assert.equal(config.probe.workerPoolSize, 0);
     assert.equal(config.core.heartbeatIntervalMs, 10_000);
+  });
+});
+
+describe('how long a session lasts (A-38)', () => {
+  const load = (sessions: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env,
+      argv: ['--config', tempFile('core.json', JSON.stringify({ sessions }))],
+    });
+
+  it('is twelve hours idle and seven days at most unless it is set', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.deepEqual(config.sessions, { idleTimeoutMinutes: 720, absoluteTimeoutHours: 168 });
+  });
+
+  it('takes both from the file or the environment', () => {
+    const { config } = load(
+      { idleTimeoutMinutes: 4_320 },
+      { MS_SESSIONS__ABSOLUTE_TIMEOUT_HOURS: '720' },
+    );
+    assert.deepEqual(config.sessions, { idleTimeoutMinutes: 4_320, absoluteTimeoutHours: 720 });
+  });
+
+  it('refuses either outside its bounds', () => {
+    for (const sessions of [
+      { idleTimeoutMinutes: 4 },
+      { idleTimeoutMinutes: 43_201 },
+      { absoluteTimeoutHours: 0 },
+      { absoluteTimeoutHours: 2_161 },
+      { idleTimeoutMinutes: 90.5 },
+    ]) {
+      const error = captureError(() => load(sessions));
+      assert.ok(error instanceof ConfigError, JSON.stringify(sessions));
+      assert.match(error.message, /sessions\./, JSON.stringify(sessions));
+    }
+  });
+
+  it('refuses an idle timeout longer than the absolute one, naming both', () => {
+    // A session would reach its ceiling first every time, so the idle setting would be a number
+    // that looks like it does something and never does.
+    const error = captureError(() => load({ idleTimeoutMinutes: 1_441, absoluteTimeoutHours: 24 }));
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /sessions\.idleTimeoutMinutes: 1441 minutes is longer than/);
+    assert.match(error.message, /sessions\.absoluteTimeoutHours \(24 hours\)/);
+
+    // Equal is fine: the idle timeout and the ceiling arrive together.
+    const { config } = load({ idleTimeoutMinutes: 1_440, absoluteTimeoutHours: 24 });
+    assert.equal(config.sessions.idleTimeoutMinutes, 1_440);
   });
 });
 

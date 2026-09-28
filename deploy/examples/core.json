@@ -12,6 +12,10 @@
     "webRoot": "/opt/ms/web",
     "allowedOrigins": []
   },
+  "sessions": {
+    "idleTimeoutMinutes": 720,
+    "absoluteTimeoutHours": 168
+  },
   "database": {
     "host": "127.0.0.1",
     "port": 5432,

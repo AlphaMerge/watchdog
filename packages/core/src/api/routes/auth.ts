@@ -195,11 +195,12 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       }
 
       await throttle.record(login, address, true);
-      const { token, expiresAt } = await sessions.start(outcome.account, {
+      // The cookie lives as long as the session could (`A-38`); the server ends it sooner.
+      const { token, lastsUntil } = await sessions.start(outcome.account, {
         remoteAddress: address,
         userAgent: request.headers['user-agent'] ?? '',
       });
-      setSessionCookie(request, reply, token, expiresAt);
+      setSessionCookie(request, reply, token, lastsUntil);
 
       return {
         userId: outcome.account.id,

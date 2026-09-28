@@ -386,6 +386,31 @@ export interface CoreConfig {
     requireAuthentication: boolean;
   };
   /**
+   * How long a signed-in browser stays signed in (`A-01`, `A-38`).
+   *
+   * **Its own section, apart from `api`**, because `api` is the listener — where it binds and what
+   * it serves — and this is how long an identity lasts. The rest of that question lives here as it
+   * arrives.
+   *
+   * **Both clocks apply to every session in the installation**, so raising them for one screen
+   * raises them for everybody: `administration.md` has the recipe for a wall display and what it
+   * costs. An API token has neither; it lasts until it expires or is revoked.
+   */
+  sessions: {
+    /**
+     * Minutes without a request before a session ends. A request extends it; an open live stream
+     * does not (`A-34`). 12 hours by default: a shift, and an unattended screen is signed out by
+     * the next one.
+     */
+    idleTimeoutMinutes: number;
+    /**
+     * Hours after signing in at which a session ends however active it is. 7 days by default.
+     * Never shorter than the idle timeout — `config check` refuses that, since the idle timeout
+     * would then never be what ended a session.
+     */
+    absoluteTimeoutHours: number;
+  };
+  /**
    * Where a geographical map's tiles come from (`G-08`, `ADR-004`).
    *
    * **Empty by default, and the product ships no tiles and no provider.** Bundling a world is
@@ -765,6 +790,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
   required: [
     'service',
     'api',
+    'sessions',
     'notifications',
     'database',
     'ingestion',
@@ -787,6 +813,20 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // origin a browser would send, and `registerCsrfGuard` says so by name at startup.
         allowedOrigins: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
         requireAuthentication: { type: 'boolean', default: true },
+      },
+    },
+    sessions: {
+      type: 'object',
+      default: {} as CoreConfig['sessions'],
+      additionalProperties: false,
+      required: ['idleTimeoutMinutes', 'absoluteTimeoutHours'],
+      properties: {
+        // Five minutes at the least: shorter signs somebody out between reading a page and saving
+        // the form on it. Thirty days at the most.
+        idleTimeoutMinutes: { type: 'integer', minimum: 5, maximum: 43_200, default: 720 },
+        // Ninety days at the most. A browser that must stay signed in longer than a quarter is
+        // a script, and a script uses an API token.
+        absoluteTimeoutHours: { type: 'integer', minimum: 1, maximum: 2_160, default: 168 },
       },
     },
     maps: {
@@ -1072,6 +1112,35 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
     },
   },
 };
+
+/**
+ * What a configuration must satisfy that its schema cannot say (`A-38`): rules across fields.
+ *
+ * **Keyed by the schema, so no loader has to be told.** The core loads its configuration in three
+ * places — serving, `migrate` and `config check` — and a rule passed in by each would be a rule one
+ * of them forgets; `loadConfig` asks here for whatever schema it was given.
+ */
+const RULES = new WeakMap<object, (config: never) => readonly string[]>();
+
+/** The problems `config` has that its schema's cross-field rules find. Empty when it has none. */
+export function crossFieldProblems<T>(schema: JSONSchemaType<T>, config: T): readonly string[] {
+  const rules = RULES.get(schema) as ((config: T) => readonly string[]) | undefined;
+  return rules === undefined ? [] : rules(config);
+}
+
+RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
+  const problems: string[] = [];
+  const { idleTimeoutMinutes, absoluteTimeoutHours } = config.sessions;
+  if (idleTimeoutMinutes > absoluteTimeoutHours * 60) {
+    problems.push(
+      `sessions.idleTimeoutMinutes: ${String(idleTimeoutMinutes)} minutes is longer than ` +
+        `sessions.absoluteTimeoutHours (${String(absoluteTimeoutHours)} hours), so the idle ` +
+        'timeout would never be what ended a session; raise the absolute timeout or lower the ' +
+        'idle one',
+    );
+  }
+  return problems;
+});
 
 export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
   type: 'object',

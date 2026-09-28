@@ -76,13 +76,24 @@ export class SessionService {
     this.#now = options.now ?? ((): Date => new Date());
   }
 
-  /** Starts a session and returns the token for the cookie. The token is never stored. */
+  /**
+   * Starts a session and returns the token for the cookie. The token is never stored.
+   *
+   * `lastsUntil` is the latest the session can live — its absolute ceiling — and is what the
+   * cookie's own expiry has to be (`A-38`). The idle expiry moves on every request, and the cookie
+   * is written once, at login: a cookie that expired at the *first* idle deadline was dropped by
+   * the browser twelve hours after signing in however busy the operator was, and the rolling
+   * expiry in `resolve` never got to roll. The server decides when a session ends; the cookie only has to
+   * outlive it.
+   */
   async start(
     account: Account,
     context: { remoteAddress: string; userAgent: string },
-  ): Promise<{ token: string; expiresAt: Date }> {
+  ): Promise<{ token: string; expiresAt: Date; lastsUntil: Date }> {
     const { token, id } = newSessionToken();
-    const expiresAt = new Date(this.#now().getTime() + this.#idleMs);
+    const now = this.#now().getTime();
+    const lastsUntil = new Date(now + this.#absoluteMs);
+    const expiresAt = new Date(Math.min(now + this.#idleMs, lastsUntil.getTime()));
     await this.#db.query(
       `INSERT INTO user_session (id, user_id, remote_address, user_agent, created_at,
                                  last_seen_at, expires_at)
@@ -92,7 +103,7 @@ export class SessionService {
         account.id,
         context.remoteAddress.slice(0, 64),
         context.userAgent.slice(0, 400),
-        this.#now(),
+        new Date(now),
         expiresAt,
       ],
     );
@@ -100,7 +111,7 @@ export class SessionService {
       { login: account.login, remoteAddress: context.remoteAddress },
       'session started',
     );
-    return { token, expiresAt };
+    return { token, expiresAt, lastsUntil };
   }
 
   /**

@@ -69,6 +69,18 @@ describe('checking a configuration', () => {
     assert.match(err.join('\n'), /api\.port/);
   });
 
+  it('refuses what only a rule across two settings can see (A-38)', () => {
+    // An idle timeout longer than the absolute one is two valid numbers that make no sense
+    // together — the schema cannot say so, and an install should not find out after the restart.
+    const path = tempFile(
+      JSON.stringify({ sessions: { idleTimeoutMinutes: 20_160, absoluteTimeoutHours: 168 } }),
+    );
+    const { code, err } = check(['--config', path]);
+
+    assert.equal(code, 1);
+    assert.match(err.join('\n'), /sessions\.idleTimeoutMinutes: 20160 minutes is longer than/);
+  });
+
   it('reports every problem at once, not just the first', () => {
     // Somebody fixing a configuration during an upgrade window should not have to run this five
     // times to find five mistakes.

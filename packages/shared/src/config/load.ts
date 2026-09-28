@@ -4,6 +4,7 @@ import { Ajv, type ErrorObject, type JSONSchemaType, type ValidateFunction } fro
 import * as ajvFormats from 'ajv-formats';
 import type { FormatsPlugin } from 'ajv-formats';
 import { ConfigError } from '../errors/app-error.js';
+import { crossFieldProblems } from './schema.js';
 
 /** Where a configuration value came from. Reported at boot so operators can see the layering. */
 export interface ConfigSources {
@@ -218,14 +219,19 @@ export function loadConfig<T>(options: LoadConfigOptions<T>): LoadedConfig<T> {
   const addFormats = ajvFormats.default as unknown as FormatsPlugin;
   addFormats(ajv);
 
-  const validate: ValidateFunction<T> = ajv.compile(options.schema);
-  if (!validate(merged)) {
-    const problems = (validate.errors ?? []).map(formatAjvError);
+  const invalid = (problems: readonly string[]): ConfigError => {
     const unique = [...new Set(problems)];
-    throw new ConfigError(`Configuration is invalid:\n  - ${unique.join('\n  - ')}`, {
+    return new ConfigError(`Configuration is invalid:\n  - ${unique.join('\n  - ')}`, {
       context: { file: filePath ?? '(none)', problemCount: unique.length },
     });
-  }
+  };
+
+  const validate: ValidateFunction<T> = ajv.compile(options.schema);
+  if (!validate(merged)) throw invalid((validate.errors ?? []).map(formatAjvError));
+  // The rules across fields (`A-38`), once every field has a value of the right type — which is
+  // what they read.
+  const crossField = crossFieldProblems(options.schema, merged);
+  if (crossField.length > 0) throw invalid(crossField);
 
   // `validate` is a type predicate: past the guard, `merged` is a `T`.
   return {

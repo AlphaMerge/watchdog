@@ -95,9 +95,19 @@ A few consequences are worth knowing before somebody reports them as bugs:
 
 ### Sessions, and screens left open
 
-A browser session ends after **12 hours without a request**, and after **7 days** however active;
-neither is a setting yet. A logout, a password change (which ends the account's other sessions),
-a revoked token and a disabled account each take effect on the next request.
+A browser session ends after **12 hours without a request**, and **7 days** after signing in
+however active it is. Both are settings, in their own section, and both apply to every session in
+the installation:
+
+```json
+{ "sessions": { "idleTimeoutMinutes": 720, "absoluteTimeoutHours": 168 } }
+```
+
+The idle timeout may be 5 minutes to 30 days, and the absolute one 1 hour to 90 days.
+`config check` refuses an idle timeout longer than the absolute one, since the absolute one would
+then always arrive first. A logout, a password change (which ends the account's other sessions),
+a revoked token and a disabled account each take effect on the next request. The browser keeps
+the cookie for as long as the absolute timeout allows. The core decides when the session ends.
 
 **And on an open page, within seconds.** A page's live updates arrive over a WebSocket that is
 signed in once, when it opens, and the core keeps asking whether what opened it still
@@ -113,10 +123,28 @@ are not being checked.
 browser left on a dashboard would never time out, and the idle timeout would mean nothing for the
 unattended screen it exists for. A page that makes requests of its own keeps its session: the
 alarm list asks again after each change, and a sensor's page re-reads its channels every 15
-seconds. A page that makes none for 12 hours, such as a tree on a quiet installation, is signed
-out, and every page is signed out at 7 days. A screen meant to stay up unattended can show a
-**public share link** of a map, which needs no session (see above), in a build that has maps
-(`H-12`). A script uses an API token, which has no idle timeout.
+seconds. A page that makes none for the idle timeout, such as a tree on a quiet installation, is
+signed out, and every page is signed out at the absolute timeout. A script uses an API token,
+which has neither.
+
+#### A wall display
+
+1. **Give it an account of its own**, `readonly`, in a group granted `read` on the branch it shows.
+   The screen is signed in and unattended, and whoever walks up to it has that account.
+2. **Show the alarm list, or a sensor's page, rather than the tree.** Both ask the core for
+   something on their own, so the idle timeout never ends the display's session, and only the
+   absolute timeout does. Set `sessions.absoluteTimeoutHours` to how often somebody is willing
+   to sign the screen in again: `720` is monthly.
+3. **For a tree, the idle timeout has to outlast the quiet.** A tree asks for nothing while
+   nothing changes, so set `sessions.idleTimeoutMinutes` longer than the quietest stretch you
+   expect. A weekend is `4320` (three days). This applies to every browser in the installation,
+   so an unattended office desk stays signed in as long. Prefer step 2 if you can.
+4. Run `config check`, restart the core, and **sign the display in again**. Its browser keeps the
+   cookie only as long as the absolute timeout allowed when it signed in, so a session started
+   before the change can still end on the old schedule.
+
+In a build that has maps (`H-12`), a map's **public share link** needs no session at all, and is
+the better answer for a screen that shows one.
 
 ### API tokens
 

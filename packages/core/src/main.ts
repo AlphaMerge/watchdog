@@ -939,7 +939,13 @@ async function serve(): Promise<void> {
   // one.
   const identityAudit = new CompositeAuditSink(identityAuditSinks(auditSinks));
   const accounts = new AccountService({ db, audit: identityAudit, logger });
-  const sessions = new SessionService({ db, logger });
+  // How long a signed-in browser stays signed in is the operator's to set (`A-38`).
+  const sessions = new SessionService({
+    db,
+    logger,
+    idleTimeoutMs: config.sessions.idleTimeoutMinutes * 60_000,
+    absoluteTimeoutMs: config.sessions.absoluteTimeoutHours * 3_600_000,
+  });
   const userGroups = new GroupService({ db, audit: identityAudit, logger });
   const apiTokens = new TokenService({ db, audit: identityAudit, logger });
   const mfa = new TotpService({ db, audit: identityAudit, logger });
