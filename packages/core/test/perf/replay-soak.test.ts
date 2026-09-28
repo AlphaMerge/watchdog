@@ -5,6 +5,7 @@ import type { Database } from '../../src/db/pool.js';
 import { Ingestor } from '../../src/ingestion/ingestor.js';
 import { ReplayPacer } from '../../src/ingestion/replay-pacer.js';
 import { IngestionService } from '../../src/ingestion/service.js';
+import type { ProbeOrigin } from '../../src/transport/probe-endpoint.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -53,6 +54,12 @@ const available = await databaseAvailable();
  * **`MS_SOAK_FRACTION=1` loads the machine for a minute and a half**, which is long enough to
  * disturb the latency percentiles of whichever benchmark runs next to it. Run it on its own when
  * the number matters.
+ *
+ * **Every batch arrives the way a probe's does** (`P-233`): through `acceptProbeResults` and
+ * `P-228`'s ownership gate, from the probe object its sensors are under. Each probe's first batch
+ * finds the gate's cache empty, as it would after a restart. The measurement above was taken
+ * before the gate existed, on `acceptResults`: `P-233` ran this at the default fraction, and
+ * re-taking the full hour through the gate belongs to the next full `test:perf`.
  */
 
 /** `PLAN.md`'s v1 target: 5,000 sensors on a 60-second interval is 300,000 readings an hour. */
@@ -91,6 +98,8 @@ describe(
     const replaySensors: number[] = [];
     const secondReplaySensors: number[] = [];
     const liveSensors: number[] = [];
+    /** Each source's probe object: the one its sensors are under, so the gate admits them. */
+    const probeOf = new Map<string, number>();
 
     before(async () => {
       scratch = await createScratchDatabase('replaysoak');
@@ -102,16 +111,17 @@ describe(
       // its spool is not a fairness problem, it is just work. The delay starts when more probes
       // are catching up than the core will let run at full speed, so a two-probe test measures
       // the mechanism and a one-probe test measures its absence.
-      for (const [name, into] of [
-        ['Replaying probe', replaySensors],
-        ['Second replaying probe', secondReplaySensors],
-        ['Live probe', liveSensors],
+      for (const [name, into, source] of [
+        ['Replaying probe', replaySensors, 'replaying-probe'],
+        ['Second replaying probe', secondReplaySensors, 'second-replaying-probe'],
+        ['Live probe', liveSensors, 'live-probe'],
       ] as const) {
         const probe = await harness.service.create(testActor, {
           kind: 'probe',
           parentId: harness.rootId,
           name,
         });
+        probeOf.set(source, probe.id);
         const device = await harness.service.create(testActor, {
           kind: 'device',
           parentId: probe.id,
@@ -128,6 +138,10 @@ describe(
           into.push(sensor.id);
         }
       }
+
+      // The first replaying probe again, under a name the pacer has not seen: how the last case
+      // gets a probe with a fresh catch-up history without building another tree.
+      probeOf.set('recovered-probe', probeOf.get('replaying-probe') ?? 0);
 
       pacer = new ReplayPacer({
         logger: silent,
@@ -167,7 +181,8 @@ describe(
       batchId: number,
     ): Promise<{ ms: number; retryAfterMs: number }> => {
       const started = process.hrtime.bigint();
-      const reply = await service.acceptResults(source, {
+      const origin: ProbeOrigin = { gid: source, probeObjectId: probeOf.get(source) ?? null };
+      const reply = await service.acceptProbeResults(origin, {
         type: 'results',
         batchId: String(batchId),
         backlog,
@@ -260,6 +275,11 @@ describe(
           `      pacing          the replaying probe was asked to wait up to ${String(maxPaced)} ms; ` +
           `the live one ${String(livePaced)} ms\n`,
       );
+
+      // Every batch was its probe's own. A source mapped to the wrong probe would be refused,
+      // acknowledged at once and stored nowhere, which would read as a very fast replay.
+      const ingested = service.stats();
+      assert.equal(ingested.refusedUnknown + ingested.refusedMoved + ingested.refusedForeign, 0);
 
       // --- the criterion ----------------------------------------------------------------
       assert.ok(

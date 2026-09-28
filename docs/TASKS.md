@@ -5627,7 +5627,7 @@ because each is a decision rather than a defect:
 
       Mutations caught: 18 of 18. Each was applied alone, built, and run against its own tests.
 
-- [ ] **P-233 — `test:perf`'s ingestion budgets bypass the probe gate** · S · P-228, P-15 · Found
+- [x] **P-233 — `test:perf`'s ingestion budgets bypass the probe gate** · S · P-228, P-15 · Found
       landing `P-228`. `ingestion-performance.test.ts` and `replay-soak.test.ts` call
       `acceptResults`, the in-process path. So no budget covers the path every probe result now
       takes: `acceptProbeResults`, with its ownership cache in front of `#prepare` and the query
@@ -5639,6 +5639,36 @@ because each is a decision rather than a defect:
       sensors, with a realistic mix of warm and cold cache. The mix includes a first batch after a
       core restart (all misses) and the clear that follows a move. The numbers are measured in a
       quiet window and committed to `docs/findings/`.
+
+      **Done.** Every service-level budget in `ingestion-performance.test.ts` and the replay soak
+      now goes through `acceptProbeResults`, from the probe object that owns its sensors:
+      - **The full-path budget starts with the owner cache empty.** All 100 batches in its timed
+        window miss the cache, which is the restart shape.
+      - **The state-machine and flapping cases run warm**, which is the steady state.
+      - **The replay soak asserts that the gate refused nothing.** A source wired to the wrong
+        probe would otherwise read as a very fast replay.
+      - **A new case covers `PLAN.md`'s v1 probe:** 5,000 sensors in a tree four levels deep,
+        offered in the shipped 500-result batches. It measures the gate after a restart, warm, and
+        after a real `ObjectService.move` of 500 of them. The service carries a
+        `DatabaseAuditSink` and a `ResultCacheInvalidator`, as `main.ts` wires them, and nothing
+        clears the cache by hand.
+      - **Budgets:** a cold batch may cost no more than the 100 ms write budget, and a warm batch
+        no more than 5 ms.
+
+      **Measured** in a held window, twice, in `findings/2026-09-29-probe-gate-ingestion.md`:
+      - the worst cold batch was **19.6 ms and 18.3 ms**, the batch after the move, which walks
+        the audit log for the 500 moved sensors, all 500 of them found moved and none foreign;
+      - after a restart the worst was 5.1 and 5.8 ms, and warm 0.13 and 0.10 ms;
+      - the full path with every batch cold ran at 2.5M and 2.1M samples a minute, and the soak
+        degraded by 0.97× and 0.95×.
+
+      On a busy VM the same case measured a 72 ms worst, so the margin shrinks tenfold under load
+      and still holds. Run 2's raw-writer sweep, which `P-233` did not touch, measured a 285.6 ms
+      p99. Three reruns measured 73.8, 24.2 and 38.2 ms, so it is filed as an observation for the
+      next full `test:perf`, and no budget was moved.
+
+      **Not done:** the soak ran at the default 5%. Its committed full-hour figures date from
+      before the gate, and re-taking them belongs to the next full `test:perf`.
 
 - [x] **P-225 — the tree-build criterion was measured on a server with no authentication** · M ·
       P-15, P-19, A-09 · Found 2026-09-28 by the second review round.
@@ -5704,6 +5734,19 @@ because each is a decision rather than a defect:
       reads other objects still has its writer's sight checked, inside the write's transaction,
       with `A-29`'s tests unchanged and passing; and the next quiet `P-225` run records the
       difference.
+
+- [ ] **P-237 — the batch-size sweep's relative check is narrower than the case's run-to-run
+      spread** · S · S-07, P-233 · Found in `P-233`'s window. `ingestion-performance.test.ts`
+      asserts that the shipped 1,000-row batch writes with a lower p99 than the 5,000-row one, in
+      the same run. Five sweeps of one commit, within four minutes, measured the shipped size's p99
+      at 22.9, 285.6, 73.8, 24.2 and 38.2 ms, and one of them failed that check by 0.3 ms: 73.8
+      against 73.5 (`findings/2026-09-29-probe-gate-ingestion.md`). A check that loses by 0.3 ms
+      against a spread of 23 to 286 ms fails at random, and a `test:perf` that fails at random
+      teaches people to stop reading it.
+
+      **Done when** the comparison is robust, for example the median of several sweeps, or a
+      margin taken from the measured spread and stated in the test, or it is dropped because the
+      absolute budgets already carry the claim. The entry says which, and why.
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
@@ -16296,6 +16339,21 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       **After it landed**, on a release built from `b17f83d` itself: smoke-restore passed, so
       migration 059's enum, rebuilt under a hypertable, survives a dump and a restore; and
       smoke-install passed.
+
+- [ ] **H-23 — a probe that crash-loops is left failed for good** · S–M · H-21, P-215, P-222 ·
+      Found by `P-216b`: six OOM kills in ten minutes hit `StartLimitBurst=5` within
+      `StartLimitIntervalSec=600`, and `ms-probe` stayed `failed` with nothing to bring it back.
+      For a remote probe that is an outage until someone visits the site. `P-222`'s reasoning
+      stands: a configuration error exits 78 and must not loop. So the fix is for crashes only.
+      Two ways to do it: `RestartSteps=` and `RestartMaxDelaySec=` (systemd 254 and later) give a
+      growing backoff instead of a hard stop; on older systemd, an `OnFailure=` unit or a timer
+      retries after a cool-down. Debian 12 and Rocky 9 both ship systemd 252. The core's unit
+      faces the same question, and the fix says what it should do too.
+
+      **Done when** a crash-looping unit comes back by itself after a cool-down and a unit that
+      exited 78 does not, on the systemd the supported distros ship. A smoke test asserts both:
+      a unit killed repeatedly comes back, and an exit-78 unit stays down. The design goes to
+      WatchDog before it is built.
 
 ---
 
