@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
-import type { CheckResult, MachineMemoryLow } from '@ms/shared';
+import type { AvailableMemoryLow, CheckResult } from '@ms/shared';
 import {
   CoreHealthService,
   readingsFrom,
@@ -59,7 +59,8 @@ function sources(
     resultsFutureDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
-    machineMemory: MachineMemoryLow | null;
+    machineMemory: AvailableMemoryLow | null;
+    limitMemory: AvailableMemoryLow | null;
   }> = {},
 ): CoreHealthSources {
   return {
@@ -69,6 +70,8 @@ function sources(
     evictedChunks: () => overrides.evictedChunks ?? 0,
     // Null by default too: a platform that cannot say, whose two channels must gap (`P-208`).
     machineMemory: () => overrides.machineMemory ?? null,
+    // And no ceiling: a core outside any cgroup limit, whose two channels must gap (`P-210`).
+    limitMemory: () => overrides.limitMemory ?? null,
     ingestion: () => ({
       queuedRows: overrides.queuedRows ?? 0,
       refusedRows: overrides.refusedRows ?? 0,
@@ -289,7 +292,11 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // `P-208`: the machine's memory rather than the core's, so a core beside a database that has
       // taken the rest is visible before the kernel picks something to kill.
       const measured = await build({
-        machineMemory: { availablePercent: 8.5, availableBytes: 675 * 1024 * 1024 },
+        machineMemory: {
+          availablePercent: 8.5,
+          availableBytes: 675 * 1024 * 1024,
+          totalBytes: 7_936 * 1024 * 1024,
+        },
       }).read();
       assert.equal(measured['memoryAvailable'], 8.5);
       assert.equal(measured['memoryAvailableBytes'], 675);
@@ -298,6 +305,23 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const unknown = await build({ machineMemory: null }).read();
       assert.equal(unknown['memoryAvailable'], null);
       assert.equal(unknown['memoryAvailableBytes'], null);
+    });
+
+    it('reports how close the core is to its own ceiling, and gaps where it has none', async () => {
+      // `P-210`: 1.5 GiB left under the stock unit's 6 GiB MemoryHigh is 75% used.
+      const limited = await build({
+        limitMemory: {
+          availablePercent: 25,
+          availableBytes: 1_536 * 1024 * 1024,
+          totalBytes: 6_144 * 1024 * 1024,
+        },
+      }).read();
+      assert.equal(limited['memoryLimitUsage'], 75);
+      assert.equal(limited['memoryLimit'], 6_144);
+
+      const unlimited = await build({ limitMemory: null }).read();
+      assert.equal(unlimited['memoryLimitUsage'], null);
+      assert.equal(unlimited['memoryLimit'], null);
     });
 
     it('passes each subsystem’s own number through unchanged', async () => {

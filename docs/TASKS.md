@@ -4448,7 +4448,7 @@ because each is a decision rather than a defect:
       no dev token could be minted because the generated admin password had been changed), and
       Windows (`H-09`). The cgroup case is `P-210`.
 
-- [ ] **P-210 — a probe near its own cgroup ceiling is killed with memory to spare** · S · P-208 ·
+- [x] **P-210 — a probe near its own cgroup ceiling is killed with memory to spare** · S · P-208 ·
       `ms-probe.service` sets `MemoryHigh=4G` and `MemoryMax=6G`, and the kernel enforces those on
       the probe's cgroup whatever the machine has left: on a 64 GiB host the probe can be killed at
       6 GiB while `memoryAvailable` reads 80%. `memory` shows the probe's resident set, but not the
@@ -4458,6 +4458,38 @@ because each is a decision rather than a defect:
       `process.constrainedMemory()` returns, and the difference is `process.availableMemory()`) and a gap where there is none, with a default limit
       that has a stated reason — or the ticket records why `memory` against the unit's figure is
       enough. Core Health's `ms-core.service` has the same pair (`6G`/`8G`).
+
+      **Done.** `memoryLimitUsage` (%) and `memoryLimit` (MB) on **both** Probe Health and Core
+      Health. `readLimitMemory` in `@ms/shared` walks the process's cgroup v2 path from
+      `/proc/self/cgroup` up to the root: at each level the ceiling is the **lower of `memory.high`
+      and `memory.max`**, because the lower acts first — on the stock units that is `MemoryHigh`,
+      which throttles rather than kills — the usage is the **working set**, `memory.current` less
+      `inactive_file`, because page cache fills a cgroup to its ceiling on purpose, and the tightest
+      level wins. **Not `process.availableMemory()`**, which this ticket proposed: it counts page
+      cache, and with 180 MB of it in a 200 MiB `memory.high` it said 2 MiB were left of a ceiling
+      the working set used 18 MiB of. (`process.constrainedMemory()` does find `MemoryHigh` on
+      libuv 1.52; the reader walks the tree itself so that each ceiling is measured against the
+      usage at its own level.) A **gap** with no limit anywhere up the tree, on cgroup v1 and on a
+      hybrid host, and off Linux — WinSW sets none. The highest of the last thirty seconds, through
+      the same watch `P-208`'s channel uses, renamed `AvailableMemoryWatch` now that it watches two
+      things. **Default limits: warning above 80%, error above 100%** — the error where the kernel
+      acts, the warning because `P-206`'s start-up surge was 21% of the stock 4 GiB. Protocol 18,
+      capability `memoryLimit`; `healthForPeer` strips only what the core's version lacks, so a
+      core at 17 still gets 17's pair. Prometheus: `ms_{probe,core}_memory_limit_usage_ratio` and
+      `ms_{probe,core}_memory_limit_bytes`. `smoke-install.sh` gains `MS_SMOKE_KEEP=1`, which leaves
+      its box running for a measurement like this one.
+
+      **Measured** (`findings/2026-09-27-memory-limit.md`), under the shipped unit in the smoke
+      test's systemd box: the core's route matched the kernel's own files at every heartbeat; a
+      ceiling moved to put the probe at 85% was a **Warning** 27 s later and in `sample`; and the
+      channel was a gap in `sample`, not a zero, while the probe was down. **Past the ceiling**:
+      with swap the kernel held the probe at 93% of it, stalled at most 2.4% of the time and
+      working — a Warning, correctly. Without swap it was stalled 73% of the time within 17 s, and
+      **systemd's watchdog killed it** — the kernel never did — and restarted it into the same
+      ceiling, where start-up alone stalled it again (`P-213`). A probe that far gone rarely gets
+      out the heartbeat that would report it; what the core sees is the link drop, which makes the
+      80% warning the limit that does the work. **Not measured**: cgroup v1 and a parent slice's
+      limit (unit-tested), the core past its ceiling, and Windows.
 
 - [x] **P-211 — the report formatter's timeout test fails under a full `npm test`** · S · P-204 ·
       Seen 2026-09-27: "ends a job that runs out of time, with its worker, and carries on" in
@@ -4515,6 +4547,21 @@ because each is a decision rather than a defect:
       a hostname fragment in the other case and by an address fragment, still by name, and `host`
       stays exact. Mutated in `dist`: name-only fails three of them, an unparenthesised OR fails
       the AND test.
+
+- [ ] **P-213 — a probe past its `MemoryHigh` is killed by its own watchdog, and restarts into the
+      same ceiling for ever** · S · P-210 · Measured in `P-210`, under the shipped `ms-probe.service`
+      with no swap: past `MemoryHigh` the kernel throttles the probe — stalled on memory 73% of the
+      time within 17 s — the probe cannot fork the `systemd-notify` that answers `WatchdogSec=30`,
+      and systemd kills it. `oom_kill` stays at zero; `MemoryMax` is 2 GiB away. `Restart=on-failure`
+      brings it back under the same ceiling, start-up alone takes it past, it never reports ready,
+      `TimeoutStartSec=60` stops it, and round it goes every ~85 s — never five starts in ten seconds,
+      so systemd's start limit never trips, and nothing says why beyond "Link to the core is 0".
+      With swap the kernel holds the probe just under the ceiling instead and it keeps working.
+      `ms-core.service` has the same pair and the same watchdog. **Done when** the stock units'
+      behaviour past their ceiling is chosen and measured with `scripts/sizing/memory-limit-live.sh`
+      — drop `MemoryHigh`, so that `MemoryMax` kills at once and says `oom_kill`; keep it and make
+      the loop end where an operator will see it; or keep both and say that the 80% warning is the
+      signal — and `administration.md` says what a probe in that state looks like, and what to raise.
 
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15

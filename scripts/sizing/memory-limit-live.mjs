@@ -1,0 +1,284 @@
+// Probe Health's `memoryLimitUsage` on a real systemd install, for `P-210`. Runs *inside* the box
+// `scripts/smoke-install.sh` builds — started by `scripts/sizing/memory-limit-live.sh`, which says
+// how — as root, with MS_TOKEN set.
+//
+// It approves the probe, gives it a Probe Health and a Core Health sensor, and then moves the
+// probe's ceiling under it with `systemctl set-property --runtime` — the stock `MemoryHigh=4G` is
+// far above what an idle probe uses, so the ceiling is brought to the probe rather than the probe
+// to the ceiling. Four stages, each held for a minute: at the stock unit; with `MemoryHigh` set so
+// the working set is 85% of it (the warning); with `MemoryHigh` below the working set and swap
+// available, which is the stock unit on a host with swap; and the same with `MemorySwapMax=0`,
+// held for two, followed by the stock ceiling again to see whether the probe comes back.
+// Every five seconds it records what systemd and the kernel say about the service, what the core's
+// live route says, and the sensor's state; at the end, what the sweep stored in `sample`.
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+const API = 'http://127.0.0.1:8080/api/v1';
+const TOKEN = process.env.MS_TOKEN;
+if (!TOKEN) {
+  console.error('MS_TOKEN is not set');
+  process.exit(2);
+}
+const HOLD_MS = Number(process.env.MS_STAGE_SECONDS ?? 65) * 1_000;
+const MIB = 1024 * 1024;
+const start = Date.now();
+const elapsed = () => Math.round((Date.now() - start) / 100) / 10;
+const emit = (line) => console.log(JSON.stringify({ t: elapsed(), ...line }));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sh = (command, args) => execFileSync(command, args, { encoding: 'utf8' }).trim();
+
+async function api(method, path, body) {
+  const response = await fetch(`${API}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${method} ${path} answered ${response.status}: ${text}`);
+  return text === '' ? null : JSON.parse(text);
+}
+
+// ---- What systemd and the kernel say about the probe's service. ----
+/** The unit's main process, how often it has been restarted, and why it last stopped. */
+function unit() {
+  const fields = Object.fromEntries(
+    sh('systemctl', ['show', '-p', 'MainPID,NRestarts,ActiveState,SubState,Result', 'ms-probe'])
+      .split('\n')
+      .map((entry) => [entry.slice(0, entry.indexOf('=')), entry.slice(entry.indexOf('=') + 1)]),
+  );
+  return {
+    pid: Number(fields.MainPID),
+    restarts: Number(fields.NRestarts),
+    state: `${fields.ActiveState}/${fields.SubState}`,
+    result: fields.Result,
+  };
+}
+/**
+ * The service's cgroup directory, from its main process. Read from `/proc` rather than from
+ * systemd's `ControlGroup`, which is relative to systemd's root and this box's is not the kernel's.
+ * Null between a kill and the restart, when there is no main process to ask.
+ */
+function serviceCgroup(pid) {
+  if (pid === 0) return null;
+  try {
+    const line = readFileSync(`/proc/${String(pid)}/cgroup`, 'utf8')
+      .split('\n')
+      .find((entry) => entry.startsWith('0::'));
+    return line === undefined ? null : `/sys/fs/cgroup${line.slice(3)}`;
+  } catch {
+    return null;
+  }
+}
+// A restart makes the service's cgroup again at the same path, so the last one seen is kept for
+// the reads between a kill and the restart — which find it missing, and say so.
+let lastCgroup = null;
+function kernel() {
+  const service = unit();
+  lastCgroup = serviceCgroup(service.pid) ?? lastCgroup;
+  // Recorded rather than thrown, so a restart is a line in the record and not the end of it.
+  try {
+    return { ...service, ...cgroupFiles(lastCgroup) };
+  } catch (error) {
+    return { ...service, unreadable: String(error) };
+  }
+}
+function cgroupFiles(directory) {
+  const read = (file) => readFileSync(`${directory}/${file}`, 'utf8').trim();
+  const number = (text) => (text === 'max' ? null : Number(text));
+  const stat = Object.fromEntries(
+    read('memory.stat')
+      .split('\n')
+      .map((entry) => entry.split(' '))
+      .map(([key, value]) => [key, Number(value)]),
+  );
+  const events = Object.fromEntries(
+    read('memory.events')
+      .split('\n')
+      .map((entry) => entry.split(' '))
+      .map(([key, value]) => [key, Number(value)]),
+  );
+  const current = Number(read('memory.current'));
+  const high = number(read('memory.high'));
+  const max = number(read('memory.max'));
+  const ceiling = [high, max]
+    .filter((value) => value !== null)
+    .reduce((a, b) => Math.min(a, b), Infinity);
+  const workingSet = Math.max(0, current - (stat.inactive_file ?? 0));
+  let swap = null;
+  try {
+    swap = Math.round(Number(read('memory.swap.current')) / MIB);
+  } catch {
+    // No swap accounting on this kernel.
+  }
+  return {
+    highMiB: high === null ? null : Math.round(high / MIB),
+    maxMiB: max === null ? null : Math.round(max / MIB),
+    currentMiB: Math.round(current / MIB),
+    workingSetMiB: Math.round(workingSet / MIB),
+    swapMiB: swap,
+    usagePercent: ceiling === Infinity ? null : Math.round((workingSet / ceiling) * 1_000) / 10,
+    highEvents: events.high,
+    oomKills: events.oom_kill,
+    stalledPercent: Number(/some avg10=([\d.]+)/.exec(read('memory.pressure'))?.[1] ?? NaN),
+    workingSetBytes: workingSet,
+  };
+}
+function setProperty(property) {
+  sh('systemctl', ['set-property', '--runtime', 'ms-probe.service', property]);
+  emit({ kind: 'set', property });
+}
+
+// ---- Set up: approve the probe, and give it the two health sensors. ----
+// From the stock unit, whatever a previous run left behind.
+setProperty('MemoryHigh=4G');
+setProperty('MemorySwapMax=infinity');
+const root = await api('GET', '/objects/root');
+// A rerun in the same box finds the probe already approved and reuses it.
+const approved = (await api('GET', '/probes?status=approved')).items[0] ?? null;
+let probeObject;
+if (approved !== null && approved.objectId !== null) {
+  probeObject = { id: approved.objectId };
+} else {
+  probeObject = await api('POST', '/objects', {
+    kind: 'probe',
+    parentId: root.id,
+    name: 'Local probe',
+  });
+  let pending = null;
+  for (let attempt = 0; attempt < 60 && pending === null; attempt += 1) {
+    const { items } = await api('GET', '/probes?status=pending');
+    pending = items[0] ?? null;
+    if (pending === null) await sleep(1_000);
+  }
+  if (pending === null) throw new Error('no probe is waiting for approval');
+  await api('POST', `/probes/${encodeURIComponent(pending.gid)}/approve`, {
+    objectId: probeObject.id,
+    local: true,
+  });
+}
+const device = await api('POST', '/objects', {
+  kind: 'device',
+  parentId: probeObject.id,
+  name: 'This box',
+  host: '127.0.0.1',
+});
+const probeHealth = await api('POST', '/objects', {
+  kind: 'sensor',
+  parentId: device.id,
+  name: 'Probe Health',
+  sensorType: 'ms.probe.health',
+  params: {},
+});
+const coreHealth = await api('POST', '/objects', {
+  kind: 'sensor',
+  parentId: device.id,
+  name: 'Core Health',
+  sensorType: 'ms.core.health',
+  params: {},
+});
+const { pid } = unit();
+lastCgroup = serviceCgroup(pid);
+if (lastCgroup === null) throw new Error(`the probe is not running (main process ${String(pid)})`);
+emit({
+  kind: 'setup',
+  probeObjectId: probeObject.id,
+  probeHealthSensorId: probeHealth.id,
+  coreHealthSensorId: coreHealth.id,
+  probeCgroup: lastCgroup,
+  probeSelfCgroup: readFileSync(`/proc/${String(pid)}/cgroup`, 'utf8').trim(),
+});
+
+// Wait for the approved probe to come back and report a limit.
+for (let attempt = 0; attempt < 60; attempt += 1) {
+  const health = await api('GET', `/probes/${probeObject.id}/health`);
+  if (health.channels.connected === 1 && health.channels.memoryLimit !== null) break;
+  await sleep(1_000);
+}
+
+async function stage(name, hold) {
+  emit({ kind: 'stage', stage: name });
+  const until = Date.now() + hold;
+  while (Date.now() < until) {
+    const [probe, core, state] = await Promise.all([
+      api('GET', `/probes/${probeObject.id}/health`).catch((error) => ({ error: String(error) })),
+      api('GET', '/core-health').catch((error) => ({ error: String(error) })),
+      api('GET', `/sensors/${probeHealth.id}/state`).catch((error) => ({ error: String(error) })),
+    ]);
+    const { workingSetBytes: _bytes, ...cgroupNow } = kernel();
+    emit({
+      kind: 'poll',
+      stage: name,
+      kernel: cgroupNow,
+      probe: probe.channels
+        ? {
+            connected: probe.channels.connected,
+            heartbeatAge: probe.channels.heartbeatAge,
+            memoryLimitUsage: probe.channels.memoryLimitUsage,
+            memoryLimit: probe.channels.memoryLimit,
+            memoryAvailable: probe.channels.memoryAvailable,
+            memory: probe.channels.memory,
+          }
+        : probe,
+      core: core.channels
+        ? {
+            memoryLimitUsage: core.channels.memoryLimitUsage,
+            memoryLimit: core.channels.memoryLimit,
+          }
+        : core,
+      state: state.state ? { state: state.state, message: state.message } : state,
+    });
+    await sleep(5_000);
+  }
+}
+
+await stage('stock unit', HOLD_MS);
+const workingSet = () => {
+  const now = kernel();
+  if (now.workingSetBytes === undefined)
+    throw new Error(`cannot read the probe's cgroup: ${now.unreadable}`);
+  return now.workingSetBytes;
+};
+setProperty(`MemoryHigh=${String(Math.ceil(workingSet() / 0.85))}`);
+await stage('ceiling at 85%', HOLD_MS);
+setProperty(`MemoryHigh=${String(Math.floor(workingSet() * 0.9))}`);
+await stage('ceiling below the working set, swap available', HOLD_MS);
+setProperty('MemoryHigh=4G');
+await stage('restored', 30_000);
+setProperty('MemorySwapMax=0');
+setProperty(`MemoryHigh=${String(Math.floor(workingSet() * 0.9))}`);
+// Twice as long: a probe with nowhere to put its pages stalls, stops pinging the unit's 30 s
+// watchdog and is killed by it, and the question is what the restart does under the same ceiling.
+await stage('ceiling below the working set, no swap', 2 * HOLD_MS);
+setProperty('MemoryHigh=4G');
+setProperty('MemorySwapMax=infinity');
+await stage('restored', HOLD_MS);
+
+// ---- What the sweep stored. ----
+const stored = sh('runuser', [
+  '-u',
+  'postgres',
+  '--',
+  'psql',
+  '-d',
+  'monitoring',
+  '-Atc',
+  `SELECT c.sensor_id, c.key, to_char(s.time, 'HH24:MI:SS'), s.value
+     FROM sample s JOIN channel c ON c.id = s.channel_id
+    WHERE c.sensor_id IN (${String(probeHealth.id)}, ${String(coreHealth.id)})
+      AND c.key IN ('memoryLimitUsage', 'memoryLimit', 'memoryAvailable')
+    ORDER BY s.time, c.sensor_id, c.key`,
+]);
+for (const row of stored.split('\n').filter(Boolean)) {
+  const [sensorId, key, time, value] = row.split('|');
+  emit({
+    kind: 'stored',
+    sensor: Number(sensorId) === probeHealth.id ? 'probe' : 'core',
+    key,
+    time,
+    value: Number(value),
+  });
+}

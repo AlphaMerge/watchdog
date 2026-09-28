@@ -72,6 +72,8 @@ const FULL: ProbeHealthReport = {
   uptimeSeconds: 3_600,
   memoryAvailablePercent: 23.4,
   memoryAvailableMb: 1_860,
+  memoryLimitUsagePercent: 55.2,
+  memoryLimitMb: 4_096,
 };
 
 describe('the Probe Health sensor', { skip: available ? false : 'no database' }, () => {
@@ -211,6 +213,22 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['memory'], 210.4);
       assert.equal(reading['memoryAvailable'], 23.4);
       assert.equal(reading['memoryAvailableBytes'], 1_860);
+    });
+
+    it('carries how close the probe is to its own ceiling, and the ceiling', () => {
+      // `P-210`: the number that says a probe on a large host is about to be throttled by its own
+      // unit while the machine has memory to spare.
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['memoryLimitUsage'], 55.2);
+      assert.equal(reading['memoryLimit'], 4_096);
+    });
+
+    it('gaps the limit for a probe with no ceiling or too old to say, never reading it as zero', () => {
+      const { memoryLimitUsagePercent: _a, memoryLimitMb: _b, ...older } = FULL;
+      const { reading } = build(() => connected({ health: older })).read(probeId);
+      assert.equal(reading['memoryLimitUsage'], null);
+      assert.equal(reading['memoryLimit'], null);
+      assert.equal(reading['memoryAvailable'], 23.4, 'the machine’s figure is unaffected');
     });
 
     it('gaps the machine’s memory for a probe that does not send it, never reading it as zero', () => {

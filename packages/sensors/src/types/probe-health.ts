@@ -303,8 +303,8 @@ const CHANNELS: readonly ChannelDef[] = [
   //
   // A **gap** where the platform cannot say, never a zero: a zero on this channel is the error.
   //
-  // The machine's, not the probe's cgroup: a probe near its own `MemoryMax` in `ms-probe.service`
-  // shows on `memory`, against the figure in that unit, and is killed with plenty available here.
+  // The machine's, not the probe's cgroup: a probe at its own unit's ceiling is throttled with
+  // plenty available here, and that is `memoryLimitUsage` below (`P-210`).
   {
     key: 'memoryAvailable',
     name: 'Memory available',
@@ -326,6 +326,37 @@ const CHANNELS: readonly ChannelDef[] = [
   // on without knowing of what. No limit: a threshold in megabytes is wrong on every machine but
   // the one it was written for, which is `diskFreeBytes`' reason on Core Health too.
   { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
+  // **How close the probe is to the ceiling its own service sets** (`P-210`), which the machine's
+  // figure above cannot say: `ms-probe.service` caps the probe whatever the host has left. The
+  // ceiling is the lower of `MemoryHigh` and `MemoryMax`, because the lower one acts first — and on
+  // the stock unit that is `MemoryHigh`, where the kernel does not kill the probe but throttles it
+  // to a standstill. Measured against the working set, not `memory.current`, because page cache
+  // fills a cgroup to its ceiling on purpose; `packages/shared/src/process/limit-memory.ts` has the
+  // measurements. The highest of the last thirty seconds, and above 100 past the ceiling.
+  //
+  // A **gap** where there is no ceiling — no limit, cgroup v1, or not Linux — never a zero, which
+  // would say the probe is using none of a limit it does not have.
+  {
+    key: 'memoryLimitUsage',
+    name: 'Memory used of its limit',
+    unit: '%',
+    // **The error is past 100%** because that is where the kernel acts: past `MemoryHigh` with no
+    // swap, the probe under the shipped unit was stalled on memory 73% of the time within 17
+    // seconds, and its unit's watchdog killed it within 25 (`P-213`). **But it is the warning that
+    // does the work**: a probe that far past its ceiling rarely gets out the heartbeat that would
+    // report it, and the core sees the link drop instead. **The warning is at 80%** because the probe's own start-up grew 856 MiB in five seconds
+    // (`P-206`), 21% of the stock 4 GiB `MemoryHigh`: from 80%, one pool growing — which a
+    // configuration push can start at any time (`P-34`) — reaches the ceiling before anybody has
+    // read the warning.
+    limits: {
+      upperWarning: 80,
+      upperError: 100,
+      warningMessage: 'the probe is nearing its memory limit',
+      errorMessage: 'the probe is past its memory limit; the kernel is throttling or killing it',
+    },
+  },
+  // The ceiling itself, so "92% of its limit" says of what.
+  { key: 'memoryLimit', name: 'Memory limit', unit: 'MB' },
   { key: 'uptime', name: 'Uptime', unit: 's' },
 ];
 

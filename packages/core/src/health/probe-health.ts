@@ -204,6 +204,9 @@ export class ProbeHealthService {
       // either way a gap: a zero here would be the error limit firing on nothing (`P-208`).
       memoryAvailable: health?.memoryAvailablePercent ?? null,
       memoryAvailableBytes: health?.memoryAvailableMb ?? null,
+      // Absent below protocol 18 and wherever the probe has no ceiling to be near (`P-210`).
+      memoryLimitUsage: health?.memoryLimitUsagePercent ?? null,
+      memoryLimit: health?.memoryLimitMb ?? null,
     };
 
     return {

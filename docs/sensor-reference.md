@@ -974,6 +974,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `heap` | Heap in use | MB | — |
 | `memoryAvailable` | Memory available | % | default limits: error below 10, warn below 20 |
 | `memoryAvailableBytes` | Memory available | MB | — |
+| `memoryLimitUsage` | Memory used of its limit | % | default limits: warn above 80, error above 100 |
+| `memoryLimit` | Memory limit | MB | — |
 | `uptime` | Uptime | s | — |
 | `rollupLag` | Rollup lag (worst tier) | s | default limits: warn above 3600, error above 86400 |
 | `backfillQueue` | Rollup backfill queue | windows | — |
@@ -1062,6 +1064,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `memory` | Memory (resident) | MB | — |
 | `memoryAvailable` | Memory available | % | default limits: error below 10, warn below 20 |
 | `memoryAvailableBytes` | Memory available | MB | — |
+| `memoryLimitUsage` | Memory used of its limit | % | default limits: warn above 80, error above 100 |
+| `memoryLimit` | Memory limit | MB | — |
 | `uptime` | Uptime | s | — |
 
 | Parameter | Type | Default | Bounds | |

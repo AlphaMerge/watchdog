@@ -1,0 +1,89 @@
+{"cpus":8,"loadavg":"0.77 0.62 0.42"}
+{"workload":"anon","t":0,"currentMiB":202,"workingSetMiB":202,"highEvents":36,"oomKills":0,"stalledPercent":0.00}
+{"workload":"anon","t":1,"currentMiB":208,"workingSetMiB":208,"highEvents":393,"oomKills":0,"stalledPercent":0.00}
+{"workload":"anon","t":2,"currentMiB":208,"workingSetMiB":208,"highEvents":393,"oomKills":0,"stalledPercent":13.22}
+{"workload":"anon","t":3,"currentMiB":210,"workingSetMiB":210,"highEvents":410,"oomKills":0,"stalledPercent":13.22}
+{"workload":"anon","t":4,"currentMiB":212,"workingSetMiB":212,"highEvents":427,"oomKills":0,"stalledPercent":28.76}
+{"workload":"anon","t":5,"currentMiB":212,"workingSetMiB":212,"highEvents":427,"oomKills":0,"stalledPercent":28.76}
+{"workload":"anon","t":6,"currentMiB":214,"workingSetMiB":214,"highEvents":444,"oomKills":0,"stalledPercent":41.48}
+{"workload":"anon","t":7,"currentMiB":214,"workingSetMiB":214,"highEvents":444,"oomKills":0,"stalledPercent":41.48}
+{"workload":"anon","t":8,"currentMiB":216,"workingSetMiB":216,"highEvents":461,"oomKills":0,"stalledPercent":51.90}
+{"workload":"anon","t":9,"currentMiB":216,"workingSetMiB":216,"highEvents":461,"oomKills":0,"stalledPercent":51.90}
+{"workload":"anon","t":10,"currentMiB":218,"workingSetMiB":218,"highEvents":478,"oomKills":0,"stalledPercent":60.43}
+{"workload":"anon","t":11,"currentMiB":218,"workingSetMiB":218,"highEvents":478,"oomKills":0,"stalledPercent":60.43}
+{"workload":"anon","t":12,"currentMiB":220,"workingSetMiB":220,"highEvents":495,"oomKills":0,"stalledPercent":67.42}
+{"workload":"anon","t":13,"currentMiB":220,"workingSetMiB":220,"highEvents":495,"oomKills":0,"stalledPercent":67.42}
+{"workload":"anon","t":14,"currentMiB":222,"workingSetMiB":222,"highEvents":512,"oomKills":0,"stalledPercent":73.14}
+{"workload":"anon","t":15,"currentMiB":222,"workingSetMiB":222,"highEvents":512,"oomKills":0,"stalledPercent":73.14}
+{"workload":"anon","t":16,"currentMiB":224,"workingSetMiB":224,"highEvents":529,"oomKills":0,"stalledPercent":77.82}
+{"workload":"anon","t":17,"currentMiB":224,"workingSetMiB":224,"highEvents":529,"oomKills":0,"stalledPercent":77.82}
+{"workload":"anon","t":18,"currentMiB":226,"workingSetMiB":226,"highEvents":546,"oomKills":0,"stalledPercent":81.66}
+{"workload":"anon","t":19,"currentMiB":226,"workingSetMiB":226,"highEvents":546,"oomKills":0,"stalledPercent":81.66}
+{"workload":"anon","t":20,"currentMiB":228,"workingSetMiB":228,"highEvents":563,"oomKills":0,"stalledPercent":84.80}
+{"workload":"anon","t":21,"currentMiB":228,"workingSetMiB":228,"highEvents":563,"oomKills":0,"stalledPercent":84.80}
+{"workload":"anon","t":22,"currentMiB":230,"workingSetMiB":230,"highEvents":580,"oomKills":0,"stalledPercent":87.37}
+{"workload":"anon","t":23,"currentMiB":230,"workingSetMiB":230,"highEvents":580,"oomKills":0,"stalledPercent":87.37}
+{"workload":"anon","t":24,"currentMiB":232,"workingSetMiB":232,"highEvents":597,"oomKills":0,"stalledPercent":88.75}
+{"workload":"anon","t":25,"currentMiB":232,"workingSetMiB":232,"highEvents":597,"oomKills":0,"stalledPercent":88.75}
+{"workload":"anon","t":26,"currentMiB":232,"workingSetMiB":232,"highEvents":597,"oomKills":0,"stalledPercent":90.61}
+{"workload":"anon","t":27,"currentMiB":234,"workingSetMiB":234,"highEvents":614,"oomKills":0,"stalledPercent":90.61}
+{"workload":"anon","t":28,"currentMiB":234,"workingSetMiB":234,"highEvents":614,"oomKills":0,"stalledPercent":92.13}
+{"workload":"anon","t":29,"currentMiB":234,"workingSetMiB":234,"highEvents":631,"oomKills":0,"stalledPercent":92.13}
+{"workload":"anon","t":30,"currentMiB":234,"workingSetMiB":234,"highEvents":631,"oomKills":0,"stalledPercent":93.37}
+{"workload":"anon","t":31,"currentMiB":234,"workingSetMiB":234,"highEvents":648,"oomKills":0,"stalledPercent":93.37}
+{"workload":"anon","t":32,"currentMiB":234,"workingSetMiB":234,"highEvents":648,"oomKills":0,"stalledPercent":94.39}
+{"workload":"anon","t":33,"currentMiB":234,"workingSetMiB":234,"highEvents":665,"oomKills":0,"stalledPercent":94.39}
+{"workload":"anon","t":34,"currentMiB":234,"workingSetMiB":234,"highEvents":682,"oomKills":0,"stalledPercent":95.22}
+{"workload":"anon","t":35,"currentMiB":234,"workingSetMiB":234,"highEvents":682,"oomKills":0,"stalledPercent":95.22}
+{"workload":"anon","t":36,"currentMiB":234,"workingSetMiB":234,"highEvents":699,"oomKills":0,"stalledPercent":95.91}
+{"workload":"anon","t":37,"currentMiB":234,"workingSetMiB":234,"highEvents":699,"oomKills":0,"stalledPercent":95.91}
+{"workload":"anon","t":38,"currentMiB":234,"workingSetMiB":234,"highEvents":716,"oomKills":0,"stalledPercent":96.47}
+{"workload":"anon","t":39,"currentMiB":234,"workingSetMiB":234,"highEvents":716,"oomKills":0,"stalledPercent":96.47}
+{"workload":"anon","log":"held 32 MiB, that allocation took 19 ms"}
+{"workload":"anon","log":"held 64 MiB, that allocation took 24 ms"}
+{"workload":"anon","log":"held 96 MiB, that allocation took 23 ms"}
+{"workload":"anon","log":"held 128 MiB, that allocation took 23 ms"}
+{"workload":"anon","log":"held 160 MiB, that allocation took 35 ms"}
+{"workload":"anon","log":"held 192 MiB, that allocation took 434 ms"}
+{"workload":"cache","t":0,"currentMiB":198,"workingSetMiB":6,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":1,"currentMiB":198,"workingSetMiB":6,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":2,"currentMiB":189,"workingSetMiB":6,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":3,"currentMiB":183,"workingSetMiB":6,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":4,"currentMiB":166,"workingSetMiB":6,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":5,"currentMiB":158,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":6,"currentMiB":155,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":7,"currentMiB":155,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":8,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":9,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":10,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":11,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":12,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":13,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":14,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":15,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":16,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":17,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":18,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":19,"currentMiB":150,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":20,"currentMiB":144,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":21,"currentMiB":135,"workingSetMiB":5,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":22,"currentMiB":28,"workingSetMiB":2,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":23,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":24,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":25,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":26,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":27,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":28,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":29,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":30,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":31,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":32,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":33,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":34,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":35,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":36,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":37,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":38,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","t":39,"currentMiB":2,"workingSetMiB":1,"highEvents":425,"oomKills":0,"stalledPercent":0.00}
+{"workload":"cache","log":"wrote 400 MB in 771 ms"}
+{"workload":"node-api","uv":"1.52.1","constrainedMiB":200,"availableMiB":2,"currentMiB":198,"workingSetMiB":18}

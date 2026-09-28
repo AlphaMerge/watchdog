@@ -1,7 +1,9 @@
 import {
+  AvailableMemoryWatch,
   CpuMeter,
-  MachineMemoryWatch,
-  type MachineMemoryLow,
+  readLimitMemory,
+  readMachineMemory,
+  type AvailableMemoryLow,
   type ProbeHealthReport,
 } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
@@ -73,7 +75,12 @@ export interface ProbeHealthSources {
    * so the lowest of the last thirty seconds is the worst of fifteen readings rather than one.
    * Injectable for the same reason `process` is.
    */
-  machineMemory?: { sample: () => void; lowest: () => MachineMemoryLow | null };
+  machineMemory?: MemoryWatch;
+  /**
+   * How close the probe's own cgroup is to its memory ceiling (`P-210`), sampled at the same
+   * moments as the machine. Injectable for the same reason.
+   */
+  limitMemory?: MemoryWatch;
   /** Injectable so a test does not measure the test runner. */
   process?: {
     cpuUsage: () => NodeJS.CpuUsage;
@@ -83,17 +90,27 @@ export interface ProbeHealthSources {
   };
 }
 
+/** What the reporter needs of a memory watch. */
+interface MemoryWatch {
+  sample: () => void;
+  lowest: () => AvailableMemoryLow | null;
+}
+
 const MB = 1024 * 1024;
 
 export class ProbeHealthReporter {
   readonly #sources: ProbeHealthSources;
   readonly #cpu = new CpuMeter();
   readonly #process: NonNullable<ProbeHealthSources['process']>;
-  readonly #machineMemory: NonNullable<ProbeHealthSources['machineMemory']>;
+  readonly #machineMemory: MemoryWatch;
+  readonly #limitMemory: MemoryWatch;
 
   constructor(sources: ProbeHealthSources) {
     this.#sources = sources;
-    this.#machineMemory = sources.machineMemory ?? new MachineMemoryWatch();
+    this.#machineMemory =
+      sources.machineMemory ?? new AvailableMemoryWatch({ read: () => readMachineMemory() });
+    this.#limitMemory =
+      sources.limitMemory ?? new AvailableMemoryWatch({ read: () => readLimitMemory() });
     this.#process = sources.process ?? {
       cpuUsage: () => process.cpuUsage(),
       memoryUsage: () => process.memoryUsage(),
@@ -116,6 +133,9 @@ export class ProbeHealthReporter {
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
     this.#machineMemory.sample();
     const machine = this.#machineMemory.lowest();
+    this.#limitMemory.sample();
+    // The lowest headroom is the highest usage: the worst of the last thirty seconds either way.
+    const limit = this.#limitMemory.lowest();
 
     return {
       scheduled: scheduler.tasks,
@@ -214,6 +234,13 @@ export class ProbeHealthReporter {
         : {
             memoryAvailablePercent: machine.availablePercent,
             memoryAvailableMb: Math.round((machine.availableBytes / MB) * 10) / 10,
+          }),
+      // Absent where the probe has no ceiling to be near — no limit, cgroup v1, or not Linux.
+      ...(limit === null
+        ? {}
+        : {
+            memoryLimitUsagePercent: Math.round((100 - limit.availablePercent) * 10) / 10,
+            memoryLimitMb: Math.round((limit.totalBytes / MB) * 10) / 10,
           }),
     };
   }

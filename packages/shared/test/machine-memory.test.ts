@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
-  MachineMemoryWatch,
+  AvailableMemoryWatch,
   readMachineMemory,
   type MachineMemory,
   type MachineMemorySources,
@@ -92,7 +92,7 @@ describe('reading what the machine has left', () => {
 
 describe('the lowest reading in the window', () => {
   function watch(script: (MachineMemory | null)[]): {
-    watch: MachineMemoryWatch;
+    watch: AvailableMemoryWatch;
     advance: (ms: number) => void;
   } {
     let now = 0;
@@ -103,7 +103,7 @@ describe('the lowest reading in the window', () => {
       return next === undefined ? null : next;
     };
     return {
-      watch: new MachineMemoryWatch({ windowMs: 30_000, read, now: () => now }),
+      watch: new AvailableMemoryWatch({ windowMs: 30_000, read, now: () => now }),
       advance: (ms) => {
         now += ms;
       },
@@ -122,7 +122,11 @@ describe('the lowest reading in the window', () => {
     w.sample();
     advance(2_000);
     w.sample();
-    assert.deepEqual(w.lowest(), { availablePercent: 0.4, availableBytes: 30 * MIB });
+    assert.deepEqual(w.lowest(), {
+      availablePercent: 0.4,
+      availableBytes: 30 * MIB,
+      totalBytes: total,
+    });
   });
 
   it('forgets a low once it is older than the window', () => {
@@ -148,6 +152,14 @@ describe('the lowest reading in the window', () => {
     w.sample();
     advance(30_001);
     assert.equal(w.lowest(), null);
+  });
+
+  it('reads past a total as negative, which a throttled cgroup can be', () => {
+    // `P-210`: past `memory.high` the kernel throttles a cgroup rather than stopping it, so its
+    // working set stands above the ceiling. Clamping that to zero would hide how far past it is.
+    const { watch: w } = watch([{ availableBytes: -34 * MIB, totalBytes: 200 * MIB }]);
+    w.sample();
+    assert.equal(w.lowest()?.availablePercent, -17);
   });
 
   it('gives the percentage of the same reading the bytes came from', () => {

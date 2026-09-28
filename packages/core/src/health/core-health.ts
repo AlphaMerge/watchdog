@@ -4,8 +4,8 @@ import {
   describeError,
   type ChannelReading,
   type CheckResult,
+  type AvailableMemoryLow,
   type Logger,
-  type MachineMemoryLow,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
@@ -97,7 +97,12 @@ export interface CoreHealthSources {
    * sampled on a timer of its own, because this service is only read every thirty seconds and a
    * squeeze that ends in a kill can be shorter than that.
    */
-  machineMemory: () => MachineMemoryLow | null;
+  machineMemory: () => AvailableMemoryLow | null;
+  /**
+   * How close the core's own cgroup is to its memory ceiling — the lowest headroom in the last
+   * thirty seconds (`P-210`). Null where there is no ceiling, and before the first sample.
+   */
+  limitMemory: () => AvailableMemoryLow | null;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -208,6 +213,7 @@ export class CoreHealthService {
     const reports = this.#sources.reports();
     const disk = this.#sources.disk();
     const machine = this.#sources.machineMemory();
+    const limit = this.#sources.limitMemory();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
@@ -222,6 +228,9 @@ export class CoreHealthService {
       // Gaps, not zeros, where the platform cannot say: a zero is this channel's error limit.
       memoryAvailable: machine === null ? null : machine.availablePercent,
       memoryAvailableBytes: machine === null ? null : round(machine.availableBytes / MB, 1),
+      // Gaps where the core has no ceiling to be near: no limit, cgroup v1, or not Linux.
+      memoryLimitUsage: limit === null ? null : round(100 - limit.availablePercent, 1),
+      memoryLimit: limit === null ? null : round(limit.totalBytes / MB, 1),
       uptime: Math.round(this.#process.uptime()),
       rollupLag: queues.rollup,
       backfillQueue: queues.backfill,

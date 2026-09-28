@@ -73,6 +73,11 @@ export interface ProbeCapabilities {
    * Below this the two channels gap and Probe Health's message says why.
    */
   machineMemory: boolean;
+  /**
+   * Reports how close it is to its own cgroup's memory ceiling (`P-210`). Stripped below this for
+   * the same reason as `machineMemory`, and separately, so a core at 17 still gets 17's fields.
+   */
+  memoryLimit: boolean;
 }
 
 /**
@@ -92,6 +97,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['chunkedPushFinal', 16],
   ['resultSendTime', 16],
   ['machineMemory', 17],
+  ['memoryLimit', 18],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -105,6 +111,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   chunkedPushFinal: 'be told which message completes a configuration push',
   resultSendTime: 'say when it sent a batch, so a replay can be told from live data',
   machineMemory: 'report how much memory its machine has left',
+  memoryLimit: 'report how close it is to its own memory limit',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -119,6 +126,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     chunkedPushFinal: has(16),
     resultSendTime: has(16),
     machineMemory: has(17),
+    memoryLimit: has(18),
   };
 }
 
@@ -131,13 +139,19 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
  * when an older core starts rejecting heartbeats.
  */
 export function healthForPeer(health: ProbeHealthReport, peerVersion: number): ProbeHealthReport {
-  if (capabilitiesFor(peerVersion).machineMemory) return health;
-  const {
-    memoryAvailablePercent: _memoryAvailablePercent,
-    memoryAvailableMb: _memoryAvailableMb,
-    ...older
-  } = health;
-  return older;
+  const capabilities = capabilitiesFor(peerVersion);
+  let sent = health;
+  // Newest first; each capability's fields are stripped on their own, so a peer one version
+  // behind loses only that version's.
+  if (!capabilities.memoryLimit) {
+    const { memoryLimitUsagePercent: _usage, memoryLimitMb: _limit, ...older } = sent;
+    sent = older;
+  }
+  if (!capabilities.machineMemory) {
+    const { memoryAvailablePercent: _percent, memoryAvailableMb: _megabytes, ...older } = sent;
+    sent = older;
+  }
+  return sent;
 }
 
 /** The version a peer must speak for one capability — the number the gates used to inline. */

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { freemem, totalmem } from 'node:os';
+import type { AvailableMemory } from './memory-watch.js';
 
 /**
  * How much memory the *machine* has left, as the operating system counts it (`P-208`).
@@ -25,10 +26,7 @@ import { freemem, totalmem } from 'node:os';
  * **Anywhere else, a gap.** macOS and the BSDs count free pages, which is `MemFree`'s mistake again,
  * and neither is a platform this system is installed on.
  */
-export interface MachineMemory {
-  readonly availableBytes: number;
-  readonly totalBytes: number;
-}
+export type MachineMemory = AvailableMemory;
 
 /** Where the numbers come from, injectable so a test does not measure the machine it runs on. */
 export interface MachineMemorySources {
@@ -86,73 +84,4 @@ export function readMachineMemory(sources: MachineMemorySources = LIVE): Machine
     return { availableBytes: sources.freemem(), totalBytes };
   }
   return null;
-}
-
-/** The lowest reading in the window, as the two channels carry it. */
-export interface MachineMemoryLow {
-  /** Of the machine's total, to one decimal place. */
-  readonly availablePercent: number;
-  readonly availableBytes: number;
-}
-
-export interface MachineMemoryWatchOptions {
-  /** How far back the lowest reading is taken from. Thirty seconds: Probe Health's record interval. */
-  readonly windowMs?: number;
-  readonly read?: () => MachineMemory | null;
-  /** Monotonic milliseconds. */
-  readonly now?: () => number;
-}
-
-/**
- * The **lowest** available memory over the last thirty seconds, rather than the latest reading.
- *
- * **A point sample misses the event this exists for.** `P-206` watched a VM fall from 675 MiB
- * available to 30 MiB, and the kernel kill a process, inside six seconds — and a watchdog polling
- * every two seconds read 675, then 2,230 once the kill had freed the memory, and never saw the low.
- * Probe Health and Core Health each record once every thirty seconds, so a latest-value channel
- * would show a short squeeze roughly one time in fifteen. The window matches the record interval,
- * so each recorded value is the worst of the interval it stands for.
- *
- * Sampled by the caller — the probe at every heartbeat, the core on a timer of its own — and read
- * in-process, because `P-206`'s other lesson is that a guard which starts a process to look is
- * slowest exactly when memory is shortest.
- */
-export class MachineMemoryWatch {
-  readonly #windowMs: number;
-  readonly #read: () => MachineMemory | null;
-  readonly #now: () => number;
-  #samples: { readonly at: number; readonly memory: MachineMemory }[] = [];
-
-  constructor(options: MachineMemoryWatchOptions = {}) {
-    this.#windowMs = options.windowMs ?? 30_000;
-    this.#read = options.read ?? ((): MachineMemory | null => readMachineMemory());
-    this.#now = options.now ?? ((): number => performance.now());
-  }
-
-  /** Read the machine now and keep it. A reading the platform cannot give is simply not kept. */
-  sample(): void {
-    const memory = this.#read();
-    const at = this.#now();
-    this.#prune(at);
-    if (memory !== null) this.#samples.push({ at, memory });
-  }
-
-  /** The lowest reading still inside the window, or `null` — a gap — when there is none. */
-  lowest(): MachineMemoryLow | null {
-    this.#prune(this.#now());
-    let low: MachineMemory | null = null;
-    for (const { memory } of this.#samples) {
-      if (low === null || memory.availableBytes < low.availableBytes) low = memory;
-    }
-    if (low === null) return null;
-    return {
-      availablePercent: Math.round((low.availableBytes / low.totalBytes) * 1_000) / 10,
-      availableBytes: low.availableBytes,
-    };
-  }
-
-  #prune(now: number): void {
-    const since = now - this.#windowMs;
-    this.#samples = this.#samples.filter((sample) => sample.at >= since);
-  }
 }

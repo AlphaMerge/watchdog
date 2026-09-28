@@ -94,6 +94,25 @@ const CHANNELS: readonly ChannelDef[] = [
     },
   },
   { key: 'memoryAvailableBytes', name: 'Memory available', unit: 'MB' },
+  // **How close the core is to the ceiling its own service sets** (`P-210`): the lower of
+  // `ms-core.service`'s `MemoryHigh` and `MemoryMax`, against the working set. Probe Health's pair
+  // argues each choice; `packages/shared/src/process/limit-memory.ts` has the measurements.
+  {
+    key: 'memoryLimitUsage',
+    name: 'Memory used of its limit',
+    unit: '%',
+    // **Past 100% is the error for the same measured reason as Probe Health's**: past `MemoryHigh`
+    // the kernel throttles the core to a standstill. **The warning is Probe Health's 80% too**, and
+    // the reason is weaker here, so it is stated as such: the probe's start-up surge is the only one
+    // measured, and nobody has measured the core's — a second number would be a guess.
+    limits: {
+      upperWarning: 80,
+      upperError: 100,
+      warningMessage: 'the core is nearing its memory limit',
+      errorMessage: 'the core is past its memory limit; the kernel is throttling or killing it',
+    },
+  },
+  { key: 'memoryLimit', name: 'Memory limit', unit: 'MB' },
   // In seconds so `M-11`'s threshold triggers can say "when uptime < 600", which is how `T-05`
   // established that a restart is detected. Transition detection would need the core to remember
   // a previous value and would miss a restart that happened while the sensor was Down.

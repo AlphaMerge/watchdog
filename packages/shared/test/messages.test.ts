@@ -92,6 +92,26 @@ describe('protocol message validation', () => {
     );
   });
 
+  it('accepts a working set past its limit, which a throttled probe has', () => {
+    // `P-210`. Past `memory.high` the kernel throttles rather than stops, so usage above 100% is a
+    // real reading — and the one the error limit exists for — not a sender's bug.
+    const health = parseProbeToCore({
+      type: 'heartbeat',
+      seq: 9,
+      sentAt: 'now',
+      health: { memoryLimitUsagePercent: 117, memoryLimitMb: 4_096 },
+    });
+    assert.equal(health.type === 'heartbeat' ? health.health?.memoryLimitUsagePercent : null, 117);
+    assert.throws(() =>
+      parseProbeToCore({
+        type: 'heartbeat',
+        seq: 10,
+        sentAt: 'now',
+        health: { memoryLimitMb: -1 },
+      }),
+    );
+  });
+
   it('refuses a negative count in the health payload', () => {
     assert.throws(() =>
       parseProbeToCore({ type: 'heartbeat', seq: 6, sentAt: 'now', health: { deferred: -1 } }),

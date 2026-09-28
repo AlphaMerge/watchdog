@@ -84,13 +84,16 @@ export type {
   SweepJob,
 } from './protocol/messages.js';
 export { CpuMeter } from './process/cpu-meter.js';
-export { MachineMemoryWatch, parseMeminfo, readMachineMemory } from './process/machine-memory.js';
+export { parseMeminfo, readMachineMemory } from './process/machine-memory.js';
+export type { MachineMemory, MachineMemorySources } from './process/machine-memory.js';
+export { readLimitMemory } from './process/limit-memory.js';
+export type { LimitMemorySources } from './process/limit-memory.js';
+export { AvailableMemoryWatch } from './process/memory-watch.js';
 export type {
-  MachineMemory,
-  MachineMemoryLow,
-  MachineMemorySources,
-  MachineMemoryWatchOptions,
-} from './process/machine-memory.js';
+  AvailableMemory,
+  AvailableMemoryLow,
+  AvailableMemoryWatchOptions,
+} from './process/memory-watch.js';
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 

@@ -5,8 +5,10 @@ import { isAbsolute, join } from 'node:path';
 import {
   bootstrap,
   coreConfigSchema,
+  AvailableMemoryWatch,
   describeError,
-  MachineMemoryWatch,
+  readLimitMemory,
+  readMachineMemory,
   runConfigCheck,
   type CoreConfig,
   type Logger,
@@ -1194,11 +1196,15 @@ async function serve(): Promise<void> {
   // How much this machine has left (`P-208`), on a two-second timer of its own: Core Health is
   // read every thirty seconds, and `P-206` watched a machine go from 8.5% available to a kernel
   // kill in six. Read in-process, because a guard that starts a process to look is slowest exactly
-  // when memory is shortest. The probe's copy is sampled at its heartbeat instead.
-  const machineMemory = new MachineMemoryWatch();
+  // when memory is shortest. The probe's copy is sampled at its heartbeat instead. The core's own
+  // cgroup ceiling (`P-210`) is sampled at the same moments.
+  const machineMemory = new AvailableMemoryWatch({ read: () => readMachineMemory() });
+  const limitMemory = new AvailableMemoryWatch({ read: () => readLimitMemory() });
   machineMemory.sample();
+  limitMemory.sample();
   const machineMemoryTimer = setInterval(() => {
     machineMemory.sample();
+    limitMemory.sample();
   }, 2_000);
   machineMemoryTimer.unref();
   lifecycle.onShutdown({
@@ -1230,6 +1236,7 @@ async function serve(): Promise<void> {
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,
       machineMemory: () => machineMemory.lowest(),
+      limitMemory: () => limitMemory.lowest(),
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       reports: () => {

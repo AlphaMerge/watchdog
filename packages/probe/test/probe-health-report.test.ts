@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import type { MachineMemoryLow } from '@ms/shared';
+import type { AvailableMemoryLow } from '@ms/shared';
 import { ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
@@ -91,7 +91,9 @@ function reporter(options: {
   rss?: number;
   uptime?: number;
   /** What the machine has left; `null` is a platform that cannot say. Defaults to that. */
-  machine?: MachineMemoryLow | null;
+  machine?: AvailableMemoryLow | null;
+  /** Headroom to the probe's own ceiling; `null` is no ceiling. Defaults to that. */
+  limit?: AvailableMemoryLow | null;
   /** Counts how often the reporter samples the machine. */
   onSample?: () => void;
 }): ProbeHealthReporter {
@@ -110,6 +112,10 @@ function reporter(options: {
     machineMemory: {
       sample: () => options.onSample?.(),
       lowest: () => options.machine ?? null,
+    },
+    limitMemory: {
+      sample: () => undefined,
+      lowest: () => options.limit ?? null,
     },
     process: {
       cpuUsage: () => {
@@ -366,7 +372,7 @@ describe('the probe’s own health report', () => {
     // `P-208`. `memoryMb` is the probe's share; this is everybody else's too.
     const report = reporter({
       rss: 220_200_960,
-      machine: { availablePercent: 23.4, availableBytes: 1_950_351_360 },
+      machine: { availablePercent: 23.4, availableBytes: 1_950_351_360, totalBytes: 8_321_499_136 },
     }).report();
     assert.equal(report.memoryMb, 210);
     assert.equal(report.memoryAvailablePercent, 23.4);
@@ -384,6 +390,29 @@ describe('the probe’s own health report', () => {
     health.report();
     health.report();
     assert.equal(samples, 3);
+  });
+
+  it('reports its working set against its own ceiling, and the ceiling', () => {
+    // `P-210`: 1 GiB of headroom left under a 4 GiB MemoryHigh is 75% used.
+    const report = reporter({
+      limit: { availablePercent: 25, availableBytes: 1_073_741_824, totalBytes: 4_294_967_296 },
+    }).report();
+    assert.equal(report.memoryLimitUsagePercent, 75);
+    assert.equal(report.memoryLimitMb, 4_096);
+  });
+
+  it('reports usage past 100% when the probe stands above its ceiling', () => {
+    // Throttled, not stopped: the reading the error limit exists for.
+    const report = reporter({
+      limit: { availablePercent: -17, availableBytes: -35_651_584, totalBytes: 209_715_200 },
+    }).report();
+    assert.equal(report.memoryLimitUsagePercent, 117);
+  });
+
+  it('leaves the limit out where there is no ceiling, rather than reporting none of it used', () => {
+    const report = reporter({ limit: null }).report();
+    assert.equal('memoryLimitUsagePercent' in report, false);
+    assert.equal('memoryLimitMb' in report, false);
   });
 
   it('leaves the machine’s memory out where the platform cannot say, rather than sending zero', () => {

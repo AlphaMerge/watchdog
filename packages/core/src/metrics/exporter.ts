@@ -107,6 +107,18 @@ const CORE_METRICS: readonly Metric[] = [
     scale: MB,
   },
   {
+    key: 'memoryLimitUsage',
+    name: 'ms_core_memory_limit_usage_ratio',
+    help: "The core's working set as a fraction of the lower of its cgroup's memory.high and memory.max; the highest in the last 30 s. Above 1 while throttled.",
+    scale: PERCENT,
+  },
+  {
+    key: 'memoryLimit',
+    name: 'ms_core_memory_limit_bytes',
+    help: "The lower of the core's cgroup memory.high and memory.max. Absent where there is none.",
+    scale: MB,
+  },
+  {
     key: 'diskFree',
     name: 'ms_core_disk_free_percent',
     help: 'Free space on the filesystem holding the readings. Absent where the core cannot say.',
@@ -456,6 +468,18 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'memoryAvailableBytes',
     name: 'ms_probe_machine_memory_available_bytes',
     help: "Memory the operating system says is available on the probe's machine; the lowest in the last 30 s.",
+    scale: MB,
+  },
+  {
+    key: 'memoryLimitUsage',
+    name: 'ms_probe_memory_limit_usage_ratio',
+    help: "The probe's working set as a fraction of the lower of its cgroup's memory.high and memory.max; the highest in the last 30 s. Above 1 while throttled.",
+    scale: PERCENT,
+  },
+  {
+    key: 'memoryLimit',
+    name: 'ms_probe_memory_limit_bytes',
+    help: "The lower of the probe's cgroup memory.high and memory.max. Absent where there is none.",
     scale: MB,
   },
   { key: 'uptime', name: 'ms_probe_uptime_seconds', help: 'Seconds since the probe started.' },

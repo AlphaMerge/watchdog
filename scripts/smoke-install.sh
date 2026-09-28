@@ -30,6 +30,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # TimescaleDB repository and a different init layout.
 #
 #     MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh
+#
+# `MS_SMOKE_KEEP=1` leaves the box running when the script ends and prints its name — for a
+# measurement that needs a real systemd install to work in (`scripts/sizing/memory-limit-live.sh`,
+# `P-210`). Both services are stopped by then: the last assertion is that they stop cleanly.
 distro="${MS_SMOKE_DISTRO:-debian}"
 case "${distro}" in
   debian) dockerfile=Dockerfile;        image=ms-smoke:bookworm ;;
@@ -70,7 +74,14 @@ else
 fi
 echo "    ${tarball}"
 
-cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+remove_box() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+cleanup() {
+  if [ "${MS_SMOKE_KEEP:-0}" = "1" ]; then
+    echo "==> kept ${container} (docker rm -f ${container} removes it)"
+    return
+  fi
+  remove_box
+}
 trap cleanup EXIT
 
 echo "==> building smoke image"
@@ -78,7 +89,7 @@ docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/${dockerfile}" \
   "${repo_root}/scripts/smoke" >/dev/null
 
 echo "==> booting a clean systemd box"
-cleanup
+remove_box
 # The labels are two separate arguments by design, so this expansion must split.
 # shellcheck disable=SC2046
 docker run -d --name "${container}" \

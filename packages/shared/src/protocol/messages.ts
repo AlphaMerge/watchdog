@@ -41,6 +41,10 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 18 adds `memoryLimitUsagePercent` and `memoryLimitMb` (`P-210`): how close the probe's
+ * cgroup is to the memory ceiling the kernel enforces on it. Gated the same way as 17's pair, and
+ * stripped separately, so a v17 core still gets 17's fields.
+ *
  * Version 17 adds `memoryAvailablePercent` and `memoryAvailableMb` to the heartbeat's health
  * (`P-208`): how much the probe's *machine* has left, beside what the probe itself holds. **The
  * first health field since `P-178`, so the first one the probe has to gate.** Every earlier health
@@ -75,7 +79,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 
 /**
  * The oldest peer version this build still understands.
@@ -516,6 +520,16 @@ export interface ProbeHealthReport {
    */
   memoryAvailablePercent?: number;
   memoryAvailableMb?: number;
+  /**
+   * The probe's *cgroup*: its working set as a percentage of the ceiling the kernel enforces on it
+   * — the lower of `memory.high` and `memory.max` — and that ceiling in megabytes (`P-210`). The
+   * highest in the last thirty seconds, and **above 100 past the ceiling**, which a cgroup can be:
+   * the kernel throttles it past `memory.high` rather than stopping it there.
+   *
+   * Absent where there is no ceiling, on cgroup v1, and off Linux. Since protocol 18.
+   */
+  memoryLimitUsagePercent?: number;
+  memoryLimitMb?: number;
 }
 
 export type ProbeToCoreMessage =
@@ -861,6 +875,9 @@ const PROBE_HEALTH_SCHEMA = {
     uptimeSeconds: { type: 'number', minimum: 0 },
     memoryAvailablePercent: { type: 'number', minimum: 0, maximum: 100 },
     memoryAvailableMb: { type: 'number', minimum: 0 },
+    // No maximum: past `memory.high` the working set stands above the ceiling while it is throttled.
+    memoryLimitUsagePercent: { type: 'number', minimum: 0 },
+    memoryLimitMb: { type: 'number', minimum: 0 },
   },
 } as const;
 
