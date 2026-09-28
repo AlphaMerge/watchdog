@@ -14282,6 +14282,40 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       covered and what it did not. A hosted runner can install an MSI and cannot run a week, so
       this needs a Windows Server host.
 
+- [ ] **H-18 — Nothing notices a core that has stopped** · M · P-215 · Found 2026-09-28 in
+      `P-215`'s review. `P-215` made a core that cannot stay up end in `failed` rather than loop,
+      and `ms-core.service` and `administration.md` now say so in as many words: the core is the
+      thing that raises alarms, so a stopped core is silent, and "this project ships neither" the
+      host check nor the check from another machine that would notice. Core Health cannot help —
+      it is a sensor the core records about itself, and it goes quiet with the core, not Down.
+      Remote probes know within a heartbeat that the core has gone, and spool and say nothing.
+
+      **Three ways to notice, weighed.** (1) **A documented external check** from another
+      machine: works for every way a core stops, host included, and costs the project a runbook
+      section — but it is only as good as the operator's copy of it. (2) **An operator-configured
+      outbound heartbeat**, a dead man's switch: the core requests a URL the operator names, and
+      whatever serves that URL (theirs, or a hosted one) alarms when the requests stop. Nothing
+      here depends on it being there, so it is not an always-on service dependency; it catches a
+      wedged event loop as well as a stopped process, provided the request is sent from the
+      housekeeping pass and not from a timer of its own. (3) **A remote probe noticing**: it
+      already knows, but a partition between one probe and the core looks exactly like a stopped
+      core from the probe's side, and a probe has no way to tell anybody — notifications are the
+      core's, and giving the probe a second set of transports to keep in step is the larger job.
+      **(1) and (2), then, and not (3) in 1.x.**
+
+      **Done when** the runbook has a section on watching the core from outside, with a concrete
+      check an operator can paste: a cron entry on another machine calling
+      `GET /api/v1/core-health` with a read-only API token, treating anything but a 200 inside ten
+      seconds as down — which covers the process, the host, the port and the database the token is
+      checked against — and the host-local `OnFailure=` drop-in for the unit reaching `failed`,
+      said to be the weaker half because it dies with the host. The heartbeat is a pair of settings
+      (URL, interval), off by default, validated at load, sending nothing about the installation
+      but its version; each missed or refused request counts on **Core Health** as a new channel,
+      `heartbeatFailures`, which warns above zero, so a heartbeat that has quietly stopped reaching
+      its receiver is visible while the core is up to show it. A test against a local receiver
+      proves a wedged housekeeping pass stops the requests. `ms-core.service` and
+      `administration.md` stop saying the project ships nothing.
+
 - [ ] **T-25 — The Windows queries, run against Windows** · M · T-09, T-10 · `T-10` says it in
       so many words: **no `Get-CimInstance` has run against a Windows machine.** The transport, the
       wrapper and the parsing are proved, the wrapper against a real PowerShell 7, and the four
