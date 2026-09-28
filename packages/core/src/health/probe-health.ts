@@ -8,6 +8,7 @@ import {
   type Logger,
 } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
@@ -45,6 +46,12 @@ export interface ProbeHealthServiceOptions {
    */
   readonly delivery?: { verdictFor: (probeObjectId: number) => DeliveryVerdict | null };
   readonly ingest: (results: readonly CheckResult[]) => Promise<void>;
+  /**
+   * Asked before a sensor is read, whether whoever vouched for it may still read the probe it
+   * reports on (`A-29`). A probe's health is `onObject('read')` on `/probes/:id/health`, and a
+   * sensor must not go on publishing it to a branch its voucher lost.
+   */
+  readonly vouching: VoucherCheck;
   readonly now?: () => Date;
 }
 
@@ -53,6 +60,8 @@ export interface ProbeHealthStats {
   readonly evaluated: number;
   /** Sensors whose probe could not be worked out at all. */
   readonly unresolved: number;
+  /** Sensors not read because of who vouched for them (`A-29`), counted per sweep. */
+  readonly withheld: number;
 }
 
 /** One reading of every channel. `null` is a gap and stays one — never a zero (`CLAUDE.md`). */
@@ -67,6 +76,8 @@ interface SensorRow {
   params: Record<string, unknown>;
   /** The probe ancestor of this sensor, or null when it has none. */
   probe_id: string | null;
+  vouched_by: string;
+  vouched_by_user: string | null;
 }
 
 export class ProbeHealthService {
@@ -75,11 +86,13 @@ export class ProbeHealthService {
   readonly #sources: ProbeHealthSources;
   readonly #delivery: ProbeHealthServiceOptions['delivery'];
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
+  readonly #vouching: VoucherCheck;
   readonly #now: () => Date;
 
   #sweeps = 0;
   #evaluated = 0;
   #unresolved = 0;
+  #withheld = 0;
 
   constructor(options: ProbeHealthServiceOptions) {
     this.#db = options.db;
@@ -87,11 +100,17 @@ export class ProbeHealthService {
     this.#sources = options.sources;
     this.#delivery = options.delivery;
     this.#ingest = options.ingest;
+    this.#vouching = options.vouching;
     this.#now = options.now ?? ((): Date => new Date());
   }
 
   stats(): ProbeHealthStats {
-    return { sweeps: this.#sweeps, evaluated: this.#evaluated, unresolved: this.#unresolved };
+    return {
+      sweeps: this.#sweeps,
+      evaluated: this.#evaluated,
+      unresolved: this.#unresolved,
+      withheld: this.#withheld,
+    };
   }
 
   /** Every channel for one probe, read now. Public so the API can answer without a sensor. */
@@ -239,18 +258,37 @@ export class ProbeHealthService {
        )
        SELECT sc.object_id::text AS id,
               sc.params AS params,
+              sc.vouched_by,
+              sc.vouched_by_user::text AS vouched_by_user,
               (SELECT up.id::text FROM up WHERE up.sensor_id = sc.object_id AND up.kind = 'probe'
                  LIMIT 1) AS probe_id
        FROM sensor_config sc
        WHERE sc.type = $1`,
       [HEALTH_TYPE],
     );
+    // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
+    // go rather than held Unknown for ever.
+    const withheld = await this.#vouching.refusals(
+      sensors.map((row) => ({
+        sensorId: Number(row.id),
+        sensorType: HEALTH_TYPE,
+        params: row.params,
+        enclosingProbeId: row.probe_id === null ? null : Number(row.probe_id),
+        voucher: storedVoucher(row.vouched_by, row.vouched_by_user),
+      })),
+    );
+    await this.#vouching.settle('probe-health', withheld);
     if (sensors.length === 0) return 0;
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
     for (const row of sensors) {
       const sensorId = Number(row.id);
+      // Not read and nothing recorded: a gap, and Unknown laid over it by the check (`A-29`).
+      if (withheld.has(sensorId)) {
+        this.#withheld += 1;
+        continue;
+      }
       const named = row.params['probeId'];
       const probeId = typeof named === 'number' ? named : Number(row.probe_id ?? Number.NaN);
       if (!Number.isInteger(probeId) || probeId <= 0) {

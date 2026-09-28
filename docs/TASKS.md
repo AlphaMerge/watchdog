@@ -13144,7 +13144,7 @@ because each is a decision rather than a defect:
       tests. Mutation 2/2: the check removed from `start` (3 tests fail), and removed from
       `create` (2 tests fail).
 
-- [ ] **A-29 — A sensor's parameters can name objects its writer cannot read** · L · A-12, T-21 ·
+- [x] **A-29 — A sensor's parameters can name objects its writer cannot read** · L · A-12, T-21 ·
       Found in `A-12`'s triage, 2026-09-28, and upheld by both verifiers. **A `core.factory`
       formula can reference any sensor id.** `referencedSensors` is used only to plan the
       factory sweep (`factory/service.ts`), with no read check anywhere, so a `readwrite` account
@@ -13181,6 +13181,53 @@ because each is a decision rather than a defect:
       - **It costs a fixed number of queries per sweep, not one per sensor.** Each voucher's
         visibility is resolved once per `access_epoch`, the counter every grant, membership and
         move already bumps (`A-12`).
+
+      **A-29 outcome.** Two commits: the write-time check, then the voucher at use.
+
+      - **The contract.** `SensorType.references(params)` and `requires: 'installation'`, declared
+        by `core.factory`, `ms.probe.health` (its `probeId`, or the probe it sits under) and
+        `ms.core.health`. The catalogue refuses a core-evaluated type that declares neither.
+        `SensorTypeGate.reads` is the one place that asks, for the write path and the sweeps
+        alike.
+      - **At write.** `ObjectService` checks every reading-type sensor a create, a params edit, a
+        created tree, a move or a clone leaves behind, after the write and inside its
+        transaction, through a `Writer` — the audit actor plus a voucher. A hidden id and a
+        missing one get the same 403. A wrong kind is a 400, and said only of an object the
+        writer can read. Routes build the writer from the principal. Discovery and the system
+        vouch as the installation.
+      - **At use.** Migration 059 records `vouched_by` on `sensor_config` and backfills it from
+        the audit log: the account that last created the sensor or wrote its parameters,
+        directly or through a token. Anything else vouches as the installation, so nothing's
+        self-monitoring is switched off by the upgrade. `SensorVouching` asks, before every
+        Factory, Probe Health and Core Health sweep, whether each account voucher can still read
+        what the sensor names, and holds the answer as a live fact. A refused sensor is not
+        evaluated, so its channels gap. It reads `unknown`/`access`: layer 3a in
+        `docs/state-machine.md`, below pause, a simulated error and a lost probe, above
+        "no reading yet". Its message gives the fix and never names the object. A deleted or
+        disabled account is refused; a locked one is not (the reports' rule). A named object
+        that no longer exists is skipped rather than called a revoked grant.
+      - **Notifications.** None through a Down trigger. An alarm already sent is suspended, not
+        recovered, and resumes silently when the sensor comes back still Down. A trigger on
+        Unknown fires, as it does for a lost probe. `sensor-vouching.test.ts` revokes the read
+        twenty factories depend on and counts **zero** notifications, both ways.
+      - **Cost.** Two queries a sweep once an account's sight is cached, and none when every
+        voucher is the installation. The test asserts that forty sensors cost what two do.
+      - `administration.md` says what an operator sees and how to fix it, including the upgrade.
+        `adding-a-sensor-type.md` says the sweep asks again.
+
+      Tests:
+      - `sensor-reads.test.ts`: the rules as a table, then each type through each write path.
+      - `sensor-vouching.test.ts`: 12.
+      - `state-machine.test.ts`: the layer's rows, and `vouchedFor` in the exhaustive walk.
+      - `state-machine-properties.test.ts`: a `vouch` event.
+      - `migrator.test.ts`: the backfill, and `access` rewritten to `scan` on the way down.
+      - `core-health.test.ts` and `probe-health.test.ts`: one sweep case each.
+
+      Mutation 4/4 on the second commit:
+      - layer 3a removed (8 fail);
+      - the sight cache kept across an epoch (5 fail);
+      - the factory evaluating a withheld sensor (2 fail);
+      - the voucher never recorded (6 fail).
 
 - [x] **A-30 — The live stream races grants, its own subscriptions and its clients** · M · A-12,
       A-21 · Found 2026-09-28 in `A-12`'s review, and widened by its second round. Six ways the

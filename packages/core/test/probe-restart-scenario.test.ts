@@ -21,6 +21,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { shippedUnit, startLimitOf } from './support/units.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 const available = await databaseAvailable();
 
@@ -371,6 +372,7 @@ describe(
         const now = at(ms);
         const up = linkUpAt(loop, starts, ms);
         const service = new ProbeHealthService({
+          vouching: everyVoucherHolds,
           db,
           logger: silent,
           sources: { link: () => link(up, now) },

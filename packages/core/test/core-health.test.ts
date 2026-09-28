@@ -20,6 +20,8 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import type { SensorToVouchFor } from '../src/objects/vouching.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 /**
  * The core watching itself (`P-12`).
@@ -200,6 +202,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     now?: () => Date,
   ): CoreHealthService =>
     new CoreHealthService({
+      vouching: everyVoucherHolds,
       db,
       logger: silent,
       sources: sources(overrides),
@@ -393,6 +396,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // failed, which is a claim about a subsystem that is not running.
       const { reports: _reports, ...withoutReports } = sources();
       const reading = await new CoreHealthService({
+        vouching: everyVoucherHolds,
         db,
         logger: silent,
         sources: withoutReports,
@@ -690,9 +694,52 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(results[0]?.outcome, 'ok');
     });
 
+    it('reads nothing for a sensor its voucher check withholds, and counts it', async () => {
+      // `A-29`: the bar `/core-health` has is read on the root, and a sensor whose voucher lost
+      // it publishes nothing — a gap — while the other still reports.
+      const asked: SensorToVouchFor[] = [];
+      const settled: [string, number[]][] = [];
+      const batches: CheckResult[][] = [];
+      const service = new CoreHealthService({
+        vouching: {
+          refusals: (sensors) => {
+            asked.push(...sensors);
+            const first = sensors[0];
+            return Promise.resolve(
+              new Map(first === undefined ? [] : [[first.sensorId, 'withheld']]),
+            );
+          },
+          settle: (owner, refused) => {
+            settled.push([owner, [...refused.keys()]]);
+            return Promise.resolve(0);
+          },
+        },
+        db,
+        logger: silent,
+        sources: sources(),
+        ingest: (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+        process: fakeProcess({ cpuUs: [], elapsedNs: [] }),
+      });
+      assert.equal(await service.sweep(), 1);
+
+      assert.equal(asked.length, 2);
+      assert.ok(asked.every((one) => one.sensorType === 'ms.core.health'));
+      assert.ok(asked.every((one) => one.voucher.kind === 'installation'));
+      const withheld = asked[0]?.sensorId;
+      assert.deepEqual(settled, [['core-health', [withheld]]]);
+      const results = batches[0] ?? [];
+      assert.equal(results.length, 1);
+      assert.notEqual(results[0]?.sensorId, withheld);
+      assert.equal(service.stats().withheld, 1);
+    });
+
     it('does nothing at all when no such sensor exists', async () => {
       let called = 0;
       const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
         db: {
           query: () => Promise.resolve([]),
           tx: () => {

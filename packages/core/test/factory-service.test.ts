@@ -11,6 +11,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 /**
  * The Sensor Factory evaluator (`T-21`), against a real tree and real readings.
@@ -59,6 +60,7 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     deviceId = device.id;
 
     factory = new FactoryService({
+      vouching: everyVoucherHolds,
       db,
       logger: silentLogger,
       ingest: (results) => {

@@ -23,6 +23,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 /**
  * The Prometheus scrape endpoint (`P-14`).
@@ -70,6 +71,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
 
   const coreHealth = (): CoreHealthService =>
     new CoreHealthService({
+      vouching: everyVoucherHolds,
       db,
       logger: silent,
       sources: {
@@ -112,6 +114,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
 
   const probeHealth = (link: ProbeLink): ProbeHealthService =>
     new ProbeHealthService({
+      vouching: everyVoucherHolds,
       db,
       logger: silent,
       sources: { link: () => link },
@@ -268,6 +271,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         coreHealth: () => core,
         probeHealth: () =>
           new ProbeHealthService({
+            vouching: everyVoucherHolds,
             db,
             logger: silent,
             sources: { link: () => link },
@@ -296,6 +300,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
     const varying = (get: () => ProbeLink): MetricsExporter => {
       const core = coreHealth();
       const probe = new ProbeHealthService({
+        vouching: everyVoucherHolds,
         db,
         logger: silent,
         sources: { link: () => get() },

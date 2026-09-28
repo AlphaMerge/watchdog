@@ -165,6 +165,47 @@ A report never contains a monitored device's credentials. What it names an objec
 kind and name; sensor parameters marked `writeOnly` are stripped at one place for every route in
 the system, and the report projection has no field for one in the first place.
 
+
+### A sensor that republishes what it reads is vouched for, and stops when that lapses
+
+Three sensor types publish readings that are somebody else's: a **Sensor Factory** computes from
+other sensors' channels, a **Probe Health** sensor reports a probe's health, and a **Core Health**
+sensor the installation's own figures. Everybody who can read the sensor sees what it publishes, so
+the system holds each one to the account that stands behind it (`A-29`):
+
+- **Writing one checks what it names.** Creating one, editing its parameters, moving it and
+  cloning it are refused when it names something the account doing so cannot read — a sensor in a
+  formula, the probe a Probe Health sensor reports on (the one it sits under, if it names none).
+  A Core Health sensor needs `read` on the root. The refusal reads the same for an object that is
+  hidden and one that does not exist, so it never says which ids exist. Renaming one checks
+  nothing.
+- **That account vouches for it from then on, and is checked again at every sweep.** When it can
+  no longer read everything the sensor names — a grant revoked or carved to `none`, a group
+  membership removed, an object moved out of its view — or the account is **deleted or
+  disabled**, the sensor stops being evaluated. It reads **Unknown**, its graphs gap, and its
+  message says why without naming what it cannot read: *"Not evaluated: the account that vouched
+  for this sensor can no longer read everything it names…"*. An account merely locked out keeps
+  vouching, for the reason its reports keep running.
+- **It does not page as Down.** Nothing measured has failed, and one grant edit must not become
+  one alarm for every sensor that account wrote. A Down trigger stays quiet, and an alarm
+  already sent is held rather than recovered — nobody is told "back to normal" about a sensor that
+  simply stopped being looked at. A trigger on **Unknown** does fire, as it does when a probe is
+  lost; its template's summary window collects them.
+- **To start it again**, save its parameters as an account that can read everything it names —
+  an administrator, usually — or give the original account its access back. Either takes effect
+  at the next sweep, within thirty seconds. The state log shows the transition with cause `access`.
+
+The system itself vouches for what it writes, and so does a discovery run — its sensors come from
+a template somebody with the server's file system installed.
+
+**On upgrade** (migration 059) every existing sensor is assigned the account that last created it
+or wrote its parameters, from the audit log, directly or through one of its tokens. That account
+is then checked at the first sweep, so **a factory written by somebody who has since lost access
+goes Unknown right after the upgrade** — which is the point: it had been publishing what they could
+no longer see. A sensor the audit log cannot tie to a live account — written by the system, by an
+account since deleted, or inside a clone, which is recorded under the clone's top object — is
+vouched for by the installation, and goes on as before. Save one again to put an account behind
+it.
 ---
 
 ## Credentials for monitored devices

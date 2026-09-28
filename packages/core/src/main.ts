@@ -35,6 +35,7 @@ import {
 } from './objects/audit-composition.js';
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
+import { SensorVouching } from './objects/vouching.js';
 import {
   applyDeclaredLimits,
   declaredChannelLookup,
@@ -409,6 +410,11 @@ async function serve(): Promise<void> {
   // eslint-disable-next-line prefer-const -- assigned below, once reachability exists.
   let reachabilityRef: ProbeReachability | undefined;
   const noProbesDown: ReadonlySet<number> = new Set();
+  // The same shape, for the sensors the core has stopped evaluating because of who vouched for
+  // them (`A-29`). The check needs the state service to move them, so it is built after it.
+  // eslint-disable-next-line prefer-const -- assigned below, once the check exists.
+  let vouchingRef: SensorVouching | undefined;
+  const nothingWithheld: ReadonlyMap<number, string> = new Map();
   const states = new SensorStateService({
     db,
     logger,
@@ -420,6 +426,7 @@ async function serve(): Promise<void> {
     alarms,
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
+    withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.
@@ -461,6 +468,30 @@ async function serve(): Promise<void> {
     triggerSync,
   };
 
+  // Object rights (`A-03`), built here rather than beside the accounts because email needs it
+  // first — a message goes to the people a template names only if they may read what it is about
+  // (`M-19`) — and the voucher check before that: a sensor that republishes what it reads is
+  // evaluated through the eyes of whoever vouched for it (`A-29`).
+  const objectAccess = new AccessService({
+    db,
+    audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
+    logger,
+  });
+  // One gate, so the write that records a voucher and the sweep that re-checks it ask each type
+  // the same question about what it reads (`A-29`).
+  const sensorTypeGate = catalogueSensorTypeGate(catalogue);
+  const vouching = new SensorVouching({
+    db,
+    logger,
+    sensorTypes: sensorTypeGate,
+    sight: (principal, q) => objectAccess.visibilityFor(principal, q),
+    states,
+    // A master that stops being evaluated is Unknown, not Down, so whatever it held is released
+    // here — the same reason `ProbeReachability` is handed it (`P-135`).
+    dependencies: dependencyPauses,
+  });
+  vouchingRef = vouching;
+
   // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
   // may be constrained by a permission window, and what an evaluator needs is the definition
   // rather than the view a UI wants.
@@ -474,7 +505,7 @@ async function serve(): Promise<void> {
     // and what S-10 made queryable, and the log is the plain-text audit component
     // CAPABILITIES.MD §9 lists — the copy that survives someone dropping the database.
     audit: new CompositeAuditSink(objectAuditSinks(auditSinks)),
-    sensorTypes: catalogueSensorTypeGate(catalogue),
+    sensorTypes: sensorTypeGate,
     // A pause has to take effect now, not at the next scan (M-08): an operator pausing a device
     // for maintenance means now, and a sensor that alarmed thirty seconds into a planned outage
     // is the exact failure pausing exists to prevent.
@@ -572,6 +603,7 @@ async function serve(): Promise<void> {
   const factory = new FactoryService({
     db,
     logger,
+    vouching,
     ingest: async (results) => {
       await ingestion.acceptResults('factory', {
         type: 'results',
@@ -680,14 +712,6 @@ async function serve(): Promise<void> {
   // What turns a queued obligation into a message somebody receives (N-07). Email is the only
   // transport so far; N-08 to N-10 add the rest, and a method with no transport leaves its
   // requests queued rather than failing them.
-  // Object rights (`A-03`), built here rather than beside the accounts because email needs it
-  // first: a message goes to the people a template names only if they may read what it is about
-  // (`M-19`), and that is this service's question to answer.
-  const objectAccess = new AccessService({
-    db,
-    audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
-    logger,
-  });
   const email = new EmailTransport({
     config: config.notifications.smtp,
     logger,
@@ -1198,6 +1222,7 @@ async function serve(): Promise<void> {
   const coreHealth = new CoreHealthService({
     db,
     logger,
+    vouching,
     sources: {
       ingestion: () => ingestor.stats(),
       stream: () => stream.stats,
@@ -1248,6 +1273,7 @@ async function serve(): Promise<void> {
   const probeHealth = new ProbeHealthService({
     db,
     logger,
+    vouching,
     sources: { link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId) },
     delivery: deliveryWatch,
     ingest: async (results) => {

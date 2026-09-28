@@ -36,6 +36,7 @@ const BASE: StateFacts = {
   pause: NO_PAUSE,
   simulatedError: false,
   probeReachable: true,
+  vouchedFor: true,
   acknowledged: false,
   scan: { kind: 'none' },
   channel: null,
@@ -169,6 +170,42 @@ describe('layered evaluation', () => {
       name: 'a simulated error still beats a lost probe',
       facts: facts({ simulatedError: true, probeReachable: false }),
       expect: { state: 'down', cause: 'simulated' },
+    },
+    {
+      // `A-29`. The core declined to evaluate it: nothing about the target failed, so not Down.
+      name: 'a sensor whose voucher lost read on what it names is unknown, not down',
+      facts: facts({
+        vouchedFor: false,
+        scan: { kind: 'failed', consecutiveFailures: 7 },
+        channel: BREACH_ERROR,
+      }),
+      expect: { state: 'unknown', cause: 'access' },
+    },
+    {
+      name: 'a lost probe is named before a lost voucher, because it is the wider fact',
+      facts: facts({ probeReachable: false, vouchedFor: false, scan: { kind: 'ok' } }),
+      expect: { state: 'unknown', cause: 'probe' },
+    },
+    {
+      name: 'a simulated error beats a lost voucher, because it ignores the readings anyway',
+      facts: facts({ simulatedError: true, vouchedFor: false }),
+      expect: { state: 'down', cause: 'simulated' },
+    },
+    {
+      name: 'a pause beats a lost voucher',
+      facts: facts({ pause: flags(['schedule']), vouchedFor: false }),
+      expect: { state: 'paused', cause: 'schedule' },
+    },
+    {
+      // An acknowledged Down that stops being evaluated has not been dealt with; it is Unknown,
+      // and the acknowledgement stays for when it is evaluated again.
+      name: 'an acknowledged down whose voucher is lost is unknown',
+      facts: facts({
+        vouchedFor: false,
+        acknowledged: true,
+        scan: { kind: 'failed', consecutiveFailures: 2 },
+      }),
+      expect: { state: 'unknown', cause: 'access' },
     },
     {
       // `N-17`. A forced error exists to rehearse a notification chain end to end, and
@@ -389,6 +426,18 @@ describe('acknowledgement', () => {
     );
   });
 
+  it('is not cleared by a lost voucher, which is not recovery either', () => {
+    const withheld: SensorFacts = { ...acknowledgedDown(null), vouchedFor: false };
+    const applied = applyResult(withheld, { ...ok, at: later(10) });
+    assert.equal(applied.decision.state, 'unknown');
+    assert.equal(applied.decision.cause, 'access');
+    assert.equal(
+      applied.facts.acknowledged,
+      true,
+      'the outage was not fixed; it stopped being looked at',
+    );
+  });
+
   it('is cleared by a resume', () => {
     assert.equal(clearedByResume(acknowledgedDown(null), new Date()).acknowledged, false);
   });
@@ -412,17 +461,20 @@ describe('invariants', () => {
     for (const pauseCase of PAUSE_PRECEDENCE) {
       for (const simulatedError of [false, true]) {
         for (const probeReachable of [true, false]) {
-          for (const acknowledged of [false, true]) {
-            for (const scan of scans) {
-              for (const channel of channels) {
-                yield {
-                  pause: flags(pauseCase.active),
-                  simulatedError,
-                  probeReachable,
-                  acknowledged,
-                  scan,
-                  channel,
-                };
+          for (const vouchedFor of [true, false]) {
+            for (const acknowledged of [false, true]) {
+              for (const scan of scans) {
+                for (const channel of channels) {
+                  yield {
+                    pause: flags(pauseCase.active),
+                    simulatedError,
+                    probeReachable,
+                    vouchedFor,
+                    acknowledged,
+                    scan,
+                    channel,
+                  };
+                }
               }
             }
           }
@@ -446,7 +498,7 @@ describe('invariants', () => {
       );
       checked += 1;
     }
-    assert.equal(checked, 16 * 2 * 2 * 2 * 5 * 4, 'the whole space, not a corner of it');
+    assert.equal(checked, 16 * 2 * 2 * 2 * 2 * 5 * 4, 'the whole space, not a corner of it');
   });
 
   it('names a cause an operator can act on, every time', () => {
@@ -492,6 +544,8 @@ describe('invariants', () => {
         facts: { ...run(['error', 'error']).facts, acknowledged: true, acknowledgedUntil: null },
       },
       { name: 'paused', facts: { ...run(['ok']).facts, pause: flags(['manual']) } },
+      // Coming back is a transition too: whatever the last reading said decides again (`A-29`).
+      { name: 'withheld', facts: { ...run(['error', 'error']).facts, vouchedFor: false } },
     ];
 
     // `when` rules out an event that cannot happen from a state, rather than letting the test
@@ -521,6 +575,8 @@ describe('invariants', () => {
         when: (from) => from === 'paused',
       },
       { name: 'probe lost', apply: (from) => evaluate({ ...from, probeReachable: false }) },
+      { name: 'voucher lost', apply: (from) => evaluate({ ...from, vouchedFor: false }) },
+      { name: 'voucher restored', apply: (from) => evaluate({ ...from, vouchedFor: true }) },
       { name: 'policy relaxed', apply: (from) => evaluate(from, { warnFor: 9 }) },
       { name: 'policy tightened', apply: (from) => evaluate(from, { warnFor: 0 }) },
       { name: 'simulated', apply: (from) => evaluate({ ...from, simulatedError: true }) },

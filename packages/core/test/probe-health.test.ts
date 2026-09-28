@@ -16,6 +16,8 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
+import type { SensorToVouchFor } from '../src/objects/vouching.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 /**
  * Probe Health (`P-13`), and `P-04`'s numbers arriving on it.
@@ -163,6 +165,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     ingest: (results: readonly CheckResult[]) => Promise<void> = () => Promise.resolve(),
   ): ProbeHealthService =>
     new ProbeHealthService({
+      vouching: everyVoucherHolds,
       db,
       logger: silent,
       sources: { link },
@@ -554,6 +557,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       // be told, and the sentence says what to do.
       const batches: CheckResult[][] = [];
       const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
         db: {
           query: () => Promise.resolve([{ id: '99', params: {}, probe_id: null }]),
           tx: () => Promise.resolve({}),
@@ -575,9 +579,52 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(service.stats().unresolved, 1);
     });
 
+    it('reads nothing for a sensor its voucher check withholds, and counts it', async () => {
+      // `A-29`: a sensor whose voucher can no longer read the probe it reports on publishes
+      // nothing — a gap — and its Unknown is the check's to lay over it, not this sweep's.
+      const asked: SensorToVouchFor[] = [];
+      const settled: [string, number[]][] = [];
+      const batches: CheckResult[][] = [];
+      const service = new ProbeHealthService({
+        vouching: {
+          refusals: (sensors) => {
+            asked.push(...sensors);
+            return Promise.resolve(new Map([[sensorId, 'withheld']]));
+          },
+          settle: (owner, refused) => {
+            settled.push([owner, [...refused.keys()]]);
+            return Promise.resolve(0);
+          },
+        },
+        db,
+        logger: silent,
+        sources: { link: () => connected() },
+        ingest: (results) => {
+          batches.push([...results]);
+          return Promise.resolve();
+        },
+        now: () => new Date('2026-08-28T00:00:25Z'),
+      });
+      await service.sweep();
+
+      const mine = asked.find((one) => one.sensorId === sensorId);
+      assert.ok(mine !== undefined);
+      assert.equal(mine.sensorType, 'ms.probe.health');
+      assert.equal(mine.enclosingProbeId, probeId, 'the probe a sensor naming none reports on');
+      assert.deepEqual(mine.voucher, { kind: 'installation' });
+      assert.equal(asked.length, 2);
+      assert.deepEqual(settled, [['probe-health', [sensorId]]]);
+      assert.deepEqual(
+        (batches[0] ?? []).map((one) => one.sensorId),
+        [orphanId],
+      );
+      assert.equal(service.stats().withheld, 1);
+    });
+
     it('does nothing at all when no such sensor exists', async () => {
       let ingested = 0;
       const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
         db: {
           query: () => Promise.resolve([]),
           tx: () => Promise.resolve({}),

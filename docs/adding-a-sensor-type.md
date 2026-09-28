@@ -168,6 +168,16 @@ is covered by declaring this and nothing else.
 Leave out a reference its params cannot state — a formula that does not parse names nothing that
 anybody could read out of it, and the sensor fails on its own for that.
 
+**And again at every evaluation.** A grant taken away after the write would otherwise leave the
+sensor publishing what its writer may no longer see, so the account that last vouched for it is
+recorded on the sensor, and the sweep that evaluates it asks the same `references` and `requires`
+again, through that account's eyes as they are now (`SensorVouching`). One it may no longer read
+through — or whose account was deleted or disabled — is not evaluated: its channels gap and it
+reads `unknown` with cause `access` (`docs/state-machine.md` §2, row 3a). **A sweep that
+evaluates a core type calls `refusals` before it reads anything and `settle` after**, and
+records nothing for a sensor refused; the three that exist show how. A type's `references` is
+therefore asked on every sweep, which is one more reason it has to be pure and cheap.
+
 ### `requires` (optional)
 
 A bar on writing one at all, for a type whose readings describe the whole installation rather

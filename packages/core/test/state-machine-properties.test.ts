@@ -58,7 +58,8 @@ type Event =
   | { readonly kind: 'acknowledge'; readonly untilMinute: number | null }
   | { readonly kind: 'clearAcknowledgement' }
   | { readonly kind: 'simulate'; readonly on: boolean }
-  | { readonly kind: 'probe'; readonly reachable: boolean };
+  | { readonly kind: 'probe'; readonly reachable: boolean }
+  | { readonly kind: 'vouch'; readonly vouched: boolean };
 
 interface Step {
   readonly event: Event;
@@ -148,6 +149,8 @@ function withEvent(facts: SensorFacts, event: Event): SensorFacts {
       return { ...facts, simulatedError: event.on };
     case 'probe':
       return { ...facts, probeReachable: event.reachable };
+    case 'vouch':
+      return { ...facts, vouchedFor: event.vouched };
     case 'result':
       return facts;
   }
@@ -235,6 +238,11 @@ const anyEvent: fc.Arbitrary<Event> = fc.oneof(
     weight: 1,
     arbitrary: fc.record({ kind: fc.constant('probe' as const), reachable: fc.boolean() }),
   },
+  {
+    // `A-29`: the core stops evaluating a sensor whose voucher lost read, and starts again.
+    weight: 1,
+    arbitrary: fc.record({ kind: fc.constant('vouch' as const), vouched: fc.boolean() }),
+  },
 );
 
 const sequence = fc.array(anyEvent, { minLength: 1, maxLength: 40 });
@@ -263,6 +271,7 @@ function factsKey(facts: SensorFacts): string {
     pause: facts.pause,
     simulatedError: facts.simulatedError,
     probeReachable: facts.probeReachable,
+    vouchedFor: facts.vouchedFor,
     acknowledged: facts.acknowledged,
     acknowledgedUntil: facts.acknowledgedUntil?.toISOString() ?? null,
     scan: facts.scan,
@@ -519,7 +528,7 @@ describe('the state machine over event sequences', () => {
           if (!taken.applied || taken.event.kind !== 'result' || taken.event.ok) continue;
           // Only when the reading is what decided it: layers 1 to 3 short-circuit above.
           if (isPaused(taken.after.pause) || taken.after.simulatedError) continue;
-          if (!taken.after.probeReachable) continue;
+          if (!taken.after.probeReachable || !taken.after.vouchedFor) continue;
           const failures =
             taken.after.scan.kind === 'failed' ? taken.after.scan.consecutiveFailures : 0;
           const expected = failures > failurePolicy.warnFor ? 'down' : 'warning';
@@ -552,10 +561,12 @@ describe('the state machine over event sequences', () => {
           // it — lifting a simulated error is one, and before `M-16` it did not clear. What
           // must never clear it is a layer that short-circuited above the reading: a lost probe
           // is not a recovery, and clearing there would un-suppress an outage nobody has fixed.
+          // Nor is a lost voucher (`A-29`): the sensor stopped being looked at, not recovered.
           assert.ok(
             !isPaused(taken.after.pause) &&
               !taken.after.simulatedError &&
-              taken.after.probeReachable,
+              taken.after.probeReachable &&
+              taken.after.vouchedFor,
             `${taken.event.kind} cleared an acknowledgement without a reading deciding it`,
           );
           assert.notEqual(taken.decision.state, 'down');
@@ -579,7 +590,8 @@ describe('the state machine over event sequences', () => {
           const hidden =
             isPaused(taken.after.pause) ||
             taken.after.simulatedError ||
-            !taken.after.probeReachable;
+            !taken.after.probeReachable ||
+            !taken.after.vouchedFor;
           if (hidden) continue;
           assert.ok(
             taken.decision.state === 'down' || taken.decision.state === 'down_acknowledged',

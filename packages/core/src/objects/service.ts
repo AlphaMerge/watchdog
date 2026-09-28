@@ -1722,7 +1722,8 @@ export class ObjectService {
   }
 
   /**
-   * Refuses a write that leaves a sensor naming something its writer could not read (`A-29`).
+   * Refuses a write that leaves a sensor naming something its writer could not read, and records
+   * the writer as the one the core evaluates it through from then on (`A-29`).
    *
    * **After the write, inside its transaction**, so that every path answers the same question
    * about the same thing: what the tree looks like now. A moved or cloned subtree has its new
@@ -1771,7 +1772,14 @@ export class ObjectService {
         }
       }
     }
-    await assertMayName(q, voucherOf(writer), { named, bars, sayWhich: options.sayWhich });
+    const voucher = voucherOf(writer);
+    await assertMayName(q, voucher, { named, bars, sayWhich: options.sayWhich });
+    // And it is this writer the core evaluates them through from now on (`A-29`).
+    await this.#repo.recordVoucher(
+      q,
+      sensors.map((sensor) => sensor.id),
+      voucher,
+    );
   }
 
   /** A node's input as `create` would have normalised it, with its parent id filled in. */

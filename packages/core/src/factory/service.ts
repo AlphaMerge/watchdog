@@ -1,5 +1,6 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { storedVoucher, type StoredVoucher, type VoucherCheck } from '../objects/vouching.js';
 import {
   FormulaError,
   evaluate,
@@ -42,6 +43,12 @@ export interface FactoryServiceOptions {
   readonly logger: Logger;
   /** Where results go. The same entry point a probe's batch uses. */
   readonly ingest: (results: readonly CheckResult[]) => Promise<void>;
+  /**
+   * Asked before a factory is evaluated, whether whoever vouched for it may still read what its
+   * formulas name (`A-29`). Required for `P-111`'s reason: a wiring line that can be deleted with
+   * every test still green is one that will be.
+   */
+  readonly vouching: VoucherCheck;
   readonly now?: () => Date;
 }
 
@@ -57,6 +64,9 @@ interface FactorySensor {
   /** Parsed once per sweep. A formula that will not parse fails the check rather than the sweep. */
   readonly parsed: ReadonlyMap<string, Node | FormulaError>;
   readonly reads: ReadonlySet<number>;
+  /** As stored, for the voucher check; `reads` is what the formulas that parsed name. */
+  readonly params: Record<string, unknown>;
+  readonly voucher: StoredVoucher;
 }
 
 export interface FactoryStats {
@@ -66,6 +76,8 @@ export interface FactoryStats {
   readonly gaps: number;
   readonly failed: number;
   readonly cycles: number;
+  /** Factories not evaluated because of who vouched for them (`A-29`), counted per sweep. */
+  readonly withheld: number;
 }
 
 const FACTORY_TYPE = 'core.factory';
@@ -74,6 +86,7 @@ export class FactoryService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
+  readonly #vouching: VoucherCheck;
   readonly #now: () => Date;
 
   #sweeps = 0;
@@ -82,11 +95,13 @@ export class FactoryService {
   #gaps = 0;
   #failed = 0;
   #cycles = 0;
+  #withheld = 0;
 
   constructor(options: FactoryServiceOptions) {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'factory' });
     this.#ingest = options.ingest;
+    this.#vouching = options.vouching;
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -98,6 +113,7 @@ export class FactoryService {
       gaps: this.#gaps,
       failed: this.#failed,
       cycles: this.#cycles,
+      withheld: this.#withheld,
     };
   }
 
@@ -105,6 +121,18 @@ export class FactoryService {
   async sweep(): Promise<number> {
     this.#sweeps += 1;
     const sensors = await this.#load();
+    // Settled even when there are none, so a factory withheld last sweep and deleted or paused
+    // since is let go rather than held Unknown for ever.
+    const withheld = await this.#vouching.refusals(
+      sensors.map((sensor) => ({
+        sensorId: sensor.sensorId,
+        sensorType: FACTORY_TYPE,
+        params: sensor.params,
+        enclosingProbeId: null,
+        voucher: sensor.voucher,
+      })),
+    );
+    await this.#vouching.settle('factory', withheld);
     if (sensors.length === 0) return 0;
 
     const cycles = findCycles(sensors);
@@ -124,6 +152,14 @@ export class FactoryService {
       // lines down for whatever this sensor actually computes.
       for (const channel of sensor.channels) {
         inputs.channels.delete(`${String(sensor.sensorId)}:${channel.key}`);
+      }
+
+      // Not evaluated, and nothing recorded: its channels gap and its state is Unknown, laid
+      // over it by the voucher check (`A-29`). After the clearing above, so a factory reading
+      // this one sees a gap rather than this one's last value.
+      if (withheld.has(sensor.sensorId)) {
+        this.#withheld += 1;
+        continue;
       }
 
       const inCycle = cycles.get(sensor.sensorId);
@@ -239,9 +275,14 @@ export class FactoryService {
 
   /** Every factory sensor that is not paused, with its formulas parsed. */
   async #load(): Promise<FactorySensor[]> {
-    const rows = await this.#db.query<{ object_id: string; params: Record<string, unknown> }>(
+    const rows = await this.#db.query<{
+      object_id: string;
+      params: Record<string, unknown>;
+      vouched_by: string;
+      vouched_by_user: string | null;
+    }>(
       `
-      SELECT sc.object_id, sc.params
+      SELECT sc.object_id, sc.params, sc.vouched_by, sc.vouched_by_user
       FROM sensor_config sc
       JOIN sensor_runtime sr ON sr.object_id = sc.object_id
       WHERE sc.type = $1
@@ -292,6 +333,8 @@ export class FactoryService {
         maxAgeSeconds: readMaxAge(row.params['maxAgeSeconds']),
         parsed,
         reads,
+        params: row.params,
+        voucher: storedVoucher(row.vouched_by, row.vouched_by_user),
       });
     }
     return out;

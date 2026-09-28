@@ -98,7 +98,13 @@ export interface Harness {
 
 export async function buildHarness(
   db: Database,
-  options: { states?: boolean; alarms?: AlarmReactor; types?: readonly SensorType[] } = {},
+  options: {
+    states?: boolean;
+    alarms?: AlarmReactor;
+    types?: readonly SensorType[];
+    /** The sensors the core is declining to evaluate (`A-29`); `SensorVouching.withheld`. */
+    withheldSensors?: () => ReadonlyMap<number, string>;
+  } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
 
@@ -119,6 +125,9 @@ export async function buildHarness(
           // choke point for every state change that is not a check result, so a pause, an
           // acknowledgement or a schedule window reaches it here or not at all.
           ...(options.alarms === undefined ? {} : { alarms: options.alarms }),
+          ...(options.withheldSensors === undefined
+            ? {}
+            : { withheldSensors: options.withheldSensors }),
         })
       : undefined;
   // Built here rather than in each test, because the pause sweep releases dependency delays and

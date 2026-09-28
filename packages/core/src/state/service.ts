@@ -24,6 +24,7 @@ import {
   isStaleResult,
   operatorDecided,
   DEFAULT_FAILURE_POLICY,
+  type Decision,
   type FailurePolicy,
   type SensorFacts,
 } from './machine.js';
@@ -144,6 +145,16 @@ export interface SensorStateServiceOptions {
    * without a probe endpoint would honestly report.
    */
   unreachableSensors?: () => ReadonlySet<number>;
+  /**
+   * The sensors the core has stopped evaluating, each with the sentence that says why (`A-29`).
+   *
+   * Live for `unreachableSensors`' reason, and laid over the facts at the same point: a sensor
+   * whose voucher may no longer read what it names must read Unknown however its state comes to
+   * be re-decided, and the sentence has to come with it, because it is also the fix.
+   *
+   * Absent means every voucher holds.
+   */
+  withheldSensors?: () => ReadonlyMap<number, string>;
 }
 
 export interface StateStats {
@@ -177,6 +188,7 @@ export class SensorStateService {
   readonly #alarms: AlarmReactor | undefined;
   readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #unreachableSensors: (() => ReadonlySet<number>) | undefined;
+  readonly #withheldSensors: (() => ReadonlyMap<number, string>) | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -206,6 +218,7 @@ export class SensorStateService {
     this.#alarms = options.alarms;
     this.#onStatesCommitted = options.onStatesCommitted;
     this.#unreachableSensors = options.unreachableSensors;
+    this.#withheldSensors = options.withheldSensors;
   }
 
   stats(): StateStats {
@@ -315,7 +328,7 @@ export class SensorStateService {
         // `operatorDecided`, the same one `reevaluate` uses; the difference is that there are no
         // fresh operator words here, so what is already stored is what stays.
         const message = operatorDecided(applied.decision)
-          ? runtime.message
+          ? (this.#withheldMessage(sensorId, applied.decision) ?? runtime.message)
           : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
             ? (result.channels?.message ?? result.message)
             : result.message;
@@ -413,7 +426,7 @@ export class SensorStateService {
 
     // Read through the caller's transaction, never the cache: the flags were written moments
     // ago in this same transaction, and a cache populated before them is exactly wrong.
-    const runtimes = this.#withProbeFacts(await loadRuntimes(q, sensorIds));
+    const runtimes = this.#withLiveFacts(await loadRuntimes(q, sensorIds));
     const transitions: StateTransition[] = [];
     const rewrites: StateRewrite[] = [];
     const recovered: number[] = [];
@@ -460,12 +473,14 @@ export class SensorStateService {
       // `object_pause` knows what an operator typed, so a manual or inherited pause is looked
       // up rather than guessed; there is nothing to look up for the other causes, and an empty
       // message is what a sensor awaiting its next scan has always carried.
+      //
+      // A withheld sensor's words come from the voucher check whoever re-decided it (`A-29`):
+      // they are the only ones that say what fixes it, and they are held with the fact.
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
       const message = !operatorDecided(decision)
         ? ''
-        : owned
-          ? cause.message
-          : (pauseMessages.get(sensorId) ?? '');
+        : (this.#withheldMessage(sensorId, decision) ??
+          (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
       transitions.push({
         sensorId,
         at,
@@ -567,7 +582,7 @@ export class SensorStateService {
   ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }> {
     if (sensorIds.length === 0) return { acknowledged: [], refused: [], transitions: 0 };
 
-    const runtimes = this.#withProbeFacts(await loadRuntimes(q, sensorIds));
+    const runtimes = this.#withLiveFacts(await loadRuntimes(q, sensorIds));
     const acknowledged: number[] = [];
     const refused: number[] = [];
     for (const sensorId of sensorIds) {
@@ -621,23 +636,40 @@ export class SensorStateService {
 
   /** Loads what is not already cached. One query each for the whole batch, or none at all. */
   /**
-   * What was loaded, with the live probe fact laid over it (`R-05`).
+   * What was loaded, with the live facts laid over it: the probe (`R-05`) and the voucher
+   * (`A-29`).
    *
-   * `loadRuntimes` restores `probeReachable: true` because the column does not exist — the fact
-   * is a connection, not a row. This is the one place that knows better, so every path that
-   * decides a state gets the same answer and none of them has to remember to ask.
+   * `loadRuntimes` restores both as true because neither has a column — one is a connection and
+   * the other a question about grants asked every sweep, not rows. This is the one place that
+   * knows better, so every path that decides a state gets the same answer and none of them has
+   * to remember to ask.
    */
-  #withProbeFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
+  #withLiveFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
     const unreachable = this.#unreachableSensors?.();
-    if (unreachable === undefined || unreachable.size === 0) return runtimes;
+    const withheld = this.#withheldSensors?.();
+    const anyUnreachable = unreachable !== undefined && unreachable.size > 0;
+    const anyWithheld = withheld !== undefined && withheld.size > 0;
+    if (!anyUnreachable && !anyWithheld) return runtimes;
     for (const [sensorId, runtime] of runtimes) {
-      if (!unreachable.has(sensorId)) continue;
+      const lost = anyUnreachable && unreachable.has(sensorId);
+      const refused = anyWithheld && withheld.has(sensorId);
+      if (!lost && !refused) continue;
       runtimes.set(sensorId, {
         ...runtime,
-        facts: { ...runtime.facts, probeReachable: false },
+        facts: {
+          ...runtime.facts,
+          ...(lost ? { probeReachable: false } : {}),
+          ...(refused ? { vouchedFor: false } : {}),
+        },
       });
     }
     return runtimes;
+  }
+
+  /** Why the core stopped evaluating this sensor, when that is what decided it (`A-29`). */
+  #withheldMessage(sensorId: number, decision: Decision): string | undefined {
+    if (decision.cause !== 'access') return undefined;
+    return this.#withheldSensors?.().get(sensorId);
   }
 
   /**
@@ -711,7 +743,7 @@ export class SensorStateService {
         ? new Map<number, SensorRuntime>()
         : this.#db
             .tx((q: Queryable) => loadRuntimes(q, runtimes))
-            .then((loaded) => this.#withProbeFacts(loaded)),
+            .then((loaded) => this.#withLiveFacts(loaded)),
       policies.length === 0 || this.#settings === undefined
         ? new Map<number, { value: unknown }>()
         : this.#settings.resolveForObjects(policies, SCAN_RETRY_WARNINGS.key),

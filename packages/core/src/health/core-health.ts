@@ -8,6 +8,7 @@ import {
   type Logger,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
 
 /**
@@ -129,6 +130,11 @@ export interface CoreHealthServiceOptions {
   readonly sources: CoreHealthSources;
   /** Where results go. The same entry point a probe's batch uses. */
   readonly ingest: (results: readonly CheckResult[]) => Promise<void>;
+  /**
+   * Asked before a sensor is read, whether whoever vouched for it may still read the root
+   * (`A-29`) — the bar `/core-health` has, which a sensor must not go on getting around.
+   */
+  readonly vouching: VoucherCheck;
   readonly now?: () => Date;
   /** Process counters, injectable so a test does not measure the test runner. */
   readonly process?: {
@@ -143,6 +149,8 @@ export interface CoreHealthStats {
   readonly sweeps: number;
   readonly evaluated: number;
   readonly failed: number;
+  /** Sensors not read because of who vouched for them (`A-29`), counted per sweep. */
+  readonly withheld: number;
 }
 
 /** One reading of every channel. `null` is a gap and stays one — never a zero (`CLAUDE.md`). */
@@ -157,6 +165,7 @@ export class CoreHealthService {
   readonly #logger: Logger;
   readonly #sources: CoreHealthSources;
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
+  readonly #vouching: VoucherCheck;
   readonly #now: () => Date;
   readonly #process: NonNullable<CoreHealthServiceOptions['process']>;
 
@@ -175,12 +184,14 @@ export class CoreHealthService {
   #sweeps = 0;
   #evaluated = 0;
   #failed = 0;
+  #withheld = 0;
 
   constructor(options: CoreHealthServiceOptions) {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'core-health' });
     this.#sources = options.sources;
     this.#ingest = options.ingest;
+    this.#vouching = options.vouching;
     this.#now = options.now ?? ((): Date => new Date());
     this.#process = options.process ?? {
       cpuUsage: (previous?: NodeJS.CpuUsage) => process.cpuUsage(previous),
@@ -191,7 +202,12 @@ export class CoreHealthService {
   }
 
   stats(): CoreHealthStats {
-    return { sweeps: this.#sweeps, evaluated: this.#evaluated, failed: this.#failed };
+    return {
+      sweeps: this.#sweeps,
+      evaluated: this.#evaluated,
+      failed: this.#failed,
+      withheld: this.#withheld,
+    };
   }
 
   /**
@@ -306,10 +322,30 @@ export class CoreHealthService {
    */
   async sweep(): Promise<number> {
     this.#sweeps += 1;
-    const sensors = await this.#db.query<{ id: string }>(
-      `SELECT object_id::text AS id FROM sensor_config WHERE type = $1`,
+    const every = await this.#db.query<{
+      id: string;
+      params: Record<string, unknown>;
+      vouched_by: string;
+      vouched_by_user: string | null;
+    }>(
+      `SELECT object_id::text AS id, params, vouched_by, vouched_by_user::text AS vouched_by_user
+       FROM sensor_config WHERE type = $1`,
       [HEALTH_TYPE],
     );
+    // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
+    // go. A withheld one is not read and records nothing: a gap, and Unknown (`A-29`).
+    const withheld = await this.#vouching.refusals(
+      every.map((row) => ({
+        sensorId: Number(row.id),
+        sensorType: HEALTH_TYPE,
+        params: row.params,
+        enclosingProbeId: null,
+        voucher: storedVoucher(row.vouched_by, row.vouched_by_user),
+      })),
+    );
+    await this.#vouching.settle('core-health', withheld);
+    const sensors = every.filter((row) => !withheld.has(Number(row.id)));
+    this.#withheld += every.length - sensors.length;
     if (sensors.length === 0) return 0;
 
     // ISO-8601 on the wire, exactly as a probe's result carries it: these go through

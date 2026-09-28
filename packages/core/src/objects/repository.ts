@@ -1038,6 +1038,25 @@ export class ObjectRepository {
     }));
   }
 
+  /**
+   * Records who vouched for these sensors (`A-29`, migration 059): an account, or the installation.
+   *
+   * Written by the write that passed the check, in its transaction, so a sensor never carries a
+   * voucher that was not checked against what it names now.
+   */
+  async recordVoucher(
+    q: Queryable,
+    sensorIds: readonly ObjectId[],
+    voucher: { kind: 'account'; userId: number } | { kind: 'installation' },
+  ): Promise<void> {
+    if (sensorIds.length === 0) return;
+    await q.query(
+      `UPDATE sensor_config SET vouched_by = $2, vouched_by_user = $3
+       WHERE object_id = ANY($1::bigint[])`,
+      [sensorIds, voucher.kind, voucher.kind === 'account' ? voucher.userId : null],
+    );
+  }
+
   /** One enumeration, feeding both the delete confirmation and the audit payload. */
   async enumerateSubtree(
     q: Queryable,

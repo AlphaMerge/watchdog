@@ -33,6 +33,8 @@ export const SENSOR_STATE_CAUSES = [
   'dependency',
   'parent',
   'probe',
+  // `A-29`: the account that vouched for the sensor may no longer read what it names.
+  'access',
   'simulated',
 ] as const;
 
@@ -236,18 +238,18 @@ export const TRANSITIONS: readonly Transition[] = [
     causes: ['parent', 'dependency', 'schedule', 'user'],
     trigger: 'a pause source became active',
   })),
-  // Layers 3 and 4 of §2 are the only things that produce Unknown, and either can take over
+  // Layers 3, 3a and 4 of §2 are the only things that produce Unknown, and any can take over
   // from *any* state the moment the layer above it is lifted: a resume, a simulated error
   // cleared, a probe returning. The first version of this table enumerated the `from` states by
   // hand and excluded `paused` from both, on the reasoning that pause outranks them — which is
   // true while it is paused and beside the point at the instant it resumes. `M-16`'s property
   // tests reached `paused -> unknown : probe` and then `down -> unknown : scan`, neither of
   // which was here; deriving the entries from the layers rather than listing them is what stops
-  // a third one turning up.
+  // a third one turning up. `access` is layer 3a's (`A-29`), and arrived by the same derivation.
   ...V1_STATES.map((from): Transition => ({
     from,
     to: 'unknown',
-    causes: ['scan', 'probe'],
+    causes: ['scan', 'probe', 'access'],
     trigger: 'whatever was deciding the state was lifted, and there is no current reading',
   })),
   ...V1_STATES.map((from): Transition => ({

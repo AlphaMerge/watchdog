@@ -86,6 +86,11 @@ export interface StateFacts {
   readonly simulatedError: boolean;
   /** False only while the owning probe is unreachable. `R-05` is what will set it. */
   readonly probeReachable: boolean;
+  /**
+   * False only while the account that vouched for this sensor may not read what it names, or is
+   * gone (`A-29`). Set by the core's own evaluators, live, as `probeReachable` is.
+   */
+  readonly vouchedFor: boolean;
   readonly acknowledged: boolean;
   readonly scan: ScanFacts;
   /** `null` when there is nothing to judge — no readings, or no limits configured. */
@@ -102,6 +107,7 @@ export const INITIAL_FACTS: StateFacts = {
   pause: NO_PAUSE,
   simulatedError: false,
   probeReachable: true,
+  vouchedFor: true,
   acknowledged: false,
   scan: { kind: 'none' },
   channel: null,
@@ -125,10 +131,11 @@ export function pauseCause(flags: PauseFlags): SensorStateCause | null {
 /**
  * Whether this state needs a sentence of its own on the sensor.
  *
- * Four that do: a pause, an acknowledgement, a simulated error and a lost probe. The first three
- * are an operator's own words; the fourth is `R-05`'s, and it belongs here for the same reason —
- * a sensor reading "Unknown" with nothing beside it is the thing to avoid, and "the probe
- * carrying this sensor stopped answering" is the whole of what an operator needs to know.
+ * Five that do: a pause, an acknowledgement, a simulated error, a lost probe and a lost voucher.
+ * The first three are an operator's own words; the fourth is `R-05`'s, and it belongs here for the
+ * same reason — a sensor reading "Unknown" with nothing beside it is the thing to avoid, and "the
+ * probe carrying this sensor stopped answering" is the whole of what an operator needs to know.
+ * The fifth is `A-29`'s, and its sentence is also the fix: who has to save the sensor again.
  *
  * A state a *reading* decided already carries the check's own message, and a state that decided
  * itself — Unknown after a resume — has nothing to say beyond that nobody has scanned it yet.
@@ -138,7 +145,8 @@ export function operatorDecided(decision: Decision): boolean {
     decision.state === 'paused' ||
     decision.cause === 'user' ||
     decision.cause === 'simulated' ||
-    decision.cause === 'probe'
+    decision.cause === 'probe' ||
+    decision.cause === 'access'
   );
 }
 
@@ -200,6 +208,12 @@ export function evaluate(
   //    Down would be a claim the system cannot support (WORKFLOW.MD §12). The one alarm comes
   //    from Probe Health.
   if (!facts.probeReachable) return { state: 'unknown', cause: 'probe' };
+
+  // 3a. A sensor the core has stopped evaluating, because the account that vouched for it may no
+  //     longer read what it names (`A-29`). Unknown for the reason a lost probe is: nothing about
+  //     the target has failed, the question stopped being asked — and Down would turn one grant
+  //     edit into an alarm per sensor that account ever wrote.
+  if (!facts.vouchedFor) return { state: 'unknown', cause: 'access' };
 
   // 4. Nothing has been measured since this sensor was created or resumed.
   const query = queryState(facts.scan, policy);
@@ -359,7 +373,7 @@ export function applyResult(
 /**
  * Drops an acknowledgement that the sensor has recovered out of (§2.4).
  *
- * **Only when the reading decided the state.** Layers 1 to 3 short-circuit before the reading is
+ * **Only when the reading decided the state.** Layers 1 to 3a short-circuit before the reading is
  * looked at, and a sensor that reads Unknown because its probe went away has not recovered from
  * anything; clearing the acknowledgement there would un-suppress an outage nobody has fixed.
  *
@@ -371,7 +385,8 @@ export function applyResult(
  */
 export function clearedByRecovery(facts: SensorFacts, decision: Decision): SensorFacts {
   if (!facts.acknowledged) return facts;
-  const decidedByReading = !isPaused(facts.pause) && !facts.simulatedError && facts.probeReachable;
+  const decidedByReading =
+    !isPaused(facts.pause) && !facts.simulatedError && facts.probeReachable && facts.vouchedFor;
   const recovered =
     decidedByReading && decision.state !== 'down' && decision.state !== 'down_acknowledged';
   return recovered ? { ...facts, acknowledged: false, acknowledgedUntil: null } : facts;

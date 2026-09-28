@@ -174,9 +174,19 @@ describe(
         `SELECT column_name FROM information_schema.columns
          WHERE table_name = 'sensor_config' ORDER BY column_name`,
       );
+      // Who vouched for the sensor (`A-29`, 059) is a fact about this sensor's last write, not a
+      // setting — nothing inherits it, and a child has no reason to.
       assert.deepEqual(
         columns.map((row) => row.column_name),
-        ['created_at', 'object_id', 'params', 'type', 'updated_at'],
+        [
+          'created_at',
+          'object_id',
+          'params',
+          'type',
+          'updated_at',
+          'vouched_by',
+          'vouched_by_user',
+        ],
       );
 
       // A freshly created sensor defines nothing of its own.

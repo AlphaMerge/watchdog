@@ -443,6 +443,162 @@ describe(
       }
     });
 
+    it('asks the audit log who vouched for each sensor, and takes `access` back out (059)', async () => {
+      // `A-29` re-checks a sensor's voucher every sweep, and was found in sensors that already
+      // existed — so the backfill has to name the account that last wrote each one's
+      // parameters, and fall back to the installation for anything else.
+      const fresh = await createScratchDatabase('voucher');
+      try {
+        const earlier = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id < 59),
+        );
+        await earlier.up();
+        // 059 and whatever lands after it, so this is still about 059 the day 060 is appended.
+        const since = MIGRATIONS.filter((one) => one.id >= 59);
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensor = async (name: string): Promise<string> => {
+          const id = await insert('sensor', name, device);
+          await q.query(`INSERT INTO sensor_config (object_id, type) VALUES ($1, 'core.factory')`, [
+            id,
+          ]);
+          return id;
+        };
+        const [person] = await q.query<{ id: string }>(
+          `INSERT INTO user_account (login, password_hash, role)
+           VALUES ('operator', 'x', 'readwrite') RETURNING id::text`,
+        );
+        const operator = person?.id ?? assert.fail('no account');
+        const [issued] = await q.query<{ id: string }>(
+          `INSERT INTO api_token (user_id, name, token_hash, prefix)
+           VALUES ($1, 'script', repeat('a', 64), 'ms_') RETURNING id::text`,
+          [operator],
+        );
+        const token = issued?.id ?? assert.fail('no token');
+
+        const written = await sensor('written by an account');
+        const edited = await sensor('created by the system, edited by an account');
+        const renamed = await sensor('created by an account, renamed by the system');
+        const system = await sensor('created by the system');
+        const gone = await sensor('created by an account since deleted');
+        const orphan = await sensor('inside a clone, with no row of its own');
+        const scripted = await sensor('created through a token');
+        const audit = async (
+          id: string,
+          seconds: number,
+          action: string,
+          actor: { kind: string; ref: string },
+          summary: Record<string, unknown> = {},
+        ): Promise<void> => {
+          await q.query(
+            `INSERT INTO audit_log (at, action, object_id, object_kind, actor_kind, actor_ref, summary)
+             VALUES (now() - make_interval(secs => $2), $3, $1, 'sensor', $4, $5, $6)`,
+            [id, 1_000 - seconds, action, actor.kind, actor.ref, JSON.stringify(summary)],
+          );
+        };
+        const theOperator = { kind: 'user', ref: operator };
+        const theSystem = { kind: 'system', ref: 'discovery' };
+        await audit(written, 1, 'object.created', theOperator);
+        await audit(edited, 1, 'object.created', theSystem);
+        await audit(edited, 2, 'object.updated', theOperator, { paramsChanged: ['channels'] });
+        await audit(renamed, 1, 'object.created', theOperator);
+        await audit(renamed, 2, 'object.updated', theSystem, {});
+        await audit(system, 1, 'object.created', theSystem);
+        await audit(gone, 1, 'object.created', { kind: 'user', ref: '9000000' });
+        await audit(scripted, 1, 'object.created', { kind: 'token', ref: token });
+
+        const all = migrator(fresh.db, MIGRATIONS);
+        await all.up();
+        const vouchers = await q.query<{ id: string; by: string; account: string | null }>(
+          `SELECT object_id::text AS id, vouched_by AS by, vouched_by_user::text AS account
+           FROM sensor_config ORDER BY object_id`,
+        );
+        assert.deepEqual(
+          vouchers.map(({ id, by, account }) => [id, by, account]),
+          [
+            [written, 'account', operator],
+            [edited, 'account', operator],
+            // A rename writes no parameters, so the create is still the last word on them.
+            [renamed, 'account', operator],
+            [system, 'installation', null],
+            // Nobody to vouch: the installation, the permissive reading the migration states.
+            [gone, 'installation', null],
+            [orphan, 'installation', null],
+            // A token writes as its owner, and vouches as its owner.
+            [scripted, 'account', operator],
+          ],
+        );
+
+        // An account deleted since goes NULL, and the sensor stays an account's — withheld.
+        await q.query('DELETE FROM user_account WHERE id = $1', [operator]);
+        const [deleted] = await q.query<{ by: string; account: string | null }>(
+          `SELECT vouched_by AS by, vouched_by_user::text AS account
+           FROM sensor_config WHERE object_id = $1`,
+          [written],
+        );
+        assert.deepEqual(deleted, { by: 'account', account: null });
+
+        // Back: a row that says `access` survives as `scan`, with its state and its message.
+        await q.query(
+          `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
+           VALUES (now(), $1, 'unknown', 'up', 'access', 'withheld')`,
+          [written],
+        );
+        await q.query(
+          `UPDATE sensor_runtime SET state = 'unknown', cause = 'access', message = 'withheld'
+           WHERE object_id = $1`,
+          [written],
+        );
+        await all.down(since.length);
+        const [history] = await q.query<{ cause: string; message: string }>(
+          `SELECT cause::text AS cause, message FROM sensor_state WHERE sensor_id = $1`,
+          [written],
+        );
+        assert.deepEqual(history, { cause: 'scan', message: 'withheld' });
+        const [runtime] = await q.query<{ cause: string; message: string; initial: string }>(
+          `SELECT cause::text AS cause, message,
+                  (SELECT column_default FROM information_schema.columns
+                   WHERE table_name = 'sensor_runtime' AND column_name = 'cause') AS initial
+           FROM sensor_runtime WHERE object_id = $1`,
+          [written],
+        );
+        assert.deepEqual(runtime, {
+          cause: 'scan',
+          message: 'withheld',
+          initial: "'scan'::sensor_state_cause",
+        });
+        const labels = await q.query<{ label: string }>(
+          `SELECT e.enumlabel AS label FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+           WHERE t.typname = 'sensor_state_cause' ORDER BY e.enumsortorder`,
+        );
+        assert.ok(!labels.some((one) => one.label === 'access'));
+        const columns = await q.query<{ name: string }>(
+          `SELECT column_name AS name FROM information_schema.columns
+           WHERE table_name = 'sensor_config' AND column_name LIKE 'vouched%'`,
+        );
+        assert.deepEqual(columns, []);
+
+        // And forward again.
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          since.map((one) => one.id),
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {
