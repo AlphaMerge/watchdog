@@ -479,6 +479,7 @@ Core Health and probe reconnection → verify a sample of sensors resumed.
 | Disk fills                  | Housekeeping escalates, oldest raw data is evicted first, a critical alarm fires before ingestion stops       |
 | Clock jumps                 | Timing wheel resynchronises against monotonic time; samples keep wall-clock timestamps                        |
 | A probe's clock is wrong    | A result no clock could have stamped, more than 15 minutes ahead of the core or older than anything is kept, is refused whole, readings and state together. Counted on that probe's Probe Health, which warns, and logged once a batch (`P-99`, `P-231`). Never moved to a time nobody measured it. A clock behind by less is not yet detected (`P-232`) |
+| A probe reports on work it was not given | Refused where it arrives, and nothing is written: a result for a sensor not under it (an `error` one included, so no sensor turns Down on another probe's word), an answer to a query put to another probe, a message about another probe's discovery run. Acknowledged all the same, so the probe does not resend it. Counted on that probe's Probe Health, which warns only for work it never had: a sensor moved away from it or deleted while its spool still held results is the probe lagging a change, and is counted without a warning (`P-228`) |
 
 The last column is the actual specification. A monitoring system that fails silently is worse
 than none, because it is trusted.

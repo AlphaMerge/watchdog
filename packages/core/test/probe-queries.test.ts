@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { CheckResult, ProbeQuery, SensorAssignment } from '@ms/shared';
 import { ProbeQueryService, type ProbeQuerySender } from '../src/probes/queries.js';
+import { ProbeRefusals } from '../src/probes/refusals.js';
 import { silent } from './support/tree.js';
 
 /**
@@ -99,7 +100,9 @@ function fakeTimer(): {
   };
 }
 
-function build(overrides: { maxInFlight?: number; maxInFlightPerProbe?: number } = {}): {
+function build(
+  overrides: { maxInFlight?: number; maxInFlightPerProbe?: number; refusals?: ProbeRefusals } = {},
+): {
   service: ProbeQueryService;
   sender: StubSender;
   clock: ReturnType<typeof fakeTimer>;
@@ -131,7 +134,7 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
 
     const queryId = sender.asked[0];
     assert.ok(queryId !== undefined, 'nothing was sent');
-    service.deliver({ queryId, result: RESULT });
+    service.deliver({ queryId, result: RESULT }, 1);
 
     const outcome = await waiting;
     assert.equal(outcome.kind, 'ok');
@@ -153,8 +156,8 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.notEqual(a, b, 'two queries must not share an id');
 
     // Answered out of order on purpose.
-    service.deliver({ queryId: b, result: { ...RESULT, message: 'second' } });
-    service.deliver({ queryId: a, result: { ...RESULT, message: 'first' } });
+    service.deliver({ queryId: b, result: { ...RESULT, message: 'second' } }, 2);
+    service.deliver({ queryId: a, result: { ...RESULT, message: 'first' } }, 1);
 
     const [one, two] = await Promise.all([first, second]);
     assert.ok(one.kind === 'ok' && two.kind === 'ok');
@@ -162,12 +165,35 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.equal(two.result.message, 'second');
   });
 
+  it('refuses an answer from any probe but the one asked, and waits for the real one', async () => {
+    // `P-228`. The probe a query was put to was recorded and never compared, so any connected
+    // probe holding the id could settle it with a reading of its choosing — the answer an
+    // operator was waiting on. A GID with no probe object behind it was asked nothing either.
+    const refusals = new ProbeRefusals();
+    const { service, sender } = build({ refusals });
+    const waiting = service.ask(1, QUERY);
+    await Promise.resolve();
+    const queryId = sender.asked[0] ?? '';
+
+    service.deliver({ queryId, result: { ...RESULT, message: 'forged' } }, 2);
+    service.deliver({ queryId, result: { ...RESULT, message: 'forged' } }, null);
+    assert.equal(service.stats().answered, 0, 'neither settled it');
+    assert.equal(service.stats().foreign, 2);
+    assert.equal(service.stats().inFlight, 1, 'the caller is still waiting');
+    assert.deepEqual(refusals.countsFor(2), { refused: 1, foreignRecently: 1 });
+
+    service.deliver({ queryId, result: RESULT }, 1);
+    const outcome = await waiting;
+    assert.ok(outcome.kind === 'ok');
+    assert.equal(outcome.result.message, '4/4 replies', 'and got the answer from the probe asked');
+  });
+
   it('passes a probe’s own refusal through rather than calling it a success', async () => {
     const { service, sender } = build();
     const waiting = service.ask(1, QUERY);
     await Promise.resolve();
     const queryId = sender.asked[0] ?? '';
-    service.deliver({ queryId, failure: 'busy', message: 'the probe is already running one' });
+    service.deliver({ queryId, failure: 'busy', message: 'the probe is already running one' }, 1);
 
     const outcome = await waiting;
     assert.ok(outcome.kind === 'failed');
@@ -181,7 +207,7 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     const { service, sender } = build();
     const waiting = service.ask(1, QUERY);
     await Promise.resolve();
-    service.deliver({ queryId: sender.asked[0] ?? '' });
+    service.deliver({ queryId: sender.asked[0] ?? '' }, 1);
 
     const outcome = await waiting;
     assert.ok(outcome.kind === 'failed');
@@ -236,7 +262,7 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     const { service, sender, clock } = build();
     const waiting = service.ask(1, QUERY);
     await Promise.resolve();
-    service.deliver({ queryId: sender.asked[0] ?? '', result: RESULT });
+    service.deliver({ queryId: sender.asked[0] ?? '', result: RESULT }, 1);
     assert.ok((await waiting).kind === 'ok');
 
     assert.equal(clock.pending(), 0, 'the deadline should have been cleared');
@@ -255,7 +281,7 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
 
     clock.fire();
     assert.ok((await waiting).kind === 'failed');
-    service.deliver({ queryId, result: RESULT });
+    service.deliver({ queryId, result: RESULT }, 1);
     assert.equal(service.stats().answered, 0, 'a late answer settles nobody');
   });
 
@@ -349,12 +375,12 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.equal(sender.asked.length, 1, 'the refused query never reached a probe');
     assert.ok((await refusal).kind === 'failed');
 
-    service.deliver({ queryId: sender.asked[0] ?? '', result: RESULT });
+    service.deliver({ queryId: sender.asked[0] ?? '', result: RESULT }, 1);
     assert.ok((await first).kind === 'ok');
 
     const second = service.ask(1, QUERY);
     await Promise.resolve();
-    service.deliver({ queryId: sender.asked[1] ?? '', result: RESULT });
+    service.deliver({ queryId: sender.asked[1] ?? '', result: RESULT }, 1);
     assert.ok((await second).kind === 'ok');
   });
 

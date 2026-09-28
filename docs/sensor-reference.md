@@ -1026,6 +1026,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `checksOutstanding` | Checks in flight | checks | — |
 | `checkStalled` | Oldest check waiting | s | — |
 | `protocol` | Protocol version skew | — | lookup `ms.probe.protocol` |
+| `reportsRefused` | Reports refused | reports | 64-bit counter → rate |
+| `reportsForeign` | Reports on work never given to it (5 min) | reports | default limits: warn above 0.5 |
 | `schedulerLag` | Scheduler lag (p95) | ms | default limits: warn above 1000, error above 5000 |
 | `skippedTicks` | Ticks skipped | ticks | 64-bit counter → rate |
 | `poolUsage` | Worker pool in use | % | default limits: warn above 80, error above 95 |

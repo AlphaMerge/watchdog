@@ -300,6 +300,51 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['resultsPastDated'], null);
     });
 
+    it('carries what the core refused from this probe, by the probe object it owns', () => {
+      // `P-228`. By object rather than GID because that is what ownership is decided against,
+      // and what a warning has to name for an operator to find the probe.
+      const asked: number[] = [];
+      const { reading, message } = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link: () => connected(),
+          refusals: (probeObjectId) => {
+            asked.push(probeObjectId);
+            return { refused: 9, foreignRecently: 2 };
+          },
+        },
+        ingest: () => Promise.resolve(),
+      }).read(probeId);
+      assert.deepEqual(asked, [probeId]);
+      assert.equal(reading['reportsRefused'], 9);
+      assert.equal(reading['reportsForeign'], 2);
+      assert.match(message, /2 reports on work never given to it in the last 5 minutes/u);
+    });
+
+    it('says nothing about refusals when none was foreign, however many were refused', () => {
+      // A probe draining its spool after a move has thousands refused and nothing wrong with it.
+      const { reading, message } = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link: () => connected(),
+          refusals: () => ({ refused: 5_000, foreignRecently: 0 }),
+        },
+        ingest: () => Promise.resolve(),
+      }).read(probeId);
+      assert.equal(reading['reportsForeign'], 0, 'a count, not a gap');
+      assert.doesNotMatch(message, /never given/u);
+    });
+
+    it('gaps the refusals on a core that does not count them, rather than reading zero', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['reportsRefused'], null);
+      assert.equal(reading['reportsForeign'], null);
+    });
+
     it('turns the probe Down when its worker pool has given up', () => {
       // **The alarm for a probe that is up and monitoring nothing** (`P-62`). Every other channel
       // reads like a quiet night: the link is connected, `poolUsage` is 0%, nothing is deferred or

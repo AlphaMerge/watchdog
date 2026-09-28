@@ -69,6 +69,31 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Protocol version skew',
     lookup: 'ms.probe.protocol',
   },
+  // **What the core refused from this probe** (`P-228`). A probe may report on the sensors under
+  // it, answer the queries put to it and progress the discovery runs dispatched to it, and the
+  // core now refuses anything else where it arrives. Both are the core's own numbers, like the
+  // link's, so they read on a probe of any version.
+  //
+  // Every refusal, with no limit: most are ordinary. A sensor moved to another probe, or deleted,
+  // while this one's spool still held results for it is the probe lagging a change the core has
+  // already made, and a warning on it would turn every move into an alarm on the probe it moved
+  // away from.
+  { key: 'reportsRefused', name: 'Reports refused', unit: 'reports', counter: { bits: 64 } },
+  // The ones no correct probe sends: a sensor that was never under it, a query put to another
+  // probe, another probe's discovery run. **A count over the last five minutes, not a counter**,
+  // because a rate needs the reading before it, and the first reading after a core restart or a
+  // reconnect has none — which is exactly when a probe that should not be doing this would. It
+  // falls back to zero five minutes after the last one, which is what clears the warning.
+  {
+    key: 'reportsForeign',
+    name: 'Reports on work never given to it (5 min)',
+    unit: 'reports',
+    limits: {
+      upperWarning: 0.5,
+      warningMessage:
+        'this probe reported on sensors, queries or discovery runs that were never given to it',
+    },
+  },
   // **Only the wheel can measure this**, because only it knows the instant each tick should have
   // run at (`P-01`). p95 rather than the mean: a scheduler is late in bursts.
   {

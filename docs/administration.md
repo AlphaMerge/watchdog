@@ -338,6 +338,8 @@ alarm.
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
+| `reportsRefused` | Everything the core refused from this probe because it was not the probe's to report: a result for a sensor not under it, an answer to a query put to another probe, a message about another probe's discovery run. A counter with no limit, because most refusals are ordinary — a probe whose spool still holds results for sensors that were moved away from it or deleted. See [a probe reporting on work it was not given](#a-probe-reporting-on-work-it-was-not-given) |
+| `reportsForeign` | **Any value above zero is a warning.** The part of the above no correct probe sends: work that was never this probe's. A count over the last five minutes, so it sees the first report after a restart or a reconnect and clears five minutes after the last one |
 
 These thresholds ship as **defaults, not policy**. They are written once when the channel is
 created and never again — change or clear one and it is yours from then on, because a default
@@ -366,6 +368,41 @@ The bound behind is deliberately that long. A probe's spool is bounded by size, 
 probe cut off for a month replays a month. Past the raw retention, its readings still fill the
 rollup tiers where they are empty, and its states still count towards uptime. A shorter bound
 would throw that away at the door.
+
+### A probe reporting on work it was not given
+
+A probe may report on the sensors under its own probe object, answer the queries put to it, and
+progress the discovery runs dispatched to it. The core refuses anything else where it arrives,
+and writes nothing (`P-228`). Before that, any approved probe could store readings to, declare
+channels on and turn Down any sensor in the installation, answer another probe's query, and plant
+hosts in — and finish, and so provision — another probe's discovery run.
+
+| What was refused | Counted as | Why |
+| --- | --- | --- |
+| A result for a sensor that no longer exists | `reportsRefused` | A spool draining after a delete. Ordinary |
+| A result for a sensor that was once under this probe | `reportsRefused` | The sensor, its device or a group above it was moved to another probe while this one's spool still held results. Ordinary, and never a warning: an administrator moving sensors must not raise an alarm on the probe they moved them from |
+| A result for a sensor that was never under this probe, or for one the core evaluates itself (Probe Health, Core Health, a Sensor Factory) | `reportsForeign` as well | No correct probe sends one |
+| An answer to a query put to another probe | `reportsForeign` as well | Likewise. The caller keeps waiting for the real answer |
+| A message about a discovery run dispatched to another probe | `reportsForeign` as well | Likewise |
+
+**Whether a sensor was once under a probe is read from the audit log**: every move records the
+probe it left, in the move's own transaction, and the core follows a sensor's history back
+through each move of it or of anything above it. So it depends on the audit retention
+(`retention.auditDays`, 730 days by default). A spool older than the retention would read as
+foreign — far longer than any spool, which is bounded by size.
+
+**The results are refused, not recovered.** Ownership is decided when a result arrives, not when
+it was measured, so what a probe measured before a sensor was moved away from it is not kept.
+The gap is one spool's length on the moved sensors, and the new probe fills from the move on.
+
+**When `reportsForeign` warns**, the probe is sending what it was never given. The log has one
+line a batch, `a probe reported on sensors that were never under it; refused`, naming the GID,
+the probe object and up to twenty of the sensor ids. The usual causes are a probe host restored
+from another probe's backup, or two probe objects whose GIDs were swapped when one was re-pointed.
+Neither is fixed on the core: find the host, and re-enrol it if its identity is not its own.
+
+A probe cannot enrol under a name the core reports its own results under (`factory`,
+`core-health`, `probe-health`). One that offers one is given a fresh identity.
 
 ### A service at its memory ceiling
 

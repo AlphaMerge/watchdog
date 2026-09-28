@@ -90,6 +90,9 @@ import { loadLookups } from './lookups/loader.js';
 import { loadDeviceTemplates } from './device-templates/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
 import { ResultCacheInvalidator } from './ingestion/invalidation.js';
+import { SensorOwnership } from './ingestion/ownership.js';
+import { IN_PROCESS_SOURCE } from './ingestion/sources.js';
+import { ProbeRefusals } from './probes/refusals.js';
 import { Ingestor } from './ingestion/ingestor.js';
 import { IngestionService, maxResultAgeMs } from './ingestion/service.js';
 import { HistoryService } from './timeseries/history.js';
@@ -431,7 +434,20 @@ async function serve(): Promise<void> {
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.
   const triggerSync = new TriggerSync({ engine: alarms, logger });
-  const cacheInvalidator = new ResultCacheInvalidator({ channels, sensors: states, logger });
+  // Which probe may report which sensor (`P-228`), and what was refused from each. Built here
+  // because the invalidator below is what keeps the first honest across a move or a delete, and
+  // the second is read by ingestion, queries, discovery and Probe Health alike.
+  const ownership = new SensorOwnership({
+    coreEvaluated: (sensorType) =>
+      catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
+  });
+  const refusals = new ProbeRefusals();
+  const cacheInvalidator = new ResultCacheInvalidator({
+    channels,
+    sensors: states,
+    owners: ownership,
+    logger,
+  });
 
   // What turns a schedule into `sensor_runtime.paused_by_schedule` (M-09). It rides the audit
   // sink for the same reason the config push does — assigning a schedule, editing one and
@@ -605,7 +621,7 @@ async function serve(): Promise<void> {
     logger,
     vouching,
     ingest: async (results) => {
-      await ingestion.acceptResults('factory', {
+      await ingestion.acceptResults(IN_PROCESS_SOURCE.factory, {
         type: 'results',
         batchId: `factory-${String(Date.now())}`,
         results: [...results],
@@ -815,6 +831,7 @@ async function serve(): Promise<void> {
     onFinished: async (runId) => {
       await rediscoveryRef?.runFinished(runId);
     },
+    refusals,
   });
 
   // What a probe should be scanning (`R-04`), built here rather than inline in the endpoint so
@@ -839,6 +856,7 @@ async function serve(): Promise<void> {
   // honest answer rather than a promise nobody can keep.
   const probeQueries = new ProbeQueryService({
     logger,
+    refusals,
     sender: {
       sendQuery: (probeObjectId, message) =>
         probeEndpointRef?.sendQuery(probeObjectId, message) ?? { kind: 'offline' },
@@ -1143,6 +1161,8 @@ async function serve(): Promise<void> {
     // spools cannot queue everyone else's live results behind them (R-03).
     pacer: new ReplayPacer({ config: config.ingestion.replay, logger }),
     resolver: channels,
+    ownership,
+    refusals,
     // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
     // own transaction, so the two can never disagree about what happened.
     states,
@@ -1255,7 +1275,7 @@ async function serve(): Promise<void> {
       ...(v2.reporting === undefined ? {} : { reports: v2.reporting.stats }),
     },
     ingest: async (results) => {
-      await ingestion.acceptResults('core-health', {
+      await ingestion.acceptResults(IN_PROCESS_SOURCE.coreHealth, {
         type: 'results',
         batchId: `core-health-${String(Date.now())}`,
         results: [...results],
@@ -1285,10 +1305,11 @@ async function serve(): Promise<void> {
     sources: {
       link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
       timeRefusals: (gid) => ingestion.timeRefusals(gid),
+      refusals: (probeObjectId) => refusals.countsFor(probeObjectId),
     },
     delivery: deliveryWatch,
     ingest: async (results) => {
-      await ingestion.acceptResults('probe-health', {
+      await ingestion.acceptResults(IN_PROCESS_SOURCE.probeHealth, {
         type: 'results',
         batchId: `probe-health-${String(Date.now())}`,
         results: [...results],

@@ -38,6 +38,11 @@ export interface ProbeHealthSources {
    * on a build without ingestion, and then both channels gap.
    */
   timeRefusals?: (gid: string) => TimeRefusals;
+  /**
+   * What the core refused from this probe (`P-228`), from `ProbeRefusals`. Absent on a build
+   * that does not count them, and then both channels gap rather than read a confident zero.
+   */
+  refusals?: (probeObjectId: number) => { refused: number; foreignRecently: number };
 }
 
 export interface ProbeHealthServiceOptions {
@@ -147,6 +152,7 @@ export class ProbeHealthService {
     // Also the core's, and for the same reason (`P-231`): a probe cannot see that its own clock
     // is wrong, only the core it is compared against can.
     const refused = this.#sources.timeRefusals?.(link.gid) ?? null;
+    const refusals = this.#sources.refusals?.(probeObjectId);
 
     const reading: ProbeHealthReading = {
       ...blank(),
@@ -162,6 +168,8 @@ export class ProbeHealthService {
       // A skew of `unknown` gaps rather than taking a code: a lookup maps a reading to a state
       // and has no Unknown to map to, so the honest answer is no reading.
       protocol: skewCode(skew.kind),
+      reportsRefused: refusals?.refused ?? null,
+      reportsForeign: refusals?.foreignRecently ?? null,
       schedulerLag: health?.schedulerLagMs?.p95 ?? null,
       poolUsage: poolUsage(health?.poolBusy, health?.poolSize),
       queued: health?.queued ?? null,
@@ -433,6 +441,15 @@ function describe(
       ? 'connected'
       : `connected, ${String(scheduled)} sensors scheduled`,
   );
+  // Before the probe's own numbers, because it is the core's and reads on a probe of any version
+  // — and because it is the one part of this sentence that is about trust rather than load.
+  const foreign = reading['reportsForeign'];
+  if (foreign !== null && foreign !== undefined && foreign > 0) {
+    parts.push(
+      `${String(foreign)} report${foreign === 1 ? '' : 's'} on work never given to it in the ` +
+        'last 5 minutes, refused',
+    );
+  }
 
   if (!reporting) {
     // **Said in words, never as an absent channel.** `R-06`'s rule: a probe that connects and

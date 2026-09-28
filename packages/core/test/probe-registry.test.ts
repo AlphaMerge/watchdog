@@ -3,6 +3,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import { ProbeRegistry } from '../src/probes/registry.js';
+import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -159,6 +160,22 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const decision = await registry.admit(hello({ gid: 'from-a-restored-backup' }));
       assert.ok(decision.kind === 'pending');
       assert.equal(decision.gid, 'from-a-restored-backup');
+    });
+
+    it('will not enrol a probe under a name the core reports its own results under', async () => {
+      // `P-228`. The Sensor Factory, Core Health and Probe Health report through the trusted
+      // path under these names. A probe called `factory` could not borrow that trust — a probe's
+      // batch goes through the ownership gate whatever it is called — but it would read as the
+      // factory in every log line and share its pacing. It is enrolled under a fresh identity,
+      // which the welcome carries and the probe keeps.
+      for (const reserved of IN_PROCESS_SOURCES) {
+        const decision = await registry.admit(hello({ gid: reserved }));
+        assert.ok(decision.kind === 'pending');
+        assert.notEqual(decision.gid, reserved);
+        assert.match(decision.gid, /^[0-9a-f]{32}$/u, 'minted, as for a probe that offered none');
+      }
+      const listed = await registry.list();
+      assert.ok(!listed.some((one) => IN_PROCESS_SOURCES.has(one.gid)), 'and none is recorded');
     });
 
     it('accepts any key when the installation has set none', async () => {

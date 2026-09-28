@@ -15,7 +15,10 @@ import type { StateDecisions } from '../state/runtime.js';
 import type { SensorResult, SensorStateService, StateStats } from '../state/service.js';
 import { ChannelResolver } from './channels.js';
 import type { Ingestor, SampleRow } from './ingestor.js';
+import { SensorOwnership, type Admitted } from './ownership.js';
 import type { ReplayPacer } from './replay-pacer.js';
+import type { ProbeRefusals } from '../probes/refusals.js';
+import type { ProbeOrigin } from '../transport/probe-endpoint.js';
 
 export type ResultsMessage = Extract<ProbeToCoreMessage, { type: 'results' }>;
 
@@ -43,6 +46,13 @@ export interface IngestionServiceOptions {
   resolver?: ChannelResolver;
   /** Absent leaves catch-up unpaced, which is how it behaved before R-03. */
   pacer?: ReplayPacer;
+  /**
+   * Which probe may report which sensor (`P-228`). Shared with `ResultCacheInvalidator`, which
+   * clears it on a move or a delete; a fresh one, never cleared, is only right for a test.
+   */
+  ownership?: SensorOwnership;
+  /** Where a refused result is counted per probe, for Probe Health (`P-228`). */
+  refusals?: ProbeRefusals;
   /**
    * The state machine (`M-02`). Absent stores readings and decides nothing, which is what a
    * throughput benchmark wants and no running system does.
@@ -129,6 +139,16 @@ export interface ResultStats {
   /** Readings for sensors that no longer exist — a spool replayed after a deletion. */
   discardedUnknownSensor: number;
   /**
+   * A probe's results refused because the sensor is not under it (`P-228`), by why. `unknown`
+   * is a sensor that does not exist (its readings are in `discardedUnknownSensor` too), `moved`
+   * one that was under this probe once, and `foreign` one that never was.
+   */
+  refusedUnknown: number;
+  refusedMoved: number;
+  refusedForeign: number;
+  /** Sensors whose owning probe is cached. */
+  cachedOwners: number;
+  /**
    * Readings thrown away by a channel's spike filter or because they were not numbers (`M-07`).
    *
    * Counted, never silent: a filter that is quietly eating a third of a channel's data looks
@@ -177,6 +197,8 @@ export class IngestionService {
   readonly #ingestor: Ingestor;
   readonly #resolver: ChannelResolver;
   readonly #pacer: ReplayPacer | undefined;
+  readonly #ownership: SensorOwnership;
+  readonly #refusals: ProbeRefusals | undefined;
   readonly #states: SensorStateService | undefined;
   readonly #maxFutureSkewMs: number;
   readonly #maxResultAgeMs: number;
@@ -197,6 +219,9 @@ export class IngestionService {
   readonly #windowClock: { monotonicMs?: () => number };
   #discardedInvalidSentAt = 0;
   #discardedUnknownSensor = 0;
+  #refusedUnknown = 0;
+  #refusedMoved = 0;
+  #refusedForeign = 0;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
@@ -213,6 +238,8 @@ export class IngestionService {
     this.#ingestor = options.ingestor;
     this.#resolver = options.resolver ?? new ChannelResolver({ logger: options.logger });
     this.#pacer = options.pacer;
+    this.#ownership = options.ownership ?? new SensorOwnership();
+    this.#refusals = options.refusals;
     this.#states = options.states;
     this.#maxFutureSkewMs = options.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS;
     this.#maxResultAgeMs = options.maxResultAgeMs ?? DEFAULT_MAX_RESULT_AGE_MS;
@@ -231,6 +258,10 @@ export class IngestionService {
       discardedFutureTime: this.#discardedFutureTime,
       discardedPastTime: this.#discardedPastTime,
       discardedUnknownSensor: this.#discardedUnknownSensor,
+      refusedUnknown: this.#refusedUnknown,
+      refusedMoved: this.#refusedMoved,
+      refusedForeign: this.#refusedForeign,
+      cachedOwners: this.#ownership.cached,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
       counterFirst: this.#counterFirst,
@@ -256,13 +287,124 @@ export class IngestionService {
     return refusals;
   }
 
-  /** Accepts a batch and returns the message to send back. Never throws. */
+  /**
+   * Accepts a batch from one of the core's own producers and returns the message to send back.
+   * Never throws.
+   *
+   * **Trusted: nothing here asks whether the source may report these sensors.** The callers are
+   * in this process — Core Health, Probe Health, a Sensor Factory (`IN_PROCESS_SOURCE`) — and
+   * compute sensors no probe runs. A probe's batch comes through `acceptProbeResults`.
+   */
   async acceptResults(source: string, message: ResultsMessage): Promise<CoreToProbeMessage> {
+    return this.#accept(source, message, message.results);
+  }
+
+  /**
+   * Accepts a probe's batch: what it may report is stored, and the rest refused (`P-228`).
+   * Never throws.
+   *
+   * **Before `P-228` any probe could write any sensor.** The only check on the way in was that
+   * the id named a sensor, so a probe could declare channels on, store readings to, and — with
+   * an `error` outcome and no readings at all — turn Down and alarm on a sensor under a probe it
+   * had never been given. Now a probe may report the sensors under its own probe object, and
+   * nothing else.
+   *
+   * **The gate is in front of both halves, not in the channel resolver.** The resolver reads
+   * `sensor_config` only for a channel it has not cached, and a failed check has no channels at
+   * all and never reaches it, while the state machine takes every result. A gate there would
+   * have let the most damaging case through.
+   *
+   * **Refused results are acknowledged, not refused back.** A `results-nack` asks the probe to
+   * send the batch again, and it would, for ever: nothing about the batch will change. The ack
+   * counts only what was stored.
+   */
+  async acceptProbeResults(
+    origin: ProbeOrigin,
+    message: ResultsMessage,
+  ): Promise<CoreToProbeMessage> {
+    let admitted: Admitted;
+    try {
+      admitted = await this.#ownership.admit(this.#db, origin.probeObjectId, message.results);
+    } catch (error: unknown) {
+      this.#resultsReceived += message.results.length;
+      this.#logger.error(
+        { err: error, source: origin.gid },
+        'could not check which sensors a probe may report',
+      );
+      return {
+        type: 'results-nack',
+        batchId: message.batchId,
+        reason: 'storage-error',
+        retryAfterMs: 1_000,
+      };
+    }
+
+    const refused = this.#refuse(origin, admitted);
+    if (refused > 0 && admitted.results.length === 0) {
+      // Nothing left to store. Answered here rather than sent through the ingestor as an empty
+      // batch, so a probe whose whole spool is for sensors that moved away drains it at once
+      // instead of queueing behind every live batch to be told that nothing happened.
+      this.#resultsReceived += message.results.length;
+      return { type: 'results-ack', batchId: message.batchId, storedSamples: 0, retryAfterMs: 0 };
+    }
+    return this.#accept(origin.gid, message, admitted.results);
+  }
+
+  /** Counts what `admit` refused, here and per probe. Returns how many results that was. */
+  #refuse(origin: ProbeOrigin, admitted: Admitted): number {
+    const { unknown, moved, foreign } = admitted.refused;
+    const total = unknown.length + moved.length + foreign.length;
+    if (total === 0) return 0;
+
+    // Received, even though refused: the counter is what arrived, and the discards below say
+    // what became of it.
+    for (const list of [unknown, moved, foreign]) {
+      for (const result of list) this.#readingsReceived += result.channels.length;
+    }
+    for (const result of unknown) this.#discardedUnknownSensor += result.channels.length;
+    this.#refusedUnknown += unknown.length;
+    this.#refusedMoved += moved.length;
+    this.#refusedForeign += foreign.length;
+    this.#refusals?.refused(origin.probeObjectId, unknown.length + moved.length);
+    this.#refusals?.foreign(origin.probeObjectId, foreign.length);
+
+    if (foreign.length > 0) {
+      // Warned once a batch, not once a result: a probe replaying an hour of spool for sensors it
+      // never had would otherwise write thousands of identical lines.
+      this.#logger.warn(
+        {
+          source: origin.gid,
+          probeObjectId: origin.probeObjectId,
+          results: foreign.length,
+          sensorIds: [...new Set(foreign.map((one) => one.sensorId))].slice(0, 20),
+        },
+        'a probe reported on sensors that were never under it; refused',
+      );
+    }
+    if (unknown.length + moved.length > 0) {
+      this.#logger.debug(
+        {
+          source: origin.gid,
+          probeObjectId: origin.probeObjectId,
+          unknown: unknown.length,
+          moved: moved.length,
+        },
+        'refused results for sensors deleted or moved away from this probe',
+      );
+    }
+    return total;
+  }
+
+  async #accept(
+    source: string,
+    message: ResultsMessage,
+    admitted: readonly CheckResult[],
+  ): Promise<CoreToProbeMessage> {
     this.#resultsReceived += message.results.length;
 
     let prepared: Prepared;
     try {
-      prepared = await this.#prepare(source, message.results);
+      prepared = await this.#prepare(source, admitted);
     } catch (error: unknown) {
       this.#logger.error({ err: error, source }, 'could not prepare a results batch for storage');
       return {

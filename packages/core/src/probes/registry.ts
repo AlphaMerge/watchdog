@@ -18,6 +18,7 @@ import type {
   ProbeIdentity,
   ProbeTrustAudit,
 } from '../objects/audit.js';
+import { IN_PROCESS_SOURCES } from '../ingestion/sources.js';
 
 /**
  * Which probes this installation trusts (`R-01`).
@@ -325,7 +326,20 @@ export class ProbeRegistry {
     // recorded under the GID it offered rather than a fresh one, because that is the identity
     // it will keep presenting and inventing a second one would put two rows in the queue for
     // one machine.
-    const gid = hello.gid === '' ? randomBytes(16).toString('hex') : hello.gid;
+    //
+    // **Except a name the core's own producers report under** (`P-228`): a probe called `factory`
+    // would read as the Sensor Factory in every log line and share its replay pacing. It could
+    // not borrow the factory's trust — a probe's results go through `acceptProbeResults` whatever
+    // it is called — so this is about what an operator reads, and a fresh identity costs the
+    // probe nothing: the welcome carries it, and the probe keeps whatever it is given.
+    const reserved = IN_PROCESS_SOURCES.has(hello.gid);
+    if (reserved) {
+      this.#logger.warn(
+        { offered: hello.gid, remoteAddress: hello.remoteAddress },
+        'a probe offered an identity the core reserves for itself; enrolling it under a new one',
+      );
+    }
+    const gid = hello.gid === '' || reserved ? randomBytes(16).toString('hex') : hello.gid;
     const now = this.#now();
     await this.#db.query(
       `INSERT INTO probe_registration

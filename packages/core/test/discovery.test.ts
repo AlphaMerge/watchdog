@@ -3,6 +3,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DiscoveryService, type DispatchMessage } from '../src/discovery/service.js';
 import { DiscoveryError } from '../src/discovery/errors.js';
+import { ProbeRefusals } from '../src/probes/refusals.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -172,6 +173,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('stores hosts and advances the cursor', async () => {
       const run = await start();
       await discovery.progress(
+        probeId,
         run.id,
         3,
         [
@@ -195,6 +197,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // operator reading the list for gaps needs.
       const run = await start('10.0.0.0/24');
       await discovery.progress(
+        probeId,
         run.id,
         20,
         [
@@ -214,8 +217,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A resume re-sweeps a few addresses after a crash. If that double-counted, every restart
       // would inflate the summary D-08 persists.
       const run = await start();
-      await discovery.progress(run.id, 3, [{ address: '10.0.0.1', rttMs: 0.4 }], 0);
-      await discovery.progress(run.id, 4, [{ address: '10.0.0.1', rttMs: 0.9 }], 0);
+      await discovery.progress(probeId, run.id, 3, [{ address: '10.0.0.1', rttMs: 0.4 }], 0);
+      await discovery.progress(probeId, run.id, 4, [{ address: '10.0.0.1', rttMs: 0.9 }], 0);
 
       const after = await mustGet(run.id);
       assert.equal(after.found, 1, 'the same host twice is one host');
@@ -226,16 +229,16 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A probe that resumed from an older position and reported it would otherwise make the
       // run sweep the range twice.
       const run = await start();
-      await discovery.progress(run.id, 5, [], 0);
-      await discovery.progress(run.id, 2, [], 0);
+      await discovery.progress(probeId, run.id, 5, [], 0);
+      await discovery.progress(probeId, run.id, 2, [], 0);
       assert.equal((await mustGet(run.id)).cursor, 5);
     });
 
     it('counts addresses that could not be attempted', async () => {
       // A firewalled network and an empty one look identical without this.
       const run = await start();
-      await discovery.progress(run.id, 2, [], 2);
-      await discovery.progress(run.id, 4, [], 1);
+      await discovery.progress(probeId, run.id, 2, [], 2);
+      await discovery.progress(probeId, run.id, 4, [], 1);
       assert.equal((await mustGet(run.id)).failed, 3);
     });
 
@@ -244,7 +247,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // life, or a cancel would look like it did nothing.
       const run = await start();
       await discovery.cancel(run.id, testActor);
-      await discovery.progress(run.id, 6, [], 0);
+      await discovery.progress(probeId, run.id, 6, [], 0);
       const after = await mustGet(run.id);
       assert.equal(after.status, 'cancelled');
       assert.equal(after.cursor, 0, 'the cursor did not move');
@@ -254,7 +257,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
   describe('finishing', () => {
     it('records a completed run', async () => {
       const run = await start();
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       const after = await mustGet(run.id);
       assert.equal(after.status, 'done');
       assert.equal(after.cursor, 6);
@@ -263,7 +266,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('records a failure with what to tell the operator', async () => {
       const run = await start();
-      await discovery.finished(run.id, 'failed', 2, 'the "ping" binary is not available');
+      await discovery.finished(probeId, run.id, 'failed', 2, 'the "ping" binary is not available');
       const after = await mustGet(run.id);
       assert.equal(after.status, 'failed');
       assert.match(after.message, /ping/);
@@ -273,8 +276,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A probe restarting reports `cancelled` for everything it was doing. Marking those
       // failed would have an operator restarting a sweep that only needed to wait.
       const run = await start();
-      await discovery.progress(run.id, 4, [], 0);
-      await discovery.finished(run.id, 'cancelled', 4, '');
+      await discovery.progress(probeId, run.id, 4, [], 0);
+      await discovery.finished(probeId, run.id, 'cancelled', 4, '');
 
       const after = await mustGet(run.id);
       assert.equal(after.status, 'queued');
@@ -284,7 +287,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('keeps a run the operator cancelled cancelled', async () => {
       const run = await start();
       await discovery.cancel(run.id, testActor);
-      await discovery.finished(run.id, 'cancelled', 3, '');
+      await discovery.finished(probeId, run.id, 'cancelled', 3, '');
       assert.equal((await mustGet(run.id)).status, 'cancelled');
     });
 
@@ -292,7 +295,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // It means a newer `sweep-start` for the same run took over. Recording it as an ending
       // would mark a run finished at the moment it restarted.
       const run = await start();
-      await discovery.finished(run.id, 'superseded', 2, '');
+      await discovery.finished(probeId, run.id, 'superseded', 2, '');
       assert.equal((await mustGet(run.id)).status, 'running');
     });
   });
@@ -324,7 +327,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('answers null for a run that has already finished', async () => {
       const run = await start();
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       assert.equal(await discovery.cancel(run.id, testActor), null);
     });
   });
@@ -332,7 +335,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
   describe('a probe that dropped', () => {
     it('releases its runs for a resume rather than failing them', async () => {
       const run = await start();
-      await discovery.progress(run.id, 3, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.progress(probeId, run.id, 3, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       await discovery.probeDisconnected(probeId);
 
       const after = await mustGet(run.id);
@@ -356,7 +359,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
   describe('listing', () => {
     it('lists a group’s runs newest first', async () => {
       const first = await start('10.0.0.0/29');
-      await discovery.finished(first.id, 'done', 6, '');
+      await discovery.finished(probeId, first.id, 'done', 6, '');
       const second = await start('10.0.1.0/29');
       const runs = await discovery.list(groupId);
       assert.deepEqual(
@@ -395,12 +398,13 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     const sweptAndFound = async (addresses: string[]) => {
       const run = await start();
       await discovery.progress(
+        probeId,
         run.id,
         6,
         addresses.map((address) => ({ address, rttMs: 1 })),
         0,
       );
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       return run;
     };
 
@@ -424,10 +428,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // without the run ever having been refused. Left alone it stayed `identifying` forever,
       // with a progress bar that had finished sweeping and would never finish anything else.
       const run = await start();
-      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
 
       tooOld = true;
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.finished(probeId, run.id, 'done', 6, '');
 
       const stored = await mustGet(run.id);
       assert.equal(stored.status, 'failed');
@@ -445,20 +449,20 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         },
         testActor,
       );
-      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       assert.equal((await mustGet(run.id)).status, 'done');
     });
 
     it('ends the run without identifying when the sweep found nothing', async () => {
       const run = await start();
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       assert.equal((await mustGet(run.id)).status, 'done');
     });
 
     it('stores a fingerprint against the host it belongs to', async () => {
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
-      await discovery.identified(run.id, 2, [
+      await discovery.identified(probeId, run.id, 2, [
         fingerprint('10.0.0.1', { kind: 'windows', confidence: 65 }),
         fingerprint('10.0.0.2'),
       ]);
@@ -473,7 +477,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A probe answering about the wrong run would otherwise put a host into a run that never
       // saw it, and the run's counts would stop adding up.
       const run = await sweptAndFound(['10.0.0.1']);
-      await discovery.identified(run.id, 1, [fingerprint('192.0.2.99')]);
+      await discovery.identified(probeId, run.id, 1, [fingerprint('192.0.2.99')]);
       assert.equal((await mustGet(run.id)).identified, 0);
       assert.equal((await discovery.hosts(run.id))[0]?.fingerprint, null);
     });
@@ -483,7 +487,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // boundary. TypeScript would not have caught it either — `DiscoverySink` declares
       // `unknown[]` and method parameters are bivariant.
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3']);
-      await discovery.identified(run.id, 3, [
+      await discovery.identified(probeId, run.id, 3, [
         fingerprint('10.0.0.1'),
         { address: '10.0.0.2', kind: 'quantum-toaster', confidence: 99, ports: [], evidence: [] },
         { kind: 'linux', confidence: 10, ports: [], evidence: [] },
@@ -500,7 +504,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // The column is jsonb and the shape grows. Dropping an unrecognised field would lose
       // information a later release knows how to read.
       const run = await sweptAndFound(['10.0.0.1']);
-      await discovery.identified(run.id, 1, [
+      await discovery.identified(probeId, run.id, 1, [
         fingerprint('10.0.0.1', { somethingNewer: { model: 'X99' } }),
       ]);
       const stored = (await discovery.hosts(run.id))[0]?.fingerprint as
@@ -510,8 +514,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('makes a replayed fingerprint free, as the sweep does for a replayed host', async () => {
       const run = await sweptAndFound(['10.0.0.1']);
-      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
-      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1', { kind: 'windows' })]);
+      await discovery.identified(probeId, run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identified(probeId, run.id, 1, [
+        fingerprint('10.0.0.1', { kind: 'windows' }),
+      ]);
       assert.equal((await mustGet(run.id)).identified, 1);
       assert.equal(
         (await discovery.hosts(run.id))[0]?.fingerprint?.kind,
@@ -524,16 +530,16 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // The probe counts from the start of the batch it was handed. Replacing would walk a
       // resumed pass back to the start of the list.
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3']);
-      await discovery.identified(run.id, 2, []);
+      await discovery.identified(probeId, run.id, 2, []);
       assert.equal((await mustGet(run.id)).identifyCursor, 2);
-      await discovery.identified(run.id, 1, []);
+      await discovery.identified(probeId, run.id, 1, []);
       assert.equal((await mustGet(run.id)).identifyCursor, 3);
     });
 
     it('finishes the run when a batch comes back empty', async () => {
       const run = await sweptAndFound(['10.0.0.1']);
-      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
-      await discovery.identifyFinished(run.id, 'done', '');
+      await discovery.identified(probeId, run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identifyFinished(probeId, run.id, 'done', '');
       const after = await mustGet(run.id);
       assert.equal(after.status, 'done');
       assert.ok(after.finishedAt !== null);
@@ -543,8 +549,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A probe restarting reports `cancelled` for everything it was doing. The run stays
       // `identifying` so the next connect picks it up from its own cursor.
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
-      await discovery.identified(run.id, 1, [fingerprint('10.0.0.1')]);
-      await discovery.identifyFinished(run.id, 'cancelled', '');
+      await discovery.identified(probeId, run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identifyFinished(probeId, run.id, 'cancelled', '');
       assert.equal((await mustGet(run.id)).status, 'identifying');
 
       sent = [];
@@ -556,7 +562,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('fails the run when identification failed', async () => {
       const run = await sweptAndFound(['10.0.0.1']);
-      await discovery.identifyFinished(run.id, 'failed', 'the resolver is not reachable');
+      await discovery.identifyFinished(probeId, run.id, 'failed', 'the resolver is not reachable');
       const after = await mustGet(run.id);
       assert.equal(after.status, 'failed');
       assert.match(after.message, /resolver/);
@@ -581,7 +587,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // missing was anybody noticing that no progress was being made.
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        await discovery.identifyFinished(run.id, 'done', '');
+        await discovery.identifyFinished(probeId, run.id, 'done', '');
       }
       const after = await mustGet(run.id);
       assert.equal(after.status, 'failed');
@@ -592,8 +598,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('does not count an offer as stalled when the cursor is moving', async () => {
       const run = await sweptAndFound(['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']);
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        await discovery.identified(run.id, 1, []);
-        await discovery.identifyFinished(run.id, 'done', '');
+        await discovery.identified(probeId, run.id, 1, []);
+        await discovery.identifyFinished(probeId, run.id, 'done', '');
       }
       // Four hosts, so the fifth pass finds an empty batch and finishes the run cleanly.
       assert.equal((await mustGet(run.id)).status, 'done');
@@ -628,9 +634,9 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         { groupId, probeId, range: '10.0.0.0/29', level },
         testActor,
       );
-      await discovery.progress(record.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.progress(probeId, record.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       sent = [];
-      await discovery.finished(record.id, 'done', 6, '');
+      await discovery.finished(probeId, record.id, 'done', 6, '');
       return record;
     };
 
@@ -656,8 +662,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       const standardTimeout = first.job.timeoutMs;
 
       // One run per probe at a time, so this one has to finish before the next is offered.
-      await discovery.identified(standard.id, 1, []);
-      await discovery.identifyFinished(standard.id, 'done', '');
+      await discovery.identified(probeId, standard.id, 1, []);
+      await discovery.identifyFinished(probeId, standard.id, 'done', '');
       assert.equal((await mustGet(standard.id)).status, 'done');
 
       await sweptAndDone('detailed');
@@ -721,6 +727,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('counts what was swept, found and identified', async () => {
       const run = await start();
       await discovery.progress(
+        probeId,
         run.id,
         6,
         [
@@ -729,8 +736,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         ],
         1,
       );
-      await discovery.finished(run.id, 'done', 6, '');
-      await discovery.identified(run.id, 2, [
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      await discovery.identified(probeId, run.id, 2, [
         fingerprint('10.0.0.1', { kind: 'windows', vendor: 'Dell' }),
         fingerprint('10.0.0.2', { vendor: 'Dell' }),
       ]);
@@ -756,6 +763,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // required string. Found by a mutation: the first fixture gave every host a vendor.
       const run = await start();
       await discovery.progress(
+        probeId,
         run.id,
         6,
         [
@@ -765,8 +773,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         ],
         0,
       );
-      await discovery.finished(run.id, 'done', 6, '');
-      await discovery.identified(run.id, 3, [
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      await discovery.identified(probeId, run.id, 3, [
         fingerprint('10.0.0.1', { vendor: 'Cisco' }),
         fingerprint('10.0.0.2'),
         fingerprint('10.0.0.3'),
@@ -784,8 +792,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         { groupId, probeId, range: '10.0.0.0/29', level: 'ping' },
         testActor,
       );
-      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
 
       const summary = await discovery.summary(run.id);
       assert.deepEqual(summary?.found.byKind, [{ kind: 'unidentified', count: 1 }]);
@@ -798,8 +806,8 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         { groupId, probeId, range: '10.0.0.0/29', level: 'ping' },
         testActor,
       );
-      await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
-      await discovery.finished(run.id, 'done', 6, '');
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
       await discovery.recordProvisioning(run.id, {
         devicesCreated: 3,
         matched: 2,
@@ -840,6 +848,123 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       ]);
 
       assert.equal((await discovery.summary(run.id))?.scheduleId, scheduleId);
+    });
+  });
+
+  /**
+   * Only the probe a run was dispatched to may report on it (`P-228`).
+   *
+   * The messages used to name a run and nothing else, and every write was `WHERE id = $1`: a
+   * probe could add hosts to another probe's run, write the fingerprints provisioning turns into
+   * devices, and finish it — which is what provisions it (`D-07`).
+   */
+  describe('a probe other than the run’s', () => {
+    const fingerprint = (address: string) => ({
+      address,
+      ports: [{ port: 22, transport: 'tcp' }],
+      kind: 'linux',
+      confidence: 45,
+      evidence: ['SSH is open'],
+    });
+
+    let refusals: ProbeRefusals;
+    let finished: number[];
+    let otherId = 0;
+
+    beforeEach(async () => {
+      refusals = new ProbeRefusals();
+      finished = [];
+      const other = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `other-${String(process.hrtime.bigint())}`,
+      });
+      otherId = other.id;
+      discovery = new DiscoveryService({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        dispatch: (_probeId, message) => {
+          sent.push(message);
+          return { kind: 'sent' };
+        },
+        onFinished: (runId) => {
+          finished.push(runId);
+          return Promise.resolve();
+        },
+        refusals,
+      });
+    });
+
+    const hostsOf = async (runId: number): Promise<number> => {
+      const rows = await db.query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM discovery_host WHERE run_id = $1',
+        [runId],
+      );
+      return Number(rows[0]?.n ?? 0);
+    };
+
+    it('writes nothing for its sweep messages, and does not finish the run', async () => {
+      const run = await start();
+      await discovery.progress(otherId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 2);
+      await discovery.finished(otherId, run.id, 'done', 6, '');
+      await discovery.finished(otherId, run.id, 'failed', 6, 'forged');
+
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'running');
+      assert.equal(after.cursor, 0);
+      assert.equal(after.found, 0);
+      assert.equal(await hostsOf(run.id), 0, 'no host planted in the run');
+      assert.deepEqual(finished, [], 'and nothing announced to provisioning');
+      assert.deepEqual(refusals.countsFor(otherId), { refused: 3, foreignRecently: 3 });
+      assert.equal(discovery.stats().foreign, 3);
+    });
+
+    it('writes no fingerprint and ends no identification', async () => {
+      const run = await start();
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      assert.equal((await mustGet(run.id)).status, 'identifying');
+      const offered = sent.length;
+
+      await discovery.identified(otherId, run.id, 1, [fingerprint('10.0.0.1')]);
+      await discovery.identifyFinished(otherId, run.id, 'done', '');
+      await discovery.identifyFinished(otherId, run.id, 'failed', 'forged');
+
+      const after = await mustGet(run.id);
+      assert.equal(after.status, 'identifying');
+      assert.equal(after.identified, 0);
+      assert.equal((await discovery.hosts(run.id))[0]?.fingerprint ?? null, null);
+      assert.equal(sent.length, offered, 'no next batch offered on its say-so');
+      assert.deepEqual(finished, []);
+      assert.equal(refusals.countsFor(otherId).foreignRecently, 3);
+    });
+
+    it('lets the run’s own probe carry on as before', async () => {
+      const run = await start();
+      await discovery.progress(otherId, run.id, 6, [{ address: '10.0.0.9', rttMs: 1 }], 0);
+      await discovery.progress(probeId, run.id, 3, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+
+      const after = await mustGet(run.id);
+      assert.equal(after.cursor, 3);
+      assert.equal(after.found, 1);
+      assert.equal(await hostsOf(run.id), 1);
+      assert.deepEqual(refusals.countsFor(probeId), { refused: 0, foreignRecently: 0 });
+    });
+
+    it('refuses a GID no probe object has claimed, which was dispatched nothing', async () => {
+      const run = await start();
+      await discovery.progress(null, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      assert.equal(await hostsOf(run.id), 0);
+      assert.deepEqual(refusals.stats(), { refused: 1, foreign: 1 });
+    });
+
+    it('refuses a run that no longer exists without calling it foreign', async () => {
+      // A group deleted while its probe was still sweeping: the probe reports on a run the
+      // cascade took with it. Ordinary, and counted as refused only.
+      await discovery.progress(probeId, 2_000_000_000, 6, [], 0);
+      assert.deepEqual(refusals.countsFor(probeId), { refused: 1, foreignRecently: 0 });
+      assert.equal(discovery.stats().foreign, 0);
     });
   });
 });

@@ -5172,6 +5172,102 @@ because each is a decision rather than a defect:
       named. `state-machine.md` says which, and a table-driven test covers a step back, a step
       forward, a duplicate and a replay.
 
+- [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
+      Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.
+      The only check on a result was that its id named a sensor, so any approved probe could store
+      readings to, declare channels on and — with an `error` outcome, which carries no readings —
+      turn Down and alarm on any sensor in the installation. A query's answer was matched by id
+      alone, although the probe it was put to was recorded. The four discovery messages named a run
+      and nothing else, and every write was `WHERE id = $1`: a probe could plant hosts in another
+      probe's run, write the fingerprints provisioning turns into devices, and finish it, which
+      provisions it. Reproduced on all three paths before any of it was changed.
+
+      **What a probe sends, and whether ownership was checked:**
+
+      | Message | What it names | Ownership checked before P-228 |
+      | --- | --- | --- |
+      | `hello` | its own GID, access key, config version | Yes — this is identity: an approved probe's key is its own (`R-01`), so no probe can present another's GID |
+      | `heartbeat` | nothing but itself; the health report is stored on its own session and read for its own probe object | Self-scoped |
+      | `results` | `sensorId` per result → channels created, samples written, state decided (error results reach the state machine too) | **No** |
+      | `config-ack` | a version and a count, compared with what this session was sent; a mismatch re-pushes to this probe only | Self-scoped |
+      | `sweep-progress` | `runId` → `discovery_host` rows inserted, `found`/`cursor`/`failed` updated | **No** |
+      | `sweep-finished` | `runId` → status and cursor; `done` hands the run to identification or ends it, which triggers `D-07` provisioning | **No** |
+      | `identify-progress` | `runId` → fingerprints written to `discovery_host`, which provisioning turns into devices | **No** |
+      | `identify-finished` | `runId` → failed, or the next batch offered, or done → provisioning | **No** |
+      | `query-result` | `queryId` → settles whoever awaits it; nothing stored, and the route overwrites `sensorId` | **No** — `pending.probeObjectId` is recorded and never compared |
+      | `bye` | nothing | Self-scoped |
+
+      Not separate paths: syslog, SNMP trap and flow events travel as `results` of their listener
+      sensor types, drained on the probe, so the results gate covers them. Lookups have no protocol
+      message; they are applied in the core. Clock readings (`heartbeat.sentAt`, `results.sentAt`)
+      and `backlog` belong to the sending session.
+
+      **Done:**
+      - **Results: a gate in front of both halves of ingestion.** `acceptProbeResults(origin,
+        message)` splits a batch by `SensorOwnership` before `#prepare` and the state machine
+        see it. A gate in the channel resolver, the first idea, would have missed the worst case:
+        the resolver reads `sensor_config` only on a cache miss, and an `error` result never
+        reaches it. A probe may report the sensors under its own probe object, and not a type the
+        core evaluates itself (Probe Health, Core Health, a Sensor Factory). Owners are cached and
+        cleared by `ResultCacheInvalidator` on every move and delete; a load that races a clear is
+        not cached. Refused results are **acknowledged**, not refused back: a `results-nack`
+        would have the probe resend them for ever.
+      - **The trust boundary is the method, not the source string.** The endpoint calls
+        `acceptProbeResults`; the core's own producers call `acceptResults` under
+        `IN_PROCESS_SOURCE`. A probe picks its own GID, so it could have enrolled as `factory`.
+        The registry now gives such a probe a fresh identity, which the welcome carries.
+      - **Queries**: only the probe a query was put to may settle it. Another's answer is
+        refused and the caller keeps waiting for the real one.
+      - **Discovery**: all four messages carry the sender's probe object. Each path checks the
+        run's `probe_id` first, and every write after it also carries `AND probe_id`, so a path
+        added later without the check still writes nothing for the wrong probe.
+      - **Refused, and foreign.** Ownership is decided when a result arrives, not when it was
+        measured, so a moved sensor's late results are refused. That is ordinary and must not
+        warn: an administrator moving sensors would otherwise get an alarm on the probe they
+        moved them from. So a refused result is classified from the audit log. Every move
+        records the parent and the probe it left, in the move's transaction, and the core walks
+        a sensor's **historical** ancestry back through each move of it or of anything above it.
+        Historical, because a group moved from A to B and then a sensor moved out of that group
+        would otherwise read as foreign on A. `unknown` (deleted) and `moved` are counted;
+        `foreign` is counted and warned.
+      - **Probe Health** gains `reportsRefused`, a counter with no limit, and `reportsForeign`, a
+        count over five minutes on `P-231`'s `RecentCount`, warning above 0.5. A gauge because a
+        counter's rate gaps on the first reading after a restart or a reconnect, which is when a
+        probe that should not be doing this would. Kept per probe object in `ProbeRefusals`,
+        which ingestion, queries and discovery all write to.
+      - `administration.md` has **A probe reporting on work it was not given**, and
+        `WORKFLOW.MD` §13 has the row.
+
+      **WatchDog's five checks:**
+      1. The `object.moved` row is written by `DatabaseAuditSink` inside the mover's transaction,
+         so it is visible exactly when the move is. The ownership cache is cleared inside the
+         transaction and again after it settles, and the classification cache with it.
+      2. One statement changes `parent_id` (`ObjectRepository.reparent`), and its one caller,
+         `ObjectService.move`, records `fromProbeId`. Bulk moves go through it. Create, clone and
+         provisioning make new ids, which no probe has reported, and factory sensors are
+         core-evaluated. A test fails the day a second writer appears.
+      3. A result for a sensor that does not exist is `unknown`: refused and counted, never
+         foreign. Its readings still count in `discardedUnknownSensor`, as before.
+      4. `factory`, `core-health` and `probe-health` are refused as GIDs at enrolment.
+      5. `reportsForeign` is `P-231`'s idiom: a gauge over five minutes, warning above 0.5.
+
+      **Scenario** (`probe-ownership-scenario.test.ts`), through the state machine, the alarm
+      engine and a Down and a Warning trigger on the root:
+      - 300 sensors moved from A to B while A's spool drains failures for all of them: 300
+        refused, none foreign, no state change, no warning, no notification.
+      - B sends failures for A's sensor: it stays Up with no transition, no notification for
+        it, and exactly one warning — one notification — on B's Probe Health, which clears five
+        minutes after.
+      - B plants a host in, fingerprints and finishes A's scheduled discovery run: the run is
+        untouched, nothing reaches provisioning, no device appears.
+
+      **Not built:** a probe that sends only foreign results still counts as delivering for
+      `P-74`'s watch. The gate is not measured: `test:perf`'s ingestion budgets call
+      `acceptResults` directly, so they do not include it. Its cost is a map lookup a result,
+      and one query a batch for the sensors a move or a delete has just cleared from the cache.
+
+      Mutations caught: 18 of 18. Each was applied alone, built, and run against its own tests.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

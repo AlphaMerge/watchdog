@@ -37,7 +37,7 @@ class StubSender implements ProbeQuerySender {
   service: ProbeQueryService | undefined;
 
   sendQuery(
-    _probeObjectId: number,
+    probeObjectId: number,
     message:
       | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
       | { kind: 'cancel'; queryId: string },
@@ -49,7 +49,9 @@ class StubSender implements ProbeQuerySender {
     if (delivery.kind === 'sent' && answer !== null) {
       // Answered on the next turn, exactly as a probe's reply arrives: synchronously here would
       // settle the promise before `ask` had even created it.
-      setImmediate(() => this.service?.deliver({ queryId: message.queryId, ...answer }));
+      setImmediate(() =>
+        this.service?.deliver({ queryId: message.queryId, ...answer }, probeObjectId),
+      );
     }
     return delivery;
   }

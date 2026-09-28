@@ -35,12 +35,30 @@ import {
 import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
 
 /**
+ * Who sent something, as far as the endpoint can vouch for it (`P-228`).
+ *
+ * The GID is the identity the handshake proved — an approved probe holds a key of its own
+ * (`R-01`), so no probe can present another's. The probe object is the branch that GID owns,
+ * and it is what everything a probe reports is checked against: the sensors under it, the
+ * queries put to it, the discovery runs dispatched to it.
+ */
+export interface ProbeOrigin {
+  gid: string;
+  /** Null while no probe object has claimed the GID, in which case it owns nothing. */
+  probeObjectId: number | null;
+}
+
+/**
  * Whatever stores check results. `IngestionService` is it; the endpoint takes the interface so
  * the transport stays testable without a database, and so ingestion never learns about sockets.
+ *
+ * **Told who sent the batch, and expected to check it** (`P-228`). It used to be given the GID
+ * as a label and nothing else, and nothing compared it with anything: any probe could report
+ * any sensor.
  */
 export interface ResultReceiver {
-  acceptResults(
-    source: string,
+  acceptProbeResults(
+    origin: ProbeOrigin,
     message: Extract<ProbeToCoreMessage, { type: 'results' }>,
   ): Promise<CoreToProbeMessage>;
 }
@@ -99,19 +117,45 @@ export type SweepDelivery =
   | { kind: 'offline' }
   | { kind: 'too-old'; protocolVersion: number; needs: number };
 
+/**
+ * Where a probe's discovery messages go.
+ *
+ * **Every message a probe sends about a run carries the probe object that sent it** (`P-228`),
+ * and the sink refuses a run that was dispatched to another. They used to carry the run id and
+ * nothing else, so a probe could add hosts to, fingerprint, finish and so provision a run
+ * belonging to any other probe. Null is a GID no probe object has claimed, which was dispatched
+ * nothing.
+ */
 export interface DiscoverySink {
   /** A probe with this branch has connected, or reconnected. Offer it whatever it should run. */
   pump(probeObjectId: number): Promise<void>;
   progress(
+    from: number | null,
     runId: number,
     cursor: number,
     found: readonly SweepHost[],
     failed: number,
   ): Promise<void>;
   /** Fingerprints from `D-02`. `unknown[]` here; the service validates the shape. */
-  identified(runId: number, cursor: number, found: readonly unknown[]): Promise<void>;
-  identifyFinished(runId: number, ending: SweepEnding, message: string): Promise<void>;
-  finished(runId: number, ending: SweepEnding, cursor: number, message: string): Promise<void>;
+  identified(
+    from: number | null,
+    runId: number,
+    cursor: number,
+    found: readonly unknown[],
+  ): Promise<void>;
+  identifyFinished(
+    from: number | null,
+    runId: number,
+    ending: SweepEnding,
+    message: string,
+  ): Promise<void>;
+  finished(
+    from: number | null,
+    runId: number,
+    ending: SweepEnding,
+    cursor: number,
+    message: string,
+  ): Promise<void>;
   probeDisconnected(probeObjectId: number): Promise<void>;
 }
 
@@ -149,12 +193,19 @@ export interface ProbeEndpointOptions {
 
 /** What the transport tells `R-09`, and nothing more. */
 export interface ProbeQuerySink {
-  deliver(message: {
-    queryId: string;
-    result?: CheckResult;
-    failure?: QueryFailure;
-    message?: string;
-  }): void;
+  /**
+   * An answer, and the probe object that sent it (`P-228`): only the probe a query was put to
+   * may settle it. Null is a GID no probe object has claimed, which was asked nothing.
+   */
+  deliver(
+    message: {
+      queryId: string;
+      result?: CheckResult;
+      failure?: QueryFailure;
+      message?: string;
+    },
+    from: number | null,
+  ): void;
   probeDisconnected(probeObjectId: number): void;
 }
 
@@ -612,7 +663,7 @@ export class ProbeEndpoint {
           // Straight through, and never queued behind `pending`: a query has a caller holding a
           // deadline, and chaining it behind a results batch that is mid-write would spend that
           // deadline waiting for work nobody is watching.
-          this.#options.queries?.deliver(message);
+          this.#options.queries?.deliver(message, session.probeObjectId);
           return session;
         case 'config-ack':
           if (message.version !== session.sentVersion) {
@@ -668,23 +719,23 @@ export class ProbeEndpoint {
         case 'sweep-progress':
           // Never awaited by the message loop, for the same reason results are not: a database
           // round trip must not delay the heartbeat that keeps this connection alive.
-          this.#queueDiscovery(session, logger, (sink) =>
-            sink.progress(message.runId, message.cursor, message.found, message.failed),
+          this.#queueDiscovery(session, logger, (sink, from) =>
+            sink.progress(from, message.runId, message.cursor, message.found, message.failed),
           );
           return session;
         case 'sweep-finished':
-          this.#queueDiscovery(session, logger, (sink) =>
-            sink.finished(message.runId, message.ending, message.cursor, message.message),
+          this.#queueDiscovery(session, logger, (sink, from) =>
+            sink.finished(from, message.runId, message.ending, message.cursor, message.message),
           );
           return session;
         case 'identify-progress':
-          this.#queueDiscovery(session, logger, (sink) =>
-            sink.identified(message.runId, message.cursor, message.found),
+          this.#queueDiscovery(session, logger, (sink, from) =>
+            sink.identified(from, message.runId, message.cursor, message.found),
           );
           return session;
         case 'identify-finished':
-          this.#queueDiscovery(session, logger, (sink) =>
-            sink.identifyFinished(message.runId, message.ending, message.message),
+          this.#queueDiscovery(session, logger, (sink, from) =>
+            sink.identifyFinished(from, message.runId, message.ending, message.message),
           );
           return session;
         case 'bye':
@@ -705,13 +756,15 @@ export class ProbeEndpoint {
   #queueDiscovery(
     session: ProbeSession,
     logger: Logger,
-    run: (sink: DiscoverySink) => Promise<void>,
+    run: (sink: DiscoverySink, from: number | null) => Promise<void>,
   ): void {
     const sink = this.#options.discovery;
     if (sink === undefined) return;
     session.pending = session.pending.then(async () => {
       try {
-        await run(sink);
+        // Read when the message's turn comes rather than when it arrived: chained behind the
+        // admission, so this is the settled answer and not the null a session opens with.
+        await run(sink, session.probeObjectId);
       } catch (error) {
         // A discovery write that fails must not take the connection with it: the probe is still
         // delivering readings, which matter more than a sweep does.
@@ -858,7 +911,12 @@ export class ProbeEndpoint {
         return;
       }
       try {
-        connection.send(await receiver.acceptResults(session.info.gid, message));
+        connection.send(
+          await receiver.acceptProbeResults(
+            { gid: session.info.gid, probeObjectId: session.probeObjectId },
+            message,
+          ),
+        );
       } catch (error: unknown) {
         // The receiver is not supposed to throw. If it does, the probe still needs an answer —
         // an unanswered batch is one the probe holds for ever.

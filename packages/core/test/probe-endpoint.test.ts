@@ -773,8 +773,8 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
   it('acknowledges a results batch', async () => {
     const received: string[] = [];
     const results: ResultReceiver = {
-      acceptResults: (source, message) => {
-        received.push(`${source}/${message.batchId}`);
+      acceptProbeResults: (origin, message) => {
+        received.push(`${origin.gid}/${message.batchId}`);
         return Promise.resolve({
           type: 'results-ack',
           batchId: message.batchId,
@@ -837,7 +837,7 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     // on the case were forty copies of one assertion about a 30 s gap in a 240 s window. The
     // property lives *here*, in the one line that stamps arrival, and nothing pinned it.
     const results: ResultReceiver = {
-      acceptResults: (_source, message) =>
+      acceptProbeResults: (_origin, message) =>
         Promise.resolve({
           type: 'results-ack',
           batchId: message.batchId,
@@ -927,7 +927,7 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     // trim past a gap.
     const order: string[] = [];
     const results: ResultReceiver = {
-      acceptResults: async (_source, message) => {
+      acceptProbeResults: async (_origin, message) => {
         // The first batch takes its time; without serialisation the second would overtake it.
         await new Promise((resolve) => setTimeout(resolve, message.batchId === 'slow' ? 120 : 0));
         order.push(message.batchId);
@@ -1823,6 +1823,171 @@ describe(
           { deliver: () => undefined, probeDisconnected: (id) => gone.push(id) },
         );
         assert.deepEqual(gone, [7]);
+      });
+    });
+  },
+);
+
+describe(
+  'ProbeEndpoint: who sent it (`P-228`)',
+  { skip: opensslAvailable ? false : 'openssl is not available' },
+  () => {
+    // Every message a probe sends about work — a result, a query's answer, a discovery run's
+    // progress — used to reach its sink with nothing but the ids it named, so nothing downstream
+    // could ask whether this probe had been given that work. These pin that each now carries
+    // the probe object the sending GID owns; the refusals themselves are tested where they are
+    // made.
+    const gidA = 'gid-probe-a';
+    const gidB = 'gid-probe-b';
+    const gidUnclaimed = 'gid-nobody-claimed';
+    const objectOf = new Map<string, number>([
+      [gidA, 7],
+      [gidB, 8],
+    ]);
+    const assignment = (id: number): SensorAssignment => ({
+      sensorId: id,
+      sensorType: 'icmp.ping',
+      params: { count: 4 },
+      target: { host: `192.0.2.${String(id)}`, ipVersion: 'auto' },
+      intervalSeconds: 60,
+      timeoutMs: 30_000,
+    });
+    const checkResult = (sensorId: number) => ({
+      sensorId,
+      at: '2026-09-29T10:00:00.000Z',
+      outcome: 'ok' as const,
+      message: '4/4 replies',
+      durationMs: 12,
+      channels: [{ key: 'rtt', value: 1.5 }],
+    });
+
+    let dir: string;
+    before(() => {
+      dir = mkdtempSync(join(tmpdir(), 'ms-tls-origin-'));
+      generateCerts(dir);
+    });
+
+    interface Heard {
+      results: { gid: string; probeObjectId: number | null; sensorIds: number[] }[];
+      answers: { queryId: string; from: number | null }[];
+      progress: { from: number | null; runId: number }[];
+      finished: { from: number | null; runId: number }[];
+    }
+
+    async function withTwoProbes(
+      body: (
+        probes: { a: TestProbe; b: TestProbe; port: number },
+        endpoint: ProbeEndpoint,
+        heard: Heard,
+      ) => Promise<void>,
+    ): Promise<void> {
+      const heard: Heard = { results: [], answers: [], progress: [], finished: [] };
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+        probeConfig: {
+          probeObjectFor: (gid) => Promise.resolve(objectOf.get(gid) ?? null),
+          assignmentsFor: (id) => {
+            const sensors = [assignment(id)];
+            return Promise.resolve({ version: fingerprint(sensors), sensors, stamps: new Map() });
+          },
+          touch: () => Promise.resolve(),
+        },
+        results: {
+          acceptProbeResults: (origin, message) => {
+            heard.results.push({ ...origin, sensorIds: message.results.map((r) => r.sensorId) });
+            return Promise.resolve({
+              type: 'results-ack',
+              batchId: message.batchId,
+              storedSamples: 0,
+              retryAfterMs: 0,
+            });
+          },
+        },
+        queries: {
+          deliver: (message, from) => heard.answers.push({ queryId: message.queryId, from }),
+          probeDisconnected: () => undefined,
+        },
+        discovery: {
+          pump: () => Promise.resolve(),
+          progress: (from, runId) => {
+            heard.progress.push({ from, runId });
+            return Promise.resolve();
+          },
+          identified: () => Promise.resolve(),
+          identifyFinished: () => Promise.resolve(),
+          finished: (from, runId) => {
+            heard.finished.push({ from, runId });
+            return Promise.resolve();
+          },
+          probeDisconnected: () => Promise.resolve(),
+        },
+      });
+      const address = await endpoint.start();
+      const a = await TestProbe.connect(dir, address.port);
+      const b = await TestProbe.connect(dir, address.port);
+      try {
+        a.send(hello({ gid: gidA }));
+        await a.waitFor((m) => m.type === 'config-set');
+        b.send(hello({ gid: gidB }));
+        await b.waitFor((m) => m.type === 'config-set');
+        await body({ a, b, port: address.port }, endpoint, heard);
+      } finally {
+        a.close();
+        b.close();
+        await endpoint.stop();
+      }
+    }
+
+    it('tells ingestion which probe object a batch came from', async () => {
+      await withTwoProbes(async ({ b }, _endpoint, heard) => {
+        b.send({ type: 'results', batchId: 'b-1', results: [checkResult(7)] });
+        await b.waitFor((m) => m.type === 'results-ack');
+        assert.deepEqual(heard.results, [{ gid: gidB, probeObjectId: 8, sensorIds: [7] }]);
+      });
+    });
+
+    it('hands a query’s answer over with the probe that sent it, not the one asked', async () => {
+      await withTwoProbes(async ({ a, b }, endpoint, heard) => {
+        const delivery = endpoint.sendQuery(7, {
+          kind: 'ask',
+          queryId: 'q-for-a',
+          query: { kind: 'check', assignment: assignment(7) },
+          timeoutMs: 5_000,
+        });
+        assert.equal(delivery.kind, 'sent');
+        await a.waitFor((m) => m.type === 'query');
+        b.send({ type: 'query-result', queryId: 'q-for-a', result: checkResult(7) });
+        await waitUntil(() => heard.answers.length === 1);
+        assert.deepEqual(heard.answers, [{ queryId: 'q-for-a', from: 8 }]);
+      });
+    });
+
+    it('hands every discovery message over with the probe that sent it', async () => {
+      await withTwoProbes(async ({ b }, _endpoint, heard) => {
+        b.send({ type: 'sweep-progress', runId: 5, cursor: 10, found: [], failed: 0 });
+        b.send({ type: 'sweep-finished', runId: 5, ending: 'done', cursor: 10, message: '' });
+        await waitUntil(() => heard.finished.length === 1);
+        assert.deepEqual(heard.progress, [{ from: 8, runId: 5 }]);
+        assert.deepEqual(heard.finished, [{ from: 8, runId: 5 }]);
+      });
+    });
+
+    it('says so when the GID owns no probe object, rather than inventing one', async () => {
+      await withTwoProbes(async ({ port }, _endpoint, heard) => {
+        const nobody = await TestProbe.connect(dir, port);
+        try {
+          nobody.send(hello({ gid: gidUnclaimed }));
+          await nobody.waitFor((m) => m.type === 'welcome');
+          nobody.send({ type: 'results', batchId: 'n-1', results: [checkResult(7)] });
+          await nobody.waitFor((m) => m.type === 'results-ack');
+          assert.deepEqual(heard.results, [
+            { gid: gidUnclaimed, probeObjectId: null, sensorIds: [7] },
+          ]);
+        } finally {
+          nobody.close();
+        }
       });
     });
   },

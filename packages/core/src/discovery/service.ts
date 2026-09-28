@@ -10,6 +10,7 @@ import {
 import type { DiscoveryLevel, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
+import type { ProbeRefusals } from '../probes/refusals.js';
 import { DiscoveryError } from './errors.js';
 import { requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
@@ -122,6 +123,8 @@ export interface DiscoveryServiceOptions {
    * sweeps a network.
    */
   onFinished?: (runId: number) => Promise<void>;
+  /** Where a message about another probe's run is counted, for Probe Health (`P-228`). */
+  refusals?: ProbeRefusals;
 }
 
 /**
@@ -180,11 +183,13 @@ export class DiscoveryService {
   readonly #logger: Logger;
   readonly #dispatch: DiscoveryServiceOptions['dispatch'];
   readonly #onFinished: DiscoveryServiceOptions['onFinished'];
+  readonly #refusals: ProbeRefusals | undefined;
   #started = 0;
   #resumed = 0;
   #hostsStored = 0;
   #identifiedCount = 0;
   #stalled = 0;
+  #foreign = 0;
   /** Per run: the cursor an offer was last made at, and how many times from there. */
   readonly #offers = new Map<number, { cursor: number; times: number }>();
 
@@ -194,6 +199,7 @@ export class DiscoveryService {
     this.#logger = options.logger.child({ component: 'discovery' });
     this.#dispatch = options.dispatch;
     this.#onFinished = options.onFinished;
+    this.#refusals = options.refusals;
   }
 
   stats(): {
@@ -203,6 +209,8 @@ export class DiscoveryService {
     identified: number;
     /** Runs failed for making no progress. Visible, because a stall that nobody counts recurs. */
     stalled: number;
+    /** Messages refused because another probe's run was named in them (`P-228`). */
+    foreign: number;
   } {
     return {
       started: this.#started,
@@ -210,7 +218,44 @@ export class DiscoveryService {
       hostsStored: this.#hostsStored,
       identified: this.#identifiedCount,
       stalled: this.#stalled,
+      foreign: this.#foreign,
     };
+  }
+
+  /**
+   * Whether the probe that sent a message about this run is the one it was dispatched to
+   * (`P-228`). Counted and logged when not.
+   *
+   * **Every path a probe drives goes through this first, and every write after it carries
+   * `AND probe_id` as well.** A run's probe never changes once it is recorded, so the check alone
+   * would do; the predicate on the writes is there so that a path added later without the check
+   * still writes nothing for the wrong probe, and so that the rule can be read off each statement.
+   *
+   * Before `P-228` the messages named a run and nothing else, and the service updated `WHERE id =
+   * $1`: any probe could add hosts to another's run, write the fingerprints provisioning turns
+   * into devices, and finish it — which is what provisions it (`D-07`).
+   *
+   * A run that no longer exists is refused without being foreign: its group was deleted while
+   * the probe was still sweeping, which is ordinary.
+   */
+  async #fromItsProbe(from: number | null, runId: number, what: string): Promise<boolean> {
+    const [row] = await this.#db.query<{ probe_id: string }>(
+      'SELECT probe_id::text AS probe_id FROM discovery_run WHERE id = $1',
+      [runId],
+    );
+    if (row === undefined) {
+      this.#refusals?.refused(from);
+      this.#logger.debug({ runId, from, what }, 'a probe reported on a run that no longer exists');
+      return false;
+    }
+    if (from !== null && Number(row.probe_id) === from) return true;
+    this.#foreign += 1;
+    this.#refusals?.foreign(from);
+    this.#logger.warn(
+      { runId, what, runProbe: Number(row.probe_id), from },
+      'a probe reported on a discovery run dispatched to another probe; refused',
+    );
+    return false;
   }
 
   /**
@@ -377,22 +422,26 @@ export class DiscoveryService {
    * it would otherwise walk the run backwards, and the range would be swept twice.
    */
   async progress(
+    from: number | null,
     runId: number,
     cursor: number,
     found: readonly SweepHost[],
     failed: number,
   ): Promise<void> {
+    if (!(await this.#fromItsProbe(from, runId, 'sweep-progress'))) return;
     if (found.length > 0) {
       // One statement for the batch. `ON CONFLICT DO NOTHING` is what makes a resume free: a
       // replayed address is already there and inserting it again changes nothing.
-      const values: unknown[] = [runId];
+      const values: unknown[] = [runId, from];
       const tuples = found.map((host, at) => {
         values.push(host.address, host.rttMs);
-        return `($1, $${String(at * 2 + 2)}::inet, $${String(at * 2 + 3)}::numeric)`;
+        return `($${String(at * 2 + 3)}::inet, $${String(at * 2 + 4)}::numeric)`;
       });
       const inserted = await this.#db.query<{ address: string }>(
         `INSERT INTO discovery_host (run_id, address, rtt_ms)
-         VALUES ${tuples.join(', ')}
+         SELECT $1::bigint, v.address, v.rtt_ms
+         FROM (VALUES ${tuples.join(', ')}) AS v(address, rtt_ms)
+         WHERE EXISTS (SELECT 1 FROM discovery_run WHERE id = $1 AND probe_id = $2)
          ON CONFLICT (run_id, address) DO NOTHING
          RETURNING host(address) AS address`,
         values,
@@ -401,18 +450,18 @@ export class DiscoveryService {
       // `found` counts distinct hosts, so it is incremented by what was actually inserted rather
       // than by what was offered — otherwise a resume inflates the total the summary reports.
       if (inserted.length > 0) {
-        await this.#db.query(`UPDATE discovery_run SET found = found + $2 WHERE id = $1`, [
-          runId,
-          inserted.length,
-        ]);
+        await this.#db.query(
+          `UPDATE discovery_run SET found = found + $2 WHERE id = $1 AND probe_id = $3`,
+          [runId, inserted.length, from],
+        );
       }
     }
 
     await this.#db.query(
       `UPDATE discovery_run
        SET cursor = GREATEST(cursor, $2), failed = failed + $3
-       WHERE id = $1 AND status = 'running'`,
-      [runId, cursor, failed],
+       WHERE id = $1 AND probe_id = $4 AND status = 'running'`,
+      [runId, cursor, failed, from],
     );
   }
 
@@ -424,12 +473,14 @@ export class DiscoveryService {
    * dropped. Treating it as an ending would mark a run finished at the moment it restarted.
    */
   async finished(
+    from: number | null,
     runId: number,
     ending: SweepEnding,
     cursor: number,
     message: string,
   ): Promise<void> {
     if (ending === 'superseded') return;
+    if (!(await this.#fromItsProbe(from, runId, 'sweep-finished'))) return;
 
     // A sweep that covered its range hands over to identification rather than ending — the two
     // are stages of one run, because an operator starts one discovery and watches one thing
@@ -445,8 +496,8 @@ export class DiscoveryService {
       ) {
         await this.#db.query(
           `UPDATE discovery_run SET status = 'identifying', cursor = GREATEST(cursor, $2)
-           WHERE id = $1 AND status = 'running'`,
-          [runId, cursor],
+           WHERE id = $1 AND probe_id = $3 AND status = 'running'`,
+          [runId, cursor, from],
         );
         const moved = await this.get(runId);
         if (moved !== null) await this.#offerIdentify(moved);
@@ -471,8 +522,8 @@ export class DiscoveryService {
            message = $4,
            finished_at = CASE WHEN $3 = 'cancelled' AND status <> 'cancelled' THEN NULL
                               ELSE now() END
-       WHERE id = $1`,
-      [runId, cursor, ending, message],
+       WHERE id = $1 AND probe_id = $5`,
+      [runId, cursor, ending, message, from],
     );
     this.#logger.info({ runId, ending, cursor }, 'discovery run ended');
     if (ending === 'done') await this.#announceFinished(runId);
@@ -583,7 +634,13 @@ export class DiscoveryService {
    * one the core holds rather than replacing it — otherwise a resumed pass reporting `40` would
    * walk the run back to its fortieth host.
    */
-  async identified(runId: number, batchCursor: number, raw: readonly unknown[]): Promise<void> {
+  async identified(
+    from: number | null,
+    runId: number,
+    batchCursor: number,
+    raw: readonly unknown[],
+  ): Promise<void> {
+    if (!(await this.#fromItsProbe(from, runId, 'identify-progress'))) return;
     // **Validated here, and this is a real boundary rather than a formality.** The wire schema
     // deliberately does not enumerate a fingerprint's fields — the shape grows, and a schema
     // that refused a newer probe's perfectly good answer would defeat the version negotiation —
@@ -603,24 +660,25 @@ export class DiscoveryService {
       // this run never found is a probe answering about the wrong run, and writing it would put a
       // host into a run that never saw it. `fingerprint IS NULL` makes a replay free, the same
       // way the sweep's `ON CONFLICT DO NOTHING` does.
-      const values: unknown[] = [runId];
+      const values: unknown[] = [runId, from];
       const tuples = found.map((one, at) => {
         values.push(one.address, JSON.stringify(one));
-        return `($${String(at * 2 + 2)}::inet, $${String(at * 2 + 3)}::jsonb)`;
+        return `($${String(at * 2 + 3)}::inet, $${String(at * 2 + 4)}::jsonb)`;
       });
       const updated = await this.#db.query<{ address: string }>(
         `UPDATE discovery_host AS h
          SET fingerprint = v.fingerprint
-         FROM (VALUES ${tuples.join(', ')}) AS v(address, fingerprint)
+         FROM (VALUES ${tuples.join(', ')}) AS v(address, fingerprint), discovery_run r
          WHERE h.run_id = $1 AND h.address = v.address AND h.fingerprint IS NULL
+           AND r.id = h.run_id AND r.probe_id = $2
          RETURNING host(h.address) AS address`,
         values,
       );
       this.#identifiedCount += updated.length;
       if (updated.length > 0) {
         await this.#db.query(
-          `UPDATE discovery_run SET identified = identified + $2 WHERE id = $1`,
-          [runId, updated.length],
+          `UPDATE discovery_run SET identified = identified + $2 WHERE id = $1 AND probe_id = $3`,
+          [runId, updated.length, from],
         );
       }
     }
@@ -628,8 +686,8 @@ export class DiscoveryService {
     await this.#db.query(
       `UPDATE discovery_run
        SET identify_cursor = identify_cursor + $2
-       WHERE id = $1 AND status = 'identifying'`,
-      [runId, batchCursor],
+       WHERE id = $1 AND probe_id = $3 AND status = 'identifying'`,
+      [runId, batchCursor, from],
     );
   }
 
@@ -639,14 +697,20 @@ export class DiscoveryService {
    * A `done` here does not necessarily finish the run: a large sweep is many batches, and the run
    * is only over when a batch comes back empty — which `#offerIdentify` decides, in one place.
    */
-  async identifyFinished(runId: number, ending: SweepEnding, message: string): Promise<void> {
+  async identifyFinished(
+    from: number | null,
+    runId: number,
+    ending: SweepEnding,
+    message: string,
+  ): Promise<void> {
     if (ending === 'superseded') return;
+    if (!(await this.#fromItsProbe(from, runId, 'identify-finished'))) return;
 
     if (ending === 'failed') {
       await this.#db.query(
         `UPDATE discovery_run SET status = 'failed', message = $2, finished_at = now()
-         WHERE id = $1 AND status = 'identifying'`,
-        [runId, message],
+         WHERE id = $1 AND probe_id = $3 AND status = 'identifying'`,
+        [runId, message, from],
       );
       return;
     }

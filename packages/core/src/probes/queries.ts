@@ -7,6 +7,7 @@ import {
   type ProbeQuery,
   type QueryFailure,
 } from '@ms/shared';
+import type { ProbeRefusals } from './refusals.js';
 
 /**
  * On-demand queries to a probe, with an API call waiting on the answer (`R-09`).
@@ -55,6 +56,8 @@ export interface ProbeQuerySender {
 export interface ProbeQueryServiceOptions {
   logger: Logger;
   sender: ProbeQuerySender;
+  /** Where an answer from the wrong probe is counted, for Probe Health (`P-228`). */
+  refusals?: ProbeRefusals;
   /** How long to wait when a caller does not say. */
   defaultTimeoutMs?: number;
   /**
@@ -85,6 +88,8 @@ export interface ProbeQueryStats {
   timedOut: number;
   /** Abandoned because the probe's connection went while they were waiting. */
   abandoned: number;
+  /** Answers refused because a probe other than the one asked sent them (`P-228`). */
+  foreign: number;
 }
 
 interface Pending {
@@ -100,6 +105,7 @@ const DEFAULT_MAX_PER_PROBE = 8;
 export class ProbeQueryService {
   readonly #logger: Logger;
   readonly #sender: ProbeQuerySender;
+  readonly #refusals: ProbeRefusals | undefined;
   readonly #defaultTimeoutMs: number;
   readonly #maxInFlight: number;
   readonly #maxPerProbe: number;
@@ -110,10 +116,12 @@ export class ProbeQueryService {
   #answered = 0;
   #timedOut = 0;
   #abandoned = 0;
+  #foreign = 0;
 
   constructor(options: ProbeQueryServiceOptions) {
     this.#logger = options.logger.child({ component: 'probe-queries' });
     this.#sender = options.sender;
+    this.#refusals = options.refusals;
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
     this.#maxPerProbe = options.maxInFlightPerProbe ?? DEFAULT_MAX_PER_PROBE;
@@ -138,6 +146,7 @@ export class ProbeQueryService {
       answered: this.#answered,
       timedOut: this.#timedOut,
       abandoned: this.#abandoned,
+      foreign: this.#foreign,
     };
   }
 
@@ -211,16 +220,36 @@ export class ProbeQueryService {
    *
    * An id nobody is waiting for is ordinary and is logged rather than refused: it is what a
    * result that lost a race with its own deadline looks like, and the answer is simply late.
+   *
+   * **Only the probe the query was put to may answer it** (`P-228`). The probe was recorded when
+   * the query was sent and never compared, so any connected probe that learned a query id could
+   * settle it with a reading of its choosing — the answer an operator was waiting on to decide
+   * whether the thing they just fixed works. The id is a random UUID, so this is not a guess
+   * anyone makes by accident, and that is exactly why an answer from elsewhere is foreign rather
+   * than late: it is refused, the caller keeps waiting for the real one, and Probe Health warns
+   * on the probe that sent it.
    */
-  deliver(message: {
-    queryId: string;
-    result?: CheckResult;
-    failure?: QueryFailure;
-    message?: string;
-  }): void {
+  deliver(
+    message: {
+      queryId: string;
+      result?: CheckResult;
+      failure?: QueryFailure;
+      message?: string;
+    },
+    from: number | null,
+  ): void {
     const pending = this.#pending.get(message.queryId);
     if (pending === undefined) {
       this.#logger.debug({ queryId: message.queryId }, 'a probe answered a query nobody awaits');
+      return;
+    }
+    if (pending.probeObjectId !== from) {
+      this.#foreign += 1;
+      this.#refusals?.foreign(from);
+      this.#logger.warn(
+        { queryId: message.queryId, askedProbe: pending.probeObjectId, answeredBy: from },
+        'a probe answered a query that was put to another probe; refused',
+      );
       return;
     }
     this.#pending.delete(message.queryId);

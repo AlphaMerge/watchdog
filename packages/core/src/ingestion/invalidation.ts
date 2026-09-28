@@ -15,9 +15,15 @@ export interface ForgetsSensors {
   forgetPolicies(): void;
 }
 
+/** Which probe may report which sensor (`P-228`). A move or a delete changes the answer. */
+export interface ForgetsOwners {
+  clear(): void;
+}
+
 export interface ResultCacheInvalidatorOptions {
   channels: ChannelResolver | ForgetsChannels;
   sensors?: ForgetsSensors;
+  owners?: ForgetsOwners;
   logger: Logger;
   /** How long after the transaction to invalidate a second time. See below. */
   settleMs?: number;
@@ -47,6 +53,7 @@ export interface ResultCacheInvalidatorOptions {
 export class ResultCacheInvalidator implements AuditSink {
   readonly #channels: ForgetsChannels;
   readonly #sensors: ForgetsSensors | undefined;
+  readonly #owners: ForgetsOwners | undefined;
   readonly #logger: Logger;
   readonly #settleMs: number;
   #stopped = false;
@@ -54,6 +61,7 @@ export class ResultCacheInvalidator implements AuditSink {
   constructor(options: ResultCacheInvalidatorOptions) {
     this.#channels = options.channels;
     this.#sensors = options.sensors;
+    this.#owners = options.owners;
     this.#logger = options.logger.child({ component: 'cache-invalidation' });
     this.#settleMs = options.settleMs ?? 250;
   }
@@ -82,6 +90,10 @@ export class ResultCacheInvalidator implements AuditSink {
         // inside the mutation's own transaction, and re-resolving them costs one query for the
         // whole next batch. The precise version would cost more than the imprecise one.
         this.#forgetPolicies();
+        // And which probe may report a sensor is exactly what a move changes (`P-228`). All of
+        // it, for the same reason: a group's move carries every sensor beneath it, and working
+        // out which those are is a walk inside the mover's transaction.
+        if (mutation.action === 'object.moved') this.#forgetOwners();
       } else if (mutation.action === 'object.deleted') {
         // A subtree delete can destroy thousands of sensors, and forgetting them one at a time
         // would be a scan of the whole cache per sensor inside a transaction. Dropping the lot
@@ -117,12 +129,23 @@ export class ResultCacheInvalidator implements AuditSink {
     });
   }
 
+  #forgetOwners(): void {
+    this.#owners?.clear();
+    this.#later(() => {
+      this.#owners?.clear();
+    });
+  }
+
   #forgetEverything(): void {
     this.#channels.clear();
     this.#sensors?.clear();
+    // A deleted sensor has no owner, and a result for one must read as `unknown` rather than as
+    // the probe it used to be under (`P-228`).
+    this.#owners?.clear();
     this.#later(() => {
       this.#channels.clear();
       this.#sensors?.clear();
+      this.#owners?.clear();
     });
   }
 
