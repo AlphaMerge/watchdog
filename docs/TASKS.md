@@ -14120,6 +14120,32 @@ because each is a decision rather than a defect:
       `main.ts` has no test of its own, and the path from `core.json` to the constructor is read,
       not run.
 
+- [ ] **A-39 — The rate limit refuses a provisioning script, and nothing lets an operator raise
+      it** · S · A-09, P-225 · Found 2026-09-29 by `P-225`'s review. `A-09` set the per-client
+      limit at 1,200 requests a minute "high enough that no legitimate client meets it", as a
+      constant nobody can change. The project's own named legitimate client meets it: a
+      provisioning script creating a 5,000-object tree one object per request is refused at request
+      1,201, about five seconds in. A script that does not retry stops with the tree half-built,
+      and one that does needs at least four minutes. `P-225`'s benchmark measures the request path
+      with the limit raised in the fixture only, which is why this ticket exists rather than a
+      finding that the serial build is fast.
+
+      Decided (WatchDog, 2026-09-29):
+      - **A setting**, `api.rateLimitPerMinute` or the name that matches the section's style, with
+        bounds. **The default stays 1,200.**
+      - **Tokens are not exempt.** A leaked token with no limit is worse than a slow script, and
+        raising the setting is the operator's lever.
+      - **A refusal lets a script back off and finish.** `hardening.ts` already sends
+        `Retry-After`.
+      - **`administration.md` names bulk (`POST /objects/tree`) as the provisioning path**, with
+        the arithmetic: 5,000 serial creates need at least about four minutes under the default.
+
+      **Done when** the setting is validated, reaches `registerRateLimit` and replaces `P-225`'s
+      test-only `ApiServerOptions.rateLimit`; a test shows a script honouring `Retry-After`
+      completing a 5,000-create build under the default limit, slowly, rather than stopping
+      half-built (on an injected clock or a short window, so the test itself does not take four
+      minutes); and the documentation says the above.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
@@ -17750,6 +17776,348 @@ from rules already written, and are settled here so that no ticket re-derives th
 would reuse `L-02`'s resolver, and neither is §6's row); libraries in the Home menu, which §6 gives
 to maps; and PRTG's per-node display settings.
 
+## Phase 16 — Directory sign-in (`V2-07`)
+
+LDAP / Active Directory and OIDC sign-in, scoped 2026-09-28 and reviewed the same day.
+`CAPABILITIES.MD` marks both `[V2]` and says where PRTG falls short: domain membership, one
+domain, whole groups only, no nesting, an hourly cache. SAML stays out, as PRTG leaves it.
+
+**The tickets use the `X-` prefix.**
+
+**Reviewed before it was placed, and amended.** A design review read the draft against the code
+and upheld 21 amendments. Three were blocking because the draft's decisions contradicted the
+code, and those decisions would have gone into the ADR as written: directory deprovisioning never
+reached unattended authority, admin authority is the role *and* the group, and `A-07`'s per-group
+MFA requirement was either bypassed or a permanent lockout. They are folded into the decisions
+below. The rest are in the tickets' text and done-when lists.
+
+**What v1 has already provided.** `A-34` closes a socket whose credential lapses for any reason,
+expiry included, so a refresh or a lifetime that ends a session ends its stream too. `A-38` gave
+session lifetimes a `sessions` section of their own. `A-18` audits identity changes. `M-19` and
+`M-20` resolve user and group recipients, and list accounts. `A-36` refuses a stream opened from
+another origin.
+
+**The decisions, before the tickets.** They go into `ADR-007-directory-sign-in` (`X-01`) before
+anything else starts. They change who an account is, and every rule about rights rests on that.
+
+1. **A directory feeds group membership. It never grants rights.** Rights stay on local groups
+   (`object_access` → `user_group`), where `A-03`'s inheritance, `A-12`'s visibility and the
+   access epoch already work.
+   - An admin writes **mapping rules**: a directory group, or a claim value, maps to a local
+     group and carries a role.
+   - **Rules key an LDAP group by its `objectGUID` or `entryUUID`.** The DN is shown, not
+     matched. Name matching would let a delegated OU admin create a same-named group and inherit
+     an admin rule. DN matching silently breaks on a rename.
+   - **Only issuer-asserted claims drive a rule**: `groups`, `roles`, or a claim name the admin
+     declares. `email`, `preferred_username`, `upn`, `unique_name` and `name` are refused as rule
+     sources, because a user controls them or they change. That is the reasoning decision 2
+     applies to accounts, and a rule can map into admin. Claims come from the `id_token`.
+   - A login replaces the account's *directory-sourced* memberships with what the rules give, as
+     a diff. Local memberships are never touched.
+   - **A login that matches no rule is refused.** It does not get an empty account.
+   - **There are two admin authorities, and a rule can grant either.** `role = 'admin'` passes
+     every ADMIN route: groups, memberships, grants, audit, probes, and this phase's directory
+     configuration. Membership of an `is_admin` group gives `full` on every object. An **admin
+     rule** is one that carries role admin or maps into a group whose *current* `is_admin` is
+     true, and the rules UI flags both kinds.
+   - **A directory account's role is derived, and only derived.** It is the highest role any
+     matched rule carries, recomputed at every login and every refresh by the same function. A
+     hand-added membership of an `is_admin` group is refused for a `source = directory` account.
+     Otherwise such an account could add itself to Administrators as a local row that no refresh
+     removes.
+   - **Statement order**, because `A-04`'s triggers are not deferrable: lowering a role deletes
+     directory memberships first and then changes the role; raising it changes the role first
+     and then inserts memberships. A conflict refuses the login with the reason in the log, not a
+     500. The refresh runs one transaction per account, so one bad account does not stop the run.
+   - Nested groups are resolved. On AD that is `LDAP_MATCHING_RULE_IN_CHAIN` in one query. On
+     plain LDAP it is a bounded walk (`MAX_WALK_DEPTH`) with cycle detection.
+   - Any number of directories may be configured, each with its own rules.
+2. **An account is keyed by the directory's stable id, not by its login.**
+   - The key is (directory, `objectGUID` or `entryUUID`) for LDAP, and (directory, `iss` + `sub`)
+     for OIDC. A rename in the directory renames the account and does not create a second one.
+     `objectGUID` is read as a buffer and escaped byte by byte, since decoding it as a string is
+     lossy and it is the key.
+   - Accounts are provisioned just in time at the first successful login, with `email` and
+     `display_name` from a configured attribute or claim. They have no password.
+   - **The login is derived and namespaced.** Each directory names the attribute or claim that
+     becomes the login, fitted to `LOGIN_PATTERN` and 64 characters, and namespaced per directory,
+     since `lower(login)` is unique across the installation and two directories with a `jsmith`
+     are expected.
+   - **A collision is refused, never merged.** A collision is a match with any existing account
+     not keyed by this (directory, external id), local or not. It covers a re-created entry with
+     a new `objectGUID`, a rename into a login that is taken (the old login is kept, and the case
+     is reported), and one person arriving through two directories. Otherwise whoever controls a
+     directory entry named `admin` holds the local `admin`. An admin may link two identities
+     explicitly (`X-04`), and the link is audited.
+   - **A typed login reaches exactly one directory.** Accounts with `source = local` are settled
+     without contacting any directory, which keeps break-glass independent of them. A directory
+     login goes to one LDAP directory, chosen by a per-directory suffix or domain (`jsmith@corp`,
+     `CORP\jsmith`) or by a picker. A failed login never falls through to another directory, and a
+     search that returns more than one entry is refused. Otherwise the obvious implementation
+     tries directories in turn and binds a corporate password against a partner's server.
+3. **A directory change reaches every authority the account holds, within a bounded time.**
+   Sessions are only part of it: an API token, a report's run-as account and a map share link
+   each act for an account with nobody signed in.
+   - **LDAP: the refresh reads every enabled directory-sourced account**, not only those with a
+     live session. It uses the service bind, every 15 minutes by default, and the interval is a
+     setting.
+   - **OIDC: an account that has not authenticated at its IdP recently is stale.** OIDC has no
+     general way to ask afterwards, so `last_directory_auth_at` records the last IdP
+     authentication. Past a setting's worth of hours, the account's tokens are refused (in the
+     token lookup's single `WHERE`), its reports refuse to run and its share links resolve blank.
+     An `offline_access` refresh grant on the refresh interval may be added on top, and a refused
+     refresh then counts as deprovisioned (OIDC Core §12).
+   - **An OIDC session has an absolute lifetime, 8 hours by default**, as
+     `sessions.oidcAbsoluteTimeoutHours` in `A-38`'s section. A `ruleProblems` rule refuses it
+     longer than `sessions.absoluteTimeoutHours`. At the end the browser re-authenticates, silently
+     if the IdP session is still live, and the claims are read again.
+   - **Deprovisioning is its own state.** A refresh that finds an account gone, disabled or
+     matching no rule sets `directory_disabled`, removes its directory memberships and sets its
+     role to `readonly`. Sessions end and sockets close (`A-34`). A later confirmed-enabled read or
+     login clears it. The admin's own `disabled` flag is separate and sticky, and sessions and
+     tokens refuse either.
+   - **Only a definitive answer deprovisions.** That means a service bind proven authenticated
+     (WhoAmI, RFC 4532, returns the configured DN and the service account resolves itself) and a
+     positive "disabled" (`userAccountControl` 0x2 on AD, a per-directory rule elsewhere, since
+     OpenLDAP has no standard attribute). An empty or implausible result, an error, a timeout, a
+     size limit or a referral fails the run, which is counted, and every session stays. One run
+     may disable at most a capped share of accounts. Above the cap it stops and warns on Core
+     Health. A narrowed base DN or a lost ACL returns success with zero entries, and that must not
+     disable every administrator.
+   - A changed membership moves the access epoch through the existing trigger, so open streams
+     resync (`A-12`). Only a non-empty diff is written, and no transaction is held open across
+     directory or IdP I/O.
+4. **API tokens stay local.** They are issued here, to an account, and checked here.
+   - A token's authority is its account's rights now. So an LDAP refresh that narrows or
+     disables the account narrows or disables its tokens within one interval, and an OIDC
+     account's tokens stop when it goes stale (decision 3), not before.
+   - IdP-issued tokens are **not** accepted as API bearer credentials. That would be a second
+     token model, with its own revocation story, for automation that a local token already
+     serves.
+5. **Break-glass is a local admin account that works with the directory down.**
+   - Local password login stays enabled for `source = local` accounts.
+   - An admin may switch local login off for everybody except accounts flagged break-glass.
+   - **The invariant is a state rule, held on every write that can break it**: there is always
+     an account that is `source = local`, enabled, flagged break-glass, role admin, and TOTP
+     enrolled with recovery codes left. Role admin is what reaches every ADMIN route, and an
+     account that has it can repair its own admin-group membership. One service method enforces
+     it, raising the unused `ACCOUNT_LAST_ADMIN`. It is called from account disable, role change
+     and delete, unflagging, TOTP disable (refused outright for a break-glass account), the
+     local-login switch, and linking (a break-glass account cannot be linked to a directory).
+   - **Each break-glass login is counted on Core Health**, and an ordinary trigger and template
+     deliver it. It needs no new notification path, and it reaches somebody during the outage it
+     exists for.
+6. **The directory's secrets are write-only, and bound to where they are sent.** The LDAP bind
+   password and the OIDC client secret are stored like device credentials: encrypted at rest
+   (`A-05`'s vault), `writeOnly`, absent from every read, which shows only whether each is set.
+   - **Changing an endpoint clears its secret.** A change to the host, port, TLS mode, bind DN,
+     issuer or token endpoint clears the stored secret, which must be entered again in the same
+     request, and "test connection" never pairs a stored secret with an unsaved endpoint. The
+     vault keeps a secret the caller leaves out, so re-pointing the URL and pressing test would
+     otherwise send the service password anywhere (Keycloak CVE-2024-5967 is this case).
+   - **The configuration is trusted with domain credentials**, and the ADR says so: an admin who
+     re-points search-then-bind can collect users' passwords.
+7. **Neither the IdP nor the directory is a dependency of ours.** They are the operator's, and the
+   feature is off by default. The ADR argues directly that hard constraint 3 is not engaged, and
+   amends Phase 11's preamble, which reads SSO as not clearing the constraints without an ADR.
+   The cost is that logins depend on something outside us, and (5) is the answer to that.
+   - **Two libraries and `jose`, no service.** `ADR-001` already names `ldapts` and
+     `openid-client` (Decision 9). The work is to update the versions (`ldapts` 9.2.0,
+     `openid-client` 6.8.8, both MIT and pure JS) and to add `openid-client` and `jose` to
+     Decision 6's table.
+   - **The full profile only** (`H-12`). None of this is constructed in the v1 build, whose
+     unauthenticated surface `H-13` asserts is exactly `auth/{login,logout,session}`. Its Core
+     Health channels read as gaps where no directory is configured. The shared session and token
+     path refuses a non-local account whose directory is not present, enabled and constructed.
+     That one rule covers a v1 core started against a database a full build has touched, and a
+     deleted or disabled directory.
+8. **The test directories are dev-only** (`X-02`). The compose file gains an OpenLDAP, a Samba AD
+   DC and Dex. Nothing in `packages/` reaches for any of them at runtime, suites that need them
+   skip when they are absent, and CI asserts that they ran.
+9. **A group's MFA requirement holds for a directory login.** `A-07` promises that joining a
+   group never quietly relaxes a requirement, and today the second-factor gate exists only inline
+   in `POST /auth/login`, after the local password check.
+   - LDAP: the gate runs after this login's memberships are written, in the same flow.
+   - OIDC: either the same local TOTP step after the callback, or a per-directory required
+     `acr`/`amr` checked in the `id_token` (OIDC Core §2, §3.1.2.1). The ADR chooses.
+   - A just-in-time account in a `requires_mfa` group enrols on its first login, through a
+     half-open state scoped to enrolment only (`X-07`). An admin cannot pre-enrol an account that
+     does not exist yet.
+   - Routes that re-check a local password, `/auth/mfa/disable` among them, get a
+     re-authentication path for directory accounts, which have no local password.
+10. **A directory login may lock, deliberately.** `A-01`'s throttle delays and never locks. Put in
+    front of a directory, that makes the login form a domain-wide AD lockout tool: 20 failures per
+    address per 15 minutes, a delay spent after the bind, against a Microsoft baseline threshold of
+    10 and 5 on hardened domains. So failed binds are capped per resolved entry (`objectGUID` or
+    `entryUUID`), configurable per directory below the domain threshold. Past the cap the login is
+    refused without a bind and answered as a wrong password, and those refusals are counted. AD FS
+    Extranet Lockout is the precedent. The ADR states that this breaks `A-01`'s rule, and why.
+
+**Tickets**
+
+- [ ] **X-01 — ADR-007: directory sign-in** · S · — · Decisions 1–10 above, with the rejected
+      alternatives: rights granted straight from directory groups, IdP tokens as API credentials,
+      merge-on-collision, trying directories in turn, and SAML. It amends Phase 11's preamble
+      (decision 7) and `ADR-001`'s library versions and table. **Done when** it is agreed. Nothing
+      below starts before.
+- [ ] **X-02 — Directories to test against** · M · X-01 · `docker-compose.dev.yml` gains:
+      - an OpenLDAP seeded with users, nested and cyclic groups, a disabled user and a login that
+        collides with a local account;
+      - a **Samba AD DC** (4.4 or later) for `LDAP_MATCHING_RULE_IN_CHAIN`, a binary
+        `objectGUID`, `userAccountControl` and a lockout policy. OpenLDAP rejects IN_CHAIN, and
+        there is no Windows machine, so without it the AD half of the exit criterion is unproven
+        and the findings say so;
+      - **Dex**, backed by the OpenLDAP. Released Dex (v2.45.1) has no sessions, `prompt=none` or
+        back-channel logout. Either pin a master digest with `DEX_SESSIONS_ENABLED` for `X-13`, or
+        use Keycloak for `X-13`, and say which. Decision 3's silent re-authentication cannot be
+        exercised against released Dex.
+      The ports are variables, as `MS_DEV_PG_PORT` is, because CI shares the developer's Docker.
+      Dex's issuer comes from an environment variable, on one hostname that resolves the same from
+      the toolchain, the CI runner and a browser, since OIDC Discovery §4.3 requires an exact
+      match. **Done when** CI has an "assert the directory suites ran" step beside "assert the
+      database tests actually ran".
+- [ ] **X-03 — Accounts that come from somewhere** · L · X-01 · The migration, with a tested
+      rollback:
+      - `user_account.source`, `directory_id` and `external_id`, unique per directory;
+        `directory_disabled`; `last_directory_auth_at`; `break_glass`.
+      - `password_hash` becomes nullable, with a CHECK that a local account has one and a
+        directory account does not.
+      - `user_group_member.source`, with **local wins**: `addMember`'s `ON CONFLICT` sets
+        `source = 'local'`, and the directory sync leaves local rows alone. Today `addMember`
+        updates only `is_primary`, so a hand-add over a directory row would be lost at the next
+        refresh.
+      - The **down migration** deletes directory memberships, disables directory accounts and
+        revokes their tokens, stated as deliberate data loss (migration 024's precedent). It is
+        tested with directory rows present, because the generic round trip runs on an empty
+        database.
+      The local password verifier refuses a non-local account in the same words and the same time
+      as a wrong password; the directory paths are `X-08` and `X-09`. The shared session and
+      token check from decision 7 lands here. **Done when** a local installation behaves exactly
+      as before, asserted by the existing account suites unchanged.
+- [ ] **X-04 — Account administration** · M · X-03 · The API and UI that decisions 2 and 5 assume
+      and main does not have. `M-20` lists accounts for the recipients editor, and nothing
+      creates, updates, disables or links one. This ticket lists accounts with source, directory,
+      external id, last refresh and why disabled; sets and clears the break-glass flag; disables
+      and re-enables locally; and links and unlinks. Linking makes `source` directory and clears
+      the password hash, TOTP and recovery codes, subject to the break-glass invariant, and is
+      audited. **Done when** every write here is refused where it would break decision 5's
+      invariant, and each one leaves an audit entry.
+- [ ] **X-05 — Directory configuration, secrets write-only** · M · X-03 · Admin routes to
+      configure directories and mapping rules, validated by JSON Schema at the boundary:
+      - "test connection" and "what would this login get" are `computesOn(ADMIN)`, not
+        `COMPUTES`, which is any authenticated principal and which the access-matrix sweep skips.
+        The preview would otherwise tell a readonly account which AD users exist and which are
+        admins. Test connection reports the certificate's subject, issuer and verification result.
+      - secrets bound to their endpoint (decision 6);
+      - an optional PEM CA bundle per directory, passed to `ldapts`'s `tlsOptions` and to
+        `openid-client`'s `customFetch`. Verification is always on and there is no switch to skip
+        it; `insecure` means plain LDAP only, and Core Health reports it;
+      - finite connect and operation timeouts per directory, validated as notification
+        `timeoutMs` is (`ldapts` defaults to `Infinity`);
+      - a per-directory "disabled" rule for directories without `userAccountControl`;
+      - the rule that decides a login's directory (decision 2);
+      - a directory may not be deleted while it has accounts, or deleting it disables them and
+        revokes their tokens in one audited transaction. The ADR chooses.
+      A saved or deleted LDAP rule takes effect at the next refresh. For OIDC, each directory
+      membership is tagged with the rule that gave it, so deleting a rule removes its memberships
+      at once. Otherwise an OIDC account's admin memberships survive the rule until a login that
+      may never come. **Done when** a readonly account is refused on both computing routes, and an
+      `A-10` sweep case edits the URL with the secret left out, runs test, and the fake server
+      receives no password.
+- [ ] **X-06 — Rules, and completing a login** · L · X-03, X-05 · The engine that `X-05`'s preview,
+      `X-08` and `X-09` share, so that nobody writes a second copy: rule evaluation, role
+      derivation, just-in-time provisioning, collision refusal, and the membership diff. The diff
+      keeps `A-02`'s primary invariant: the current primary is kept if it is still a member, and
+      otherwise repaired as `#repairPrimary` does. A new account's primary comes from rule order,
+      because `grantCreator` falls back to the lowest `group_id`, which decides who reads what the
+      user creates. It includes the LDAP user and group resolver. Each real change is audited in
+      the same transaction through `A-18`'s path: account provisioned, membership added or
+      removed, role changed, directory-disabled or re-enabled. The actor is
+      `{kind:'system', component:'directory:<id>'}` with the rule id. **Done when** the statement
+      order in decision 1 is table-tested across role raises and lowers with admin memberships
+      present, and a conflict gives a refused login rather than a 500.
+- [ ] **X-07 — A second factor for directory accounts** · M · X-06 · Decision 9: the half-open
+      enrolment state, and a re-authentication path for the routes that re-check a local password.
+      **Done when** a just-in-time account in a `requires_mfa` group can enrol and then sign in,
+      and has no session before it enrols.
+- [ ] **X-08 — LDAP / AD login** · L · X-02, X-06, X-07 · Search-then-bind as the user, over
+      LDAPS or StartTLS by default.
+      - **A fresh `ldapts` client per login and per refresh batch, `autoRebind` off.** Before
+        every bind, assert that the socket is a `TLSSocket` with `authorized === true`, and fail
+        closed otherwise. A StartTLS failure never falls back to plain. `ldapts` 9.2.0's
+        `_sendBind` reconnects over plain TCP without StartTLS, and AD's default `MaxConnIdleTime`
+        of 900 s equals the refresh interval, so a reused client would send a password in clear
+        with no attacker needed.
+      - Filter input is escaped per RFC 4515.
+      - **An empty password is refused before any bind**, because an unauthenticated bind succeeds
+        on many servers and that is the classic bypass.
+      - The bind cap from decision 10. **Enumeration parity:** a search miss spends a floor delay
+        or a decoy bind, and a miss, a wrong password, a collision and no matching rule give the
+        same code and words, with the reason in the log only, as a disabled local account is answered today.
+      - A bound on concurrent directory logins, with refusals counted (`probes/queries.ts`'s
+        precedent). The MFA gate runs after this login's memberships are written.
+      **Done when** tests against the dev directories pass for injection, an empty password,
+      nested and cyclic groups, a collision, a disabled user, a directory rename and a
+      `requires_mfa` group without a second factor (no session). N+1 bad attempts send at most N
+      binds. A password is bound against exactly one server. A proxy that drops the connection
+      between StartTLS and the bind sees no cleartext bind.
+- [ ] **X-09 — OIDC login** · L · X-02, X-06, X-07 · Authorization code with PKCE, `state` and
+      `nonce`, discovery, and `id_token` validation by `openid-client`. The redirect URI comes from
+      configuration, never from the request.
+      - Claims map through the same rules as LDAP groups, from decision 1's allowed sources only.
+        Entra's groups overage (`_claim_names.groups`, above 200 groups) is detected and refused
+        with a stated reason, and the guidance to use app roles. Only tenant-specific issuers are
+        supported.
+      - **A mix-up defence** where more than one OIDC directory is configured (RFC 9700 §4.4.2): a
+        server-side pending-authorization record, bound to the pre-authorization cookie, carries
+        the directory, and a callback for another directory is refused. Each directory has its own
+        redirect path, and the RFC 9207 `iss` is validated where it is advertised.
+      - Discovery is lazy and never blocks startup: with `StartLimitBurst=5` in `ms-core.service`,
+        an IdP down at boot would otherwise leave nobody able to log in, break-glass included.
+      - Each login sets `last_directory_auth_at`. The session lifetime is decision 3's.
+      **Done when** tests against the dev Dex pass, including a replayed `state`, a wrong `aud`,
+      an expired token, a cross-provider callback, a claim-sourced rule on a refused claim, and a
+      `requires_mfa` group without a second factor (no session).
+- [ ] **X-10 — The refresh, liveness, and every authority that ends** · L · X-08, X-09 · Decision
+      3, run as a job: single-flight, with an overrun skipped and counted (`rediscovery-sweep.ts`'s
+      convention). Core Health gains seconds since the last successful refresh, which warns past
+      two intervals because a hung refresh never counts as a failure. It also gains failed runs,
+      runs stopped at the disable cap, and stale OIDC accounts. **Done when** scenario tests
+      cover:
+      - a token, a report's run-as account and a share link after a directory-side disable, each
+        refused, for LDAP within one refresh and for OIDC within the liveness window;
+      - an empty or degraded refresh disabling nobody;
+      - an account re-enabled in AD coming back, and a locally disabled directory account staying
+        disabled;
+      - a user removed from a directory group whose open stream resyncs to the narrower view, and
+        a disabled user whose socket closes;
+      - a user removed from the AD admin group losing role admin at the next refresh.
+- [ ] **X-11 — Break-glass** · M · X-03, X-04 · Decision 5's invariant, enforced on every write it
+      names, the Core Health channel for break-glass logins, and a trigger and template that
+      deliver it. **Done when** a table test covers each of those writes, not only the local-login
+      switch, and a break-glass login with the directory blackholed reaches an administrator's
+      inbox in the dev stack.
+- [ ] **X-12 — Sign-in UI** · M · X-08, X-09 · "Sign in with …" for each configured OIDC
+      directory, with the local form kept. The directory picker, where decision 2 needs one. Admin
+      screens for directories, rules (admin rules flagged, both kinds), and "what would this
+      login get". WCAG 2.1 AA. **Done when** vitest covers the rules editor, and a field note shows
+      a login against the dev Dex in a browser.
+- [ ] **X-13 — OIDC back-channel logout** · M · X-09, X-02 · OpenID Connect Back-Channel Logout
+      1.0. It ends *sessions*, not accounts, and works only with an IdP that implements it and can
+      reach the core inbound. Entra's discovery document does not advertise
+      `backchannel_logout_supported`. The `logout_token` is validated with `jose`, since
+      `openid-client` has none: signature, `iss`, `aud`, `iat` and `exp`, the `events` claim,
+      `nonce` absent, `sub` or `sid`, and `jti`. A route-scoped
+      `application/x-www-form-urlencoded` parser is needed (BCL §2.5). **Done when** the pinned
+      Dex's (or Keycloak's) logout reaches a live session and closes its socket in a test.
+
+**Exit criteria.** One installation logs in through AD (the dev Samba AD DC; a real domain
+controller stays a field-test item until there is hardware) and through OIDC. A group change
+reaches a live session within one refresh. A directory-side disable ends every authority the
+account holds within its bound: sessions, sockets, tokens, reports and share links. With the DC
+blackholed and the IdP down at startup, not merely refusing connections, the break-glass admin
+can still log in. No route returns a directory secret.
+
 ## Backlog — v2 candidates
 
 Ordered by expected value. Not scheduled.
@@ -17760,7 +18128,7 @@ Ordered by expected value. Not scheduled.
 - ~~**V2-04** Libraries (filter-rule alternate tree views)~~ — **scoped 2026-09-27** into `L-01`…`L-05` under Phase 14 above, behind `A-12`…`A-15`
 - **V2-05** Ticket system (user, ToDo and notification tickets)
 - **V2-06** Failover clustering
-- **V2-07** LDAP/AD and OIDC single sign-on
+- ~~**V2-07** LDAP/AD and OIDC single sign-on~~ — **scoped 2026-09-28** into `X-01`…`X-13` under Phase 16 above, reviewed and amended the same day
 - **V2-08** Virtualisation sensors (VMware, Hyper-V, Proxmox)
 - **V2-09** Cloud sensors (AWS, Azure, Microsoft 365)
 - **V2-10** HTTP Push Data sensors and inbound webhooks
