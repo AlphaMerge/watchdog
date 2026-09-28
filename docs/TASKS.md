@@ -4787,6 +4787,13 @@ because each is a decision rather than a defect:
       restarted, with the arithmetic in the findings as `P-215` did it. A measurement: book the
       window, because a CPU hog in the box flakes other sessions' timing tests.
 
+      **CPU alone: no kill** (2026-09-28, `docs/findings/2026-09-29-watchdog-under-load.md`).
+      Six busy loops per CPU, load 50.6 on 8 CPUs, CPU `some` at 95%: `NRestarts` 0 for both
+      units in every stage, and no ping gap past 15.05 s against `WatchdogSec=30`. Memory `full`
+      stayed 0, where the incident had 18% and no swap left. So memory is the prime suspect. Its
+      stage runs in `P-216`'s window with this harness's watchdog readings, sized to the box's
+      cgroup so it cannot take the shared PostgreSQL down.
+
 - [x] **P-221 — a plain `AppError` reached the client as a masked 500** · S · — · Found by
       1a470a in `A-23`. `toHttpError` has a branch for each error class that carries a status of
       its own, and a catch-all for any other `AppError`: a 500 with the message replaced. So a

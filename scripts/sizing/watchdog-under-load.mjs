@@ -19,8 +19,9 @@
 // Stages hold a CPU hog of `factor × nproc` busy loops in its own unit for a while; factor 0 is
 // the baseline. The machine's pressure stall figures are recorded every second, because a load
 // average counts tasks waiting on disk as well as on a CPU, and the fix depends on which it was.
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { closeSync, createReadStream, openSync, readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 
 const API = 'http://127.0.0.1:8080/api/v1';
 const TOKEN = process.env.MS_TOKEN;
@@ -263,14 +264,28 @@ for (const name of UNITS) {
     });
   }
 }
-const pid1 = sh('journalctl', [
-  '_PID=1',
-  '--no-pager',
-  '--output=short-unix',
-  '--since',
-  `@${String(Math.floor(start / 1_000))}`,
-]);
-for (const entry of pid1.split('\n')) {
+// **To a file, then read line by line.** PID 1 at debug for a whole run writes far more than
+// `execFileSync`'s 1 MiB buffer, and the first full run lost every received-side record to ENOBUFS
+// at the very end, after all its stages had been measured
+// (`docs/findings/2026-09-29-watchdog-under-load.md`).
+const PID1_LOG = '/tmp/watchdog-under-load-pid1.log';
+const pid1Out = openSync(PID1_LOG, 'w');
+const read = spawnSync(
+  'journalctl',
+  [
+    '_PID=1',
+    '--no-pager',
+    '--output=short-unix',
+    '--since',
+    `@${String(Math.floor(start / 1_000))}`,
+  ],
+  { stdio: ['ignore', pid1Out, 'pipe'] },
+);
+closeSync(pid1Out);
+if (read.status !== 0) {
+  emit({ kind: 'pid1-error', status: read.status, stderr: String(read.stderr).trim() });
+}
+for await (const entry of createInterface({ input: createReadStream(PID1_LOG) })) {
   const match = /^(\d+\.\d+) \S+ [^:]+: (.*)$/.exec(entry);
   if (match === null) continue;
   const message = match[2];
