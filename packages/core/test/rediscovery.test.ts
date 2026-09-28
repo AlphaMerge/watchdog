@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
@@ -85,12 +86,14 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
 
     discovery = new DiscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silentLogger,
       // Connected, and nothing is asserted about what the probe was sent — `D-01` owns that.
       dispatch: () => ({ kind: 'sent' }),
     });
     rediscovery = new RediscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silentLogger,
       discovery,
       windowFor: (id) => {
@@ -107,16 +110,19 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
 
   /** A daily rediscovery at 03:00 UTC, which is the shape of every case below. */
   const create = (overrides: Partial<Parameters<RediscoveryService['create']>[0]> = {}) =>
-    rediscovery.create({
-      groupId,
-      probeId,
-      name: 'Nightly',
-      range: '10.0.0.0/29',
-      cadence: 'daily',
-      cadenceMinute: 3 * 60,
-      timezone: 'UTC',
-      ...overrides,
-    });
+    rediscovery.create(
+      {
+        groupId,
+        probeId,
+        name: 'Nightly',
+        range: '10.0.0.0/29',
+        cadence: 'daily',
+        cadenceMinute: 3 * 60,
+        timezone: 'UTC',
+        ...overrides,
+      },
+      testActor,
+    );
 
   /** A schedule that must exist, so the assertions read as statements rather than as guards. */
   const mustGet = async (id: number) => {
@@ -177,10 +183,10 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
   describe('enabling', () => {
     it('books the next run on, and clears it off', async () => {
       const created = await create();
-      const on = await rediscovery.setEnabled(created.id, true);
+      const on = await rediscovery.setEnabled(created.id, true, testActor);
       assert.equal(on?.nextRunAt, '2026-08-31T03:00:00.000Z');
 
-      const off = await rediscovery.setEnabled(created.id, false);
+      const off = await rediscovery.setEnabled(created.id, false, testActor);
       // `assert.equal` narrows, so the second read needs no `?.` — and eslint says so.
       assert.equal(off?.enabled, false);
       assert.equal(off.nextRunAt, null, 'a schedule that is off is not due');
@@ -190,12 +196,12 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       // Somebody switching a nightly job on at 03:00 means tonight's 03:00, not this instant.
       const created = await create();
       now = new Date('2026-08-31T03:00:00Z');
-      const on = await rediscovery.setEnabled(created.id, true);
+      const on = await rediscovery.setEnabled(created.id, true, testActor);
       assert.equal(on?.nextRunAt, '2026-09-01T03:00:00.000Z');
     });
 
     it('reports nothing for a schedule that is not there', async () => {
-      assert.equal(await rediscovery.setEnabled(999_999, true), null);
+      assert.equal(await rediscovery.setEnabled(999_999, true, testActor), null);
     });
   });
 
@@ -271,7 +277,7 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       const scheduleId = await storeWindow(SUNDAYS);
       const created = await create({ scheduleId });
       window = null;
-      const on = await rediscovery.setEnabled(created.id, true);
+      const on = await rediscovery.setEnabled(created.id, true, testActor);
       // A rediscovery that runs when it should not is visible; one that silently never runs
       // again is not, so the missing window is a warning rather than a refusal.
       assert.equal(on?.nextRunAt, '2026-08-31T03:00:00.000Z');
@@ -318,7 +324,7 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
     it('never provisions a run somebody started by hand', async () => {
       // Theirs to provision. Creating objects on their behalf is the exact surprise this
       // ticket is careful about, and a hand-started run has no schedule to have asked for it.
-      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29' });
+      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29' }, testActor);
       assert.equal(await rediscovery.runFinished(run.id), false);
       assert.deepEqual(provisioned, []);
       assert.equal(rediscovery.stats().skipped, 0, 'and it is not counted as a skip either');
@@ -346,8 +352,8 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
         ['Nightly'],
       );
 
-      assert.equal(await rediscovery.remove(first.id), true);
-      assert.equal(await rediscovery.remove(first.id), false, 'and only once');
+      assert.equal(await rediscovery.remove(first.id, testActor), true);
+      assert.equal(await rediscovery.remove(first.id, testActor), false, 'and only once');
       assert.equal(await rediscovery.get(first.id), null);
     });
 

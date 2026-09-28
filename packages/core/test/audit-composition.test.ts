@@ -1,9 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
+  discoveryAuditSinks,
   grantAuditSinks,
   libraryAuditSinks,
   mapAuditSinks,
+  probeAuditSinks,
   objectAuditSinks,
   reportAuditSinks,
   scheduleAuditSinks,
@@ -78,6 +80,8 @@ describe('what each audited service tells', () => {
     assert.ok(!libraryAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!mapAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!grantAuditSinks(all).includes(all.reachabilitySync));
+    assert.ok(!probeAuditSinks(all).includes(all.reachabilitySync));
+    assert.ok(!discoveryAuditSinks(all).includes(all.reachabilitySync));
   });
 
   it('leaves the result cache and the alarm chain out of a schedule edit', () => {
@@ -117,5 +121,14 @@ describe('what each audited service tells', () => {
     // configuration push here would send every probe a change none of them scans for (`A-17`).
     const all = sinks();
     assert.deepEqual(grantAuditSinks(all).map(all.named), ['database', 'logging']);
+  });
+
+  it('keeps probe trust and discovery to the record alone', () => {
+    // The registry acts on its own decisions — it closes or withdraws the connection, and the
+    // handshake that follows carries the key and the configuration (`P-189`) — and a discovery
+    // run's objects are audited by the object service as they are created (`A-20`).
+    const all = sinks();
+    assert.deepEqual(probeAuditSinks(all).map(all.named), ['database', 'logging']);
+    assert.deepEqual(discoveryAuditSinks(all).map(all.named), ['database', 'logging']);
   });
 });

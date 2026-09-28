@@ -8,6 +8,8 @@ import {
   type SweepJob,
 } from '@ms/shared';
 import type { DiscoveryLevel, Logger } from '@ms/shared';
+import type { Database } from '../db/pool.js';
+import type { Actor, AuditSink } from '../objects/audit.js';
 import { DiscoveryError } from './errors.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
@@ -90,12 +92,17 @@ export interface DiscoveryRunRow {
  * Structural rather than the concrete `Database`, so the tests can drive it with a stub and so
  * nothing here can reach for a transaction or a listener it has no business with.
  */
-interface Db {
-  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
-}
 
 export interface DiscoveryServiceOptions {
-  db: Db;
+  db: Database;
+  /**
+   * Where starting and stopping a run is recorded, in the run's own transaction (`A-20`).
+   *
+   * Required: a sweep sends traffic across somebody's network with a credential, and "who started
+   * that?" is asked after the fact — sometimes after the group the run belonged to, and the run
+   * with it, has been deleted.
+   */
+  audit: AuditSink;
   logger: Logger;
   /**
    * Sends a message to a connected probe.
@@ -140,10 +147,11 @@ export interface StartRequest {
   timeoutMs?: number;
   concurrency?: number;
   ratePerSecond?: number;
-  createdBy?: number;
   level?: DiscoveryLevel;
   snmpCommunity?: string;
   templates?: readonly string[];
+  /** The rediscovery schedule starting this run (`D-07`), recorded on the run and its entry. */
+  scheduleId?: number;
 }
 
 /** How many hosts one `identify-start` names, so a /16 does not become a megabyte of addresses. */
@@ -166,7 +174,8 @@ const IDENTIFY_BATCH = 4_096;
 const MAX_STALLED_OFFERS = 3;
 
 export class DiscoveryService {
-  readonly #db: Db;
+  readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   readonly #dispatch: DiscoveryServiceOptions['dispatch'];
   readonly #onFinished: DiscoveryServiceOptions['onFinished'];
@@ -180,6 +189,7 @@ export class DiscoveryService {
 
   constructor(options: DiscoveryServiceOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'discovery' });
     this.#dispatch = options.dispatch;
     this.#onFinished = options.onFinished;
@@ -209,45 +219,71 @@ export class DiscoveryService {
    * operator who typed a /8 should be told so while the form is still open, and because `total`
    * has to be right before a progress bar means anything.
    */
-  async start(request: StartRequest): Promise<DiscoveryRunRow> {
+  async start(request: StartRequest, actor: Actor): Promise<DiscoveryRunRow> {
     // Throws `IpRangeError` for anything unusable, which the API surfaces as a 400 with the
     // sentence the parser wrote rather than "invalid range".
     const range = parseIpRange(request.range);
 
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `INSERT INTO discovery_run
-         (group_id, probe_id, range_text, total, timeout_ms, concurrency, rate_per_second,
-          created_by, level, snmp_community, templates)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING *`,
-      [
-        request.groupId,
-        request.probeId,
-        range.text,
-        range.size,
-        request.timeoutMs ?? 1_000,
-        request.concurrency ?? 32,
-        request.ratePerSecond ?? 0,
-        request.createdBy ?? null,
-        request.level ?? 'standard',
-        request.snmpCommunity ?? '',
-        [...(request.templates ?? [])],
-      ],
-    );
-    const row = rows[0];
-    if (row === undefined) {
-      throw new DiscoveryError('DISCOVERY_FAILED', 'the run could not be recorded');
-    }
+    // **`created_by` is filled at last** (`A-20`): the column has existed since migration 025 and
+    // nothing wrote it. The audit entry is the durable answer; this is the one the run carries.
+    const run = await this.#db.tx(async (q) => {
+      const rows = await q.query<Record<string, unknown>>(
+        `INSERT INTO discovery_run
+           (group_id, probe_id, range_text, total, timeout_ms, concurrency, rate_per_second,
+            created_by, level, snmp_community, templates, schedule_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING *`,
+        [
+          request.groupId,
+          request.probeId,
+          range.text,
+          range.size,
+          request.timeoutMs ?? 1_000,
+          request.concurrency ?? 32,
+          request.ratePerSecond ?? 0,
+          actor.kind === 'user' ? actor.userId : null,
+          request.level ?? 'standard',
+          request.snmpCommunity ?? '',
+          [...(request.templates ?? [])],
+          request.scheduleId ?? null,
+        ],
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        throw new DiscoveryError('DISCOVERY_FAILED', 'the run could not be recorded');
+      }
+      const created = read(row);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'discovery.started',
+            objectId: created.groupId,
+            runId: created.id,
+            probeId: created.probeId,
+            range: created.range,
+            level: created.level,
+            templates: created.templates.join(', '),
+            community: created.snmpCommunity !== '',
+            scheduleId: created.scheduleId,
+          },
+        ],
+        new Date(),
+      );
+      return created;
+    });
 
     this.#started += 1;
     this.#logger.info(
-      { runId: Number(row['id']), range: range.text, total: range.size, probeId: request.probeId },
+      { runId: run.id, range: range.text, total: range.size, probeId: request.probeId },
       'discovery run created',
     );
     // Best effort: a probe that is not connected picks the run up on its next `resume`, which is
-    // the same path a probe restart takes. Nothing is lost by the offer failing.
+    // the same path a probe restart takes. Nothing is lost by the offer failing. After the commit,
+    // so a probe is never offered a run that rolled back.
     await this.pump(request.probeId);
-    return read(row);
+    return run;
   }
 
   /**
@@ -624,18 +660,36 @@ export class DiscoveryService {
   }
 
   /** Asks the probe to stop, and records the operator's decision immediately. */
-  async cancel(runId: number): Promise<DiscoveryRunRow | null> {
+  async cancel(runId: number, actor: Actor): Promise<DiscoveryRunRow | null> {
     this.#offers.delete(runId);
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `UPDATE discovery_run
-       SET status = 'cancelled', finished_at = now()
-       WHERE id = $1 AND status IN ('queued', 'running', 'identifying')
-       RETURNING *`,
-      [runId],
-    );
-    const row = rows[0];
-    if (row === undefined) return null;
-    const run = read(row);
+    // A run that had already finished writes no entry: nothing was stopped.
+    const run = await this.#db.tx(async (q) => {
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE discovery_run
+         SET status = 'cancelled', finished_at = now()
+         WHERE id = $1 AND status IN ('queued', 'running', 'identifying')
+         RETURNING *`,
+        [runId],
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      const cancelled = read(row);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'discovery.cancelled',
+            objectId: cancelled.groupId,
+            runId,
+            range: cancelled.range,
+          },
+        ],
+        new Date(),
+      );
+      return cancelled;
+    });
+    if (run === null) return null;
     // Recorded first, sent second. A cancel the probe never receives — because it is not
     // connected — must still stop the run, or the operator's click did nothing and the sweep
     // resumes the moment the probe comes back.

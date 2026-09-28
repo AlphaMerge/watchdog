@@ -21,9 +21,11 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
+  discoveryAuditSinks,
   grantAuditSinks,
   identityAuditSinks,
   objectAuditSinks,
+  probeAuditSinks,
   scheduleAuditSinks,
   triggerAuditSinks,
   type AuditSinkSet,
@@ -734,6 +736,7 @@ async function serve(): Promise<void> {
   let rediscoveryRef: RediscoveryService | undefined;
   const discovery = new DiscoveryService({
     db,
+    audit: new CompositeAuditSink(discoveryAuditSinks(auditSinks)),
     logger,
     // The endpoint does not exist yet, so `offline` is the honest answer until it does — the
     // run waits and is offered again, which is exactly what happens to a probe that has not
@@ -825,6 +828,7 @@ async function serve(): Promise<void> {
   // separately off.
   const rediscovery = new RediscoveryService({
     db,
+    audit: new CompositeAuditSink(discoveryAuditSinks(auditSinks)),
     logger,
     discovery,
     // `M-09`'s calendar as a permission window, read through the repository rather than this
@@ -854,6 +858,7 @@ async function serve(): Promise<void> {
   // every handshake and a probe that connects during startup must not be admitted by default.
   const probeRegistry = new ProbeRegistry({
     db,
+    audit: new CompositeAuditSink(probeAuditSinks(auditSinks)),
     logger,
     enrolmentKeys: config.probeEndpoint.accessKeys,
   });

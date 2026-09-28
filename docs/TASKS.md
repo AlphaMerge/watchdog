@@ -12502,7 +12502,7 @@ because each is a decision rather than a defect:
       - a token entry carrying the token where its prefix belongs;
       - leaving a group that records nothing, which the sweep also catches, by route.
 
-- [ ] **A-20 — Probe trust and rediscovery rules change without an audit entry** · M · A-17 ·
+- [x] **A-20 — Probe trust and rediscovery rules change without an audit entry** · M · A-17 ·
       Found by `A-17`'s sweep, which declares these routes against this ticket. `ProbeRegistry`
       and `RediscoveryService` call no audit sink, and neither do their routes:
 
@@ -12523,6 +12523,47 @@ because each is a decision rather than a defect:
       **Done when** each of those changes writes an entry in its own transaction with who, what,
       and the before and after — a probe named by its gid and name, never by its enrolment key —
       and every `A-20` declaration `A-17`'s sweep carries is gone and the sweep still passes.
+
+      **A-20 outcome.** All nine declarations are gone and the sweep calls every route.
+      `ProbeRegistry`, `DiscoveryService` and `RediscoveryService` each take a required `audit`
+      sink, every decision takes an `Actor`, and each change is one transaction with its entry;
+      the connection a probe decision reaches, and the probe a run is offered to, are told after
+      the commit, so a change that rolled back reaches nothing.
+
+      - **Probe trust** is `probe.approved`, `.revoked`, `.allowFrom.set` and `.deleted`, under a
+        new `probe` category. A probe is named by gid, the name it reported and the address it
+        last called from, and the diff carries status, branch, address filter and note — never
+        a key, its own or the enrolment key, nor the hash of either, which a test checks after a
+        real key has been issued. `decided_by` had never been filled either: the routes did not
+        pass who decided, and now do. A filter saved unchanged writes no entry.
+      - **Rediscovery schedules** are `discovery.schedule.created`, `.updated` and `.deleted`,
+        with `objectId` the group they fill, the cadence as the sentence the UI shows, and the
+        SNMP community as whether one is set. Switching a schedule to the state it is in writes
+        nothing.
+      - **Discovery runs are audited, decided rather than left out**: `discovery.started` and
+        `discovery.cancelled`, under a new `discovery` category, as `report.ran` is. The
+        alternative was filling `discovery_run.created_by` and exempting the routes, and it
+        loses the answer when it matters: a run is `ON DELETE CASCADE` from its group and its
+        probe, so "who swept that subnet?" would vanish with the group, while the audit log
+        outlives both. `created_by` is filled as well, for the run's own view. A run a
+        rediscovery schedule starts is recorded as the system's with the schedule's id, and
+        the schedule now rides on the run from its insert rather than a second `UPDATE`.
+      - **Found on the way, and fixed:** `POST /discovery/:id/provision` handed the provisioner
+        `{ kind: 'anonymous', remoteAddress }`, so every device and sensor it created was
+        audited as nobody's while an administrator was logged in. The sweep could not see it —
+        its provision stub writes a row for any actor — so **the sweep now checks every row a
+        route writes names the caller** (`actor_kind` and `actor_label`), which is what caught
+        it once the fix was reverted.
+
+      `probeAuditSinks` and `discoveryAuditSinks` are the record and nothing else, asserted in
+      `audit-composition.test.ts`: the registry acts on its own decisions (`P-189`), and what a
+      run creates is audited by the object service. The Logs view's chips gained `probe` and
+      `discovery`. `trust-audit.test.ts` holds what each entry says, the redaction, and three
+      rollbacks — an approval that leaves the probe pending, unbound and connected; a run that
+      leaves no row, no entry and no offer; a schedule that leaves nothing. Core 2771/2771.
+      Mutation 4/4: an approval that records nothing, a run's entry written outside its
+      transaction (which first survived, because the rollback test never looked for the entry),
+      provisioning as anonymous again, and a probe disconnected before the commit.
 
 - [x] **A-21 — The live stream's sequence number counts changes the subscriber cannot see** · S ·
       A-12 · Found 2026-09-28 in `A-12`'s review. `StateBroadcaster` numbered every published

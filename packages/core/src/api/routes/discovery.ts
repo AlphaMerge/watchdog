@@ -20,8 +20,8 @@ import {
   onObject,
   onQueryObject,
   visibilityOf,
-  auditGap,
 } from '../authorization.js';
+import { actorFor } from '../authentication.js';
 
 export interface DiscoveryRouteOptions {
   discovery: DiscoveryService;
@@ -202,9 +202,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     {
       // A discovery run provisions devices and sensors into `groupId`, which makes it a creation
       // under a parent named in the body — the case `onBodyObject` exists for (`G05`). What it
-      // provisions is audited as the objects it creates; who started the sweep is not recorded
-      // anywhere yet — `discovery_run.created_by` exists and nothing fills it (`A-20`).
-      config: { ...onBodyObject('write', 'groupId'), ...auditGap('A-20') },
+      // provisions is audited as the objects it creates, and starting it is audited as
+      // `discovery.started` (`A-20`): an action rather than configuration, recorded as
+      // `report.ran` is, because the run row goes with its group and the question does not.
+      config: onBodyObject('write', 'groupId'),
       schema: {
         tags: ['discovery'],
         summary: 'Start a discovery run',
@@ -272,7 +273,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         templates?: string[];
       };
       parse(body.range);
-      const run = await discovery.start(body);
+      const run = await discovery.start(body, actorFor(request));
       await reply.code(201).send(run);
       return reply;
     },
@@ -499,7 +500,6 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           const run = await discovery.get((request.params as { id: number }).id);
           return run?.groupId ?? null;
         }),
-        ...auditGap('A-20'),
       },
       schema: {
         tags: ['discovery'],
@@ -513,7 +513,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     },
     async (request) => {
       const { id } = request.params as { id: number };
-      const run = await discovery.cancel(id);
+      const run = await discovery.cancel(id, actorFor(request));
       if (run !== null) return run;
       // A run that exists but has already finished is not an error worth a 404: the operator
       // asked for it to stop and it is stopped. Anything else is genuinely missing.
@@ -595,7 +595,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       async (request: FastifyRequest) => {
         const { id } = request.params as { id: number };
         if ((await discovery.get(id)) === null) throw notFound(id);
-        return provision(id, { kind: 'anonymous', remoteAddress: request.ip });
+        // The caller, not the address they called from: every object this creates is audited
+        // under this actor, and "anonymous" beside a device an administrator provisioned is a
+        // record saying nobody did it (`A-20`).
+        return provision(id, actorFor(request));
       },
     );
   }
@@ -752,7 +755,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       {
         // Same shape as starting a run, and with `autoProvision` it is a standing instruction to
         // keep creating objects in that group (`G05`).
-        config: { ...onBodyObject('write', 'groupId'), ...auditGap('A-20') },
+        config: onBodyObject('write', 'groupId'),
         schema: {
           tags: ['discovery'],
           summary: 'Create a rediscovery schedule',
@@ -822,6 +825,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       async (request, reply) => {
         const created = await rediscovery.create(
           request.body as Parameters<RediscoveryService['create']>[0],
+          actorFor(request),
         );
         await reply.code(201).send(created);
         return reply;
@@ -838,7 +842,6 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             const schedule = await rediscovery.get((request.params as { id: number }).id);
             return schedule?.groupId ?? null;
           }),
-          ...auditGap('A-20'),
         },
         schema: {
           tags: ['discovery'],
@@ -859,7 +862,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       async (request: FastifyRequest) => {
         const { id } = request.params as { id: number };
         const { enabled } = request.body as { enabled: boolean };
-        const updated = await rediscovery.setEnabled(id, enabled);
+        const updated = await rediscovery.setEnabled(id, enabled, actorFor(request));
         if (updated === null) {
           throw new DiscoveryError(
             'DISCOVERY_RUN_NOT_FOUND',
@@ -881,7 +884,6 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             const schedule = await rediscovery.get((request.params as { id: number }).id);
             return schedule?.groupId ?? null;
           }),
-          ...auditGap('A-20'),
         },
         schema: {
           tags: ['discovery'],
@@ -892,7 +894,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request, reply) => {
         const { id } = request.params as { id: number };
-        if (!(await rediscovery.remove(id))) {
+        if (!(await rediscovery.remove(id, actorFor(request)))) {
           throw new DiscoveryError(
             'DISCOVERY_RUN_NOT_FOUND',
             `there is no rediscovery schedule ${String(id)}`,

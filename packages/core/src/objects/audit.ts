@@ -494,6 +494,99 @@ export type Mutation =
     }
   | {
       /**
+       * A probe was approved onto a branch of the tree (`A-20`).
+       *
+       * **As much a grant as anything `A-17` records**: approving admits a machine that runs
+       * checks with the core's credentials. Named by its gid, the name it reported and the address
+       * it last called from — the facts the decision was taken on — and never by a key: not the
+       * enrolment key, not its own, and not the hash of either. `objectId` is the probe object it
+       * is bound to, so the decision appears in that object's history.
+       */
+      action: 'probe.approved';
+      objectId: ObjectId;
+      probe: ProbeIdentity;
+      local: boolean;
+      before: ProbeTrustAudit;
+      after: ProbeTrustAudit;
+    }
+  | {
+      /** A probe was refused from now on. `objectId` is the branch it held, now released. */
+      action: 'probe.revoked';
+      objectId: ObjectId | null;
+      probe: ProbeIdentity;
+      before: ProbeTrustAudit;
+      after: ProbeTrustAudit;
+    }
+  | {
+      /** Where one probe may connect from was changed. */
+      action: 'probe.allowFrom.set';
+      objectId: ObjectId | null;
+      probe: ProbeIdentity;
+      before: ProbeTrustAudit;
+      after: ProbeTrustAudit;
+    }
+  | {
+      /** A probe was forgotten: if it connects again it enrols as a stranger. */
+      action: 'probe.deleted';
+      objectId: ObjectId | null;
+      probe: ProbeIdentity;
+      before: ProbeTrustAudit;
+    }
+  | {
+      /**
+       * A discovery run was started (`A-20`).
+       *
+       * **An action, audited as `report.ran` is**, because "who swept that subnet?" is a security
+       * question and is asked of the audit log. The run's own `created_by` says it too, but a run
+       * goes with its group when the group is deleted, and the question outlives both. A run a
+       * rediscovery schedule started is recorded as the system's, with the schedule's id.
+       * `objectId` is the group it provisions into. The SNMP community is recorded as present or
+       * not, never as itself.
+       */
+      action: 'discovery.started';
+      objectId: ObjectId;
+      runId: number;
+      probeId: number;
+      range: string;
+      level: string;
+      templates: string;
+      community: boolean;
+      scheduleId: number | null;
+    }
+  | {
+      /** A discovery run was stopped by somebody, rather than finishing or failing. */
+      action: 'discovery.cancelled';
+      objectId: ObjectId;
+      runId: number;
+      range: string;
+    }
+  | {
+      /**
+       * A rediscovery schedule was created, changed or removed (`A-20`).
+       *
+       * Standing configuration that creates objects on a timer, so audited as configuration.
+       * `objectId` is the group it provisions into, where somebody would look for it.
+       */
+      action: 'discovery.schedule.created';
+      objectId: ObjectId;
+      scheduleId: number;
+      after: RediscoveryScheduleAudit;
+    }
+  | {
+      action: 'discovery.schedule.updated';
+      objectId: ObjectId;
+      scheduleId: number;
+      before: RediscoveryScheduleAudit;
+      after: RediscoveryScheduleAudit;
+    }
+  | {
+      action: 'discovery.schedule.deleted';
+      objectId: ObjectId;
+      scheduleId: number;
+      before: RediscoveryScheduleAudit;
+    }
+  | {
+      /**
        * An account was created, changed or removed (`A-18`).
        *
        * **The role is the change this exists for.** A `readonly` account made `readwrite` can now
@@ -656,6 +749,51 @@ export type Mutation =
       name: string;
       prefix: string;
     };
+
+/**
+ * Which probe a trust decision was about (`A-20`): the facts an administrator decided on.
+ *
+ * Deliberately no key material of any kind. The gid is the identity; the name and the address
+ * are what the queue showed when somebody chose.
+ */
+export interface ProbeIdentity {
+  readonly gid: string;
+  readonly name: string;
+  readonly address: string;
+}
+
+/** What was decided about a probe, as the audit log records it (`A-20`). */
+export interface ProbeTrustAudit {
+  readonly status: string;
+  /** The probe object it is bound to, or null for none. */
+  readonly objectId: number | null;
+  /** The address filter, one range after another; empty means anywhere. */
+  readonly allowFrom: string;
+  readonly note: string;
+}
+
+/**
+ * A rediscovery schedule as the audit log records it (`A-20`).
+ *
+ * The cadence as the sentence the UI shows (`every Sunday at 03:00`), and the SNMP community as
+ * whether one is set: it is a credential, and `P-55` already keeps it out of every response.
+ */
+export interface RediscoveryScheduleAudit {
+  readonly name: string;
+  readonly probeId: number;
+  readonly range: string;
+  readonly level: string;
+  readonly templates: string;
+  readonly community: boolean;
+  readonly cadence: string;
+  readonly timezone: string;
+  readonly window: number | null;
+  readonly autoProvision: boolean;
+  readonly enabled: boolean;
+  readonly timeoutMs: number;
+  readonly concurrency: number;
+  readonly ratePerSecond: number;
+}
 
 /** What a grant is on (`A-17`). */
 export type GrantSubject =
@@ -999,6 +1137,46 @@ function summarise(mutation: Mutation): Record<string, unknown> {
       };
     case 'report.updated':
       return { action: mutation.action, reportId: mutation.reportId, name: mutation.after.name };
+    case 'probe.approved':
+    case 'probe.revoked':
+    case 'probe.allowFrom.set':
+    case 'probe.deleted':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        gid: mutation.probe.gid,
+        name: mutation.probe.name,
+      };
+    case 'discovery.started':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        runId: mutation.runId,
+        range: mutation.range,
+        scheduleId: mutation.scheduleId,
+      };
+    case 'discovery.cancelled':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        runId: mutation.runId,
+        range: mutation.range,
+      };
+    case 'discovery.schedule.created':
+    case 'discovery.schedule.deleted':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        scheduleId: mutation.scheduleId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'discovery.schedule.updated':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        scheduleId: mutation.scheduleId,
+        name: mutation.after.name,
+      };
     case 'account.created':
     case 'account.deleted':
       return {

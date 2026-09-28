@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import { ProbeRegistry } from '../src/probes/registry.js';
@@ -43,7 +44,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
   beforeEach(async () => {
     await db.query('DELETE FROM probe_registration');
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
-    registry = new ProbeRegistry({ db, logger: silentLogger, enrolmentKeys: ['shared-key'] });
+    registry = new ProbeRegistry({
+      db,
+      audit: new DatabaseAuditSink(),
+      logger: silentLogger,
+      enrolmentKeys: ['shared-key'],
+    });
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
       parentId: harness.rootId,
@@ -99,7 +105,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const closed = link.closed;
 
       await registry.admit(hello({ gid: 'reconnecting-probe' }));
-      await registry.approve('reconnecting-probe', probeId);
+      await registry.approve('reconnecting-probe', probeId, testActor);
 
       assert.equal(closed.length, 1);
       const only = closed[0];
@@ -113,9 +119,14 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('decides perfectly well with nothing attached', async () => {
       // Absent is a legitimate state: every test that only cares what the rows say, and every
       // deployment before the endpoint exists.
-      const detached = new ProbeRegistry({ db, logger: silentLogger, enrolmentKeys: [] });
+      const detached = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        enrolmentKeys: [],
+      });
       await detached.admit(hello({ gid: 'unwatched-probe', accessKey: '' }));
-      const approved = await detached.approve('unwatched-probe', probeId);
+      const approved = await detached.approve('unwatched-probe', probeId, testActor);
       assert.equal(approved.status, 'approved');
     });
   });
@@ -153,7 +164,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('accepts any key when the installation has set none', async () => {
       // The shipped development default. Only reasonable on a trusted network, and said out
       // loud rather than left as a surprise.
-      const open = new ProbeRegistry({ db, logger: silentLogger, enrolmentKeys: [] });
+      const open = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        enrolmentKeys: [],
+      });
       assert.equal((await open.admit(hello({ accessKey: '' }))).kind, 'pending');
     });
   });
@@ -187,7 +203,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
 
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
       const afterApproval = await registry.get(first.gid);
       assert.ok(afterApproval !== null);
@@ -242,7 +258,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('takes a probe back on the enrolment key when the welcome never arrived', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
       // The handshake that issues a key. Pretend the welcome is lost: the probe never sees
       // `issuedKey`, so it still holds nothing but the enrolment key.
@@ -273,7 +289,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // the probe demonstrably has nothing else.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
       const issuing = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issuing.kind === 'approved' && issuing.issuedKey !== undefined);
@@ -287,7 +303,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('lets an approved probe in with its own key, and nothing else', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       // The key is issued at the next handshake, not at approval.
       const issued = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issued.kind === 'approved' && issued.issuedKey !== undefined);
@@ -309,17 +325,17 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       const second = await registry.admit(hello({ gid: 'another-machine' }));
       assert.ok(first.kind === 'pending' && second.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
       await assert.rejects(
-        () => registry.approve(second.gid, probeId),
+        () => registry.approve(second.gid, probeId, testActor),
         (error: unknown) => error instanceof Error && /already belongs to/.test(error.message),
       );
     });
 
     it('reports a probe that is not there', async () => {
       await assert.rejects(
-        () => registry.approve('never-seen', probeId),
+        () => registry.approve('never-seen', probeId, testActor),
         (error: unknown) => error instanceof Error && /there is no probe/.test(error.message),
       );
     });
@@ -329,13 +345,13 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('refuses it from then on, and keeps the record', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       // The key is issued at the next handshake, not at approval.
       const issued = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issued.kind === 'approved' && issued.issuedKey !== undefined);
       const accessKey = issued.issuedKey;
 
-      await registry.revoke(first.gid, 'the machine was decommissioned');
+      await registry.revoke(first.gid, 'the machine was decommissioned', testActor);
 
       const back = await registry.admit(hello({ gid: first.gid, accessKey }));
       assert.ok(back.kind === 'refused');
@@ -351,8 +367,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('releases the branch, because the sensors outlive the machine', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
-      await registry.revoke(first.gid, '');
+      await registry.approve(first.gid, probeId, testActor);
+      await registry.revoke(first.gid, '', testActor);
 
       const rows = await db.query<{ gid: string | null }>(
         'SELECT gid FROM probe_config WHERE object_id = $1',
@@ -364,8 +380,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('forgets one entirely, and it then enrols as a stranger', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      assert.equal(await registry.remove(first.gid), true);
-      assert.equal(await registry.remove(first.gid), false, 'and only once');
+      assert.equal(await registry.remove(first.gid, testActor), true);
+      assert.equal(await registry.remove(first.gid, testActor), false, 'and only once');
 
       const again = await registry.admit(hello({ gid: first.gid }));
       assert.equal(again.kind, 'pending');
@@ -388,10 +404,10 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       registry.attach(link);
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       assert.deepEqual(link.withdrawn, [], 'approving is not withdrawing');
 
-      await registry.revoke(first.gid, 'decommissioned, replaced by web-dc4');
+      await registry.revoke(first.gid, 'decommissioned, replaced by web-dc4', testActor);
       assert.deepEqual(link.withdrawn, [
         { gid: first.gid, code: 'revoked', detail: 'decommissioned, replaced by web-dc4' },
       ]);
@@ -403,7 +419,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
 
-      await registry.revoke(first.gid, '');
+      await registry.revoke(first.gid, '', testActor);
       assert.deepEqual(link.withdrawn, [
         { gid: first.gid, code: 'revoked', detail: 'this probe has been revoked' },
       ]);
@@ -417,9 +433,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       registry.attach(link);
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
-      assert.equal(await registry.remove(first.gid), true);
+      assert.equal(await registry.remove(first.gid, testActor), true);
       assert.deepEqual(link.withdrawn, [
         {
           gid: first.gid,
@@ -435,7 +451,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const link = recorder('10.4.2.9');
       registry.attach(link);
 
-      assert.equal(await registry.remove('never-seen'), false);
+      assert.equal(await registry.remove('never-seen', testActor), false);
       assert.deepEqual(link.withdrawn, []);
     });
 
@@ -448,9 +464,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       registry.attach(link);
       const first = await registry.admit(hello({ remoteAddress: '192.0.2.5' }));
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
-      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24'], testActor);
       assert.deepEqual(link.withdrawn, [
         {
           gid: first.gid,
@@ -468,9 +484,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       registry.attach(link);
       const first = await registry.admit(hello({ remoteAddress: '10.0.0.9' }));
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
-      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24'], testActor);
       assert.deepEqual(link.withdrawn, [], 'a probe inside its own filter was disconnected');
     });
 
@@ -482,6 +498,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const link = recorder('192.0.2.5');
       const narrowed = new ProbeRegistry({
         db,
+        audit: new DatabaseAuditSink(),
         logger: silentLogger,
         enrolmentKeys: ['shared-key'],
         enrolFrom: ['10.0.0.0/24'],
@@ -490,10 +507,10 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await narrowed.admit(hello({ remoteAddress: '10.0.0.9' }));
       assert.ok(first.kind === 'pending');
 
-      await narrowed.setAllowFrom(first.gid, ['192.0.2.0/24']);
+      await narrowed.setAllowFrom(first.gid, ['192.0.2.0/24'], testActor);
       assert.deepEqual(link.withdrawn, [], 'its own filter covers where it is');
 
-      await narrowed.setAllowFrom(first.gid, []);
+      await narrowed.setAllowFrom(first.gid, [], testActor);
       assert.deepEqual(
         link.withdrawn,
         [
@@ -515,7 +532,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello({ remoteAddress: '192.0.2.5' }));
       assert.ok(first.kind === 'pending');
 
-      await registry.setAllowFrom(first.gid, ['10.0.0.0/24']);
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/24'], testActor);
       assert.deepEqual(link.withdrawn, []);
     });
   });
@@ -524,12 +541,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('refuses an approved probe from outside its filter', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       // The key is issued at the next handshake, not at approval.
       const issued = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issued.kind === 'approved' && issued.issuedKey !== undefined);
       const accessKey = issued.issuedKey;
-      await registry.setAllowFrom(first.gid, ['10.4.0.0/16']);
+      await registry.setAllowFrom(first.gid, ['10.4.0.0/16'], testActor);
 
       assert.equal(
         (await registry.admit(hello({ gid: first.gid, accessKey, remoteAddress: '10.4.2.9' })))
@@ -554,7 +571,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
       await assert.rejects(
-        () => registry.setAllowFrom(first.gid, ['10.0.0.0/33']),
+        () => registry.setAllowFrom(first.gid, ['10.0.0.0/33'], testActor),
         (error: unknown) =>
           error instanceof Error && /prefix longer than 32 bits/.test(error.message),
       );
@@ -565,12 +582,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // cannot describe, and refusing is the only answer that keeps it meaning what it says.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       // The key is issued at the next handshake, not at approval.
       const issued = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issued.kind === 'approved' && issued.issuedKey !== undefined);
       const accessKey = issued.issuedKey;
-      await registry.setAllowFrom(first.gid, ['10.0.0.0/8']);
+      await registry.setAllowFrom(first.gid, ['10.0.0.0/8'], testActor);
 
       const v6 = await registry.admit(
         hello({ gid: first.gid, accessKey, remoteAddress: '2001:db8::1' }),
@@ -585,12 +602,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // "may this identity connect from here". A probe really can sit on `10.0.0.0/31`.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       // The key is issued at the next handshake, not at approval.
       const issued = await registry.admit(hello({ gid: first.gid }));
       assert.ok(issued.kind === 'approved' && issued.issuedKey !== undefined);
       const accessKey = issued.issuedKey;
-      await registry.setAllowFrom(first.gid, ['10.9.0.0/24']);
+      await registry.setAllowFrom(first.gid, ['10.9.0.0/24'], testActor);
 
       for (const address of ['10.9.0.0', '10.9.0.255', '10.9.0.17']) {
         assert.equal(
@@ -604,7 +621,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('takes a range too large to enumerate, because it is a permission not a sweep', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      const after = await registry.setAllowFrom(first.gid, ['10.0.0.0/8']);
+      const after = await registry.setAllowFrom(first.gid, ['10.0.0.0/8'], testActor);
       assert.deepEqual(after.allowFrom, ['10.0.0.0/8']);
     });
   });
@@ -617,7 +634,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // under it went with the subtree.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId, { local: true });
+      await registry.approve(first.gid, probeId, testActor, { local: true });
 
       await assert.rejects(
         () => harness.service.delete(testActor, probeId, { kind: 'leafOnly' }, { kind: 'none' }),
@@ -630,7 +647,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     it('is only local when somebody said so', async () => {
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
       const report = await harness.service.delete(
         testActor,
         probeId,
@@ -645,12 +662,12 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // the branch deletable.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.approve(first.gid, probeId, { local: true });
-      await registry.revoke(first.gid, 'the machine was replaced');
+      await registry.approve(first.gid, probeId, testActor, { local: true });
+      await registry.revoke(first.gid, 'the machine was replaced', testActor);
 
       const second = await registry.admit(hello({ gid: 'the-replacement' }));
       assert.ok(second.kind === 'pending');
-      await registry.approve(second.gid, probeId);
+      await registry.approve(second.gid, probeId, testActor);
 
       const rows = await db.query<{ is_local: boolean }>(
         'SELECT is_local FROM probe_config WHERE object_id = $1',
@@ -687,7 +704,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // one that takes a day to find.
       const first = await registry.admit(hello());
       assert.ok(first.kind === 'pending');
-      await registry.revoke(first.gid, 'no longer ours');
+      await registry.revoke(first.gid, 'no longer ours', testActor);
       await registry.admit(hello({ gid: first.gid, remoteAddress: '198.51.100.3' }));
 
       const stored = await registry.get(first.gid);
@@ -698,7 +715,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const first = await registry.admit(hello());
       const second = await registry.admit(hello({ gid: 'second-machine' }));
       assert.ok(first.kind === 'pending' && second.kind === 'pending');
-      await registry.approve(first.gid, probeId);
+      await registry.approve(first.gid, probeId, testActor);
 
       assert.deepEqual(
         (await registry.list('pending')).map((one) => one.gid),

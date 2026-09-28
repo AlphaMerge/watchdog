@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DiscoveryService, type DispatchMessage } from '../src/discovery/service.js';
 import { DiscoveryError } from '../src/discovery/errors.js';
@@ -64,6 +65,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     discovery = new DiscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silentLogger,
       dispatch: (_probeId, message) => {
         if (tooOld) return { kind: 'too-old', protocolVersion: 2, needs: 4 };
@@ -89,7 +91,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
   };
 
   const start = (range = '10.0.0.0/29') =>
-    discovery.start({ groupId, probeId, range, timeoutMs: 500, concurrency: 8 });
+    discovery.start({ groupId, probeId, range, timeoutMs: 500, concurrency: 8 }, testActor);
 
   describe('starting', () => {
     it('records the range, its size, and offers it to the probe', async () => {
@@ -241,7 +243,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // A cancelled run whose last in-flight pings are still reporting must not come back to
       // life, or a cancel would look like it did nothing.
       const run = await start();
-      await discovery.cancel(run.id);
+      await discovery.cancel(run.id, testActor);
       await discovery.progress(run.id, 6, [], 0);
       const after = await mustGet(run.id);
       assert.equal(after.status, 'cancelled');
@@ -281,7 +283,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('keeps a run the operator cancelled cancelled', async () => {
       const run = await start();
-      await discovery.cancel(run.id);
+      await discovery.cancel(run.id, testActor);
       await discovery.finished(run.id, 'cancelled', 3, '');
       assert.equal((await mustGet(run.id)).status, 'cancelled');
     });
@@ -301,7 +303,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // comes back.
       const run = await start();
       connected = false;
-      const cancelled = await discovery.cancel(run.id);
+      const cancelled = await discovery.cancel(run.id, testActor);
       assert.ok(cancelled !== null);
       assert.equal(cancelled.status, 'cancelled');
       assert.equal((await mustGet(run.id)).status, 'cancelled');
@@ -313,7 +315,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       // probe answers honestly.
       const run = await start();
       sent = [];
-      await discovery.cancel(run.id);
+      await discovery.cancel(run.id, testActor);
       assert.deepEqual(sent, [
         { kind: 'cancel', runId: run.id },
         { kind: 'identify-cancel', runId: run.id },
@@ -323,7 +325,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('answers null for a run that has already finished', async () => {
       const run = await start();
       await discovery.finished(run.id, 'done', 6, '');
-      assert.equal(await discovery.cancel(run.id), null);
+      assert.equal(await discovery.cancel(run.id, testActor), null);
     });
   });
 
@@ -345,7 +347,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('leaves a cancelled run cancelled', async () => {
       const run = await start();
-      await discovery.cancel(run.id);
+      await discovery.cancel(run.id, testActor);
       await discovery.probeDisconnected(probeId);
       assert.equal((await mustGet(run.id)).status, 'cancelled');
     });
@@ -434,12 +436,15 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     });
 
     it('ends the run without identifying when the level says ping only', async () => {
-      const run = await discovery.start({
-        groupId,
-        probeId,
-        range: '10.0.0.0/29',
-        level: 'ping',
-      });
+      const run = await discovery.start(
+        {
+          groupId,
+          probeId,
+          range: '10.0.0.0/29',
+          level: 'ping',
+        },
+        testActor,
+      );
       await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       await discovery.finished(run.id, 'done', 6, '');
       assert.equal((await mustGet(run.id)).status, 'done');
@@ -560,7 +565,7 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('cancels both stages, because the status no longer says which was running', async () => {
       const run = await sweptAndFound(['10.0.0.1']);
       sent = [];
-      await discovery.cancel(run.id);
+      await discovery.cancel(run.id, testActor);
       assert.deepEqual(
         sent.map((one) => one.kind),
         ['cancel', 'identify-cancel'],
@@ -619,7 +624,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
    */
   describe('levels', () => {
     const sweptAndDone = async (level: 'ping' | 'standard' | 'detailed') => {
-      const record = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level });
+      const record = await discovery.start(
+        { groupId, probeId, range: '10.0.0.0/29', level },
+        testActor,
+      );
       await discovery.progress(record.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       sent = [];
       await discovery.finished(record.id, 'done', 6, '');
@@ -666,12 +674,15 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       const all = await start();
       assert.deepEqual(all.templates, []);
 
-      const some = await discovery.start({
-        groupId,
-        probeId,
-        range: '10.0.0.0/29',
-        templates: ['acme.switch', 'acme.router'],
-      });
+      const some = await discovery.start(
+        {
+          groupId,
+          probeId,
+          range: '10.0.0.0/29',
+          templates: ['acme.switch', 'acme.router'],
+        },
+        testActor,
+      );
       assert.deepEqual((await mustGet(some.id)).templates, ['acme.switch', 'acme.router']);
     });
 
@@ -769,7 +780,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('counts a host nobody identified as unidentified rather than unknown', async () => {
       // A `ping` run identifies nothing, and that is the level working rather than failing.
-      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level: 'ping' });
+      const run = await discovery.start(
+        { groupId, probeId, range: '10.0.0.0/29', level: 'ping' },
+        testActor,
+      );
       await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       await discovery.finished(run.id, 'done', 6, '');
 
@@ -780,7 +794,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
     it('carries what provisioning did, and what it could not do', async () => {
       // `ping`, so the sweep's ending is the run's ending — provisioning is what is under test
       // here and a run parked in `identifying` would only be testing the fixture.
-      const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29', level: 'ping' });
+      const run = await discovery.start(
+        { groupId, probeId, range: '10.0.0.0/29', level: 'ping' },
+        testActor,
+      );
       await discovery.progress(run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
       await discovery.finished(run.id, 'done', 6, '');
       await discovery.recordProvisioning(run.id, {

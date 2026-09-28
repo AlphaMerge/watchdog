@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { classify, type Evidence } from '@ms/shared';
 import { DeviceTemplateCatalogue, type DeviceTemplate } from '../src/device-templates/index.js';
@@ -152,6 +153,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
 
     discovery = new DiscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silentLogger,
       dispatch: () => ({ kind: 'sent' }),
     });
@@ -168,7 +170,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
   });
 
   const run = async (): Promise<DiscoveryRunRow> =>
-    discovery.start({ groupId, probeId, range: '10.0.0.0/29' });
+    discovery.start({ groupId, probeId, range: '10.0.0.0/29' }, testActor);
 
   /** Everything a group holds, so a second pass can be given what the first left behind. */
   const existing = async (): Promise<{
@@ -486,12 +488,15 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       // A filter rather than a fourth level (`D-06`), because "detailed, but only these
       // templates" is a thing somebody wants and a level could not express it.
       credentials = new Set(['snmp']);
-      const record = await discovery.start({
-        groupId,
-        probeId,
-        range: '10.0.0.0/29',
-        templates: ['test.generic'],
-      });
+      const record = await discovery.start(
+        {
+          groupId,
+          probeId,
+          range: '10.0.0.0/29',
+          templates: ['test.generic'],
+        },
+        testActor,
+      );
       const report = await provision([host('10.0.0.1', { sysDescr: 'Linux one 5.15' })], record);
       assert.deepEqual(report.devices[0]?.sensors, ['Ping'], 'test.linux was not consulted');
     });
@@ -500,12 +505,15 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       // Honest rather than helpful: a run filtered to templates that do not apply should say so
       // by creating nothing, not by quietly falling back to the generic set the operator
       // excluded.
-      const record = await discovery.start({
-        groupId,
-        probeId,
-        range: '10.0.0.0/29',
-        templates: ['test.web'],
-      });
+      const record = await discovery.start(
+        {
+          groupId,
+          probeId,
+          range: '10.0.0.0/29',
+          templates: ['test.web'],
+        },
+        testActor,
+      );
       const report = await provision([host('10.0.0.1')], record);
       assert.equal(report.devicesCreated, 1, 'the device is still made');
       assert.deepEqual(report.devices[0]?.sensors, []);

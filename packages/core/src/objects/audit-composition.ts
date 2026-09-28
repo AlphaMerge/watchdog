@@ -104,6 +104,29 @@ export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
 }
 
 /**
+ * Approving, refusing, fencing or forgetting a probe (`A-20`).
+ *
+ * **The record and nothing else**, because the registry already acts on the decision itself: it
+ * closes or withdraws the probe's connection (`P-189`), and the handshake that follows issues the
+ * key and the configuration. A configuration push from here would race that reconnect for a
+ * probe that is, at that moment, not connected.
+ */
+export function probeAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
+/**
+ * Starting or stopping a discovery run, and editing a rediscovery schedule (`A-20`).
+ *
+ * **The record and nothing else.** What a run creates is audited as the objects it creates,
+ * through the object service's own sinks; the run and its schedule hold nothing a probe's
+ * configuration, a cache or an alarm chain reads.
+ */
+export function discoveryAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
+/**
  * Changing an account, a user group, a membership, a password, a second factor or an API token
  * (`A-18`).
  *

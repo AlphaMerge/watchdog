@@ -52,6 +52,8 @@ const CATEGORIES = [
   'library',
   'map',
   'grant',
+  'probe',
+  'discovery',
   'account',
   'group',
   'token',

@@ -10,6 +10,14 @@ import {
   type ProtocolSkew,
   type WithdrawnCode,
 } from '@ms/shared';
+import type { Database, Queryable } from '../db/pool.js';
+import type {
+  Actor,
+  AuditSink,
+  Mutation,
+  ProbeIdentity,
+  ProbeTrustAudit,
+} from '../objects/audit.js';
 
 /**
  * Which probes this installation trusts (`R-01`).
@@ -95,10 +103,6 @@ export class ProbeRegistryError extends AppError {
   }
 }
 
-interface Db {
-  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
-}
-
 /**
  * Just enough of `ProbeEndpoint` for a decision to reach a connection that is already open.
  *
@@ -129,7 +133,14 @@ export interface ProbeConnections {
 }
 
 export interface ProbeRegistryOptions {
-  db: Db;
+  db: Database;
+  /**
+   * Where every trust decision is recorded, in the decision's own transaction (`A-20`).
+   *
+   * Required: approving a probe admits a machine that runs checks with the core's credentials,
+   * and until this ticket nothing durable said who had admitted one.
+   */
+  audit: AuditSink;
   logger: Logger;
   /**
    * Keys any probe may present to *enrol*. Empty means enrolment needs no key at all, which is
@@ -152,7 +163,8 @@ export interface ProbeHello {
 }
 
 export class ProbeRegistry {
-  readonly #db: Db;
+  readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   #connections: ProbeConnections | undefined;
   readonly #enrolmentKeys: readonly string[];
@@ -161,6 +173,7 @@ export class ProbeRegistry {
 
   constructor(options: ProbeRegistryOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'probe-registry' });
     this.#enrolmentKeys = options.enrolmentKeys;
     this.#enrolFrom = options.enrolFrom ?? [];
@@ -374,70 +387,81 @@ export class ProbeRegistry {
   async approve(
     gid: string,
     objectId: number,
-    options: { local?: boolean; actorId?: number } = {},
+    actor: Actor,
+    options: { local?: boolean } = {},
   ): Promise<ProbeRegistration> {
-    const existing = await this.get(gid);
-    if (existing === null)
-      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+    const local = options.local ?? false;
+    const approved = await this.#db.tx(async (q) => {
+      const existing = await this.#lock(q, gid);
 
-    // **A revoked identity does not hold a branch**, which is what revoking means — the row
-    // stays so the decision survives and the GID cannot return by reconnecting, but the branch
-    // it was on is free for the machine that replaces it. Without this exclusion, replacing a
-    // probe means deleting its record, and deleting the record is how a revoked GID gets back
-    // in. Found by the test that replaces the machine beside the core.
-    const claimed = await this.#db.query<{ gid: string }>(
-      `SELECT gid FROM probe_registration
-       WHERE object_id = $1 AND gid <> $2 AND status <> 'revoked'`,
-      [objectId, gid],
-    );
-    if (claimed.length > 0) {
-      // One branch per probe, and one probe per branch. Two identities on one branch would both
-      // be told to scan the same sensors, which is the duplicate-alarm failure `CLAUDE.md`'s
-      // "one outage, one alarm" rule exists to prevent.
-      throw new ProbeRegistryError(
-        'PROBE_CONFLICT',
-        `that probe object already belongs to ${claimed[0]?.gid ?? 'another probe'}`,
+      // **A revoked identity does not hold a branch**, which is what revoking means — the row
+      // stays so the decision survives and the GID cannot return by reconnecting, but the branch
+      // it was on is free for the machine that replaces it. Without this exclusion, replacing a
+      // probe means deleting its record, and deleting the record is how a revoked GID gets back
+      // in. Found by the test that replaces the machine beside the core.
+      const claimed = await q.query<{ gid: string }>(
+        `SELECT gid FROM probe_registration
+         WHERE object_id = $1 AND gid <> $2 AND status <> 'revoked'`,
+        [objectId, gid],
       );
-    }
+      if (claimed.length > 0) {
+        // One branch per probe, and one probe per branch. Two identities on one branch would
+        // both be told to scan the same sensors, which is the duplicate-alarm failure
+        // `CLAUDE.md`'s "one outage, one alarm" rule exists to prevent.
+        throw new ProbeRegistryError(
+          'PROBE_CONFLICT',
+          `that probe object already belongs to ${claimed[0]?.gid ?? 'another probe'}`,
+        );
+      }
 
-    // `access_key_hash` is cleared rather than set: a re-approved probe is issued a fresh key at
-    // its next handshake, so a key that leaked before it was revoked does not survive the
-    // decision to let the machine back in.
-    //
-    // **`access_key_confirmed_at` goes with it** (`P-37`). A row with no hash but a confirmation
-    // is a state that cannot be true — nothing was confirmed, because there is nothing to
-    // confirm — and leaving it set would mean the next reader has to know that the hash is
-    // checked first. It is harmless today for exactly that reason and would not stay harmless.
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `UPDATE probe_registration
-       SET status = 'approved', object_id = $2, access_key_hash = NULL,
-           access_key_confirmed_at = NULL, decided_at = now(),
-           decided_by = $3, note = ''
-       WHERE gid = $1
-       RETURNING *`,
-      [gid, objectId, options.actorId ?? null],
-    );
-    // The tree's own side of the binding, so `R-04`'s config push finds this probe's subtree.
-    // `is_local` is only ever raised, never cleared by an approval: re-approving the core's own
-    // probe after replacing the machine must not quietly make it deletable.
-    await this.#db.query(
-      `INSERT INTO probe_config (object_id, gid, is_local) VALUES ($1, $2, $3)
-       ON CONFLICT (object_id) DO UPDATE
-         SET gid = EXCLUDED.gid, is_local = probe_config.is_local OR EXCLUDED.is_local`,
-      [objectId, gid, options.local ?? false],
-    );
+      // `access_key_hash` is cleared rather than set: a re-approved probe is issued a fresh key
+      // at its next handshake, so a key that leaked before it was revoked does not survive the
+      // decision to let the machine back in.
+      //
+      // **`access_key_confirmed_at` goes with it** (`P-37`). A row with no hash but a
+      // confirmation is a state that cannot be true — nothing was confirmed, because there is
+      // nothing to confirm — and leaving it set would mean the next reader has to know that the
+      // hash is checked first. It is harmless today for exactly that reason and would not stay
+      // harmless.
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE probe_registration
+         SET status = 'approved', object_id = $2, access_key_hash = NULL,
+             access_key_confirmed_at = NULL, decided_at = now(),
+             decided_by = $3, note = ''
+         WHERE gid = $1
+         RETURNING *`,
+        [gid, objectId, decidedBy(actor)],
+      );
+      // The tree's own side of the binding, so `R-04`'s config push finds this probe's subtree.
+      // `is_local` is only ever raised, never cleared by an approval: re-approving the core's own
+      // probe after replacing the machine must not quietly make it deletable.
+      await q.query(
+        `INSERT INTO probe_config (object_id, gid, is_local) VALUES ($1, $2, $3)
+         ON CONFLICT (object_id) DO UPDATE
+           SET gid = EXCLUDED.gid, is_local = probe_config.is_local OR EXCLUDED.is_local`,
+        [objectId, gid, local],
+      );
+      const after = readOne(rows, gid);
+      await this.#record(q, actor, {
+        action: 'probe.approved',
+        objectId,
+        probe: identityOf(after),
+        local,
+        before: trustOf(existing),
+        after: trustOf(after),
+      });
+      return after;
+    });
 
-    this.#logger.info({ gid, objectId, local: options.local ?? false }, 'a probe was approved');
+    this.#logger.info({ gid, objectId, local }, 'a probe was approved');
     // **The decision has to reach the connection** (`P-189`). `session.approved` is fixed at
     // admission, so a probe that connected while pending stays marked unapproved for the life of
     // that session: it was sent nothing, and it went on being sent nothing after somebody
     // approved it. Closing it brings it back in about a second, through the handshake that
-    // issues its key and its configuration.
+    // issues its key and its configuration. After the commit, so a decision that rolled back
+    // closes nothing.
     this.#connections?.disconnect(gid, 'approved; reconnect for a key and a configuration');
-    const row = rows[0];
-    if (row === undefined)
-      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
-    return read(row);
+    return approved;
   }
 
   /**
@@ -447,24 +471,32 @@ export class ProbeRegistry {
    * so the log of what was refused survives the decision. Deleting is a separate act, and it
    * means "I am sure this machine is gone".
    */
-  async revoke(gid: string, note: string, actorId?: number): Promise<ProbeRegistration> {
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `UPDATE probe_registration
-       SET status = 'revoked', access_key_hash = NULL, access_key_confirmed_at = NULL,
-           note = $2, decided_at = now(),
-           decided_by = $3
-       WHERE gid = $1
-       RETURNING *`,
-      [gid, note.slice(0, 1_000), actorId ?? null],
-    );
-    const row = rows[0];
-    if (row === undefined)
-      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
-
-    // The branch is released so an operator can bind a replacement machine to it — the sensors,
-    // their history and their thresholds all live on the objects, and losing them because a
-    // probe was replaced would be the wrong end of the trade.
-    await this.#db.query(`UPDATE probe_config SET gid = NULL WHERE gid = $1`, [gid]);
+  async revoke(gid: string, note: string, actor: Actor): Promise<ProbeRegistration> {
+    const revoked = await this.#db.tx(async (q) => {
+      const existing = await this.#lock(q, gid);
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE probe_registration
+         SET status = 'revoked', access_key_hash = NULL, access_key_confirmed_at = NULL,
+             note = $2, decided_at = now(),
+             decided_by = $3
+         WHERE gid = $1
+         RETURNING *`,
+        [gid, note.slice(0, 1_000), decidedBy(actor)],
+      );
+      // The branch is released so an operator can bind a replacement machine to it — the
+      // sensors, their history and their thresholds all live on the objects, and losing them
+      // because a probe was replaced would be the wrong end of the trade.
+      await q.query(`UPDATE probe_config SET gid = NULL WHERE gid = $1`, [gid]);
+      const after = readOne(rows, gid);
+      await this.#record(q, actor, {
+        action: 'probe.revoked',
+        objectId: existing.objectId,
+        probe: identityOf(after),
+        before: trustOf(existing),
+        after: trustOf(after),
+      });
+      return after;
+    });
     this.#logger.warn({ gid, note }, 'a probe was revoked');
 
     // **The decision has to reach the machine, and `disconnect` would not be enough** (`P-189`
@@ -474,17 +506,29 @@ export class ProbeRegistry {
     // tells whoever reads the probe's journal nothing and "decommissioned, replaced by web-dc4"
     // tells them everything — and it is the same sentence `admit` sends at a refused handshake.
     this.#connections?.withdraw(gid, 'revoked', note === '' ? 'this probe has been revoked' : note);
-    return read(row);
+    return revoked;
   }
 
   /** Forgets a probe entirely. A revoked probe that comes back would enrol as new. */
-  async remove(gid: string): Promise<boolean> {
-    await this.#db.query(`UPDATE probe_config SET gid = NULL WHERE gid = $1`, [gid]);
-    const rows = await this.#db.query<{ gid: string }>(
-      `DELETE FROM probe_registration WHERE gid = $1 RETURNING gid`,
-      [gid],
-    );
-    if (rows.length === 0) return false;
+  async remove(gid: string, actor: Actor): Promise<boolean> {
+    const removed = await this.#db.tx(async (q) => {
+      await q.query(`UPDATE probe_config SET gid = NULL WHERE gid = $1`, [gid]);
+      const rows = await q.query<Record<string, unknown>>(
+        `DELETE FROM probe_registration WHERE gid = $1 RETURNING *`,
+        [gid],
+      );
+      const row = rows[0];
+      if (row === undefined) return false;
+      const before = read(row);
+      await this.#record(q, actor, {
+        action: 'probe.deleted',
+        objectId: before.objectId,
+        probe: identityOf(before),
+        before: trustOf(before),
+      });
+      return true;
+    });
+    if (!removed) return false;
 
     // **Forgetting a probe stops it too, and it has to.** Deleting the row means "this machine
     // is gone", which is usually said about one that is — but said about one still connected it
@@ -501,20 +545,36 @@ export class ProbeRegistry {
   }
 
   /** Narrows where one probe may connect from. */
-  async setAllowFrom(gid: string, filters: readonly string[]): Promise<ProbeRegistration> {
+  async setAllowFrom(
+    gid: string,
+    filters: readonly string[],
+    actor: Actor,
+  ): Promise<ProbeRegistration> {
     for (const filter of filters) {
       // Validated here rather than at the column, so the operator gets the parser's own sentence
       // about what is wrong with `10.0.0.0/33` instead of a check-constraint violation.
       parseAddressFilter(filter);
     }
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `UPDATE probe_registration SET allow_from = $2 WHERE gid = $1 RETURNING *`,
-      [gid, [...filters]],
-    );
-    const row = rows[0];
-    if (row === undefined)
-      throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
-    const updated = read(row);
+    const updated = await this.#db.tx(async (q) => {
+      const existing = await this.#lock(q, gid);
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE probe_registration SET allow_from = $2 WHERE gid = $1 RETURNING *`,
+        [gid, [...filters]],
+      );
+      const after = readOne(rows, gid);
+      // Only a filter that moved: the same list saved twice changed nothing, and an entry with
+      // an empty diff is one somebody reads for nothing.
+      if (trustOf(existing).allowFrom !== trustOf(after).allowFrom) {
+        await this.#record(q, actor, {
+          action: 'probe.allowFrom.set',
+          objectId: after.objectId,
+          probe: identityOf(after),
+          before: trustOf(existing),
+          after: trustOf(after),
+        });
+      }
+      return after;
+    });
 
     // **A filter that no longer covers where the probe actually is takes effect now.** The
     // narrower statement is already true the moment it is written — the very next handshake
@@ -534,6 +594,19 @@ export class ProbeRegistry {
       this.#connections?.withdraw(gid, 'source-not-allowed', refusedFrom(address));
     }
     return updated;
+  }
+
+  /** The registration, locked for the decision about to be taken on it, or `PROBE_NOT_FOUND`. */
+  async #lock(q: Queryable, gid: string): Promise<ProbeRegistration> {
+    const rows = await q.query<Record<string, unknown>>(
+      `SELECT * FROM probe_registration WHERE gid = $1 FOR UPDATE`,
+      [gid],
+    );
+    return readOne(rows, gid);
+  }
+
+  async #record(q: Queryable, actor: Actor, mutation: Mutation): Promise<void> {
+    await this.#audit.record(q, actor, [mutation], this.#now());
   }
 
   /**
@@ -658,6 +731,36 @@ function matchesAny(presented: string, accepted: readonly string[]): boolean {
     matched = timingSafeMatch(presented, candidate) || matched;
   }
   return matched;
+}
+
+function readOne(rows: readonly Record<string, unknown>[], gid: string): ProbeRegistration {
+  const row = rows[0];
+  if (row === undefined)
+    throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
+  return read(row);
+}
+
+/** The account a decision is attributed to in `decided_by`, which holds an account id or nothing. */
+function decidedBy(actor: Actor): number | null {
+  return actor.kind === 'user' ? actor.userId : null;
+}
+
+/** Which probe, by what the queue showed: never a key, and not the hash of one (`A-20`). */
+function identityOf(registration: ProbeRegistration): ProbeIdentity {
+  return {
+    gid: registration.gid,
+    name: registration.displayName,
+    address: registration.lastAddress,
+  };
+}
+
+function trustOf(registration: ProbeRegistration): ProbeTrustAudit {
+  return {
+    status: registration.status,
+    objectId: registration.objectId,
+    allowFrom: registration.allowFrom.join(', '),
+    note: registration.note,
+  };
 }
 
 function read(row: Record<string, unknown>): ProbeRegistration {

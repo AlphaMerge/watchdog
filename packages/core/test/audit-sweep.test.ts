@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION } from '@ms/shared';
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
@@ -94,6 +95,10 @@ interface Kit {
   readonly group: (parentId?: number) => Promise<number>;
   readonly pingSensor: () => Promise<number>;
   readonly downSensor: () => Promise<number>;
+  /** A probe identity that has connected and is waiting in the queue, by gid. */
+  readonly pendingProbe: () => Promise<string>;
+  /** A probe object nothing is bound to yet, for an approval to bind one to. */
+  readonly probeObject: () => Promise<number>;
   readonly post: (url: string, payload: unknown) => Promise<{ id: number; version: number }>;
   /** A fresh account, and a user group it can be put in (`A-18`). */
   readonly person: () => Promise<Person>;
@@ -402,7 +407,79 @@ const FIXTURES: Record<string, Fixture> = {
     url: `/api/v1/templates/${id((await k.post('/api/v1/templates', { name: k.name('template'), method: 'email', settings: {} })).id)}`,
   }),
 
+  // -------------------------------------------------------------------------------- probes
+  'POST /api/v1/probes/:gid/approve': async (k) => ({
+    url: `/api/v1/probes/${await k.pendingProbe()}/approve`,
+    payload: { objectId: await k.probeObject() },
+  }),
+  'POST /api/v1/probes/:gid/revoke': async (k) => ({
+    url: `/api/v1/probes/${await k.pendingProbe()}/revoke`,
+    payload: { note: 'swept' },
+  }),
+  'PUT /api/v1/probes/:gid/allow-from': async (k) => ({
+    url: `/api/v1/probes/${await k.pendingProbe()}/allow-from`,
+    payload: { allowFrom: ['10.0.0.0/24'] },
+  }),
+  'DELETE /api/v1/probes/:gid': async (k) => ({
+    url: `/api/v1/probes/${await k.pendingProbe()}`,
+  }),
+
   // ----------------------------------------------------------------------------- discovery
+  // The community is the planted secret in both places a discovery takes one: a run and a
+  // schedule each record whether there is one, and never what it is.
+  'POST /api/v1/discovery': (k) =>
+    Promise.resolve({
+      url: '/api/v1/discovery',
+      payload: {
+        groupId: k.groupId,
+        probeId: k.probeId,
+        range: '192.0.2.0/30',
+        snmpCommunity: PLANTED_SECRET,
+      },
+    }),
+  'POST /api/v1/discovery/:id/cancel': async (k) => {
+    const run = await k.post('/api/v1/discovery', {
+      groupId: k.groupId,
+      probeId: k.probeId,
+      range: '192.0.2.4/30',
+    });
+    return { url: `/api/v1/discovery/${id(run.id)}/cancel` };
+  },
+  'POST /api/v1/discovery/schedules': (k) =>
+    Promise.resolve({
+      url: '/api/v1/discovery/schedules',
+      payload: {
+        groupId: k.groupId,
+        probeId: k.probeId,
+        name: k.name('rediscovery'),
+        range: '192.0.2.8/30',
+        cadence: 'daily',
+        snmpCommunity: PLANTED_SECRET,
+      },
+    }),
+  'POST /api/v1/discovery/schedules/:id/enabled': async (k) => {
+    const schedule = await k.post('/api/v1/discovery/schedules', {
+      groupId: k.groupId,
+      probeId: k.probeId,
+      name: k.name('rediscovery'),
+      range: '192.0.2.12/30',
+      cadence: 'weekly',
+    });
+    return {
+      url: `/api/v1/discovery/schedules/${id(schedule.id)}/enabled`,
+      payload: { enabled: true },
+    };
+  },
+  'DELETE /api/v1/discovery/schedules/:id': async (k) => {
+    const schedule = await k.post('/api/v1/discovery/schedules', {
+      groupId: k.groupId,
+      probeId: k.probeId,
+      name: k.name('rediscovery'),
+      range: '192.0.2.16/30',
+      cadence: 'hourly',
+    });
+    return { url: `/api/v1/discovery/schedules/${id(schedule.id)}` };
+  },
   // Provisioning creates objects, and objects are audited as they are created. The stub below
   // creates one through the object service with the actor the route handed it — the property
   // this sweep is about is that the route passes the caller through, not the planner.
@@ -521,6 +598,8 @@ describe(
     let harness: Harness;
     let formatter: ReportFormatter;
     let kit: Kit;
+    /** Whose session each cookie is, so an entry is held to naming whoever made the call. */
+    const signedIn = new Map<string, string>();
     const planted: string[] = [];
 
     before(async () => {
@@ -535,9 +614,16 @@ describe(
 
       const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const access = new AccessService({ db, audit: harness.audit, logger: silent });
+      const registry = new ProbeRegistry({
+        db,
+        audit: harness.audit,
+        logger: silent,
+        enrolmentKeys: ['sweep-key'],
+      });
       const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
       const discovery = new DiscoveryService({
         db,
+        audit: harness.audit,
         logger: silent,
         dispatch: () => ({ kind: 'sent' }),
       });
@@ -646,13 +732,14 @@ describe(
         },
         rediscovery: new RediscoveryService({
           db,
+          audit: harness.audit,
           logger: silent,
           discovery,
           windowFor: () => Promise.resolve(null),
           provision: () => Promise.resolve(),
         }),
         deviceTemplates: new DeviceTemplateCatalogue(() => true),
-        probeRegistry: new ProbeRegistry({ db, logger: silent, enrolmentKeys: ['sweep-key'] }),
+        probeRegistry: registry,
         queries: new ProbeQueryService({
           logger: silent,
           sender: { sendQuery: () => ({ kind: 'offline' as const }) },
@@ -750,6 +837,7 @@ describe(
         const header = response.headers['set-cookie'];
         const value = (Array.isArray(header) ? (header[0] ?? '') : (header ?? '')).split(';')[0];
         assert.ok(value !== undefined && value !== '');
+        signedIn.set(value, person.login);
         return value;
       };
 
@@ -797,6 +885,26 @@ describe(
           (await harness.service.create(testActor, { kind: 'group', parentId, name: name('g') }))
             .id,
         pingSensor,
+        pendingProbe: async () => {
+          const gid = name('probe-gid');
+          await registry.admit({
+            gid,
+            displayName: gid,
+            agentVersion: '0.1.0',
+            protocolVersion: PROTOCOL_VERSION,
+            accessKey: 'sweep-key',
+            remoteAddress: '192.0.2.200',
+          });
+          return gid;
+        },
+        probeObject: async () =>
+          (
+            await harness.service.create(testActor, {
+              kind: 'probe',
+              parentId: harness.rootId,
+              name: name('probe'),
+            })
+          ).id,
         // Down through the state machine rather than by writing the column: two failures, because
         // the default policy warns for one interval first.
         downSensor: async () => {
@@ -877,8 +985,12 @@ describe(
 
     it('records an audit entry for every change that does not say why not', async () => {
       const problems: string[] = [];
-      const count = async (): Promise<number> =>
-        Number((await db.query<{ n: string }>('SELECT count(*)::text AS n FROM audit_log'))[0]?.n);
+      const last = async (): Promise<number> =>
+        Number(
+          (
+            await db.query<{ n: string }>('SELECT coalesce(max(id), 0)::text AS n FROM audit_log')
+          )[0]?.n,
+        );
 
       for (const route of changing()) {
         if (route.audit !== undefined) continue;
@@ -895,7 +1007,7 @@ describe(
           problems.push(`${key}: the fixture could not arrange it — ${String(error)}`);
           continue;
         }
-        const before = await count();
+        const before = await last();
         const response = await app.inject({
           method: route.method as 'POST',
           url: call.url,
@@ -908,7 +1020,23 @@ describe(
           );
           continue;
         }
-        if ((await count()) <= before) problems.push(`${key}: succeeded and wrote no audit entry`);
+        const written = await db.query<{ action: string; actor_kind: string; actor_label: string }>(
+          `SELECT action, actor_kind, actor_label FROM audit_log WHERE id > $1 ORDER BY id`,
+          [before],
+        );
+        if (written.length === 0) problems.push(`${key}: succeeded and wrote no audit entry`);
+        // **And names who did it.** An entry that exists and names somebody else is a false
+        // record: the provision route wrote every device it created as `anonymous` from an
+        // address, with an administrator logged in, until `A-20`. Who did it is the sweeper,
+        // or the person a self-service fixture signed in to change their own account (`A-18`).
+        const caller = signedIn.get(call.headers?.['cookie'] ?? '') ?? 'sweeper';
+        for (const row of written) {
+          if (row.actor_kind !== 'user' || row.actor_label !== caller) {
+            problems.push(
+              `${key}: ${row.action} names ${row.actor_kind} ${row.actor_label}, not the caller`,
+            );
+          }
+        }
       }
       assert.deepEqual(problems, [], `\n  ${problems.join('\n  ')}`);
     });

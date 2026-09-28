@@ -126,12 +126,14 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
 
     const discovery = new DiscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silent,
       dispatch: () => ({ kind: 'sent' }),
     });
     const triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const rediscovery = new RediscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silent,
       discovery,
       windowFor: () => Promise.resolve(null),
@@ -195,7 +197,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           devices: [],
         }),
       deviceTemplates: new DeviceTemplateCatalogue(() => true),
-      probeRegistry: new ProbeRegistry({ db, logger: silent, enrolmentKeys: ['visibility-key'] }),
+      probeRegistry: new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+        enrolmentKeys: ['visibility-key'],
+      }),
       queries: new ProbeQueryService({
         logger: silent,
         sender: { sendQuery: () => ({ kind: 'offline' as const }) },
@@ -343,16 +350,22 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     // pause view nor the state history it writes may say what the master is called.
     await harness.service.setDependency(testActor, heldId, 'object', otherSensorId, undefined);
 
-    visibleRunId = (await discovery.start({ groupId: branchId, probeId, range: '10.0.0.0/30' })).id;
-    hiddenRunId = (await discovery.start({ groupId: otherGroupId, probeId, range: '10.9.0.0/30' }))
-      .id;
-    await rediscovery.create({
-      groupId: otherGroupId,
-      probeId,
-      name: `${MARK}-rediscovery`,
-      range: '10.9.0.0/30',
-      cadence: 'daily',
-    });
+    visibleRunId = (
+      await discovery.start({ groupId: branchId, probeId, range: '10.0.0.0/30' }, testActor)
+    ).id;
+    hiddenRunId = (
+      await discovery.start({ groupId: otherGroupId, probeId, range: '10.9.0.0/30' }, testActor)
+    ).id;
+    await rediscovery.create(
+      {
+        groupId: otherGroupId,
+        probeId,
+        name: `${MARK}-rediscovery`,
+        range: '10.9.0.0/30',
+        cadence: 'daily',
+      },
+      testActor,
+    );
 
     // ── the account, and exactly one branch granted to it ────────────────────────────────────
     teamId = (await groups.create({ name: 'Customer A team' }, testActor)).id;

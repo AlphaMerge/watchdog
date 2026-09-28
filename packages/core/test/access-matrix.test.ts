@@ -105,6 +105,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
 
     discovery = new DiscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silent,
       dispatch: () => ({ kind: 'sent' }),
     });
@@ -115,6 +116,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
     rediscovery = new RediscoveryService({
       db,
+      audit: new DatabaseAuditSink(),
       logger: silent,
       discovery,
       windowFor: () => Promise.resolve(null),
@@ -222,7 +224,12 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         }),
       rediscovery,
       deviceTemplates: new DeviceTemplateCatalogue(() => true),
-      probeRegistry: new ProbeRegistry({ db, logger: silent, enrolmentKeys: ['matrix-key'] }),
+      probeRegistry: new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+        enrolmentKeys: ['matrix-key'],
+      }),
       queries: probeQueries,
       probeConfig: new ProbeConfigService({
         db,
@@ -293,15 +300,18 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         enabled: true,
       })
     ).id;
-    runId = (await discovery.start({ groupId, probeId, range: '10.9.9.0/30' })).id;
+    runId = (await discovery.start({ groupId, probeId, range: '10.9.9.0/30' }, testActor)).id;
     scheduleId = (
-      await rediscovery.create({
-        groupId,
-        probeId,
-        name: 'matrix-rediscovery',
-        range: '10.9.9.0/30',
-        cadence: 'daily',
-      })
+      await rediscovery.create(
+        {
+          groupId,
+          probeId,
+          name: 'matrix-rediscovery',
+          range: '10.9.9.0/30',
+          cadence: 'daily',
+        },
+        testActor,
+      )
     ).id;
 
     teamId = (await groups.create({ name: 'Team' }, testActor)).id;

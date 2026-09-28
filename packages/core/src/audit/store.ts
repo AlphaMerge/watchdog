@@ -8,6 +8,9 @@ import type {
   MapAudit,
   MapBackgroundAudit,
   Mutation,
+  ProbeIdentity,
+  ProbeTrustAudit,
+  RediscoveryScheduleAudit,
   ReportAudit,
   ScheduleAudit,
 } from '../objects/audit.js';
@@ -76,6 +79,8 @@ export const AUDIT_CATEGORIES = [
   'library',
   'map',
   'grant',
+  'probe',
+  'discovery',
   'account',
   'group',
   'token',
@@ -614,6 +619,79 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: deleted(REPORT_FIELDS, mutation.before, 'report'),
       };
 
+    case 'probe.approved':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { ...probeSummary(mutation.probe), local: mutation.local },
+        diff: changed(PROBE_FIELDS, mutation.before, mutation.after, 'probe'),
+      };
+
+    case 'probe.revoked':
+    case 'probe.allowFrom.set':
+      return {
+        ...base,
+        objectKind: null,
+        summary: probeSummary(mutation.probe),
+        diff: changed(PROBE_FIELDS, mutation.before, mutation.after, 'probe'),
+      };
+
+    case 'probe.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: probeSummary(mutation.probe),
+        diff: deleted(PROBE_FIELDS, mutation.before, 'probe'),
+      };
+
+    case 'discovery.started':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          runId: mutation.runId,
+          probeId: mutation.probeId,
+          range: mutation.range,
+          level: mutation.level,
+          templates: mutation.templates,
+          community: mutation.community,
+          scheduleId: mutation.scheduleId,
+        },
+        diff: [],
+      };
+
+    case 'discovery.cancelled':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { runId: mutation.runId, range: mutation.range },
+        diff: [],
+      };
+
+    case 'discovery.schedule.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
+        diff: created(REDISCOVERY_FIELDS, mutation.after, 'discovery.schedule'),
+      };
+
+    case 'discovery.schedule.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
+        diff: changed(REDISCOVERY_FIELDS, mutation.before, mutation.after, 'discovery.schedule'),
+      };
+
+    case 'discovery.schedule.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { scheduleId: mutation.scheduleId, name: mutation.before.name },
+        diff: deleted(REDISCOVERY_FIELDS, mutation.before, 'discovery.schedule'),
+      };
+
     case 'account.created':
       return {
         ...base,
@@ -990,6 +1068,35 @@ const REPORT_FIELDS = [
   'schedule',
   'runAs',
 ] as const satisfies readonly (keyof ReportAudit)[];
+
+const PROBE_FIELDS = [
+  'status',
+  'objectId',
+  'allowFrom',
+  'note',
+] as const satisfies readonly (keyof ProbeTrustAudit)[];
+
+const REDISCOVERY_FIELDS = [
+  'name',
+  'probeId',
+  'range',
+  'level',
+  'templates',
+  'community',
+  'cadence',
+  'timezone',
+  'window',
+  'autoProvision',
+  'enabled',
+  'timeoutMs',
+  'concurrency',
+  'ratePerSecond',
+] as const satisfies readonly (keyof RediscoveryScheduleAudit)[];
+
+/** Which probe, by the facts somebody decided on — never by anything it authenticates with. */
+function probeSummary(probe: ProbeIdentity): Record<string, unknown> {
+  return { gid: probe.gid, name: probe.name, address: probe.address };
+}
 
 /** Everything an administrator sets on an account, in the order a person reads them (`A-18`). */
 const ACCOUNT_FIELDS = [

@@ -1,7 +1,8 @@
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { ProbeRegistryError, type ProbeRegistry } from '../../probes/registry.js';
-import { ADMIN, auditGap } from '../authorization.js';
+import { actorFor } from '../authentication.js';
+import { ADMIN } from '../authorization.js';
 
 export interface ProbeRoutesOptions {
   registry: ProbeRegistry;
@@ -110,7 +111,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.post(
     '/probes/:gid/approve',
     {
-      config: { ...ADMIN, ...auditGap('A-20') },
+      config: ADMIN,
       schema: {
         tags: ['probes'],
         summary: 'Approve a probe onto a branch of the tree',
@@ -153,14 +154,14 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
     async (request: FastifyRequest) => {
       const { gid } = request.params as { gid: string };
       const { objectId, local } = request.body as { objectId: number; local?: boolean };
-      return await registry.approve(gid, objectId, { local: local ?? false });
+      return await registry.approve(gid, objectId, actorFor(request), { local: local ?? false });
     },
   );
 
   app.post(
     '/probes/:gid/revoke',
     {
-      config: { ...ADMIN, ...auditGap('A-20') },
+      config: ADMIN,
       schema: {
         tags: ['probes'],
         summary: 'Refuse a probe from now on',
@@ -188,14 +189,14 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
     async (request: FastifyRequest) => {
       const { gid } = request.params as { gid: string };
       const { note } = (request.body ?? {}) as { note?: string };
-      return await registry.revoke(gid, note ?? '');
+      return await registry.revoke(gid, note ?? '', actorFor(request));
     },
   );
 
   app.put(
     '/probes/:gid/allow-from',
     {
-      config: { ...ADMIN, ...auditGap('A-20') },
+      config: ADMIN,
       schema: {
         tags: ['probes'],
         summary: 'Narrow where one probe may connect from',
@@ -220,14 +221,14 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
     async (request: FastifyRequest) => {
       const { gid } = request.params as { gid: string };
       const { allowFrom } = request.body as { allowFrom: string[] };
-      return await registry.setAllowFrom(gid, allowFrom);
+      return await registry.setAllowFrom(gid, allowFrom, actorFor(request));
     },
   );
 
   app.delete(
     '/probes/:gid',
     {
-      config: { ...ADMIN, ...auditGap('A-20') },
+      config: ADMIN,
       schema: {
         tags: ['probes'],
         summary: 'Forget a probe entirely',
@@ -240,7 +241,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
     },
     async (request, reply) => {
       const { gid } = request.params as { gid: string };
-      if (!(await registry.remove(gid))) {
+      if (!(await registry.remove(gid, actorFor(request)))) {
         throw new ProbeRegistryError('PROBE_NOT_FOUND', `there is no probe ${gid}`);
       }
       await reply.code(204).send();
