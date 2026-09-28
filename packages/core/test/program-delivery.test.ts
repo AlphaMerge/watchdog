@@ -20,6 +20,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     subject: 'Ping on edge-router is down',
     body: 'no ICMP reply from 192.0.2.7',
     recipients: [],
+    about: [],
     priority: 2,
     settings: { path: 'notify.sh', args: [], secretArgs: [], timeoutMs: 5_000 },
     context: messageContext(),

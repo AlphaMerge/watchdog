@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { RecipientResolver } from '../src/notifications/recipients.js';
+import { AccessService } from '../src/auth/access.js';
+import { addressesOnly } from './support/recipients.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { SmtpConfig, SmtpRelay } from '@ms/shared';
@@ -71,6 +74,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     subject: 'Ping on edge-router is down',
     body: 'no ICMP reply from 192.0.2.7',
     recipients: [{ kind: 'address', value: 'ops@example.test' }],
+    about: [2],
     priority: 3,
     settings: { format: 'plain', senderOverride: null },
     context: messageContext(),
@@ -156,6 +160,7 @@ describe('the email transport', () => {
     const transport = new EmailTransport({
       config: smtp({ primary: relay({ host: '' }) }),
       logger: silent,
+      recipients: addressesOnly,
     });
     assert.equal(transport.configured, false);
     const result = await transport.send(message());
@@ -165,20 +170,54 @@ describe('the email transport', () => {
     assert.ok(result.error.includes('notifications.smtp.primary.host'));
   });
 
-  it('refuses a template with no addresses, and says which recipients it could not resolve', async () => {
-    const { build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+  it('refuses a message nobody it names can receive, and says who and why', async () => {
+    const { sent, build } = stub();
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(
       message({ recipients: [{ kind: 'user', value: 'alice' }] }),
     );
     assert.ok(!result.ok);
-    assert.ok(result.error.includes('accounts'), result.error);
-    assert.equal(result.retryable, false);
+    assert.equal(result.error, 'nobody to send to: user "alice" (no such account)');
+    assert.equal(result.retryable, false, 'waiting gives nobody an address');
+    assert.equal(sent.length, 0);
+  });
+
+  it('sends to the addresses and names the people it missed, rather than dropping them', async () => {
+    // **The regression `M-19` is about.** A template naming an address *and* a person used to
+    // send to the address and drop the person without a word — it looked like it worked.
+    const { sent, build } = stub();
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
+    const result = await transport.send(
+      message({
+        recipients: [
+          { kind: 'address', value: 'ops@example.test' },
+          { kind: 'userGroup', value: 'noc' },
+        ],
+      }),
+    );
+    assert.ok(result.ok);
+    assert.equal(result.skipped, 'group "noc" (no such group)');
+    assert.equal(sent.length, 1);
   });
 
   it('sends through the primary relay', async () => {
     const { sent, build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(message());
     assert.ok(result.ok);
     assert.equal(sent.length, 1);
@@ -197,6 +236,7 @@ describe('the email transport', () => {
     const transport = new EmailTransport({
       config: smtp({ fallback: relay({ host: 'backup.test' }) }),
       logger: silent,
+      recipients: addressesOnly,
       build,
     });
     const result = await transport.send(message());
@@ -214,6 +254,7 @@ describe('the email transport', () => {
     const transport = new EmailTransport({
       config: smtp({ fallback: relay({ host: 'backup.test' }) }),
       logger: silent,
+      recipients: addressesOnly,
       build,
     });
     const result = await transport.send(message());
@@ -234,7 +275,12 @@ describe('the email transport', () => {
       [552, false],
     ] as const) {
       const { build } = stub({ [MAILHOG_HOST]: { code, message: 'refused' } });
-      const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+      const transport = new EmailTransport({
+        config: smtp(),
+        logger: silent,
+        recipients: addressesOnly,
+        build,
+      });
       const result = await transport.send(message());
       assert.ok(!result.ok);
       assert.equal(result.retryable, retryable, String(code));
@@ -243,7 +289,12 @@ describe('the email transport', () => {
 
   it('treats a connection failure with no code as worth retrying', async () => {
     const { build } = stub({ [MAILHOG_HOST]: { message: 'ECONNREFUSED' } });
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(message());
     assert.ok(!result.ok);
     assert.equal(result.retryable, true);
@@ -251,7 +302,12 @@ describe('the email transport', () => {
 
   it('sends HTML when the template asks for it', async () => {
     const { sent, build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     await transport.send(message({ settings: { format: 'html' }, body: '<b>down</b>' }));
     assert.equal(sent.at(0)?.mail['html'], '<b>down</b>');
     assert.equal(sent.at(0)?.mail['text'], undefined);
@@ -262,7 +318,12 @@ describe('the email transport', () => {
     // rendered body because the escaping belongs to substitution — only substitution knows which
     // characters came from a value and which the operator typed as syntax — and this is the half
     // that was missing.
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build: stub().build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build: stub().build,
+    });
     assert.equal(transport.bodyEscaping({ format: 'html' }), 'html');
     assert.equal(transport.bodyEscaping({ format: 'text' }), 'none');
     assert.equal(transport.bodyEscaping({}), 'none', 'a plain email has no syntax to break out of');
@@ -273,7 +334,12 @@ describe('the email transport', () => {
     // alarm that reached nobody on the list was recorded `delivered`, counted as a success on
     // Delivery Health, and never retried. The one place an operator would look said it went out.
     const { build } = stub({}, ['ops@example.test']);
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(message());
     assert.ok(!result.ok);
     assert.match(result.error, /rejected every recipient/);
@@ -293,7 +359,12 @@ describe('the email transport', () => {
     // permanent failure, the fallback relay sent them a second copy, and with no fallback
     // Delivery Health went Down over an alarm that was delivered.
     const { build } = stub({}, ['ops@example.test'], ['oncall@example.test']);
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(message());
     assert.ok(result.ok, 'somebody received it, so it was delivered');
     assert.match(result.detail, /rejected ops@example.test/, 'and the miss is still said');
@@ -303,7 +374,12 @@ describe('the email transport', () => {
     // Somebody got it, so it is delivered. Saying nothing about the rest is how a rota gap
     // survives for months.
     const { build } = stub({}, ['gone@example.test']);
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     const result = await transport.send(
       message({
         recipients: [
@@ -318,14 +394,24 @@ describe('the email transport', () => {
 
   it('honours a template’s sender override', async () => {
     const { sent, build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     await transport.send(message({ settings: { senderOverride: 'noc@example.test' } }));
     assert.equal(sent.at(0)?.mail['from'], 'noc@example.test');
   });
 
   it('strips a newline out of every header it builds', async () => {
     const { sent, build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     await transport.send(
       message({
         subject: 'down\r\nBcc: someone@else',
@@ -341,7 +427,12 @@ describe('the email transport', () => {
 
   it('carries the priority and the request id in headers', async () => {
     const { sent, build } = stub();
-    const transport = new EmailTransport({ config: smtp(), logger: silent, build });
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
     await transport.send(message({ priority: 1, requestId: 77, sensorId: 88 }));
     const headers = sent.at(0)?.mail['headers'] as Record<string, string>;
     assert.equal(headers['X-Priority'], '1');
@@ -706,7 +797,11 @@ describe(
         });
         const requestId = await queue(templateId);
 
-        const transport = new EmailTransport({ config: smtp(), logger: silent });
+        const transport = new EmailTransport({
+          config: smtp(),
+          logger: silent,
+          recipients: addressesOnly,
+        });
         const dispatcher = new NotificationDispatcher({
           db,
           logger: silent,
@@ -767,6 +862,101 @@ describe(
     );
 
     it(
+      'delivers to a group’s members at their own addresses, and records who it missed',
+      { skip: mailhog ? false : 'no MailHog reachable (start docker-compose.dev.yml)' },
+      async () => {
+        // `M-19` end to end: a template naming a group, resolved when the alarm is sent, through
+        // a real relay. One member receives it; one is disabled and one has no address, and the
+        // notification log says so rather than recording a plain "sent".
+        const mark = String(process.hrtime.bigint());
+        const account = async (login: string, email: string, disabled = false) =>
+          Number(
+            (
+              await db.query<{ id: string }>(
+                `INSERT INTO user_account (login, display_name, email, password_hash, role, disabled)
+                 VALUES ($1, $1, $2, 'x', 'readwrite', $3) RETURNING id::text AS id`,
+                [`${login}-${mark}`, email, disabled],
+              )
+            )[0]?.id,
+          );
+        const reachable = `oncall-${mark}@example.test`;
+        const members = [
+          await account('oncall', reachable),
+          await account('leaver', `leaver-${mark}@example.test`, true),
+          await account('noaddress', ''),
+        ];
+        const groupId = Number(
+          (
+            await db.query<{ id: string }>(
+              `INSERT INTO user_group (name) VALUES ($1) RETURNING id::text AS id`,
+              [`NOC ${mark}`],
+            )
+          )[0]?.id,
+        );
+        for (const member of members) {
+          await db.query(`INSERT INTO user_group_member (group_id, user_id) VALUES ($1, $2)`, [
+            groupId,
+            member,
+          ]);
+        }
+        // Read on the whole tree, so the rights rule lets the members through and the case is
+        // about the account column alone.
+        await db.query(
+          `INSERT INTO object_access (object_id, group_id, right_, granted_by)
+           VALUES ($1, $2, 'read', 'test')`,
+          [h.rootId, groupId],
+        );
+
+        const templateId = await emailTemplate({
+          recipients: [{ kind: 'userGroup', value: String(groupId) }],
+        });
+        const requestId = await queue(templateId);
+        const transport = new EmailTransport({
+          config: smtp(),
+          logger: silent,
+          recipients: new RecipientResolver({
+            db,
+            access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+          }),
+        });
+        const dispatcher = new NotificationDispatcher({
+          db,
+          logger: silent,
+          contexts,
+          transports: [transport],
+          retry: { firstDelayMs: 0, maxDelayMs: 0 },
+          leaseMs: 0,
+        });
+        try {
+          let delivered = await statusOf(requestId);
+          for (let attempt = 0; attempt < 5 && delivered.status !== 'sent'; attempt += 1) {
+            await dispatcher.dispatch();
+            delivered = await statusOf(requestId);
+          }
+          assert.equal(delivered.status, 'sent', delivered.error ?? 'no error recorded');
+
+          const response = await fetch(`${MAILHOG_API}/search?kind=to&query=${reachable}`, {
+            signal: AbortSignal.timeout(5_000),
+          });
+          assert.ok(response.ok);
+          assert.equal(((await response.json()) as { total: number }).total, 1);
+
+          const [row] = await db.query<{ skipped_recipients: string }>(
+            `SELECT skipped_recipients FROM notification_request WHERE id = $1`,
+            [requestId],
+          );
+          assert.equal(
+            row?.skipped_recipients,
+            `"leaver-${mark}" in group "NOC ${mark}" (disabled), ` +
+              `"noaddress-${mark}" in group "NOC ${mark}" (no email address)`,
+          );
+        } finally {
+          await transport.close();
+        }
+      },
+    );
+
+    it(
       'reports a refused connection as a transient failure',
       { skip: mailhog ? false : 'no MailHog reachable (start docker-compose.dev.yml)' },
       async () => {
@@ -774,6 +964,7 @@ describe(
         const transport = new EmailTransport({
           config: smtp({ primary: relay({ port: 1 }) }),
           logger: silent,
+          recipients: addressesOnly,
         });
         try {
           const result = await transport.send(message());

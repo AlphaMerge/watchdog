@@ -444,6 +444,8 @@ export interface NotificationRequestView {
   deliveredAt: string | null;
   nextAttemptAt: string | null;
   lastError: string | null;
+  /** Who a sent message named and did not reach, and why; empty when it reached everybody. */
+  skippedRecipients: string;
 }
 
 export interface NotificationRequestPage {

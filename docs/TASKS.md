@@ -4627,6 +4627,73 @@ because each is a decision rather than a defect:
       genuine recovery still alarms, with the test that says what "genuine" means; and
       `alarm-storm.test.ts` still passes.
 
+- [x] **M-19 — A template's user and group recipients have never been delivered to** · M · A-01,
+      A-12, N-07 · Found 2026-09-28 by bc8184 while scoping `V2-05`. `CAPABILITIES.MD` marks
+      "recipients as users, user groups, or raw addresses" `[V1]`, and the template API has
+      accepted all three kinds since `N-05`; `EmailTransport` resolved only `address`. A template
+      naming only people failed every send as "cannot be resolved until accounts exist" — accounts
+      have had an `email` since `A-01` — and one naming people *and* an address sent to the
+      address and **dropped the people silently**. Email is the only method with
+      `usesRecipients`, so the fix is email's alone.
+
+      **Done when:**
+
+      1. **Resolved at send time**, not when the template is saved: a user to their account's
+         address, a group to its members', deduplicated, so a change of membership applies to the
+         next send. Disabled accounts and accounts with no address are skipped and **named in the
+         delivery result**; the send fails only when nobody resolves, and permanently then.
+      2. **One question decided and documented: does a recipient who cannot read the sensor get
+         the message?** `A-12` makes an object somebody cannot see absent; an email naming a
+         device in a carved-out branch would be the way round that. Argued in the ticket, the
+         rule kept in one place, and tested whichever way it goes.
+      3. **One resolver, exported**, which `K-05`'s ticket emails reuse rather than rewrite.
+      4. *(Moved to `M-20`: the web editor offering users and groups.)*
+      5. A table over user, group, mixed, disabled, no address and not permitted; a regression
+         test that the mixed case no longer drops anybody silently; a MailHog delivery test.
+      6. The stale comment in `email.ts` goes.
+
+      **M-19 outcome.** `RecipientResolver` (`notifications/recipients.ts`) is the one resolver,
+      exported for `K-05`. `EmailTransport` requires one and calls it at send time. Both the
+      dispatcher and the test send reach it through `send`, so they cannot resolve differently.
+
+      - **A user or group recipient's value is its id**, as a decimal string. Nothing had ever
+        read that value, so there was no convention to keep, and the template API now refuses
+        any other value for those two kinds. A group is sent to at its members' own addresses,
+        deduplicated together with the raw addresses and read at send time.
+      - **Skipped recipients are named.** A recipient is skipped when the account or group does
+        not exist, the group has no members, the account is disabled, it has no address, or it
+        may not read the sensor. Each is named in the delivery result and in the notification
+        log's new `skippedRecipients` (migration 056), which the Logs view shows as "Not sent
+        to …". A send that reaches nobody fails permanently and names them all. "Cannot be
+        resolved until accounts exist" is gone.
+      - **Decided: a recipient who cannot read the sensor is not sent the message.** `A-12`
+        makes an object somebody cannot see absent, and an email naming it would be the way
+        round that: the device's name, its host and its message, in their inbox. The rule is one
+        call to `AccessService.resolveManyFor`, asked about every sensor the message names. For
+        a digest that is every sensor in it, so one hidden sensor withholds the whole digest
+        from that person rather than sending it with a line missing. Administrators are sent
+        everything. A deleted sensor's message goes to administrators only, as its log does. A
+        raw address is not an account and is always sent to.
+      - The editor offering users and groups is `M-20`.
+
+      `recipients.test.ts` is a table of 12 cases, plus a group read at send time rather than
+      when the template was saved. `email-delivery.test.ts` adds the refusal sentences, the
+      mixed regression, and a MailHog send to a group's members that records who it missed.
+      The migrator test takes 055 and 056 up and back down. The summarisation test asserts that
+      a digest asks about every sensor it lists. A vitest covers the Logs row. Mutation 3/3: the
+      rights check skipped (5 cases fail), the skipped names dropped from a partial send (2 fail),
+      and a digest asking only about its lead sensor (1 fails).
+
+- [ ] **M-20 — The web recipients editor offers users and groups** · M · M-19, A-18 · Split from
+      `M-19` on 2026-09-28: its item 4 assumed pickers that do not exist. The web has one picker,
+      `ObjectPicker`, and no account or group UI; no route lists accounts at all; `GET /groups`
+      and `GET /groups/:id/members` are `ADMIN`, while editing a template is `WRITES`. So this
+      needs an administrator's `GET /accounts` list route, built on `A-18`'s `AccountService`;
+      two picker components, WCAG 2.1 AA, with vitests; and a decision on what a writer who is
+      not an administrator sees — most likely that they cannot pick users or groups, and the
+      editor says why rather than offering a list that fails to load. Until it lands, users and
+      groups are set over the API, and the editor round-trips a recipient's `kind` unchanged.
+
 - [ ] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
       queue filled** · M · P-206, P-207 · Seen 2026-09-28, on the dev VM, with ms-server's probe at
       its usual ~5,000 sensors: **4.76 GiB resident and 337% CPU**, with the VM at 457 MB available,
@@ -12716,7 +12783,7 @@ because each is a decision rather than a defect:
       and a socket whose grant is revoked while the counter is put back below the number it was
       resolved at is sent `overflow`, not the change. Mutation 2/2: the page length, and `<`.
 
-- [ ] **A-28 — A branch writer can run discovery from any probe** · M · A-12, A-20 · Found
+- [x] **A-28 — A branch writer can run discovery from any probe** · M · A-12, A-20 · Found
       2026-09-28 by the `A-12` triage, and upheld as **high** by both verifiers. `POST /discovery`
       and `POST /discovery/schedules` check write on `groupId` and nothing on `probeId`, and
       `DiscoveryService.start` stores and dispatches to whatever probe it is given. So a writer on
@@ -12735,6 +12802,32 @@ because each is a decision rather than a defect:
         something that is not a probe, and nothing at all (`A-15`, `A-16`).
       - `scheduleId` on `/discovery/schedules` is looked at as well; the triage did not verify it.
       - The refusal has tests of its own, not a place in the audit sweep.
+
+      **A-28 outcome.** `requireGroupProbe` (`discovery/scope.ts`) asks
+      `ObjectRepository.nearestProbe` which probe the group is under and refuses any other,
+      inside the transaction that writes the run or the rule, so nothing is inserted and no
+      probe is offered anything.
+
+      - **Every path.** `DiscoveryService.start` checks, which covers a run by hand and a rule
+        firing; `RediscoveryService.create` checks when a rule is written, and `setEnabled(true)`
+        when one is switched back on, since its group may have moved while it was off.
+      - **One answer:** 400 `DISCOVERY_PROBE_INVALID`, with a sentence that names neither id.
+        The HTTP test logs in as a writer on one customer's group and asserts the error body is
+        identical, less its correlation id, for the other customer's probe, a group, a device
+        under the right group and an id that does not exist, on both routes.
+      - **A refused firing is written on the rule.** A rule fires unattended, and a refusal
+        nobody reads is a rule that has silently stopped. The refusal's sentence is kept as
+        `lastProblem` (migration 055, at most 1,000 characters), returned by
+        `GET /discovery/schedules`, and cleared by the next firing that starts a run. The web
+        has no rediscovery view to show it in, so the API is where a rule is read.
+      - **`scheduleId`**, the permitted window, was a foreign key and nothing more, so a missing
+        one came back as a 409 conflict. It is a 400 `DISCOVERY_SCHEDULE_INVALID` now. Naming the
+        id leaks nothing: `GET /schedules` is open to every reader.
+
+      Found on the way and routed to `A-16`: refusing to delete a schedule that a rediscovery
+      rule uses names the rules, whichever branch they are in. `discovery-scope.test.ts` has 7
+      tests. Mutation 2/2: the check removed from `start` (3 tests fail), and removed from
+      `create` (2 tests fail).
 
 ### Panel round two — notifications, schedules, triggers
 

@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { addressesOnly } from './support/recipients.js';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -146,7 +147,7 @@ describe(
       await new Promise<void>((resolve) => sink.listen(0, '127.0.0.1', resolve));
       sinkPort = (sink.address() as AddressInfo).port;
 
-      email = new EmailTransport({ config: smtp(), logger: silent });
+      email = new EmailTransport({ config: smtp(), logger: silent, recipients: addressesOnly });
       const webhookConfig: WebhookConfig = {
         targetPolicy: 'link-local',
         maxRedirects: 0,

@@ -140,6 +140,12 @@ const entrySchema = {
     deliveredAt: { type: ['string', 'null'] },
     nextAttemptAt: { type: ['string', 'null'] },
     lastError: { type: ['string', 'null'] },
+    skippedRecipients: {
+      type: 'string',
+      description:
+        'Who a sent message named and did not reach, and why — a disabled account, one with no ' +
+        'address, one that may not see the sensor. Empty when it reached everybody (`M-19`).',
+    },
   },
 } as const;
 

@@ -239,6 +239,7 @@ export class NotificationDispatcher {
               subject: rendered.subject,
               body: rendered.body,
               recipients: row.t_recipients ?? [],
+              about: [Number(row.sensor_id)],
               priority: row.t_priority ?? 3,
               settings,
               context,
@@ -517,6 +518,9 @@ export class NotificationDispatcher {
               subject,
               body: part.lines.join('\n'),
               recipients: first.t_recipients ?? [],
+              // Every sensor the digest lists: somebody who may not read one of them is not sent
+              // a message naming it (`M-19`).
+              about: part.members.map((entry) => Number(entry.row.sensor_id)),
               priority: first.t_priority ?? 3,
               settings,
               // One message about many sensors, so there is no single context that is *the*
@@ -560,11 +564,18 @@ export class NotificationDispatcher {
       await this.#db.query(
         `UPDATE notification_request
          SET status = 'sent', delivered_at = $2, settled_at = $2, next_attempt_at = NULL,
-             last_error = NULL
+             last_error = NULL, skipped_recipients = $3
          WHERE id = $1`,
-        [requestId, now],
+        [requestId, now, (result.skipped ?? '').slice(0, 2_000)],
       );
-      this.#logger.info({ requestId, detail: result.detail }, 'notification delivered');
+      this.#logger.info(
+        {
+          requestId,
+          detail: result.detail,
+          ...(result.skipped === undefined ? {} : { skipped: result.skipped }),
+        },
+        'notification delivered',
+      );
       return;
     }
 

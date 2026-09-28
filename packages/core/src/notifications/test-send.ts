@@ -127,6 +127,9 @@ export class NotificationTester {
             subject: rendered.subject,
             body: rendered.body,
             recipients: template.recipients,
+            // The sensor it was asked about, or none for example values: a test send reaches
+            // people by the same rule an alarm does, so it shows who that alarm would miss.
+            about: request.sensorId === undefined ? [] : [request.sensorId],
             priority: template.priority,
             settings: template.settings,
             context,
@@ -145,7 +148,12 @@ export class NotificationTester {
       recipients: template.recipients,
       unknownPlaceholders: rendered.unknown,
       delivered: result.ok,
-      detail: result.ok ? result.detail : null,
+      // Who it would have missed, in the one place somebody testing a template is looking.
+      detail: result.ok
+        ? result.skipped === undefined
+          ? result.detail
+          : `${result.detail}; not sent to ${result.skipped}`
+        : null,
       error: result.ok ? null : result.error,
       retryable: result.ok ? null : result.retryable,
       durationMs,

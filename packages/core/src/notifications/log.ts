@@ -23,6 +23,8 @@ export interface NotificationLogEntry {
   readonly deliveredAt: Date | null;
   readonly nextAttemptAt: Date | null;
   readonly lastError: string | null;
+  /** Who a sent message named and did not reach, and why; empty when it reached everybody. */
+  readonly skippedRecipients: string;
 }
 
 export interface NotificationLogQuery {
@@ -58,6 +60,7 @@ interface Row {
   delivered_at: Date | null;
   next_attempt_at: Date | null;
   last_error: string | null;
+  skipped_recipients: string;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -96,7 +99,7 @@ export class NotificationLogReader {
       SELECT r.id::text AS id, r.at, r.sensor_id::text AS sensor_id, o.name AS sensor_name,
              r.template_id::text AS template_id, t.name AS template_name, t.method,
              r.trigger_kind, r.reason, r.state, r.message, r.status, r.disposition, r.attempts,
-             r.delivered_at, r.next_attempt_at, r.last_error
+             r.delivered_at, r.next_attempt_at, r.last_error, r.skipped_recipients
       FROM notification_request r
       LEFT JOIN object o ON o.id = r.sensor_id
       LEFT JOIN notification_template t ON t.id = r.template_id
@@ -133,5 +136,6 @@ function toEntry(row: Row): NotificationLogEntry {
     deliveredAt: row.delivered_at,
     nextAttemptAt: row.next_attempt_at,
     lastError: row.last_error,
+    skippedRecipients: row.skipped_recipients,
   };
 }

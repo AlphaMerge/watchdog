@@ -238,6 +238,13 @@ describe(
         'DNS on edge-router is down',
         'SNMP on edge-router is down',
       ]);
+      // **Every sensor it lists, not only the first** (`M-19`): a person is sent a digest only
+      // if they may read all of it, so the rule has to be asked about all of it.
+      assert.deepEqual(seen[0]?.about, [sensorAt(0)]);
+      assert.deepEqual(
+        [...digest.about].sort((a, b) => a - b),
+        sensors.slice(1).sort((a, b) => a - b),
+      );
       assert.deepEqual(
         (await dispositions()).map((row) => row.status),
         ['sent', 'sent', 'sent', 'sent', 'sent'],

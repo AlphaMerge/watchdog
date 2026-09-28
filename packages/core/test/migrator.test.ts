@@ -325,6 +325,40 @@ describe(
       }
     });
 
+    it('adds and takes back a rule’s last problem and a message’s missed recipients (055, 056)', async () => {
+      // `A-28` keeps why a rediscovery firing was refused on the rule; `M-19` keeps who a sent
+      // message did not reach on the request. Both are text with an empty default, so a row
+      // written before either reads as "nothing to say" rather than as null.
+      const fresh = await createScratchDatabase('lastproblem');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 56),
+        );
+        await all.up();
+        const columns = async (): Promise<string[]> =>
+          (
+            await fresh.db.query<{ name: string }>(
+              `SELECT table_name || '.' || column_name || ' ' || column_default AS name
+               FROM information_schema.columns
+               WHERE (table_name, column_name) IN
+                 (('discovery_schedule', 'last_problem'),
+                  ('notification_request', 'skipped_recipients'))
+               ORDER BY 1`,
+            )
+          ).map((one) => one.name);
+        assert.deepEqual(await columns(), [
+          "discovery_schedule.last_problem ''::text",
+          "notification_request.skipped_recipients ''::text",
+        ]);
+
+        await all.down(2);
+        assert.deepEqual(await columns(), []);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

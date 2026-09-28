@@ -22,6 +22,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     subject: 'Ping on edge-router is down',
     body: 'no ICMP reply from 192.0.2.7',
     recipients: [],
+    about: [],
     priority: 3,
     settings: { webhookUrl: 'http://127.0.0.1/services/T000/B000/xxxx' },
     context: messageContext(),

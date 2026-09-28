@@ -57,6 +57,7 @@ import { AlarmEngine } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
 import { MessageContextLoader } from './notifications/context.js';
+import { RecipientResolver } from './notifications/recipients.js';
 import { EmailTransport } from './notifications/delivery/email.js';
 import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
@@ -647,7 +648,19 @@ async function serve(): Promise<void> {
   // What turns a queued obligation into a message somebody receives (N-07). Email is the only
   // transport so far; N-08 to N-10 add the rest, and a method with no transport leaves its
   // requests queued rather than failing them.
-  const email = new EmailTransport({ config: config.notifications.smtp, logger });
+  // Object rights (`A-03`), built here rather than beside the accounts because email needs it
+  // first: a message goes to the people a template names only if they may read what it is about
+  // (`M-19`), and that is this service's question to answer.
+  const objectAccess = new AccessService({
+    db,
+    audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
+    logger,
+  });
+  const email = new EmailTransport({
+    config: config.notifications.smtp,
+    logger,
+    recipients: new RecipientResolver({ db, access: objectAccess }),
+  });
   if (!email.configured) {
     logger.warn(
       'no SMTP relay is configured; email notifications will queue and fail until one is set',
@@ -872,11 +885,6 @@ async function serve(): Promise<void> {
   const accounts = new AccountService({ db, audit: identityAudit, logger });
   const sessions = new SessionService({ db, logger });
   const userGroups = new GroupService({ db, audit: identityAudit, logger });
-  const objectAccess = new AccessService({
-    db,
-    audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
-    logger,
-  });
   const apiTokens = new TokenService({ db, audit: identityAudit, logger });
   const mfa = new TotpService({ db, audit: identityAudit, logger });
   const loginThrottle = new LoginThrottle({ db, logger });

@@ -8,11 +8,18 @@ import {
   type OutgoingMessage,
 } from './transport.js';
 import type { Escaping } from '../placeholders.js';
-import type { Recipient } from '../templates.js';
+import { describeSkipped, type RecipientSource } from '../recipients.js';
 
 export interface EmailTransportOptions {
   config: SmtpConfig;
   logger: Logger;
+  /**
+   * Turns a template's users and groups into addresses when a message is sent (`M-19`).
+   *
+   * Required: email is the one method that sends to people, and a transport built without this
+   * is the one that dropped them for a year without saying so.
+   */
+  recipients: RecipientSource;
   /** Swapped in tests for a relay that fails on demand. Production uses nodemailer. */
   build?: (relay: SmtpRelay, config: SmtpConfig) => Transporter;
 }
@@ -83,12 +90,14 @@ export class EmailTransport implements DeliveryTransport {
   readonly method = EMAIL_METHOD.id;
   readonly #config: SmtpConfig;
   readonly #logger: Logger;
+  readonly #recipients: RecipientSource;
   readonly #build: (relay: SmtpRelay, config: SmtpConfig) => Transporter;
   readonly #transports = new Map<string, Transporter>();
 
   constructor(options: EmailTransportOptions) {
     this.#config = options.config;
     this.#logger = options.logger.child({ component: 'email' });
+    this.#recipients = options.recipients;
     this.#build = options.build ?? buildTransport;
   }
 
@@ -110,11 +119,19 @@ export class EmailTransport implements DeliveryTransport {
       };
     }
 
-    const addresses = this.#addressesIn(message.recipients);
-    if ('error' in addresses) return addresses.error;
+    if (message.recipients.length === 0) {
+      return { ok: false, retryable: false, error: 'the template has no recipients' };
+    }
+    const resolved = await this.#recipients.resolve(message.recipients, message.about);
+    const skipped = describeSkipped(resolved.skipped);
+    if (resolved.addresses.length === 0) {
+      // Permanent: waiting does not give anybody an address or a right. Every name is in the
+      // error, because "nobody to send to" is only actionable once it says who and why.
+      return { ok: false, retryable: false, error: `nobody to send to: ${skipped}` };
+    }
 
     const override = message.settings['senderOverride'];
-    return this.#deliver(
+    const result = await this.#deliver(
       {
         subject: message.subject,
         body: message.body,
@@ -127,8 +144,12 @@ export class EmailTransport implements DeliveryTransport {
         requestId: message.requestId,
         sensorId: message.sensorId,
       },
-      addresses.to,
+      resolved.addresses.map(headerSafe),
     );
+    // **Sent, and who was not** — a partial send is still a send, and the people it missed are
+    // named where the delivery is recorded rather than dropped without a word (`M-19`).
+    if (!result.ok || resolved.skipped.length === 0) return result;
+    return { ok: true, detail: result.detail, skipped };
   }
 
   /**
@@ -148,10 +169,10 @@ export class EmailTransport implements DeliveryTransport {
           'notifications.smtp.sender',
       };
     }
-    const addresses = this.#addressesIn(
-      message.recipients.map((value) => ({ kind: 'address' as const, value })),
-    );
-    if ('error' in addresses) return addresses.error;
+    const to = message.recipients.map(headerSafe).filter((address) => address !== '');
+    if (to.length === 0) {
+      return { ok: false, retryable: false, error: 'the report has no recipients' };
+    }
 
     return this.#deliver(
       {
@@ -166,7 +187,7 @@ export class EmailTransport implements DeliveryTransport {
         requestId: message.requestId,
         sensorId: 0,
       },
-      addresses.to,
+      to,
     );
   }
 
@@ -210,31 +231,6 @@ export class EmailTransport implements DeliveryTransport {
   *#relays(): Generator<[string, SmtpRelay]> {
     yield ['primary', this.#config.primary];
     if (this.#config.fallback.host !== '') yield ['fallback', this.#config.fallback];
-  }
-
-  #addressesIn(recipients: readonly Recipient[]): { to: string[] } | { error: DeliveryResult } {
-    const to: string[] = [];
-    const unresolved: string[] = [];
-    for (const recipient of recipients) {
-      if (recipient.kind === 'address') to.push(headerSafe(recipient.value));
-      else unresolved.push(`${recipient.kind} "${recipient.value}"`);
-    }
-
-    if (to.length === 0) {
-      return {
-        error: {
-          ok: false,
-          retryable: false,
-          error:
-            unresolved.length === 0
-              ? 'the template has no recipients'
-              : // A-01 and A-02 are what make these resolve. Saying so is better than an empty
-                // recipient list that looks like a mistake nobody made.
-                `no addresses: ${unresolved.join(', ')} cannot be resolved until accounts exist`,
-        },
-      };
-    }
-    return { to };
   }
 
   /**

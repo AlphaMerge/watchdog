@@ -28,6 +28,7 @@ function message(overrides: Partial<OutgoingMessage> = {}): OutgoingMessage {
     subject: 'Ping on edge-router is down',
     body: '{"message":"no ICMP reply"}',
     recipients: [],
+    about: [],
     priority: 3,
     settings: { url: 'http://127.0.0.1/hook', verb: 'POST', contentType: 'application/json' },
     context: messageContext(),

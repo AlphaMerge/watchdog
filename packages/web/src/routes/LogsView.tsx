@@ -618,7 +618,7 @@ const STATUS_TONE: Record<string, string> = {
   discarded: 'border-paused-border bg-paused-bg text-paused-fg',
 };
 
-function NotificationRow({ entry }: { entry: NotificationRequestView }): React.JSX.Element {
+export function NotificationRow({ entry }: { entry: NotificationRequestView }): React.JSX.Element {
   return (
     <li className="space-y-1 py-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -651,6 +651,9 @@ function NotificationRow({ entry }: { entry: NotificationRequestView }): React.J
         {entry.disposition !== null && <span>{entry.disposition}</span>}
         {entry.message !== '' && <span className="truncate">{entry.message}</span>}
         {entry.lastError !== null && <span className="text-down-fg">{entry.lastError}</span>}
+        {entry.skippedRecipients !== '' && (
+          <span className="text-warning-fg">Not sent to {entry.skippedRecipients}</span>
+        )}
       </div>
     </li>
   );

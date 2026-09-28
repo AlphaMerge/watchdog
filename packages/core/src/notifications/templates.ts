@@ -1,4 +1,5 @@
 import type { Logger } from '@ms/shared';
+import { recipientId } from './recipients.js';
 import type { Database, Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { Visibility } from '../auth/access.js';
@@ -638,6 +639,14 @@ export class TemplateService {
       if (recipient.kind === 'address' && !recipient.value.includes('@')) {
         throw new MethodError('this template cannot be saved', { method: method.id }, [
           `"${recipient.value}" is not an address`,
+        ]);
+      }
+      // A person or a group is named by id (`M-19`): a login or a group name can be changed, and
+      // a template that followed the old one would page somebody else's account.
+      if (recipient.kind !== 'address' && recipientId(recipient.value) === null) {
+        throw new MethodError('this template cannot be saved', { method: method.id }, [
+          `a ${recipient.kind === 'user' ? 'user' : 'group'} recipient is named by its id, ` +
+            `and "${recipient.value}" is not one`,
         ]);
       }
     }

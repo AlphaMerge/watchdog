@@ -9,6 +9,11 @@ export interface OutgoingMessage {
   readonly subject: string;
   readonly body: string;
   readonly recipients: readonly Recipient[];
+  /**
+   * Every sensor this message names: one for an alarm, all of a digest's, none for a test send
+   * built from example values (`M-19`). A person is sent it only if they may read all of them.
+   */
+  readonly about: readonly number[];
   /** 1 (highest) to 5 (lowest), from the template. */
   readonly priority: number;
   /** The method's own settings, already validated and still holding their secrets. */
@@ -33,7 +38,16 @@ export interface OutgoingMessage {
  * giving up on the first is how an outage goes unreported because the network hiccuped.
  */
 export type DeliveryResult =
-  | { readonly ok: true; readonly detail: string }
+  | {
+      readonly ok: true;
+      readonly detail: string;
+      /**
+       * Who the message names and did not reach, and why, when that is anybody (`M-19`). Only a
+       * method that sends to people has any; it is kept on the request, because "sent" has to be
+       * able to say "but not to Bob".
+       */
+      readonly skipped?: string;
+    }
   | { readonly ok: false; readonly error: string; readonly retryable: boolean };
 
 /**
