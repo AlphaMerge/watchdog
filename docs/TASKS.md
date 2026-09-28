@@ -13383,6 +13383,72 @@ because each is a decision rather than a defect:
       named, a superseded snapshot sent, a failure detaching the replacement, a held change sent
       before the snapshot, and each of the three bounds removed.
 
+- [ ] **A-31 — `A-12`'s sweep passes routes it cannot fail, and its findings say they are
+      covered** · M · A-12, A-23, A-26 · Filed 2026-09-28 by WatchDog from `A-12`'s triage: 20 of
+      27 unverified items survived. The 1.0 claim "absent, not counted" rests on
+      `object-visibility.test.ts`, and these are the places where it does not hold:
+
+      - **T2.** The discovery `/summary`, `/hosts`, `/problems` and `/plan` guards, and the
+        shared `toReadRun`, could each be reverted with the suite green. `idsFor` passes both
+        runs, and there are no `discovery_host` rows or markers to find.
+      - **T3.** The fixture passes `coreHealth`, `probeHealth` and `metrics` as `() =>
+        undefined`. `/probes` has no registrations, and `#withoutHiddenProbes` runs in no test.
+      - **T4.** There is no schedule in the fixture, so a schedule's `usedBy` is untested.
+      - **T5, the alarms half.** Only `pathNames` is asserted.
+      - **T6.** The registration guard does not cover schedules, device templates, Core Health or
+        Probe Health.
+      - **T7.** The floor is `answered.size > 25` against about 70 GET routes, and the marker
+        check pools every body together. Re-measure the floor.
+      - **T9.** The administrator's control pass checks 12 URLs. Re-measure it.
+      - **T12.** The commit and the findings overstate: "Mutation 27/27", "every query
+        parameter", and "seven refused scopes" where there are nine. `queryValues` also drops
+        parameters it does not declare, including the planted `${MARK}-tag`, without saying so.
+      - **L5 (docs).** Notification rows cascade with their sensor (migration 016, line 93), so
+        the comment in `log.ts` and the docs are wrong.
+      - **L3 (docs).** State rows written before `A-12` keep the master's name. Accept that and
+        write it down: there are no pre-1.0 installations, so no scrub migration.
+
+      **Round-3 additions:**
+      - **A disabled or deleted maker blanks a share link, and nothing tests it.** The only guard
+        is `AND NOT u.disabled` in `shareByToken`'s join (`maps/repository.ts`). The resolver
+        test builds `maker: null` by hand, so it bypasses the join and the foreign key's
+        `ON DELETE SET NULL`. Test both through the route.
+      - **The clear and release halves of `A-24`'s test cannot fail.** Nothing acknowledges or
+        forces the carved sensor first, so a clear or a release that walked into the hole would
+        be a no-op on it, and the test reads only the status. Replacing either `DELETE` route's
+        visibility with everything leaves it green. Have an administrator acknowledge and force
+        the carved sensor first, then assert the answers' lists and the sensor's state.
+      - **Decide: acknowledging, clearing or forcing through a device reaches a sensor the caller
+        holds only `read` on.** Naming the sensor directly is refused. Both verifiers note that
+        `write` on the device already allows pause, resume, a host change and delete, so this
+        grants nothing new. Either partition the targets as the bulk route does, or write down
+        that a `read` carve under a writable device protects nothing from its writer.
+      - **Decide: what a public link whose maker is gone still serves.** Tile data is withheld,
+        but the map's name, description, tile titles, layout, connectors, geo view, HTML tiles
+        and background image are still served. ADR-002 accepts canvas content until revoke or
+        expiry; `web-ui.md` and `administration.md` say the link "goes blank". Either make the
+        docs say exactly what is withheld, or answer a link with no maker as a revoked one.
+
+      **Done when** each item is fixed or decided, every new assertion is shown to fail against
+      the mutant it names, and the findings and `A-12`'s outcome claim no more than the suite
+      proves.
+
+- [ ] **A-32 — An object's ETag does not change when the caller's view does** · S · A-12 · Can
+      wait. Filed 2026-09-28 from `A-12`'s triage (M1, low). `GET /objects/:id` answers 304 on a
+      tag made from the object's version and, with `include`, its ancestors' versions. Nothing in
+      it says what the caller may see, so a grant or a hole that changes what their answer holds
+      (its path, the names of inherited sources) can be answered "not modified" from a stale
+      view. **Fix:** fold `access_epoch` and the principal into the tag for a restricted caller,
+      and send `Cache-Control: private`.
+
+- [ ] **A-33 — Visibility for a root-readable account is never tested with nested holes, or
+      measured with many** · M · A-12 · Can wait, and needs a booked `test:perf` slot. Filed
+      2026-09-28 from `A-12`'s triage (T10 and M3, low). Across 40 seeds the agreement test made
+      a hole inside a hole zero times and a re-opened hole zero times, and the only `NOT IN`
+      performance case has 10 holes. **Fix:** fixed grant sets for each shape, and one measured
+      principal with several hundred carve-outs under `EXPLAIN`. Switch to `NOT EXISTS` only if
+      the plan degrades, after checking its null semantics.
+
 - [x] **A-34 — An open state stream outlives logout, token revocation and account disable** · M ·
       A-01, A-06, A-30 · Found 2026-09-28 while scoping V2-07. Every ordinary request resolves its
       session or token again, and that lookup refuses an ended or expired session, a revoked token
