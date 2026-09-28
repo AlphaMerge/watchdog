@@ -238,7 +238,7 @@ PostgreSQL, in the query that returns the rows.
 
 ## What review found after it landed
 
-`A-12` landed as `91c4ead`; review found three more ways out, each filed on its own number with
+`A-12` landed as `91c4ead`; review found four more ways out, each filed on its own number with
 a test shown to fail before its fix.
 
 - **`A-22` — a public share link published whatever its map named.** The sweep had called
@@ -259,6 +259,10 @@ a test shown to fail before its fix.
 - **`A-23` — `POST /objects/:id/as-template` read the sensors under a device without asking which
   the caller could see.** A `COMPUTES` route, so the sweep of `GET`s could not reach it; the
   device check was right and the walk under it had no condition.
+- **`A-24` — acknowledging or forcing a device reached the sensors in its holes.** A write, not
+  only a read: the route checked `write` on the device, and the walk beneath it acknowledged, or
+  forced Down and paged the owner of, a sensor carved `none` — and the answer named it, or said
+  whether the hole held anything Down. Both walks now carry the condition every listing does.
 
 **Reported, and not this ticket's:** a change that commits while a subscriber's snapshot is being
 read is sent *before* the snapshot frame, and the client replaces its state wholesale on a

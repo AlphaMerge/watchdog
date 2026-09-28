@@ -182,8 +182,8 @@ describe(
       // Uptime is computed from these rows, so a Warning that became a *different* Warning has
       // to be here — the operator's question is "why", and the answer changed.
       await report([{ sensorId, at: at(0), outcome: 'error', message: 'no reply' }]);
-      await h.service.simulateError(testActor, sensorId, true, 'chain test');
-      await h.service.simulateError(testActor, sensorId, false);
+      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
+      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
 
       const { items } = await log.list({
         visibility: Visibility.EVERYTHING,

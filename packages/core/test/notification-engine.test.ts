@@ -16,6 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -374,7 +375,13 @@ describe(
       await scan([sensorId], false, at(10));
       await sweep(at(11));
 
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'looking at it');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'looking at it',
+      );
 
       const [held] = await standing();
       assert.ok(held !== undefined, 'the alarm stands');
@@ -400,7 +407,13 @@ describe(
       await scan([sensorId], false, T0);
       await scan([sensorId], false, at(10));
       await sweep(at(11));
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'mine');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'mine',
+      );
       assert.equal(await sweep(at(710)), 0);
 
       // Un-acknowledged: the sensor is plainly Down again, and the operator who was putting the
@@ -411,7 +424,7 @@ describe(
       // stamp `new Date()` — and the chain resumes from when the acknowledgement was lifted. A
       // sweep at `at(810)` therefore only fired while the wall clock happened to be behind
       // 09:00Z, which is how this passed all morning and failed after lunch.
-      await h.service.clearAcknowledgement(testActor, sensorId);
+      await h.service.clearAcknowledgement(testActor, sensorId, Visibility.EVERYTHING);
       const lifted = Date.now();
       await sweep(new Date(lifted + 700_000));
       assert.deepEqual(
@@ -439,13 +452,19 @@ describe(
 
       // Against the real clock, not `T0`: `simulateError` and `acknowledge` are the calls that
       // take no timestamp, because production has no synthetic clock and they stamp `new Date()`.
-      await h.service.simulateError(testActor, sensorId, true, 'rehearsal');
+      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'rehearsal');
       const forcedAt = Date.now();
       const after = (seconds: number): Date => new Date(forcedAt + seconds * 1000);
 
       assert.equal(await sweep(after(1)), 1, 'the forced outage armed and fired');
 
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'rehearsing');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'rehearsing',
+      );
       const [held] = await standing();
       assert.ok(held !== undefined, 'the alarm still stands');
       assert.equal(held.suppressed, true, 'and is suppressed, exactly as a real one would be');
@@ -453,7 +472,7 @@ describe(
       assert.equal(await sweep(after(4_000)), 0, 'nor any repeat');
 
       // Lifting the force is the recovery, the same way a successful scan would be.
-      await h.service.simulateError(testActor, sensorId, false);
+      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
       assert.deepEqual(
         (await queued()).map((request) => request.reason),
         ['initial', 'recovery'],

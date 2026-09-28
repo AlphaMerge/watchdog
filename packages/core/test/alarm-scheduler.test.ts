@@ -16,6 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -400,7 +401,13 @@ describe(
       await scan([sensorId], false);
       await until(async () => (await requests()) === 1, 'the initial notification');
 
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'mine');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'mine',
+      );
       const [held] = await alarmsStanding();
       assert.ok(held !== undefined, 'the alarm stands');
       assert.equal(held.suppressed, true);

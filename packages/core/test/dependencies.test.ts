@@ -21,6 +21,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -286,13 +287,19 @@ describe(
       // Down never paused its dependents, and the storm the dependency was configured to prevent
       // arrived in full, from the button whose purpose is to rehearse exactly that.
       await masterForDevice();
-      await h.service.simulateError(testActor, pingId, true, 'rehearsing the failover');
+      await h.service.simulateError(
+        testActor,
+        pingId,
+        true,
+        Visibility.EVERYTHING,
+        'rehearsing the failover',
+      );
 
       assert.equal((await runtimeOf(httpId)).cause, 'dependency');
       assert.equal((await runtimeOf(snmpId)).cause, 'dependency');
 
       // And lifting it releases them, which is the same defect in the other direction.
-      await h.service.simulateError(testActor, pingId, false);
+      await h.service.simulateError(testActor, pingId, false, Visibility.EVERYTHING);
       assert.equal((await runtimeOf(httpId)).dependency, false);
     });
 

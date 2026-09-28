@@ -12453,6 +12453,33 @@ because each is a decision rather than a defect:
       asserted in `object-visibility.test.ts`, and the sweep calls every `COMPUTES` route
       (`changes: false`) it can build a body for, so the next one is not found by reading.
 
+- [x] **A-24 — Acknowledging or forcing a device reaches the sensors in its holes** · S · A-12 ·
+      Found 2026-09-28 in `A-12`'s review. `POST /objects/:id/acknowledge` and
+      `/simulate-error` check `write` on the object they are given, and then act on every sensor
+      beneath it: `downSensorsIn` and `sensorsIn` walk the subtree with no visibility condition. An
+      operator with `write` on a device whose sensor is carved `none` acknowledged that sensor's
+      outage, or forced it Down and paged whoever owns it, and the answer said so — the
+      acknowledged list named it, and "nothing here is Down" on a device whose only Down sensor
+      is hidden told the caller its state. The same two walks stopped at a literal depth of 1000
+      where every other walk uses `MAX_WALK_DEPTH`.
+
+      **Done when** both act only on the sensors the caller can see, the response and the refusal
+      count nothing else, and `object-visibility.test.ts` shows it on a device with a hole in it
+      and on one whose only Down sensor is hidden, with the hidden sensor's state unchanged.
+
+      **A-24 outcome.** `downSensorsIn` and `sensorsIn` take the caller's visibility and put
+      `A-12`'s condition in their own `WHERE`, beside the state filter; `ObjectService.acknowledge`,
+      `clearAcknowledgement` and `simulateError` take it from the route. A sensor named directly is
+      unchanged — the route's `write` on it is the whole check. So the acknowledged list and the
+      forced list name only visible sensors, and a device whose only Down sensor is hidden is
+      refused with "nothing here is Down to acknowledge", the answer a healthy device gets. Both
+      walks now stop at `MAX_WALK_DEPTH`. The other callers are tests, which pass
+      `Visibility.EVERYTHING`. Tests: 1 new in `object-visibility.test.ts` — the operator
+      acknowledges and clears the device with a carved sensor, then forces and releases it; the
+      carved sensor stays Down, unacknowledged and unforced throughout, and is named in neither
+      answer; granted `write` on the device whose only sensor is hidden, the acknowledgement is
+      refused and the sensor untouched. Mutation 2/2: either walk without the condition.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

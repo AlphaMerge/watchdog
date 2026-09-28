@@ -1276,7 +1276,13 @@ export async function objectRoutes(
             : ({ kind: 'indefinite' } as const);
 
       await reply.send(
-        await service.acknowledge(actorFor(request), request.params.id, acknowledgement, message),
+        await service.acknowledge(
+          actorFor(request),
+          request.params.id,
+          acknowledgement,
+          await visibilityOf(request),
+          message,
+        ),
       );
     },
   );
@@ -1297,7 +1303,13 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      await reply.send(await service.clearAcknowledgement(actorFor(request), request.params.id));
+      await reply.send(
+        await service.clearAcknowledgement(
+          actorFor(request),
+          request.params.id,
+          await visibilityOf(request),
+        ),
+      );
     },
   );
 
@@ -1332,6 +1344,7 @@ export async function objectRoutes(
           actorFor(request),
           request.params.id,
           true,
+          await visibilityOf(request),
           request.body.message,
         ),
       );
@@ -1353,7 +1366,14 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      await reply.send(await service.simulateError(actorFor(request), request.params.id, false));
+      await reply.send(
+        await service.simulateError(
+          actorFor(request),
+          request.params.id,
+          false,
+          await visibilityOf(request),
+        ),
+      );
     },
   );
 

@@ -8,7 +8,9 @@
  * without the state change they caused, is a history that disagrees with itself.
  */
 
+import type { Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { ChannelVerdict, SensorFacts } from './machine.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
@@ -583,8 +585,20 @@ export async function readSensorState(
  *
  * `down_acknowledged` is included so that extending or re-wording an existing acknowledgement
  * over a whole device is the same call as making one.
+ *
+ * **Only the sensors the caller can see** (`A-24`). The route checks the object it was given, and
+ * an acknowledgement on a group used to reach every Down sensor beneath it, holes included: a
+ * write crossing into a branch the caller was never shown, and an answer — "acknowledged 12",
+ * or "nothing here is Down" — about the state of what is in it. The condition is `A-12`'s, the
+ * one every listing puts in its own `WHERE`.
  */
-export async function downSensorsIn(q: Queryable, rootId: number): Promise<number[]> {
+export async function downSensorsIn(
+  q: Queryable,
+  rootId: number,
+  visibility: Visibility,
+): Promise<number[]> {
+  const values: unknown[] = [rootId];
+  const visible = visibility.where('subtree.id', (value) => `$${String(values.push(value))}`);
   const rows = await q.query<{ object_id: string }>(
     `
     WITH RECURSIVE subtree AS (
@@ -592,15 +606,15 @@ export async function downSensorsIn(q: Queryable, rootId: number): Promise<numbe
       UNION ALL
       SELECT c.id, subtree.depth + 1
       FROM object c JOIN subtree ON c.parent_id = subtree.id
-      WHERE subtree.depth < 1000
+      WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
     )
     SELECT r.object_id::text AS object_id
     FROM subtree
     JOIN sensor_runtime r ON r.object_id = subtree.id
-    WHERE r.state IN ('down', 'down_acknowledged')
+    WHERE r.state IN ('down', 'down_acknowledged') AND ${visible}
     ORDER BY r.object_id
     `,
-    [rootId],
+    values,
   );
   return rows.map((row) => Number(row.object_id));
 }
@@ -608,11 +622,19 @@ export async function downSensorsIn(q: Queryable, rootId: number): Promise<numbe
 /**
  * Every sensor beneath an object.
  *
- * Unlike `downSensorsIn`, this filters on nothing: a simulated error (`M-14`) is applied to what
+ * Unlike `downSensorsIn`, this filters on no state: a simulated error (`M-14`) is applied to what
  * an operator selected, whatever state it happens to be in, because forcing a Down is not a
- * statement about the current one.
+ * statement about the current one. It does filter on sight, for `downSensorsIn`'s reason (`A-24`):
+ * forcing Down a sensor in a hole would page whoever owns it, on the word of somebody who cannot
+ * see it.
  */
-export async function sensorsIn(q: Queryable, rootId: number): Promise<number[]> {
+export async function sensorsIn(
+  q: Queryable,
+  rootId: number,
+  visibility: Visibility,
+): Promise<number[]> {
+  const values: unknown[] = [rootId];
+  const visible = visibility.where('subtree.id', (value) => `$${String(values.push(value))}`);
   const rows = await q.query<{ object_id: string }>(
     `
     WITH RECURSIVE subtree AS (
@@ -620,11 +642,11 @@ export async function sensorsIn(q: Queryable, rootId: number): Promise<number[]>
       UNION ALL
       SELECT c.id, c.kind, subtree.depth + 1
       FROM object c JOIN subtree ON c.parent_id = subtree.id
-      WHERE subtree.depth < 1000
+      WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
     )
-    SELECT id::text AS object_id FROM subtree WHERE kind = 'sensor' ORDER BY id
+    SELECT id::text AS object_id FROM subtree WHERE kind = 'sensor' AND ${visible} ORDER BY id
     `,
-    [rootId],
+    values,
   );
   return rows.map((row) => Number(row.object_id));
 }

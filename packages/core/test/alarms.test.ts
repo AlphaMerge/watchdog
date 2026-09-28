@@ -204,7 +204,13 @@ describe(
 
     it('keeps an acknowledged alarm, because acknowledging is not fixing', async () => {
       await knockDown(ping, NOW);
-      await h.service.acknowledge(testActor, ping, { kind: 'indefinite' }, 'engineer on site');
+      await h.service.acknowledge(
+        testActor,
+        ping,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'engineer on site',
+      );
 
       const page = await list({ limit: 100 });
       assert.equal(page.items.length, 1);
@@ -226,7 +232,13 @@ describe(
       const before = (await list({ limit: 100 })).items[0]?.since;
       assert.ok(before !== undefined);
 
-      await h.service.acknowledge(testActor, ping, { kind: 'indefinite' }, 'engineer on site');
+      await h.service.acknowledge(
+        testActor,
+        ping,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'engineer on site',
+      );
 
       const after = (await list({ limit: 100 })).items[0];
       assert.ok(after);
@@ -241,7 +253,13 @@ describe(
     it('can hide the acknowledged ones, for the reader who wants what is unhandled', async () => {
       await knockDown(ping, NOW);
       await knockDown(http, NOW);
-      await h.service.acknowledge(testActor, ping, { kind: 'indefinite' }, 'engineer on site');
+      await h.service.acknowledge(
+        testActor,
+        ping,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'engineer on site',
+      );
 
       const page = await list({ limit: 100, includeAcknowledged: false });
       assert.deepEqual(

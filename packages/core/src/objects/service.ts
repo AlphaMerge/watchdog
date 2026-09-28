@@ -864,6 +864,7 @@ export class ObjectService {
     actor: Actor,
     id: ObjectId,
     simulated: boolean,
+    visibility: Visibility,
     message = '',
   ): Promise<SimulatedErrorView> {
     const now = new Date();
@@ -878,7 +879,9 @@ export class ObjectService {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
 
-      const targets = object.kind === 'sensor' ? [id] : await sensorsIn(q, id);
+      // What the caller can see beneath it (`A-24`) — and so the "no sensors here" refusal below
+      // is the same answer for a hole as for an empty device.
+      const targets = object.kind === 'sensor' ? [id] : await sensorsIn(q, id, visibility);
       if (targets.length === 0) {
         throw new ObjectError('OBJECT_INVALID', 'there are no sensors here to force', {
           context: { objectId: id, phase: 'simulate' },
@@ -937,6 +940,7 @@ export class ObjectService {
     actor: Actor,
     id: ObjectId,
     request: AcknowledgeRequest,
+    visibility: Visibility,
     message = '',
   ): Promise<AcknowledgementView> {
     const now = new Date();
@@ -947,7 +951,7 @@ export class ObjectService {
         details: { problems: resolved.problems },
       });
     }
-    return this.#applyAcknowledgement(actor, id, resolved.acknowledgement, now);
+    return this.#applyAcknowledgement(actor, id, resolved.acknowledgement, visibility, now);
   }
 
   /**
@@ -959,14 +963,19 @@ export class ObjectService {
    * leaves it Unknown, which is a worse outcome than the mistake. One call, the same write path,
    * and the audit log records both halves.
    */
-  async clearAcknowledgement(actor: Actor, id: ObjectId): Promise<AcknowledgementView> {
-    return this.#applyAcknowledgement(actor, id, null, new Date());
+  async clearAcknowledgement(
+    actor: Actor,
+    id: ObjectId,
+    visibility: Visibility,
+  ): Promise<AcknowledgementView> {
+    return this.#applyAcknowledgement(actor, id, null, visibility, new Date());
   }
 
   async #applyAcknowledgement(
     actor: Actor,
     id: ObjectId,
     acknowledgement: ResolvedAcknowledgement | null,
+    visibility: Visibility,
     now: Date,
   ): Promise<AcknowledgementView> {
     const states = this.#states;
@@ -980,7 +989,9 @@ export class ObjectService {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
 
-      const targets = object.kind === 'sensor' ? [id] : await downSensorsIn(q, id);
+      // The Down sensors the caller can see beneath it (`A-24`): an acknowledgement is a write,
+      // and it must not reach into a hole — nor may its refusal say whether the hole is Down.
+      const targets = object.kind === 'sensor' ? [id] : await downSensorsIn(q, id, visibility);
       if (targets.length === 0) {
         throw new ObjectError(
           'OBJECT_NOT_PAUSED',

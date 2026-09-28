@@ -759,6 +759,74 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.ok(saved.body.includes(String(otherSensorId)), 'the stored tile was dropped');
     });
 
+    it('acknowledges and forces only what the caller can see beneath it (A-24)', async () => {
+      // The operator holds `write` on the device, and a sensor beneath it is carved `none`. An
+      // acknowledgement or a simulated error on the device used to reach that sensor too: a
+      // write into a branch the operator was never shown, and an answer about what is in it.
+      const runtimeOf = async (sensorId: number) =>
+        (
+          await db.query<{ state: string; simulated: boolean }>(
+            `SELECT state::text AS state, simulated_error AS simulated
+             FROM sensor_runtime WHERE object_id = $1`,
+            [sensorId],
+          )
+        )[0];
+      assert.equal((await runtimeOf(carvedSensorId))?.state, 'down', 'the fixture’s hole is Down');
+      assert.equal((await runtimeOf(pingId))?.state, 'down');
+
+      const device = `/api/v1/objects/${String(deviceId)}`;
+      const acknowledged = await app.inject({
+        method: 'POST',
+        url: `${device}/acknowledge`,
+        headers: as('operator'),
+        payload: { message: 'on it' },
+      });
+      assert.equal(acknowledged.statusCode, 200, acknowledged.body);
+      const view = acknowledged.json<{ acknowledged: number[]; refused: number[] }>();
+      assert.deepEqual(view.acknowledged, [pingId]);
+      assert.deepEqual(view.refused, []);
+      assert.equal((await runtimeOf(carvedSensorId))?.state, 'down', 'the hole was acknowledged');
+      const cleared = await app.inject({
+        method: 'DELETE',
+        url: `${device}/acknowledge`,
+        headers: as('operator'),
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+
+      const forced = await app.inject({
+        method: 'POST',
+        url: `${device}/simulate-error`,
+        headers: as('operator'),
+        payload: { message: 'drill' },
+      });
+      assert.equal(forced.statusCode, 200, forced.body);
+      assert.ok(!forced.json<{ sensors: number[] }>().sensors.includes(carvedSensorId));
+      assert.equal((await runtimeOf(carvedSensorId))?.simulated, false, 'the hole was forced');
+      const unforced = await app.inject({
+        method: 'DELETE',
+        url: `${device}/simulate-error`,
+        headers: as('operator'),
+      });
+      assert.equal(unforced.statusCode, 200, unforced.body);
+
+      // **The refusal is not an oracle either.** A device whose only Down sensor is hidden reads
+      // exactly as one with nothing Down — the operator is given `write` on it for this, so that
+      // it is the hole and not the right that decides.
+      await access.grant(lonelyDeviceId, teamId, 'write', actorNamed('visibility'));
+      const lonely = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(lonelyDeviceId)}/acknowledge`,
+        headers: as('operator'),
+        payload: { message: 'on it' },
+      });
+      assert.notEqual(lonely.statusCode, 200, 'the hidden sensor was acknowledged');
+      assert.equal(
+        lonely.json<{ error: { message: string } }>().error.message,
+        'nothing here is Down to acknowledge',
+      );
+      assert.equal((await runtimeOf(lonelySensorId))?.state, 'down');
+    });
+
     it('shows an administrator everything, so the markers are reachable', async () => {
       // The control: the same routes, as somebody who may see it all, do name the hidden objects.
       // Without this the sweep above would pass on a fixture whose markers nothing returns.

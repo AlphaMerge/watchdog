@@ -22,6 +22,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -258,6 +259,7 @@ describe(
         testActor,
         sensorId,
         { kind: 'indefinite' },
+        Visibility.EVERYTHING,
         'ticket 4471, engineer on site',
       );
       assert.deepEqual(view.acknowledged, [sensorId]);
@@ -273,7 +275,13 @@ describe(
     it('suppresses notifications, not monitoring: the probe still scans it', async () => {
       const config = new ProbeConfigService({ db, resolver: h.resolver });
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, '');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        '',
+      );
 
       const scheduled = (await config.assignmentsFor(probeId)).sensors.map((s) => s.sensorId);
       assert.ok(scheduled.includes(sensorId), 'WORKFLOW.MD §4 rule 4: it keeps scanning');
@@ -281,7 +289,13 @@ describe(
 
     it('records the transition, so uptime and the log both see it', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'duration', minutes: 60 }, 'later');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'duration', minutes: 60 },
+        Visibility.EVERYTHING,
+        'later',
+      );
 
       const rows = await db.query<{ previous_state: string; state: string; cause: string }>(
         `SELECT previous_state, state, cause FROM sensor_state
@@ -298,7 +312,14 @@ describe(
     it('refuses to acknowledge a sensor that is not Down', async () => {
       await makeUp(sensorId, NOW);
       await assert.rejects(
-        () => h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, ''),
+        () =>
+          h.service.acknowledge(
+            testActor,
+            sensorId,
+            { kind: 'indefinite' },
+            Visibility.EVERYTHING,
+            '',
+          ),
         (error: unknown) => {
           const err = error as { code?: string; message?: string };
           assert.equal(err.code, 'OBJECT_NOT_PAUSED');
@@ -314,7 +335,13 @@ describe(
       await makeDown(siblingId);
       await makeUp(healthyId, NOW);
 
-      const view = await h.service.acknowledge(testActor, deviceId, { kind: 'indefinite' }, 'one');
+      const view = await h.service.acknowledge(
+        testActor,
+        deviceId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'one',
+      );
       assert.deepEqual(
         [...view.acknowledged].sort((a, b) => a - b),
         [sensorId, siblingId].sort((a, b) => a - b),
@@ -325,7 +352,13 @@ describe(
 
     it('is a snapshot, not a rule: a sensor that fails afterwards is a new alarm', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, deviceId, { kind: 'indefinite' }, 'known');
+      await h.service.acknowledge(
+        testActor,
+        deviceId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'known',
+      );
 
       await makeDown(siblingId, new Date(NOW.getTime() + 300_000));
       const later = await runtimeOf(siblingId);
@@ -336,7 +369,14 @@ describe(
     it('refuses when nothing beneath the object is Down', async () => {
       await makeUp(sensorId, NOW);
       await assert.rejects(
-        () => h.service.acknowledge(testActor, deviceId, { kind: 'indefinite' }, ''),
+        () =>
+          h.service.acknowledge(
+            testActor,
+            deviceId,
+            { kind: 'indefinite' },
+            Visibility.EVERYTHING,
+            '',
+          ),
         (error: unknown) => {
           assert.ok((error as Error).message.includes('nothing here is Down'));
           return true;
@@ -350,7 +390,13 @@ describe(
 
     it('clears on a recovery a reading decided', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'known');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'known',
+      );
       await makeUp(sensorId);
 
       const current = await runtimeOf(sensorId);
@@ -360,7 +406,13 @@ describe(
 
     it('expires back to plain Down, against the result clock', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'duration', minutes: 5 }, 'briefly');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'duration', minutes: 5 },
+        Visibility.EVERYTHING,
+        'briefly',
+      );
       assert.equal((await runtimeOf(sensorId)).state, 'down_acknowledged');
 
       // §2.4: expiry is evaluated against the *result's* clock, so a replayed spool writes the
@@ -384,7 +436,13 @@ describe(
 
     it('clears on pause then resume, which is WORKFLOW.MD §4 rule 5', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'known');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'known',
+      );
 
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
       assert.equal((await runtimeOf(sensorId)).state, 'paused');
@@ -402,11 +460,17 @@ describe(
       // that never existed. Before this was fixed it stayed — invisibly, because nothing shows
       // an acknowledgement on an Up sensor — and silenced the next genuine failure.
       await makeUp(sensorId, NOW);
-      await h.service.simulateError(testActor, sensorId, true, 'chain test');
+      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
       assert.equal((await runtimeOf(sensorId)).state, 'down');
 
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'testing');
-      await h.service.simulateError(testActor, sensorId, false);
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'testing',
+      );
+      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
 
       const recovered = await runtimeOf(sensorId);
       assert.equal(recovered.state, 'up');
@@ -421,9 +485,15 @@ describe(
       // "I acknowledged the wrong sensor" is not recovery, expiry or a pause — and pause-then-
       // resume as the only undo would cost the sensor its failure count.
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'wrong one');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'wrong one',
+      );
 
-      const view = await h.service.clearAcknowledgement(testActor, sensorId);
+      const view = await h.service.clearAcknowledgement(testActor, sensorId, Visibility.EVERYTHING);
       assert.deepEqual(view.acknowledged, [sensorId]);
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'down', 'back to alarming');
@@ -437,7 +507,13 @@ describe(
 
     it('loses to a pause, because §2 puts pause first', async () => {
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'known');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'known',
+      );
       await h.service.pause(testActor, deviceId, { kind: 'indefinite' }, 'planned');
 
       const current = await runtimeOf(sensorId);
@@ -450,7 +526,13 @@ describe(
       // master that is Down (Acknowledged) still holds what depends on it.
       await h.service.setDependency(testActor, siblingId, 'object', sensorId, undefined);
       await makeDown(sensorId);
-      await h.service.acknowledge(testActor, sensorId, { kind: 'indefinite' }, 'known');
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        'known',
+      );
       await db.tx(async (q) => {
         await h.dependencies?.recompute(q, new Date());
       });
@@ -518,6 +600,7 @@ describe(
         testActor,
         sensorId,
         { kind: 'duration', minutes: 60 },
+        Visibility.EVERYTHING,
         'ticket 1',
       );
 
