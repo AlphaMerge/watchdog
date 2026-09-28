@@ -12344,6 +12344,28 @@ because each is a decision rather than a defect:
       and the before and after — a probe named by its gid and name, never by its enrolment key —
       and every `A-20` declaration `A-17`'s sweep carries is gone and the sweep still passes.
 
+- [x] **A-21 — The live stream's sequence number counts changes the subscriber cannot see** · S ·
+      A-12 · Found 2026-09-28 in `A-12`'s review. `StateBroadcaster` numbered every published
+      change in one process-wide `#seq` before `A-12`'s per-socket filtering, and every socket was
+      sent it — in `hello`, in every snapshot and in every `state` frame. A branch account whose
+      sequence jumped by 3,000 between two of its own events had been told the size and timing of
+      an outage somewhere it cannot see: counted, not absent, which is the oracle `A-12` exists to
+      close. The web client never reads `seq`, so nothing on screen showed it.
+
+      **Done when** a change the subscriber may not see leaves no trace in its sequence — asserted
+      in `object-visibility.test.ts` with changes in hidden branches between two visible ones —
+      and `seq` still means what it is for: a gap is a missed frame.
+
+      **A-21 outcome.** Each socket numbers the `state` frames it has been sent, from 1 and across
+      every subscription it makes; `hello` carries 0 and a snapshot the number of the last `state`
+      frame sent before it. **The broadcaster carries no number at all**: one kept there is one per
+      change anywhere, so there is nothing left for a later consumer to forward by mistake. The
+      protocol version stays 1 — the frames have the same shape, and no client read the old
+      meaning. Tests: 1 new in `object-visibility.test.ts` (the branch account and an administrator
+      watch one window; the branch socket's count has no gap while the administrator's numbers the
+      hidden changes, and it carries on across a resubscription), and `state-stream.test.ts`'s
+      "numbers its events" is now "numbers nothing". Both fail against the code before the fix.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

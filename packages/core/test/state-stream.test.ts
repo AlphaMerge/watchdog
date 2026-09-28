@@ -282,14 +282,16 @@ describe(
       assert.equal(event.sensorName, 'Ping');
     });
 
-    it('numbers its events, so a gap is visible', async () => {
+    it('numbers nothing, because its only number would be the installation’s (A-21)', async () => {
+      // A count kept here is one per change anywhere, and a subscriber that sees part of the tree
+      // would read the rest in its gaps. The route numbers what each socket is sent.
       const seen = recorder();
       stream.subscribe(seen.subscriber, null, EVERYONE);
       await scan([sensorId, otherSensorId], false, new Date());
-      assert.deepEqual(
-        seen.events.map((event) => event.seq),
-        [1, 2],
-      );
+      assert.equal(seen.events.length, 2);
+      for (const event of seen.events) assert.equal('seq' in event, false);
+      const snapshot = await stream.snapshot(db, null, Visibility.EVERYTHING);
+      assert.equal('seq' in snapshot, false);
     });
 
     it('hands a subscriber the state of its subtree, and says where it starts', async () => {
@@ -321,7 +323,12 @@ describe(
       const [event] = seen.events;
       assert.ok(event !== undefined, 'the change arrived on the stream');
       assert.equal(seen.events.length, 1);
-      assert.ok(snapshot.seq >= event.seq, 'and the snapshot already includes it');
+      assert.ok(
+        snapshot.entries.some(
+          (entry) => entry.sensorId === sensorId && entry.state === event.state,
+        ),
+        'and the snapshot already includes it',
+      );
     });
 
     it('says a subtree is bigger than one snapshot rather than truncating quietly', async () => {

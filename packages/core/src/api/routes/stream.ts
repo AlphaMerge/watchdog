@@ -83,11 +83,19 @@ export function contained<A extends unknown[]>(
   };
 }
 
-/** What the server sends. A discriminated union, so a client switches rather than sniffs. */
+/**
+ * What the server sends. A discriminated union, so a client switches rather than sniffs.
+ *
+ * **`seq` is this socket's own count of the `state` frames it has been sent** (`A-21`): 1, 2, 3
+ * and on across every subscription the socket makes, with a snapshot carrying the number of the
+ * last one before it and `hello` carrying 0. So a gap still means a frame went missing — which is
+ * what a sequence number is for — and a gap no longer means that something changed where the
+ * caller cannot see, which is what a process-wide counter told every account granted a branch.
+ */
 type ServerFrame =
   | { readonly type: 'hello'; readonly seq: number; readonly protocol: number }
-  | ({ readonly type: 'snapshot' } & StateSnapshot)
-  | ({ readonly type: 'state' } & StateEvent)
+  | ({ readonly type: 'snapshot'; readonly seq: number } & StateSnapshot)
+  | ({ readonly type: 'state'; readonly seq: number } & StateEvent)
   | { readonly type: 'overflow'; readonly reason: string }
   | { readonly type: 'problem'; readonly reason: string };
 
@@ -183,7 +191,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'snapshot nor streamed, and every `path` carries only the steps it can read. ' +
           'Subscribing to an object it cannot read is answered with a `problem` frame. When ' +
           'what the caller may see changes — a grant revoked, a group left — the socket is sent ' +
-          '`overflow` with that reason, and subscribing again takes a snapshot of the new view.',
+          '`overflow` with that reason, and subscribing again takes a snapshot of the new view.' +
+          '\n\n`seq` numbers the `state` frames this socket has been sent, from 1 and across ' +
+          'every subscription it makes; `hello` carries 0 and a `snapshot` the number of the last ' +
+          '`state` frame before it. It is the socket’s own count, so a gap means a frame was ' +
+          'lost and never that something changed outside what the caller can see.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -216,7 +228,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         detach = undefined;
       };
 
-      send({ type: 'hello', seq: stream.seq, protocol: PROTOCOL });
+      // The `state` frames this socket has been sent, and nothing else (`A-21`). See `ServerFrame`.
+      let numbered = 0;
+
+      send({ type: 'hello', seq: numbered, protocol: PROTOCOL });
 
       // A function rather than an inline test: `closed` changes in a callback across the awaits
       // below, and a condition written out twice is narrowed to its first answer.
@@ -245,7 +260,8 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         detach = stream.subscribe(
           {
             send: (event) => {
-              backlog.wrote(send({ type: 'state', ...event }));
+              numbered += 1;
+              backlog.wrote(send({ type: 'state', seq: numbered, ...event }));
             },
             overflow: (reason) => {
               cutOff.dropped = true;
@@ -264,10 +280,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         );
         // A snapshot supersedes everything before it, so the event accounting starts again from
         // here and its own bytes are never counted. See `socketBacklog`.
-        const frame = {
-          type: 'snapshot' as const,
-          ...(await stream.snapshot(db, objectId, visibility)),
-        };
+        const snapshot = await stream.snapshot(db, objectId, visibility);
+        // Numbered once it has been read: every `state` frame sent while it was being read is
+        // counted in it, and every one sent after it carries a higher number.
+        const frame = { type: 'snapshot' as const, seq: numbered, ...snapshot };
         // Detached while the snapshot was being read — sending it now would append megabytes to a
         // socket the cut-off has already given up on, which is the amplification `P-70` closes.
         if (cutOff.dropped) return;

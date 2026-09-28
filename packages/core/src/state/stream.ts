@@ -5,10 +5,15 @@ import type { Visibility } from '../auth/access.js';
 import type { ObjectId } from '../objects/types.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
-/** One committed state change, as a subscriber receives it. */
+/**
+ * One committed state change, as a subscriber receives it.
+ *
+ * **Unnumbered, deliberately** (`A-21`). A number given here would be the installation's, one per
+ * change, and a subscriber that sees a tenth of the tree would read the other nine tenths in the
+ * gaps between its own — how many changes, and when. What a socket was sent is numbered where it
+ * is sent, in the stream route, and counts nothing else.
+ */
 export interface StateEvent {
-  /** Monotonic within a process. A gap means this subscriber missed something. */
-  readonly seq: number;
   readonly sensorId: ObjectId;
   readonly sensorName: string;
   /**
@@ -38,8 +43,6 @@ export interface StateSnapshotEntry {
 }
 
 export interface StateSnapshot {
-  /** The sequence the snapshot was taken at; every event after it carries a higher one. */
-  readonly seq: number;
   readonly objectId: ObjectId | null;
   readonly entries: readonly StateSnapshotEntry[];
   /** True when the subtree has more sensors than one snapshot may carry. */
@@ -156,7 +159,6 @@ export class StateBroadcaster {
   readonly #backlogLimit: number;
   readonly #snapshotLimit: number;
   readonly #attached = new Set<Attached>();
-  #seq = 0;
   #published = 0;
   #delivered = 0;
   #overflowed = 0;
@@ -183,10 +185,6 @@ export class StateBroadcaster {
   /** Whether anything is listening. The guard every publish path checks first. */
   get watching(): boolean {
     return this.#attached.size > 0;
-  }
-
-  get seq(): number {
-    return this.#seq;
   }
 
   /**
@@ -286,10 +284,8 @@ export class StateBroadcaster {
       // A sensor deleted between the commit and this read. Nothing to say about it, and the
       // deletion is its own event as far as a tree is concerned.
       if (found === undefined) continue;
-      this.#seq += 1;
       this.#published += 1;
       const event: StateEvent = {
-        seq: this.#seq,
         sensorId: change.sensorId,
         sensorName: found.name,
         path: found.path,
@@ -371,7 +367,6 @@ export class StateBroadcaster {
       );
     }
     return {
-      seq: this.#seq,
       objectId,
       truncated,
       entries: rows.slice(0, this.#snapshotLimit).map((row) => ({

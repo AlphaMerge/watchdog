@@ -773,6 +773,82 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         socket.terminate();
       }
     });
+
+    it('numbers only what it sends, so a change it hides leaves no gap (A-21)', async () => {
+      // The branch account and an administrator watch the same window: a visible change, three
+      // hidden ones, the visible sensor again. A process-wide counter put the hidden three in the
+      // branch socket's sequence as a gap — how many changes, and when, outside its branch.
+      const watch = async (login: string) => {
+        const frames: Record<string, unknown>[] = [];
+        // Listening from before the upgrade, or `hello` is gone before anybody hears it.
+        const socket = await app.injectWS(
+          '/api/v1/stream',
+          { headers: as(login) },
+          {
+            onInit: (ws) => {
+              ws.on('message', (raw: Buffer) => {
+                frames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
+              });
+            },
+          },
+        );
+        socket.send(JSON.stringify({ subscribe: {} }));
+        const states = () => frames.filter((frame) => frame['type'] === 'state');
+        return { socket, frames, states };
+      };
+      const until = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 300 && !done(); i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.ok(done(), 'the stream did not deliver in time');
+      };
+      const hidden = [otherSensorId, carvedSensorId, lonelySensorId];
+      const branch = await watch('watcher');
+      const admin = await watch('admin');
+      try {
+        const snapshotOf = (frames: Record<string, unknown>[]) =>
+          frames.find((frame) => frame['type'] === 'snapshot');
+        await until(() => snapshotOf(branch.frames) !== undefined);
+        await until(() => snapshotOf(admin.frames) !== undefined);
+        for (const { frames } of [branch, admin]) {
+          assert.deepEqual(frames[0], { type: 'hello', seq: 0, protocol: 1 });
+          assert.equal(snapshotOf(frames)?.['seq'], 0, 'nothing was sent before the snapshot');
+        }
+
+        await scan([pingId], false);
+        await scan(hidden, false);
+        await scan([pingId], true);
+        const recovered = (frames: Record<string, unknown>[]) =>
+          frames.some((frame) => frame['sensorId'] === pingId && frame['state'] === 'up');
+        await until(() => recovered(branch.frames) && recovered(admin.frames));
+
+        const seqs = (states: Record<string, unknown>[]) => states.map((frame) => frame['seq']);
+        const counted = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+        const mine = branch.states();
+        assert.ok(mine.every((frame) => frame['sensorId'] === pingId));
+        assert.deepEqual(seqs(mine), counted(mine.length), 'the branch socket’s count has a gap');
+        // The control: the hidden changes did happen in that window, and were numbered — on the
+        // one socket allowed to see them.
+        const all = admin.states();
+        assert.ok(all.some((frame) => hidden.includes(frame['sensorId'] as number)));
+        assert.deepEqual(seqs(all), counted(all.length));
+        assert.ok(all.length > mine.length);
+
+        // Across a second subscription the count carries on rather than starting again, so a
+        // client never sees a number twice on one socket.
+        const before = mine.length;
+        branch.socket.send(JSON.stringify({ subscribe: {} }));
+        await until(() => branch.frames.filter((frame) => frame['type'] === 'snapshot').length > 1);
+        assert.equal(branch.frames.at(-1)?.['seq'], before);
+        await scan([pingId], false);
+        await until(() => branch.states().length > before);
+        assert.equal(branch.states()[before]?.['seq'], before + 1);
+      } finally {
+        await scan([...hidden, pingId], true);
+        branch.socket.terminate();
+        admin.socket.terminate();
+      }
+    });
   });
 
   describe('absent, not counted', () => {
