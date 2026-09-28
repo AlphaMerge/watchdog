@@ -309,6 +309,7 @@ describe(
       return {
         connected: true,
         gid: 'probe-gid',
+        clockOffsetMs: null,
         protocolVersion: PROTOCOL_VERSION,
         connectedAt: now,
         lastHeartbeatAt: now,

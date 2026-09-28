@@ -35,6 +35,7 @@ function link(over: Partial<Extract<ProbeLink, { connected: true }>> = {}): Prob
   return {
     connected: true,
     gid: 'probe-gid',
+    clockOffsetMs: null,
     protocolVersion: 13,
     connectedAt: START,
     lastHeartbeatAt: START,

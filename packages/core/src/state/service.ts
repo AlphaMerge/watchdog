@@ -146,6 +146,15 @@ export interface SensorStateServiceOptions {
    */
   unreachableSensors?: () => ReadonlySet<number>;
   /**
+   * The sensors whose probe's clock reads earlier than their last result (`P-232`), which can
+   * accept nothing it sends. Laid over the facts exactly as `unreachableSensors` is — the same
+   * fact, so the same state, cause and alarms — because it is the same answer: nothing the probe
+   * says about them can be used.
+   *
+   * Absent means no probe's clock has stepped back.
+   */
+  clockFrozenSensors?: () => ReadonlySet<number>;
+  /**
    * The sensors the core has stopped evaluating, each with the sentence that says why (`A-29`).
    *
    * Live for `unreachableSensors`' reason, and laid over the facts at the same point: a sensor
@@ -188,6 +197,7 @@ export class SensorStateService {
   readonly #alarms: AlarmReactor | undefined;
   readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #unreachableSensors: (() => ReadonlySet<number>) | undefined;
+  readonly #clockFrozenSensors: (() => ReadonlySet<number>) | undefined;
   readonly #withheldSensors: (() => ReadonlyMap<number, string>) | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
@@ -218,6 +228,7 @@ export class SensorStateService {
     this.#alarms = options.alarms;
     this.#onStatesCommitted = options.onStatesCommitted;
     this.#unreachableSensors = options.unreachableSensors;
+    this.#clockFrozenSensors = options.clockFrozenSensors;
     this.#withheldSensors = options.withheldSensors;
   }
 
@@ -646,12 +657,15 @@ export class SensorStateService {
    */
   #withLiveFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
     const unreachable = this.#unreachableSensors?.();
+    const frozen = this.#clockFrozenSensors?.();
     const withheld = this.#withheldSensors?.();
     const anyUnreachable = unreachable !== undefined && unreachable.size > 0;
+    const anyFrozen = frozen !== undefined && frozen.size > 0;
     const anyWithheld = withheld !== undefined && withheld.size > 0;
-    if (!anyUnreachable && !anyWithheld) return runtimes;
+    if (!anyUnreachable && !anyFrozen && !anyWithheld) return runtimes;
     for (const [sensorId, runtime] of runtimes) {
-      const lost = anyUnreachable && unreachable.has(sensorId);
+      const lost =
+        (anyUnreachable && unreachable.has(sensorId)) || (anyFrozen && frozen.has(sensorId));
       const refused = anyWithheld && withheld.has(sensorId);
       if (!lost && !refused) continue;
       runtimes.set(sensorId, {

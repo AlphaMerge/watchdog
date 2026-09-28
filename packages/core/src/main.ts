@@ -114,6 +114,7 @@ import { TotpService } from './auth/totp.js';
 import { SessionService } from './auth/sessions.js';
 import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
+import { ClockFreeze } from './probes/clock-freeze.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
@@ -418,6 +419,10 @@ async function serve(): Promise<void> {
   // eslint-disable-next-line prefer-const -- assigned below, once the check exists.
   let vouchingRef: SensorVouching | undefined;
   const nothingWithheld: ReadonlyMap<number, string> = new Map();
+  // And for the sensors a probe's clock has frozen (`P-232`), which needs the endpoint.
+  // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
+  let clockFreezeRef: ClockFreeze | undefined;
+  const noneFrozen: ReadonlySet<number> = new Set();
   const states = new SensorStateService({
     db,
     logger,
@@ -429,6 +434,7 @@ async function serve(): Promise<void> {
     alarms,
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
+    clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
     withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
@@ -1170,6 +1176,10 @@ async function serve(): Promise<void> {
     maxResultAgeMs: maxResultAgeMs(config.housekeeping.retention),
   });
 
+  const coreEvaluatedTypes = catalogue
+    .ids()
+    .filter((id) => catalogue.declaration(id).evaluatedBy === 'core');
+
   // A lost probe is one alarm, not a thousand (`R-05`). Built before the endpoint, which is
   // what tells it when a link comes and goes.
   const reachability = new ProbeReachability({
@@ -1184,9 +1194,7 @@ async function serve(): Promise<void> {
     // outage says nothing about it (`P-13`). Probe Health depends on this: it is a sensor under
     // the probe it reports on, and without the exclusion the outage it exists to raise would be
     // the thing that silenced it.
-    coreEvaluatedTypes: catalogue
-      .ids()
-      .filter((id) => catalogue.declaration(id).evaluatedBy === 'core'),
+    coreEvaluatedTypes,
   });
   reachabilityRef = reachability;
 
@@ -1298,6 +1306,35 @@ async function serve(): Promise<void> {
     linkFor: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
   });
 
+  // A probe whose clock reads earlier than its sensors' last results freezes them (`P-232`).
+  // Moved the way a lost probe's sensors are, through the same two calls, so the alarms they
+  // raise are a lost probe's and no more.
+  const clockFreeze = new ClockFreeze({
+    db,
+    logger,
+    states,
+    dependencies: dependencyPauses,
+    links: probeEndpoint,
+    coreEvaluatedTypes,
+  });
+  clockFreezeRef = clockFreeze;
+  const clockFreezeSweep = new PeriodicSweep({
+    logger,
+    component: 'clock-freeze-sweep',
+    what: 'a probe clock sweep failed',
+    run: () => clockFreeze.sweep().then(() => undefined),
+    intervalMs: 30_000,
+  });
+  clockFreezeSweep.start();
+  lifecycle.onShutdown({
+    name: 'clock-freeze-sweep',
+    timeoutMs: 2_000,
+    run: () => {
+      clockFreezeSweep.stop();
+      return Promise.resolve();
+    },
+  });
+
   const probeHealth = new ProbeHealthService({
     db,
     logger,
@@ -1306,6 +1343,7 @@ async function serve(): Promise<void> {
       link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
       timeRefusals: (gid) => ingestion.timeRefusals(gid),
       refusals: (probeObjectId) => refusals.countsFor(probeObjectId),
+      frozenSensors: (probeObjectId) => clockFreeze.frozenOn(probeObjectId),
     },
     delivery: deliveryWatch,
     ingest: async (results) => {

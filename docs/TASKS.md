@@ -5156,7 +5156,7 @@ because each is a decision rather than a defect:
 
       Mutations caught: 15 of 15. Each was applied alone, built, and run against its own tests.
 
-- [ ] **P-232 — a probe whose clock steps back freezes its sensors, and nothing says why** · M ·
+- [x] **P-232 — a probe whose clock steps back freezes its sensors, and nothing says why** · M ·
       P-231, P-169, M-02 · Found writing `P-231`. `isStaleResult` discards a result no newer than
       a sensor's `last_result_at`, which is what makes an at-least-once protocol safe. A probe whose
       clock steps back by N (an RTC reset at boot, NTP correcting a fast clock) sends results that
@@ -5171,6 +5171,103 @@ because each is a decision rather than a defect:
       tells a duplicate from a clock that stepped back, or the freeze is otherwise bounded and
       named. `state-machine.md` says which, and a table-driven test covers a step back, a step
       forward, a duplicate and a replay.
+
+      **Done: bounded and named, the way a lost probe is.**
+      - **The offset.** Arrival less `sentAt`, from every heartbeat and every results batch that
+        carries one. It is the smallest reading over five minutes (`RecentMinimum`, a fixed ring
+        beside `P-231`'s `RecentCount`), because a delay only ever adds to a reading. A batch that
+        sat ninety seconds in a send buffer is late, not behind. It is kept per session and is a
+        gap until the session has sent a time.
+      - **The freeze, exactly.** A sensor is frozen when its last accepted result is later than its
+        probe's clock reads now, plus a minute. While that holds, `isStaleResult` must drop
+        everything the probe sends. No duplicate or replay can make it true, since anything sent
+        again was measured at or before the probe's clock. It is true only after the clock read
+        earlier than a stamp it produced, and only for that difference.
+      - **Unknown with cause `probe`, through the lost path.** `ClockFreeze` sweeps every thirty
+        seconds. The state service lays its set over the facts at the same point as
+        `ProbeReachability`'s unreachable set. The freeze moves sensors with the same `reevaluate`
+        and dependency recompute. The set is changed before the transaction and put back if the
+        transaction fails (`P-80`). Core-evaluated types are excluded, because the core stamps
+        them. What it froze is kept across a disconnect and decided again once the new session is
+        measured.
+      - **Not a re-base of the watermark.** Results carry no clock of their own. After a step, a
+        result measured before it and sent again cannot be told from one measured after.
+      - **Probe Health.**
+        - `clockOffset`: seconds, positive when the probe is behind. Warns beyond a minute either
+          way.
+        - `sensorsFrozen`: warns at one. This catches NTP correcting a fast clock, where the offset
+          reads near zero.
+      - `state-machine.md` §7, `administration.md`'s wrong-clock table and Probe Health channels,
+        and `WORKFLOW.MD` §13 say it.
+
+      **The four conditions:**
+      1. **The frozen overlay queues exactly what `lost` queues.** Two probes of 150 pings each.
+         Triggers on Down, Unknown and Up sit at the root, and every fifth ping is Down. One probe
+         is lost and the other stepped back an hour. The requests are counted by trigger, reason
+         and state, and they are equal on the step and on the lift. No Down is paged for the
+         Unknown, and there is no second wave on the lift. The test also asserts one Unknown per
+         sensor on the step, so the equality cannot be two empty answers. That count is what
+         `M-22` is for.
+      2. **The offset is a minimum over a window.** Rows: "one delayed batch, clock fine: not
+         frozen" in the freeze table, and "a message ninety seconds late changes nothing" through
+         the real endpoint.
+      3. **Device-supplied timestamps: there are none.** Every result's `at` is stamped by the
+         probe that ran the check. No sensor type reads a time from the device it measures and
+         stores that instead, so one probe offset covers every sensor under it.
+      4. **Measured at 5,000 sensors:** an ordinary pass takes a median of 14.6 ms (worst 23.1 ms of 20) against a budget of 300 ms, 1% of its period. Every step of the plan is an index scan, and each pass is linear in the connected fleet. The edge froze 5,000 sensors in 550 ms and thawed them in 204 ms. `docs/findings/2026-09-29-clock-freeze-sweep.md`
+         has the plan.
+
+      **Not built:** a probe steadily behind by less than `P-231`'s bound, with no step, still has
+      its results stored at the wrong time. Now `clockOffset` warns and says by how much. The
+      Unknown trigger's one notification per carried sensor, for a lost or frozen probe, is
+      `M-22`.
+
+      Tests:
+      - `clock-freeze.test.ts`: the table against the real query, the core-evaluated exclusion,
+        dependency release, the delayed batch, kept across a disconnect, two probes kept apart,
+        the scenario, and the rollback.
+      - `probe-endpoint.test.ts`: the offset from what a probe sends.
+      - `recent-count.test.ts`: `RecentMinimum`.
+      - `probe-health.test.ts`: both channels, their gaps, and the two warnings through ingestion,
+        the limit and the state machine.
+      - `perf/clock-freeze-performance.test.ts`: the measurement.
+
+      Mutations caught: 21 of 21. Each was applied alone, built, and run against its own tests.
+
+- [ ] **M-22 — a trigger on Unknown notifies once per sensor of a lost or frozen probe** · M ·
+      P-232, P-135, P-105 · Found writing `P-232`. The state service moves a lost probe's
+      sensors to Unknown with cause `probe` (`WORKFLOW.MD` §13), and `P-232` moves a frozen
+      probe's the same way. Down alarms are suspended and resume without a second wave, but
+      nothing in the alarm engine reads the cause.
+      - **The per-sensor Unknowns.** A trigger on Unknown arms one alarm per carried sensor and
+        queues one notification each. Only email is summarised; webhook and program deliver
+        every one.
+      - **The per-sensor Ups.** A trigger on Up has its alarm cancelled when the sensor leaves Up
+        (`P-113`), and re-armed on return, so the lift pages once per sensor as well.
+      - `WORKFLOW.MD` §13 promises "a single alarm, not one per sensor". `P-232`'s scenario test
+        counts 150 Unknowns for a probe of 150 pings.
+
+      **Done when:**
+      - **Held per trigger, never per sensor.** A carried sensor's alarm under a trigger is held
+        only when that trigger would raise Probe Health's own alarm for the same loss: it is a
+        state trigger, its scope covers the probe's live Probe Health sensor, and its state is
+        the one Probe Health takes. Holding never takes the last route away from any trigger.
+        A group trigger below the probe, and a root trigger on Unknown only, go on notifying as
+        they do now.
+      - **While it is held:** nothing arms, a standing alarm is suspended rather than cancelled
+        or recovered, and this holds for every delivery method. That includes the Up re-arm on
+        return.
+      - **Not a literal dependency.** A dependency pause would cancel the carried sensors' Down
+        alarms (`P-105`, `P-112`) and change their state from Unknown to Paused.
+      - `sensorsFrozen` becomes an error limit, so a frozen probe's one alarm is Down like a lost
+        one's.
+      - A scenario test counts `notification_request` rows for a lost probe carrying a few
+        hundred sensors, and for a frozen one. It names each case: a root Down trigger (the one
+        Probe Health alarm), a group Unknown trigger below the probe, and a root Unknown-only
+        trigger.
+      - **A-29's Unknown/`access` stays per sensor**, argued here: nothing is its one alarm, it is
+        bounded by what one account wrote, and the trigger over those sensors is who needs to
+        know.
 
 - [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
       Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.

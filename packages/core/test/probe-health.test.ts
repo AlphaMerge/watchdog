@@ -8,7 +8,11 @@ import {
   type IngestionConfig,
   type ProbeHealthReport,
 } from '@ms/shared';
-import { ProbeHealthService, readingsFrom } from '../src/health/probe-health.js';
+import {
+  ProbeHealthService,
+  readingsFrom,
+  type ProbeHealthSources,
+} from '../src/health/probe-health.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { IngestionService } from '../src/ingestion/service.js';
@@ -151,6 +155,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
   ): ProbeLink => ({
     connected: true,
     gid: 'probe-gid',
+    clockOffsetMs: null,
     protocolVersion: PROTOCOL_VERSION,
     connectedAt: new Date('2026-08-28T00:00:00Z'),
     lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
@@ -292,6 +297,34 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.deepEqual(asked, ['probe-a']);
       assert.equal(reading['resultsFutureDated'], 7);
       assert.equal(reading['resultsPastDated'], 2);
+    });
+
+    it('carries the probe clock as the core reads it, and the sensors it froze', () => {
+      // `P-232`. Seconds, positive when the probe is behind; the count comes from the sweep that
+      // froze them, by probe.
+      const asked: number[] = [];
+      const { reading } = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link: () => connected({ clockOffsetMs: 3_600_049 }),
+          frozenSensors: (id) => {
+            asked.push(id);
+            return 12;
+          },
+        },
+        ingest: () => Promise.resolve(),
+      }).read(probeId);
+      assert.equal(reading['clockOffset'], 3_600);
+      assert.equal(reading['sensorsFrozen'], 12);
+      assert.deepEqual(asked, [probeId]);
+    });
+
+    it('gaps the clock until the session has sent a time, and never reads it as zero', () => {
+      const { reading } = build(() => connected({ clockOffsetMs: null })).read(probeId);
+      assert.equal(reading['clockOffset'], null);
+      assert.equal(reading['sensorsFrozen'], null, 'and the count, on a core without the sweep');
     });
 
     it('gaps them on a core that does not count them, rather than reading zero', () => {
@@ -518,6 +551,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const old: ProbeLink = {
         connected: true,
         gid: 'probe-gid',
+        clockOffsetMs: null,
         protocolVersion: 3,
         connectedAt: new Date('2026-08-28T00:00:00Z'),
         lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
@@ -603,13 +637,19 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
     };
 
-    it('warns on the first reading that has refusals, and clears once they stop', async () => {
-      // **The warning has to see the first batch and clear itself.** A running count only goes
-      // up, so a limit on it would warn for ever after one bad batch. A counter's rate clears, but
-      // it is a gap on the first reading, and after every core restart, which is when a wrong
-      // clock first shows. So the channel is what the core refused in the last five minutes, a
-      // gauge. This goes through the whole path — the sweep, ingestion, the limit, the state
-      // machine — because each of them is a place that could miss it or latch it.
+    // Just behind the core's own clock, so that nothing here is a replay held back from reacting
+    // (`P-157`) or a result refused for its time. Shared, because both tests below write to the
+    // same sensor and a result earlier than its last would be dropped as stale.
+    let now = new Date(Date.now() - 5 * 60_000);
+    const quiet: ProbeHealthReport = { ...FULL, spoolStalledMs: 0, sessionOverflows: 0 };
+
+    /**
+     * A Probe Health sweep that goes the whole way — ingestion, the limit, the state machine —
+     * with its sources read at the time of each sweep, thirty seconds apart.
+     */
+    const sweeper = async (
+      sources: (at: Date) => ProbeHealthSources,
+    ): Promise<() => Promise<{ state: string; message: string }>> => {
       const lookups = await loadLookups({ logger: silent });
       const states = new SensorStateService({
         db,
@@ -618,13 +658,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         pauses: new PauseRepository(),
       });
       const channels = new ChannelResolver({ logger: silent, lookups });
-      // Just behind the core's own clock, so that nothing here is a replay held back from
-      // reacting (`P-157`) or a result refused for its time.
-      let now = new Date(Date.now() - 5 * 60_000);
-      let future = 0;
-      const quiet: ProbeHealthReport = { ...FULL, spoolStalledMs: 0, sessionOverflows: 0 };
-
-      const sweep = async (): Promise<{ state: string; message: string }> => {
+      return async () => {
         const ingestor = new Ingestor({ db, logger: silent, config: CONFIG });
         const ingestion = new IngestionService({
           db,
@@ -637,10 +671,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           db,
           logger: silent,
           vouching: everyVoucherHolds,
-          sources: {
-            link: () => connected({ lastHeartbeatAt: now, health: quiet }),
-            timeRefusals: () => ({ past: 0, future }),
-          },
+          sources: sources(now),
           ingest: async (results) => {
             await ingestion.acceptResults('probe-health', {
               type: 'results',
@@ -659,6 +690,20 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         assert.ok(rows[0]);
         return rows[0];
       };
+    };
+
+    it('warns on the first reading that has refusals, and clears once they stop', async () => {
+      // **The warning has to see the first batch and clear itself.** A running count only goes
+      // up, so a limit on it would warn for ever after one bad batch. A counter's rate clears, but
+      // it is a gap on the first reading, and after every core restart, which is when a wrong
+      // clock first shows. So the channel is what the core refused in the last five minutes, a
+      // gauge. This goes through the whole path — the sweep, ingestion, the limit, the state
+      // machine — because each of them is a place that could miss it or latch it.
+      let future = 0;
+      const sweep = await sweeper((at) => ({
+        link: () => connected({ lastHeartbeatAt: at, health: quiet }),
+        timeRefusals: () => ({ past: 0, future }),
+      }));
 
       future = 30;
       const refusing = await sweep();
@@ -672,6 +717,41 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       future = 1;
       const again = await sweep();
       assert.equal(again.state, 'warning', 'one refused result is enough');
+    });
+
+    it('warns on a clock a minute out either way, and on any sensor it froze (`P-232`)', async () => {
+      // Two warnings for two cases. The offset catches a probe behind or ahead; the frozen count
+      // catches NTP correcting a clock that was fast, which leaves the offset near zero and the
+      // sensors frozen for as long as it was fast.
+      let offsetMs: number | null = 0;
+      let frozen = 0;
+      const sweep = await sweeper((at) => ({
+        link: () => connected({ lastHeartbeatAt: at, health: quiet, clockOffsetMs: offsetMs }),
+        timeRefusals: () => ({ past: 0, future: 0 }),
+        frozenSensors: () => frozen,
+      }));
+
+      assert.equal((await sweep()).state, 'up', 'the clock right and nothing frozen');
+
+      offsetMs = 3_600_000;
+      const behind = await sweep();
+      assert.equal(behind.state, 'warning', 'an hour behind');
+      assert.match(behind.message, /differs from the core's by more than a minute/u);
+
+      offsetMs = -90_000;
+      assert.equal((await sweep()).state, 'warning', 'a minute and a half ahead');
+
+      offsetMs = 30_000;
+      assert.equal((await sweep()).state, 'up', 'half a minute is inside the limit');
+
+      frozen = 1;
+      const stuck = await sweep();
+      assert.equal(stuck.state, 'warning', 'one frozen sensor is enough');
+      assert.match(stuck.message, /cannot accept results until its clock passes/u);
+
+      frozen = 0;
+      offsetMs = null;
+      assert.equal((await sweep()).state, 'up', 'a gap is not a reading, and clears nothing');
     });
   });
 

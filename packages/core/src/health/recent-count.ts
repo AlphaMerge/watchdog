@@ -71,6 +71,63 @@ export class RecentCount {
   }
 }
 
+/**
+ * The smallest value seen in the last few minutes, on the same fixed ring (`P-232`).
+ *
+ * For a measurement whose error only ever goes one way. A probe's clock offset is read as the
+ * time a message arrived less the time the probe says it sent it, and whatever delayed the
+ * message — the network, a congested send buffer, a core busy writing — adds to that and never
+ * subtracts. The smallest reading in the window is the one with the least delay on it, so a
+ * single late message cannot make a probe look behind. The price is that a real change upwards
+ * shows once the smaller readings before it have left the window, and a change downwards shows
+ * at once.
+ */
+export class RecentMinimum {
+  readonly #bucketMs: number;
+  readonly #monotonicMs: () => number;
+  readonly #minima: number[];
+  readonly #buckets: number[];
+
+  constructor(
+    windowMs: number,
+    options: { readonly buckets?: number; readonly monotonicMs?: () => number } = {},
+  ) {
+    const buckets = options.buckets ?? 60;
+    if (!Number.isInteger(buckets) || buckets < 1 || !(windowMs > 0)) {
+      throw new RangeError(`a window of ${String(windowMs)} ms in ${String(buckets)} buckets`);
+    }
+    this.#bucketMs = windowMs / buckets;
+    this.#monotonicMs = options.monotonicMs ?? hrtimeMs;
+    this.#minima = new Array<number>(buckets).fill(Number.POSITIVE_INFINITY);
+    this.#buckets = new Array<number>(buckets).fill(Number.NEGATIVE_INFINITY);
+  }
+
+  add(value: number): void {
+    if (!Number.isFinite(value)) return;
+    const bucket = Math.floor(this.#monotonicMs() / this.#bucketMs);
+    const size = this.#minima.length;
+    const slot = ((bucket % size) + size) % size;
+    if (this.#buckets[slot] !== bucket) {
+      this.#buckets[slot] = bucket;
+      this.#minima[slot] = value;
+      return;
+    }
+    this.#minima[slot] = Math.min(this.#minima[slot] ?? value, value);
+  }
+
+  /** The smallest value added in the last window, or null when nothing was. */
+  minimum(): number | null {
+    const oldest = Math.floor(this.#monotonicMs() / this.#bucketMs) - this.#minima.length + 1;
+    let smallest = Number.POSITIVE_INFINITY;
+    for (let slot = 0; slot < this.#minima.length; slot += 1) {
+      if ((this.#buckets[slot] ?? Number.NEGATIVE_INFINITY) >= oldest) {
+        smallest = Math.min(smallest, this.#minima[slot] ?? Number.POSITIVE_INFINITY);
+      }
+    }
+    return Number.isFinite(smallest) ? smallest : null;
+  }
+}
+
 function hrtimeMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n);
 }

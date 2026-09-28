@@ -43,6 +43,11 @@ export interface ProbeHealthSources {
    * that does not count them, and then both channels gap rather than read a confident zero.
    */
   refusals?: (probeObjectId: number) => { refused: number; foreignRecently: number };
+  /**
+   * How many of this probe's sensors its clock has frozen (`P-232`). Absent on a build without
+   * the sweep, and then the channel gaps.
+   */
+  frozenSensors?: (probeObjectId: number) => number;
 }
 
 export interface ProbeHealthServiceOptions {
@@ -236,6 +241,10 @@ export class ProbeHealthService {
       clockJumps: health?.clockJumps ?? null,
       resultsFutureDated: refused?.future ?? null,
       resultsPastDated: refused?.past ?? null,
+      // The core's reading of the probe's clock, from the `sentAt` on what it sends (`P-232`).
+      // Seconds, positive when the probe is behind; a gap until this session has sent one.
+      clockOffset: link.clockOffsetMs === null ? null : round(link.clockOffsetMs / 1000, 1),
+      sensorsFrozen: this.#sources.frozenSensors?.(probeObjectId) ?? null,
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,
       uptime: health?.uptimeSeconds ?? null,

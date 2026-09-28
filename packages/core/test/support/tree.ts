@@ -104,6 +104,10 @@ export async function buildHarness(
     types?: readonly SensorType[];
     /** The sensors the core is declining to evaluate (`A-29`); `SensorVouching.withheld`. */
     withheldSensors?: () => ReadonlyMap<number, string>;
+    /** A lost probe's sensors (`R-05`); `ProbeReachability.unreachableSensors`. */
+    unreachableSensors?: () => ReadonlySet<number>;
+    /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */
+    clockFrozenSensors?: () => ReadonlySet<number>;
   } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
@@ -128,6 +132,12 @@ export async function buildHarness(
           ...(options.withheldSensors === undefined
             ? {}
             : { withheldSensors: options.withheldSensors }),
+          ...(options.unreachableSensors === undefined
+            ? {}
+            : { unreachableSensors: options.unreachableSensors }),
+          ...(options.clockFrozenSensors === undefined
+            ? {}
+            : { clockFrozenSensors: options.clockFrozenSensors }),
         })
       : undefined;
   // Built here rather than in each test, because the pause sweep releases dependency delays and

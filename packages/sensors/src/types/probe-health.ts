@@ -346,6 +346,34 @@ const CHANNELS: readonly ChannelDef[] = [
         "this probe's clock is further behind than the core keeps anything, and its results are being refused",
     },
   },
+  // `P-232`. How far this probe's clock is behind the core's, measured by the core from the send
+  // time on every heartbeat and batch, the smallest of five minutes so that a delayed message
+  // cannot make it look behind. Negative is a probe that is ahead. A minute either way warns: an
+  // NTP-synced host is within a second, and a graph out by a minute is visibly wrong.
+  {
+    key: 'clockOffset',
+    name: 'Clock behind the core',
+    unit: 's',
+    limits: {
+      upperWarning: 60,
+      lowerWarning: -60,
+      warningMessage: "this probe's clock differs from the core's by more than a minute",
+    },
+  },
+  // `P-232`. The sensors this probe's clock has frozen: their last result is later than its clock
+  // reads now, so they can accept nothing it sends until it catches up, and they read Unknown
+  // meanwhile. The alarm for the case the offset misses: NTP correcting a fast clock leaves the
+  // offset near zero and the sensors frozen for as long as it was fast.
+  {
+    key: 'sensorsFrozen',
+    name: 'Sensors frozen by the clock',
+    unit: 'sensors',
+    limits: {
+      upperWarning: 0.5,
+      warningMessage:
+        'sensors on this probe cannot accept results until its clock passes their last one',
+    },
+  },
   { key: 'cpu', name: 'CPU', unit: '%' },
   { key: 'memory', name: 'Memory (resident)', unit: 'MB' },
   // **How much the machine has left, which is not how much the probe holds** (`P-208`). `P-206`'s

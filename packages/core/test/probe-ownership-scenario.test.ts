@@ -190,6 +190,7 @@ describe(
         return {
           connected: true,
           gid: 'any',
+          clockOffsetMs: null,
           protocolVersion: PROTOCOL_VERSION,
           connectedAt: now,
           lastHeartbeatAt: now,

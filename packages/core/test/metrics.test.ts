@@ -126,6 +126,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
   const connected: Extract<ProbeLink, { connected: true }> = {
     connected: true,
     gid: 'probe-gid',
+    clockOffsetMs: null,
     protocolVersion: 7,
     connectedAt: new Date(),
     lastHeartbeatAt: new Date(),

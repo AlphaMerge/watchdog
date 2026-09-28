@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { RecentCount } from '../src/health/recent-count.js';
+import { RecentCount, RecentMinimum } from '../src/health/recent-count.js';
 
 /**
  * A count over a window, on a ring of buckets (`P-231`).
@@ -90,5 +90,70 @@ describe('a count over the last few minutes', () => {
     assert.throws(() => new RecentCount(0), RangeError);
     assert.throws(() => new RecentCount(WINDOW, { buckets: 0 }), RangeError);
     assert.throws(() => new RecentCount(WINDOW, { buckets: 2.5 }), RangeError);
+  });
+});
+
+/**
+ * The smallest reading over a window (`P-232`), for a probe's clock offset: whatever delays a
+ * message only adds to the reading, so the smallest is the one with the least delay on it.
+ */
+describe('the smallest reading over the last few minutes', () => {
+  const WINDOW = 300_000;
+
+  function reading(): { min: RecentMinimum; at: (ms: number) => void } {
+    let now = 0;
+    return {
+      min: new RecentMinimum(WINDOW, { monotonicMs: () => now }),
+      at: (ms) => {
+        now = ms;
+      },
+    };
+  }
+
+  it('is nothing until something is read', () => {
+    assert.equal(reading().min.minimum(), null);
+  });
+
+  it('is not moved by one delayed reading, which is the whole point', () => {
+    const { min, at } = reading();
+    min.add(120);
+    at(10_000);
+    min.add(90_000); // a batch that sat ninety seconds in a send buffer
+    at(20_000);
+    min.add(150);
+    assert.equal(min.minimum(), 120);
+  });
+
+  it('follows a reading downwards at once, and upwards once the window has passed', () => {
+    const { min, at } = reading();
+    min.add(100);
+    at(10_000);
+    min.add(3_600_000); // the clock stepped back an hour
+    assert.equal(min.minimum(), 100, 'slow to believe a probe has fallen behind');
+    at(300_000);
+    assert.equal(min.minimum(), 3_600_000, 'until the smaller readings have left the window');
+    min.add(50); // and put right
+    assert.equal(min.minimum(), 50, 'immediate to believe it has caught up');
+  });
+
+  it('keeps a negative reading, which is a probe ahead of the core', () => {
+    const { min } = reading();
+    min.add(-600_000);
+    min.add(200);
+    assert.equal(min.minimum(), -600_000);
+  });
+
+  it('forgets everything once the window has passed with nothing in it', () => {
+    const { min, at } = reading();
+    min.add(100);
+    at(WINDOW);
+    assert.equal(min.minimum(), null);
+  });
+
+  it('ignores a reading that is not a number', () => {
+    const { min } = reading();
+    min.add(Number.NaN);
+    min.add(Number.POSITIVE_INFINITY);
+    assert.equal(min.minimum(), null);
   });
 });

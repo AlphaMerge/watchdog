@@ -33,6 +33,7 @@ import {
   type WithdrawnCode,
 } from '@ms/shared';
 import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
+import { RecentMinimum } from '../health/recent-count.js';
 
 /**
  * Who sent something, as far as the endpoint can vouch for it (`P-228`).
@@ -295,6 +296,11 @@ export type ProbeLink =
       configured: boolean;
       /** Whether it is new enough to be sent them at all (`R-06`). */
       configurable: boolean;
+      /**
+       * How far the probe's clock is behind this core's, in milliseconds, or null until this
+       * session has sent a `sentAt` (`P-232`). Negative is a probe that is ahead.
+       */
+      clockOffsetMs: number | null;
       /** Absent from a probe below protocol 7, which cannot report its own numbers. */
       health?: ProbeHealthReport;
     };
@@ -375,6 +381,25 @@ interface ProbeSession {
    * total can be compared with the core's.
    */
   configAcksOutstanding: number;
+  /**
+   * How far this probe's clock is behind this core's, from every `sentAt` it sends (`P-232`).
+   *
+   * Arrival less `sentAt`, so positive is a probe that is behind. Every heartbeat carries one in
+   * every protocol version, and a results batch from protocol 16. What delayed the message only
+   * ever adds to the reading, so the answer is the smallest over the last five minutes: a batch
+   * that sat in a send buffer cannot make a probe look behind. Per session, like the link, so a
+   * reconnect measures afresh rather than trusting the clock of a probe that may have rebooted.
+   */
+  clockOffset: RecentMinimum;
+}
+
+/** How long a probe's clock offset is the smallest of (`P-232`). */
+export const CLOCK_OFFSET_WINDOW_MS = 5 * 60_000;
+
+/** One reading of a probe's clock offset. A `sentAt` that will not parse is no reading. */
+function noteClockOffset(session: ProbeSession, sentAt: string, arrived: Date): void {
+  const sent = Date.parse(sentAt);
+  if (!Number.isNaN(sent)) session.clockOffset.add(arrived.getTime() - sent);
 }
 
 /** Milliseconds between two readings of the monotonic clock. */
@@ -635,6 +660,7 @@ export class ProbeEndpoint {
       switch (message.type) {
         case 'heartbeat':
           session.info.lastHeartbeatAt = new Date();
+          noteClockOffset(session, message.sentAt, session.info.lastHeartbeatAt);
           // The probe's own numbers, when it is new enough to send them (`P-13`). Held in memory
           // beside the link, never persisted: this is a live fact about a process that is
           // currently running, and a value read back from a table after a restart would be a
@@ -880,6 +906,9 @@ export class ProbeEndpoint {
       session.lastResultsAt = new Date();
       session.lastResultsAtNs = process.hrtime.bigint();
     }
+    // The first message of a new session is usually the spool's first batch, sent before any
+    // heartbeat, and it is what gives the offset its first reading (`P-232`).
+    if (message.sentAt !== undefined) noteClockOffset(session, message.sentAt, new Date());
     const receiver = this.#options.results;
     if (receiver === undefined) {
       logger.warn({ batchId: message.batchId }, 'results arrived before ingestion was wired up');
@@ -1179,6 +1208,7 @@ export class ProbeEndpoint {
       configSentAtNs: null,
       cadenceSeconds: null,
       sentStamps: new Map(),
+      clockOffset: new RecentMinimum(CLOCK_OFFSET_WINDOW_MS),
     };
     if (approved && gid !== '') this.#sessions.set(gid, session);
     return session;
@@ -1470,6 +1500,15 @@ export class ProbeEndpoint {
    * report its own absence. A missing session is not an error here — it is the most important
    * answer this method gives.
    */
+  /** The probes with a session open right now, by object id. */
+  connectedProbeIds(): number[] {
+    const ids: number[] = [];
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId !== null) ids.push(session.probeObjectId);
+    }
+    return ids;
+  }
+
   linkFor(probeObjectId: number): ProbeLink {
     const nowNs = process.hrtime.bigint();
     for (const session of this.#sessions.values()) {
@@ -1496,6 +1535,7 @@ export class ProbeEndpoint {
         // apart is the whole of `P-82`.
         configured: session.sentVersion !== null,
         configurable: capabilitiesFor(session.protocolVersion).configPush,
+        clockOffsetMs: session.clockOffset.minimum(),
         ...(session.health === undefined ? {} : { health: session.health }),
       };
     }

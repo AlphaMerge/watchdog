@@ -894,6 +894,93 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('reads the probe clock from what it sends, and a delayed batch cannot make it look behind', async () => {
+    // **`P-232`.** Arrival less `sentAt`, the smallest over five minutes: whatever delays a
+    // message only ever adds to the reading. A probe an hour behind reads an hour; a batch that
+    // sat ninety seconds in a send buffer reads an hour and a half and changes nothing; the clock
+    // put right reads right at once. An unreadable `sentAt` is no reading.
+    const results: ResultReceiver = {
+      acceptProbeResults: (_origin, message) =>
+        Promise.resolve({
+          type: 'results-ack',
+          batchId: message.batchId,
+          storedSamples: message.results.length,
+          retryAfterMs: 0,
+        }),
+    };
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      results,
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+    });
+    const address = await endpoint.start();
+    const offset = (): number | null => {
+      const link = endpoint.linkFor(7);
+      assert.ok(link.connected);
+      return link.clockOffsetMs;
+    };
+    const HOUR = 3_600_000;
+    const near = (actual: number | null, expected: number, what: string): void => {
+      assert.ok(
+        actual !== null && Math.abs(actual - expected) < 5_000,
+        `${what}: ${String(actual)} ms, expected about ${String(expected)}`,
+      );
+    };
+
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello());
+      await probe.waitFor((m) => m.type === 'welcome');
+      await waitUntil(() => endpoint.linkFor(7).connected);
+      assert.equal(offset(), null, 'nothing sent yet, so nothing known');
+
+      probe.send({ type: 'heartbeat', seq: 1, sentAt: 'not a time' });
+      await probe.waitFor((m) => m.type === 'heartbeat-ack');
+      assert.equal(offset(), null, 'an unreadable sentAt is no reading');
+
+      // The first message of a session is usually the spool's first batch, before any heartbeat.
+      probe.send({
+        type: 'results',
+        batchId: 'first',
+        sentAt: new Date(Date.now() - HOUR).toISOString(),
+        results: [
+          {
+            sensorId: 42,
+            at: new Date(Date.now() - HOUR - 5_000).toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 3,
+            channels: [{ key: 'rtt', value: 12 }],
+          },
+        ],
+      });
+      await probe.waitFor((m) => m.type === 'results-ack');
+      near(offset(), HOUR, 'a probe an hour behind, from its first batch');
+
+      probe.send({
+        type: 'heartbeat',
+        seq: 2,
+        sentAt: new Date(Date.now() - HOUR - 90_000).toISOString(),
+      });
+      await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === 2);
+      near(offset(), HOUR, 'a message ninety seconds late changes nothing');
+
+      probe.send({ type: 'heartbeat', seq: 3, sentAt: new Date().toISOString() });
+      await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === 3);
+      near(offset(), 0, 'the clock put right reads right at once');
+      probe.close();
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
   it('refuses results when nothing is there to store them', async () => {
     // The transport is usable without ingestion wired up — the handshake tests rely on it — so
     // the probe has to be told, rather than left waiting for an acknowledgement forever.
