@@ -29,6 +29,7 @@ the hard constraints, the design rules, and the decisions that need an ADR to re
 | Give somebody an account and the right permissions      | [administration.md](administration.md)                                         |
 | Back it up, or restore onto a different host            | [runbook-backup-restore.md](runbook-backup-restore.md)                         |
 | Qualify a release candidate                             | [runbook-field-test.md](runbook-field-test.md)                                 |
+| Decide what the v1 release candidate is                | [proposal, 2026-09-28](findings/2026-09-28-v1-release-candidate.md)            |
 | Check a performance claim                               | [findings/](findings/) — every number here was measured                        |
 | Pick up a piece of work                                 | [TASKS.md](TASKS.md)                                                           |
 
