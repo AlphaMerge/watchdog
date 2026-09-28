@@ -6,7 +6,7 @@ import {
   parseFormula,
   referencedSensors,
   type FormulaInputs,
-} from '../src/factory/formula.js';
+} from '../src/support/formula.js';
 
 /**
  * The Sensor Factory formula language (`T-21`), on its own.

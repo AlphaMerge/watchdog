@@ -26,7 +26,11 @@ import { VaultSealer } from '../../src/vault/sealer.js';
 
 export const silent = pino({ level: 'silent' });
 
-export const testActor: Actor = { kind: 'system', component: 'test' };
+/**
+ * The system, which is also a `Writer`: it vouches as the installation (`A-29`), so a test that
+ * is not about who may name what does not have to say whose sight it writes with.
+ */
+export const testActor: Extract<Actor, { kind: 'system' }> = { kind: 'system', component: 'test' };
 
 /**
  * A person, by login, for a service that records who acted and uses the login as well (`A-17`).

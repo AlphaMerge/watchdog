@@ -104,6 +104,11 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     return sensor.id;
   }
 
+  /** Deletes a sensor a factory was written against, the way an operator would. */
+  async function removed(id: number): Promise<void> {
+    await harness.service.delete(testActor, id, { kind: 'leafOnly' }, { kind: 'none' });
+  }
+
   async function makeFactory(
     name: string,
     channels: { key: string; formula: string; name?: string }[],
@@ -161,10 +166,17 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     // The failure mode a factory is most likely to produce: a total that quietly lost a term is
     // a number that looks like data and is wrong.
     const a = await source('uplink-a', 'traffic.in', 100);
+    const b = await source('uplink-b', 'traffic.in', 50);
     const total = await makeFactory('Total inbound', [
       { key: 'known', formula: `channel(${String(a)}, 'traffic.in')` },
-      { key: 'total', formula: `channel(${String(a)}, 'traffic.in') + channel(99999, 'x')` },
+      {
+        key: 'total',
+        formula: `channel(${String(a)}, 'traffic.in') + channel(${String(b)}, 'traffic.in')`,
+      },
     ]);
+    // Deleted after the factory was written: a formula cannot name a sensor that does not exist
+    // yet (`A-29`), so this is how a source goes missing.
+    await removed(b);
 
     await factory.sweep();
     assert.equal(resultFor(total)?.outcome, 'ok');
@@ -338,10 +350,14 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
   it('fails rather than reporting nothing when every channel gapped', async () => {
     // Not a reading of none: every source this sensor is built on is missing, which is a fault
     // of its own rather than a quiet period.
+    const x = await source('decommissioned-x', 'x', 1);
+    const y = await source('decommissioned-y', 'y', 2);
     const gone = await makeFactory('All missing', [
-      { key: 'a', formula: "channel(99999, 'x')" },
-      { key: 'b', formula: "channel(99998, 'y')" },
+      { key: 'a', formula: `channel(${String(x)}, 'x')` },
+      { key: 'b', formula: `channel(${String(y)}, 'y')` },
     ]);
+    await removed(x);
+    await removed(y);
 
     await factory.sweep();
     assert.equal(resultFor(gone)?.outcome, 'error');
@@ -365,7 +381,7 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
   });
 
   it('refuses a factory that reads itself, naming the loop', async () => {
-    const self = await makeFactory('Ouroboros', [{ key: 'x', formula: "channel(0, 'x')" }]);
+    const self = await makeFactory('Ouroboros', [{ key: 'x', formula: '1' }]);
     // The formula has to name the sensor's own id, which is only known after it exists.
     await db.query(
       `UPDATE sensor_config SET params = jsonb_set(params, '{channels,0,formula}', $2::jsonb)

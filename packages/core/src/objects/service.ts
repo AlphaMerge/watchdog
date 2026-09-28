@@ -29,6 +29,14 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
+import {
+  actorOf,
+  assertMayName,
+  voucherOf,
+  type InstallationBar,
+  type NamedObject,
+  type Writer,
+} from './sensor-reads.js';
 import type { SensorStateCause } from '../state/tables.js';
 import type {
   AcknowledgementView,
@@ -1526,7 +1534,8 @@ export class ObjectService {
     return this.#db.tx((q) => this.#repo.chainValidator(q, id, salt));
   }
 
-  async create(actor: Actor, input: CreateObjectInput): Promise<ObjectDetail> {
+  async create(writer: Writer, input: CreateObjectInput): Promise<ObjectDetail> {
+    const actor = actorOf(writer);
     // Validation fills in the defaults the type declares, and what gets stored is the filled-in
     // version — so a sensor's row is complete rather than depending on which form created it.
     const normalised: CreateObjectInput =
@@ -1545,6 +1554,10 @@ export class ObjectService {
       const id = await this.#repo.insert(q, normalised);
 
       if (normalised.kind === 'sensor') {
+        await this.#checkReads(q, writer, [id], {
+          sayWhich: false,
+          types: [normalised.sensorType],
+        });
         await this.#repo.createChannels(
           q,
           id,
@@ -1612,9 +1625,10 @@ export class ObjectService {
    * subtree that was just written, which is the same answer for a fraction of the work.
    */
   async createTree(
-    actor: Actor,
+    writer: Writer,
     input: TreePlanInput,
   ): Promise<{ count: number; objects: { ref?: string; id: ObjectId; kind: ObjectKind }[] }> {
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeShared(q);
 
@@ -1627,6 +1641,8 @@ export class ObjectService {
 
       const ids = new Map<number, ObjectId>();
       const drafts: { sensorId: ObjectId; draft: ChannelDraft }[] = [];
+      const sensors: ObjectId[] = [];
+      const sensorTypes = new Set<string>();
 
       for (const level of plan.levels) {
         const written = await this.#repo.createLevel(
@@ -1644,6 +1660,8 @@ export class ObjectService {
           if (id === undefined) return;
           ids.set(node.index, id);
           if (node.input.kind !== 'sensor') return;
+          sensors.push(id);
+          sensorTypes.add(node.input.sensorType);
           for (const draft of this.#sensorTypes.channelsFor(
             node.input.sensorType,
             node.input.params ?? {},
@@ -1657,6 +1675,7 @@ export class ObjectService {
       // sensor ids, so there is nothing to gain from doing it level by level and a statement per
       // level to lose.
       await this.#repo.createChannelsFor(q, drafts);
+      await this.#checkReads(q, writer, sensors, { sayWhich: true, types: [...sensorTypes] });
 
       const now = new Date();
       if (await this.#pauses.anyActive(q, now)) {
@@ -1702,6 +1721,59 @@ export class ObjectService {
     });
   }
 
+  /**
+   * Refuses a write that leaves a sensor naming something its writer could not read (`A-29`).
+   *
+   * **After the write, inside its transaction**, so that every path answers the same question
+   * about the same thing: what the tree looks like now. A moved or cloned subtree has its new
+   * probe above it, a created tree has its ids, and a refusal rolls the whole write back.
+   *
+   * `types` is what the caller knows was written, when it knows: a sensor of a type that reads
+   * nothing but its target — every sensor a provisioning run creates — costs no query at all.
+   */
+  async #checkReads(
+    q: Queryable,
+    writer: Writer,
+    under: readonly ObjectId[],
+    options: { sayWhich: boolean; types?: readonly string[] },
+  ): Promise<void> {
+    const reading = this.#sensorTypes.readingTypes();
+    const types =
+      options.types === undefined
+        ? reading
+        : options.types.filter((type) => reading.includes(type));
+    if (types.length === 0 || under.length === 0) return;
+
+    const sensors = await this.#repo.sensorsOfTypesAtOrUnder(q, under, types);
+    const named: NamedObject[] = [];
+    const bars: InstallationBar[] = [];
+    for (const sensor of sensors) {
+      const reads = this.#sensorTypes.reads(sensor.sensorType, sensor.params);
+      const sensorName = sensor.name;
+      if (reads.requires === 'installation') {
+        bars.push({ sensorName, sensorType: sensor.sensorType });
+      }
+      for (const reference of reads.references) {
+        if (reference.kind === 'object') {
+          named.push({
+            sensorName,
+            param: reference.param,
+            objectId: reference.objectId,
+            expects: reference.expects,
+          });
+          continue;
+        }
+        // Not under a probe at all names nothing; the sensor has nothing to report on, and says
+        // so when it is evaluated.
+        const probe = await this.#repo.nearestProbe(q, sensor.id);
+        if (probe !== null) {
+          named.push({ sensorName, param: reference.param, objectId: probe.id, expects: 'probe' });
+        }
+      }
+    }
+    await assertMayName(q, voucherOf(writer), { named, bars, sayWhich: options.sayWhich });
+  }
+
   /** A node's input as `create` would have normalised it, with its parent id filled in. */
   #normalisedFor(node: TreeNodeInput, parentId: ObjectId): CreateObjectInput {
     const withParent = { ...node, parentId } as CreateObjectInput;
@@ -1714,11 +1786,12 @@ export class ObjectService {
   }
 
   async update(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     patch: UpdateObjectInput,
     pre: Precondition,
   ): Promise<ObjectDetail> {
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
@@ -1755,6 +1828,12 @@ export class ObjectService {
           : patch;
 
       const after = await this.#repo.update(q, id, applied, pre);
+
+      // Writing the parameters vouches for all of them, not just the ones that changed: the
+      // writer is the one standing behind the sensor from here on (`A-29`). A rename does not.
+      if (after.kind === 'sensor' && patch.kind === 'sensor' && patch.params !== undefined) {
+        await this.#checkReads(q, writer, [id], { sayWhich: false, types: [after.sensorType] });
+      }
 
       // Computed on the real values, because a rotated secret redacts to the same absence on
       // both sides and would otherwise look like no change at all.
@@ -1852,11 +1931,12 @@ export class ObjectService {
   }
 
   async move(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     targetParentId: ObjectId,
     pre: Precondition,
   ): Promise<MoveResult> {
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeExclusive(q);
 
@@ -1912,6 +1992,10 @@ export class ObjectService {
 
       const fromParentId = object.parentId;
       await this.#repo.reparent(q, id, targetParentId, pre);
+
+      // The moved sensors have a new audience, and a Probe Health sensor with no `probeId` may
+      // have a new probe, so the mover vouches for what every one of them reads (`A-29`).
+      await this.#checkReads(q, writer, [id], { sayWhich: object.kind !== 'sensor' });
 
       // The resolver is bound to this transaction, so it sees the uncommitted parent. Through
       // the pool it would read the pre-move chain and report that nothing changed.
@@ -1985,11 +2069,12 @@ export class ObjectService {
    * tree passes `Visibility.EVERYTHING` and says so.
    */
   async clone(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     input: CloneInput,
     visibility: Visibility,
   ): Promise<CloneResult> {
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeShared(q);
 
@@ -2024,6 +2109,9 @@ export class ObjectService {
 
       const cloneRoot = await this.#repo.get(q, copied.cloneRootId);
       if (cloneRoot === null) throw notFound(copied.cloneRootId);
+
+      // A copy names what its source named, now in front of whoever reads where it landed.
+      await this.#checkReads(q, writer, [cloneRoot.id], { sayWhich: source.kind !== 'sensor' });
 
       // S-03: a clone arrives manually paused. It carries its source's configuration and none
       // of its credentials, so scanning immediately would mean a burst of authentication

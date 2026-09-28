@@ -987,6 +987,57 @@ export class ObjectRepository {
     return row === undefined ? null : { id: Number(row.id), kind: row.kind, name: row.name };
   }
 
+  /**
+   * The sensors at or under these objects whose type is one of these (`A-29`).
+   *
+   * For the check a write runs on what it leaves behind: a moved group carries its sensors to a
+   * new audience, and a cloned one copies their parameters. Handed sensor ids, it is a walk of
+   * nothing, which is what `create` and `update` pass.
+   */
+  async sensorsOfTypesAtOrUnder(
+    q: Queryable,
+    ids: readonly ObjectId[],
+    types: readonly string[],
+  ): Promise<
+    { id: ObjectId; name: string; sensorType: string; params: Record<string, unknown> }[]
+  > {
+    if (ids.length === 0 || types.length === 0) return [];
+    const rows = await q.query<{
+      id: string;
+      name: string;
+      type: string;
+      params: Record<string, unknown>;
+    }>(
+      `
+      WITH RECURSIVE subtree AS (
+        SELECT id, 0 AS depth FROM object WHERE id = ANY($1::bigint[])
+
+        UNION ALL
+
+        SELECT c.id, subtree.depth + 1
+        FROM object c
+        JOIN subtree ON c.parent_id = subtree.id
+        WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT o.id, o.name, sc.type, sc.params
+      -- Distinct ids rather than distinct rows: two of the objects asked about can be one
+      -- inside the other, and comparing whole parameter documents to find that out is waste.
+      FROM (SELECT DISTINCT id FROM subtree) walked
+      JOIN object o ON o.id = walked.id
+      JOIN sensor_config sc ON sc.object_id = o.id
+      WHERE sc.type = ANY($2::text[])
+      ORDER BY o.id
+      `,
+      [ids, types],
+    );
+    return rows.map((row) => ({
+      id: Number(row.id),
+      name: row.name,
+      sensorType: row.type,
+      params: row.params,
+    }));
+  }
+
   /** One enumeration, feeding both the delete confirmation and the audit payload. */
   async enumerateSubtree(
     q: Queryable,

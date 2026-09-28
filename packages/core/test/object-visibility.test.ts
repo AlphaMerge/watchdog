@@ -1376,6 +1376,59 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal(depend.statusCode, 403, depend.body);
     });
 
+    it('refuses a sensor naming what its writer cannot read, as it refuses one naming nothing (A-29)', async () => {
+      const write = (sensorType: string, params: Record<string, unknown>) =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/objects',
+          headers: { ...as('operator'), 'content-type': 'application/json' },
+          payload: { kind: 'sensor', parentId: deviceId, name: 'a-sum', sensorType, params },
+        });
+      const naming = (id: number) => ({
+        channels: [{ key: 'x', formula: `channel(${String(id)}, 'rtt')` }],
+      });
+      /** The body a caller sees, with the one thing it supplied itself taken out. */
+      const said = (body: string, id: number): Record<string, unknown> => {
+        const { error } = JSON.parse(body) as {
+          error: { message: string; context: Record<string, unknown>; correlationId: string };
+        };
+        const { correlationId: _, message, context, ...rest } = error;
+        assert.equal(context['objectId'], id);
+        return {
+          ...rest,
+          message: message.replaceAll(String(id), 'N'),
+          context: { ...context, objectId: 'N' },
+        };
+      };
+
+      // A formula naming a hidden sensor would republish its readings inside the branch.
+      const hidden = await write('core.factory', naming(otherSensorId));
+      assert.equal(hidden.statusCode, 403, hidden.body);
+      assert.ok(!hidden.body.includes(MARK), hidden.body);
+      const neverIssued = otherSensorId + 1_000_000;
+      const missing = await write('core.factory', naming(neverIssued));
+      assert.equal(missing.statusCode, 403, missing.body);
+      assert.deepEqual(said(hidden.body, otherSensorId), said(missing.body, neverIssued));
+
+      // Probe Health with no `probeId` names the probe above the device, which is outside the
+      // branch; Core Health reports on the whole installation.
+      const probeHealth = await write('ms.probe.health', {});
+      assert.equal(probeHealth.statusCode, 403, probeHealth.body);
+      assert.ok(!probeHealth.body.includes(MARK), probeHealth.body);
+      const coreHealth = await write('ms.core.health', {});
+      assert.equal(coreHealth.statusCode, 403, coreHealth.body);
+
+      // What the account can read, it can build on.
+      const fine = await write('core.factory', naming(pingId));
+      assert.equal(fine.statusCode, 201, fine.body);
+      await harness.service.delete(
+        testActor,
+        fine.json<{ id: number }>().id,
+        { kind: 'leafOnly' },
+        { kind: 'none' },
+      );
+    });
+
     it('starts the account’s tree at the branch', async () => {
       const response = await app.inject({
         method: 'GET',

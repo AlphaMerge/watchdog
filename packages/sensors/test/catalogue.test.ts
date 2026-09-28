@@ -55,6 +55,39 @@ describe('registration', () => {
     );
   });
 
+  it('refuses a type the core evaluates that does not say what it reads (A-29)', () => {
+    // The core evaluates exactly the types whose readings come from what it already holds, and
+    // a sensor republishes its readings to whoever can read it. So one of these that declared
+    // nothing would be a way to read anything the core holds from wherever one could be put.
+    assert.throws(
+      () => new SensorCatalogue().register(variant({ evaluatedBy: 'core' })),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        /has to declare what it reads/.test(error.message),
+    );
+    // Either declaration is enough, and a probe's type needs neither.
+    new SensorCatalogue().register(variant({ evaluatedBy: 'core', requires: 'installation' }));
+    new SensorCatalogue().register(variant({ evaluatedBy: 'core', references: () => [] }));
+    new SensorCatalogue().register(variant({}));
+  });
+
+  it('has every shipped type the core evaluates say what it reads (A-29)', () => {
+    const catalogue = standardCatalogue();
+    const declared = catalogue
+      .ids()
+      .filter((id) => catalogue.declaration(id).evaluatedBy === 'core')
+      .map((id) => {
+        const type = catalogue.declaration(id);
+        return [id, type.requires ?? (type.references === undefined ? 'nothing' : 'references')];
+      });
+    assert.deepEqual(declared, [
+      ['core.factory', 'references'],
+      ['ms.core.health', 'installation'],
+      ['ms.probe.health', 'references'],
+    ]);
+  });
+
   it('refuses a repeated channel key', () => {
     assert.throws(
       () =>

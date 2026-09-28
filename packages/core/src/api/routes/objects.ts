@@ -41,6 +41,7 @@ import {
   onSubtree,
   toAcknowledge,
   visibilityOf,
+  writerFor,
 } from '../authorization.js';
 import { atLeast, type AccessService, type SubtreeAccess } from '../../auth/access.js';
 
@@ -559,7 +560,7 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      const created = await service.create(actorFor(request), request.body);
+      const created = await service.create(await writerFor(request), request.body);
       await reply
         .status(201)
         .header('Location', `/api/v1/objects/${String(created.id)}`)
@@ -598,7 +599,7 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      const result = await service.createTree(actorFor(request), request.body);
+      const result = await service.createTree(await writerFor(request), request.body);
       await reply.status(201).send(result);
     },
   );
@@ -662,7 +663,7 @@ export async function objectRoutes(
     async (request, reply) => {
       const id = request.params.id;
       const pre = requireIfMatch(request.headers['if-match']);
-      const updated = await service.update(actorFor(request), id, request.body, pre);
+      const updated = await service.update(await writerFor(request), id, request.body, pre);
       await reply.header('ETag', etagFor(updated.version)).send(updated);
     },
   );
@@ -780,7 +781,7 @@ export async function objectRoutes(
     },
     async (request, reply) => {
       const result = await service.move(
-        actorFor(request),
+        await writerFor(request),
         request.params.id,
         request.body.targetParentId,
         optionalIfMatch(request.headers['if-match']),
@@ -830,7 +831,7 @@ export async function objectRoutes(
     },
     async (request, reply) => {
       const result = await service.clone(
-        actorFor(request),
+        await writerFor(request),
         request.params.id,
         request.body ?? {},
         await visibilityOf(request),
@@ -970,7 +971,7 @@ export async function objectRoutes(
         allowed.length === 0
           ? { succeeded: 0, failed: 0, outcomes: [] }
           : await bulk.apply(
-              actorFor(request),
+              await writerFor(request),
               allowed,
               operationFrom(request.body),
               await visibilityOf(request),

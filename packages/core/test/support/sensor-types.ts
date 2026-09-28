@@ -1,4 +1,10 @@
-import { coreHealth, probeHealth, SensorCatalogue, type SensorType } from '@ms/sensors';
+import {
+  coreFactory,
+  coreHealth,
+  probeHealth,
+  SensorCatalogue,
+  type SensorType,
+} from '@ms/sensors';
 import {
   catalogueSensorTypeGate,
   type SensorTypeGate,
@@ -69,13 +75,15 @@ const snmpTraffic: SensorType = {
  * Here rather than imported from `@ms/sensors` for the reason the other two are: these tests
  * assert stored params exactly, and the real type's schema defaults would make them about Ajv.
  * What matters to the core is `evaluatedBy`, which is what keeps a factory out of every probe's
- * assignment list.
+ * assignment list, and `references`, the real type's, which is what a write is checked against
+ * (`A-29`).
  */
 const factory: SensorType = {
   id: 'core.factory',
   category: 'Custom',
   costHint: 'light',
   evaluatedBy: 'core',
+  references: (params) => coreFactory.references?.(params) ?? [],
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

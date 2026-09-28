@@ -3,6 +3,7 @@ import { ObjectError } from './errors.js';
 import type { ObjectService } from './service.js';
 import type { Visibility } from '../auth/access.js';
 import type { Actor } from './audit.js';
+import { actorOf, type Writer } from './sensor-reads.js';
 import type { ObjectId } from './types.js';
 import type { PauseRequest } from '../state/pause.js';
 
@@ -111,7 +112,7 @@ export class BulkService {
    * clone copies only what its caller can see (`A-35`). Required for the reason `list`'s is.
    */
   async apply(
-    actor: Actor,
+    writer: Writer,
     ids: readonly ObjectId[],
     operation: BulkOperation,
     visibility: Visibility,
@@ -145,7 +146,7 @@ export class BulkService {
         outcomes.push({
           objectId: id,
           ok: true,
-          ...(await this.#one(actor, id, operation, visibility, alreadyGone)),
+          ...(await this.#one(writer, id, operation, visibility, alreadyGone)),
         });
       } catch (error) {
         outcomes.push({
@@ -174,12 +175,15 @@ export class BulkService {
 
   /** One object, through the one place that knows how to change it. */
   async #one(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     operation: BulkOperation,
     visibility: Visibility,
     alreadyGone: Set<ObjectId>,
   ): Promise<Partial<BulkOutcome>> {
+    // A move and a clone vouch for what the sensors they carry name (`A-29`); the rest only need
+    // to know who did it.
+    const actor = actorOf(writer);
     switch (operation.kind) {
       case 'pause':
         await this.#objects.pause(actor, id, operation.request, operation.message);
@@ -188,11 +192,11 @@ export class BulkService {
         await this.#objects.resume(actor, id);
         return {};
       case 'move':
-        await this.#objects.move(actor, id, operation.targetParentId, { kind: 'none' });
+        await this.#objects.move(writer, id, operation.targetParentId, { kind: 'none' });
         return {};
       case 'clone': {
         const result = await this.#objects.clone(
-          actor,
+          writer,
           id,
           { targetParentId: operation.targetParentId },
           visibility,

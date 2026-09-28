@@ -1,4 +1,11 @@
-import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import type {
+  ChannelDef,
+  CheckContext,
+  CheckExecution,
+  SensorReference,
+  SensorType,
+} from '../contract.js';
+import { parseFormula, referencedSensors } from '../support/formula.js';
 
 /**
  * A sensor whose readings come from other sensors' readings (`T-21`).
@@ -23,6 +30,39 @@ export const coreFactory: SensorType = {
   // Arithmetic over rows the core already has. It costs one query, not a network round trip.
   costHint: 'light',
   evaluatedBy: 'core',
+
+  /**
+   * Every sensor a formula reads, with the channel row it is in (`A-29`).
+   *
+   * `channel(42, 'in')` and `status(42)` both read sensor 42, so both name it. A formula that
+   * does not parse names nothing that anybody could read out of it; the sensor fails on its own
+   * for that.
+   */
+  references(params) {
+    const out: SensorReference[] = [];
+    const channels = params['channels'];
+    if (!Array.isArray(channels)) return out;
+    channels.forEach((entry: unknown, index) => {
+      if (typeof entry !== 'object' || entry === null) return;
+      const formula = (entry as Record<string, unknown>)['formula'];
+      if (typeof formula !== 'string') return;
+      let ids: Set<number>;
+      try {
+        ids = referencedSensors(parseFormula(formula));
+      } catch {
+        return;
+      }
+      for (const objectId of ids) {
+        out.push({
+          kind: 'object',
+          objectId,
+          expects: 'sensor',
+          param: `channels[${String(index)}].formula`,
+        });
+      }
+    });
+    return out;
+  },
 
   paramsSchema: {
     type: 'object',

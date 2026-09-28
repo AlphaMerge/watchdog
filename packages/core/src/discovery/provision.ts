@@ -2,6 +2,7 @@ import type { Fingerprint, Logger } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { SensorSpec } from '../device-templates/definition.js';
 import type { Actor } from '../objects/audit.js';
+import { asInstallation } from '../objects/sensor-reads.js';
 import type { ObjectService } from '../objects/service.js';
 import type { DiscoveredHost, DiscoveryRunRow } from './service.js';
 
@@ -118,6 +119,9 @@ export class ProvisionService {
     }
 
     const credentials = await this.#credentialsFor(input.run.groupId);
+    // What a template names, the installation stands behind: the template is a file somebody with
+    // the server's file system put there (`A-29`). The audit still says who started the run.
+    const writer = asInstallation(input.actor);
     // Empty means every template, which is what almost every run wants (`D-06`).
     const only = new Set(input.run.templates);
 
@@ -134,7 +138,7 @@ export class ProvisionService {
           deviceId = existing.id;
           report.matched += 1;
         } else {
-          const device = await this.#objects.create(input.actor, {
+          const device = await this.#objects.create(writer, {
             kind: 'device',
             parentId: input.run.groupId,
             name: deviceName(host.address, fingerprint),
@@ -164,7 +168,7 @@ export class ProvisionService {
             continue;
           }
           try {
-            const sensor = await this.#objects.create(input.actor, {
+            const sensor = await this.#objects.create(writer, {
               kind: 'sensor',
               parentId: deviceId,
               name: spec.name ?? spec.type,

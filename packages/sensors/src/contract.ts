@@ -339,6 +339,30 @@ export interface SensorType {
    * to keep in step by hand.
    */
   readonly evaluatedBy?: 'core';
+  /**
+   * The objects this sensor's parameters name, other than its own place in the tree (`A-29`).
+   *
+   * **A sensor that reads another object's data republishes it** to whoever can read the sensor.
+   * So whoever writes one has to be able to read what it names, and the core asks the type
+   * rather than knowing its parameters. `ObjectService` checks what this returns on every create,
+   * edit, move and clone, and the core checks it again, through the eyes of whoever last vouched
+   * for the sensor, every time it evaluates one.
+   *
+   * Called with already-validated params, in the core. Must be pure. A reference the parameters
+   * cannot state — a formula that does not parse — is left out: the sensor fails on its own for
+   * that, and a check cannot be about an id nobody can read out of it.
+   *
+   * **The catalogue refuses a type the core evaluates that declares neither this nor
+   * `requires`.** The core evaluates exactly the types whose readings come from what it already
+   * holds, which is the case this exists for.
+   */
+  references?(params: Readonly<Record<string, unknown>>): readonly SensorReference[];
+  /**
+   * A bar on writing one at all (`A-29`), for a type whose readings describe the whole
+   * installation rather than anything in it. `'installation'` is read on the root — the bar
+   * `/core-health` and the Prometheus scrape already have — checked where `references` is.
+   */
+  readonly requires?: 'installation';
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;
@@ -354,6 +378,23 @@ export interface SensorType {
    */
   preview?(input: PreviewInput): Promise<PreviewResult>;
 }
+
+/**
+ * An object a sensor's parameters name (`A-29`).
+ *
+ * `param` says where, so a refusal can point at the field — `probeId`, `channels[2].formula` —
+ * without saying anything about the object it could not find.
+ */
+export type SensorReference =
+  /** Named by id. `expects` is the kind it has to be, checked only once it is known to be readable. */
+  | {
+      readonly kind: 'object';
+      readonly objectId: number;
+      readonly expects: 'sensor' | 'probe';
+      readonly param: string;
+    }
+  /** The probe this sensor sits under, whatever it is: Probe Health with no `probeId`. */
+  | { readonly kind: 'enclosing-probe'; readonly param: string };
 
 /** A type as the core sees it: everything except the half that does I/O. */
 export type SensorTypeDeclaration = Omit<SensorType, 'execute'>;

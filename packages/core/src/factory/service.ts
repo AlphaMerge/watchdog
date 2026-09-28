@@ -5,10 +5,10 @@ import {
   evaluate,
   parseFormula,
   referencedSensors,
-  type ChannelReading,
   type FormulaInputs,
-  type Node,
-} from './formula.js';
+  type FormulaNode as Node,
+  type FormulaReading as ChannelReading,
+} from '@ms/sensors';
 
 /**
  * Evaluating Sensor Factory sensors (`T-21`).

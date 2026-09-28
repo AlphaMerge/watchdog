@@ -13,6 +13,7 @@ export type {
   PreviewSelection,
   ReceivedBatch,
   ReceivedNotification,
+  SensorReference,
   SensorType,
   SensorTypeDeclaration,
 } from './contract.js';
@@ -136,6 +137,22 @@ import { windowsVolume } from './types/windows-volume.js';
  */
 export { coreHealth, CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from './types/core-health.js';
 export { probeHealth, PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from './types/probe-health.js';
+// The Sensor Factory and its formula language (`T-21`). The language is here rather than in the
+// core since `A-29`: `core.factory` has to read its own formulas to say which sensors it names.
+export { coreFactory } from './types/core-factory.js';
+export {
+  FormulaError,
+  MAX_FORMULA,
+  evaluate,
+  parseFormula,
+  referencedSensors,
+} from './support/formula.js';
+export type {
+  ChannelReading as FormulaReading,
+  FormulaInputs,
+  FunctionName as FormulaFunctionName,
+  Node as FormulaNode,
+} from './support/formula.js';
 
 export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   icmpPing,

@@ -129,6 +129,52 @@ A core-evaluated type still writes `execute`, and it should reject with a senten
 that path is unreachable unless the assignment filter has broken, and a sensor that started being
 scanned by a probe would otherwise report Down for ever with no explanation.
 
+**A core-evaluated type has to say what it reads**, with `references` or `requires`, and the
+catalogue refuses one that says neither (`A-29`). The reason is the same property that makes it
+core-evaluated: its readings come from what the core already holds — other sensors' values, a
+probe's health, the installation's own figures — and **a sensor republishes its readings to
+everybody who can read the sensor**. A type that could name anything would be a way to read
+anything the core holds from wherever an account can put a sensor.
+
+### `references(params)` (optional)
+
+The objects this sensor's parameters name, other than its own place in the tree. Called in the
+core, with validated params, and must be pure. Each entry says where in the params it came from,
+so a refusal can point at the field:
+
+```ts
+references(params) {
+  const probeId = params['probeId'];
+  return typeof probeId === 'number'
+    ? [{ kind: 'object', objectId: probeId, expects: 'probe', param: 'probeId' }]
+    : [{ kind: 'enclosing-probe', param: 'probeId' }];
+},
+```
+
+`{ kind: 'object', objectId, expects }` is an object named by id; `expects` is the kind it has to
+be, checked only once the writer is known to be able to read it. `{ kind: 'enclosing-probe' }` is
+the probe the sensor sits under, whatever that is — Probe Health with no `probeId` names that
+one, and it is a reference too, because rights can be granted on a device without any on the
+probe above it.
+
+`ObjectService` checks every reference on every write that leaves such a sensor behind — create,
+an edit of its parameters, a created tree, a move and a clone — through the eyes of whoever wrote
+it. **A hidden object and one that does not exist are refused in the same words**, so a
+parameter is never a way to learn which ids exist. A rename is not checked; writing the parameters
+is, all of them, because the writer is the one standing behind the sensor from then on. The
+service never asks which type a sensor is — it asks the type — so a new type that names objects
+is covered by declaring this and nothing else.
+
+Leave out a reference its params cannot state — a formula that does not parse names nothing that
+anybody could read out of it, and the sensor fails on its own for that.
+
+### `requires` (optional)
+
+A bar on writing one at all, for a type whose readings describe the whole installation rather
+than anything in it. `'installation'` is read on the root — the bar `/core-health` and the
+Prometheus scrape already have — and `ms.core.health` declares it. Checked where `references`
+is.
+
 ### `costHint`
 
 `light` | `medium` | `heavy`. Not a duration — a `heavy` check is heavy because of what it
@@ -250,6 +296,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
+| `evaluatedBy: 'core'` declares `references` or `requires` | its readings are the core's own data, republished (`A-29`) |
 
 ---
 

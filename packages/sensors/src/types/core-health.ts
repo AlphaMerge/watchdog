@@ -342,6 +342,10 @@ export const coreHealth: SensorType = {
   // Counters this process already holds, plus two small queries. No network round trip.
   costHint: 'light',
   evaluatedBy: 'core',
+  // Its channels are the installation's own figures — queue depths, every probe's connection,
+  // the database — which `/core-health` gives only to an account that can read the root. A sensor
+  // anybody could put on a group they write would publish all of it there (`A-29`).
+  requires: 'installation',
 
   paramsSchema: {
     type: 'object',

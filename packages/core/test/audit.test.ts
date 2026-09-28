@@ -13,6 +13,7 @@ import type { Database } from '../src/db/pool.js';
 import { LoggingAuditSink, type Actor } from '../src/objects/audit.js';
 import { ObjectRepository } from '../src/objects/repository.js';
 import { ObjectService } from '../src/objects/service.js';
+import { asInstallation } from '../src/objects/sensor-reads.js';
 import type { ObjectDetail } from '../src/objects/types.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
 import { HistoryService } from '../src/timeseries/history.js';
@@ -624,8 +625,18 @@ describe(
         // id DESC) for exactly this.
         const ada: Actor = { kind: 'user', userId: 4, login: 'ada' };
         const bob: Actor = { kind: 'user', userId: 5, login: 'bob' };
-        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
-        await service.update(bob, probeId, { kind: 'probe', name: 'by-bob' }, { kind: 'none' });
+        await service.update(
+          asInstallation(ada),
+          probeId,
+          { kind: 'probe', name: 'by-ada' },
+          { kind: 'none' },
+        );
+        await service.update(
+          asInstallation(bob),
+          probeId,
+          { kind: 'probe', name: 'by-bob' },
+          { kind: 'none' },
+        );
 
         const hers = await db.tx((q) =>
           repository.list(q, { limit: 100, actorKinds: ['user'], actorRef: '4' }),
@@ -646,8 +657,18 @@ describe(
         // changes as another's, which in an audit log is worse than reporting none.
         const ada: Actor = { kind: 'user', userId: 4, login: 'ada' };
         const token: Actor = { kind: 'token', tokenId: 4 };
-        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
-        await service.update(token, probeId, { kind: 'probe', name: 'by-token' }, { kind: 'none' });
+        await service.update(
+          asInstallation(ada),
+          probeId,
+          { kind: 'probe', name: 'by-ada' },
+          { kind: 'none' },
+        );
+        await service.update(
+          asInstallation(token),
+          probeId,
+          { kind: 'probe', name: 'by-token' },
+          { kind: 'none' },
+        );
 
         const shared = await db.tx((q) => repository.list(q, { limit: 100, actorRef: '4' }));
         assert.equal(
@@ -749,8 +770,18 @@ describe(
         // the ref and keeping the kind returns exactly the same rows, and the test passes on a
         // route that ignores the ref altogether — which is the mutant that found this.
         const bob: Actor = { kind: 'user', userId: 5, login: 'bob' };
-        await service.update(ada, probeId, { kind: 'probe', name: 'by-ada' }, { kind: 'none' });
-        await service.update(bob, probeId, { kind: 'probe', name: 'by-bob' }, { kind: 'none' });
+        await service.update(
+          asInstallation(ada),
+          probeId,
+          { kind: 'probe', name: 'by-ada' },
+          { kind: 'none' },
+        );
+        await service.update(
+          asInstallation(bob),
+          probeId,
+          { kind: 'probe', name: 'by-bob' },
+          { kind: 'none' },
+        );
         await service.update(
           testActor,
           probeId,

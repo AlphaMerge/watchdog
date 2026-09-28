@@ -12995,6 +12995,44 @@ because each is a decision rather than a defect:
       tests. Mutation 2/2: the check removed from `start` (3 tests fail), and removed from
       `create` (2 tests fail).
 
+- [ ] **A-29 — A sensor's parameters can name objects its writer cannot read** · L · A-12, T-21 ·
+      Found in `A-12`'s triage, 2026-09-28, and upheld by both verifiers. **A `core.factory`
+      formula can reference any sensor id.** `referencedSensors` is used only to plan the
+      factory sweep (`factory/service.ts`), with no read check anywhere, so a `readwrite` account
+      that can write one group gets a hidden sensor's live values and up/down state, and learns
+      which ids exist. **`ms.probe.health`'s `probeId` can name any probe, and `ms.core.health`
+      can be placed anywhere.** Between them they get around `onObject('read')` on
+      `/probes/:id/health` and the `INSTALLATION` bar on `/core-health`. The precedent is
+      `PUT /objects/:id/dependency`, which requires read on `masterId`.
+
+      **Done when:**
+      - **The type declares what it names.** `references(params)` on the `SensorType` contract
+        gives object ids and "the probe this sensor sits under"; `requires: 'installation'` is a
+        declared bar. `ObjectService` never switches on a type id (`CLAUDE.md`'s plugin rule),
+        `adding-a-sensor-type.md` explains it, and the catalogue enforces it at registration.
+      - **The check runs on create, update, createTree, move and clone**, and a hidden id and a
+        nonexistent one are refused in the same words.
+      - **Probe Health with no `probeId` names the probe above it**, so a move re-checks it.
+      - **What happens when the author later loses read is decided and argued here.**
+
+      **Decided: the account that vouched is recorded, and re-checked every time the sensor is
+      evaluated.** A snapshot at write time would let a factory go on publishing a sensor its
+      author was removed from, for as long as nobody edits it, and nobody hunts for them. It is
+      `A-22`'s reasoning about a share link — a delegation should not outlive the right it was
+      made from — and a sensor that republishes another's readings to its own audience is exactly
+      a delegation. Who vouches is whoever last wrote the sensor's parameters, moved it or cloned
+      it, having passed the check. A rename does not re-vouch; an administrator's edit does, as
+      that administrator, and the audit row says who. Three consequences, each pinned:
+      - **A failed re-check is not an outage.** The sensor's channels record nothing — a gap — and
+        it reads Unknown with a message that says why without naming what it cannot read. Down
+        would turn one grant edit into one alarm per sensor that account wrote; a scenario test
+        revokes read on a group twenty factory sensors reference and counts the notifications.
+      - **A deleted author is not the system.** The sensor stops being evaluated, and says an
+        administrator has to edit it to vouch for it.
+      - **It costs a fixed number of queries per sweep, not one per sensor.** Each voucher's
+        visibility is resolved once per `access_epoch`, the counter every grant, membership and
+        move already bumps (`A-12`).
+
 - [x] **A-30 — The live stream races grants, its own subscriptions and its clients** · M · A-12,
       A-21 · Found 2026-09-28 in `A-12`'s review, and widened by its second round. Six ways the
       stream sent what it should not have, or sent it in the wrong order, none of them on the

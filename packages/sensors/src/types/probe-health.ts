@@ -373,6 +373,21 @@ export const probeHealth: SensorType = {
   costHint: 'light',
   evaluatedBy: 'core',
 
+  /**
+   * The probe it reports on (`A-29`): the one `probeId` names, or the one it sits under.
+   *
+   * The second is a reference too. Rights can be granted on a device under a probe without any on
+   * the probe itself, and a Probe Health sensor put on that device would otherwise publish the
+   * probe's health to everybody who can read the device. Moving one re-checks it for the same
+   * reason: the probe above it can change.
+   */
+  references(params) {
+    const probeId = params['probeId'];
+    return typeof probeId === 'number'
+      ? [{ kind: 'object', objectId: probeId, expects: 'probe', param: 'probeId' }]
+      : [{ kind: 'enclosing-probe', param: 'probeId' }];
+  },
+
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

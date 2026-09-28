@@ -3,6 +3,7 @@ import type { AccessRight, AccessService } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
 import { atLeast, lower, Visibility } from '../auth/access.js';
+import type { Writer } from '../objects/sensor-reads.js';
 
 /**
  * Who may call a route (`A-11`).
@@ -284,6 +285,29 @@ export function clears(request: FastifyRequest, bar: 'read' | 'write' | 'admin')
   if (principal === undefined) return false;
   if (!ROLES[bar].includes(principal.role)) return false;
   return principal.scope === undefined || lower(principal.scope, SCOPES[bar]) === SCOPES[bar];
+}
+
+/**
+ * The request as a writer of objects (`A-29`): who, for the audit, as `actorFor` has it, and what
+ * they can read, for what a sensor's parameters may name.
+ *
+ * The account vouches as itself, with the sight this request already resolved. With the
+ * authorisation layer off there is nobody to hide anything from, and the installation vouches.
+ */
+export async function writerFor(request: FastifyRequest): Promise<Writer> {
+  const principal = request.principal;
+  if (principal === undefined) {
+    // Asked anyway, for what it refuses: with no principal and the layer on — a `PUBLIC` route —
+    // there is nobody to vouch, and the installation must not do it for them.
+    await visibilityOf(request);
+    return { kind: 'anonymous', remoteAddress: request.ip };
+  }
+  return {
+    kind: 'user',
+    userId: principal.userId,
+    login: principal.login,
+    voucher: { kind: 'account', userId: principal.userId, sees: await visibilityOf(request) },
+  };
 }
 
 /**

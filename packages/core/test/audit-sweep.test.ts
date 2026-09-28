@@ -40,6 +40,7 @@ import { ReportFormatter } from '../src/reports/formatter.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { Database } from '../src/db/pool.js';
 import type { Actor } from '../src/objects/audit.js';
+import { asInstallation } from '../src/objects/sensor-reads.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -730,7 +731,7 @@ describe(
         schedules: new ScheduleService({ db, audit, logger: silent }),
         discovery,
         provision: async (_runId: number, actor: Actor) => {
-          await harness.service.create(actor, {
+          await harness.service.create(asInstallation(actor), {
             kind: 'group',
             parentId: kit.groupId,
             name: kit.name('provisioned'),

@@ -1,4 +1,4 @@
-import type { ChannelLimitDefaults, SensorCatalogue } from '@ms/sensors';
+import type { ChannelLimitDefaults, SensorCatalogue, SensorReference } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { ObjectError } from './errors.js';
 import type { ChannelRecord } from './types.js';
@@ -19,6 +19,17 @@ export interface ChannelDraft {
    * decision — including a decision to clear them — is never overwritten by a restart.
    */
   limits?: ChannelLimitDefaults;
+}
+
+/**
+ * What a sensor reads beyond its own place in the tree (`A-29`), as its type declares it.
+ *
+ * `references` are the objects its parameters name; `requires` is a bar on writing one at all.
+ * Both empty for every type a probe runs, which read nothing but their own target.
+ */
+export interface SensorReads {
+  readonly references: readonly SensorReference[];
+  readonly requires?: 'installation';
 }
 
 /** Params fit to leave the process, and which secrets were taken out of them. */
@@ -65,6 +76,16 @@ export interface SensorTypeGate {
     patch: Record<string, unknown>,
     stored: Record<string, unknown>,
   ): Record<string, unknown>;
+
+  /**
+   * The types whose sensors read something other than their own target (`A-29`), so that a
+   * write can ask the database for just those — and skip asking at all for the rest, which is
+   * every sensor a provisioning run creates.
+   */
+  readingTypes(): readonly string[];
+
+  /** What a sensor of this type, with these stored params, reads (`A-29`). */
+  reads(sensorType: string, params: Record<string, unknown>): SensorReads;
 }
 
 export type { ChannelRecord };
@@ -120,6 +141,18 @@ function assertStructurallySane(sensorType: string, params: Record<string, unkno
 
 /** The real gate: a `SensorCatalogue` behind the interface the object service uses. */
 export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeGate {
+  // Fixed once the catalogue is sealed, which is before anything writes; worked out again until
+  // then, so a type registered after the gate was made is not missed.
+  let sealedReadingTypes: readonly string[] | undefined;
+  const readingTypes = (): readonly string[] => {
+    if (sealedReadingTypes !== undefined) return sealedReadingTypes;
+    const found = catalogue.ids().filter((id) => {
+      const type = catalogue.declaration(id);
+      return type.references !== undefined || type.requires !== undefined;
+    });
+    if (catalogue.sealed) sealedReadingTypes = found;
+    return found;
+  };
   return {
     normalise(sensorType: string, params: Record<string, unknown>): Record<string, unknown> {
       assertStructurallySane(sensorType, params);
@@ -170,6 +203,19 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
       // refuse the patch anyway with a message that names what is registered.
       if (!catalogue.has(sensorType)) return patch;
       return catalogue.carryWriteOnly(sensorType, patch, stored);
+    },
+
+    readingTypes,
+
+    reads(sensorType: string, params: Record<string, unknown>): SensorReads {
+      // An unregistered type is not evaluated by anything, so it reads nothing; `normalise`
+      // refuses to write one in the first place.
+      if (!catalogue.has(sensorType)) return { references: [] };
+      const type = catalogue.declaration(sensorType);
+      return {
+        references: type.references?.(params) ?? [],
+        ...(type.requires === undefined ? {} : { requires: type.requires }),
+      };
     },
 
     redact(sensorType: string, params: Record<string, unknown>): RedactedParams {

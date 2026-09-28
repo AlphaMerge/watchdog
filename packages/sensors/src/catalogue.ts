@@ -122,6 +122,7 @@ export class SensorCatalogue {
 
     const writeOnly = collectWriteOnly(type.paramsSchema, type.id);
     assertOnePrimaryChannel(type);
+    assertSaysWhatItReads(type);
 
     this.#types.set(type.id, type);
     this.#validators.set(type.id, validate);
@@ -291,6 +292,26 @@ export class SensorCatalogue {
     }
     return type;
   }
+}
+
+/**
+ * A type the core evaluates has to say what it reads (`A-29`).
+ *
+ * The core evaluates exactly the types whose readings come from what it already holds — other
+ * sensors' readings, a probe's health, the installation's own figures — and a sensor republishes
+ * its readings to everybody who can read it. So the type declares which objects its parameters
+ * name (`references`), or the bar for writing one at all (`requires`), and the core checks the
+ * writer against that. A type with neither would be a way to read anything the core holds from
+ * wherever one could be put, which is `A-29`'s whole finding.
+ */
+function assertSaysWhatItReads(type: SensorType): void {
+  if (type.evaluatedBy !== 'core') return;
+  if (type.references !== undefined || type.requires !== undefined) return;
+  throw new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    `sensor type "${type.id}" is evaluated by the core, so it has to declare what it reads: ` +
+      '`references` for the objects its parameters name, or `requires` for a bar on writing one',
+  );
 }
 
 /**
