@@ -59,9 +59,10 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
    * never sends the cookie back; set never, and a session issued over TLS travels in clear on the
    * next plain-HTTP request to the same host. Asking the request that is actually in hand is the
    * one answer that is right in both deployments, and it needs no option an operator can get
-   * wrong. Behind a TLS-terminating proxy this reads the proxy's own header only when Fastify is
-   * configured to trust it, which is the correct default — an untrusted `X-Forwarded-Proto` is a
-   * claim anybody can make.
+   * wrong. Behind a TLS-terminating proxy this reads the proxy's own `X-Forwarded-Proto`, and only
+   * from an address in `api.trustedProxies` — an untrusted one is a claim anybody can make. Until
+   * that setting existed (`A-36`) nothing could configure the trust, and a cookie issued through
+   * an HTTPS proxy was never `Secure`.
    */
   const cookieParts = (request: FastifyRequest, value: string, expires: string): string => {
     const parts = [

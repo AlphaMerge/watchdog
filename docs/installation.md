@@ -172,8 +172,11 @@ Log in, change the password when prompted, and delete the file.
 
 The API and UI listen on **`127.0.0.1:8080`** by default — loopback, so that a fresh install is
 not exposed before anyone has decided how it should be. Reach it over an SSH tunnel, or put a
-reverse proxy in front of it and set `api.allowedOrigins` to the origin browsers will use.
-Changing `api.host` to `0.0.0.0` also works and is your decision to make deliberately.
+reverse proxy in front of it and set `api.allowedOrigins` to the origin browsers will use and
+`api.trustedProxies` to the proxy's address. Without the second, the session cookie is never
+`Secure` and the login throttle counts every browser as the proxy
+(`administration.md` → Reverse proxies). Changing `api.host` to `0.0.0.0` also works and is your
+decision to make deliberately.
 
 ## 5. The local probe
 

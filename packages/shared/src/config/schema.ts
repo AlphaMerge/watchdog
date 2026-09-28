@@ -2,6 +2,7 @@
    Each nested object carries `default: {}` so ajv's `useDefaults` walks into it and fills the
    leaves. `JSONSchemaType` insists a default is a complete `T`, so the cast is what tsc needs;
    the lint rule reads the same types and disagrees. tsc is the authority. */
+import { isIP } from 'node:net';
 import type { JSONSchemaType } from 'ajv';
 
 /**
@@ -358,6 +359,22 @@ export interface CoreConfig {
      * same-origin writes, which is what a direct install wants.
      */
     allowedOrigins: string[];
+    /**
+     * The reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` this API believes
+     * (`A-36`).
+     *
+     * **Behind a proxy the core sees one client, the proxy, over plain HTTP**, unless it is told
+     * which peer may speak for the browser. Then the session cookie is never `Secure` and HSTS is
+     * never sent, however the browser reached the proxy; and the login throttle and the rate limit
+     * count every browser as the proxy's one address, so twenty wrong passwords from anybody
+     * refuse everybody's login for fifteen minutes.
+     *
+     * Addresses and CIDR ranges of **the proxy itself**, or `loopback` for a proxy on the same
+     * host. Not the network the browsers are on: a client inside a listed range can write its own
+     * `X-Forwarded-For` and be counted as whoever it names. Empty trusts nobody, and the headers
+     * are then ignored whoever sends them, which is what a direct install wants.
+     */
+    trustedProxies: string[];
     /**
      * Whether the API refuses a request that does not reach the bar its route declares
      * (`A-11`, `R11`).
@@ -804,7 +821,14 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
       type: 'object',
       default: {} as CoreConfig['api'],
       additionalProperties: false,
-      required: ['host', 'port', 'webRoot', 'allowedOrigins', 'requireAuthentication'],
+      required: [
+        'host',
+        'port',
+        'webRoot',
+        'allowedOrigins',
+        'trustedProxies',
+        'requireAuthentication',
+      ],
       properties: {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
         port: { type: 'integer', minimum: 1, maximum: 65_535, default: 8080 },
@@ -812,6 +836,9 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // Not validated by pattern here: what makes an entry usable is that it parses to the
         // origin a browser would send, and `registerCsrfGuard` says so by name at startup.
         allowedOrigins: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
+        // Not by pattern either: an address, a CIDR range or `loopback`, checked by
+        // `trustedProxyProblem` below, which names the entry.
+        trustedProxies: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
         requireAuthentication: { type: 'boolean', default: true },
       },
     },
@@ -1114,7 +1141,8 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
 };
 
 /**
- * What a configuration must satisfy that its schema cannot say (`A-38`): rules across fields.
+ * What a configuration must satisfy that its schema cannot say: rules across fields (`A-38`), and
+ * values whose shape a pattern would state badly (`A-36`).
  *
  * **Keyed by the schema, so no loader has to be told.** The core loads its configuration in three
  * places — serving, `migrate` and `config check` — and a rule passed in by each would be a rule one
@@ -1122,14 +1150,47 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
  */
 const RULES = new WeakMap<object, (config: never) => readonly string[]>();
 
-/** The problems `config` has that its schema's cross-field rules find. Empty when it has none. */
-export function crossFieldProblems<T>(schema: JSONSchemaType<T>, config: T): readonly string[] {
+/** The problems `config` has that its schema's own rules find. Empty when it has none. */
+export function ruleProblems<T>(schema: JSONSchemaType<T>, config: T): readonly string[] {
   const rules = RULES.get(schema) as ((config: T) => readonly string[]) | undefined;
   return rules === undefined ? [] : rules(config);
 }
 
+/**
+ * What is wrong with one `api.trustedProxies` entry, or `undefined` when it is usable (`A-36`).
+ *
+ * An address, a CIDR range, or `loopback` for a proxy on the core's own host. **`uniquelocal` and
+ * `linklocal` are refused although the proxy library understands them**: they name every private
+ * or link-local address, which is where the browsers are too, and a browser inside a trusted range
+ * can write its own `X-Forwarded-For` and be counted as whoever it names. The core asks this again
+ * when it builds its listener, so a server built without loading a file is held to it as well.
+ */
+export function trustedProxyProblem(entry: string): string | undefined {
+  if (entry === 'loopback') return undefined;
+  if (entry === 'uniquelocal' || entry === 'linklocal') {
+    return (
+      `api.trustedProxies: "${entry}" names every ` +
+      `${entry === 'linklocal' ? 'link-local' : 'private'} address, which is where the browsers ` +
+      "are too — list the proxy's own address or range"
+    );
+  }
+  const [address = '', bits, extra] = entry.split('/');
+  const family = isIP(address);
+  const widest = family === 6 ? 128 : 32;
+  const range = bits === undefined || (/^\d{1,3}$/.test(bits) && Number(bits) <= widest);
+  if (family !== 0 && extra === undefined && range) return undefined;
+  return (
+    `api.trustedProxies: "${entry}" is not an address, a CIDR range or "loopback" — name the ` +
+    'proxy, as in "127.0.0.1", "10.0.4.7" or "10.0.4.0/28"'
+  );
+}
+
 RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
   const problems: string[] = [];
+  for (const entry of config.api.trustedProxies) {
+    const problem = trustedProxyProblem(entry);
+    if (problem !== undefined) problems.push(problem);
+  }
   const { idleTimeoutMinutes, absoluteTimeoutHours } = config.sessions;
   if (idleTimeoutMinutes > absoluteTimeoutHours * 60) {
     problems.push(

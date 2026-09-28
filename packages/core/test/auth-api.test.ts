@@ -42,6 +42,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   /** The servers behind those apps, for the one assertion that reads the route table. */
   const built: ApiServer[] = [];
   let proxied: FastifyInstance;
+  /** Behind a reverse proxy on this host, which it believes (`A-36`). */
+  let behind: FastifyInstance;
+  let tokens: TokenService;
 
   before(async () => {
     scratch = await createScratchDatabase('authapi');
@@ -57,9 +60,12 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       sleep: () => Promise.resolve(),
     });
 
+    tokens = new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent });
+
     const build = async (
       required: boolean,
       allowedOrigins: string[] = [],
+      trustedProxies: string[] = [],
     ): Promise<FastifyInstance> => {
       const server = new ApiServer({
         config: {
@@ -67,6 +73,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           port: 0,
           webRoot: '',
           allowedOrigins,
+          trustedProxies,
           requireAuthentication: true,
         },
         logger: silent,
@@ -82,7 +89,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           throttle,
           groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
-          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          tokens,
           totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           required,
         },
@@ -95,6 +102,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     app = await build(false);
     guarded = await build(true);
     proxied = await build(false, ['http://ui.test']);
+    behind = await build(false, [], ['loopback']);
   });
 
   after(async () => {
@@ -624,6 +632,134 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       });
       assert.equal(response.statusCode, 403);
       assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_FORBIDDEN');
+    });
+  });
+
+  /**
+   * Which requests the CSRF guard exempts (`A-36`): those an API token authenticated, and not
+   * those that merely carry an `Authorization` header.
+   */
+  describe('the guard, and an Authorization header', () => {
+    const foreign = { origin: 'http://evil.test', host: 'core.test' };
+
+    it('refuses a session write from another origin that carries a Basic header', async () => {
+      // An authenticating proxy forwards the browser's Basic credentials, which the browser sent
+      // on its own; the cookie beside them is what authenticates. 204 would be the logout done.
+      const signedIn = await login(app, { login: 'ops', password: 'correct-horse-battery' });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/logout',
+        headers: {
+          ...foreign,
+          cookie: cookieFrom(signedIn.headers['set-cookie']),
+          authorization: 'Basic b3BzOmh1bnRlcjI=',
+        },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_FORBIDDEN');
+    });
+
+    it('exempts a request a token authenticated, whatever its Origin', async () => {
+      const account = await accounts.byLogin('ops');
+      assert.ok(account !== null);
+      const { secret } = await tokens.issue(
+        { userId: account.id, role: account.role },
+        { name: 'a script' },
+        testActor,
+      );
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/logout',
+        headers: { ...foreign, authorization: `Bearer ${secret}` },
+      });
+      assert.equal(response.statusCode, 204);
+    });
+  });
+
+  /**
+   * A core behind a reverse proxy it believes (`A-36`). `inject` arrives from `127.0.0.1`, which
+   * `loopback` lists — the proxy on the same host that `installation.md` describes.
+   */
+  describe('behind a reverse proxy', () => {
+    const through = (address: string, extra: Record<string, string> = {}) => ({
+      'x-forwarded-for': address,
+      'x-forwarded-proto': 'https',
+      ...extra,
+    });
+    const setCookieOf = (response: { headers: Record<string, unknown> }): string => {
+      const setCookie = response.headers['set-cookie'] as string | string[] | undefined;
+      return Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '');
+    };
+    const fail = (instance: FastifyInstance, headers: Record<string, string>) =>
+      login(instance, { login: 'ops', password: 'not-the-password' }, headers);
+
+    it('marks the cookie Secure and sends HSTS when the proxy says the browser used HTTPS', async () => {
+      const response = await login(
+        behind,
+        { login: 'ops', password: 'correct-horse-battery' },
+        through('203.0.113.5'),
+      );
+      assert.equal(response.statusCode, 200);
+      assert.match(setCookieOf(response), /; Secure/);
+      assert.match(String(response.headers['strict-transport-security']), /max-age=\d+/);
+    });
+
+    it('believes neither from a peer it does not list', async () => {
+      // The same headers, straight from a client: a claim anybody can make.
+      for (const response of [
+        await login(
+          app,
+          { login: 'ops', password: 'correct-horse-battery' },
+          through('203.0.113.5'),
+        ),
+        await behind.inject({
+          method: 'POST',
+          url: '/api/v1/auth/login',
+          payload: { login: 'ops', password: 'correct-horse-battery' },
+          headers: through('203.0.113.5'),
+          remoteAddress: '198.51.100.9',
+        }),
+      ]) {
+        assert.equal(response.statusCode, 200);
+        assert.equal(/Secure/.test(setCookieOf(response)), false);
+        assert.equal(response.headers['strict-transport-security'], undefined);
+      }
+    });
+
+    it('throttles each browser behind the proxy by its own address, not the proxy’s', async () => {
+      // Twenty failures refuse an address (`DEFAULT_THROTTLE`). Counted against the proxy, that
+      // would be everybody's login refused for fifteen minutes by one person's wrong passwords.
+      for (let attempt = 0; attempt < 20; attempt += 1) await fail(behind, through('203.0.113.5'));
+
+      assert.equal((await fail(behind, through('203.0.113.5'))).statusCode, 429);
+      const neighbour = await login(
+        behind,
+        { login: 'ops', password: 'correct-horse-battery' },
+        through('203.0.113.6'),
+      );
+      assert.equal(neighbour.statusCode, 200, 'another browser behind the same proxy signs in');
+
+      const rows = await db.query<{ remote_address: string }>(
+        'SELECT DISTINCT remote_address FROM login_attempt',
+      );
+      assert.deepEqual(
+        rows.map((row) => row.remote_address).sort(),
+        ['203.0.113.5', '203.0.113.6'],
+        'and the proxy never appears as the address',
+      );
+    });
+
+    it('and a browser cannot choose its address by writing the header itself', async () => {
+      // What it writes comes before what the proxy appends, and only the proxy is believed.
+      for (let attempt = 0; attempt < 20; attempt += 1)
+        await fail(behind, through(`198.51.100.${String(attempt)}, 203.0.113.5`));
+      assert.equal((await fail(behind, through('203.0.113.5'))).statusCode, 429);
+
+      // Nor with no proxy listed, where the header is not read at all.
+      await db.query('DELETE FROM login_attempt');
+      for (let attempt = 0; attempt < 20; attempt += 1)
+        await fail(app, through(`198.51.100.${String(attempt)}`));
+      assert.equal((await fail(app, through('198.51.100.200'))).statusCode, 429);
     });
   });
 });

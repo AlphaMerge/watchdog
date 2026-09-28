@@ -13617,6 +13617,95 @@ because each is a decision rather than a defect:
       answered 400 "body must be object", although the route's own comment says a bodiless clone
       is legitimate. `{}` works.
 
+- [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
+      header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
+      2026-09-28 by the round-three review of the API's browser boundary. Three findings, each
+      confirmed by two verifiers, and one test that could not fail:
+      - **Nothing checked `Origin` on the stream's handshake.** The CSRF guard passes every GET,
+        and a WebSocket handshake is a GET — the one whose answer another origin can read. The
+        `SameSite=Lax` cookie goes with a handshake from any same-site page (another port on the
+        core's host, a sibling subdomain), so such a page could subscribe with the operator's
+        session and read the state of everything the operator could see. With authentication
+        off, any page the browser could reach the core from could do it without a cookie.
+      - **The CSRF guard exempted any request carrying `Authorization`**, not the ones a token
+        authenticated. A proxy that authenticates with HTTP Basic or Negotiate forwards the
+        browser's own header, which a browser attaches to a cross-site form on its own, and the
+        session cookie beside it then authenticated a write the guard had waved through.
+      - **The core could not be told to believe a proxy.** No `trustProxy` and no setting for it,
+        so behind the TLS-terminating proxy `installation.md` describes, `request.protocol` was
+        always `http`: the session cookie was never `Secure` and HSTS was never sent. The same
+        gap made every browser the proxy's one address to the login throttle, so twenty wrong
+        passwords from anybody refused everybody's login for fifteen minutes.
+      - `hardening.test.ts` "closes its sweep when the server does" asserted `true`: the sweep's
+        timer is unref'd, so leaving it running held nothing open and could not fail the test.
+
+      **Done when** a handshake whose `Origin` is neither the core's own nor configured is refused
+      whether or not authentication is on, and one with no `Origin` is not; the guard exempts a
+      request only when a token authenticated it; `api.trustedProxies` names the proxies whose
+      forwarded headers are believed, refuses at startup what it cannot use, and makes the cookie
+      `Secure`, HSTS sent and the throttle count browsers behind a listed proxy; a browser cannot
+      choose its throttled address by writing the header; the docs say how to put the core behind
+      a proxy; and the sweep test can fail.
+
+      **A-36 outcome.**
+      - **The stream's handshake is checked for its origin** (`registerUpgradeOriginCheck`), with
+        the comparison the write guard makes. The two now share one function, so they cannot come
+        to disagree about what "another origin" means. It is registered wherever the stream is,
+        outside the authentication block, because with authentication off it is the only thing
+        between another site and the feed. A handshake with no `Origin` is let through: a browser
+        always sends one, and a client that does not is a script with only the credentials it was
+        given. The scheme is not compared, only the host, because behind a TLS proxy the core is
+        not told to trust, it cannot know the browser's scheme. Comparing it would refuse every
+        write and stream from such an installation.
+      - **The guard exempts a request a token authenticated, and nothing else.** It asks
+        `request.principal?.tokenId`, which is set because the guard runs after authentication.
+        A Basic, Negotiate or unresolved Bearer header is checked like a cookie.
+      - **`api.trustedProxies`**, passed to Fastify as `trustProxy`. It holds addresses, CIDR
+        ranges, or `loopback`. `uniquelocal` and `linklocal` are refused although the proxy library
+        takes them, because they name the network the browsers are on, and a browser inside a
+        trusted range can name its own address. Checked by `trustedProxyProblem` in the shared
+        config rules, so boot, `migrate` and `config check` refuse a bad entry, naming it, and
+        again when the listener is built, so a server built without a file is held to the same
+        rule. `crossFieldProblems` became `ruleProblems`, since not every rule it runs now spans
+        two fields. With a proxy listed, the cookie is `Secure` and HSTS is sent when the proxy
+        says HTTPS. The login throttle, rate limit, session list and log see the browser's address.
+      - **The login throttle behind a proxy**, verified rather than assumed. Unlisted, every browser
+        was the proxy's one address, and twenty failures from anybody refused everybody. Listed,
+        each browser is counted by its own address. What a browser writes into `X-Forwarded-For`
+        before the proxy appends to it is ignored, and so is the whole header from a peer that is
+        not listed.
+      - **Said once, when nobody is trusted.** A request carrying `X-Forwarded-For` while the list
+        is empty logs one warning naming the peer. Once a proxy is listed it says nothing. A
+        request from the proxy's own host keeps the peer's address, so a warning there would be
+        wrong half the time.
+      - **The sweep test** now proves both halves. The sweep reads the clock while the server is
+        open and never once it has closed, and registering the limiter adds no timer that holds
+        the process open. The describe that leaked four servers closes each one.
+      - `administration.md`'s reverse-proxy section covers both settings, what goes wrong without
+        the second, an nginx block that forwards the headers and the WebSocket, and what the
+        stream check changes on upgrade. Only an installation with authentication off that never
+        writes needs `allowedOrigins` where it did not before. `installation.md` and
+        `troubleshooting.md` point at it, and `deploy/examples/core.json` shows the key.
+
+      Tests: `stream-origin.test.ts` (new, 5 cases against the real upgrade): another port on the
+      same host refused with the operator's cookie; another origin refused with authentication
+      off; the core's own origin, a configured one through a Host-rewriting proxy (and only where
+      configured), and no `Origin` all open. `hardening.test.ts`: the handshake check's cases,
+      the exemption by principal, an `Authorization` header that authenticated nothing,
+      `proxyTrust`, what Fastify then believes, the notice (once, and silent when trusted), and the
+      two sweep tests. `auth-api.test.ts`: a Basic header beside a session cookie from another
+      origin refused; a real token's write exempt; `Secure` and HSTS through the listed proxy and
+      from neither an unlisted peer nor a direct client; the throttle per browser (and
+      `login_attempt` never records the proxy); a browser unable to choose its throttled address,
+      listed or not. Shared: the default, the shapes accepted, each bad entry named, the private
+      names refused, and `config check` exiting 1.
+
+      Mutation 12/12: the exemption back on the header; no handshake check; the check only when
+      authentication is required; the check ignoring the allowlist; no proxy believed; `uniquelocal`
+      accepted; the config rule not run; the prefix length unbounded; the notice on every request;
+      the notice with a proxy listed; the sweep not cleared on close; the sweep's timer holding the
+      process open.
+
 - [x] **A-37 — The `derived` guard tells a hidden row from a missing one** · S · A-12, D-11 ·
       Found by `D-11`, which fixed it for the three rediscovery-rule routes. A route addressed by a
       row that belongs to an object (a trigger, a discovery run, a rediscovery rule) looks the

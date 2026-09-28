@@ -32,7 +32,14 @@ import {
   type AuditDeclaration,
   type RouteAccess,
 } from './authorization.js';
-import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
+import {
+  proxyTrust,
+  registerCsrfGuard,
+  registerForwardedHeaderNotice,
+  registerRateLimit,
+  registerSecurityHeaders,
+  registerUpgradeOriginCheck,
+} from './hardening.js';
 import { validatorSalt } from './preconditions.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
@@ -112,8 +119,15 @@ import { LIBRARY_SCHEMAS } from './schemas/libraries.js';
 import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
+/**
+ * The listener's settings. `trustedProxies` may be left out, and is then empty: a server built for
+ * a route test is not behind a proxy, and saying so in every one of them would be noise.
+ */
+export type ApiListenerConfig = Omit<CoreConfig['api'], 'trustedProxies'> &
+  Partial<Pick<CoreConfig['api'], 'trustedProxies'>>;
+
 export interface ApiServerOptions {
-  config: CoreConfig['api'];
+  config: ApiListenerConfig;
   logger: Logger;
   version: string;
   /**
@@ -287,7 +301,7 @@ export interface ApiServerOptions {
  */
 export class ApiServer {
   readonly #app: FastifyInstance;
-  readonly #config: CoreConfig['api'];
+  readonly #config: ApiListenerConfig;
   readonly #logger: Logger;
   readonly #history: HistoryService;
   readonly #stateLog: StateLogService;
@@ -411,6 +425,11 @@ export class ApiServer {
       },
       // A request id per request, so every log line from a handler ties back to it.
       genReqId: () => newCorrelationId(),
+      // Whose `X-Forwarded-For` and `X-Forwarded-Proto` to believe (`A-36`). Nobody's by default,
+      // so that a client of a direct install cannot name its own address or scheme. With a proxy
+      // listed, `request.ip` is the browser and `request.protocol` is what it used, which is what
+      // the login throttle, the rate limit, the cookie's `Secure` and HSTS each read.
+      trustProxy: proxyTrust(this.#config.trustedProxies ?? []),
     });
 
     // **A body a route requires nothing of may be left out** (`P-230`). Fastify validates an
@@ -561,6 +580,19 @@ export class ApiServer {
     // that does not parse adds nothing rather than breaking the policy.
     const tileOrigin = originOf(this.#mapTiles?.urlTemplate ?? '');
     registerSecurityHeaders(this.#app, tileOrigin === null ? {} : { imageOrigins: [tileOrigin] });
+    registerForwardedHeaderNotice(this.#app, {
+      logger: this.#logger,
+      trustedProxies: this.#config.trustedProxies ?? [],
+    });
+
+    // **The stream's handshake is checked for its origin whether or not authentication is on**
+    // (`A-36`): off, it is the only thing between another site and the feed.
+    if (this.#stream !== undefined) {
+      registerUpgradeOriginCheck(this.#app, {
+        logger: this.#logger,
+        allowedOrigins: this.#config.allowedOrigins,
+      });
+    }
 
     // Rate limiting sits *after* authentication in registration order, so it can key by account
     // where there is one — everybody behind one NAT would otherwise share a bucket.

@@ -250,7 +250,20 @@ cookie-authenticated write is refused. Set `api.allowedOrigins` to the origin br
 full origin with a scheme, not a hostname and not a wildcard. A bad value is refused at startup.
 
 API tokens are unaffected: the header requirement applies to cookies, because a cookie is what a
-browser attaches on its own.
+browser attaches on its own. A proxy's forwarded Basic or Negotiate header is not a token and
+exempts nothing.
+
+The same comparison refuses the live stream's handshake, so the same setting fixes a page whose
+data loads but never updates on its own. The core logs `refusing a cross-origin stream` with the
+two values it compared.
+
+## Everybody's login is refused after one person's wrong passwords
+
+Or the session cookie is not `Secure` behind an HTTPS proxy. Both mean the core sees the proxy
+rather than the browsers: set `api.trustedProxies` to the proxy's address (`loopback` for one on
+the same host), and make the proxy send `X-Forwarded-For` and `X-Forwarded-Proto`. While that
+setting is empty the core logs a warning naming the proxy's address the first time a forwarded
+header arrives.
 
 ## A credential is not readable through the API
 

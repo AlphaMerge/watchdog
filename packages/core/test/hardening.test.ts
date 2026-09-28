@@ -1,10 +1,16 @@
 import { strict as assert } from 'node:assert';
-import { after, before, beforeEach, describe, it } from 'node:test';
-import Fastify, { type FastifyInstance } from 'fastify';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import { pino } from 'pino';
+import type { Logger } from '@ms/shared';
 import {
+  proxyTrust,
   registerCsrfGuard,
+  registerForwardedHeaderNotice,
   registerRateLimit,
   registerSecurityHeaders,
+  registerUpgradeOriginCheck,
 } from '../src/api/hardening.js';
 import { toHttpError } from '../src/api/errors.js';
 import { silent } from './support/tree.js';
@@ -17,8 +23,11 @@ import { silent } from './support/tree.js';
  * measuring the harness.
  */
 
-const build = async (install: (app: FastifyInstance) => void): Promise<FastifyInstance> => {
-  const app = Fastify({ logger: false });
+const build = async (
+  install: (app: FastifyInstance) => void,
+  options: FastifyServerOptions = {},
+): Promise<FastifyInstance> => {
+  const app = Fastify({ logger: false, ...options });
   app.setErrorHandler((error, request, reply) => {
     const mapped = toHttpError(error, request.id);
     void reply.status(mapped.status).send(mapped.body);
@@ -146,19 +155,55 @@ describe('the CSRF guard', () => {
     assert.equal(response.statusCode, 200);
   });
 
-  it('exempts a request authenticated by a bearer token', async () => {
+  it('exempts a request an API token authenticated', async () => {
     // A token carries no ambient authority: there is nothing for a third-party page to ride on,
-    // and demanding an Origin from `curl` would break every integration for no gain.
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/v1/thing',
-      headers: {
-        origin: 'http://evil.test',
-        host: 'example.test',
-        authorization: 'Bearer mst_something',
-      },
+    // and demanding an Origin from `curl` would break every integration for no gain. The
+    // authentication hook stands in here: it runs first, and sets the principal the guard reads.
+    const tokened = await build((instance) => {
+      instance.addHook('onRequest', (request, _reply, done) => {
+        request.principal = {
+          userId: 7,
+          login: 'script',
+          role: 'readwrite',
+          mustChangePassword: false,
+          mayAcknowledge: true,
+          sessionId: '',
+          tokenId: 3,
+          scope: 'write',
+        };
+        done();
+      });
+      registerCsrfGuard(instance, { logger: silent });
     });
-    assert.equal(response.statusCode, 200);
+    try {
+      const response = await tokened.inject({
+        method: 'POST',
+        url: '/api/v1/thing',
+        headers: {
+          origin: 'http://evil.test',
+          host: 'example.test',
+          authorization: 'Bearer mst_something',
+        },
+      });
+      assert.equal(response.statusCode, 200);
+    } finally {
+      await tokened.close();
+    }
+  });
+
+  it('does not exempt an Authorization header that authenticated nothing (A-36)', async () => {
+    // A proxy that authenticates with HTTP Basic or Negotiate forwards the browser's own header,
+    // and a browser attaches that to a cross-site form on its own — as ambient as a cookie. A
+    // bearer token that did not resolve is no better: whatever let the request in, it was not a
+    // token.
+    for (const authorization of ['Basic b3BzOmh1bnRlcjI=', 'Negotiate YIIGhgYGKwYB', 'Bearer x']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/thing',
+        headers: { origin: 'http://evil.test', host: 'example.test', authorization },
+      });
+      assert.equal(response.statusCode, 403, `${authorization.split(' ')[0] ?? ''} was exempted`);
+    }
   });
 
   it('allows a write with no Origin at all', async () => {
@@ -303,6 +348,171 @@ describe('an allowlist that could never match', () => {
   });
 });
 
+/**
+ * The stream's handshake from another origin (`A-36`).
+ *
+ * A WebSocket handshake is a GET, which the guard above passes, and it is the one GET whose answer
+ * another origin can read. These drive the hook with the headers a handshake carries; the real
+ * upgrade, against the real stream, is `stream-origin.test.ts`.
+ */
+describe('the handshake origin check', () => {
+  let app: FastifyInstance;
+
+  before(async () => {
+    app = await build((instance) => {
+      registerUpgradeOriginCheck(instance, {
+        logger: silent,
+        allowedOrigins: ['http://127.0.0.1:5173'],
+      });
+    });
+  });
+
+  after(async () => {
+    await app.close();
+  });
+
+  const handshake = (headers: Record<string, string>) =>
+    app.inject({
+      method: 'GET',
+      url: '/api/v1/thing',
+      headers: { upgrade: 'websocket', connection: 'Upgrade', ...headers },
+    });
+
+  it('refuses one from another origin', async () => {
+    // Another port on the same host is another origin, and the same site: the cookie goes with it.
+    const response = await handshake({ origin: 'http://10.0.0.5:3000', host: '10.0.0.5:8080' });
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_FORBIDDEN');
+  });
+
+  it('refuses one whose Origin is not a URL, which is what a sandboxed page sends', async () => {
+    assert.equal((await handshake({ origin: 'null', host: '10.0.0.5:8080' })).statusCode, 403);
+  });
+
+  it('lets through its own origin, a configured one, and a client that sends none', async () => {
+    for (const headers of [
+      { origin: 'http://10.0.0.5:8080', host: '10.0.0.5:8080' },
+      // Vite's proxy: the browser's origin, and the Host it rewrote.
+      { origin: 'http://127.0.0.1:5173', host: '127.0.0.1:8080' },
+      { host: '10.0.0.5:8080' },
+    ])
+      assert.equal((await handshake(headers)).statusCode, 200, JSON.stringify(headers));
+  });
+
+  it('leaves an ordinary read alone, whatever its origin', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://evil.test', host: 'example.test' },
+    });
+    assert.equal(response.statusCode, 200);
+  });
+});
+
+describe('which proxies are believed (A-36)', () => {
+  it('trusts nobody when none is listed', () => {
+    assert.equal(proxyTrust([]), false);
+  });
+
+  it('accepts an address, a range and loopback', () => {
+    const entries = ['127.0.0.1', '10.0.4.7', '10.0.4.0/28', '::1', 'fd00::/8', 'loopback'];
+    assert.deepEqual(proxyTrust(entries), entries);
+  });
+
+  it('names the setting and the entry it cannot use', () => {
+    for (const entry of ['ms-proxy', '10.0.4.0/33', '10.0.4.7/', '::1/129', '10.0.4.0/28/1'])
+      assert.throws(
+        () => proxyTrust([entry]),
+        new RegExp(`api\\.trustedProxies: "${entry.replace(/[./:]/g, '\\$&')}" is not`),
+        entry,
+      );
+  });
+
+  it('refuses the names that mean every private address, since the browsers are there too', () => {
+    // A browser inside a trusted range writes its own X-Forwarded-For and is counted as whoever it
+    // names — the throttle's address is then the attacker's choice.
+    assert.throws(() => proxyTrust(['uniquelocal']), /names every private address/);
+    assert.throws(() => proxyTrust(['linklocal']), /names every link-local address/);
+  });
+
+  it('is what the server believes: the browser behind a listed proxy, and nobody else', async () => {
+    const app = await build(
+      (instance) => {
+        instance.get('/whoami', (request) => ({ ip: request.ip, protocol: request.protocol }));
+      },
+      { trustProxy: proxyTrust(['127.0.0.1']) },
+    );
+    try {
+      const forwarded = {
+        'x-forwarded-for': '198.51.100.1, 203.0.113.5',
+        'x-forwarded-proto': 'https',
+      };
+      const through = await app.inject({
+        url: '/whoami',
+        remoteAddress: '127.0.0.1',
+        headers: forwarded,
+      });
+      // The proxy appended the browser's address; what came before it, the browser wrote itself.
+      assert.deepEqual(through.json(), { ip: '203.0.113.5', protocol: 'https' });
+      const direct = await app.inject({
+        url: '/whoami',
+        remoteAddress: '198.51.100.9',
+        headers: forwarded,
+      });
+      assert.deepEqual(direct.json(), { ip: '198.51.100.9', protocol: 'http' });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('a proxy that is not believed (A-36)', () => {
+  const capture = (): { logger: Logger; warnings: () => string[] } => {
+    const lines: { level: number; msg: string }[] = [];
+    const logger = pino(
+      { level: 'warn' },
+      { write: (line: string) => lines.push(JSON.parse(line) as { level: number; msg: string }) },
+    ) as unknown as Logger;
+    return { logger, warnings: () => lines.filter((l) => l.level === 40).map((l) => l.msg) };
+  };
+
+  it('is said once, naming the peer, when a request carries X-Forwarded-For it ignored', async () => {
+    const { logger, warnings } = capture();
+    const app = await build((instance) => {
+      registerForwardedHeaderNotice(instance, { logger, trustedProxies: [] });
+    });
+    try {
+      await app.inject({ url: '/api/v1/thing' });
+      assert.deepEqual(warnings(), [], 'nothing forwarded, nothing to say');
+      for (let n = 0; n < 3; n += 1)
+        await app.inject({ url: '/api/v1/thing', headers: { 'x-forwarded-for': '203.0.113.5' } });
+      assert.equal(warnings().length, 1);
+      assert.match(warnings()[0] ?? '', /api\.trustedProxies is empty/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('says nothing once a proxy is listed, even for a request from the proxy’s own host', async () => {
+    // `curl` on the proxy's host, forwarded as `127.0.0.1`: its address stays the peer's, and a
+    // warning about an unlisted proxy would be wrong.
+    const { logger, warnings } = capture();
+    const app = await build(
+      (instance) => {
+        registerForwardedHeaderNotice(instance, { logger, trustedProxies: ['loopback'] });
+      },
+      { trustProxy: proxyTrust(['loopback']) },
+    );
+    try {
+      await app.inject({ url: '/api/v1/thing', headers: { 'x-forwarded-for': '127.0.0.1' } });
+      await app.inject({ url: '/api/v1/thing', headers: { 'x-forwarded-for': '203.0.113.5' } });
+      assert.deepEqual(warnings(), []);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe('rate limiting', () => {
   let app: FastifyInstance;
   let clock = 0;
@@ -317,6 +527,10 @@ describe('rate limiting', () => {
         now: () => clock,
       });
     });
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   const get = () => app.inject({ method: 'GET', url: '/api/v1/thing' });
@@ -349,12 +563,43 @@ describe('rate limiting', () => {
     assert.equal((await get()).statusCode, 200, 'a new window');
   });
 
-  it('closes its sweep when the server does', async () => {
-    // An interval left running keeps the process alive, which turns a graceful shutdown into a
-    // timeout somebody has to investigate.
-    await app.close();
-    // Nothing to assert beyond this returning: an un-cleared interval would hold the loop open
-    // and the test runner would report a hang rather than a failure.
-    assert.ok(true);
+  it('stops sweeping when the server closes (A-36)', async () => {
+    // The sweep reads the clock and nothing else does between requests, so a clock nobody else
+    // is asking is the sweep running. A real, short window: the claim is about a real timer.
+    // (This once only closed the server and asserted `true`: the timer is unref'd, so a sweep
+    // left running held nothing open and could not fail it.)
+    let asked = 0;
+    const swept = await build((instance) => {
+      registerRateLimit(instance, {
+        logger: silent,
+        windowMs: 5,
+        now: () => {
+          asked += 1;
+          return Date.now();
+        },
+      });
+    });
+    const deadline = Date.now() + 5_000;
+    while (asked === 0 && Date.now() < deadline) await sleep(5);
+    assert.ok(asked > 0, 'the sweep runs while the server is open');
+
+    await swept.close();
+    asked = 0;
+    await sleep(60);
+    assert.equal(asked, 0, 'and not once it has closed');
+  });
+
+  it('holds nothing open, so a server nobody closed cannot keep the process up', async () => {
+    const timers = (): number =>
+      process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
+    const before = timers();
+    const unclosed = await build((instance) => {
+      registerRateLimit(instance, { logger: silent });
+    });
+    try {
+      assert.equal(timers(), before);
+    } finally {
+      await unclosed.close();
+    }
   });
 });

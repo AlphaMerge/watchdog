@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { Logger } from '@ms/shared';
+import { trustedProxyProblem, type Logger } from '@ms/shared';
 import { AuthError } from '../auth/errors.js';
 
 /**
@@ -56,7 +56,9 @@ const HEADERS: Readonly<Record<string, string>> = {
  *
  * **Never on plain HTTP**, where it would be ignored by a compliant browser and actively harmful
  * behind a proxy that terminates TLS elsewhere — an installation reachable on both would find
- * the plain-HTTP one unreachable for a year.
+ * the plain-HTTP one unreachable for a year. Behind a proxy, "a TLS request" is the proxy's
+ * `X-Forwarded-Proto`, believed only from an address in `api.trustedProxies` (`A-36`); before
+ * that setting existed the core saw plain HTTP from every proxy and this header was never sent.
  */
 const HSTS = 'max-age=31536000; includeSubDomains';
 
@@ -97,9 +99,16 @@ export function registerSecurityHeaders(
  * set by the browser, cannot be forged by page script, and is present on exactly the requests
  * that matter — anything with side effects.
  *
- * **Token-authenticated requests are exempt**, and must be: a script posting with an
- * `Authorization` header sends no cookie, so there is no ambient authority to forge, and
- * demanding an `Origin` from `curl` would break every integration for no gain.
+ * **A request an API token authenticated is exempt**, and must be: a script posting with a
+ * bearer token sends no cookie, so there is no ambient authority to forge, and demanding an
+ * `Origin` from `curl` would break every integration for no gain.
+ *
+ * **Asked of the principal, not of the header** (`A-36`). The exemption was once any request
+ * carrying `Authorization`, which is not the same thing. A reverse proxy that authenticates with
+ * HTTP Basic or Negotiate forwards the browser's own header, and a browser attaches those on its
+ * own, to cross-site requests too — ambient authority exactly as a cookie is, and `SameSite` does
+ * not govern it. So every write through such a proxy skipped the guard, and the session cookie
+ * beside the header then authenticated it.
  */
 export interface CsrfOptions {
   logger: Logger;
@@ -131,45 +140,86 @@ export function registerCsrfGuard(app: FastifyInstance, options: CsrfOptions): v
       return;
     }
     // A bearer token carries no ambient authority: there is nothing for a third-party page to
-    // ride on, and `curl` sends no Origin.
-    if (request.headers.authorization !== undefined) {
+    // ride on, and `curl` sends no Origin. Registered after authentication, so the principal is
+    // what the request actually authenticated as.
+    if (request.principal?.tokenId !== undefined) {
       done();
       return;
     }
-
-    const origin = request.headers.origin;
-    // Absent on same-origin requests from some clients and on every non-browser one. Refusing it
-    // would break `curl` against a cookie-authenticated session, which is how an operator debugs
-    // this system.
-    if (origin === undefined) {
-      done();
-      return;
-    }
-
-    let originHost: string;
-    try {
-      originHost = new URL(origin).host;
-    } catch {
-      options.logger.warn(
-        { origin, path: request.url },
-        'refusing a request with an unparseable Origin',
-      );
-      done(new AuthError('AUTH_FORBIDDEN', 'that Origin header is not a URL'));
-      return;
-    }
-
-    const host = request.headers.host ?? '';
-    if (originHost === host || allowed.has(origin)) {
-      done();
-      return;
-    }
-
-    options.logger.warn(
-      { origin, host, method: request.method, path: request.url },
-      'refusing a cross-origin write',
-    );
-    done(new AuthError('AUTH_FORBIDDEN', 'this request came from another origin', { origin }));
+    done(refusalFor(request, allowed, options.logger, 'write'));
   });
+}
+
+/**
+ * The stream's handshake, from another origin (`A-36`).
+ *
+ * **The guard above passes every GET, and a WebSocket handshake is a GET — the one GET whose answer
+ * another origin can read.** The same-origin policy hides an ordinary response from a page on
+ * another origin; it does not govern a socket, whose every frame the page that opened it reads.
+ * The session cookie goes with the handshake whenever that page is same-site: another port on the
+ * core's host, such as a Grafana beside it or anything on `localhost` through an SSH tunnel, or a
+ * sibling subdomain, because a site ignores the port and `SameSite=Lax` is per site. With
+ * authentication off no cookie is needed at all. So a page like that could subscribe and read the
+ * state of everything its victim could see, for as long as the tab stayed open.
+ *
+ * A browser always sends `Origin` on a handshake and page script cannot change it, so the guard's
+ * own comparison decides. A client that sends none is not a browser, and has only the credentials
+ * it was given; it is let through, as the guard lets `curl` through.
+ *
+ * **Registered whether or not authentication is required, and so apart from the guard.** With
+ * authentication off, this is all that stands between another site and the stream.
+ */
+export function registerUpgradeOriginCheck(app: FastifyInstance, options: CsrfOptions): void {
+  const allowed = new Set((options.allowedOrigins ?? []).map(normaliseOrigin));
+
+  app.addHook('onRequest', (request: FastifyRequest, _reply: FastifyReply, done) => {
+    // The header rather than whether `@fastify/websocket` took the request: a page cannot set
+    // `Upgrade` on anything but a handshake, and a plain GET that carries it asks for nothing.
+    if (request.headers.upgrade?.toLowerCase() !== 'websocket') {
+      done();
+      return;
+    }
+    done(refusalFor(request, allowed, options.logger, 'stream'));
+  });
+}
+
+/**
+ * Whether `Origin` names this API or an origin configured to stand for it, and the refusal when
+ * it does not. One comparison, so the write guard and the stream cannot come to disagree about
+ * what "another origin" means.
+ *
+ * **The host is compared and the scheme is not.** Behind a proxy that terminates TLS and is not in
+ * `api.trustedProxies`, the core cannot know the scheme the browser used, and comparing it would
+ * refuse every write and every stream from such an installation.
+ */
+function refusalFor(
+  request: FastifyRequest,
+  allowed: ReadonlySet<string>,
+  logger: Logger,
+  what: 'write' | 'stream',
+): AuthError | undefined {
+  const origin = request.headers.origin;
+  // Absent on same-origin requests from some clients and on every non-browser one. Refusing it
+  // would break `curl` against a cookie-authenticated session, which is how an operator debugs
+  // this system.
+  if (origin === undefined) return undefined;
+
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    logger.warn({ origin, path: request.url }, 'refusing a request with an unparseable Origin');
+    return new AuthError('AUTH_FORBIDDEN', 'that Origin header is not a URL');
+  }
+
+  const host = request.headers.host ?? '';
+  if (originHost === host || allowed.has(origin)) return undefined;
+
+  logger.warn(
+    { origin, host, method: request.method, path: request.url },
+    `refusing a cross-origin ${what}`,
+  );
+  return new AuthError('AUTH_FORBIDDEN', 'this request came from another origin', { origin });
 }
 
 /**
@@ -207,6 +257,60 @@ function normaliseOrigin(configured: string): string {
 }
 
 /**
+ * What Fastify is told to believe about `X-Forwarded-For` and `X-Forwarded-Proto`, from
+ * `api.trustedProxies` (`A-36`): `false` for nobody.
+ *
+ * **Checked again here, not left to Fastify**, which also refuses a bad entry but names the entry
+ * and not the setting — "invalid IP address: ms-proxy", at startup, with nothing to say which file
+ * or key — and accepts `uniquelocal` and `linklocal`, which name the network the browsers are on.
+ * Loading the configuration has already refused all of these; a server built without loading one,
+ * as every test builds it, is held to the same rule by the same function.
+ */
+export function proxyTrust(entries: readonly string[]): string[] | false {
+  for (const entry of entries) {
+    const problem = trustedProxyProblem(entry);
+    if (problem !== undefined) throw new Error(problem);
+  }
+  return entries.length === 0 ? false : [...entries];
+}
+
+/**
+ * Says once that something in front of the core is speaking for browsers and nobody is believed
+ * (`A-36`).
+ *
+ * The failure it names is otherwise silent until it bites: an install behind a proxy with
+ * `api.trustedProxies` empty sees every browser as the proxy — one address for the login throttle
+ * and the rate limit, so one person's wrong passwords refuse everybody's login — and never marks
+ * the session cookie `Secure`. A request carrying `X-Forwarded-For` is that situation, or a client
+ * that set the header itself; the warning names the peer, and says it once, so the log is not the
+ * proxy's traffic twice over.
+ *
+ * **Only while nobody is trusted.** With a list, a forwarded address that stayed the peer's is as
+ * likely a request from the proxy's own host — `curl` on it, forwarded with `127.0.0.1` — as a
+ * second proxy nobody listed, and a warning that is wrong half the time is read by nobody.
+ */
+export function registerForwardedHeaderNotice(
+  app: FastifyInstance,
+  options: { logger: Logger; trustedProxies: readonly string[] },
+): void {
+  if (options.trustedProxies.length > 0) return;
+  let said = false;
+  app.addHook('onRequest', (request: FastifyRequest, _reply: FastifyReply, done) => {
+    if (!said && request.headers['x-forwarded-for'] !== undefined) {
+      said = true;
+      options.logger.warn(
+        { peer: request.ip },
+        'a request carried X-Forwarded-For and api.trustedProxies is empty, so the header was ' +
+          'ignored: if a reverse proxy is in front of this core, every browser behind it is one ' +
+          'address to the login throttle and the rate limit, and the session cookie is never ' +
+          'marked Secure',
+      );
+    }
+    done();
+  });
+}
+
+/**
  * A ceiling on requests per client, per window.
  *
  * **Not a fairness mechanism and not a quota — a backstop.** The limit is set high enough that no
@@ -216,7 +320,9 @@ function normaliseOrigin(configured: string): string {
  *
  * **Keyed by account where there is one, by address where there is not.** Keying only by address
  * puts everybody behind one NAT in the same bucket; keying only by account leaves an
- * unauthenticated flood uncounted. `A-01`'s login throttle is separate and stricter, because a
+ * unauthenticated flood uncounted. Behind a proxy the address is the browser's only when the proxy
+ * is in `api.trustedProxies` (`A-36`); otherwise every browser is the proxy, and shares a bucket.
+ * `A-01`'s login throttle is separate and stricter, because a
  * login is worth far more attempts to an attacker than a page of sensors is.
  */
 export interface RateLimitOptions {

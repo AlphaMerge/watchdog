@@ -4,7 +4,7 @@ export type { ErrorContext } from './errors/app-error.js';
 export { loadConfig } from './config/load.js';
 export { runConfigCheck, type ConfigCheckOptions } from './config/check.js';
 export type { ConfigSources, LoadConfigOptions, LoadedConfig } from './config/load.js';
-export { coreConfigSchema, probeConfigSchema } from './config/schema.js';
+export { coreConfigSchema, probeConfigSchema, trustedProxyProblem } from './config/schema.js';
 export type {
   CoreConfig,
   DatabaseConfig,

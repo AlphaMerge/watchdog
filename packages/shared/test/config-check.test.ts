@@ -81,6 +81,14 @@ describe('checking a configuration', () => {
     assert.match(err.join('\n'), /sessions\.idleTimeoutMinutes: 20160 minutes is longer than/);
   });
 
+  it('refuses a trusted proxy that is not an address, before a restart finds it (A-36)', () => {
+    const path = tempFile(JSON.stringify({ api: { trustedProxies: ['ms-proxy.example.com'] } }));
+    const { code, err } = check(['--config', path]);
+
+    assert.equal(code, 1);
+    assert.match(err.join('\n'), /api\.trustedProxies: "ms-proxy\.example\.com" is not an address/);
+  });
+
   it('reports every problem at once, not just the first', () => {
     // Somebody fixing a configuration during an upgrade window should not have to run this five
     // times to find five mistakes.

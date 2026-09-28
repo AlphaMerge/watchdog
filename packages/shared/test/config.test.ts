@@ -232,6 +232,41 @@ describe('how long a session lasts (A-38)', () => {
   });
 });
 
+describe('which proxies are believed (A-36)', () => {
+  const load = (trustedProxies: unknown) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env: {},
+      argv: ['--config', tempFile('core.json', JSON.stringify({ api: { trustedProxies } }))],
+    });
+
+  it('is nobody unless it is set', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.deepEqual(config.api.trustedProxies, []);
+  });
+
+  it('takes addresses, ranges and loopback', () => {
+    const entries = ['loopback', '10.0.4.7', '10.0.4.0/28', '::1', 'fd00::/8'];
+    assert.deepEqual(load(entries).config.api.trustedProxies, entries);
+  });
+
+  it('refuses what is not one of those, naming every entry', () => {
+    const error = captureError(() => load(['ms-proxy', '10.0.4.0/33', '192.0.2.10']));
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /api\.trustedProxies: "ms-proxy" is not an address/);
+    assert.match(error.message, /api\.trustedProxies: "10\.0\.4\.0\/33" is not an address/);
+    assert.equal(error.message.includes('192.0.2.10'), false, 'and not the one that is fine');
+  });
+
+  it('refuses the names for every private address, since the browsers are there too', () => {
+    // A browser inside a trusted range writes its own X-Forwarded-For and is counted as whoever
+    // it names, which makes the login throttle's address the attacker's choice.
+    const error = captureError(() => load(['uniquelocal']));
+    assert.ok(error instanceof ConfigError);
+    assert.match(error.message, /"uniquelocal" names every private address/);
+  });
+});
+
 describe('loadConfig environment scoping', () => {
   it('ignores MS_ variables that do not name a configuration section', () => {
     // Regression: the release launcher exports MS_BUILD_VERSION and honours MS_NODE, and the

@@ -4,7 +4,7 @@ import { Ajv, type ErrorObject, type JSONSchemaType, type ValidateFunction } fro
 import * as ajvFormats from 'ajv-formats';
 import type { FormatsPlugin } from 'ajv-formats';
 import { ConfigError } from '../errors/app-error.js';
-import { crossFieldProblems } from './schema.js';
+import { ruleProblems } from './schema.js';
 
 /** Where a configuration value came from. Reported at boot so operators can see the layering. */
 export interface ConfigSources {
@@ -228,10 +228,10 @@ export function loadConfig<T>(options: LoadConfigOptions<T>): LoadedConfig<T> {
 
   const validate: ValidateFunction<T> = ajv.compile(options.schema);
   if (!validate(merged)) throw invalid((validate.errors ?? []).map(formatAjvError));
-  // The rules across fields (`A-38`), once every field has a value of the right type — which is
-  // what they read.
-  const crossField = crossFieldProblems(options.schema, merged);
-  if (crossField.length > 0) throw invalid(crossField);
+  // The rules the schema cannot state (`A-38`, `A-36`), once every field has a value of the right
+  // type — which is what they read.
+  const broken = ruleProblems(options.schema, merged);
+  if (broken.length > 0) throw invalid(broken);
 
   // `validate` is a type predicate: past the guard, `merged` is a `T`.
   return {

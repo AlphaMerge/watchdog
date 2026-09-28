@@ -158,7 +158,9 @@ there is no expiry to wait for.
 
 Tokens authenticate with `Authorization: Bearer …` and are not subject to the CSRF header
 requirement — that applies to cookie-authenticated writes, because a cookie is what a browser
-attaches on its own.
+attaches on its own. The exemption is for a request a token actually authenticated. HTTP Basic or
+Negotiate credentials that an authenticating proxy forwards are something a browser also attaches
+on its own, so a write carrying them is checked like any other.
 
 ### Two-factor authentication
 
@@ -672,17 +674,60 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
 
 ## Reverse proxies
 
-The API listens on loopback by default. Behind a proxy, set `api.allowedOrigins` to the origin
-browsers will actually use:
+The API listens on loopback by default. Behind a proxy, two settings tell the core about it:
 
 ```json
-{ "api": { "allowedOrigins": ["https://ms.example.com"] } }
+{
+  "api": {
+    "allowedOrigins": ["https://ms.example.com"],
+    "trustedProxies": ["loopback"]
+  }
+}
 ```
 
-The CSRF guard compares the browser's `Origin` against the request's `Host`, and a proxy that
-rewrites `Host` makes those differ for a request that is not cross-site at all — so without this
-key every write from such a deployment is refused. Full origins, with a scheme; not a bare
-hostname, and not a wildcard. A bad value is refused at startup, not at the first write.
+**`api.trustedProxies`** lists the proxy's own addresses: `loopback` for a proxy on the same host,
+otherwise its address or a CIDR range such as `10.0.4.0/28`. The core believes `X-Forwarded-For`
+and `X-Forwarded-Proto` from those addresses and ignores them from everyone else. Leave it empty
+behind a proxy and the core sees every browser as the proxy, arriving over plain HTTP:
+
+- **The session cookie is never marked `Secure`, and HSTS is never sent**, although browsers reach
+  the proxy over HTTPS.
+- **The login throttle counts every browser as one address.** Twenty wrong passwords from anybody
+  then refuse everybody's login for fifteen minutes.
+- The rate limit, the session list and the log record the proxy's address, not the browser's.
+
+While the list is empty, the core logs a warning, once, the first time a request carries
+`X-Forwarded-For`, naming the address it came from.
+
+**List the proxy, not the network the browsers are on.** A browser inside a trusted range can write
+its own `X-Forwarded-For` and be counted as whatever address it names, which defeats the throttle.
+For that reason `uniquelocal` and `linklocal` are refused. The proxy has to send both headers,
+and forward the live stream's WebSocket. In nginx:
+
+```nginx
+location / {
+    proxy_pass         http://127.0.0.1:8080;
+    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_set_header   Upgrade           $http_upgrade;
+    proxy_set_header   Connection        "upgrade";
+}
+```
+
+**`api.allowedOrigins`** lists the origins browsers use, and is needed when the proxy rewrites
+`Host`, as that one does. The core compares the browser's `Origin` with the request's `Host` on
+every write and on the live stream's handshake, and a proxy that rewrites `Host` makes those differ
+for a request that is not cross-site at all. Without this key every write from such a deployment is
+refused, and every page's live updates with it. Full origins, with a scheme: not a bare hostname,
+and not a wildcard. A proxy that passes `Host` through (`proxy_set_header Host $host`) needs no
+entry. A bad value in either key is refused at startup, not at the first request.
+
+The stream's handshake has been checked since `A-36`. Before that, a page on another port of the
+same host, or on a sibling subdomain, could open the stream with the operator's cookie and read
+everything the operator could see. An installation behind a proxy that rewrites `Host` has
+needed `allowedOrigins` to sign in at all, so this changes nothing for it. The exception is an
+installation with authentication off that only ever reads: it now needs the key for live updates.
 
 Set `notifications.publicUrl` to the same origin, or alarm emails will link to an address nobody
 receiving them can open.
