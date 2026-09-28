@@ -47,11 +47,14 @@ import { dispatchTables } from './catalogue.js';
  * so `config <anything but check>` is a usage error rather than a fall-through.
  */
 /**
- * How long a stopping check pool waits for the checks already running (`CheckPool.stop`).
+ * How long a stopping runner waits for the checks already running: the check pool
+ * (`CheckPool.stop`) and the process runner (`ProcessRunner.stop`), one after the other.
  *
- * Inside the check-pool hook's 10 s and well inside the default 20 s service budget, and longer
- * than an ordinary check takes: a check that runs past it is one its own timeout was going to
- * report anyway, and shutdown does not wait for the slowest of those.
+ * Longer than an ordinary check takes: a check that runs past it is one its own timeout was going
+ * to report anyway, and shutdown does not wait for the slowest of those. **Both windows together
+ * must leave the result spool its turn inside the default 20 s service budget** (`P-227`): 5 s
+ * and 5 s leave it ten. The process runner used to wait for its slowest check's own timeout, 30 s
+ * by default, and the budget ran out before the spool closed.
  */
 const POOL_DRAIN_MS = 5_000;
 
@@ -161,9 +164,11 @@ async function main(): Promise<void> {
     run: async () => {
       // The sink first, synchronously: every append it has started is on the spool's write chain,
       // which `close` finishes, and anything later is counted by the sink instead of refused.
-      const results = spoolResult.close();
+      spoolResult.close();
       await spool.close();
-      logger.info({ results, spool: spool.stats() }, 'result spool closed');
+      // The sink's counts read *after* the spool has closed (`P-227`). Read at `close()`, the
+      // snapshot came before any result could arrive late, so `unspooled` was always zero.
+      logger.info({ results: spoolResult.stats(), spool: spool.stats() }, 'result spool closed');
     },
   });
 
@@ -221,8 +226,8 @@ async function main(): Promise<void> {
   });
   lifecycle.onShutdown({
     name: 'process-runner',
-    timeoutMs: 30_000,
-    run: () => processRunner.stop(),
+    timeoutMs: 10_000,
+    run: () => processRunner.stop({ drainMs: POOL_DRAIN_MS }),
   });
 
   // Which sensor types a listener feeds and which run in a process of their own, from this

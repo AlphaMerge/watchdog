@@ -59,7 +59,9 @@ RuntimeDirectory=ms-core
 #LoadCredentialEncrypted=db-password:/etc/ms/db-password.cred
 #Environment=MS_DATABASE__PASSWORD__FROM_FILE=%d/db-password
 
-# Graceful shutdown: SIGTERM, drain, exit. Must exceed service.shutdownTimeoutMs (default 20s).
+# Graceful shutdown: SIGTERM, drain, exit. Above service.shutdownTimeoutMs (default 20s) so
+# nothing depends on it, but not the limit: the service tells systemd its budget as it stops
+# (EXTEND_TIMEOUT_USEC, P-227), so a raised budget holds without editing this.
 KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=30

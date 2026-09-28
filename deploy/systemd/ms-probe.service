@@ -53,7 +53,8 @@ RuntimeDirectory=ms-probe
 
 KillSignal=SIGTERM
 KillMode=mixed
-# Longer than the core's: in-flight checks get their timeout before the spool is flushed.
+# Longer than the core's. The probe tells systemd its budget as it stops (EXTEND_TIMEOUT_USEC,
+# P-227), and its runners wait at most 5 s each for running checks before the spool closes.
 TimeoutStopSec=45
 
 # --- Capabilities ------------------------------------------------------------------------

@@ -17,6 +17,19 @@ const LATENCY_WINDOW = 1_024;
 const MAX_CONSECUTIVE_START_FAILURES = 3;
 
 /**
+ * How long a failed worker start waits before the next attempt, doubling with each consecutive
+ * failure up to the ceiling (`P-227`).
+ *
+ * The latch above only fires when nothing is working (`P-80`), and a live probe always holds
+ * ready workers. So a start failure that persists, such as a tree half-copied by an upgrade or a
+ * full disk, used to respawn at once and without limit: a worker booted, failed its import, logged
+ * an error and was replaced, eight chains at a time, for as long as the cause lasted. Backing off
+ * keeps the retry going, because the cause may clear, at a rate the log and the CPU can carry.
+ */
+const START_RETRY_BASE_MS = 250;
+const START_RETRY_MAX_MS = 30_000;
+
+/**
  * How much recent history the *sizing* estimate is allowed to see (`P-46`).
  *
  * **Counted in seconds, and that is the whole point.** This window used to be the same 1,024
@@ -418,6 +431,8 @@ export class CheckPool {
   #shrunk = 0;
   /** When every slot was last seen busy, or the queue non-empty. Monotonic (`CLAUDE.md`). */
   #shrinkTimer: NodeJS.Timeout | undefined;
+  /** Start retries waiting out their backoff, cleared by `stop`. */
+  readonly #retryTimers = new Set<NodeJS.Timeout>();
   /** Set only while the pool is above its ceiling and still has workers to give back (`P-45`). */
   #overCeilingTimer: NodeJS.Timeout | undefined;
   #startFailures = 0;
@@ -612,6 +627,8 @@ export class CheckPool {
     this.#shrinkTimer = undefined;
     if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
     this.#overCeilingTimer = undefined;
+    for (const timer of this.#retryTimers) clearTimeout(timer);
+    this.#retryTimers.clear();
     for (const job of this.#queue.splice(0)) this.#settle(job, 'pool-stopped', 'probe is stopping');
 
     const running = this.#inFlight();
@@ -958,6 +975,12 @@ export class CheckPool {
     const parsed = message as { type?: string; jobId?: string };
     if (parsed.type === 'ready') {
       slot.ready = true;
+      if (this.#startFailures > 0) {
+        this.#logger.info(
+          { workerId: slot.id, failedStarts: this.#startFailures },
+          'a check worker started after consecutive failed starts',
+        );
+      }
       this.#startFailures = 0;
       this.#pump();
       return;
@@ -1081,6 +1104,25 @@ export class CheckPool {
         );
         return;
       }
+      // Some workers are working, so this keeps trying, but not at the speed of the event loop.
+      const delayMs = Math.min(
+        START_RETRY_MAX_MS,
+        START_RETRY_BASE_MS * 2 ** (this.#startFailures - 1),
+      );
+      if (this.#startFailures === 1) {
+        this.#logger.warn(
+          { reason, registry: this.#registryModule, retryInMs: delayMs },
+          'a check worker failed to start; retrying with a growing delay while the others work',
+        );
+      }
+      const timer = setTimeout(() => {
+        this.#retryTimers.delete(timer);
+        void this.#spawn().then(() => {
+          this.#pump();
+        });
+      }, delayMs);
+      this.#retryTimers.add(timer);
+      return;
     }
     void this.#spawn().then(() => {
       this.#pump();
@@ -1161,7 +1203,13 @@ export class CheckPool {
       this.#onWorkerMessage(slot, message);
     });
     worker.on('error', (error) => {
-      this.#logger.error({ err: describeError(error), workerId: slot.id }, 'check worker failed');
+      // One error line per streak of failed starts, not one per attempt (`P-227`): the retries
+      // back off, and the rest of the streak is in `workerCrashes` and the line `ready` logs.
+      const repeat = !slot.ready && this.#startFailures > 0;
+      this.#logger[repeat ? 'debug' : 'error'](
+        { err: describeError(error), workerId: slot.id },
+        'check worker failed',
+      );
       this.#onWorkerGone(slot, 'failed');
     });
     worker.on('exit', (code) => {

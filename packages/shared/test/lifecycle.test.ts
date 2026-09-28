@@ -13,7 +13,8 @@ function fakeNotifier(): ServiceNotifier & { calls: string[] } {
     enabled: true,
     ready: () => calls.push('ready'),
     watchdog: () => calls.push('watchdog'),
-    stopping: () => calls.push('stopping'),
+    stopping: (_status?: string, extendMs?: number) =>
+      calls.push(extendMs === undefined ? 'stopping' : `stopping ${String(extendMs)}`),
     status: () => calls.push('status'),
     extendTimeout: (ms: number, status?: string) =>
       calls.push(`extend ${String(ms)} ${status ?? ''}`.trimEnd()),
@@ -142,7 +143,9 @@ describe('Lifecycle', () => {
     lifecycle.ready('listening');
     await lifecycle.shutdown({ kind: 'requested', detail: 'test' });
 
-    assert.deepEqual(notifier.calls, ['ready', 'stopping']);
+    // The stop carries the budget and a margin (`P-227`), so `TimeoutStopSec` cannot cut short a
+    // drain the configuration allows.
+    assert.deepEqual(notifier.calls, ['ready', 'stopping 6000']);
   });
 
   it('asks for more start-up time with the reason in the same notification (P-215)', () => {

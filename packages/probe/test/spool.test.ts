@@ -1,8 +1,17 @@
 import { strict as assert } from 'node:assert';
-import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+  type FileHandle,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, beforeEach, describe, it } from 'node:test';
+import { after, beforeEach, describe, it, type TestContext } from 'node:test';
 import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
 import { ResultSpool } from '../src/spool/spool.js';
@@ -251,6 +260,156 @@ describe('result spool', () => {
     assert.equal(kept.at(-1), 40, 'the newest result is always kept');
     assert.ok((kept[0] ?? 0) > 1, 'and the oldest went first');
     await spool.close();
+  });
+
+  /** Peeks and commits until the spool hands back nothing, and returns every sensor it saw. */
+  async function drainAll(spool: ResultSpool): Promise<number[]> {
+    const seen: number[] = [];
+    for (let round = 0; round < 50; round += 1) {
+      const batch = await spool.peek(100);
+      if (batch.length === 0) break;
+      seen.push(...batch.map((r) => r.sensorId));
+      await spool.commit();
+    }
+    return seen;
+  }
+
+  it('keeps draining when the segment a batch came from is evicted before the ack', async () => {
+    // **`P-227`.** The drain peeks, waits for the core, then commits, and appends arrive in
+    // between. At the cap, one of them evicts the segment the batch was read from. `commit` put
+    // the cursor back on that deleted segment, and from then on every `peek` found nothing: the
+    // link up, the probe heartbeating, and not one more result delivered until a restart.
+    // About 125 bytes a record: two to a 300-byte segment, and a third segment tips 600.
+    const spool = await openSpool(dir, { maxBytes: 600, segmentMaxBytes: 300 });
+    for (let id = 1; id <= 4; id += 1) await spool.append([result(id)]);
+
+    assert.deepEqual(
+      (await spool.peek(1)).map((r) => r.sensorId),
+      [1],
+    );
+    // While the core is still answering: the spool fills and evicts the oldest segment, [1, 2].
+    await spool.append([result(5)]);
+    assert.equal(spool.stats().dropped, 1, 'only 2 is dropped; 1 is in flight and may yet arrive');
+
+    await spool.commit();
+    assert.deepEqual(await drainAll(spool), [3, 4, 5], 'and the drain carries on after it');
+    assert.equal(spool.stats().pending, 0);
+    assert.equal(spool.stats().dropped, 1, 'the acknowledged 1 was delivered, not dropped');
+    await spool.close();
+  });
+
+  it('counts an evicted in-flight result as dropped once its batch is never confirmed', async () => {
+    const spool = await openSpool(dir, { maxBytes: 600, segmentMaxBytes: 300 });
+    for (let id = 1; id <= 4; id += 1) await spool.append([result(id)]);
+    await spool.peek(1);
+    await spool.append([result(5)]);
+
+    // The core asked for a retry, so the drain peeks again without committing: 1 is on no disk
+    // and was never acknowledged.
+    assert.deepEqual(
+      (await spool.peek(100)).map((r) => r.sensorId),
+      [3, 4, 5],
+    );
+    assert.equal(spool.stats().dropped, 2, '2 at eviction, and 1 now that its batch is gone');
+    await spool.commit();
+    assert.equal(spool.stats().pending, 0);
+    await spool.close();
+  });
+
+  /** The prototype every `FileHandle` shares, so a test can intercept the spool's own writes. */
+  async function fileHandlePrototype(): Promise<FileHandle> {
+    const handle = await open(join(dir, 'prototype-probe'), 'w');
+    await handle.close();
+    await rm(join(dir, 'prototype-probe'));
+    return Object.getPrototypeOf(handle) as FileHandle;
+  }
+
+  /**
+   * The next write lands half its bytes and reports it, and the one after fails with ENOSPC: a
+   * disk that fills in the middle of a record.
+   */
+  async function fillDiskMidRecord(t: TestContext): Promise<FileHandle> {
+    const prototype = await fileHandlePrototype();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- applied below to the handle it belongs to
+    const original = prototype.write;
+    const plan: ('short' | 'full')[] = ['short', 'full'];
+    t.mock.method(prototype, 'write', function (this: FileHandle, ...args: unknown[]) {
+      const step = plan.shift();
+      if (step === 'full') {
+        return Promise.reject(
+          Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }),
+        );
+      }
+      if (step === 'short') {
+        const buffer = args[0] as Buffer;
+        const from = (args[1] as number | undefined) ?? 0;
+        const half = buffer.subarray(from, from + Math.floor((buffer.byteLength - from) / 2));
+        return (Reflect.apply(original, this, [half]) as Promise<unknown>).then(() => ({
+          bytesWritten: half.byteLength,
+          buffer,
+        }));
+      }
+      return Reflect.apply(original, this, args) as Promise<unknown>;
+    });
+    return prototype;
+  }
+
+  it('takes back a record a full disk half-wrote, and counts it as unwritten', async (t) => {
+    // **`P-227`.** A write on a filling disk returns a short count rather than an error, and the
+    // spool ignored the count. The fragment joined the next record into one unparseable line,
+    // two results were lost and counted as crash corruption, and the segment's counted size ran
+    // past the file, so once it rolled `peek` waited at its real end for good.
+    const spool = await openSpool(dir, { segmentMaxBytes: 300 });
+    await spool.append([result(1)]);
+    await fillDiskMidRecord(t);
+    await assert.rejects(spool.append([result(2)]), /ENOSPC/, 'the caller hears about it');
+    t.mock.restoreAll();
+
+    for (let id = 3; id <= 7; id += 1) await spool.append([result(id)]);
+    assert.deepEqual(await drainAll(spool), [1, 3, 4, 5, 6, 7], 'everything written arrives');
+    const stats = spool.stats();
+    assert.equal(stats.unwritten, 1, 'the half-written result is counted as never written');
+    assert.equal(stats.corrupt, 0, 'and it tore nothing: the fragment was taken back');
+    assert.equal(stats.pending, 0);
+    await spool.close();
+  });
+
+  it('seals a segment round a fragment it cannot take back, and drains past it', async (t) => {
+    const spool = await openSpool(dir, { segmentMaxBytes: 300 });
+    await spool.append([result(1)]);
+    const prototype = await fillDiskMidRecord(t);
+    t.mock.method(prototype, 'truncate', () =>
+      Promise.reject(Object.assign(new Error('EIO: i/o error, ftruncate'), { code: 'EIO' })),
+    );
+    await assert.rejects(spool.append([result(2)]));
+    t.mock.restoreAll();
+
+    for (let id = 3; id <= 7; id += 1) await spool.append([result(id)]);
+    assert.deepEqual(await drainAll(spool), [1, 3, 4, 5, 6, 7], 'the drain does not stall');
+    const stats = spool.stats();
+    assert.equal(stats.unwritten, 1);
+    assert.equal(stats.corrupt, 1, 'the fragment left behind is one torn record');
+    assert.equal(stats.pending, 0);
+    await spool.close();
+  });
+
+  it('loses nothing to a clock stepped back before a restart', async (t) => {
+    // **`P-227`.** Segments were named for `Date.now()`, and `#load` reads them in name order.
+    // One rolled after a backward step sorted in front of the cursor's segment on restart, so
+    // nothing read it, and the first commit reclaimed it as confirmed: lost, and counted nowhere.
+    let clock = 2_000_000_000_000;
+    t.mock.method(Date, 'now', () => clock);
+    const spool = await openSpool(dir, { segmentMaxBytes: 300 });
+    for (let id = 1; id <= 2; id += 1) await spool.append([result(id)]);
+    clock -= 3_600_000;
+    for (let id = 3; id <= 6; id += 1) await spool.append([result(id)]);
+    await spool.close();
+
+    const reopened = await openSpool(dir, { segmentMaxBytes: 300 });
+    assert.equal(reopened.stats().pending, 6, 'every result is counted after the restart');
+    assert.deepEqual(await drainAll(reopened), [1, 2, 3, 4, 5, 6], 'and delivered, in order');
+    assert.equal(reopened.stats().dropped, 0);
+    await reopened.close();
   });
 
   it('reclaims space as results are confirmed', async () => {

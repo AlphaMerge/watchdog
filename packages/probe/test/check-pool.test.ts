@@ -377,6 +377,14 @@ describe('check pool', () => {
       }
       await until(() => pool.stats().workerCrashes >= 3, 'three failed starts');
 
+      // **And it backs off while it keeps trying** (`P-227`). With ready workers the latch never
+      // fires, so every failed start was replaced at once: a boot, a failed import and an error
+      // line, eight chains at a time, for as long as the cause lasted. Hundreds a second here.
+      const before = pool.stats().workerCrashes;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      const retried = pool.stats().workerCrashes - before;
+      assert.ok(retried < 20, `${String(retried)} failed starts in two seconds`);
+
       assert.notEqual(pool.submit(request(99, 'test.ok')), 'disabled', 'the pool still works');
       await until(() => seen.length >= 1, 'checks to keep coming back');
     } finally {

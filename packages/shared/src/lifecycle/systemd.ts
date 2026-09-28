@@ -19,7 +19,11 @@ export interface ServiceNotifier {
   ready(status?: string): void;
   /** Watchdog keep-alive. Must arrive more often than `WatchdogSec`. */
   watchdog(): void;
-  stopping(status?: string): void;
+  /**
+   * Tell the supervisor the service is stopping, and, with `extendMs`, that the stop may take that
+   * long (`P-227`). Sent together in one datagram for the reason `extendTimeout` gives.
+   */
+  stopping(status?: string, extendMs?: number): void;
   status(text: string): void;
   /**
    * Ask for more time to finish starting (`P-215`), as `EXTEND_TIMEOUT_USEC`.
@@ -66,8 +70,18 @@ export function createServiceNotifier(logger: Logger, env = process.env): Servic
     watchdog: () => {
       send([pidArg, 'WATCHDOG=1'], logger);
     },
-    stopping: (status) => {
-      send([pidArg, 'STOPPING=1', ...(status === undefined ? [] : [`STATUS=${status}`])], logger);
+    stopping: (status, extendMs) => {
+      send(
+        [
+          pidArg,
+          'STOPPING=1',
+          ...(extendMs === undefined
+            ? []
+            : [`EXTEND_TIMEOUT_USEC=${String(Math.max(0, Math.round(extendMs)) * 1000)}`]),
+          ...(status === undefined ? [] : [`STATUS=${status}`]),
+        ],
+        logger,
+      );
     },
     status: (text) => {
       send([pidArg, `STATUS=${text}`], logger);

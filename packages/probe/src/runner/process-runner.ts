@@ -95,6 +95,10 @@ export interface ProcessRunnerOptions {
 interface Job {
   request: CheckRequest;
   queuedAt: bigint;
+  /** Answered already, by `stop` abandoning it, so the run's own result is not reported too. */
+  settled: boolean;
+  /** Ends the check's process when `stop` abandons it. */
+  abort: AbortController;
 }
 
 interface ChildAnswer {
@@ -135,6 +139,8 @@ export class ProcessRunner {
 
   readonly #queue: Job[] = [];
   readonly #active = new Set<number>();
+  /** The jobs `#running` counts, so `stop` can answer the ones it stops waiting for. */
+  readonly #inProgress = new Set<Job>();
   #running = 0;
   #stopped = false;
 
@@ -211,7 +217,12 @@ export class ProcessRunner {
     }
 
     this.#active.add(request.sensorId);
-    this.#queue.push({ request, queuedAt: process.hrtime.bigint() });
+    this.#queue.push({
+      request,
+      queuedAt: process.hrtime.bigint(),
+      settled: false,
+      abort: new AbortController(),
+    });
     this.#pump();
     return 'accepted';
   }
@@ -221,8 +232,10 @@ export class ProcessRunner {
       const job = this.#queue.shift();
       if (job === undefined) return;
       this.#running += 1;
+      this.#inProgress.add(job);
       void this.#run(job).finally(() => {
         this.#running -= 1;
+        this.#inProgress.delete(job);
         this.#active.delete(job.request.sensorId);
         this.#pump();
       });
@@ -263,12 +276,15 @@ export class ProcessRunner {
         ...this.#childEnv,
       },
       timeoutMs: job.request.timeoutMs + KILL_MARGIN_MS,
+      signal: job.abort.signal,
       maxOutputBytes: this.#maxOutputBytes,
       stdin: payload,
       ...(this.#uid === undefined ? {} : { uid: this.#uid }),
       ...(this.#gid === undefined ? {} : { gid: this.#gid }),
     });
 
+    // Abandoned by `stop` while it ran, and answered there.
+    if (job.settled) return;
     const answer = parseAnswer(run.stdout);
 
     if (answer !== null) {
@@ -371,6 +387,8 @@ export class ProcessRunner {
         }
       | { outcome: 'error'; message: string; durationMs: number },
   ): void {
+    if (job.settled) return;
+    job.settled = true;
     const result: CheckResult = {
       sensorId: job.request.sensorId,
       at: new Date().toISOString(),
@@ -402,13 +420,20 @@ export class ProcessRunner {
   }
 
   /**
-   * Stops accepting work and waits for what is running.
+   * Stops accepting work and waits for what is running, for up to `drainMs` when given.
    *
-   * Nothing is killed here: `runProgram` already holds a deadline on every child, so the longest
-   * this can take is the slowest check's own timeout plus the kill margin. Killing them instead
-   * would turn a clean shutdown into a batch of results that say a check crashed.
+   * A check that finishes inside the window reports what it found, as on any other day. One still
+   * running when the window closes is answered as `pool-stopped`, which the result sink counts as
+   * abandoned, and its process is ended. It is not reported as a crash, because it did not crash.
+   *
+   * **Bounded, because the service budget is shared** (`P-227`). This used to wait for the
+   * slowest check's own timeout, 30 s by default and up to fifteen minutes, inside a 30 s hook
+   * and a 20 s service budget. A stop that arrived while a script hung ran the budget out here.
+   * The check pool's drain and the result spool's close, which `P-205` placed last on purpose,
+   * then never ran, and the probe exited 1 on an ordinary `systemctl stop` and left the unit
+   * `failed`. Without `drainMs` it still waits for everything, which only a test should ask for.
    */
-  async stop(): Promise<void> {
+  async stop(options: { drainMs?: number } = {}): Promise<void> {
     this.#stopped = true;
     // Answered rather than emptied. Truncating the array left every queued check accepted and
     // never settled — counted in nothing, and its sensor stuck in `#active` — which is the drop
@@ -422,7 +447,28 @@ export class ProcessRunner {
         message: 'probe is stopping',
       });
     }
-    while (this.#running > 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    const deadline =
+      options.drainMs === undefined ? Infinity : performance.now() + Math.max(0, options.drainMs);
+    while (this.#running > 0 && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const abandoned = [...this.#inProgress].filter((job) => !job.settled);
+    for (const job of abandoned) {
+      this.#failed += 1;
+      this.#emit(job, msSince(job.queuedAt), 'pool-stopped', {
+        outcome: 'error',
+        durationMs: 0,
+        message: 'probe is stopping',
+      });
+      job.abort.abort();
+    }
+    if (options.drainMs !== undefined) {
+      this.#logger.info(
+        { drainMs: options.drainMs, abandoned: abandoned.length },
+        'process runner stopped',
+      );
+    }
   }
 }
 

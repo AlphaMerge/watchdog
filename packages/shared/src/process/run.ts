@@ -24,6 +24,11 @@ export interface ProgramRunOptions {
   readonly gid?: number;
   /** How long a timed-out program is given to end on `SIGTERM` before `SIGKILL`. */
   readonly graceMs?: number;
+  /**
+   * Ends the program early, the way its deadline would, and it is reported as a `timeout`
+   * (`P-227`). The caller that aborted knows why. What the program started goes with it.
+   */
+  readonly signal?: AbortSignal;
 }
 
 interface ProgramOutput {
@@ -120,7 +125,8 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
 
     const grace = options.graceMs ?? DEFAULT_GRACE_MS;
     let hardTimer: NodeJS.Timeout | undefined;
-    const deadline = setTimeout(() => {
+    const end = (): void => {
+      if (timedOut || settled) return;
       timedOut = true;
       terminate(child, 'SIGTERM');
       // Asked to stop, then made to. A program that ignores SIGTERM is exactly the one a hard
@@ -129,13 +135,17 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
         hardKilled = true;
         terminate(child, 'SIGKILL');
       }, grace);
-    }, options.timeoutMs);
+    };
+    const deadline = setTimeout(end, options.timeoutMs);
+    options.signal?.addEventListener('abort', end, { once: true });
+    if (options.signal?.aborted === true) end();
 
     const finish = (run: ProgramRun): void => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       if (hardTimer !== undefined) clearTimeout(hardTimer);
+      options.signal?.removeEventListener('abort', end);
       resolve(run);
     };
 

@@ -4867,6 +4867,44 @@ because each is a decision rather than a defect:
 
       Mutation 1/1: without the assignment, both fail, and the sweep names all eleven routes.
 
+- [x] **P-227 — the spool's durability, and the probe's stop** · M · R-02, P-205 · Found by the
+      round-3 review of the probe. **Eviction during an in-flight batch** stopped the drain until
+      restart. The drain peeks, waits for the core, then commits, and appends arrive in between.
+      At the cap, one evicted the segment the batch came from. `commit` subtracted the batch from
+      the wrong segments and put the cursor back on the deleted one. Every later `peek` found
+      nothing while the link stayed up. **A short write** on a filling disk was taken as success.
+      The fragment joined the next record into one torn line, two results were counted as crash
+      corruption, and the segment's counted size ran past the file, so the drain waited at its
+      real end for good. **Segments were named for the wall clock**. After a backward step and a
+      restart, a later segment sorted in front of the cursor's. Nothing read it, and the first
+      commit reclaimed it unsent and uncounted. **The process runner waited for its slowest
+      check**, 30 s by default, inside a 20 s budget. On a stop during a hung script, the pool's
+      drain and the spool's close never ran, and an ordinary stop exited 1. **A failed worker
+      start was replaced at once** whenever another worker was ready, so a lasting cause (a tree
+      half-copied by an upgrade) booted and logged a worker error dozens of times a second.
+      **`shutdownTimeoutMs` was never told to systemd**, so `TimeoutStopSec` was the real bound.
+      **The spool summary** was read before any late result could arrive, so `unspooled` was
+      always 0.
+
+      **Fixed.** A batch records its lines per segment. Eviction moves a span's lines out of
+      `dropped` and into the batch. An acknowledgement delivered them, and a batch replaced or
+      still open at close counts them as dropped then. A cursor on a missing segment is repaired
+      at the next `peek`, with an error, rather than obeyed. `peek`, `commit` and appends share one
+      queue. A write is finished or taken back with `truncate`. If that fails, the segment is
+      sealed and its unterminated tail is passed as torn. A segment is named no earlier than the
+      one before it. `ProcessRunner.stop` takes `drainMs` (5 s, like the pool), then answers what
+      is left as `pool-stopped` and ends the processes through a new `runProgram` `signal`. Failed
+      starts back off from 250 ms to 30 s, with one error line per streak. `STOPPING=1` carries
+      `EXTEND_TIMEOUT_USEC` for the budget plus 5 s. `main.ts` logs the sink's counts after the
+      spool closes. `administration.md` has a new section, *What a stop does*.
+
+      **Tests** (each of the first five fails on the code before): `spool.test.ts` evicts between
+      `peek` and `commit`, half-writes a record then fails with `ENOSPC`, does the same with
+      `truncate` failing too, and steps the clock back an hour before a restart. It also counts
+      an evicted in-flight result once its batch is abandoned. `process-runner.test.ts` stops with
+      a 200 ms window while a check sleeps for 8 s. `check-pool.test.ts` counts failed starts over
+      two seconds: 66 before, under 20 now. `lifecycle.test.ts` expects the extension on stop.
+
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
       `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a

@@ -250,6 +250,39 @@ describe('process runner', () => {
     assert.equal(runner.stats().queued, 0);
   });
 
+  it('stops waiting for a running check at the drain window, and counts it', async () => {
+    // **`P-227`.** `stop` waited for the slowest check's own timeout, 30 s by default, inside a
+    // 20 s service budget. A stop that arrived while a script hung ran the budget out here, the
+    // pool's drain and the spool's close never ran, and the probe exited 1.
+    const { runner, seen } = runnerOf();
+    runner.submit(request(60, 'test.slow', { delayMs: 8_000, timeoutMs: 20_000 }));
+    await until(() => runner.stats().running === 1, 'the check to start');
+
+    const startedAt = performance.now();
+    await runner.stop({ drainMs: 200 });
+    const tookMs = performance.now() - startedAt;
+    assert.ok(tookMs < 2_000, `stop took ${String(Math.round(tookMs))} ms with a 200 ms window`);
+
+    assert.deepEqual(
+      seen.map((one) => [one.result.sensorId, one.meta.phase]),
+      [[60, 'pool-stopped']],
+      'answered as abandoned, which the result sink counts',
+    );
+    await until(() => runner.stats().running === 0, 'its process to be ended', 5_000);
+    assert.equal(seen.length, 1, 'and the ended process reports nothing more');
+  });
+
+  it('lets a check that finishes inside the drain window report what it found', async () => {
+    const { runner, seen } = runnerOf();
+    runner.submit(request(61, 'test.slow', { delayMs: 300 }));
+    await until(() => runner.stats().running === 1, 'the check to start');
+    await runner.stop({ drainMs: 5_000 });
+    assert.deepEqual(
+      seen.map((one) => [one.result.sensorId, one.meta.phase]),
+      [[61, 'execute']],
+    );
+  });
+
   it('stops accepting work once stopped', async () => {
     const { runner } = runnerOf();
     await runner.stop();

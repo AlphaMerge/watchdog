@@ -414,6 +414,23 @@ sudo systemctl reset-failed ms-core ms-probe
 sudo systemctl start ms-core ms-probe
 ```
 
+### What a stop does
+
+`systemctl stop` sends `SIGTERM`, and the service drains inside `service.shutdownTimeoutMs`
+(20 s by default) and exits 0. It tells systemd that budget as it starts to stop, so a raised
+budget holds even past the unit's `TimeoutStopSec`. You do not need a drop-in for it. On Windows
+there is no such message: keep `stoptimeout` in the WinSW file above the budget.
+
+A probe stops scheduling first. Checks already running get 5 s in the process runner and then
+5 s in the worker pool to finish and be spooled. What outlives that is abandoned: the check's
+process is ended, and the result spool's closing line counts it under `abandoned`. A check that
+the stop cut off is not spooled. Spooling it would give the core a Down for every sensor that
+was mid-check at every restart. The spool closes last, so every result that did finish is on disk
+before the process exits.
+
+`shutdown budget exhausted` in the journal, with exit 1, means some part of the drain did not
+finish in time. The line before it names the hook.
+
 ### Prometheus
 
 `/metrics`, outside `/api/v1` because that is the path every scraper config, service-discovery

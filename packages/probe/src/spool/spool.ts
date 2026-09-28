@@ -10,7 +10,7 @@ import {
   type FileHandle,
 } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { CheckResult, Logger } from '@ms/shared';
+import { describeError, type CheckResult, type Logger } from '@ms/shared';
 
 /**
  * The probe's disk-backed result spool (R-02).
@@ -85,6 +85,12 @@ interface Segment {
   pending: number;
 }
 
+/** Lines a peek consumed from one segment: its records and the lines it skipped. */
+interface Span {
+  segment: string;
+  lines: number;
+}
+
 interface Cursor {
   /** Segment the next unacknowledged record is in, or null when the spool is empty. */
   segment: string | null;
@@ -125,17 +131,46 @@ export class ResultSpool {
    * commit rather than at read: `peek` re-reads from the cursor until the batch is confirmed, and
    * the drain does not confirm on a retryable nack, so counting at read turned one torn record
    * into a fabricated per-second rate of unreadable results.
+   *
+   * **`spans` is per segment, because a segment can go while the batch is in flight (`P-227`).**
+   * The drain peeks, waits for the core, then commits, and appends keep arriving in between. At
+   * the cap, one of them evicts the segment the batch was read from. `commit` used to subtract
+   * the batch from whatever segments were left, which were the wrong ones, and then put the cursor
+   * back on the deleted segment. Every later `peek` found no such segment and returned nothing,
+   * with the link up and the probe heartbeating, until a restart. Eviction now takes a span's
+   * lines out of the batch and into `evicted`: they were neither dropped nor delivered yet. The
+   * batch's outcome settles them. An acknowledgement delivered them, and a batch replaced by a
+   * fresh peek, or still open at close, means they are gone, and they are counted as dropped then.
    */
   #peeked:
-    { records: number; skipped: number; torn: number; segment: string; offset: number } | undefined;
+    | {
+        records: number;
+        skipped: number;
+        torn: number;
+        spans: Span[];
+        evicted: number;
+        segment: string;
+        offset: number;
+      }
+    | undefined;
   /**
-   * Appends run one at a time.
+   * Everything that touches the segments runs one at a time: appends, eviction, `peek` and
+   * `commit`.
    *
    * The pool reports results from several workers and its callback is synchronous, so without
    * this two `write` calls could interleave and produce a line that is half of each. Serialising
-   * here rather than at every call site means a caller cannot forget.
+   * here rather than at every call site means a caller cannot forget. `peek` and `commit` are on
+   * it too (`P-227`), so an eviction cannot delete a segment while `peek` is between finding it
+   * and reading it.
    */
   #writing: Promise<void> = Promise.resolve();
+  /**
+   * The next append starts a new segment (`P-227`). Set when a failed write left bytes that
+   * could not be taken back, so that the segment is sealed with the fragment inside it. `peek`
+   * passes a sealed segment's unterminated tail as torn, where the active segment's would wait
+   * for the rest of the line.
+   */
+  #rollNext = false;
 
   private constructor(options: SpoolOptions) {
     this.#dir = options.dir;
@@ -169,10 +204,7 @@ export class ResultSpool {
       this.#unwritten += results.length;
       throw new SpoolClosedError();
     }
-    const queued = this.#writing.then(() => this.#appendNow(results));
-    // Swallowed on the chain so one failed append cannot reject every later one; the caller
-    // still sees its own error.
-    this.#writing = queued.catch(() => undefined);
+    const queued = this.#serially(() => this.#appendNow(results));
     // **Counted here, not at the call site** (`P-78`). A failed write loses exactly these
     // results, and this is the only place that knows how many — every caller sees a rejected
     // promise and an error, neither of which carries a number. `main.ts` logged the error and the
@@ -184,15 +216,35 @@ export class ResultSpool {
     });
   }
 
+  /**
+   * Runs `task` after everything already queued, and before anything queued later.
+   *
+   * Failures are swallowed on the chain, so one failed append cannot reject every later one. The
+   * caller still sees its own error.
+   */
+  #serially<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.#writing.then(task);
+    this.#writing = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   async #appendNow(results: readonly CheckResult[]): Promise<void> {
     const payload = Buffer.from(results.map((result) => JSON.stringify(result)).join('\n') + '\n');
     let active = this.#segments.at(-1);
 
-    if (active === undefined || active.bytes + payload.byteLength > this.#segmentMaxBytes) {
+    if (
+      active === undefined ||
+      this.#rollNext ||
+      active.bytes + payload.byteLength > this.#segmentMaxBytes
+    ) {
       active = await this.#roll();
+      this.#rollNext = false;
     }
 
-    await this.#handle?.write(payload);
+    await this.#write(active, payload);
     active.bytes += payload.byteLength;
     active.pending += results.length;
     if (this.#cursor.segment === null) this.#cursor = { segment: active.name, offset: 0 };
@@ -201,19 +253,94 @@ export class ResultSpool {
   }
 
   /**
+   * Writes all of `payload` to the active segment, or none of it (`P-227`).
+   *
+   * **A write can succeed with fewer bytes than it was given.** On a filesystem that fills up,
+   * the bytes that fit in the file's last block land and the call returns a short count rather
+   * than an error, and `FileHandle.write` hands that count back without trying again. This used
+   * to ignore it. The fragment then joined the next record into one line that did not parse, and
+   * `segment.bytes` ran ahead of the file, so once the segment rolled `peek` waited at its real
+   * end for bytes that would never come. The drain stalled until a restart. Now the rest is
+   * written, and if that fails the fragment is cut off again, so the segment still ends on a
+   * record boundary and its size is still its file's.
+   */
+  async #write(active: Segment, payload: Buffer): Promise<void> {
+    const handle = this.#handle;
+    if (handle === undefined) throw new Error('the result spool has no segment open to write to');
+    let written = 0;
+    try {
+      while (written < payload.byteLength) {
+        const { bytesWritten } = await handle.write(payload, written);
+        if (bytesWritten === 0) {
+          throw new Error(
+            `the disk took none of the last ${String(payload.byteLength - written)} bytes of a record`,
+          );
+        }
+        written += bytesWritten;
+      }
+    } catch (error) {
+      if (written > 0) await this.#cutFragment(handle, active, written);
+      throw error;
+    }
+  }
+
+  /** Takes back the part of a record a failed write left, or seals the segment around it. */
+  async #cutFragment(handle: FileHandle, active: Segment, written: number): Promise<void> {
+    try {
+      await handle.truncate(active.bytes);
+    } catch (error) {
+      // Shrinking a file needs no space, so this is very unlikely. If it happens anyway, the
+      // fragment stays, the size is taken from the file, and the next append starts a new
+      // segment. `peek` then passes the unterminated tail of a sealed segment as torn.
+      active.bytes = await handle
+        .stat()
+        .then((stats) => stats.size)
+        .catch(() => active.bytes + written);
+      this.#rollNext = true;
+      this.#logger.error(
+        { ...describeError(error), segment: active.name, fragmentBytes: written },
+        'could not remove part of a record a failed write left; sealing the segment around it',
+      );
+    }
+  }
+
+  /**
    * The oldest unacknowledged results, without removing them.
    *
    * Nothing leaves the spool until the core has said it stored the batch: a lost acknowledgement
    * costs a duplicate write, which is free, while an optimistic delete costs the reading.
    */
-  async peek(max: number): Promise<CheckResult[]> {
+  peek(max: number): Promise<CheckResult[]> {
+    return this.#serially(() => this.#peekNow(max));
+  }
+
+  async #peekNow(max: number): Promise<CheckResult[]> {
+    // A batch that was never confirmed, replaced by this one. Whatever eviction took from it is
+    // on no disk and was not acknowledged, so it is gone now and is counted as gone.
+    this.#settleUnconfirmed();
     if (this.#cursor.segment === null || max <= 0) return [];
+    // **A cursor on a segment that is not there is repaired, not obeyed.** Every later read would
+    // find nothing, with the link up and results on disk, which is the silent stall `P-227` was
+    // filed for. Replaying from the oldest segment costs duplicates at worst, and the core's
+    // unique index makes those free, which is `#loadCursor`'s rule for a cursor it cannot read.
+    const named = this.#cursor.segment;
+    if (!this.#segments.some((segment) => segment.name === named)) {
+      this.#logger.error(
+        { cursor: named, oldest: this.#segments[0]?.name ?? null },
+        'the spool cursor names a segment that no longer exists; replaying from the oldest',
+      );
+      await this.#countPending();
+      // Typed as declared: the checker narrowed the field above and cannot see `#countPending` move it.
+      const repaired: Cursor = this.#cursor;
+      if (repaired.segment === null) return [];
+    }
 
     const results: CheckResult[] = [];
     // Consumed but unusable, and the unparseable subset of it. Across segments, because one peek
     // may span a boundary.
     let skipped = 0;
     let torn = 0;
+    const spans: Span[] = [];
     // Where the *next* unread record starts. Kept as a pair rather than recomputed at the end:
     // running off the last segment must leave this at that segment's end, not reset it to the
     // beginning — which would make every commit re-read the batch it just confirmed.
@@ -231,10 +358,16 @@ export class ResultSpool {
 
       const slice = (await readFile(segment.path)).subarray(position.offset);
       let consumed = 0;
+      let lines = 0;
+      let full = false;
 
       for (const line of splitLines(slice)) {
-        if (results.length >= max) break;
+        if (results.length >= max) {
+          full = true;
+          break;
+        }
         consumed += line.length + 1;
+        lines += 1;
         const text = line.toString('utf8').trim();
         if (text === '') {
           skipped += 1;
@@ -249,13 +382,20 @@ export class ResultSpool {
           torn += 1;
         }
       }
+      if (lines > 0) spans.push({ segment: current, lines });
 
-      const offset = position.offset + consumed;
       const next = this.#segments[this.#segments.indexOf(segment) + 1];
-      position =
-        offset >= segment.bytes && next !== undefined
-          ? { segment: next.name, offset: 0 }
-          : { segment: current, offset };
+      // **A segment with one after it is finished when its lines are** (`P-227`), whatever its
+      // counted size says. Nothing appends to a segment once the next is rolled, so what is left
+      // past its last newline is a fragment no write will complete. This used to compare the
+      // offset with `segment.bytes`, and a count that ran ahead of the file held `peek` at the
+      // file's real end for good. The fragment is torn, counted once at commit like any other.
+      if (next !== undefined && !full) {
+        if (consumed < slice.length) torn += 1;
+        position = { segment: next.name, offset: 0 };
+      } else {
+        position = { segment: current, offset: position.offset + consumed };
+      }
 
       // Nothing readable in this segment. Break only if we did not just step to another one:
       // a cursor parked exactly on a boundary — which is where a drain that caught up leaves it,
@@ -268,20 +408,24 @@ export class ResultSpool {
     }
 
     this.#peeked =
-      results.length === 0 && skipped === 0
+      results.length === 0 && skipped === 0 && torn === 0
         ? undefined
-        : { records: results.length, skipped, torn, ...position };
+        : { records: results.length, skipped, torn, spans, evicted: 0, ...position };
 
     // Bytes consumed, nothing to send. No batch means nothing will ever acknowledge these, so
     // nothing would call `commit` — and the same unusable lines would be re-read for ever while
     // `pending` never reached zero. Confirming here discards no result: only lines that cannot
     // become one.
-    if (results.length === 0 && skipped > 0) await this.commit();
+    if (results.length === 0 && (skipped > 0 || torn > 0)) await this.#commitNow();
     return results;
   }
 
   /** Confirms the last `peek`: those results are stored and their space can be reclaimed. */
-  async commit(): Promise<void> {
+  commit(): Promise<void> {
+    return this.#serially(() => this.#commitNow());
+  }
+
+  async #commitNow(): Promise<void> {
     const peeked = this.#peeked;
     if (peeked === undefined) return;
     this.#peeked = undefined;
@@ -289,18 +433,29 @@ export class ResultSpool {
     // Counted here, once, for the reason given on `#peeked`.
     this.#corrupt += peeked.torn;
     // Skipped lines are subtracted too: `pending` is a count of lines, so a line the reader
-    // passed over is no longer pending however unusable it was.
-    let remaining = peeked.records + peeked.skipped;
-    for (const segment of [...this.#segments]) {
-      if (remaining <= 0) break;
-      const taken = Math.min(segment.pending, remaining);
-      segment.pending -= taken;
-      remaining -= taken;
+    // passed over is no longer pending however unusable it was. Each span from the segment it
+    // was read from, and none from a segment eviction took while the batch was in flight.
+    for (const span of peeked.spans) {
+      const segment = this.#segments.find((candidate) => candidate.name === span.segment);
+      if (segment !== undefined) segment.pending -= Math.min(segment.pending, span.lines);
     }
 
-    this.#cursor = { segment: peeked.segment, offset: peeked.offset };
+    // Onto where the batch ended, unless eviction took that segment too. Then `#evict` has
+    // already moved the cursor to the oldest segment left, and every segment the batch read has
+    // gone, so that is where the next unconfirmed record is.
+    if (this.#segments.some((segment) => segment.name === peeked.segment)) {
+      this.#cursor = { segment: peeked.segment, offset: peeked.offset };
+    }
     await this.#reclaim();
     await this.#saveCursor();
+  }
+
+  /** Counts as dropped what eviction took from a batch that will now never be confirmed. */
+  #settleUnconfirmed(): void {
+    const peeked = this.#peeked;
+    if (peeked === undefined) return;
+    this.#peeked = undefined;
+    this.#dropped += peeked.evicted;
   }
 
   async close(): Promise<void> {
@@ -308,6 +463,7 @@ export class ResultSpool {
     // Appends accepted before this point are already on the chain and must finish while the handle
     // is still open; without this they ran after it was cleared and vanished silently.
     await this.#writing.catch(() => undefined);
+    this.#settleUnconfirmed();
     await this.#handle?.close();
     this.#handle = undefined;
     await this.#saveCursor();
@@ -398,13 +554,34 @@ export class ResultSpool {
 
   async #roll(): Promise<Segment> {
     await this.#handle?.close();
-    // Monotonic and lexicographically sortable, so `sort()` is chronological order.
-    const name = `${String(Date.now()).padStart(14, '0')}-${randomSuffix()}${SEGMENT_SUFFIX}`;
+    const name = `${String(this.#nextSegmentMs()).padStart(14, '0')}-${randomSuffix()}${SEGMENT_SUFFIX}`;
     const path = join(this.#dir, name);
     this.#handle = await open(path, 'a');
     const segment: Segment = { name, path, bytes: 0, pending: 0 };
     this.#segments.push(segment);
     return segment;
+  }
+
+  /**
+   * The time a new segment is named for: now, or just after the newest segment, whichever is
+   * later (`P-227`).
+   *
+   * Names sort into the order `#load` reads segments in after a restart, and the wall clock can
+   * step backwards (an NTP step, a clock that ran ahead, `date -s`). A segment rolled after a step
+   * used to be named before the segment the cursor was in. After a restart it sorted in front of
+   * the cursor, so nothing counted it and nothing read it, and the first commit's `#reclaim`
+   * deleted it as already confirmed. Every result in it was lost, and none was counted.
+   */
+  #nextSegmentMs(): number {
+    const now = Date.now();
+    const newest = Number.parseInt(this.#segments.at(-1)?.name.slice(0, 14) ?? '', 10);
+    if (Number.isNaN(newest) || now > newest) return now;
+    this.#logger.warn(
+      { clockMs: now, newestSegmentMs: newest },
+      'the wall clock is behind the newest spool segment; naming the next one after it, so the ' +
+        'order survives a restart',
+    );
+    return newest + 1;
   }
 
   /** Oldest-first, and counted. A spool that silently forgets is worse than no spool. */
@@ -413,14 +590,25 @@ export class ResultSpool {
       const oldest = this.#segments.shift();
       if (oldest === undefined) break;
 
-      this.#dropped += oldest.pending;
+      // Lines of a batch the drain is waiting on are not dropped yet: the acknowledgement may
+      // still deliver them. They move to the batch, which settles them (see `#peeked`).
+      const peeked = this.#peeked;
+      const inFlight = peeked?.spans.find((span) => span.segment === oldest.name)?.lines ?? 0;
+      if (peeked !== undefined && inFlight > 0) peeked.evicted += inFlight;
+      const dropped = Math.max(0, oldest.pending - inFlight);
+      this.#dropped += dropped;
       await rm(oldest.path, { force: true });
 
       if (this.#cursor.segment === oldest.name) {
         this.#cursor = { segment: this.#segments[0]?.name ?? null, offset: 0 };
       }
       this.#logger.warn(
-        { droppedRecords: oldest.pending, totalDropped: this.#dropped, maxBytes: this.#maxBytes },
+        {
+          droppedRecords: dropped,
+          inFlight,
+          totalDropped: this.#dropped,
+          maxBytes: this.#maxBytes,
+        },
         'spool is full; evicted the oldest results',
       );
     }

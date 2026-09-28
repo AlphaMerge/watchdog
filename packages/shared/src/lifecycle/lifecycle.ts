@@ -2,6 +2,9 @@ import { describeError } from '../errors/app-error.js';
 import type { Logger } from '../logging/logger.js';
 import { createServiceNotifier, watchdogIntervalMs, type ServiceNotifier } from './systemd.js';
 
+/** Past the shutdown budget, what the stop extension leaves for the exit itself (`P-227`). */
+const STOP_EXTEND_MARGIN_MS = 5_000;
+
 export type ShutdownReason =
   | { kind: 'signal'; signal: NodeJS.Signals }
   | { kind: 'error'; error: unknown }
@@ -158,7 +161,12 @@ export class Lifecycle {
 
     const exitCode = reason.kind === 'error' ? 1 : 0;
     this.#logger.info({ reason: reason.kind, ...this.#reasonDetail(reason) }, 'shutting down');
-    this.#notifier.stopping('draining');
+    // **The budget, told to systemd** (`P-227`). `TimeoutStopSec` was the real bound and
+    // `shutdownTimeoutMs` only a wish: an operator who raised the budget past the unit's stop
+    // timeout, which `config check` accepts, had the drain SIGKILLed part-way, the whole cgroup
+    // with it. The extension makes the configured budget the one that holds. The margin covers
+    // the exit after it, so systemd never kills a service that is keeping its own deadline.
+    this.#notifier.stopping('draining', this.#shutdownTimeoutMs + STOP_EXTEND_MARGIN_MS);
     if (this.#watchdogTimer !== undefined) clearInterval(this.#watchdogTimer);
     this.#abort.abort();
 

@@ -46,7 +46,8 @@ export interface ResultSinkStats {
 export interface ResultSink {
   (result: CheckResult, meta: ResultMeta): void;
   /**
-   * Stops handing results to the spool, and says what it has not spooled so far.
+   * Stops handing results to the spool, and says what it has not spooled so far. What arrives
+   * later is counted too, so a summary reads `stats()` after the spool has closed.
    *
    * Called immediately before `spool.close()`, so no append the sink starts can reach a spool
    * that is closed: everything already on the spool's write chain is finished by `close`, and
@@ -63,7 +64,8 @@ export function resultSink(deps: ResultSinkDeps): ResultSink {
 
   // **Logged once, counted always.** Results that miss a closed spool come in a burst — every
   // worker still delivering — and forty-five identical errors in a second is one fact repeated,
-  // not forty-five. The total goes in the shutdown summary `main.ts` logs from `close()`.
+  // not forty-five. The total goes in the shutdown summary `main.ts` logs from `stats()` once the
+  // spool has closed.
   const late = (sensorId: number): void => {
     counts.unspooled += 1;
     if (reportedLate) return;
