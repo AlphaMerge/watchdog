@@ -101,6 +101,8 @@ export type { MachineMemory, MachineMemorySources } from './process/machine-memo
 export { readLimitMemory } from './process/limit-memory.js';
 export type { LimitMemorySources } from './process/limit-memory.js';
 export { AvailableMemoryWatch } from './process/memory-watch.js';
+export { MEMORY_SAMPLE_INTERVAL_MS, MemorySampler } from './process/memory-sampler.js';
+export type { MemorySamplerOptions } from './process/memory-sampler.js';
 export type {
   AvailableMemory,
   AvailableMemoryLow,

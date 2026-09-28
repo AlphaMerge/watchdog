@@ -5,11 +5,9 @@ import { isAbsolute, join } from 'node:path';
 import {
   bootstrap,
   coreConfigSchema,
-  AvailableMemoryWatch,
   describeBuild,
   describeError,
-  readLimitMemory,
-  readMachineMemory,
+  MemorySampler,
   runConfigCheck,
   type CoreConfig,
   type Lifecycle,
@@ -1115,25 +1113,17 @@ async function serve(): Promise<void> {
   // queue, a pool or a connection reports here. Built last because it reads all of them, and the
   // results go through `acceptResults` exactly as a probe's do — so Core Health has history,
   // limits, triggers and alarms with no special case anywhere downstream.
-  // How much this machine has left (`P-208`), on a two-second timer of its own: Core Health is
-  // read every thirty seconds, and `P-206` watched a machine go from 8.5% available to a kernel
-  // kill in six. Read in-process, because a guard that starts a process to look is slowest exactly
-  // when memory is shortest. The probe's copy is sampled at its heartbeat instead. The core's own
-  // cgroup ceiling (`P-210`) is sampled at the same moments.
-  const machineMemory = new AvailableMemoryWatch({ read: () => readMachineMemory() });
-  const limitMemory = new AvailableMemoryWatch({ read: () => readLimitMemory() });
-  machineMemory.sample();
-  limitMemory.sample();
-  const machineMemoryTimer = setInterval(() => {
-    machineMemory.sample();
-    limitMemory.sample();
-  }, 2_000);
-  machineMemoryTimer.unref();
+  // How much this machine has left (`P-208`), and the core's own cgroup ceiling (`P-210`), on a
+  // two-second timer of their own. Core Health is read every thirty seconds, and `P-206` watched a
+  // machine go from 8.5% available to a kernel kill in six. The probe reads the same way since
+  // `P-218`; it had been reading at its heartbeat, which is 10 s as shipped.
+  const memory = new MemorySampler();
+  memory.start();
   lifecycle.onShutdown({
     name: 'machine-memory',
     timeoutMs: 1_000,
     run: () => {
-      clearInterval(machineMemoryTimer);
+      memory.stop();
       return Promise.resolve();
     },
   });
@@ -1157,8 +1147,8 @@ async function serve(): Promise<void> {
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,
-      machineMemory: () => machineMemory.lowest(),
-      limitMemory: () => limitMemory.lowest(),
+      machineMemory: () => memory.machine.lowest(),
+      limitMemory: () => memory.limit.lowest(),
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).

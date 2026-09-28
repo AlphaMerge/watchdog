@@ -299,12 +299,13 @@ const CHANNELS: readonly ChannelDef[] = [
   // a machine the probe has to itself the two nearly agree; beside the core and its database —
   // the default installation — they do not. `MemAvailable` on Linux, never `MemFree`, and the
   // lowest in the last thirty seconds rather than the latest, because a squeeze that ends in a
-  // kill can be over inside one record interval.
+  // kill can be over inside one record interval. Read every two seconds on the probe's own timer,
+  // not at the heartbeat, which is ten as shipped and missed a five-second squeeze (`P-218`).
   //
   // A **gap** where the platform cannot say, never a zero: a zero on this channel is the error.
   //
-  // The machine's, not the probe's cgroup: a probe at its own unit's ceiling is throttled with
-  // plenty available here, and that is `memoryLimitUsage` below (`P-210`).
+  // The machine's, not the probe's cgroup: a probe at its own unit's ceiling is killed with plenty
+  // available here, and that is `memoryLimitUsage` below (`P-210`, `P-213`).
   {
     key: 'memoryAvailable',
     name: 'Memory available',

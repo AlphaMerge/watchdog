@@ -4725,6 +4725,64 @@ because each is a decision rather than a defect:
       Mutated: `socket.on('message', receive)` without `contained` fails the 1011 test on the
       throw it forces.
 
+- [x] **P-218 — the probe read memory once per heartbeat, so its lowest of thirty seconds held
+      three readings** · S · P-208, P-210 · Found reviewing 2026-09-28. `ProbeHealthReporter`
+      sampled the machine (`P-208`) and its own cgroup ceiling (`P-210`) inside `report()`, and the
+      heartbeat is its only caller. The heartbeat is 10 s as shipped (`deploy/examples/core.json`,
+      and the schema's default), so the window held three readings rather than fifteen and a
+      six-second squeeze could fall between two of them. The schema allows up to 300 s, and from 30 s
+      the window held one reading, which is a latest-value channel again. `P-208`'s "within half a
+      point" was measured on `dev/core.json`'s 2-second heartbeat. The heartbeat also stops while
+      the probe is disconnected, so the first one after a reconnect read an empty window. Core
+      Health was never affected: the core samples on its own two-second timer. **Done when** the
+      probe samples on its own timer as the core does; a test pins a squeeze shorter than one
+      heartbeat, at the shipped heartbeat, being recorded; and the findings say `P-208` was measured
+      at 2 s and add a measurement at 10 s.
+
+      **Done.** `MemorySampler` in `@ms/shared` reads the machine and the cgroup ceiling together
+      every two seconds, on an unref'd timer. The core's inline timer is now one of these, and the
+      probe's `ProbeHealthReporter` owns another, which `main.ts` starts and stops with the
+      process. `report()` only reads the window. Reading goes on while the probe is disconnected,
+      so the first heartbeat after a reconnect reports a full window.
+
+      **Measured at the shipped 10 s**
+      (`docs/findings/2026-09-28-memory-sampling.md`). Both behaviours ran side by side against the
+      same squeezes, on a VM booked for it at 0.28 load per CPU:
+      - The **five-second squeeze**, `P-206`'s shape, read **32.8%** before against a true 15.2%. It
+        was missed completely, since the heartbeats fell either side of it. With the fix it read
+        **15.3%**.
+      - A **one-second squeeze** read 34.8% before and 19.8% now, which is under the 20% warning.
+      - Squeezes longer than a heartbeat were caught by both, within 0.6 points.
+
+      **What remains is the heartbeat, not the sampling.** A low reached after the last report
+      before a record arrives one record late. At 10 s, which divides thirty, it is never lost. At a
+      heartbeat that does not divide thirty, it can be, and that is `P-219`. `P-208`'s findings
+      now say they were measured at 2 s.
+
+      **Tests.**
+      - `memory-sampler.test.ts`: reads both watches at once on start, then every interval until
+        stopped, with one timer however often it is started.
+      - `probe-health-report.test.ts`: at the heartbeat read from `deploy/examples/core.json`, a
+        four-second squeeze between two heartbeats is recorded. Reading continues through a minute
+        with no report, and nothing is read before `start()`.
+      - Mutation: a timer that reads nothing fails two tests in each file.
+
+- [ ] **P-219 — a memory low can fall between two reports when the heartbeat does not divide
+      thirty seconds** · S · P-218 · Found measuring `P-218`
+      (`docs/findings/2026-09-28-memory-sampling.md`). The core records whichever report reached it
+      last, so each record reads a report up to a heartbeat old.
+      - **At 10 s it is never lost.** 10 divides 30, so consecutive records read reports exactly
+        thirty seconds apart, and a thirty-second window covers everything between them. The run
+        showed the cost: a low one record late (150 → 180, 210 → 240).
+      - **At other intervals it can be lost.** The schema allows any heartbeat from 1 to 300 s. At
+        20 s, the reports two consecutive records read can be up to 50 s apart, and a low in the
+        gap is in neither.
+
+      **Done when** the probe's window is thirty seconds plus its heartbeat interval, taken from the
+      hello, so the 10 s default catches exactly what it does now. A mocked-timer test at a 20 s
+      heartbeat records a squeeze placed in today's gap. The administration guide says a low can
+      arrive one record late, by up to a heartbeat's age, so nobody reads the lag as a fault.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

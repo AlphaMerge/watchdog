@@ -426,6 +426,16 @@ async function main(): Promise<void> {
     // without it.
     drain: () => drain.stats(),
   });
+  // Memory is read every two seconds whether or not a heartbeat is due, or connected (`P-218`).
+  health.start();
+  lifecycle.onShutdown({
+    name: 'health-memory',
+    timeoutMs: 1_000,
+    run: () => {
+      health.stop();
+      return Promise.resolve();
+    },
+  });
 
   /**
    * What this probe does when the core says something (`P-43`).

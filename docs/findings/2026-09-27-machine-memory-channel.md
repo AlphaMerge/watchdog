@@ -13,6 +13,14 @@
   **Raw**: [`2026-09-27-machine-memory-channel.jsonl`](2026-09-27-machine-memory-channel.jsonl) —
   1,288 samples at 250 ms, 161 heartbeats, 10 records.
 
+> **Measured at a heartbeat no installation ships** (`P-218`, 2026-09-28). This run reported
+> every 2 s, which is the development configuration's `heartbeatIntervalMs`, and the probe then
+> read memory only when it reported. The shipped heartbeat is 10 s (`deploy/examples/core.json`),
+> and at 10 s the window held three readings, not fifteen. `P-218` moved the reading onto a
+> two-second timer of its own, and re-measured at 10 s:
+> [`2026-09-28-memory-sampling.md`](2026-09-28-memory-sampling.md). The numbers below are what
+> two-second *sampling* gives, which is what every probe now does whatever its heartbeat.
+
 ## The question
 
 `P-208`'s done-when asks for the channel to be "measured to track it under load". Two things can

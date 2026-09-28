@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
-import type { AvailableMemoryLow } from '@ms/shared';
+import { describe, it, type TestContext } from 'node:test';
+import { AvailableMemoryWatch, MemorySampler, type AvailableMemoryLow } from '@ms/shared';
 import { ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
@@ -94,8 +94,8 @@ function reporter(options: {
   machine?: AvailableMemoryLow | null;
   /** Headroom to the probe's own ceiling; `null` is no ceiling. Defaults to that. */
   limit?: AvailableMemoryLow | null;
-  /** Counts how often the reporter samples the machine. */
-  onSample?: () => void;
+  /** A real sampler, for the tests about when memory is read. Replaces `machine` and `limit`. */
+  memory?: MemorySampler;
 }): ProbeHealthReporter {
   let cpuCall = 0;
   let clockCall = 0;
@@ -109,13 +109,11 @@ function reporter(options: {
     ...(options.drain === false
       ? {}
       : { drain: () => ({ ...DRAIN, stalledForMs: options.stalledForMs ?? 0 }) }),
-    machineMemory: {
-      sample: () => options.onSample?.(),
-      lowest: () => options.machine ?? null,
-    },
-    limitMemory: {
-      sample: () => undefined,
-      lowest: () => options.limit ?? null,
+    memory: options.memory ?? {
+      machine: { lowest: () => options.machine ?? null },
+      limit: { lowest: () => options.limit ?? null },
+      start: () => undefined,
+      stop: () => undefined,
     },
     process: {
       cpuUsage: () => {
@@ -379,17 +377,89 @@ describe('the probe’s own health report', () => {
     assert.equal(report.memoryAvailableMb, 1_860);
   });
 
-  it('samples the machine at every report, so the window is filled at the heartbeat’s rate', () => {
-    let samples = 0;
-    const health = reporter({
-      onSample: () => {
-        samples += 1;
-      },
+  describe('when memory is read (`P-218`)', () => {
+    /**
+     * The heartbeat an installation actually runs, from the shipped example — not the development
+     * configuration's two seconds, which is what `P-208` happened to be measured at.
+     */
+    async function shippedHeartbeatMs(): Promise<number> {
+      const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+      const config = JSON.parse(
+        await readFile(join(repoRoot, 'deploy', 'examples', 'core.json'), 'utf8'),
+      ) as { probeEndpoint: { heartbeatIntervalMs: number } };
+      return config.probeEndpoint.heartbeatIntervalMs;
+    }
+
+    /**
+     * A machine of 100 bytes with 60 available, squeezed to 15 from `from` until `to`, and a
+     * sampler over it on a clock the test moves. The clock is milliseconds since the sampler
+     * started, which is what `AvailableMemoryWatch` treats as monotonic.
+     */
+    function squeezed(from: number, to: number): { memory: MemorySampler; at: { ms: number } } {
+      const at = { ms: 0 };
+      const now = (): number => at.ms;
+      const machine = new AvailableMemoryWatch({
+        read: () => ({ availableBytes: at.ms >= from && at.ms < to ? 15 : 60, totalBytes: 100 }),
+        now,
+      });
+      const limit = new AvailableMemoryWatch({ read: () => null, now });
+      return { memory: new MemorySampler({ machine, limit }), at };
+    }
+
+    /** Moves the clock and the timers together, a second at a time, to `ms`. */
+    function until(t: TestContext, at: { ms: number }, ms: number): void {
+      while (at.ms < ms) {
+        at.ms += 1_000;
+        t.mock.timers.tick(1_000);
+      }
+    }
+
+    it('records a squeeze shorter than one heartbeat, at the heartbeat the probe ships with', async (t) => {
+      const heartbeatMs = await shippedHeartbeatMs();
+      // Four seconds, in the middle of the gap between two heartbeats. The measurement this
+      // pins is `P-206`'s: a machine went from 8.5% available to a kernel kill in six.
+      const from = heartbeatMs / 2 - 2_000;
+      const to = heartbeatMs / 2 + 2_000;
+      assert.ok(
+        from > 0 && to < heartbeatMs,
+        `a ${String(heartbeatMs)} ms heartbeat is too short to test`,
+      );
+
+      t.mock.timers.enable({ apis: ['setInterval'] });
+      const { memory, at } = squeezed(from, to);
+      const health = reporter({ memory });
+      health.start();
+      t.after(() => {
+        health.stop();
+      });
+
+      assert.equal(health.report().memoryAvailablePercent, 60, 'the heartbeat before the squeeze');
+      until(t, at, heartbeatMs);
+      // Read at the report alone, the window held a 60 from each heartbeat and nothing between.
+      assert.equal(health.report().memoryAvailablePercent, 15);
     });
-    health.report();
-    health.report();
-    health.report();
-    assert.equal(samples, 3);
+
+    it('keeps reading while no heartbeat is sent, so the first after a reconnect has a full window', (t) => {
+      // A disconnected probe sends no heartbeat, so nothing calls `report()`. Down for a minute,
+      // squeezed for four seconds near the end, and reconnected: the squeeze is in the window.
+      t.mock.timers.enable({ apis: ['setInterval'] });
+      const { memory, at } = squeezed(44_000, 48_000);
+      const health = reporter({ memory });
+      health.start();
+      t.after(() => {
+        health.stop();
+      });
+
+      until(t, at, 60_000);
+      assert.equal(health.report().memoryAvailablePercent, 15);
+    });
+
+    it('gaps both memory channels until it is started, rather than reading once at the report', () => {
+      const health = reporter({ memory: squeezed(0, 0).memory });
+      const report = health.report();
+      assert.equal(report.memoryAvailablePercent, undefined);
+      assert.equal(report.memoryLimitUsagePercent, undefined);
+    });
   });
 
   it('reports its working set against its own ceiling, and the ceiling', () => {

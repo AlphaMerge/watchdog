@@ -613,7 +613,9 @@ export class CoreClient {
       this.#heartbeatSeq += 1;
       // Gathered here rather than on a timer of its own: the heartbeat is already the periodic
       // "I am here and this is how I am", and a second cadence would be a second thing to keep
-      // in step with the first.
+      // in step with the first. Memory is the one exception (`P-218`): its channels are the
+      // lowest of a window, which is filled every two seconds between heartbeats and only read
+      // here.
       const health = this.#options.health?.();
       connection.send({
         type: 'heartbeat',

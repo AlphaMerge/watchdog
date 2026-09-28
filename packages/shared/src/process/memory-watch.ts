@@ -32,12 +32,14 @@ export interface AvailableMemoryWatchOptions {
  * every two seconds read 675, then 2,230 once the kill had freed the memory, and never saw the low.
  * Probe Health and Core Health each record once every thirty seconds, so a latest-value channel
  * would show a short squeeze roughly one time in fifteen. The window matches the record interval,
- * so each recorded value is the worst of the interval it stands for; `P-208` measured it within
- * half a point of the true low for any squeeze held for a heartbeat or longer.
+ * so each recorded value is the worst of the interval it stands for. Sampling every two seconds,
+ * `P-208` measured it within half a point of the true low for every squeeze held five seconds or
+ * longer.
  *
- * Sampled by the caller — the probe at every heartbeat, the core on a timer of its own — and read
- * in-process, because `P-206`'s other lesson is that a guard which starts a process to look is
- * slowest exactly when memory is shortest.
+ * Sampled by the caller, which is `MemorySampler` on a two-second timer in both the core and the
+ * probe (`P-218`). The window only holds what somebody read, so the sampling rate is part of the
+ * guarantee. Read in-process, because `P-206`'s other lesson is that a guard which starts a process
+ * to look is slowest exactly when memory is shortest.
  */
 export class AvailableMemoryWatch {
   readonly #windowMs: number;
