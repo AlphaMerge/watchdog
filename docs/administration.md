@@ -83,6 +83,10 @@ A few consequences are worth knowing before somebody reports them as bugs:
 - **A pause or a setting on a container still reaches into its holes**, as every inherited value
   does. It stores nothing on the hidden objects, and acknowledging or forcing an error on the
   container reaches only the sensors its caller can see.
+- **An object's history leaves out its grant entries** for anybody but an administrator. They say
+  which groups may see the object and who decided so, which is what the grants list says, and
+  that list is an administrator's. `full` on an object is the right to change it, not to read who
+  else may.
 - **The history of a deleted sensor is visible to administrators only.** Nothing records which
   branch it was in, so there is no grant left to read it through.
 - **A change of grant reaches an open page at the next state change.** The live stream checks for

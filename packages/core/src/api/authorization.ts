@@ -268,6 +268,25 @@ export function visibilityOf(request: FastifyRequest): Promise<Visibility> {
 }
 
 /**
+ * Whether this request's caller clears an account-level bar, asked rather than enforced (`A-26`).
+ *
+ * For a route whose answer depends on who is asking rather than one that refuses. An object's
+ * history is readable with `read` on the object, but its `grant` entries belong to whoever may
+ * read the grants themselves, and that is `ADMIN`. The test is the one `enforce` applies, the
+ * role and then the token's scope, so the two cannot disagree about who administers. Everybody
+ * clears it when the authorisation layer is off, as every bar in this file does, and nobody does
+ * on a `PUBLIC` route.
+ */
+export function clears(request: FastifyRequest, bar: 'read' | 'write' | 'admin'): boolean {
+  const sight = sights.get(request);
+  if (sight === undefined || sight.fresh === EVERYONE) return true;
+  const principal = request.principal;
+  if (principal === undefined) return false;
+  if (!ROLES[bar].includes(principal.role)) return false;
+  return principal.scope === undefined || lower(principal.scope, SCOPES[bar]) === SCOPES[bar];
+}
+
+/**
  * How to ask again, for as long as this request's principal is around (`A-12`).
  *
  * The stream's: a WebSocket is one request that lives for days, and every subscription on it

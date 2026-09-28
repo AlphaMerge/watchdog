@@ -1997,6 +1997,91 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal(allowed.statusCode, 201, allowed.body);
     });
   });
+
+  /**
+   * `A-26`: an object's history is readable with `read` on it, and its grant entries say who else
+   * may see it and who decided so — which the grants themselves tell only an administrator.
+   */
+  describe('what an object’s history says about its grants (A-26)', () => {
+    before(() => {
+      // The harness only captures; the history is read from what is stored.
+      harness.audit.also = new DatabaseAuditSink();
+    });
+
+    after(() => {
+      harness.audit.also = undefined;
+    });
+
+    const historyOf = async (headers: Record<string, string>, limit = 100): Promise<string[]> => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(deviceId)}/audit?limit=${String(limit)}`,
+        headers,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<{ items: { action: string }[] }>().items.map((item) => item.action);
+    };
+
+    it('shows the grant entries to an administrator, and to nobody else', async () => {
+      // A setting set, a grant, and the setting reverted, in that order: the grant sits between
+      // two entries everybody may read, so a filter applied after the page was cut would answer
+      // a page of two with one.
+      await harness.service.setSetting(testActor, deviceId, 'scan.intervalSeconds', 120);
+      await access.grant(deviceId, teamId, 'full', actorNamed('visibility'));
+      await harness.service.clearSetting(testActor, deviceId, 'scan.intervalSeconds');
+
+      const operator = await db.query<{ id: string }>(
+        `SELECT id::text AS id FROM user_account WHERE login = 'operator'`,
+      );
+      assert.equal(
+        (await access.resolveFor({ userId: Number(operator[0]?.id), role: 'readwrite' }, deviceId))
+          .right,
+        'full',
+        'the operator is meant to hold full here',
+      );
+
+      // `watcher` holds read on the device, and `operator` full: neither reads its grants.
+      for (const login of ['watcher', 'operator']) {
+        const actions = await historyOf(as(login));
+        assert.deepEqual(
+          actions.filter((action) => action.startsWith('grant.')),
+          [],
+          `${login} read a grant entry`,
+        );
+        assert.deepEqual(actions.slice(0, 2), ['setting.reverted', 'setting.set'], login);
+        assert.deepEqual(
+          await historyOf(as(login), 2),
+          ['setting.reverted', 'setting.set'],
+          `${login}: a page of two was short`,
+        );
+      }
+
+      // The control: an administrator reads them where they happened.
+      assert.deepEqual((await historyOf(as('admin'))).slice(0, 3), [
+        'setting.reverted',
+        'grant.set',
+        'setting.set',
+      ]);
+
+      // And the bar is `ADMIN`'s, role and scope both: an administrator's read token reads what a
+      // read-only account does.
+      const issued = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/tokens',
+        headers: as('admin'),
+        payload: { name: 'history', scope: 'read' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const bearer = { authorization: `Bearer ${issued.json<{ secret: string }>().secret}` };
+      const throughToken = await historyOf(bearer);
+      assert.deepEqual(throughToken.slice(0, 2), ['setting.reverted', 'setting.set']);
+      assert.deepEqual(
+        throughToken.filter((action) => action.startsWith('grant.')),
+        [],
+        'a read token read a grant entry',
+      );
+    });
+  });
 });
 
 /**

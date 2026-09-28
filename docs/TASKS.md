@@ -12906,6 +12906,49 @@ because each is a decision rather than a defect:
       and a socket whose grant is revoked while the counter is put back below the number it was
       resolved at is sent `overflow`, not the change. Mutation 2/2: the page length, and `<`.
 
+- [x] **A-26 — An object's history shows its grants to anybody who may read it** · S · A-17,
+      A-12 · Found 2026-09-28 in `A-12`'s second review round. `GET /objects/:id/audit` needs
+      `read` on the object and answered every entry about it. Since `A-17` that includes a
+      `grant.set` and `grant.revoked` entry for every grant made on the object, each naming the
+      group, its right, what it held before and who set it. Those are the grants list a line at a
+      time, and that list, `GET /objects/:id/access`, is `ADMIN`. A read-only account, or a
+      writer holding `full`, read them anyway. Folded in: `flat-audit.test.ts`'s rollback check
+      could not tell a failed object grant that was undone from one written outside its
+      transaction. The case counted only audit rows, and the next case's own grant then
+      overwrote the row that should not have existed. So `A-17`'s "a failed grant and a failed
+      revoke that each leave no row and no change" was proved for the revoke alone.
+
+      **Done when** grant entries are left out of an object's history for anybody who may not
+      read its grants, inside the query so a page is still a page. Read holders and `full` holders
+      are shown not to see them, an administrator sees them, and every other entry stays visible.
+      A failed object grant is shown to have left no grant.
+
+      **A-26 outcome.**
+      - The history route asks `clears(request, 'admin')`, the same role-then-scope test `enforce`
+        applies for `ADMIN`, asked rather than enforced. If it fails, `AuditQuery.withoutCategories`
+        drops the `grant` category in SQL, so paging counts only what is shown.
+      - The route's description and `administration.md` say so: `full` on an object is the right
+        to change it, not to read who else may.
+      - The object-grant case in `flat-audit.test.ts` now compares its entries *and the grant*
+        (the right stored for the pair, before and after), so its half of `A-17`'s claim is proved
+        by its own case.
+
+      Tests:
+      - 1 new in `object-visibility.test.ts`. A setting is set, a grant made and the setting
+        reverted, so the grant sits between two readable entries.
+        - `watcher` (`read`) and `operator` (`full`, asserted) see neither grant entry, and a page
+          of two is both settings.
+        - An administrator sees all three.
+        - An administrator's read token sees what a read-only account does.
+      - 1 changed in `flat-audit.test.ts`.
+
+      Mutation 4/4:
+      - the bar lowered to `read`;
+      - the token scope ignored;
+      - the filter applied after the page was cut (a page of two came back short);
+      - the object grant's insert moved outside its transaction, which flat-audit could not see
+        before.
+
 - [x] **A-28 — A branch writer can run discovery from any probe** · M · A-12, A-20 · Found
       2026-09-28 by the `A-12` triage, and upheld as **high** by both verifiers. `POST /discovery`
       and `POST /discovery/schedules` check write on `groupId` and nothing on `probeId`, and

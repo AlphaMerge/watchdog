@@ -295,8 +295,27 @@ describe(
       const toReaders = async (): Promise<number> =>
         (await rows(`action = 'grant.set' AND (summary->>'groupId')::bigint = $1`, [groupId]))
           .length;
+      /**
+       * The object grant's entries *and the grant* (`A-26`). Its entries alone could not tell a
+       * grant that rolled back from one written outside the transaction: the audit row went
+       * either way, and the next case's own grant then overwrote the row that should not exist.
+       */
+      const toReadersAndTheGrant = async (): Promise<{
+        entries: number;
+        right: string | null;
+      }> => ({
+        entries: await toReaders(),
+        right:
+          (
+            await db.query<{ right_: string }>(
+              `SELECT right_::text AS right_ FROM object_access
+               WHERE object_id = $1 AND group_id = $2`,
+              [rootId, groupId],
+            )
+          )[0]?.right_ ?? null,
+      });
 
-      const cases: [string, string, () => Promise<number>, () => Promise<unknown>][] = [
+      const cases: [string, string, () => Promise<unknown>, () => Promise<unknown>][] = [
         [
           'a map',
           'map.created',
@@ -323,7 +342,7 @@ describe(
         [
           'an object grant',
           'grant.set',
-          toReaders,
+          toReadersAndTheGrant,
           () => access.grant(rootId, groupId, 'write', actor),
         ],
         [
@@ -348,7 +367,7 @@ describe(
           } finally {
             sink.failOn = null;
           }
-          assert.equal(await count(), before);
+          assert.deepEqual(await count(), before);
         });
       }
 
@@ -371,7 +390,8 @@ describe(
           ).length,
           0,
         );
-        // The grant that failed never landed, and the revoke that failed left the grant before it.
+        // The revoke that failed left the grant before it. The grant that failed is asserted by its
+        // own case, before the revoke's setup could overwrite it.
         assert.deepEqual(
           await db.query(
             `SELECT right_ FROM object_access WHERE object_id = $1 AND group_id = $2`,

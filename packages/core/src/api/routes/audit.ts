@@ -3,7 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { AUDIT_CATEGORIES, type AuditRepository } from '../../audit/store.js';
 import type { Database } from '../../db/pool.js';
-import { ADMIN, onObject } from '../authorization.js';
+import { ADMIN, clears, onObject } from '../authorization.js';
 
 export interface AuditRoutesOptions {
   db: Database;
@@ -111,7 +111,10 @@ export async function auditRoutes(
           'changed. Page with `before`, using the `nextBefore` from the previous page. ' +
           'Sensor parameters changed are listed in `summary.paramsChanged` by key. Values ' +
           'appear in `diff` for parameters the sensor type does not mark `writeOnly`; a ' +
-          'credential never appears in either, in any entry, at any age.',
+          'credential never appears in either, in any entry, at any age. **Grant entries are ' +
+          "an administrator's**, as the grants themselves are: `full` on an object does not " +
+          'let an account read who else may see it, so for anybody else they are left out ' +
+          'and a page is still a full page of the rest.',
         params: idParams,
         querystring: auditQuery,
         response: { 200: { $ref: 'ms:auditPage' } },
@@ -124,9 +127,15 @@ export async function auditRoutes(
       // the one recording a deletion, and it is written about an object that no longer exists;
       // refusing to serve history for something that has been deleted would hide exactly the
       // change someone came here to find.
+      //
+      // **Grant entries only for whoever may read the grants** (`A-26`). `GET
+      // /objects/:id/access` is `ADMIN`, and its own entries say the same thing a line at a
+      // time: which group may do what here, and who set it. `full` on an object does not let
+      // an account read its grants, so it does not let it read their history either.
       const items = await db.tx((q) =>
         audit.list(q, {
           objectId: request.params.id,
+          ...(clears(request, 'admin') ? {} : { withoutCategories: ['grant'] }),
           ...(before === undefined ? {} : { before }),
           limit,
         }),

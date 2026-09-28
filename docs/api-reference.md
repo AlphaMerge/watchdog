@@ -80,7 +80,7 @@ Not the same as granting `none`, which overrides inheritance rather than restori
 
 ### `GET /api/v1/objects/{id}/audit`
 
-An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age.
+An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age. **Grant entries are an administrator's**, as the grants themselves are: `full` on an object does not let an account read who else may see it, so for anybody else they are left out and a page is still a full page of the rest.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

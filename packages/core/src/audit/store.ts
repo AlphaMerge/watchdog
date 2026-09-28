@@ -48,6 +48,13 @@ export interface AuditQuery {
    * is a row of chips.
    */
   categories?: readonly string[];
+  /**
+   * Categories left out, filtered inside the query so a page is still a full page (`A-26`).
+   *
+   * For the object history read by somebody who may not read that object's grants: `full` on an
+   * object does not let an account see who else may see it, and a `grant` entry says exactly that.
+   */
+  withoutCategories?: readonly string[];
   actorKinds?: readonly string[];
   /**
    * One specific actor — a user id, a token id, a component name (`A-08`).
@@ -120,6 +127,11 @@ export class AuditRepository {
       // would make "object" also select a hypothetical "objectgroup.created".
       where.push(
         `split_part(action, '.', 1) = ANY($${String(values.push([...query.categories]))})`,
+      );
+    }
+    if (query.withoutCategories !== undefined && query.withoutCategories.length > 0) {
+      where.push(
+        `split_part(action, '.', 1) <> ALL($${String(values.push([...query.withoutCategories]))})`,
       );
     }
     if (query.actorKinds !== undefined && query.actorKinds.length > 0) {
