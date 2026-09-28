@@ -16181,6 +16181,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       migration 059 rebuilds an enum under the `sensor_state` hypertable, the kind of object a
       dump and restore round trip gets wrong, and `P-227` changed how the core stops.
 
+      **After it landed**, on a release built from `b17f83d` itself: smoke-restore passed, so
+      migration 059's enum, rebuilt under a hypertable, survives a dump and a restore; and
+      smoke-install passed.
+
 ---
 
 ## Release 1.1 — Windows
