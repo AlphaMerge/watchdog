@@ -47,6 +47,18 @@ export interface SyslogReceiver {
 
 const DEFAULT_MAX_FRAME = MAX_LINE;
 
+/**
+ * Why a socket handler threw, for `onMalformed` (`P-217`).
+ *
+ * These handlers are the last frame before the process: `dgram` and `net` call them from their
+ * own event loops, so anything that escapes one is an `uncaughtException` and the probe goes down
+ * with every check it was running. Nothing in parsing throws today, and the flow receiver already
+ * holds the same line; this is so that the day something does, it costs one message.
+ */
+function thrown(error: unknown): string {
+  return `handling a message threw: ${error instanceof Error ? error.message : String(error)}`;
+}
+
 export async function openSyslogReceiver(options: SyslogReceiverOptions): Promise<SyslogReceiver> {
   const maxFrame = options.maxFrameBytes ?? DEFAULT_MAX_FRAME;
   let udp: UdpSocket | undefined;
@@ -58,16 +70,20 @@ export async function openSyslogReceiver(options: SyslogReceiverOptions): Promis
     socket.on('message', (datagram, sender) => {
       // One datagram is one message. That is the whole of UDP framing, and it is why UDP syslog
       // silently truncates anything past the MTU — which is the sender's problem and not ours.
-      const text = datagram.toString('utf8');
-      if (text.trim() === '') {
-        options.onMalformed('an empty datagram');
-        return;
+      try {
+        const text = datagram.toString('utf8');
+        if (text.trim() === '') {
+          options.onMalformed('an empty datagram');
+          return;
+        }
+        options.onMessage({
+          source: sender.address,
+          transport: 'udp',
+          message: parseSyslog(text),
+        });
+      } catch (error: unknown) {
+        options.onMalformed(thrown(error));
       }
-      options.onMessage({
-        source: sender.address,
-        transport: 'udp',
-        message: parseSyslog(text),
-      });
     });
     socket.on('error', (error: Error) => {
       options.onMalformed(`the UDP socket failed: ${error.message}`);
@@ -102,7 +118,15 @@ export async function openSyslogReceiver(options: SyslogReceiverOptions): Promis
           connection.destroy();
           return;
         }
-        buffer = drain(buffer, source, options);
+        try {
+          buffer = drain(buffer, source, options);
+        } catch (error: unknown) {
+          // Part of the buffer may have been delivered and part not, so where the next frame
+          // starts is unknown: this sender's stream ends, and every other sender's carries on.
+          options.onMalformed(thrown(error));
+          buffer = '';
+          connection.destroy();
+        }
       });
       connection.on('error', () => {
         // A sender that disappears mid-stream is ordinary, not a fault worth a log line each.
@@ -114,7 +138,11 @@ export async function openSyslogReceiver(options: SyslogReceiverOptions): Promis
         // connection after writing one line without a newline is common enough to matter.
         const last = buffer.trim();
         if (last !== '') {
-          options.onMessage({ source, transport: 'tcp', message: parseSyslog(last) });
+          try {
+            options.onMessage({ source, transport: 'tcp', message: parseSyslog(last) });
+          } catch (error: unknown) {
+            options.onMalformed(thrown(error));
+          }
         }
       });
     });

@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { ApiServer } from '../src/api/server.js';
+import { contained, STREAM_MAX_PAYLOAD_BYTES } from '../src/api/routes/stream.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
@@ -22,6 +23,22 @@ import { buildHarness, silent, testActor, type Harness } from './support/tree.js
 import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
+
+describe('a socket handler that throws (P-217)', () => {
+  it('hands the throw to its own handler rather than to the process', () => {
+    const faults: unknown[] = [];
+    const guarded = contained(
+      (size: number) => {
+        if (size > 1) throw new Error(`too big: ${String(size)}`);
+      },
+      (error) => faults.push(error),
+    );
+    guarded(1);
+    guarded(2);
+    assert.equal(faults.length, 1);
+    assert.match(String(faults[0]), /too big: 2/);
+  });
+});
 
 /** A subscriber that sees the whole tree, said out loud (`A-12`). */
 const EVERYONE: StreamSight = {
@@ -549,6 +566,205 @@ describe(
         socket.close();
         await server.stop();
       }
+    });
+
+    /** A server with the stream on it, and what a socket connects to (`P-217`). */
+    async function streaming(): Promise<{ server: ApiServer; url: string }> {
+      const server = new ApiServer({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: true,
+        },
+        logger: silent,
+        version: '9.9.9',
+        service: h.service,
+        history: new HistoryService({ db, logger: silent }),
+        db,
+        audit: new AuditRepository(),
+        catalogue: testCatalogue(),
+        stream,
+      });
+      await server.build('9.9.9', h.service);
+      const address = await server.start();
+      return { server, url: `ws://127.0.0.1:${String(address.port)}/api/v1/stream` };
+    }
+
+    /** A socket, everything it was sent, how it closed, and a way to wait for enough of it. */
+    async function connected(url: string) {
+      const socket = new WebSocket(url);
+      const frames: Record<string, unknown>[] = [];
+      socket.addEventListener('message', (message: Event) => {
+        const data = (message as { data?: unknown }).data;
+        frames.push(JSON.parse(String(data)) as Record<string, unknown>);
+      });
+      const code = new Promise<number>((resolve) => {
+        socket.addEventListener('close', (event: Event) => {
+          resolve((event as unknown as { code: number }).code);
+        });
+      });
+      /** How the server closed it — or a failure, not a hang, when it never does. */
+      const closed = async (): Promise<number> => {
+        let timer: NodeJS.Timeout | undefined;
+        const never = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('the server never closed the socket'));
+          }, 10_000);
+        });
+        try {
+          return await Promise.race([code, never]);
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener('open', () => {
+          resolve();
+        });
+        socket.addEventListener('error', () => {
+          reject(new Error('the socket would not open'));
+        });
+      });
+      const count = async (type: string, n: number): Promise<Record<string, unknown>[]> => {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const found = frames.filter((frame) => frame['type'] === type);
+          if (found.length >= n) return found;
+          if (Date.now() > deadline) {
+            throw new Error(`${String(found.length)} ${type} frames of ${String(n)}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      };
+      await count('hello', 1);
+      return { socket, frames, count, closed };
+    }
+
+    /** Whatever reaches the process's last-resort handler while `body` runs. */
+    async function uncaughtDuring(body: () => Promise<void>): Promise<unknown[]> {
+      const uncaught: unknown[] = [];
+      const record = (error: unknown): void => {
+        uncaught.push(error);
+      };
+      process.on('uncaughtException', record);
+      try {
+        await body();
+      } finally {
+        process.off('uncaughtException', record);
+      }
+      return uncaught;
+    }
+
+    it(
+      'answers any frame a client can send, and the core stays up (P-217)',
+      { timeout: 60_000 },
+      async () => {
+        // `null` and `{"subscribe":null}` are JSON, and the handler read them straight off a cast.
+        // `ws` emits `message` synchronously, so each was an `uncaughtException` and the core shut
+        // down — one frame, from any account that may read. Every frame below has to come back as a
+        // `problem` on a socket that still subscribes afterwards.
+        const { server, url } = await streaming();
+        const open = () => connected(url);
+
+        const junk: (string | Uint8Array)[] = [
+          'null',
+          '{"subscribe":null}',
+          '[]',
+          '[{"subscribe":{}}]',
+          '5',
+          '"subscribe"',
+          'true',
+          '{}',
+          '{"subscribe":5}',
+          '{"subscribe":[]}',
+          '{"subscribe":"everything"}',
+          '{"subscribe":{"objectId":null}}',
+          '{"subscribe":{"objectId":0}}',
+          '{"subscribe":{"objectId":-3}}',
+          '{"subscribe":{"objectId":1.5}}',
+          '{"subscribe":{"objectId":"7"}}',
+          '{"subscribe":{"objectId":1e300}}',
+          '{"subscribe":{},"also":1}',
+          '{"subscribe":{"objectId":1,"depth":2}}',
+          // Deeply nested, and still under the size the handler reads.
+          `{"subscribe":{"objectId":${'['.repeat(400)}${']'.repeat(400)}}}`,
+          `{"subscribe":{"deep":${'{"a":'.repeat(150)}1${'}'.repeat(150)}}}`,
+          'not JSON at all',
+          new Uint8Array([0xff, 0x00, 0xfe]),
+          // Over what the handler reads, under what `ws` will buffer: told, not dropped.
+          JSON.stringify({ subscribe: {}, padding: 'x'.repeat(4_000) }),
+        ];
+
+        const first = await open();
+        const huge = await open();
+        const after = await open();
+        const uncaught = await uncaughtDuring(async () => {
+          for (const frame of junk) first.socket.send(frame);
+          const problems = await first.count('problem', junk.length);
+          assert.equal(problems.length, junk.length, 'one problem frame per frame of junk');
+          assert.equal(
+            first.frames.some((frame) => frame['type'] === 'snapshot'),
+            false,
+            'no junk frame may subscribe',
+          );
+
+          // The same socket still subscribes, scoped and unscoped.
+          first.socket.send(JSON.stringify({ subscribe: { objectId: deviceId } }));
+          const [scoped] = await first.count('snapshot', 1);
+          assert.equal(scoped?.['objectId'], deviceId);
+          first.socket.send(JSON.stringify({ subscribe: {} }));
+          await first.count('snapshot', 2);
+
+          // Past what `ws` will buffer at all: the library closes that socket with 1009 before the
+          // handler sees a byte, and nothing else notices.
+          huge.socket.send('['.repeat(STREAM_MAX_PAYLOAD_BYTES + 1));
+          assert.equal(await huge.closed(), 1009);
+
+          after.socket.send(JSON.stringify({ subscribe: {} }));
+          await after.count('snapshot', 1);
+        }).finally(async () => {
+          first.socket.close();
+          after.socket.close();
+          await server.stop();
+        });
+        assert.deepEqual(uncaught, [], 'a frame reached the process');
+      },
+    );
+
+    it('closes only the socket whose handler threw (P-217)', { timeout: 60_000 }, async () => {
+      // Validation closes the hole that was found; this is for the next one. A throw inside the
+      // route's `message` handler is forced by making the server's own `JSON.stringify` of one
+      // particular reply fail — the test and the server share a process, and nothing in the frame
+      // the client sends can reach a throw any more. That socket goes, with 1011; the process and
+      // every other socket stay.
+      const { server, url } = await streaming();
+      const faulty = await connected(url);
+      const bystander = await connected(url);
+      const stringify = JSON.stringify;
+      const failing = (value: unknown, ...rest: unknown[]): string => {
+        if ((value as { reason?: unknown } | null)?.reason === 'that was not JSON') {
+          throw new Error('a defect in the handler');
+        }
+        return (stringify as (...args: unknown[]) => string)(value, ...rest);
+      };
+
+      const uncaught = await uncaughtDuring(async () => {
+        JSON.stringify = failing as typeof JSON.stringify;
+        try {
+          faulty.socket.send('not JSON at all');
+          assert.equal(await faulty.closed(), 1011);
+        } finally {
+          JSON.stringify = stringify;
+        }
+        bystander.socket.send('{"subscribe":{}}');
+        await bystander.count('snapshot', 1);
+      }).finally(async () => {
+        bystander.socket.close();
+        await server.stop();
+      });
+      assert.deepEqual(uncaught, [], 'the throw reached the process');
     });
   },
 );

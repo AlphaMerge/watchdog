@@ -23,6 +23,8 @@ const PORT = 11_762;
 let received: ReceivedTrap[] = [];
 let malformed: string[] = [];
 let receiver: { close(): Promise<void> };
+/** Set to make the next notification's handler throw, as a defect downstream would. */
+let throwNext = false;
 
 /** Waits for the receiver to have `count` notifications, or gives up. */
 async function settle(count: number, withinMs = 3_000): Promise<void> {
@@ -38,6 +40,10 @@ before(() => {
     address: '127.0.0.1',
     transport: 'udp4',
     onTrap: (trap) => {
+      if (throwNext) {
+        throwNext = false;
+        throw new Error('a defect in whatever handles the trap');
+      }
       received.push(trap);
     },
     onMalformed: (reason) => {
@@ -164,6 +170,31 @@ describe('receiving notifications over a real socket', () => {
     await settle(1);
     session.close();
     assert.equal(received.length, 1, 'the receiver stopped working after a bad packet');
+  });
+});
+
+describe('a handler that throws (P-217)', () => {
+  it('costs one notification, not the probe', async () => {
+    // `net-snmp` calls the receiver's callback outside its own `try`, from its UDP `message`
+    // handler, so a throw there was an `uncaughtException` — the probe down, with every check it
+    // was running, for one trap from anything that can reach port 162.
+    malformed = [];
+    throwNext = true;
+    const first = sender(snmp.Version2c);
+    first.trap(LINK_DOWN, [], () => undefined);
+    const deadline = Date.now() + 3_000;
+    while (malformed.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    first.close();
+    assert.deepEqual(malformed, ['handling a trap threw: a defect in whatever handles the trap']);
+
+    received = [];
+    const second = sender(snmp.Version2c);
+    second.trap(LINK_DOWN, [], () => undefined);
+    await settle(1);
+    second.close();
+    assert.equal(received.length, 1, 'the receiver stopped working after a handler threw');
   });
 });
 

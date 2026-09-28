@@ -4563,6 +4563,56 @@ because each is a decision rather than a defect:
       one alarm. `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and
       RHEL 9 ship 252.
 
+- [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
+      `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
+      `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a
+      `TypeError`. `ws` emits `message` synchronously, so the throw was an `uncaughtException`, and
+      `lifecycle.ts` treats that as fatal: one frame from any account that may read, and the core
+      shut down with every probe connected to it. `ws` also buffers up to 100 MiB per frame by
+      default, and nothing here set anything lower.
+
+      **Fixed in the route.** A frame is checked, in order, for size (1 KiB; nothing a client may
+      send is longer), for JSON, and against a JSON Schema compiled with Ajv — `{"subscribe":{}}`
+      or `{"subscribe":{"objectId":<a positive safe integer>}}`, no other keys. Each failure is
+      answered with a `problem` frame on a socket that stays open, which is what the route already
+      did for non-JSON. **The next defect is contained too**: every socket listener runs inside
+      `contained()`, so a throw from any of them is logged with the login and closes *that* socket
+      with 1011, and nothing reaches the process. `@fastify/websocket` is registered with
+      `maxPayload` 64 KiB (`STREAM_MAX_PAYLOAD_BYTES`); a frame past that is closed by `ws` itself
+      with 1009 before the handler sees a byte, rather than answered with a `problem`.
+
+      **Every other handler a peer can reach, checked for the same shape** — a listener the
+      library calls synchronously, with nothing between a throw and the process:
+
+      - the probe endpoint and the probe's core client — already guarded: `MessageConnection`
+        catches both parse and handler throws and closes only that connection;
+      - the flow receiver — already guarded;
+      - syslog over UDP and TCP — **not guarded; fixed**. A throw from `onMessage` is reported
+        through `onMalformed` (`handling a message threw: …`); on TCP it also clears the buffer and
+        destroys that connection, whose framing can no longer be trusted, and the listener stays;
+      - the SNMP trap receiver — **not guarded; fixed**. `net-snmp` calls the trap callback outside
+        its own `try`, so decoding and `onTrap` are wrapped the same way (`handling a trap threw:
+        …`);
+      - the worker-thread ports (format worker, formatter, check worker, probe pool) — in-process
+        and trusted, unchanged;
+      - the protocol simulators — development only, unchanged.
+
+      No input that makes the syslog or trap handlers throw is known; those two are the same
+      containment the stream now has, so the next defect costs one message rather than a probe.
+
+      **Tests.** `state-stream.test.ts`: `contained()` hands a throw to its own handler; against a
+      real `ApiServer`, 24 frames — `null`, `{"subscribe":null}`, arrays, numbers, strings,
+      `objectId`s that are not positive integers, extra keys, 400-deep arrays, 150-deep objects,
+      non-JSON, binary, a padded 4 KiB frame — each get one `problem` and no snapshot,
+      and the same socket then subscribes scoped and unscoped; a frame one byte past the payload
+      limit is closed with 1009 while another socket still subscribes; and a handler forced to
+      throw closes its socket with 1011 while a bystander subscribes. Nothing reaches
+      `uncaughtException` in any of them. `syslog.test.ts`: a throwing handler on UDP is reported
+      and the next datagram is read; on TCP that connection is closed and a new one is read.
+      `snmp-receiver.test.ts`: a throwing `onTrap` is reported and the next trap arrives.
+      Mutated: `socket.on('message', receive)` without `contained` fails the 1011 test on the
+      throw it forces.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

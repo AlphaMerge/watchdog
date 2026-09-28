@@ -77,7 +77,7 @@ import { healthRoutes } from './routes/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
-import { streamRoutes } from './routes/stream.js';
+import { STREAM_MAX_PAYLOAD_BYTES, streamRoutes } from './routes/stream.js';
 import type { StateBroadcaster } from '../state/stream.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
@@ -578,7 +578,12 @@ export class ApiServer {
     // Before the routes, because a route declared `websocket: true` needs the plugin in place.
     // Registered only when there is something to stream: the plugin hooks the upgrade path, and
     // a build with no state service has nothing to say over it.
-    if (this.#stream !== undefined) await this.#app.register(fastifyWebsocket);
+    // The payload cap is `ws`'s own, and its default is 100 MiB per frame (`P-217`).
+    if (this.#stream !== undefined) {
+      await this.#app.register(fastifyWebsocket, {
+        options: { maxPayload: STREAM_MAX_PAYLOAD_BYTES },
+      });
+    }
 
     await this.#app.register(fastifySwagger, {
       openapi: {

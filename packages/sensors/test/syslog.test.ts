@@ -158,33 +158,46 @@ describe('TCP framing (RFC 6587)', () => {
   });
 });
 
+/**
+ * A receiver on UDP and TCP at once, on whatever port is free.
+ *
+ * Port 0 is not usable here: UDP and TCP must be the same port, which is what a syslog receiver
+ * is. Bound in a retry loop instead, because a fixed port can be taken. `offset` keeps two
+ * receivers in one run off each other's candidates.
+ */
+async function openOnFreePort(
+  handlers: Pick<Parameters<typeof openSyslogReceiver>[0], 'onMessage' | 'onMalformed'>,
+  offset = 0,
+): Promise<{ receiver: Awaited<ReturnType<typeof openSyslogReceiver>>; port: number }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = 20_000 + offset + Math.floor(attempt * 37 + (process.pid % 500));
+    try {
+      const receiver = await openSyslogReceiver({
+        port: candidate,
+        address: '127.0.0.1',
+        udp: true,
+        tcp: true,
+        ipVersion: 'udp4',
+        ...handlers,
+      });
+      return { receiver, port: candidate };
+    } catch {
+      // Taken. Try the next.
+    }
+  }
+  throw new Error('could not bind a syslog port for the test');
+}
+
 describe('the sockets', () => {
   let receiver: Awaited<ReturnType<typeof openSyslogReceiver>>;
   let port = 0;
   const seen: ReceivedSyslog[] = [];
 
   before(async () => {
-    // Port 0 is not usable here: UDP and TCP must be the same port, which is what a syslog
-    // receiver is. Bound in a retry loop instead, because a fixed port can be taken.
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const candidate = 20_000 + Math.floor(attempt * 37 + (process.pid % 500));
-      try {
-        receiver = await openSyslogReceiver({
-          port: candidate,
-          address: '127.0.0.1',
-          udp: true,
-          tcp: true,
-          ipVersion: 'udp4',
-          onMessage: (one) => seen.push(one),
-          onMalformed: () => undefined,
-        });
-        port = candidate;
-        return;
-      } catch {
-        // Taken. Try the next.
-      }
-    }
-    throw new Error('could not bind a syslog port for the test');
+    ({ receiver, port } = await openOnFreePort({
+      onMessage: (one) => seen.push(one),
+      onMalformed: () => undefined,
+    }));
   });
 
   after(async () => {
@@ -258,6 +271,57 @@ describe('the sockets', () => {
     });
     await until(() => seen.length === 1);
     assert.equal(seen[0]?.message.message, 'a message split down the middle');
+  });
+});
+
+describe('a handler that throws (P-217)', () => {
+  // `dgram` and `net` call the receiver's handlers from their own event loops, so a throw in one
+  // was an `uncaughtException`: the probe down, with every check it was running, for one message
+  // from anything that can reach the port. Now it costs that message — and, on TCP, that sender's
+  // connection, because where its next frame starts is no longer known.
+  let receiver: Awaited<ReturnType<typeof openSyslogReceiver>>;
+  let port = 0;
+  const seen: string[] = [];
+  const malformed: string[] = [];
+
+  before(async () => {
+    ({ receiver, port } = await openOnFreePort(
+      {
+        onMessage: (one) => {
+          if (one.message.message.includes('boom')) throw new Error('a defect downstream');
+          seen.push(`${one.transport}:${one.message.message}`);
+        },
+        onMalformed: (reason) => malformed.push(reason),
+      },
+      1_000,
+    ));
+  });
+
+  after(async () => {
+    await receiver.close();
+  });
+
+  it('reports a throw on UDP and reads the next datagram', async () => {
+    seen.length = 0;
+    malformed.length = 0;
+    await sendUdp(port, [{ message: 'boom' }, { message: 'and the next one is still read' }]);
+    await until(() => seen.length === 1);
+    assert.deepEqual(malformed, ['handling a message threw: a defect downstream']);
+    assert.deepEqual(seen, ['udp:and the next one is still read']);
+  });
+
+  it('closes only the TCP connection that threw', async () => {
+    seen.length = 0;
+    malformed.length = 0;
+    await sendTcp(port, [{ message: 'boom' }], { framing: 'non-transparent' });
+    await until(() => malformed.length === 1);
+    assert.deepEqual(malformed, ['handling a message threw: a defect downstream']);
+
+    await sendTcp(port, [{ message: 'a new connection is read' }], {
+      framing: 'non-transparent',
+    });
+    await until(() => seen.length === 1);
+    assert.deepEqual(seen, ['tcp:a new connection is read']);
   });
 });
 

@@ -2,6 +2,7 @@
 // @fastify/websocket augments the route options with `websocket` and the handler's socket.
 import '@fastify/swagger';
 import '@fastify/websocket';
+import { Ajv } from 'ajv';
 import type { FastifyInstance } from 'fastify';
 import { describeError } from '@ms/shared';
 import type { Database } from '../../db/pool.js';
@@ -15,7 +16,71 @@ export interface StreamRouteOptions {
 
 /** What a client sends. Anything else is answered with a `problem` frame and ignored. */
 interface ClientFrame {
-  readonly subscribe?: { readonly objectId?: number | null };
+  readonly subscribe: { readonly objectId?: number };
+}
+
+/**
+ * The one shape a client frame may have, checked before anything reads it (`P-217`).
+ *
+ * The frame used to be cast to `ClientFrame` and read, and `null` and `{"subscribe":null}` are
+ * both JSON: each threw from a property read on `null`. `ws` emits `message` synchronously from
+ * the socket's data path, so the throw was an `uncaughtException` and the lifecycle shut the core
+ * down — one frame from any account that may read, or from anybody with authentication off.
+ */
+const clientFrameSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['subscribe'],
+  properties: {
+    subscribe: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        objectId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+      },
+    },
+  },
+} as const;
+
+// First error only: this runs on whatever a client sends, and a report of every way a frame of
+// junk is wrong is work nobody reads.
+const isClientFrame = new Ajv({ allErrors: false, strict: false }).compile<ClientFrame>(
+  clientFrameSchema,
+);
+
+/**
+ * The largest frame the handler reads (`P-217`). A subscription is under fifty bytes; anything
+ * past this is answered with a `problem` frame without being parsed.
+ */
+const MAX_CLIENT_FRAME_BYTES = 1024;
+
+/**
+ * The largest frame `ws` will buffer at all, for `@fastify/websocket`'s `maxPayload` (`P-217`).
+ *
+ * `ws` defaults to 100 MiB, buffered whole and then handed over — per frame, per socket, from any
+ * account that may read. Past this the library closes the socket with 1009 before the handler
+ * sees anything; between `MAX_CLIENT_FRAME_BYTES` and this, the client is told why.
+ */
+export const STREAM_MAX_PAYLOAD_BYTES = 64 * 1024;
+
+/**
+ * A socket event handler that nothing thrown inside can escape (`P-217`).
+ *
+ * `ws` calls its listeners synchronously, so a throw in one is an `uncaughtException`, and the core
+ * treats one of those as fatal. Validating the frame closes the hole that was found; this is for
+ * the next one, so that it costs a connection rather than the service.
+ */
+export function contained<A extends unknown[]>(
+  handler: (...args: A) => void,
+  onThrow: (error: unknown) => void,
+): (...args: A) => void {
+  return (...args: A): void => {
+    try {
+      handler(...args);
+    } catch (error: unknown) {
+      onThrow(error);
+    }
+  };
 }
 
 /** What the server sends. A discriminated union, so a client switches rather than sniffs. */
@@ -210,40 +275,55 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         send(frame);
       };
 
-      socket.on('message', (raw: Buffer) => {
-        let frame: ClientFrame;
+      const receive = (raw: Buffer): void => {
+        if (raw.length > MAX_CLIENT_FRAME_BYTES) {
+          send({ type: 'problem', reason: 'that frame is larger than any subscription' });
+          return;
+        }
+        let frame: unknown;
         try {
-          frame = JSON.parse(raw.toString('utf8')) as ClientFrame;
+          frame = JSON.parse(raw.toString('utf8'));
         } catch {
           send({ type: 'problem', reason: 'that was not JSON' });
           return;
         }
-        if (frame.subscribe === undefined) {
-          send({ type: 'problem', reason: 'the only message this stream takes is "subscribe"' });
+        if (!isClientFrame(frame)) {
+          send({
+            type: 'problem',
+            reason:
+              'the only message this stream takes is {"subscribe":{}} or ' +
+              '{"subscribe":{"objectId":<a positive integer>}}',
+          });
           return;
         }
-        const objectId = frame.subscribe.objectId ?? null;
-        if (objectId !== null && (!Number.isInteger(objectId) || objectId < 1)) {
-          send({ type: 'problem', reason: 'objectId must be a positive integer, or absent' });
-          return;
-        }
-        void subscribe(objectId).catch((error: unknown) => {
+        void subscribe(frame.subscribe.objectId ?? null).catch((error: unknown) => {
           // A failed snapshot leaves the client attached but with nothing to apply the events
           // to, which is worse than telling it to try again.
           unsubscribe();
           request.log.error({ err: describeError(error) }, 'a stream subscription failed');
           send({ type: 'problem', reason: 'the snapshot could not be read; subscribe again' });
         });
-      });
+      };
 
-      socket.on('close', () => {
+      const hang = (): void => {
         closed = true;
         unsubscribe();
-      });
-      socket.on('error', () => {
-        closed = true;
-        unsubscribe();
-      });
+      };
+
+      // This socket, and only this socket: whatever went wrong, the next frame on it cannot be
+      // trusted to find the subscription in a state it expects.
+      const fault = (error: unknown): void => {
+        request.log.error(
+          { err: describeError(error), login: request.principal?.login },
+          'a stream socket handler threw; closing that socket',
+        );
+        hang();
+        socket.close(1011, 'internal error');
+      };
+
+      socket.on('message', contained(receive, fault));
+      socket.on('close', contained(hang, fault));
+      socket.on('error', contained(hang, fault));
     },
   );
 }

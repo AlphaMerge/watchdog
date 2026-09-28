@@ -102,16 +102,26 @@ export function openTrapReceiver(options: TrapReceiverOptions): TrapReceiver {
       }
       if (notification === undefined) return;
 
-      const detail = normaliseTrap(notification.pdu);
-      if (detail === null) {
-        options.onMalformed(`unsupported PDU type ${String(notification.pdu.type)}`);
-        return;
+      // **Nothing thrown here may escape** (`P-217`). `net-snmp` calls this from its own UDP
+      // `message` handler, so a throw is an `uncaughtException` and the probe goes down with every
+      // check it was running — for one packet from anybody who can reach the port. The flow
+      // receiver holds the same line.
+      try {
+        const detail = normaliseTrap(notification.pdu);
+        if (detail === null) {
+          options.onMalformed(`unsupported PDU type ${String(notification.pdu.type)}`);
+          return;
+        }
+        options.onTrap({
+          source: notification.rinfo.address,
+          detail,
+          community: notification.pdu.community ?? '',
+        });
+      } catch (thrown: unknown) {
+        options.onMalformed(
+          `handling a trap threw: ${thrown instanceof Error ? thrown.message : String(thrown)}`,
+        );
       }
-      options.onTrap({
-        source: notification.rinfo.address,
-        detail,
-        community: notification.pdu.community ?? '',
-      });
     },
   );
 
