@@ -3,6 +3,7 @@ import { AuthPage } from './auth/AuthPage';
 import { ChangePasswordForm } from './auth/ChangePasswordForm';
 import { LoginView } from './auth/LoginView';
 import { mustChangePassword, showsLoginForm, useSession } from './auth/session';
+import { Offered, SubsystemsProvider } from './build/SubsystemsProvider';
 import { Layout } from './components/Layout';
 import { ErrorPanel } from './components/Panels';
 import { AlarmsView } from './routes/AlarmsView';
@@ -78,32 +79,71 @@ export function App(): React.JSX.Element {
     );
   }
 
+  // **Maps and reports are pages only where the core built them** (`H-12`). A v1 build has
+  // neither, and says so at `GET /build`; the routes wait for that answer rather than guessing.
   return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route index element={<Overview />} />
-        <Route path="alarms" element={<AlarmsView />} />
-        <Route path="tree" element={<TreeView />} />
-        <Route path="logs" element={<LogsView />} />
-        <Route path="templates" element={<TemplatesView />} />
-        <Route path="discovery" element={<DiscoveryView />} />
-        <Route path="objects/:id" element={<ObjectDetailView />} />
-        <Route path="objects/:id/add-sensor" element={<AddSensor />} />
-        <Route path="sensor-types" element={<SensorTypesView />} />
-        <Route path="maps" element={<MapsView />} />
-        <Route path="maps/:id" element={<MapView />} />
-        <Route path="maps/:id/design" element={<MapDesignView />} />
-        <Route path="reports" element={<ReportsView />} />
-        <Route path="reports/:id" element={<ReportView />} />
-        {/*
+    <SubsystemsProvider>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Overview />} />
+          <Route path="alarms" element={<AlarmsView />} />
+          <Route path="tree" element={<TreeView />} />
+          <Route path="logs" element={<LogsView />} />
+          <Route path="templates" element={<TemplatesView />} />
+          <Route path="discovery" element={<DiscoveryView />} />
+          <Route path="objects/:id" element={<ObjectDetailView />} />
+          <Route path="objects/:id/add-sensor" element={<AddSensor />} />
+          <Route path="sensor-types" element={<SensorTypesView />} />
+          <Route
+            path="maps"
+            element={
+              <Offered name="maps">
+                <MapsView />
+              </Offered>
+            }
+          />
+          <Route
+            path="maps/:id"
+            element={
+              <Offered name="maps">
+                <MapView />
+              </Offered>
+            }
+          />
+          <Route
+            path="maps/:id/design"
+            element={
+              <Offered name="maps">
+                <MapDesignView />
+              </Offered>
+            }
+          />
+          <Route
+            path="reports"
+            element={
+              <Offered name="reports">
+                <ReportsView />
+              </Offered>
+            }
+          />
+          <Route
+            path="reports/:id"
+            element={
+              <Offered name="reports">
+                <ReportView />
+              </Offered>
+            }
+          />
+          {/*
           Signed in only. With `api.requireAuthentication` off an anonymous browser reaches the
           rest of this table, and a change-password form is the one page there whose request the
           core refuses unconditionally — `POST /auth/password` needs a principal whatever the
           flag says. A form that cannot succeed is worse than a page that is not there.
         */}
-        {session.kind === 'signed-in' && <Route path="password" element={<PasswordView />} />}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+          {session.kind === 'signed-in' && <Route path="password" element={<PasswordView />} />}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </SubsystemsProvider>
   );
 }

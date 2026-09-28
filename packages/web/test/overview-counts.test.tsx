@@ -1,6 +1,7 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SubsystemsProvider } from '../src/build/SubsystemsProvider';
 import { Overview } from '../src/routes/Overview';
 
 /** An installation far larger than any one page of the tree — 5,051 sensors, as `P-15` runs. */
@@ -141,10 +142,17 @@ describe('the overview’s totals', () => {
       updatedAt: '2026-09-09T09:00:00.000Z',
     });
 
+    // A core that built maps, as the application asks it (`H-12`).
+    const WITH_MAPS = {
+      '/api/v1/build': { subsystems: { maps: true, reports: true, libraries: true } },
+    };
+
     const overview = (): void => {
       render(
         <MemoryRouter>
-          <Overview />
+          <SubsystemsProvider>
+            <Overview />
+          </SubsystemsProvider>
         </MemoryRouter>,
       );
     };
@@ -152,6 +160,7 @@ describe('the overview’s totals', () => {
     it('lists the five-star ones and leaves the rest to the Maps page', async () => {
       stubFetch({
         ...ROUTES,
+        ...WITH_MAPS,
         '/api/v1/maps': {
           items: [mapOf(1, 5, 'Ground floor'), mapOf(2, 3, 'Spare rack'), mapOf(3, 5, 'DC2')],
         },
@@ -165,7 +174,11 @@ describe('the overview’s totals', () => {
 
     it('says none are starred rather than showing a blank card', async () => {
       // An installation with maps and no stars is a status report, not an empty space.
-      stubFetch({ ...ROUTES, '/api/v1/maps': { items: [mapOf(1, 3, 'Ground floor')] } });
+      stubFetch({
+        ...ROUTES,
+        ...WITH_MAPS,
+        '/api/v1/maps': { items: [mapOf(1, 3, 'Ground floor')] },
+      });
       overview();
 
       expect(await screen.findByText(/None of the 1 map is starred/)).toBeDefined();
@@ -173,7 +186,7 @@ describe('the overview’s totals', () => {
 
     it('carries no maps card at all on an installation with no maps', async () => {
       // A card explaining a feature nobody has reached for is a card everybody reads past.
-      stubFetch({ ...ROUTES, '/api/v1/maps': { items: [] } });
+      stubFetch({ ...ROUTES, ...WITH_MAPS, '/api/v1/maps': { items: [] } });
       overview();
 
       // Something else on the page has to have rendered before this means anything.
@@ -181,6 +194,31 @@ describe('the overview’s totals', () => {
         expect(screen.getByText('5,329 objects in the tree', { exact: false })).toBeDefined();
       });
       expect(screen.queryByText('Maps')).toBeNull();
+    });
+
+    it('asks a core that built no maps for none (`H-12`)', async () => {
+      // A v1 build has no maps route. The request would only answer 404 — and a stub that had
+      // maps to give would show the card, which is how this test would notice the page asking.
+      const asked = stubFetch({
+        ...ROUTES,
+        '/api/v1/build': { subsystems: { maps: false, reports: false, libraries: false } },
+        '/api/v1/maps': { items: [mapOf(1, 5, 'Ground floor')] },
+      });
+      overview();
+
+      await waitFor(() => {
+        expect(asked).toContain('/api/v1/build');
+      });
+      await waitFor(() => {
+        expect(screen.getByText('5,329 objects in the tree', { exact: false })).toBeDefined();
+      });
+      // Nothing on the page changes when maps are absent, so there is no element to wait for:
+      // let the answered request's render settle, then look at what was asked.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(asked).not.toContain('/api/v1/maps');
+      expect(screen.queryByRole('link', { name: 'Ground floor' })).toBeNull();
     });
   });
 });

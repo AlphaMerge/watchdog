@@ -12,7 +12,7 @@ the same one the API answers on.
 
 ## The views
 
-Eight sections, in the order the header lists them.
+Nine sections, in the order the header lists them.
 
 | View             | Path             | The question it answers                                          |
 | ---------------- | ---------------- | ---------------------------------------------------------------- |
@@ -29,6 +29,13 @@ Eight sections, in the order the header lists them.
 Alarms sits second, ahead of the tree, deliberately: [`WORKFLOW.MD §7`](WORKFLOW.MD) calls it the
 operator's home screen, and the thing somebody opens this product to look at belongs near the
 front.
+
+**Maps and Reports appear only where the core built them** (`H-12`). The v1 build — the release
+candidate — constructs neither, so its header has seven sections, and a bookmark to `/maps/3`
+goes to the Overview. The UI asks the core rather than knowing what v1 means: `GET /build` says
+which optional subsystems this server registered routes for, and a link is shown once that answer
+names it. A core that cannot answer is treated as having everything, which is what this UI showed
+before it asked.
 
 ### Overview
 

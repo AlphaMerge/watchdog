@@ -1,8 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useSession } from '../auth/session';
+import { offerOf, useSubsystems, type Subsystem } from '../build/subsystems';
 import { useTheme } from '../theme/useTheme';
 
-const NAV = [
+const NAV: readonly { to: string; label: string; end: boolean; subsystem?: Subsystem }[] = [
   { to: '/', label: 'Overview', end: true },
   // Second, and before the tree: `WORKFLOW.MD §7` calls the alarms view the operator's home
   // screen, and the thing somebody opens this product to look at belongs near the front.
@@ -12,8 +13,10 @@ const NAV = [
   { to: '/discovery', label: 'Discovery', end: false },
   { to: '/templates', label: 'Templates', end: false },
   { to: '/sensor-types', label: 'Sensor types', end: false },
-  { to: '/maps', label: 'Maps', end: false },
-  { to: '/reports', label: 'Reports', end: false },
+  // Shown once the core says it built them (`H-12`): a v1 build has neither, and a link to a
+  // page the core has no routes for is a link to an error.
+  { to: '/maps', label: 'Maps', end: false, subsystem: 'maps' },
+  { to: '/reports', label: 'Reports', end: false, subsystem: 'reports' },
 ];
 
 /**
@@ -79,6 +82,10 @@ function Account(): React.JSX.Element | null {
 
 export function Layout(): React.JSX.Element {
   const { theme, toggle } = useTheme();
+  const subsystems = useSubsystems();
+  const nav = NAV.filter(
+    (item) => item.subsystem === undefined || offerOf(subsystems, item.subsystem) === 'offered',
+  );
 
   return (
     <div className="min-h-screen bg-bg">
@@ -100,7 +107,7 @@ export function Layout(): React.JSX.Element {
             at 320px, and the thing that broke it was the same on all of them.
           */}
           <nav aria-label="Sections" className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            {NAV.map((item) => (
+            {nav.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

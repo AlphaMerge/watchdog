@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
+import { offerOf, useSubsystems } from '../build/subsystems';
 import type { MapSummary, SensorState, SensorTypeSummary, SubtreeCounts } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
@@ -50,7 +51,10 @@ export function Overview(): React.JSX.Element {
    * already ordered priority-first, an installation has tens of maps rather than thousands, and
    * the card needs to know whether *any* map exists to say the right thing when none are starred.
    */
-  const maps = useApi<{ items: MapSummary[] }>('/maps');
+  // Asked only of a core that built maps (`H-12`): a v1 build has no such route, and a request
+  // that can only answer 404 is noise in its log and a failed request in the browser's.
+  const offersMaps = offerOf(useSubsystems(), 'maps') === 'offered';
+  const maps = useApi<{ items: MapSummary[] }>(offersMaps ? '/maps' : null);
   const api = useApi<OpenApi>('/openapi.json');
 
   const objects = counts.status === 'ready' ? counts.data.objects : null;
