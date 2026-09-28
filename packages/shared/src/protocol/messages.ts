@@ -1,4 +1,4 @@
-import { Ajv, type ValidateFunction } from 'ajv';
+import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
 
 /**
@@ -882,6 +882,12 @@ const PROBE_HEALTH_SCHEMA = {
 } as const;
 
 /**
+ * Every field the heartbeat's health may carry, for the test that holds `healthForPeer` to them: a
+ * field added here and not gated there is one an older core refuses, on every heartbeat.
+ */
+export const PROBE_HEALTH_FIELDS: readonly string[] = Object.keys(PROBE_HEALTH_SCHEMA.properties);
+
+/**
  * One check result on the wire.
  *
  * Extracted so `results` and `R-09`'s `query-result` cannot drift: an on-demand check answers
@@ -1334,27 +1340,95 @@ const ajv = new Ajv({ allErrors: true, discriminator: true, strict: false });
 const validateProbeToCore = ajv.compile<ProbeToCoreMessage>(probeToCoreSchema);
 const validateCoreToProbe = ajv.compile<CoreToProbeMessage>(coreToProbeSchema);
 
-function describeErrors(validate: ValidateFunction): string {
-  return (validate.errors ?? [])
+function describeErrors(errors: readonly ErrorObject[] | null | undefined): string {
+  return (errors ?? [])
     .map((e) => `${e.instancePath === '' ? '(root)' : e.instancePath}: ${e.message ?? 'invalid'}`)
     .join('; ');
 }
 
-/** Parses a decoded frame from a probe. Throws `ProtocolError` on anything unrecognised. */
-export function parseProbeToCore(value: unknown): ProbeToCoreMessage {
-  if (!validateProbeToCore(value)) {
-    throw new ProtocolError(
-      `unrecognised message from probe: ${describeErrors(validateProbeToCore)}`,
-    );
+/** A health field a heartbeat carried and the core could not use, and why (`P-224`). */
+export interface UnusableHealthField {
+  readonly field: string;
+  /** What was sent, when it was a number; otherwise its type. A peer's string is not logged. */
+  readonly value: number | string;
+  readonly reason: string;
+}
+
+export interface ParseProbeToCoreOptions {
+  /** Told of every heartbeat that lost a health field. The heartbeat itself was kept. */
+  readonly onUnusableHealth?: (fields: readonly UnusableHealthField[]) => void;
+}
+
+/**
+ * Parses a decoded frame from a probe. Throws `ProtocolError` on anything unrecognised.
+ *
+ * **Except a health number the core cannot use, which is dropped and the heartbeat kept**
+ * (`P-224`). Every other field on this wire is the conversation itself, and a peer that gets one
+ * wrong is refused. The health report is a set of optional readings about the probe, each of which
+ * is already allowed to be absent — that is how a channel gaps — so one out of range becomes
+ * exactly that: a gap on its channel. Refusing the frame instead cost the link, and on every
+ * heartbeat, because the probe sends its worst reading of the last thirty seconds each time: a
+ * probe in a container whose `/proc/meminfo` claimed more available than total reconnected into
+ * the same refusal indefinitely, over a number that should have been one empty channel.
+ *
+ * Only a *value* is forgiven, and only of a field the schema declares. A field it does not know is
+ * still refused: that is a protocol skew, which `healthForPeer` exists to prevent, and silence
+ * about it is how a skew becomes lost data. So is anything wrong outside `health`.
+ */
+export function parseProbeToCore(
+  value: unknown,
+  options: ParseProbeToCoreOptions = {},
+): ProbeToCoreMessage {
+  if (validateProbeToCore(value)) return value;
+  const errors = validateProbeToCore.errors ?? [];
+  const usable = withoutUnusableHealth(value, errors);
+  if (usable !== null && validateProbeToCore(usable.message)) {
+    options.onUnusableHealth?.(usable.dropped);
+    return usable.message;
   }
-  return value;
+  throw new ProtocolError(`unrecognised message from probe: ${describeErrors(errors)}`);
+}
+
+/**
+ * `/health/memoryAvailablePercent`, or beneath it: `/health/schedulerLagMs/p99`. Only a declared
+ * field's value is ever reported at such a path; a field `health` does not declare is reported at
+ * `/health` itself, by `additionalProperties`, so it never matches and is still refused.
+ */
+const HEALTH_VALUE = /^\/health\/([^/]+)(?:\/|$)/;
+
+/** The heartbeat without the health fields the errors name, or `null` when any is elsewhere. */
+function withoutUnusableHealth(
+  value: unknown,
+  errors: readonly ErrorObject[],
+): { readonly message: unknown; readonly dropped: UnusableHealthField[] } | null {
+  if (!isRecord(value) || value['type'] !== 'heartbeat' || errors.length === 0) return null;
+  const health = value['health'];
+  if (!isRecord(health)) return null;
+  const reasons = new Map<string, string>();
+  for (const error of errors) {
+    const field = HEALTH_VALUE.exec(error.instancePath)?.[1];
+    if (field === undefined) return null;
+    if (!reasons.has(field)) {
+      reasons.set(field, `${error.instancePath}: ${error.message ?? 'invalid'}`);
+    }
+  }
+  const kept = Object.fromEntries(Object.entries(health).filter(([key]) => !reasons.has(key)));
+  const dropped = [...reasons].map(([field, reason]) => {
+    const sent = health[field];
+    return { field, value: typeof sent === 'number' ? sent : typeof sent, reason };
+  });
+  return { message: { ...value, health: kept }, dropped };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Parses a decoded frame from the core. */
 export function parseCoreToProbe(value: unknown): CoreToProbeMessage {
   if (!validateCoreToProbe(value)) {
     throw new ProtocolError(
-      `unrecognised message from core: ${describeErrors(validateCoreToProbe)}`,
+      `unrecognised message from core: ${describeErrors(validateCoreToProbe.errors)}`,
     );
   }
   return value;

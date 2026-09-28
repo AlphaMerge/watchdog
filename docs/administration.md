@@ -363,7 +363,7 @@ alarm.
 | `rollupLag` | Rollups falling behind. An hour is a warning; a day means graphs at wide ranges are wrong |
 | `backfillParked` | **Any value above zero is a warning.** A backfill failed three times and is parked; the sensor's message says why. See [a backfill that keeps failing](#a-backfill-that-keeps-failing) |
 | `diskFree` | Errors below 10%. See below — a full disk costs retention |
-| `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host |
+| `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host. A gap where the machine claims more available than total, as a probe's does |
 | `memoryLimitUsage` | The core's working set against its own ceiling — `MemoryMax=8G` in `ms-core.service`. Warns above 80%, and the warning is the one to act on: at 100% the kernel kills the core. See [a service at its memory ceiling](#a-service-at-its-memory-ceiling). A gap where there is no limit, on cgroup v1 and on Windows |
 | `evictedChunks` | **Any value above zero is an error.** Data was dropped early to stay on disk |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
@@ -383,7 +383,7 @@ alarm.
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
-| `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17 and on any platform but Linux and Windows. The machine's figure, not the probe's own ceiling — that is the next row |
+| `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `clockOffset` | How far the probe's clock is behind the core's, in seconds; negative is ahead. Measured by the core from the send time on every heartbeat and batch, the smallest of five minutes, so a delayed message cannot make a probe look behind. **Warns beyond a minute either way.** A gap until the session has sent one. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
@@ -391,6 +391,16 @@ alarm.
 | `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `reportsRefused` | Everything the core refused from this probe because it was not the probe's to report: a result for a sensor not under it, an answer to a query put to another probe, a message about another probe's discovery run. A counter with no limit, because most refusals are ordinary — a probe whose spool still holds results for sensors that were moved away from it or deleted. See [a probe reporting on work it was not given](#a-probe-reporting-on-work-it-was-not-given) |
 | `reportsForeign` | **Any value above zero is a warning.** The part of the above no correct probe sends: work that was never this probe's. A count over the last five minutes, so it sees the first report after a restart or a reconnect and clears five minutes after the last one |
+
+**A health reading the core cannot use is a gap on its channel, and the link stays up**
+(`P-224`). A probe's numbers arrive on its heartbeat, and the core checks each against the
+protocol's bounds. One out of range, such as an available percentage over 100, is dropped: its
+channel gaps, the rest of the heartbeat is kept, and the core logs *probe sent health readings the
+core cannot use* once per field per connection, naming the probe and the value. Before `P-224`
+the core refused the whole heartbeat and closed the link, and because the probe sends the same
+worst-of-thirty-seconds reading every time, it reconnected into the same refusal indefinitely. A
+field the core does not know at all is still refused. That is a version skew, and the probe strips
+such fields for an older core before sending.
 
 These thresholds ship as **defaults, not policy**. They are written once when the channel is
 created and never again — change or clear one and it is yours from then on, because a default

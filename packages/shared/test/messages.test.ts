@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 import {
   isProtocolCompatible,
   negotiatedVersion,
@@ -11,7 +11,9 @@ import {
   PROTOCOL_VERSION,
   ProtocolError,
   rejectionStopsMonitoring,
+  type ProbeToCoreMessage,
   type RejectCode,
+  type UnusableHealthField,
   type WithdrawnCode,
 } from '../src/protocol/messages.js';
 
@@ -72,9 +74,10 @@ describe('protocol message validation', () => {
     );
   });
 
-  it('accepts what the probe’s machine has left, and refuses a percentage above a hundred', () => {
+  it('accepts what the probe’s machine has left, and drops a percentage above a hundred', () => {
     // `P-208`, protocol 17. A percentage over 100 is a bug at the sender, and a channel with a
-    // lower limit on it would read it as a machine with more memory than it has.
+    // lower limit on it would read it as a machine with more memory than it has. `P-224`: it is a
+    // gap, not a refused heartbeat, which cost the link on every heartbeat.
     const health = parseProbeToCore({
       type: 'heartbeat',
       seq: 7,
@@ -82,13 +85,14 @@ describe('protocol message validation', () => {
       health: { memoryMb: 210.4, memoryAvailablePercent: 23.4, memoryAvailableMb: 1_860 },
     });
     assert.equal(health.type === 'heartbeat' ? health.health?.memoryAvailablePercent : null, 23.4);
-    assert.throws(() =>
+    assert.deepEqual(
       parseProbeToCore({
         type: 'heartbeat',
         seq: 8,
         sentAt: 'now',
-        health: { memoryAvailablePercent: 100.5 },
+        health: { memoryAvailablePercent: 100.5, memoryAvailableMb: 1_860 },
       }),
+      { type: 'heartbeat', seq: 8, sentAt: 'now', health: { memoryAvailableMb: 1_860 } },
     );
   });
 
@@ -102,21 +106,99 @@ describe('protocol message validation', () => {
       health: { memoryLimitUsagePercent: 117, memoryLimitMb: 4_096 },
     });
     assert.equal(health.type === 'heartbeat' ? health.health?.memoryLimitUsagePercent : null, 117);
-    assert.throws(() =>
+    assert.deepEqual(
       parseProbeToCore({
         type: 'heartbeat',
         seq: 10,
         sentAt: 'now',
         health: { memoryLimitMb: -1 },
       }),
+      { type: 'heartbeat', seq: 10, sentAt: 'now', health: {} },
     );
   });
 
-  it('refuses a negative count in the health payload', () => {
-    assert.throws(() =>
-      parseProbeToCore({ type: 'heartbeat', seq: 6, sentAt: 'now', health: { deferred: -1 } }),
-    );
-    assert.equal(parseProbeToCore({ type: 'bye', reason: 'shutting down' }).type, 'bye');
+  describe('a health reading the core cannot use (P-224)', () => {
+    // The health report is a set of optional readings, each already allowed to be absent, so one
+    // out of range is a gap on its channel. Refusing the frame closed the link, and the probe sends
+    // its worst reading of thirty seconds on every heartbeat, so it reconnected into the same
+    // refusal indefinitely.
+    const told: UnusableHealthField[][] = [];
+    const parse = (value: unknown): ProbeToCoreMessage =>
+      parseProbeToCore(value, {
+        onUnusableHealth: (fields) => {
+          told.push([...fields]);
+        },
+      });
+    beforeEach(() => {
+      told.length = 0;
+    });
+
+    it('drops the field, keeps the rest of the heartbeat, and says which and why', () => {
+      const message = parse({
+        type: 'heartbeat',
+        seq: 6,
+        sentAt: 'now',
+        health: { deferred: -1, scheduled: 12, memoryAvailablePercent: 100.3, cpuPercent: 'high' },
+      });
+      assert.deepEqual(message, {
+        type: 'heartbeat',
+        seq: 6,
+        sentAt: 'now',
+        health: { scheduled: 12 },
+      });
+      // In the schema's order, which is the order the validator reports them in.
+      assert.deepEqual(told, [
+        [
+          { field: 'deferred', value: -1, reason: '/health/deferred: must be >= 0' },
+          // A peer's string is named by its type, not written into the log.
+          { field: 'cpuPercent', value: 'string', reason: '/health/cpuPercent: must be number' },
+          {
+            field: 'memoryAvailablePercent',
+            value: 100.3,
+            reason: '/health/memoryAvailablePercent: must be <= 100',
+          },
+        ],
+      ]);
+    });
+
+    it('drops a percentile bundle whole when one of its numbers is out of range', () => {
+      const lag = { p50: 1, p95: 2, p99: -3, max: 4 };
+      const message = parse({
+        type: 'heartbeat',
+        seq: 7,
+        sentAt: 'now',
+        health: { schedulerLagMs: lag, queueWaitMs: { p50: 1, p95: 2, p99: 3, max: 4 } },
+      });
+      assert.ok(message.type === 'heartbeat');
+      assert.deepEqual(Object.keys(message.health ?? {}), ['queueWaitMs']);
+      assert.equal(told[0]?.[0]?.field, 'schedulerLagMs');
+    });
+
+    it('still refuses a field the schema does not declare, and anything wrong outside health', () => {
+      // A field the core does not know is a skew, which `healthForPeer` prevents; quietly
+      // dropping it is how a skew becomes lost data.
+      assert.throws(
+        () =>
+          parse({ type: 'heartbeat', seq: 8, sentAt: 'now', health: { madeUp: 1, deferred: -1 } }),
+        ProtocolError,
+      );
+      assert.throws(
+        () => parse({ type: 'heartbeat', seq: -1, sentAt: 'now', health: { deferred: -1 } }),
+        /seq: must be >= 0/,
+      );
+      assert.throws(
+        () => parse({ type: 'heartbeat', seq: 9, sentAt: 'now', health: 'fine' }),
+        ProtocolError,
+      );
+      assert.deepEqual(told, [], 'nothing was dropped from a message that was refused');
+    });
+
+    it('says nothing about a heartbeat whose health was all usable', () => {
+      parse({ type: 'heartbeat', seq: 10, sentAt: 'now', health: { deferred: 0 } });
+      parse({ type: 'heartbeat', seq: 11, sentAt: 'now' });
+      assert.equal(parseProbeToCore({ type: 'bye', reason: 'shutting down' }).type, 'bye');
+      assert.deepEqual(told, []);
+    });
   });
 
   it('rejects an unknown message type', () => {

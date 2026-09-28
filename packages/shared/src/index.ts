@@ -87,6 +87,7 @@ export type {
   NackReason,
   ProbeHealthReport,
   ProbeQuery,
+  ParseProbeToCoreOptions,
   ProbeToCoreMessage,
   ProtocolMessage,
   QueryFailure,
@@ -97,6 +98,7 @@ export type {
   SweepEnding,
   SweepHost,
   SweepJob,
+  UnusableHealthField,
 } from './protocol/messages.js';
 export { CpuMeter } from './process/cpu-meter.js';
 export { parseMeminfo, readMachineMemory } from './process/machine-memory.js';

@@ -58,6 +58,29 @@ describe('reading what the machine has left', () => {
     assert.equal(readMachineMemory(missing), null);
   });
 
+  it('gaps a reading with more available than total, which a virtualised meminfo gives (P-224)', () => {
+    // lxcfs and OpenVZ have both served one. 100% would be a reading nobody took, and the
+    // protocol's bound on the percentage made it worse than wrong: the core dropped the link.
+    const lxc = MEMINFO.replace('MemAvailable:    6242304 kB', 'MemAvailable:    8150000 kB');
+    assert.equal(readMachineMemory(linux(lxc)), null);
+    // Exactly the total is a machine with nothing in use, which is odd but not impossible.
+    const idle = MEMINFO.replace('MemAvailable:    6242304 kB', 'MemAvailable:    8126464 kB');
+    assert.deepEqual(readMachineMemory(linux(idle)), {
+      availableBytes: 7_936 * MIB,
+      totalBytes: 7_936 * MIB,
+    });
+    assert.equal(
+      readMachineMemory({
+        platform: 'win32',
+        readMeminfo: () => assert.fail('Windows has no /proc/meminfo'),
+        freemem: () => 17_000 * MIB,
+        totalmem: () => 16_000 * MIB,
+      }),
+      null,
+      'the same rule off Linux',
+    );
+  });
+
   it('uses what Windows calls available', () => {
     const memory = readMachineMemory({
       platform: 'win32',

@@ -1505,6 +1505,71 @@ describe(
       });
     });
 
+    it('keeps the link when a heartbeat carries a health reading out of range (P-224)', async () => {
+      // A probe in a container whose `/proc/meminfo` claimed more available than total sent
+      // 100.3%, on every heartbeat — it sends the worst of thirty seconds each time. The core
+      // refused the frame and closed the link, the probe reconnected into the same refusal, and
+      // the lot turned on one optional number that should have been one empty channel.
+      const lines: Record<string, unknown>[] = [];
+      const logger = pino(
+        { level: 'warn' },
+        {
+          write: (chunk: string) => {
+            lines.push(JSON.parse(chunk) as Record<string, unknown>);
+          },
+        },
+      );
+      const source = new StubSource();
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger,
+        coreVersion: '9.9.9',
+        probeConfig: source,
+      });
+      const address = await endpoint.start();
+      try {
+        const probe = await TestProbe.connect(dir, address.port);
+        probe.send(hello());
+        await probe.waitFor((m) => m.type === 'welcome');
+        await waitUntil(() => endpoint.linkFor(7).connected);
+        for (const seq of [1, 2, 3]) {
+          probe.send({
+            type: 'heartbeat',
+            seq,
+            sentAt: new Date().toISOString(),
+            health: { memoryAvailablePercent: 100.3, memoryAvailableMb: 7_950, scheduled: 0 },
+          });
+          await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === seq);
+        }
+
+        const link = endpoint.linkFor(7);
+        assert.ok(link.connected, 'the link survives every one of them');
+        assert.deepEqual(
+          link.health,
+          { memoryAvailableMb: 7_950, scheduled: 0 },
+          'the one reading is a gap, and the rest of the report arrives',
+        );
+        const said = lines.filter((line) =>
+          String(line['msg']).startsWith('probe sent health readings the core cannot use'),
+        );
+        assert.equal(said.length, 1, 'said once for the connection, not once a heartbeat');
+        assert.deepEqual(said[0]?.['fields'], [
+          {
+            field: 'memoryAvailablePercent',
+            value: 100.3,
+            reason: '/health/memoryAvailablePercent: must be <= 100',
+          },
+        ]);
+        assert.equal(
+          lines.some((line) => line['msg'] === 'closing connection on protocol violation'),
+          false,
+        );
+        probe.close();
+      } finally {
+        await endpoint.stop();
+      }
+    });
+
     it('pushes again when the probe acknowledges a different number of sensors', async () => {
       // **`P-149`.** A full push is one `config-set` plus N-1 deltas at the same version, and the
       // probe stamps itself as holding that version on the *first* one — so a link that drops

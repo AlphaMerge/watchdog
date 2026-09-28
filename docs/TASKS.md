@@ -5106,6 +5106,58 @@ because each is a decision rather than a defect:
       count in `P-227`'s start-failure test (load only lowers it), and the fake clocks in
       `probe-health-report`.
 
+- [x] **P-224 — one health number out of range cost a probe its link, on every heartbeat** · S ·
+      P-208 · Found by the round-2 review. The heartbeat's health schema bounds
+      `memoryAvailablePercent` at 100, and the core refused the whole frame for one field out of
+      range, which destroyed the socket (`connection.ts`, `#failProtocol`). Nothing on the probe
+      kept the value in bounds. `readMachineMemory` never compared `MemAvailable` with `MemTotal`,
+      and a virtualised `/proc/meminfo` can claim more available than total: `lxcfs` in an LXC
+      container (a Proxmox guest, say) and OpenVZ have both shipped one. The probe sends its
+      lowest reading of thirty seconds on every heartbeat, so it reconnected into the same refusal
+      indefinitely. Its sensors went Unknown, and Probe Health raised a link alarm, over one
+      optional number that should have been one empty channel.
+
+      **Fixed, at both ends.**
+      - **On the probe**, `readMachineMemory` gaps a reading with more available than total, on
+        Linux and on Windows. A clamp to 100% would be a reading nobody took. Core Health reads
+        through the same function, so its channel gaps the same way instead of storing 100.3%.
+      - **On the core**, `parseProbeToCore` drops a health *value* it cannot use and keeps the
+        heartbeat. Every error must lie beneath `/health/<field>` and the frame must validate
+        without those fields. Anything else wrong still refuses the frame. The probe endpoint logs
+        *probe sent health readings the core cannot use* once per field per connection, with the
+        probe's GID, the value (a string is named by its type) and the reason.
+      - **A field the core does not know is still refused.** That is a skew, not a reading. An
+        upgrade that reaches the probes first does not meet this: a newer probe negotiates down to
+        the core's version (`P-178`), and `healthForPeer` strips every health field that version
+        lacks before sending. A core older than `P-178` refuses a newer probe at the handshake, in
+        words, and is never sent a heartbeat. Nothing enforced the gate, though. A new field added
+        to the schema and not to `healthForPeer` would have cost every older core's links. A
+        guard test in `capabilities.test.ts` now covers every version from 16 to
+        `PROTOCOL_VERSION`, checks that no field reaches a core older than it, and pins the count
+        of pre-17 fields, so a new one has to be given a version.
+      - `administration.md` says both, under Probe Health.
+
+      **Tests.** `machine-memory.test.ts` 1: more available than total gaps on Linux and Windows,
+      and exactly the total is kept. `messages.test.ts`: the refusals of an out-of-range value now
+      expect the field dropped. Four new cases:
+      - which field, the value and the reason, in the schema's order;
+      - a percentile bundle dropped whole;
+      - an unknown field, an error outside `health` and a non-object `health` still refused, with
+        nothing reported;
+      - nothing reported for a usable heartbeat.
+
+      `capabilities.test.ts` 1, the guard. `probe-endpoint.test.ts` 1: three heartbeats at 100.3%,
+      each acked, the link up, the rest of the report delivered, one warning and no protocol
+      violation.
+
+      Mutation 6/6, each run against its own tests:
+      - the consistency check dropped (1 fails);
+      - the core's tolerance dropped (4 shared tests and the endpoint test fail);
+      - the once-per-field dedupe dropped (the endpoint test fails);
+      - the peer's string logged as is (1 fails);
+      - a field added to the schema with no gate (the guard fails, naming what to do);
+      - `memoryLimit`'s gate dropped (the guard fails at protocol 16).
+
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
       `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a

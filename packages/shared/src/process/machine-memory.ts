@@ -25,6 +25,13 @@ import type { AvailableMemory } from './memory-watch.js';
  *
  * **Anywhere else, a gap.** macOS and the BSDs count free pages, which is `MemFree`'s mistake again,
  * and neither is a platform this system is installed on.
+ *
+ * **And a gap when available exceeds total** (`P-224`). No kernel counts that, but a virtualised
+ * `/proc/meminfo` can: `lxcfs` in an LXC container, a Proxmox guest among them, and OpenVZ have
+ * both shipped one that mixes the host's figures with the container's. procps' `free` swaps in
+ * `MemFree` there; that is `MemFree`'s mistake again, and 100% would be a reading nobody took. It
+ * mattered beyond the channel, too: the protocol bounds the percentage at 100, and before `P-224`
+ * a core refused the whole heartbeat that carried it and dropped the link, on every heartbeat.
  */
 export type MachineMemory = AvailableMemory;
 
@@ -75,13 +82,17 @@ export function readMachineMemory(sources: MachineMemorySources = LIVE): Machine
     // A kernel older than 3.14 has no `MemAvailable`. The fallback the SSH sensor uses — free plus
     // buffers plus cache — overstates it, and that sensor says so in its message; a channel with
     // limits on it has nowhere to say so, so it gaps instead.
-    if (availableBytes === undefined || totalBytes === undefined || totalBytes <= 0) return null;
-    return { availableBytes, totalBytes };
+    if (availableBytes === undefined || totalBytes === undefined) return null;
+    return consistent(availableBytes, totalBytes);
   }
   if (sources.platform === 'win32') {
-    const totalBytes = sources.totalmem();
-    if (!(totalBytes > 0)) return null;
-    return { availableBytes: sources.freemem(), totalBytes };
+    return consistent(sources.freemem(), sources.totalmem());
   }
   return null;
+}
+
+/** A reading that can be true of a machine, or `null`: a total, and no more available than it. */
+function consistent(availableBytes: number, totalBytes: number): MachineMemory | null {
+  if (!(totalBytes > 0) || !(availableBytes >= 0) || availableBytes > totalBytes) return null;
+  return { availableBytes, totalBytes };
 }

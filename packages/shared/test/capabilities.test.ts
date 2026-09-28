@@ -11,7 +11,9 @@ import {
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   versionFor,
+  type ProbeHealthReport,
 } from '../src/index.js';
+import { PROBE_HEALTH_FIELDS } from '../src/protocol/messages.js';
 
 /**
  * Version skew (`R-06`).
@@ -224,6 +226,40 @@ describe('the health a peer can be sent', () => {
   it('sends everything to a core that knows it', () => {
     assert.deepEqual(healthForPeer(health, 18), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
+  });
+
+  it('never sends a core a health field older than it is, for every version and every field', () => {
+    // `P-224`. An upgrade that reaches the probes before the core must not cost the link: a newer
+    // probe speaks the core's version (`P-178`) and `healthForPeer` takes out what that version
+    // lacks, so the core never sees a field it would refuse. The core refuses one still — a value
+    // out of range is a gap since `P-224`, but a field it does not know is a skew — so a field
+    // added to the schema without a gate would cost every heartbeat and the link with it. This
+    // fails for that field: add it to `SINCE` at its version, and gate it.
+    const SINCE: Readonly<Record<string, number>> = {
+      memoryAvailablePercent: 17,
+      memoryAvailableMb: 17,
+      memoryLimitUsagePercent: 18,
+      memoryLimitMb: 18,
+    };
+    // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
+    // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
+    // not quietly taken for one of them.
+    assert.equal(
+      PROBE_HEALTH_FIELDS.filter((field) => SINCE[field] === undefined).length,
+      49,
+      'a new health field: give it a version in SINCE, and gate it in healthForPeer',
+    );
+    const knownAt = (version: number): Set<string> =>
+      new Set(PROBE_HEALTH_FIELDS.filter((field) => (SINCE[field] ?? 16) <= version));
+    const every = Object.fromEntries(
+      PROBE_HEALTH_FIELDS.map((field) => [field, 1]),
+    ) as ProbeHealthReport;
+    for (let version = 16; version <= PROTOCOL_VERSION; version++) {
+      const unknown = Object.keys(healthForPeer(every, version)).filter(
+        (field) => !knownAt(version).has(field),
+      );
+      assert.deepEqual(unknown, [], `sent to a core at protocol ${String(version)}`);
+    }
   });
 
   it('names the missing capability in words for an older probe', () => {

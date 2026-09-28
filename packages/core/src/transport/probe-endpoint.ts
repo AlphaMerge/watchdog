@@ -612,11 +612,27 @@ export class ProbeEndpoint {
     }, config.handshakeTimeoutMs);
     handshakeTimer.unref();
 
+    // `P-224`: a health number the core cannot use is a gap on its channel, and said once per
+    // field per connection. The probe sends its worst reading of the last thirty seconds on every
+    // heartbeat, so the same bad number arrives every time, and a line each time says nothing new.
+    const unusableHealth = new Set<string>();
     const connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage> =
       new MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>({
         socket,
         logger: connectionLogger,
-        parse: parseProbeToCore,
+        parse: (value) =>
+          parseProbeToCore(value, {
+            onUnusableHealth: (fields) => {
+              const fresh = fields.filter(({ field }) => !unusableHealth.has(field));
+              if (fresh.length === 0) return;
+              for (const { field } of fresh) unusableHealth.add(field);
+              connectionLogger.warn(
+                { probeGid: session?.info.gid, fields: fresh },
+                'probe sent health readings the core cannot use; their channels gap, the ' +
+                  'heartbeat is kept, and this is said once per field for this connection',
+              );
+            },
+          }),
         // Three missed heartbeats and the probe is gone as far as we are concerned.
         idleTimeoutMs: config.heartbeatIntervalMs * 3,
         onMessage: (message) => {
