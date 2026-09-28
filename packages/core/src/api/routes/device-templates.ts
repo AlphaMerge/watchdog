@@ -5,14 +5,27 @@ import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import type { DiscoveryService } from '../../discovery/service.js';
-import { COMPUTES, READS, computesOn, onObject, onDerivedObject } from '../authorization.js';
+import type { Visibility } from '../../auth/access.js';
+import { ObjectError } from '../../objects/errors.js';
+import {
+  COMPUTES,
+  READS,
+  computesOn,
+  onObject,
+  onDerivedObject,
+  visibilityOf,
+} from '../authorization.js';
 
 export interface DeviceTemplateRouteOptions {
   templates: DeviceTemplateCatalogue;
   discovery?: DiscoveryService;
-  /** A device's sensors, for save-as-template. Absent disables that one route. */
+  /**
+   * A device's sensors, for save-as-template: those the caller can see (`A-23`). Absent disables
+   * that one route.
+   */
   sensorsOf?: (
     deviceId: number,
+    visibility: Visibility,
   ) => Promise<{ name: string; sensorType: string; params: Record<string, unknown> }[]>;
   credentialKindsFor: (sensorType: string) => readonly string[];
 }
@@ -315,15 +328,14 @@ export function deviceTemplateRoutes(
           description?: string;
           match?: Record<string, unknown>;
         };
-        const sensors = await sensorsOf(id);
+        const sensors = await sensorsOf(id, await visibilityOf(request));
+        // A 400, and the same one for a device whose sensors are all hidden (`A-23`). It was a bare
+        // `AppError`, which no branch of `toHttpError` knows, so it went out as a 500 with its
+        // message replaced — a mistake by the caller reported as a failure of the core.
         if (sensors.length === 0) {
-          throw new AppError(
-            'DEVICE_TEMPLATE_INVALID',
-            `object ${String(id)} has no sensors to save`,
-            {
-              context: { id },
-            },
-          );
+          throw new ObjectError('OBJECT_INVALID', `object ${String(id)} has no sensors to save`, {
+            context: { objectId: id, phase: 'as-template' },
+          });
         }
         return templateFromDevice({
           id: body.id,

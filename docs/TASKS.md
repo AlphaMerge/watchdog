@@ -12012,8 +12012,9 @@ because each is a decision rather than a defect:
       already resubscribes on `overflow`.
 
       **The sweep is `object-visibility.test.ts`**, the shape of `A-10`'s: every registered `GET`,
-      as a branch account, with every id it can see and every query parameter the route's OpenAPI
-      entry declares, visible ids and hidden ones, must not contain a marker put on every object
+      as a branch account, with every id it can see and each query parameter the route's OpenAPI
+      entry declares that can name an object — visible ids and hidden ones; the rest are called
+      bare and named as a known limit since `A-23` — must not contain a marker put on every object
       outside the branch — including the root and the probe above it — nor may the stream, live or
       in its snapshot. An administrator's pass over the same fixture is the control that the markers
       are reachable. It found a second kind of leak the ticket had not listed, **a visible object's
@@ -12442,7 +12443,7 @@ because each is a decision rather than a defect:
       the public audience seeing every widget, its lists unfiltered, no save check, and a link with
       no maker.
 
-- [ ] **A-23 — `POST /objects/:id/as-template` lists sensors inside a carved hole** · S · A-12 ·
+- [x] **A-23 — `POST /objects/:id/as-template` lists sensors inside a carved hole** · S · A-12 ·
       Found 2026-09-28 in `A-12`'s review. The route is `computesOn(onObject('read'))` on the
       device, which is right, and `sensorsOfDevice` then reads `WHERE o.parent_id = $1 AND
       o.kind = 'sensor'` with no visibility condition — so a sensor carved `none` under a readable
@@ -12452,6 +12453,28 @@ because each is a decision rather than a defect:
       **Done when** the template drafted from a device holds only the sensors its caller can see,
       asserted in `object-visibility.test.ts`, and the sweep calls every `COMPUTES` route
       (`changes: false`) it can build a body for, so the next one is not found by reading.
+
+      **A-23 outcome.** `sensorsOfDevice` takes the caller's visibility and puts
+      `whereChildOfVisible` in its `WHERE` — the device is readable, so its children need only
+      the membership test against carved boundaries, not a walk. A device whose sensors are all
+      hidden is refused exactly as an empty one is, and that refusal is now a 400: it was a bare
+      `AppError` no branch of `toHttpError` knows, so it had always gone out as a 500 with its
+      message replaced. **The sweep now calls every `COMPUTES` route**, from the route table,
+      with a body for each; a route with `changes: false` it has no body for fails the test, so
+      the next one is found by the sweep. Four of the five answer 200 as the branch account; the
+      fifth previews a pasted document, reads nothing from the tree, and has no previewing type
+      in the test catalogue, which the test says. **And `A-12`'s "every query parameter" was an
+      overclaim**: the sweep gave values to nine and called the rest bare. `q`, `tag` and `host`
+      select by something a hidden object has, so they are now swept with the hidden object's
+      name, tag and address; the other nineteen are named in `UNSWEPT_QUERY_PARAMETERS` with why
+      none can name an object, and a new parameter fails the sweep until it is in one list or the
+      other. `A-12`'s entry, its findings and the test's header say so. The fixture's carved
+      sensor now differs from its visible siblings, because the template folds duplicates and
+      would otherwise have hidden this very leak from the test. Tests: the `COMPUTES` sweep, the
+      named-limit case and a template case (an administrator's control names the carved sensor;
+      the branch account's draft holds only `a-ping`, and a device whose only sensor is hidden is
+      refused like an empty one) in `object-visibility.test.ts`. Mutation: dropping the condition
+      is caught by both the sweep and the template case.
 
 - [x] **A-24 — Acknowledging or forcing a device reaches the sensors in its holes** · S · A-12 ·
       Found 2026-09-28 in `A-12`'s review. `POST /objects/:id/acknowledge` and

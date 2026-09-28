@@ -4,6 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { AuditRepository } from '../src/audit/store.js';
 import { ApiServer, sensorsOfDevice } from '../src/api/server.js';
+import { Visibility } from '../src/auth/access.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { SHARED_SCHEMAS } from '../src/api/schemas/objects.js';
 import {
@@ -716,7 +717,12 @@ describe(
         });
         assert.equal(sensor.statusCode, 201, sensor.body);
 
-        const sensors = await sensorsOfDevice(scratch.db, testCatalogue(), d.id);
+        const sensors = await sensorsOfDevice(
+          scratch.db,
+          testCatalogue(),
+          d.id,
+          Visibility.EVERYTHING,
+        );
         assert.equal(sensors.length, 1, 'the sensor is in the template');
 
         const body = JSON.stringify(sensors);

@@ -124,8 +124,8 @@ the sensors it can no longer see.
 ## What the sweep found that the ticket did not list
 
 The ticket named the listings. The sweep — every registered `GET`, called as a branch account with
-every id it can see and every query parameter the route's schema declares, visible ids and hidden
-ones — found the other way a hidden object reaches a visible one: **a visible object's own fact
+every id it can see and each query parameter that can name an object, visible ids and hidden ones —
+found the other way a hidden object reaches a visible one: **a visible object's own fact
 with another object's name in it.** Each is fixed the same way — the reference stays, as an id,
 and the name goes — through `Visibility.visibleAmong`, the same predicate asked of a handful of
 ids.
@@ -258,7 +258,12 @@ a test shown to fail before its fix.
   been sent, so a gap still means a lost frame and nothing else.
 - **`A-23` — `POST /objects/:id/as-template` read the sensors under a device without asking which
   the caller could see.** A `COMPUTES` route, so the sweep of `GET`s could not reach it; the
-  device check was right and the walk under it had no condition.
+  device check was right and the walk under it had no condition. It has one now, and **the sweep
+  calls every `COMPUTES` route** with a body, failing on one it has no body for. The same review
+  found this document's "every query parameter" untrue: the sweep gave values to nine and called
+  the rest bare. Three more — a name search, a tag, an address — are now swept with a hidden
+  object's own; the nineteen left are named in the test as a limit, each an ordering, a time, a
+  flag or an id of something outside the tree.
 - **`A-24` — acknowledging or forcing a device reached the sensors in its holes.** A write, not
   only a read: the route checked `write` on the device, and the walk beneath it acknowledged, or
   forced Down and paged the owner of, a sensor carved `none` — and the answer named it, or said

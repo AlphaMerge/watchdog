@@ -771,7 +771,8 @@ export class ApiServer {
           await scope.register(deviceTemplateRoutes, {
             templates,
             ...(this.#discovery === undefined ? {} : { discovery: this.#discovery }),
-            sensorsOf: (deviceId) => sensorsOfDevice(this.#db, this.#catalogue, deviceId),
+            sensorsOf: (deviceId, visibility) =>
+              sensorsOfDevice(this.#db, this.#catalogue, deviceId, visibility),
             credentialKindsFor: (sensorType) =>
               this.#catalogue.has(sensorType)
                 ? (this.#catalogue.declaration(sensorType).credentialKinds ?? [])
@@ -1062,14 +1063,24 @@ export async function buildApiServer(options: ApiServerOptions): Promise<ApiServ
  *
  * The catalogue does the stripping, so this shares one definition of "secret" with
  * `ObjectService.#redact` rather than keeping a second list that could drift.
+ *
+ * **And only the sensors the caller can see** (`A-23`). The route checks `read` on the device, and
+ * a sensor carved `none` beneath it came back with its name, type and parameters all the same. The
+ * device is visible, so its children need only `whereChildOfVisible`'s membership test, not a walk.
  */
 export async function sensorsOfDevice(
   db: Database,
   catalogue: SensorCatalogue,
   deviceId: number,
+  visibility: Visibility,
 ): Promise<
   { name: string; sensorType: string; params: Record<string, unknown>; isMaster: boolean }[]
 > {
+  const values: unknown[] = [deviceId];
+  const visible = visibility.whereChildOfVisible(
+    'o.id',
+    (value) => `$${String(values.push(value))}`,
+  );
   const rows = await db.query<{
     name: string;
     type: string;
@@ -1085,9 +1096,9 @@ export async function sensorsOfDevice(
      JOIN sensor_config sc ON sc.object_id = o.id
      LEFT JOIN object_setting s
        ON s.object_id = $1 AND s.key = 'dependency.masterId'
-     WHERE o.parent_id = $1 AND o.kind = 'sensor'
+     WHERE o.parent_id = $1 AND o.kind = 'sensor' AND ${visible}
      ORDER BY o.id`,
-    [deviceId],
+    values,
   );
   return rows.map((row) => ({
     name: row.name,

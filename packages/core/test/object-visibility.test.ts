@@ -50,8 +50,10 @@ import { testCatalogue } from './support/sensor-types.js';
  * the day it was supposed to catch something. So every object outside the branch carries a
  * marker in its name — and the hidden sensors carry one in their failure messages — and *every
  * registered `GET`* is called as the branch account, with every id the account can see, bare and
- * with each query parameter a listing takes. No answer may contain the marker. The stream is
- * swept the same way, over a real WebSocket.
+ * with each query parameter that can name an object — the others are named, as a limit, in
+ * `UNSWEPT_QUERY_PARAMETERS`. Every route that computes rather than changes is called too, with a
+ * body, since `A-23`. No answer may contain the marker. The stream is swept the same way, over a
+ * real WebSocket.
  *
  * **Outside means the containers above the branch too.** The root and the probe the branch hangs
  * under carry the marker, because their names are exactly what a breadcrumb, an alarm's path or
@@ -263,6 +265,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       parentId: deviceId,
       name: `${MARK}-carved-sensor`,
       sensorType: 'icmp.ping',
+      // Unlike its visible siblings, so a template drafted from the device cannot fold it into
+      // theirs as a duplicate and hide the leak `A-23` found.
+      params: { count: 7 },
     });
     carvedDeviceId = await create({
       kind: 'device',
@@ -603,6 +608,15 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           return ['500'];
         case 'maxDepth':
           return ['20'];
+        // Not ids, but each selects by something a hidden object has — its name, its tag, its
+        // address — so a filter applied beside the visibility condition rather than under it
+        // would hand that object back (`A-23`).
+        case 'q':
+          return [MARK];
+        case 'tag':
+          return [`${MARK}-tag`];
+        case 'host':
+          return ['10.0.0.2', '10.9.0.1'];
         default:
           return [];
       }
@@ -629,6 +643,27 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       );
       return [...new Set(filled)].flatMap((one) => queries.map((query) => `${one}${query}`));
     }
+
+    it('names the query parameters it calls with no value, as a limit and not a claim (A-23)', () => {
+      // Every declared query parameter that `queryValues` has nothing for: the routes that declare
+      // them are called bare and with the parameters it does know, and never with these.
+      const openapi = app.swagger() as unknown as OpenApi;
+      const declared = new Set<string>();
+      for (const route of server.routes) {
+        if (route.method !== 'GET') continue;
+        for (const parameter of openapi.paths[route.url.replace(/:([A-Za-z]+)/g, '{$1}')]?.get
+          ?.parameters ?? []) {
+          if (parameter.in === 'query') declared.add(parameter.name);
+        }
+      }
+      const unswept = [...declared].filter((name) => queryValues(name).length === 0).sort();
+      assert.deepEqual(
+        unswept,
+        UNSWEPT_QUERY_PARAMETERS,
+        'give a new parameter values in queryValues, or name it in UNSWEPT_QUERY_PARAMETERS ' +
+          'with the reason it cannot name an object',
+      );
+    });
 
     it('has every module that lists registered, so a silent zero is not a pass', () => {
       const swept = new Set(server.routes.map((route) => `${route.method} ${route.url}`));
@@ -695,6 +730,122 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.ok(answered.size > 25, `only ${String(answered.size)} GET routes answered 200`);
       for (const name of VISIBLE) assert.ok(bodies.includes(name), `nothing ever named ${name}`);
       assert.ok(bodies.includes('Customer A library'), 'the team’s own library was never listed');
+    });
+
+    /**
+     * The bodies to send a route that computes rather than changes, or `undefined` for one the
+     * sweep does not know how to call.
+     *
+     * **A `COMPUTES` route is a read with its question in the body** (`A-23`), so it can name an
+     * object as readily as a `GET` — and `A-12`'s sweep called only `GET`s, which is how
+     * `POST /objects/:id/as-template` kept a hole's sensor in its answer. Hidden sensors as well as
+     * visible ones where the body names one, for `queryValues`'s reason.
+     */
+    function computesBodies(route: string): Record<string, unknown>[] | undefined {
+      switch (route) {
+        case 'POST /api/v1/device-templates/plan':
+          return [{ fingerprint: {} }];
+        case 'POST /api/v1/discovery/preview':
+          return [{ range: '10.0.0.0/30' }];
+        case 'POST /api/v1/objects/:id/as-template':
+          return [{ id: 'swept.template', name: 'Swept' }];
+        case 'POST /api/v1/sensor-types/:id/preview':
+          return [{ document: '{}', params: {} }];
+        case 'POST /api/v1/templates/preview':
+          return [pingId, regrantedId, carvedSensorId, otherSensorId].map((sensorId) => ({
+            template: {
+              name: 'Swept draft',
+              method: 'email',
+              settings: {},
+              subject: '%sensor on %device is %status',
+              body: '%lastmessage, via %probe in %group',
+              recipients: [{ kind: 'address', value: 'ops@example.test' }],
+            },
+            sensorId,
+          }));
+        default:
+          return undefined;
+      }
+    }
+
+    it('never names an object outside the branch, on any route that computes (A-23)', async () => {
+      const computing = server.routes.filter((route) => route.method !== 'GET' && !route.changes);
+      const keys = computing.map((route) => `${route.method} ${route.url}`);
+      // A route added tomorrow fails here until the sweep can call it: found by the sweep, not by
+      // somebody reading, which is how this one was found.
+      assert.deepEqual(
+        keys.filter((key) => computesBodies(key) === undefined),
+        [],
+        'the sweep has no body for these, so it cannot call them',
+      );
+      assert.ok(keys.includes('POST /api/v1/objects/:id/as-template'), 'is a module unwired?');
+
+      const leaked: string[] = [];
+      const answered = new Set<string>();
+      for (const route of computing) {
+        const key = `${route.method} ${route.url}`;
+        const ids = route.url.includes('/sensor-types/') ? ['icmp.ping'] : idsFor(route.url);
+        const urls = [...new Set(ids.map((id) => route.url.replaceAll(':id', id)))];
+        for (const url of urls) {
+          for (const payload of computesBodies(key) ?? []) {
+            const response = await app.inject({
+              method: 'POST',
+              url,
+              // Not `branch`: the `GET` sweep spends most of that account's window.
+              headers: { ...as('watcher'), 'content-type': 'application/json' },
+              payload,
+            });
+            assert.notEqual(response.statusCode, 429, `${url} was throttled, and proved nothing`);
+            if (response.statusCode === 200) answered.add(key);
+            const at = response.body.indexOf(MARK);
+            if (at >= 0) {
+              leaked.push(`${url}: ${response.body.slice(Math.max(0, at - 120), at + 40)}`);
+            }
+          }
+        }
+      }
+
+      assert.deepEqual(leaked, [], 'these answers told a branch account about objects outside it');
+      // Every one computed something for somebody: a sweep of refusals proves nothing. Except the
+      // preview of a pasted document, which reads nothing from the tree and has nothing to leak:
+      // the test catalogue has no type that previews, so a 404 is all it can say here.
+      assert.deepEqual(
+        keys.filter((key) => !answered.has(key) && key !== 'POST /api/v1/sensor-types/:id/preview'),
+        [],
+        'these never answered 200',
+      );
+    });
+
+    it('drafts a template from only the sensors its caller can see (A-23)', async () => {
+      const draft = async (login: string, objectId: number) =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(objectId)}/as-template`,
+          headers: { ...as(login), 'content-type': 'application/json' },
+          payload: { id: 'drafted.template', name: 'Drafted' },
+        });
+      const names = (body: string): string[] =>
+        (JSON.parse(body) as { sensors: { name: string }[] }).sensors.map((sensor) => sensor.name);
+
+      // The control: the device's own three, a-held folded into a-ping as its duplicate.
+      const admin = await draft('admin', deviceId);
+      assert.equal(admin.statusCode, 200, admin.body);
+      assert.deepEqual(names(admin.body), ['a-ping', `${MARK}-carved-sensor`]);
+
+      const watcher = await draft('watcher', deviceId);
+      assert.equal(watcher.statusCode, 200, watcher.body);
+      assert.deepEqual(
+        names(watcher.body),
+        ['a-ping'],
+        'the carved sensor, or its count, came back',
+      );
+      assert.match(watcher.body, /with 1 sensors/);
+
+      // A device whose only sensor is hidden has nothing to save — the answer an empty one gets.
+      const lonely = await draft('watcher', lonelyDeviceId);
+      assert.equal(lonely.statusCode, 400, lonely.body);
+      assert.match(lonely.body, /has no sensors to save/);
+      assert.equal(lonely.body.includes(MARK), false, lonely.body);
     });
 
     it('publishes through a share link only what the link’s maker can see (A-22)', async () => {
@@ -1289,6 +1440,43 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     });
   });
 });
+
+/**
+ * The query parameters the sweep never gives a value (`A-23`).
+ *
+ * **A known limit, named rather than claimed away.** `A-12`'s entry said the sweep tried every
+ * query parameter; it tries the ones `queryValues` has values for, and calls the routes declaring
+ * these only without them. None of these names an object in the tree or selects by anything one
+ * has: they are times and cursors, enumerations and flags, and the ids of things that are not in
+ * the tree — an account, a notification template, an audit actor. Each narrows, orders or pages
+ * rows the bare call already reads through the same condition. A parameter that does name or
+ * select an object belongs in `queryValues`, with hidden values among its own — and a new one
+ * fails the sweep until it is in one list or the other.
+ */
+const UNSWEPT_QUERY_PARAMETERS: readonly string[] = [
+  // Times, cursors and pages.
+  'before',
+  'cursor',
+  'from',
+  'resolutionSeconds',
+  'to',
+  // Enumerations, flags and orderings.
+  'category',
+  'cause',
+  'credentials',
+  'includeAcknowledged',
+  'includeRevoked',
+  'kind',
+  'priorityMin',
+  'sort',
+  'state',
+  'status',
+  // Ids of things outside the tree.
+  'actorKind',
+  'actorRef',
+  'templateId',
+  'userId',
+].sort();
 
 /** As much of an OpenAPI document as the sweep reads: each path's declared query parameters. */
 interface OpenApi {
