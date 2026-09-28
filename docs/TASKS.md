@@ -14062,7 +14062,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       alone would not keep them out; the ticket said this does not block. Migrations 044–051 stay
       in the v1 build, so one migration history serves both profiles.
 
-- [ ] **H-13 — The candidate's surface, tested** · M · H-12 · A table of the v1 candidate's
+- [x] **H-13 — The candidate's surface, tested** · M · H-12 · A table of the v1 candidate's
       surface in `docs/runbook-field-test.md`, beside step 3's, parsed and compared **in both
       directions** against a v1-profile server built without a database, the way
       `scripts/docs/api-reference.mjs` builds one. **Done when** it asserts, of the running
@@ -14078,6 +14078,68 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       route under the profile, a route hidden from OpenAPI that still answers, the prefix exempted
       without its routes, a v1 route lost to the profile, a `windows.*` type put back,
       `FlowListener` wired under the profile, a missing stamp read as full).
+
+      **H-13 outcome**, in two commits: `b46fa88`, `0e2d01d`.
+
+      **The table** is the appendix of `docs/runbook-field-test.md`. It lists every route a v1
+      core answers (125, in 102 rows by path), what each answers without a credential, and every
+      built-in sensor type with whether the candidate carries it. It sits at the end rather than
+      inside step 3, so that the procedure still reads as a procedure. A row the test cannot
+      parse fails it, so a malformed row is never silently skipped.
+
+      **The server** is `packages/core/test/candidate-surface.test.ts`: a v1 core built without a
+      database, as the API reference builds one. Its stamp is read from a manifest, as a package
+      reads its own. Its v2 decision comes from `core/src/profile.ts`, which is now where
+      `main.ts` gets it too (`coreCatalogue`, `startV2Subsystems`, `v2ApiOptions`). What it
+      asserts:
+      - The routes, found by `inject` across every route either profile registered, every row,
+        and two probes. It answers every listed route and nothing else.
+      - `GET /api/v1/stream`, shown to answer while absent from the OpenAPI document.
+      - The same set with no credential. Everything is `401 AUTH_REQUIRED` except the three
+        `auth` routes, including `/metrics` and `GET /api/v1/public/maps/anything`.
+      - The catalogue `GET /api/v1/sensor-types` serves, against the table, and the table
+        against every built-in type.
+      - A stubbed full server answering the map, report, library and public routes, so that
+        their absence under v1 is the profile's doing. Its `/build` reports all three
+        subsystems.
+      - A manifest without a profile refused.
+      - The harness passing `ApiServer` exactly the keys `main.ts` passes, with the v2 ones only
+        through `v2ApiOptions`.
+
+      **The probe** (`build-profile.test.ts`):
+      - A `flow.netflow` assignment goes through `dueDispatcher` with the tables `main.ts` now
+        gets from `dispatchTables()`, the real pool, and a flow listener present as `B-07` will
+        wire one. Under v1 it is refused by name and the listener is never drained. Under full it
+        is drained.
+      - A check-now of it answers `unsupported` with the profile's reason. It used to answer
+        "probably older than the core": `QueryRunner` replaced the registry's message with a
+        fixed one. It now passes it through, and the hint moved to the one case it describes.
+
+      **Provenance.** `smoke-packages.sh` asks each installed launcher which build it is
+      (`ms-core --help`, `ms-probe config`), because those boxes have no database. It compares
+      the answer with the manifest and with this checkout's commit and dirty state, including
+      when it reuses a staged tree. It now also builds in the toolchain container by default and
+      passes the commit in; built there before, its packages said `commit: null`. **Run
+      2026-09-28 at `d1ecafa`**, with `MS_SMOKE_REBUILD=1`: deb and rpm both passed, and both
+      boxes answered `ms-core 0.1.0 (v1 profile, commit d1ecafa5b025)` and the same for
+      `ms-probe`.
+
+      Mutations caught, all thirteen. From the table: a v2 route added, a v1 route dropped,
+      `flow.netflow` marked carried, `/metrics` marked public. From the code:
+      - a map service under v1;
+      - a map route registered under v1 and hidden from OpenAPI;
+      - the public prefix exempted without its routes;
+      - the lookup routes gated on maps;
+      - `windows.cpu` put back;
+      - the dispatch tables built from the full catalogue;
+      - a profile-less manifest read as `full`;
+      - the check-now message fixed again;
+      - `main.ts` dropping an option the harness passes.
+
+      **Not covered, and said so.** Whether a v1 probe *binds* a flow socket is `B-07`'s, and its
+      assignment now says the `flowListener` key is refused under v1. A package whose
+      `build.json` is deleted outright reads as a working tree, which is `full`. Both smokes fail
+      on a missing `build.json`.
 
 - [ ] **H-14 — An x86_64 build, proven once** · S · — · Every package so far was built on
       this project's Apple Silicon machine, so every `.deb` has been `arm64`, and `package.sh` says

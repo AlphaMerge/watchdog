@@ -18,7 +18,7 @@ that gets run badly or not at all.
 | --- | --- | --- |
 | Clean install on Ubuntu | **2026-09-28, locally** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
 | Clean install on Debian | 2026-09-03, locally | `scripts/smoke-install.sh` |
-| `.deb` and `.rpm` install, upgrade, remove | 2026-09-03, locally | `scripts/smoke-packages.sh` |
+| `.deb` and `.rpm` install, upgrade, remove | **2026-09-28, locally** | `scripts/smoke-packages.sh` |
 | Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
 | 5,000 sensors for 24 h | 2026-08-30 | `docs/findings/2026-08-30-soak-24h.md` |
 
