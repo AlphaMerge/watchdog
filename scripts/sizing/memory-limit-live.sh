@@ -42,6 +42,9 @@ box="$(sed -n 's/^==> kept \([^ ]*\) .*/\1/p' "${log}")"
 }
 
 echo "==> starting the services again (the smoke test ends by stopping them)"
+# The smoke test has started both several times already, and every start counts toward the units'
+# start limit (P-215): cleared first, so the cases measure their own starts.
+docker exec "${box}" systemctl reset-failed ms-core ms-probe
 docker exec "${box}" systemctl start ms-core ms-probe
 docker cp "${repo_root}/scripts/smoke/api-token.sh" "${box}:/tmp/api-token.sh"
 docker cp "${repo_root}/scripts/sizing/memory-limit-live.mjs" "${box}:/tmp/memory-limit-live.mjs"

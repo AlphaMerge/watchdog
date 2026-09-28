@@ -208,19 +208,68 @@ systemd 252: mutant.service:34: Unknown key 'StartLimitIntervalSec' in section [
 systemd 255: mutant.service:34: Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring.
 ```
 
-**The code paths are tested; the units' live behaviour is not yet.** Build, lint and the shared,
-probe and core suites pass (249, 320 and 2,695 tests), including the database wait, migration
-progress and both halves of the restart scenario. What only a real systemd shows is still
-outstanding, because both attempts at the live run failed before reaching this ticket's code:
-Docker Desktop's BuildKit timed out resolving `FROM debian:bookworm`
-(`DeadlineExceeded: context deadline exceeded`) while Docker Hub itself answered the host in under
-half a second. `scripts/sizing/memory-limit-live.sh` already carries the stages that answer it:
+**The code paths are tested.** Build, lint and the shared, probe and core suites pass (249, 320
+and 2,695 tests before the rebase onto `H-12`; 258, 341 and every core unit test after it),
+including the database wait, migration progress and both halves of the restart scenario.
 
-- the probe, killed at its ceiling, reaching `failed` with *start request repeated too quickly*,
-  and `reset-failed` with a start bringing it back;
-- the core started with PostgreSQL stopped and held **90 s, past `TimeoutStartSec=60`**, which a
-  wait without `EXTEND_TIMEOUT_USEC` would not survive, then PostgreSQL started;
-- an unreadable `core.json`, which should stop the core at once with status 78 and no restarts;
-- six manual `systemctl restart`s in quick succession, which settles whether an operator's own
-  restarts count toward the burst. systemd's documentation says they do; `administration.md`
-  says so only once this run has.
+## The live run, 2026-09-28
+
+`scripts/sizing/memory-limit-live.sh`, in the smoke test's clean Debian 12 box under the shipped
+units; raw records in `2026-09-28-start-limit-live.jsonl`. The first two attempts failed in Docker
+Desktop's BuildKit (`DeadlineExceeded` resolving `FROM debian:bookworm`) before reaching this
+ticket's code; with the image pulled into the local store the build went through. It ran in a
+window with every other session holding and `ms-server` stopped, starting about 16:59:36 UTC. Load
+at the start was 3.89 / 10.79 / 16.10 on 8 CPUs, the tail of the work that had just drained; the
+restart loop ran about three minutes later. The box is small: its probe schedules no sensors and
+its working set is about 200 MiB, so the ceilings below are small too.
+
+**The probe's loop ends where an operator sees it.** With the ceiling at 90% of the working set and
+swap available, the kernel killed the probe about 0.6 s into each start, before it connected:
+
+| Kill | at (s) | since the last |
+| ---- | -----: | -------------: |
+| 1    | 143.3  |              — |
+| 2    | 149.0  |            5.7 |
+| 3    | 154.6  |            5.6 |
+| 4    | 160.3  |            5.7 |
+| 5    | 166.1  |            5.8 |
+
+Each round is the 5 s `RestartSec` plus the 0.6 s to the kill, uniform to ±0.1 s, which is not what
+a round stretched by load looks like. At 171.3 s systemd logged *Start request repeated too
+quickly* and *Failed with result 'oom-kill'*: `failed`, 28 s after the first kill, `NRestarts` 5.
+It stayed there for the remaining 37 s of the stage. `reset-failed` and a start brought it back at
+210 s, connected by 214 s. Probe Health went Down on the sweep after the first kill and stayed
+Down: the probe never connected between kills, so this shape raises one alarm, which is the
+scenario test's answer for a loop that never links up. The 10–14 s shape that connects each round,
+where the scenario's one-or-two comes from, is `P-213`'s measurement and was not reproduced in this
+box.
+
+The stage without swap did not loop here. The probe was killed once as the ceiling was lowered
+(`Failed with result 'signal'`), and the restarted process fitted, at 96.5% of 252 MiB, for the
+rest of the stage. A fresh process is smaller than the one whose working set set the ceiling. That
+is `P-213`'s question, not this one.
+
+**The core waits for its database past `TimeoutStartSec`.** Started with PostgreSQL stopped, it
+logged a warning at every attempt (1, 2, 4, then every 5 s) naming `127.0.0.1:5432/monitoring`. At
+90 s it was still `activating/start`, 30 s past `TimeoutStartSec=60`, with
+`systemctl status` reading *waiting for PostgreSQL at 127.0.0.1:5432/monitoring: nothing is
+listening yet (attempt 20, 87 s)* and **no restarts**. PostgreSQL was started at 93 s; the core
+logged the database reachable and was `active/running` 1 s later. Without `EXTEND_TIMEOUT_USEC`
+systemd would have killed it at 60 s.
+
+**Manual starts count toward the burst.** After `reset-failed ms-probe`, six
+`systemctl restart ms-probe` a second apart: the first five succeeded and the sixth was refused
+with *start request repeated too quickly*. `administration.md` says so, and says to
+`reset-failed` before the next start when iterating on a configuration or just after an install
+or upgrade.
+
+**A refused configuration was not exercised, and the harness was at fault.** The case writes an
+unreadable `core.json` and restarts the core, expecting exit 78 and no restarts. The core never read
+the file: its restart was refused by the start limit (`Failed with result 'start-limit-hit'`). The
+smoke test's own starts, the harness restarting the services, and the database case had already put
+five starts inside ten minutes. The verdict recorded `failed`, restarts 0, exit status 0, which
+looks like a pass unless you read the result; it now records the result too. The harness now runs
+`systemctl reset-failed ms-core ms-probe` before every case that starts a unit, and after the smoke
+test, so that each case counts only its own starts. **Anything else that drives the services
+through several starts in ten minutes, `H-15`'s rehearsal included, needs the same.**
+The whole run is to be repeated with that fix, and `P-215` is ticked when it shows exit 78.

@@ -81,8 +81,23 @@ function tryCtl(args) {
     sh('systemctl', args);
     return null;
   } catch (error) {
-    return String(error.stderr ?? error).trim();
+    // systemctl prefixes its own warnings (a drop-in changed on disk) to the error it is reporting.
+    return String(error.stderr ?? error)
+      .split('\n')
+      .filter((line) => !line.startsWith('Warning:'))
+      .join('\n')
+      .trim();
   }
+}
+/**
+ * Clears both units' start limit before a case that starts one of them. Every start counts toward
+ * `StartLimitBurst`, an operator's own included (measured here, 2026-09-28), and the smoke test and
+ * the cases before each one start both services several times inside the ten-minute window: on
+ * that run the refused-configuration case was refused by the start limit instead, before the core
+ * read its file. Each case measures its own starts, and nothing it inherited.
+ */
+function freshLimit() {
+  tryCtl(['reset-failed', 'ms-core', 'ms-probe']);
 }
 /**
  * Starts a unit systemd has given up on, the way an operator must after `P-215`'s start limit:
@@ -302,11 +317,13 @@ const workingSet = () => {
 };
 setProperty(`${CEILING}=${String(Math.ceil(workingSet() / 0.85))}`);
 await stage('ceiling at 85%', HOLD_MS);
+freshLimit();
 setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
 await stage('ceiling below the working set, swap available', HOLD_MS);
 restore();
 revive('ms-probe');
 await stage('restored', 30_000);
+freshLimit();
 setProperty('MemorySwapMax=0');
 setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
 // Twice as long: a probe with nowhere to put its pages is throttled or killed — which, is the
@@ -385,6 +402,7 @@ async function watch(name, stageName, hold, done = () => false) {
 // A core started ahead of its database. Held for ninety seconds — past `TimeoutStartSec=60` — so
 // that a wait without `EXTEND_TIMEOUT_USEC` would be killed here and show as a restart.
 tryCtl(['stop', 'ms-core']);
+freshLimit();
 tryCtl(['stop', 'postgresql']);
 const coreBefore = unit('ms-core').restarts;
 tryCtl(['start', '--no-block', 'ms-core']);
@@ -413,12 +431,15 @@ const refusedBefore = unit('ms-core').restarts;
 try {
   writeFileSync(configFile, '{ "this is": not json');
   emit({ kind: 'set', property: `${configFile} made unreadable` });
+  freshLimit();
   tryCtl(['restart', 'ms-core']);
   const refused = await watch('ms-core', 'configuration refused', 20_000);
   emit({
     kind: 'verdict',
     case: 'a refused configuration stops at once',
     state: refused.state,
+    // `exit-code` with 78 is the refusal; `start-limit-hit` means the case never ran.
+    result: refused.result,
     exitStatus: refused.exitStatus,
     restarts: refused.restarts - refusedBefore,
   });
@@ -431,7 +452,7 @@ await watch('ms-core', 'configuration restored', 60_000, (now) => now.state === 
 
 // Whether an operator's own restarts count against the limit. Six in quick succession, the way
 // somebody debugging does them: if the sixth is refused, `administration.md` has to say so.
-tryCtl(['reset-failed', 'ms-probe']);
+freshLimit();
 const manual = [];
 for (let attempt = 1; attempt <= 6; attempt += 1) {
   const error = tryCtl(['restart', 'ms-probe']);

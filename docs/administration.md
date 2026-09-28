@@ -242,8 +242,10 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   result.
 - **It restarts five seconds later**, and if the same work needs the same memory it is killed
   again. **After five starts inside ten minutes systemd refuses the sixth** (`P-215`): the unit is
-  `failed`, and `systemctl status ms-probe` says *start request repeated too quickly*. The measured
-  loop gets there in about a minute; any loop under two minutes a round gets there.
+  `failed`, and `systemctl status ms-probe` says *start request repeated too quickly*. Measured on
+  a real systemd, a probe killed before it could connect was killed five times 5.7 s apart and
+  refused 28 s after the first kill. The slower loop measured in `P-213`, 10–14 s a round, gets
+  there in about a minute, and any loop under two minutes a round gets there.
   `systemctl show -p NRestarts ms-probe` counts the rounds it took. The core shows the probe Down
   with "Link to the core is 0", and `memoryLimitUsage` as a gap, not as 100%.
 - **One or two alarms, not one.** The core sweeps Probe Health every thirty seconds, and a probe
@@ -259,6 +261,12 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   ```
 
   If it is still going round, the next restart comes up under the new ceiling by itself.
+- **Your own starts count too.** Every start inside the ten minutes counts toward the five,
+  whether systemd made it or you did: measured, after a `reset-failed` five `systemctl restart`s in
+  a row succeed and the sixth is refused with *start request repeated too quickly*. So when you are
+  editing a configuration and restarting to try it, or have just installed or upgraded (which
+  start the services themselves), run `systemctl reset-failed ms-core ms-probe` before the next
+  start rather than waiting ten minutes. It clears the count and changes nothing else.
 - **The core behaves the same way, and says nothing while it does.** A core killed at its ceiling
   on every start ends in `failed` too, and since the core is what raises alarms, nothing in this
   system reports it. Only the host's own monitoring, or a check from another machine, will notice;

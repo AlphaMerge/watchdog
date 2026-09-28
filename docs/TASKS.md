@@ -4567,7 +4567,7 @@ because each is a decision rather than a defect:
       `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and RHEL 9 ship
       252.
 
-      **P-215, so far — not ticked, because the live run is outstanding.**
+      **P-215, so far — not ticked, because exit 78 is not yet exercised live.**
       `docs/findings/2026-09-28-start-exits.md`. Every start-time exit of both services is listed,
       by whether waiting fixes it: **the probe has none** — it reports ready before it hears from
       the core — and **the core has two**, its first query against a PostgreSQL still recovering,
@@ -4586,13 +4586,17 @@ because each is a decision rather than a defect:
       **1–2 with it** (two at 41% of phases); connected 60 s a round, 9–14 → **1–4**. **This does not
       meet *one outage, one alarm***, and nothing at the unit or the link can: that is `M-18`.
 
-      **Verified:** the suites (shared 249, probe 320, core 2,695); `systemd-analyze verify` on
-      both units under systemd 252 and 255, clean, with a mutation — `StartLimitIntervalSec` moved
-      into `[Service]` — caught by both. **Outstanding:** the live run in
-      `scripts/sizing/memory-limit-live.sh`, which failed twice in Docker Desktop's BuildKit before
-      reaching this ticket's code. It proves the probe reaching `failed` and coming back, the core
-      waiting past `TimeoutStartSec`, exit 78 stopping at once, and whether manual restarts count
-      toward the burst. Tick this when it has run.
+      **Verified:** the suites; `systemd-analyze verify` on both units under systemd 252 and 255,
+      clean, with a mutation — `StartLimitIntervalSec` moved into `[Service]` — caught by both.
+      **Live, 2026-09-28** (`scripts/sizing/memory-limit-live.sh`, quiet VM): the probe, killed
+      0.6 s into each start, went round five times 5.6–5.8 s apart and was refused the sixth start
+      28 s after the first kill, `failed` with *start request repeated too quickly*, one alarm;
+      `reset-failed` and a start brought it back. The core waited 93 s for PostgreSQL, still
+      `activating` at 90 s past `TimeoutStartSec=60`, with no restarts. Manual restarts count: the
+      sixth in a row is refused, and `administration.md` says to `reset-failed` while iterating.
+      **Outstanding:** exit 78. That case was refused by the start limit before the core read its
+      file, because the smoke test and the earlier cases had used the five starts; the harness now
+      clears the limit before each case. Tick this when a rerun shows exit 78.
 
 - [ ] **M-18 — a flapping Probe Health link alarm re-fires on every Down that follows a brief Up** ·
       M · M-17, P-215 · Measured in `P-215`: a probe killed at its memory ceiling and restarted
