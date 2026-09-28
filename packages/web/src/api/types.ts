@@ -469,7 +469,30 @@ export interface NotificationMethod {
 
 export interface TemplateRecipient {
   kind: 'address' | 'user' | 'userGroup';
+  /** An address, or for a user or a group its id as decimal digits (`M-19`). */
   value: string;
+}
+
+/** One account as `GET /accounts` lists it for choosing (`M-20`): nothing a picker does not need. */
+export interface AccountChoice {
+  id: number;
+  login: string;
+  displayName: string;
+  /** Skipped when a notification is sent. */
+  disabled: boolean;
+  /** Whether a message to this account has anywhere to go. */
+  hasAddress: boolean;
+}
+
+/** One user group as `GET /groups` lists it. */
+export interface UserGroupView {
+  id: number;
+  name: string;
+  description: string;
+  isAdmin: boolean;
+  isDefault: boolean;
+  isBuiltin: boolean;
+  memberCount: number;
 }
 
 export interface TemplateView {

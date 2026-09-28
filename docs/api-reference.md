@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-164 routes.
+165 routes.
 
 ## Conventions
 
@@ -76,6 +76,16 @@ Not the same as granting `none`, which overrides inheritance rather than restori
 | `groupId` | path | integer | **required** |
 
 **200** { removed, items }
+
+## accounts
+
+### `GET /api/v1/accounts`
+
+Every account, for choosing one
+
+Listed by login, for the notification recipients editor. Only what choosing an account needs: the login, the display name, whether it is disabled and whether it has an address a message can go to. Its role, address and sign-in history are not listed.
+
+**200** { items }
 
 ## audit
 

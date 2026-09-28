@@ -1022,6 +1022,58 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     });
   });
 
+  describe('the accounts a notification recipient is chosen from (M-20)', () => {
+    it('lists every account to an administrator, with only what choosing one needs', async () => {
+      await db.query(
+        `UPDATE user_account SET email = 'writer@example.test', display_name = 'The Writer'
+          WHERE login = 'readwrite'`,
+      );
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/accounts',
+        headers: asRole('admin'),
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      // Neither the address nor the role is in it anywhere: whether an account can be reached is
+      // a yes or a no, and what it may do is not the picker's business.
+      assert.doesNotMatch(response.body, /writer@example\.test|"role"/u);
+
+      const items = response.json<{ items: Record<string, unknown>[] }>().items;
+      for (const item of items) {
+        assert.deepEqual(Object.keys(item).sort(), [
+          'disabled',
+          'displayName',
+          'hasAddress',
+          'id',
+          'login',
+        ]);
+      }
+      const writer = items.find((item) => item['login'] === 'readwrite');
+      assert.deepEqual(writer, {
+        id: userIds.get('readwrite'),
+        login: 'readwrite',
+        displayName: 'The Writer',
+        disabled: false,
+        hasAddress: true,
+      });
+      assert.equal(items.find((item) => item['login'] === 'readonly')?.['hasAddress'], false);
+    });
+
+    it('refuses it to anybody who is not an administrator', async () => {
+      // A list of every login is a list of what to try passwords against.
+      for (const role of ['readwrite', 'readonly']) {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/accounts',
+          headers: asRole(role),
+        });
+        assert.equal(response.statusCode, 403, `${role}: ${response.body}`);
+      }
+      const anonymous = await app.inject({ method: 'GET', url: '/api/v1/accounts' });
+      assert.equal(anonymous.statusCode, 401, anonymous.body);
+    });
+  });
+
   describe('no route leaks a credential to a read-only user', () => {
     /**
      * Fills a route template with ids that exist, so the request reaches a handler rather than a

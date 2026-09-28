@@ -9,7 +9,6 @@ import type {
   SummarisationMode,
   TemplateInput,
   TemplatePreview,
-  TemplateRecipient,
   TemplateTestResult,
   TemplateView,
 } from '../api/types';
@@ -18,6 +17,9 @@ import { SchemaForm } from '../forms/SchemaForm';
 import type { JsonSchema } from '../forms/schema';
 import { PageTitle } from '../components/PageTitle';
 import { initial, seed } from './templates-model';
+import { RecipientsEditor } from './RecipientsEditor';
+import { mayChoosePeople } from './recipients-model';
+import { useSession } from '../auth/session';
 
 /** How long to wait after a keystroke before asking the core what the draft renders as. */
 const PREVIEW_DEBOUNCE_MS = 500;
@@ -151,6 +153,7 @@ function Editor({
   const schedules = useApi<{ items: ScheduleSummary[] }>('/schedules');
 
   const [draft, setDraft] = useState<TemplateInput>(() => initial(template, methods));
+  const choosePeople = mayChoosePeople(useSession().session);
   const [replacing, setReplacing] = useState<ReadonlySet<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState<ApiError | null>(null);
@@ -280,11 +283,12 @@ function Editor({
           {placeholders.status === 'ready' && <Placeholders items={placeholders.data.items} />}
 
           {method?.usesRecipients === true && (
-            <Recipients
+            <RecipientsEditor
               items={draft.recipients ?? []}
               onChange={(recipients) => {
                 setDraft({ ...draft, recipients });
               }}
+              choosePeople={choosePeople}
             />
           )}
 
@@ -685,62 +689,6 @@ function Placeholders({ items }: { items: readonly PlaceholderInfo[] }): React.J
         ))}
       </dl>
     </details>
-  );
-}
-
-function Recipients({
-  items,
-  onChange,
-}: {
-  items: readonly TemplateRecipient[];
-  onChange: (next: TemplateRecipient[]) => void;
-}): React.JSX.Element {
-  return (
-    <fieldset className="space-y-2 border border-border px-3 pb-3 pt-1">
-      <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
-        Recipients
-      </legend>
-      {items.length === 0 && (
-        <p className="text-xs text-text-muted">
-          None. A template with no recipients delivers to nobody.
-        </p>
-      )}
-      {items.map((recipient, index) => (
-        <div key={index} className="flex flex-wrap items-center gap-2">
-          <label className="sr-only" htmlFor={`recipient-${String(index)}`}>
-            Recipient {index + 1}
-          </label>
-          <input
-            id={`recipient-${String(index)}`}
-            value={recipient.value}
-            onChange={(event) => {
-              const next = [...items];
-              next[index] = { ...recipient, value: event.target.value };
-              onChange(next);
-            }}
-            className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
-          />
-          <button
-            type="button"
-            onClick={() => {
-              onChange(items.filter((_, at) => at !== index));
-            }}
-            className="border border-control px-2 py-0.5 text-xs text-text-muted hover:text-text"
-          >
-            Remove
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={() => {
-          onChange([...items, { kind: 'address', value: '' }]);
-        }}
-        className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
-      >
-        Add a recipient
-      </button>
-    </fieldset>
   );
 }
 

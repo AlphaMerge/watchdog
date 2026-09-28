@@ -136,6 +136,12 @@ Notification templates — what a message says, who receives it, and when it is 
 - **A test send really sends** — and the result says what a green tick does *not* prove: a
   template that is switched off, outside its activation schedule, or folded into a digest can
   deliver a test and still never deliver an alarm.
+- **A recipient is an address, a user or a group.** Users and groups are picked by typing a name,
+  and the template keeps the one picked even if it is renamed later. The list warns about an
+  account that is disabled or has no address, and about a group with no members, because a
+  message to either reaches nobody. Only an administrator can pick them, since only an
+  administrator may list who is in the installation. Anyone else who edits a template sees the
+  users and groups already on it by number, keeps them as they are, and can still remove them.
 
 ### Sensor types
 

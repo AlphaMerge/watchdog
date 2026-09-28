@@ -22,6 +22,11 @@ export interface ComboboxProps {
   readonly onPick: (option: ComboboxOption) => void;
   readonly options: readonly ComboboxOption[];
   readonly className?: string;
+  /**
+   * The id of what says what is chosen now, when that lives beside the box rather than in it —
+   * the box holds what is being typed, so without this a screen reader never hears the choice.
+   */
+  readonly describedBy?: string;
 }
 
 /**
@@ -49,6 +54,7 @@ export function Combobox({
   onPick,
   options,
   className = '',
+  describedBy,
 }: ComboboxProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
@@ -163,6 +169,7 @@ export function Combobox({
         aria-controls={listId}
         aria-autocomplete="list"
         aria-activedescendant={open && active >= 0 ? optionId(active) : undefined}
+        aria-describedby={describedBy}
         value={value}
         placeholder={placeholder}
         onChange={(event) => {

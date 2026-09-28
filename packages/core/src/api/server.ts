@@ -36,6 +36,7 @@ import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from '.
 import { validatorSalt } from './preconditions.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
+import { accountRoutes } from './routes/accounts.js';
 import { accessRoutes } from './routes/access.js';
 import { tokenRoutes } from './routes/tokens.js';
 import type { AccountService } from '../auth/accounts.js';
@@ -783,6 +784,7 @@ export class ApiServer {
             logger: this.#logger,
           });
           await scope.register(groupRoutes, { groups: auth.groups });
+          await scope.register(accountRoutes, { accounts: auth.accounts });
           await scope.register(accessRoutes, { access: auth.access, accounts: auth.accounts });
           await scope.register(tokenRoutes, { tokens: auth.tokens });
         }

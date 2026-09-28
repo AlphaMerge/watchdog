@@ -280,6 +280,7 @@ build does not construct them (`H-12`).
 
 | Route | Methods | Without a credential |
 | --- | --- | --- |
+| `/api/v1/accounts` | GET | 401 |
 | `/api/v1/accounts/{id}/groups` | GET | 401 |
 | `/api/v1/accounts/{id}/primary-group/{groupId}` | PUT | 401 |
 | `/api/v1/alarms` | GET | 401 |

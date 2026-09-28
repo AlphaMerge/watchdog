@@ -4684,7 +4684,7 @@ because each is a decision rather than a defect:
       rights check skipped (5 cases fail), the skipped names dropped from a partial send (2 fail),
       and a digest asking only about its lead sensor (1 fails).
 
-- [ ] **M-20 — The web recipients editor offers users and groups** · M · M-19, A-18 · Split from
+- [x] **M-20 — The web recipients editor offers users and groups** · M · M-19, A-18 · Split from
       `M-19` on 2026-09-28: its item 4 assumed pickers that do not exist. The web has one picker,
       `ObjectPicker`, and no account or group UI; no route lists accounts at all; `GET /groups`
       and `GET /groups/:id/members` are `ADMIN`, while editing a template is `WRITES`. So this
@@ -4693,6 +4693,38 @@ because each is a decision rather than a defect:
       not an administrator sees — most likely that they cannot pick users or groups, and the
       editor says why rather than offering a list that fails to load. Until it lands, users and
       groups are set over the API, and the editor round-trips a recipient's `kind` unchanged.
+
+      **M-20 outcome.** `GET /accounts` (`routes/accounts.ts`) is `ADMIN`, like `GET /groups`,
+      and lists only what choosing an account needs: the id, login, display name, whether it is
+      disabled, and `hasAddress`. It does not list the address itself or the role. The editor is
+      `RecipientsEditor`, and its decisions live in `recipients-model.ts`.
+
+      - **Decided: only an administrator picks users and groups.** Both lists say who is in the
+        installation, which `A-02` keeps to administrators, and a list of logins is a list of
+        what to try passwords against. A writer who is not one never requests either list. The
+        editor tells them why. They still edit addresses, the users and groups already on the
+        template are shown by number and saved unchanged, and they can remove one.
+      - **Picked, never typed.** Each picker is the existing `Combobox`, filtered in the client
+        and capped at 50 suggestions. It stores the id of the one picked. What is chosen is said
+        beside the box and is also the box's `aria-describedby`, a new optional prop on
+        `Combobox`, so a screen reader hears it too. The list flags a disabled account, one with
+        no address and an empty group, the cases `M-19` skips at send time. An id that no longer
+        exists reads as "account #N, which no longer exists" rather than disappearing.
+      - A list that fails to load says so in an alert rather than offering an empty picker.
+
+      `recipients-model.test.ts` has 14 cases: who may pick, what each list offers, matching, and
+      how a recipient reads. `recipients-editor.test.tsx` renders it. An administrator picks a
+      user and a group by keyboard and the ids are stored. A writer never requests the lists and
+      keeps and removes rows. A failed list shows an alert. Every control has a name.
+      `access-matrix` adds the route's fields, with the address and role absent, and a 403 for a
+      writer and a reader and a 401 with no session. Mutation 10/10 killed, plus one
+      equivalent mutant. In the web: a writer allowed to pick, the lists requested for everyone,
+      the login stored instead of the id, the no-address badge dropped, the box left undescribed,
+      a writer's user and group rows dropped when an address is edited, and a missing id shown
+      as a bare number. In the core: the list opened to every reader, every account reported
+      with an address, and the address added to both the data and the schema. The equivalent
+      mutant added the address to the data only, and the response schema's
+      `additionalProperties: false` stripped it.
 
 - [ ] **M-21 — one memory squeeze on a single-host install raises two alarms** · S · P-208, M-17 ·
       Found by review. Core Health's and Probe Health's `memoryAvailable` both carry
