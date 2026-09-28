@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-161 routes.
+163 routes.
 
 ## Conventions
 
@@ -1145,7 +1145,7 @@ Read from the queue rather than counted in memory, deliberately: a core that res
 
 What happened to each notification
 
-Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one an activation schedule threw away on purpose (`N-12`), which is not the same thing.
+Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one an activation schedule threw away on purpose (`N-12`), which is not the same thing. Only notifications about sensors the caller can read appear.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1206,6 +1206,14 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | `include` | query | string |  |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+
+### `GET /api/v1/objects/tops`
+
+Where the caller’s tree starts
+
+The objects the caller can read whose parent it cannot. For an account that can read the root, that is the root. For one granted a few branches, it is the top of each: the containers above a granted branch are outside it, so their names are never shown and the tree starts at the branches instead — and a grant re-opened inside a hole the caller cannot see is a top of its own, because no expansion reaches it. Ordered by name.
+
+**200** { items }
 
 ### `POST /api/v1/objects/tree`
 
@@ -1350,6 +1358,14 @@ How many objects of each kind are under this one, and what state its sensors are
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
+
+**200** { objects, sensorStates }
+
+### `GET /api/v1/objects/counts`
+
+Exact totals for everything the caller can see
+
+The same totals as `/objects/:id/counts`, over every object the caller can read rather than under one. For an account that can read the root it is the root’s counts; for one granted a few branches it is theirs, with nothing outside them counted — which the root’s own counts, refused to that account, could not give.
 
 **200** { objects, sensorStates }
 
@@ -1923,7 +1939,7 @@ Lifts a simulated error. The sensors return to what they actually measure straig
 
 Every state change, newest first
 
-What changed, when, from what, why, and how long it lasted. Scope to a branch with `objectId` — a sensor id gives that sensor’s log. Filter with `state` and `cause`, both repeatable. Page with `before`, using `nextBefore` from the previous page. `durationMs` is null on the state a sensor is still in, and is measured against the real next transition rather than the next one on this page.
+What changed, when, from what, why, and how long it lasted. Scope to a branch with `objectId` — a sensor id gives that sensor’s log. Filter with `state` and `cause`, both repeatable. Page with `before`, using `nextBefore` from the previous page. `durationMs` is null on the state a sensor is still in, and is measured against the real next transition rather than the next one on this page. Only sensors the caller can read appear. A deleted sensor’s history outlives it, but nothing records which branch it was in, so only an administrator sees it.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1941,7 +1957,7 @@ What changed, when, from what, why, and how long it lasted. Scope to a branch wi
 
 Every sensor that is currently in an alarm state, worst first
 
-Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states `WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding.
+Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states `WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding. Only sensors the caller can read are listed or counted, and `path` and `pathNames` carry only the steps the caller can read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1960,7 +1976,7 @@ Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five stat
 
 Live sensor state changes
 
-A WebSocket. Send `{"subscribe":{"objectId":42}}` to scope to a subtree, or `{"subscribe":{}}` for everything; the server answers with a `snapshot` frame and then a `state` frame per change. Subscribing again replaces the subscription and takes a fresh snapshot, which is also how a client resyncs — there is no cursor. A client that cannot keep up is sent `overflow` and detached rather than being quietly trimmed, because a tree missing a change looks exactly like a tree that is up to date.
+A WebSocket. Send `{"subscribe":{"objectId":42}}` to scope to a subtree, or `{"subscribe":{}}` for everything; the server answers with a `snapshot` frame and then a `state` frame per change. Subscribing again replaces the subscription and takes a fresh snapshot, which is also how a client resyncs — there is no cursor. A client that cannot keep up is sent `overflow` and detached rather than being quietly trimmed, because a tree missing a change looks exactly like a tree that is up to date. "Everything" is everything the caller can read: sensors it cannot are neither in the snapshot nor streamed, and every `path` carries only the steps it can read. Subscribing to an object it cannot read is answered with a `problem` frame. When what the caller may see changes — a grant revoked, a group left — the socket is sent `overflow` with that reason, and subscribing again takes a snapshot of the new view.
 
 ## templates
 
@@ -2074,7 +2090,7 @@ Refused while a trigger still names it, with the list of triggers to fix: deleti
 
 Which triggers name this template
 
-`CAPABILITIES.MD §5.2`’s reverse lookup, and the reason a delete can be refused with a list rather than a shrug. A trigger names its templates inside a JSON document, so no foreign key can enforce the reference — this is the query that stands in for one.
+`CAPABILITIES.MD §5.2`’s reverse lookup, and the reason a delete can be refused with a list rather than a shrug. A trigger names its templates inside a JSON document, so no foreign key can enforce the reference — this is the query that stands in for one. Only triggers on objects the caller can read are listed.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2142,7 +2158,7 @@ Each carries the JSON Schema its settings are validated against, which is also w
 
 Every trigger in effect on an object, its own first
 
-Own and inherited together, nearest first, each naming the object it is defined on — which is the only place it can be edited or removed. A trigger on the root applies to every sensor in the installation. Unlike an inherited *setting*, an inherited trigger does not displace a nearer one: both fire.
+Own and inherited together, nearest first, each naming the object it is defined on — which is the only place it can be edited or removed. A trigger on the root applies to every sensor in the installation. Unlike an inherited *setting*, an inherited trigger does not displace a nearer one: both fire. A trigger inherited from an object the caller cannot see is still listed, because it still fires — with that object’s name null.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

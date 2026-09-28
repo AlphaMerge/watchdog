@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../db/pool.js';
 import type { DeliveryHealthReader } from '../../notifications/health.js';
 import { NotificationLogReader } from '../../notifications/log.js';
-import { READS } from '../authorization.js';
+import { INSTALLATION, onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface NotificationRoutesOptions {
   db: Database;
@@ -168,7 +168,8 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
   app.get(
     '/notification-health',
     {
-      config: READS,
+      // Every queue and every relay's last error: the installation's, not a branch's (`A-12`).
+      config: INSTALLATION,
       schema: {
         tags: ['notifications'],
         summary: 'Whether notifications are actually being delivered',
@@ -200,7 +201,8 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
   app.get<{ Querystring: LogQuery }>(
     '/notification-requests',
     {
-      config: READS,
+      // The caller's sensors only (`A-12`), and `sensorId` has to be one the caller can read.
+      config: onQueryObject('read', 'sensorId', { optional: true }),
       schema: {
         tags: ['notifications'],
         summary: 'What happened to each notification',
@@ -208,7 +210,8 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
           'Newest first, paged by `before` rather than by offset — notifications arrive while ' +
           'somebody is reading, and an offset page would show a row twice or not at all. ' +
           '`failed` is an alarm nobody received; `discarded` is one an activation schedule ' +
-          'threw away on purpose (`N-12`), which is not the same thing.',
+          'threw away on purpose (`N-12`), which is not the same thing. Only notifications ' +
+          'about sensors the caller can read appear.',
         querystring: {
           type: 'object',
           additionalProperties: false,
@@ -239,6 +242,7 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
       const limit = query.limit ?? 50;
       const status = query.status === undefined ? [] : [query.status].flat();
       const entries = await log.list(db, {
+        visibility: await visibilityOf(request),
         status,
         ...(query.sensorId === undefined ? {} : { sensorId: query.sensorId }),
         ...(query.templateId === undefined ? {} : { templateId: query.templateId }),

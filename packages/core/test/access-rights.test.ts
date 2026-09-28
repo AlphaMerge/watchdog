@@ -1,6 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { AccessService, atLeast, type AccessRight } from '../src/auth/access.js';
+import {
+  AccessService,
+  atLeast,
+  type AccessPrincipal,
+  type AccessRight,
+} from '../src/auth/access.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
 import type { Database } from '../src/db/pool.js';
@@ -397,6 +402,252 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
     it('asks nothing of the database for an empty list', async () => {
       assert.equal((await access.resolveMany(userId, [])).size, 0);
+    });
+  });
+
+  describe('what a principal may see agrees with resolving it (`A-12`)', () => {
+    /**
+     * **The claim `Visibility` rests on, checked object by object.**
+     *
+     * Lists filter with a SQL condition and the stream with a path check, and neither contains a
+     * right: both carry labels that `resolveMany`'s own SQL put on the principal's boundaries. What
+     * they add is structure — "visibility can only change where a grant sits" — and if that were
+     * wrong, a list would show an object `GET /objects/:id` refuses, or hide one it serves. That is
+     * an access-control bug visible only in a list, which is what `A-03`'s agreement test was
+     * written against; this is the same test for the two new consumers.
+     *
+     * Randomised rather than hand-picked, because the cases that break a structural shortcut are
+     * the ones nobody thinks to write: a hole inside a hole, a grant re-opening a hole, a `none` on
+     * the root with a branch granted beneath it, two groups disagreeing at different depths. Seeded,
+     * so a failure names the seed that reproduces it.
+     */
+    const RIGHTS: readonly AccessRight[] = ['none', 'read', 'write', 'full'];
+
+    /** mulberry32: small, seedable, and good enough to scatter grants over a tree. */
+    function random(seed: number): () => number {
+      let a = seed >>> 0;
+      return () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    /** Root-first path to every object, from one read of the tree. */
+    async function pathsOfEverything(): Promise<Map<number, number[]>> {
+      const rows = await db.query<{ id: string; parent_id: string | null }>(
+        'SELECT id::text AS id, parent_id::text AS parent_id FROM object',
+      );
+      const parent = new Map(
+        rows.map((row) => [Number(row.id), row.parent_id === null ? null : Number(row.parent_id)]),
+      );
+      const paths = new Map<number, number[]>();
+      for (const id of parent.keys()) {
+        const path: number[] = [];
+        for (let at: number | null = id; at !== null; at = parent.get(at) ?? null) path.unshift(at);
+        paths.set(id, path);
+      }
+      return paths;
+    }
+
+    it('agrees on every object, for every role and scope, over randomised grants', async () => {
+      // A second probe with nested groups, so there is depth to put holes in: root → probe →
+      // group → group → device → sensor, beside the fixture's own branch.
+      const probe = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: 'agreement-probe',
+      });
+      for (let g = 0; g < 2; g += 1) {
+        const outer = await harness.service.create(testActor, {
+          kind: 'group',
+          parentId: probe.id,
+          name: `outer-${String(g)}`,
+        });
+        const inner = await harness.service.create(testActor, {
+          kind: 'group',
+          parentId: outer.id,
+          name: `inner-${String(g)}`,
+        });
+        for (const parent of [outer.id, inner.id]) {
+          for (let d = 0; d < 2; d += 1) {
+            const device = await harness.service.create(testActor, {
+              kind: 'device',
+              parentId: parent,
+              name: `device-${String(parent)}-${String(d)}`,
+              host: '127.0.0.1',
+            });
+            for (let n = 0; n < 2; n += 1) {
+              await harness.service.create(testActor, {
+                kind: 'sensor',
+                parentId: device.id,
+                name: `sensor-${String(device.id)}-${String(n)}`,
+                sensorType: 'icmp.ping',
+              });
+            }
+          }
+        }
+      }
+
+      const paths = await pathsOfEverything();
+      const ids = [...paths.keys()].sort((a, b) => a - b);
+      const groupIds = [alphaId, betaId, gammaId];
+      const principals: { name: string; principal: AccessPrincipal }[] = [
+        { name: 'readwrite', principal: { userId, role: 'readwrite' } },
+        { name: 'readonly', principal: { userId, role: 'readonly' } },
+        { name: 'read-scoped token', principal: { userId, role: 'readwrite', scope: 'read' } },
+        { name: 'none-scoped token', principal: { userId, role: 'readwrite', scope: 'none' } },
+      ];
+
+      let comparisons = 0;
+      let visibleSeen = 0;
+      let hiddenSeen = 0;
+      let childrenChecked = 0;
+      for (let seed = 1; seed <= 40; seed += 1) {
+        const next = random(seed);
+        await db.query('DELETE FROM object_access');
+        const grants = 2 + Math.floor(next() * 7);
+        for (let g = 0; g < grants; g += 1) {
+          const on = ids[Math.floor(next() * ids.length)] ?? harness.rootId;
+          const group = groupIds[Math.floor(next() * groupIds.length)] ?? alphaId;
+          const right = RIGHTS[Math.floor(next() * RIGHTS.length)] ?? 'none';
+          await access.grant(on, group, right, 'agreement');
+        }
+
+        for (const { name, principal } of principals) {
+          const expected = await access.resolveManyFor(principal, ids);
+          const visibility = await access.visibilityFor(principal);
+
+          const values: unknown[] = [];
+          const condition = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
+          const listed = new Set(
+            (
+              await db.query<{ id: string }>(
+                `SELECT o.id::text AS id FROM object o WHERE ${condition}`,
+                values,
+              )
+            ).map((row) => Number(row.id)),
+          );
+          // The walk-free shortcut `hasChildren` and `childCount` use: asked only of the children
+          // of a visible object, where it has to give the resolver's answer with no walk at all.
+          const childValues: unknown[] = [];
+          const childCondition = visibility.whereChildOfVisible(
+            'c.id',
+            (value) => `$${String(childValues.push(value))}`,
+          );
+          const childOfVisible = new Map(
+            (
+              await db.query<{ id: string; visible: boolean }>(
+                `SELECT c.id::text AS id, (${childCondition}) AS visible
+                 FROM object c WHERE c.parent_id IS NOT NULL`,
+                childValues,
+              )
+            ).map((row) => [Number(row.id), row.visible]),
+          );
+
+          for (const id of ids) {
+            const readable = atLeast(expected.get(id) ?? 'none', 'read');
+            const path = paths.get(id) ?? [];
+            const where = `seed ${String(seed)}, ${name}, object ${String(id)}`;
+            assert.equal(listed.has(id), readable, `the SQL condition disagreed: ${where}`);
+            assert.equal(visibility.sees(path), readable, `the path check disagreed: ${where}`);
+            const parent = path.at(-2);
+            if (parent !== undefined && atLeast(expected.get(parent) ?? 'none', 'read')) {
+              assert.equal(
+                childOfVisible.get(id),
+                readable,
+                `the child-of-visible condition disagreed: ${where}`,
+              );
+              childrenChecked += 1;
+            }
+            // Trimming keeps exactly the steps the resolver would let this principal read.
+            assert.deepEqual(
+              visibility.trim(path),
+              path.filter((step) => atLeast(expected.get(step) ?? 'none', 'read')),
+              `the trimmed path disagreed: ${where}`,
+            );
+            comparisons += 1;
+            if (readable) visibleSeen += 1;
+            else hiddenSeen += 1;
+          }
+        }
+      }
+
+      // Not vacuous: both answers occurred plenty, so a condition that said "yes" to everything
+      // or "no" to everything would have failed above.
+      assert.ok(comparisons > 5000, `only ${String(comparisons)} comparisons`);
+      assert.ok(visibleSeen > 500, `only ${String(visibleSeen)} visible answers`);
+      assert.ok(hiddenSeen > 500, `only ${String(hiddenSeen)} hidden answers`);
+      assert.ok(childrenChecked > 1000, `only ${String(childrenChecked)} children checked`);
+    });
+
+    it('sees everything as an administrator, and nothing through a none-scoped token', async () => {
+      const admins = (await groups.list()).find((g) => g.isAdmin);
+      assert.ok(admins);
+      await groups.addMember(admins.id, userId);
+
+      const everything = await access.visibilityFor({ userId, role: 'admin' });
+      assert.equal(everything.everything, true);
+      assert.equal(
+        everything.where('o.id', () => '$1'),
+        'TRUE',
+      );
+
+      const nothing = await access.visibilityFor({ userId, role: 'admin', scope: 'none' });
+      assert.equal(nothing.everything, false);
+      assert.equal(nothing.sees([harness.rootId, probeId]), false);
+    });
+
+    it('hides a deleted object from a reader who sees the whole live tree', async () => {
+      // The state log and the notification log outlive their sensors. A reader granted the root
+      // with no holes gets no walk at all — and without `mayBeDeleted` a row naming a sensor that
+      // no longer exists would pass, although the resolver answers `none` for it.
+      await access.grant(harness.rootId, alphaId, 'read', 'test');
+      const visibility = await access.visibilityFor({ userId, role: 'readwrite' });
+      const gone = 2 ** 40;
+      assert.deepEqual(
+        (await access.resolveManyFor({ userId, role: 'readwrite' }, [gone])).get(gone),
+        'none',
+      );
+
+      const values: unknown[] = [gone];
+      const condition = visibility.where(
+        '$1::bigint',
+        (value) => `$${String(values.push(value))}`,
+        {
+          mayBeDeleted: true,
+        },
+      );
+      const rows = await db.query<{ visible: boolean }>(`SELECT ${condition} AS visible`, values);
+      assert.equal(rows[0]?.visible, false);
+    });
+
+    it('moves the access epoch with a grant, a membership and a move, and not with a rename', async () => {
+      // What the stream relies on to notice that a socket's answer has gone stale (migration 052).
+      const epoch = async (): Promise<number> => access.epoch();
+      let before = await epoch();
+
+      await access.grant(deviceId, alphaId, 'read', 'test');
+      assert.ok((await epoch()) > before, 'a grant did not move it');
+      before = await epoch();
+
+      await groups.addMember(gammaId, userId);
+      assert.ok((await epoch()) > before, 'joining a group did not move it');
+      before = await epoch();
+
+      await harness.service.move(testActor, deviceId, probeId, { kind: 'none' });
+      assert.ok((await epoch()) > before, 'a move did not move it');
+      before = await epoch();
+
+      await harness.service.update(
+        testActor,
+        deviceId,
+        { kind: 'device', name: 'renamed' },
+        { kind: 'none' },
+      );
+      assert.equal(await epoch(), before, 'a rename moved it, which re-resolves every stream');
     });
   });
 

@@ -2,6 +2,7 @@ import type { Queryable } from '../db/pool.js';
 import { OBJECT_LOCATION } from '../settings/registry.js';
 import type { SensorState } from '../state/tables.js';
 import type { MessageContext } from './placeholders.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /** One queued notification, as much of it as building a message needs. */
 export interface PendingNotification {
@@ -163,6 +164,7 @@ export class MessageContextLoader {
 
         SELECT chain.sensor_id, p.id, p.parent_id, p.kind, p.name, p.tags, chain.depth + 1
         FROM object p JOIN chain ON p.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       ),
       ancestry AS (
         SELECT

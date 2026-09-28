@@ -194,7 +194,7 @@ export function pauseIsPending(pause: { startsAt: Date }, now: Date): boolean {
  */
 export function refuseResume(
   own: boolean,
-  cascadedFrom: { objectId: number; name: string } | null,
+  cascadedFrom: { objectId: number; name: string | null } | null,
   heldBy: HeldBy = {},
 ): { reason: string; details: Record<string, unknown> } | null {
   // `own` includes a maintenance window that has not started (`M-10`): cancelling one before it
@@ -207,8 +207,8 @@ export function refuseResume(
   if (cascadedFrom !== null) {
     return {
       reason:
-        `this object is paused because #${String(cascadedFrom.objectId)} ` +
-        `("${cascadedFrom.name}") is paused; resume that instead`,
+        `this object is paused because #${String(cascadedFrom.objectId)}` +
+        `${named(cascadedFrom.name)} is paused; resume that instead`,
       details: {
         source: 'parent',
         pausedBy: cascadedFrom.objectId,
@@ -220,8 +220,8 @@ export function refuseResume(
     const master = heldBy.dependency;
     return {
       reason:
-        `this object is paused because its master #${String(master.masterId)} ` +
-        `("${master.masterName}") is Down; it resumes when the master recovers`,
+        `this object is paused because its master #${String(master.masterId)}` +
+        `${named(master.masterName)} is Down; it resumes when the master recovers`,
       details: {
         source: 'dependency',
         masterId: master.masterId,
@@ -265,9 +265,14 @@ export interface HeldBy {
   } | null;
   readonly dependency?: {
     readonly masterId: number;
-    readonly masterName: string;
+    readonly masterName: string | null;
     readonly definedOn: number;
   } | null;
+}
+
+/** ` ("core-switch")` after an id, or nothing when the name is not the reader's to see. */
+function named(name: string | null): string {
+  return name === null ? '' : ` ("${name}")`;
 }
 
 /** The four flags, as stored on `sensor_runtime`. */

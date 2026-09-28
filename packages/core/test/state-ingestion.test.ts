@@ -24,6 +24,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -524,6 +525,7 @@ describe(
       const page = await harness.service.list(
         { parentId: deviceId, kinds: ['sensor'] },
         { limit: 100, sort: 'name', cursor: null },
+        Visibility.EVERYTHING,
       );
       const summary = page.items.find((item) => item.id === sensorId);
       assert.equal(summary?.state, 'up');

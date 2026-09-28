@@ -472,14 +472,21 @@ function Group({
                   disabled
                 </span>
               )}
-              {trigger.inherited && (
-                <Link
-                  to={`/objects/${String(trigger.definedOn.objectId)}?tab=triggers`}
-                  className="ml-auto text-xs text-accent hover:underline"
-                >
-                  from {trigger.definedOn.name}
-                </Link>
-              )}
+              {trigger.inherited &&
+                (trigger.definedOn.name === null ? (
+                  // It fires for this object, so it is listed; where it is defined is outside
+                  // what this account may see, so it is not named or linked (`A-12`).
+                  <span className="ml-auto text-xs text-text-muted">
+                    from an object outside your view
+                  </span>
+                ) : (
+                  <Link
+                    to={`/objects/${String(trigger.definedOn.objectId)}?tab=triggers`}
+                    className="ml-auto text-xs text-accent hover:underline"
+                  >
+                    from {trigger.definedOn.name}
+                  </Link>
+                ))}
             </li>
           ))}
         </ul>

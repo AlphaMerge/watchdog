@@ -318,16 +318,6 @@ export class DependencyRepository {
     }));
   }
 
-  /** The names of some masters, for a message an operator can act on. */
-  async namesOf(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, string>> {
-    if (sensorIds.length === 0) return new Map();
-    const rows = await q.query<{ id: string; name: string }>(
-      'SELECT id::text AS id, name FROM object WHERE id = ANY($1::bigint[])',
-      [sensorIds],
-    );
-    return new Map(rows.map((row) => [Number(row.id), row.name]));
-  }
-
   /**
    * The master in effect for one object, and where it is defined.
    *

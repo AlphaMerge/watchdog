@@ -15,6 +15,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const T0 = new Date('2026-08-25T12:00:00.000Z');
@@ -155,7 +156,7 @@ describe(
 
     it('has every transition, with what it changed from, why, and what the check said', async () => {
       await outage(sensorId);
-      const { items } = await log.list({ limit: 100 });
+      const { items } = await log.list({ visibility: Visibility.EVERYTHING, limit: 100 });
 
       assert.deepEqual(
         items.map((entry) => `${entry.previousState ?? '-'}->${entry.state}:${entry.cause}`),
@@ -168,7 +169,7 @@ describe(
 
     it('measures how long each state lasted, and leaves the current one open', async () => {
       await outage(sensorId);
-      const { items } = await log.list({ limit: 100 });
+      const { items } = await log.list({ visibility: Visibility.EVERYTHING, limit: 100 });
 
       // Newest first: Up (still running), Down (28 min), Warning (1 min), Up (1 min).
       assert.equal(items[0]?.durationMs, null, 'the state it is still in');
@@ -184,7 +185,11 @@ describe(
       await h.service.simulateError(testActor, sensorId, true, 'chain test');
       await h.service.simulateError(testActor, sensorId, false);
 
-      const { items } = await log.list({ objectId: sensorId, limit: 100 });
+      const { items } = await log.list({
+        visibility: Visibility.EVERYTHING,
+        objectId: sensorId,
+        limit: 100,
+      });
       const causes = items.map((entry) => `${entry.state}:${entry.cause}`);
       assert.ok(causes.includes('down:simulated'), causes.join(', '));
     });
@@ -197,29 +202,45 @@ describe(
       await outage(sensorId);
       await outage(otherGroupSensorId);
 
-      const scoped = await log.list({ objectId: groupId, limit: 100 });
+      const scoped = await log.list({
+        visibility: Visibility.EVERYTHING,
+        objectId: groupId,
+        limit: 100,
+      });
       assert.ok(scoped.items.every((entry) => entry.sensorId === sensorId));
 
-      const everything = await log.list({ limit: 100 });
+      const everything = await log.list({ visibility: Visibility.EVERYTHING, limit: 100 });
       assert.ok(everything.items.some((entry) => entry.sensorId === otherGroupSensorId));
     });
 
     it('scopes to one sensor, which is the detail page-s log tab', async () => {
       await outage(sensorId);
       await outage(siblingId);
-      const { items } = await log.list({ objectId: sensorId, limit: 100 });
+      const { items } = await log.list({
+        visibility: Visibility.EVERYTHING,
+        objectId: sensorId,
+        limit: 100,
+      });
       assert.ok(items.length > 0);
       assert.ok(items.every((entry) => entry.sensorId === sensorId));
     });
 
     it('filters by state and by cause', async () => {
       await outage(sensorId);
-      const down = await log.list({ states: ['down'], limit: 100 });
+      const down = await log.list({
+        visibility: Visibility.EVERYTHING,
+        states: ['down'],
+        limit: 100,
+      });
       assert.ok(down.items.every((entry) => entry.state === 'down'));
       assert.equal(down.items.length, 1);
 
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
-      const paused = await log.list({ causes: ['user'], limit: 100 });
+      const paused = await log.list({
+        visibility: Visibility.EVERYTHING,
+        causes: ['user'],
+        limit: 100,
+      });
       assert.equal(paused.items.length, 1);
       const entry = paused.items[0];
       assert.ok(entry !== undefined);
@@ -229,7 +250,12 @@ describe(
 
     it('filters by time, both ends', async () => {
       await outage(sensorId);
-      const { items } = await log.list({ from: at(1), to: at(2), limit: 100 });
+      const { items } = await log.list({
+        visibility: Visibility.EVERYTHING,
+        from: at(1),
+        to: at(2),
+        limit: 100,
+      });
       assert.deepEqual(
         items.map((entry) => entry.state),
         ['down', 'warning'],
@@ -247,7 +273,11 @@ describe(
       const seen: StateLogEntry[] = [];
       let before: string | null | undefined;
       for (let page = 0; page < 10; page += 1) {
-        const result = await log.list({ limit: 3, ...(before == null ? {} : { before }) });
+        const result = await log.list({
+          visibility: Visibility.EVERYTHING,
+          limit: 3,
+          ...(before == null ? {} : { before }),
+        });
         seen.push(...result.items);
         before = result.nextBefore;
         if (before === null) break;
@@ -268,11 +298,20 @@ describe(
       // The reason it is a lateral join and not a window function: otherwise the same transition
       // reads "28 minutes" or "still running" according to where the page boundary fell.
       await outage(sensorId);
-      const whole = await log.list({ objectId: sensorId, limit: 100 });
-      const paged = await log.list({ objectId: sensorId, limit: 1 });
+      const whole = await log.list({
+        visibility: Visibility.EVERYTHING,
+        objectId: sensorId,
+        limit: 100,
+      });
+      const paged = await log.list({
+        visibility: Visibility.EVERYTHING,
+        objectId: sensorId,
+        limit: 1,
+      });
       assert.equal(paged.items[0]?.durationMs, whole.items[0]?.durationMs);
 
       const second = await log.list({
+        visibility: Visibility.EVERYTHING,
         objectId: sensorId,
         limit: 1,
         before: paged.nextBefore ?? '',
@@ -283,7 +322,7 @@ describe(
 
     it('refuses a cursor it did not issue, rather than serving page one again', async () => {
       await assert.rejects(
-        () => log.list({ limit: 10, before: 'not-a-cursor' }),
+        () => log.list({ visibility: Visibility.EVERYTHING, limit: 10, before: 'not-a-cursor' }),
         (error: unknown) => {
           assert.equal((error as { code?: string }).code, 'CURSOR_INVALID');
           return true;
@@ -299,7 +338,7 @@ describe(
       await outage(sensorId);
       await h.service.delete(testActor, sensorId, { kind: 'leafOnly' }, { kind: 'none' });
 
-      const { items } = await log.list({ limit: 100 });
+      const { items } = await log.list({ visibility: Visibility.EVERYTHING, limit: 100 });
       const orphaned = items.filter((entry) => entry.sensorId === sensorId);
       assert.equal(orphaned.length, 4, 'the outage is still answerable');
       assert.equal(orphaned[0]?.sensorName, '');

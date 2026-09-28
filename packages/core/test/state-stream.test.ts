@@ -5,7 +5,12 @@ import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
-import { StateBroadcaster, type StateEvent, type StateSubscriber } from '../src/state/stream.js';
+import {
+  StateBroadcaster,
+  type StateEvent,
+  type StateSubscriber,
+  type StreamSight,
+} from '../src/state/stream.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -14,8 +19,16 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
+
+/** A subscriber that sees the whole tree, said out loud (`A-12`). */
+const EVERYONE: StreamSight = {
+  visibility: Visibility.EVERYTHING,
+  key: 'everyone',
+  resolve: () => Promise.resolve(Visibility.EVERYTHING),
+};
 
 /**
  * Collects what a subscriber was sent, and can be told how far behind it is.
@@ -184,7 +197,7 @@ describe(
 
     it('says nothing at all when a transaction rolls back', async () => {
       const seen = recorder();
-      stream.subscribe(seen.subscriber, null);
+      stream.subscribe(seen.subscriber, null, EVERYONE);
 
       await assert.rejects(
         db.tx(async (q) => {
@@ -205,7 +218,7 @@ describe(
       // `ON CONFLICT (sensor_id, time) DO NOTHING` drops a repeat, and announcing the drop would
       // describe a history the table does not have.
       const seen = recorder();
-      stream.subscribe(seen.subscriber, null);
+      stream.subscribe(seen.subscriber, null, EVERYONE);
       const at = new Date();
       const states = h.states;
       assert.ok(states !== undefined);
@@ -229,8 +242,8 @@ describe(
     it('sends a subtree subscriber only what is beneath it', async () => {
       const branch = recorder();
       const everything = recorder();
-      stream.subscribe(branch.subscriber, deviceId);
-      stream.subscribe(everything.subscriber, null);
+      stream.subscribe(branch.subscriber, deviceId, EVERYONE);
+      stream.subscribe(everything.subscriber, null, EVERYONE);
 
       await scan([sensorId, otherSensorId], false, new Date());
 
@@ -244,7 +257,7 @@ describe(
 
     it('carries the path, which is what a tree rolls a colour up', async () => {
       const seen = recorder();
-      stream.subscribe(seen.subscriber, null);
+      stream.subscribe(seen.subscriber, null, EVERYONE);
       await scan([sensorId], false, new Date());
       const [event] = seen.events;
       assert.ok(event !== undefined);
@@ -254,7 +267,7 @@ describe(
 
     it('numbers its events, so a gap is visible', async () => {
       const seen = recorder();
-      stream.subscribe(seen.subscriber, null);
+      stream.subscribe(seen.subscriber, null, EVERYONE);
       await scan([sensorId, otherSensorId], false, new Date());
       assert.deepEqual(
         seen.events.map((event) => event.seq),
@@ -266,7 +279,7 @@ describe(
       await scan([sensorId, otherSensorId], false, new Date(Date.now() - 60_000));
       await scan([sensorId, otherSensorId], false, new Date());
 
-      const snapshot = await stream.snapshot(db, deviceId);
+      const snapshot = await stream.snapshot(db, deviceId, Visibility.EVERYTHING);
       assert.equal(snapshot.objectId, deviceId);
       assert.equal(snapshot.truncated, false);
       assert.deepEqual(
@@ -284,10 +297,10 @@ describe(
       // snapshot is being read is queued rather than falling into the gap. Applying it a second
       // time sets the state it already has.
       const seen = recorder();
-      stream.subscribe(seen.subscriber, null);
+      stream.subscribe(seen.subscriber, null, EVERYONE);
       await scan([sensorId], false, new Date());
 
-      const snapshot = await stream.snapshot(db, null);
+      const snapshot = await stream.snapshot(db, null, Visibility.EVERYTHING);
       const [event] = seen.events;
       assert.ok(event !== undefined, 'the change arrived on the stream');
       assert.equal(seen.events.length, 1);
@@ -297,7 +310,7 @@ describe(
     it('says a subtree is bigger than one snapshot rather than truncating quietly', async () => {
       const small = new StateBroadcaster({ logger: silent, snapshotLimit: 1 });
       await scan([sensorId, otherSensorId], false, new Date());
-      const snapshot = await small.snapshot(db, null);
+      const snapshot = await small.snapshot(db, null, Visibility.EVERYTHING);
       assert.equal(snapshot.entries.length, 1);
       assert.equal(snapshot.truncated, true);
     });
@@ -319,7 +332,7 @@ describe(
       // state the system has moved on from and has no way to tell.
       const stuck = new StateBroadcaster({ logger: silent, backlogLimitBytes: 0 });
       const seen = recorder();
-      stuck.subscribe(seen.subscriber, null);
+      stuck.subscribe(seen.subscriber, null, EVERYONE);
 
       const states = h.states;
       assert.ok(states !== undefined);
@@ -345,7 +358,7 @@ describe(
       let backlog = 0;
       const seen = recorder(() => backlog);
       const slow = new StateBroadcaster({ logger: silent, backlogLimitBytes: 4_096 });
-      slow.subscribe(seen.subscriber, null);
+      slow.subscribe(seen.subscriber, null, EVERYONE);
 
       const change = {
         sensorId,
@@ -378,7 +391,7 @@ describe(
       // transaction had already committed and whose failure costs a repaint, not a fact.
       const seen = recorder();
       const broken = new StateBroadcaster({ logger: silent });
-      broken.subscribe(seen.subscriber, null);
+      broken.subscribe(seen.subscriber, null, EVERYONE);
 
       const failing = {
         query: () => Promise.reject(new Error('connection terminated unexpectedly')),
@@ -404,7 +417,7 @@ describe(
       // that would have been wrong.
       const seen = recorder(() => 0);
       const fast = new StateBroadcaster({ logger: silent, backlogLimitBytes: 64 });
-      fast.subscribe(seen.subscriber, null);
+      fast.subscribe(seen.subscriber, null, EVERYONE);
 
       const many = Array.from({ length: 200 }, () => ({
         sensorId,
@@ -423,7 +436,7 @@ describe(
 
     it('stops sending to a subscriber that has gone', async () => {
       const seen = recorder();
-      const detach = stream.subscribe(seen.subscriber, null);
+      const detach = stream.subscribe(seen.subscriber, null, EVERYONE);
       detach();
       await scan([sensorId], false, new Date());
       assert.deepEqual(seen.events, []);
@@ -438,9 +451,9 @@ describe(
       // real one rather than on a stand-in. `stream` is rebuilt per test, so this is local.
       const registered: StateSubscriber[] = [];
       const attach = stream.subscribe.bind(stream);
-      stream.subscribe = (subscriber, objectId): (() => void) => {
+      stream.subscribe = (subscriber, objectId, sight): (() => void) => {
         registered.push(subscriber);
-        return attach(subscriber, objectId);
+        return attach(subscriber, objectId, sight);
       };
 
       const server = new ApiServer({

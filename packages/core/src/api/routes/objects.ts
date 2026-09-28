@@ -29,7 +29,17 @@ import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
-import { READS, WRITES, every, onBodyObject, onObject, toAcknowledge } from '../authorization.js';
+import {
+  INSTALLATION,
+  READS,
+  WRITES,
+  every,
+  onBodyObject,
+  onObject,
+  onQueryObject,
+  toAcknowledge,
+  visibilityOf,
+} from '../authorization.js';
 import { atLeast, type AccessService } from '../../auth/access.js';
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
@@ -308,6 +318,7 @@ export async function objectRoutes(
   const authorizing = options.authorizing ?? false;
 
   const sendDetail = async (
+    request: FastifyRequest,
     reply: FastifyReply,
     id: number,
     include: Set<IncludeToken>,
@@ -315,13 +326,19 @@ export async function objectRoutes(
   ): Promise<void> => {
     const object = await service.get(id);
     const body: Record<string, unknown> = { ...object };
+    const visibility = await visibilityOf(request);
 
+    // **A count of the children the reader can see** (`A-12`). Asked separately, and only when
+    // something is hidden, so the common case pays nothing for it.
+    if (!visibility.everything) {
+      body['childCount'] = await service.visibleChildCount(id, visibility);
+    }
     if (include.has('settings')) body['settings'] = await service.settings(id);
     if (include.has('channels') && object.kind === 'sensor') {
       body['channels'] = await service.channels(id);
     }
     if (include.has('credentials')) body['credentials'] = await service.credentials(id, true);
-    if (include.has('ancestors')) body['ancestors'] = await service.ancestors(id);
+    if (include.has('ancestors')) body['ancestors'] = await service.ancestors(id, visibility);
 
     // A response carrying inherited content needs a validator that covers what it inherited,
     // or the next conditional request gets a 304 built from this object's version alone.
@@ -337,7 +354,10 @@ export async function objectRoutes(
   app.get<{ Querystring: ListQuery }>(
     '/objects',
     {
-      config: READS,
+      // Everything the caller can see, filtered inside the query (`A-12`); `parentId` scopes it
+      // to one object's children, and naming one the caller cannot read is refused rather than
+      // answered with the visible part of it.
+      config: onQueryObject('read', 'parentId', { optional: true }),
       schema: {
         tags: ['objects'],
         querystring: listQuery,
@@ -401,6 +421,7 @@ export async function objectRoutes(
           sort,
           cursor: query.cursor === undefined ? null : decodeCursor(query.cursor, sort),
         },
+        await visibilityOf(request),
         { effective, path: include.has('path') },
       );
 
@@ -412,7 +433,11 @@ export async function objectRoutes(
   app.get<{ Querystring: { include?: string } }>(
     '/objects/root',
     {
-      config: READS,
+      // **The root is an object like any other** (`A-12`). A route that served it to anybody with
+      // a login handed a branch account the installation's name, its settings and a count of
+      // every probe — the containers above a granted branch are outside it. Such an account's
+      // tree starts at `/objects/tops`.
+      config: INSTALLATION,
       schema: {
         tags: ['objects'],
         querystring: {
@@ -425,7 +450,37 @@ export async function objectRoutes(
     },
     async (request, reply) => {
       const root = await service.getRoot();
-      await sendDetail(reply, root.id, parseInclude(request.query.include));
+      await sendDetail(request, reply, root.id, parseInclude(request.query.include));
+    },
+  );
+
+  // ── 3b. tops ─────────────────────────────────────────────────────────────────────────────
+  app.get(
+    '/objects/tops',
+    {
+      config: READS,
+      schema: {
+        tags: ['objects'],
+        summary: 'Where the caller’s tree starts',
+        description:
+          'The objects the caller can read whose parent it cannot. For an account that can ' +
+          'read the root, that is the root. For one granted a few branches, it is the top of ' +
+          'each: the containers above a granted branch are outside it, so their names are ' +
+          'never shown and the tree starts at the branches instead — and a grant re-opened ' +
+          'inside a hole the caller cannot see is a top of its own, because no expansion ' +
+          'reaches it. Ordered by name.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: { $ref: 'ms:objectSummary' } } },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      await reply.send({ items: await service.tops(await visibilityOf(request)) });
     },
   );
 
@@ -569,7 +624,7 @@ export async function objectRoutes(
         }
       }
 
-      await sendDetail(reply, id, include);
+      await sendDetail(request, reply, id, include);
     },
   );
 
@@ -919,6 +974,7 @@ export async function objectRoutes(
             ? {}
             : { kinds: asArray(request.query.kind) as ObjectKind[] }),
         },
+        await visibilityOf(request),
         effective,
       );
       await reply.send(result);
@@ -945,7 +1001,27 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      await reply.send(await service.counts(request.params.id));
+      await reply.send(await service.counts(request.params.id, await visibilityOf(request)));
+    },
+  );
+
+  app.get(
+    '/objects/counts',
+    {
+      config: READS,
+      schema: {
+        tags: ['objects'],
+        summary: 'Exact totals for everything the caller can see',
+        description:
+          'The same totals as `/objects/:id/counts`, over every object the caller can read ' +
+          'rather than under one. For an account that can read the root it is the root’s ' +
+          'counts; for one granted a few branches it is theirs, with nothing outside them ' +
+          'counted — which the root’s own counts, refused to that account, could not give.',
+        response: { 200: countsResponse },
+      },
+    },
+    async (request, reply) => {
+      await reply.send(await service.visibleCounts(await visibilityOf(request)));
     },
   );
 
@@ -968,7 +1044,9 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      await reply.send({ items: await service.ancestors(request.params.id) });
+      await reply.send({
+        items: await service.ancestors(request.params.id, await visibilityOf(request)),
+      });
     },
   );
 
@@ -1108,7 +1186,7 @@ export async function objectRoutes(
         message ?? '',
         optionalIfMatch(request.headers['if-match']),
       );
-      await reply.send(view);
+      await reply.send(await service.pauseSeenBy(view, await visibilityOf(request)));
     },
   );
 
@@ -1134,7 +1212,7 @@ export async function objectRoutes(
         request.params.id,
         optionalIfMatch(request.headers['if-match']),
       );
-      await reply.send(view);
+      await reply.send(await service.pauseSeenBy(view, await visibilityOf(request)));
     },
   );
 
@@ -1154,7 +1232,12 @@ export async function objectRoutes(
     async (request, reply) => {
       // Never cached: a timed pause expires on its own, with no write for a validator to move.
       void reply.header('cache-control', 'no-store');
-      await reply.send(await service.pauseState(request.params.id));
+      await reply.send(
+        await service.pauseSeenBy(
+          await service.pauseState(request.params.id),
+          await visibilityOf(request),
+        ),
+      );
     },
   );
 
@@ -1286,7 +1369,10 @@ export async function objectRoutes(
   }>(
     '/objects/:id/dependency',
     {
-      config: onObject('write'),
+      // **And read on the master** (`A-12`). A dependency on a sensor the caller cannot see would
+      // tell them, by pausing theirs, every time it went Down — a hidden object's state, read
+      // through a visible one's.
+      config: every(onObject('write'), onBodyObject('read', 'masterId', { optional: true })),
       schema: {
         tags: ['dependencies'],
         description:
@@ -1322,7 +1408,7 @@ export async function objectRoutes(
         delaySeconds,
         optionalIfMatch(request.headers['if-match']),
       );
-      await reply.send(view);
+      await reply.send(await service.pauseSeenBy(view, await visibilityOf(request)));
     },
   );
 
@@ -1330,7 +1416,9 @@ export async function objectRoutes(
   app.get<{ Params: { id: number }; Querystring: { asChildOf?: number } }>(
     '/objects/:id/settings',
     {
-      config: onObject('read'),
+      // `asChildOf` is read too (`A-12`): projecting under a parent is reading what that parent
+      // would hand down, and a hidden one's settings are not the caller's to read.
+      config: every(onObject('read'), onQueryObject('read', 'asChildOf', { optional: true })),
       schema: {
         tags: ['settings'],
         params: idParams,

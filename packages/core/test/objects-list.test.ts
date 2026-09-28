@@ -8,6 +8,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -112,7 +113,13 @@ describe(
     });
 
     const list = async (filter: Parameters<Harness['service']['list']>[0]) =>
-      (await h.service.list(filter, { limit: 100, sort: 'name', cursor: null })).items;
+      (
+        await h.service.list(
+          filter,
+          { limit: 100, sort: 'name', cursor: null },
+          Visibility.EVERYTHING,
+        )
+      ).items;
 
     it('matches tags case-insensitively', async () => {
       const upper = await list({ tags: ['BERLIN'] });
@@ -356,9 +363,12 @@ describe(
       path?.filter((ancestor) => ancestor.kind !== 'root').map((ancestor) => ancestor.name);
 
     it('tells objects with the same name apart by where they are', async () => {
-      const { items } = await h.service.list({ q: 'Ping', kinds: ['sensor'] }, page, {
-        path: true,
-      });
+      const { items } = await h.service.list(
+        { q: 'Ping', kinds: ['sensor'] },
+        page,
+        Visibility.EVERYTHING,
+        { path: true },
+      );
 
       assert.equal(items.length, expected.size);
       for (const item of items) {
@@ -369,7 +379,7 @@ describe(
     it('gives every row the chain its breadcrumb gives it', async () => {
       // One implementation of "where is this" in the UI's eyes, even though there are two walks:
       // a search row and the page it links to must not disagree about the way there.
-      const { items } = await h.service.list({}, page, { path: true });
+      const { items } = await h.service.list({}, page, Visibility.EVERYTHING, { path: true });
       assert.ok(
         items.some((item) => item.kind === 'root'),
         'the root is in the listing too',
@@ -378,7 +388,7 @@ describe(
       for (const item of items) {
         assert.deepEqual(
           item.path,
-          await h.service.ancestors(item.id),
+          await h.service.ancestors(item.id, Visibility.EVERYTHING),
           `${item.kind} ${item.name} (${String(item.id)})`,
         );
       }
@@ -387,7 +397,7 @@ describe(
     it('leaves the path off a listing that did not ask for it', async () => {
       // Opt-in, because it is a second statement: the tree's own levels already know where they
       // are, and a page of five hundred children should not pay for a walk nobody reads.
-      const { items } = await h.service.list({}, page);
+      const { items } = await h.service.list({}, page, Visibility.EVERYTHING);
       assert.ok(items.length > 0);
       assert.ok(items.every((item: ObjectSummary) => !('path' in item)));
     });
@@ -401,6 +411,7 @@ describe(
         const { items } = await counted.service.list(
           { q: 'Ping', kinds: ['sensor'] },
           { limit, sort: 'name', cursor: null },
+          Visibility.EVERYTHING,
           { path },
         );
         assert.equal(items.length, Math.min(limit, expected.size));
@@ -418,10 +429,14 @@ describe(
     it('gives an id with no object no path, rather than an empty one', async () => {
       // An empty path is the root's — "directly under nothing". An object deleted between the
       // listing and the walk is not that, so its row goes out without a path at all.
-      const paths = await h.repository.paths(scratch.db, [h.rootId, Number.MAX_SAFE_INTEGER]);
+      const paths = await h.repository.paths(
+        scratch.db,
+        [h.rootId, Number.MAX_SAFE_INTEGER],
+        Visibility.EVERYTHING,
+      );
       assert.deepEqual(paths.get(h.rootId), []);
       assert.equal(paths.has(Number.MAX_SAFE_INTEGER), false);
-      assert.equal((await h.repository.paths(scratch.db, [])).size, 0);
+      assert.equal((await h.repository.paths(scratch.db, [], Visibility.EVERYTHING)).size, 0);
     });
   },
 );

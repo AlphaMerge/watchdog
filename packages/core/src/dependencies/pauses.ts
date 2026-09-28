@@ -262,12 +262,13 @@ export class DependencyPauses {
       if (changes.length === 0) break;
       moved += changes.length;
 
-      const masterIds = [
-        ...new Set(changes.map((change) => change.masterId).filter((id) => id !== null)),
-      ];
-      const names = await this.#repo.namesOf(q, masterIds);
-      // Grouped by master so the state history names the outage: "master #12 (core-switch) is
-      // Down" is an answer, and "paused by a dependency" sends an operator looking for which.
+      // Grouped by master so the state history names the outage: "master #12 is Down" is an
+      // answer, and "paused by a dependency" sends an operator looking for which.
+      //
+      // **By id, not by name** (`A-12`). This message is written into the *dependent's* history,
+      // which everybody who can read the dependent reads — and the master can sit in a branch
+      // they were never granted. The pause view names the master to a reader who may see it,
+      // at the time they ask, which is also the name it has now rather than the one it had.
       const grouped = new Map<number | null, number[]>();
       for (const change of changes) {
         const group = grouped.get(change.masterId);
@@ -275,11 +276,8 @@ export class DependencyPauses {
         else group.push(change.sensorId);
       }
       for (const [masterId, sensorIds] of grouped) {
-        const name = masterId === null ? undefined : names.get(masterId);
         const message =
-          masterId === null
-            ? 'its master recovered'
-            : `master #${String(masterId)}${name === undefined ? '' : ` (${name})`} is Down`;
+          masterId === null ? 'its master recovered' : `master #${String(masterId)} is Down`;
         transitions +=
           (await this.#states?.reevaluate(q, sensorIds, now, {
             message,

@@ -1,12 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
-import type {
-  MapSummary,
-  ObjectDetail,
-  SensorState,
-  SensorTypeSummary,
-  SubtreeCounts,
-} from '../api/types';
+import type { MapSummary, SensorState, SensorTypeSummary, SubtreeCounts } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { PageTitle } from '../components/PageTitle';
@@ -34,9 +28,6 @@ const STATE_ORDER = [
 ] as const satisfies readonly SensorState[];
 
 export function Overview(): React.JSX.Element {
-  const root = useApi<ObjectDetail>('/objects/root');
-  const rootId = root.status === 'ready' ? root.data.id : null;
-
   /**
    * Totals, not rows.
    *
@@ -46,10 +37,11 @@ export function Overview(): React.JSX.Element {
    * note in a card further down. `/counts` aggregates in the database, so the numbers are exact
    * at any size and the page costs one small response rather than a megabyte of summaries it
    * throws away.
+   *
+   * **Over what this account can see, not under the root** (`A-12`). An account granted one
+   * customer's branch may not read the root, and its overview counts that branch.
    */
-  const counts = useApi<SubtreeCounts>(
-    rootId === null ? null : `/objects/${String(rootId)}/counts`,
-  );
+  const counts = useApi<SubtreeCounts>('/objects/counts');
   const types = useApi<{ items: SensorTypeSummary[] }>('/sensor-types');
   /**
    * Every map this account may see, filtered to the starred ones in the browser (`G-09`).
@@ -60,15 +52,6 @@ export function Overview(): React.JSX.Element {
    */
   const maps = useApi<{ items: MapSummary[] }>('/maps');
   const api = useApi<OpenApi>('/openapi.json');
-
-  if (root.status === 'error') {
-    return (
-      <div className="space-y-4">
-        <PageTitle title="Overview" />
-        <ErrorPanel error={root.error} retry={root.reload} />
-      </div>
-    );
-  }
 
   const objects = counts.status === 'ready' ? counts.data.objects : null;
   const states = counts.status === 'ready' ? counts.data.sensorStates : null;
@@ -87,8 +70,8 @@ export function Overview(): React.JSX.Element {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat
           label="Core"
-          value="Reachable"
-          hint={`root object #${String(root.status === 'ready' ? root.data.id : 0)}`}
+          value={api.status === 'ready' || counts.status === 'ready' ? 'Reachable' : '—'}
+          hint={api.status === 'ready' ? `version ${api.data.info.version}` : undefined}
         />
         {KINDS.map((kind) => (
           <Stat

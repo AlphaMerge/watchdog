@@ -20,6 +20,7 @@ import { ApiServer } from '../src/api/server.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { AuditRepository } from '../src/audit/store.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -537,7 +538,10 @@ describe(
       const requestId = await queue(templateId);
       await dispatcherWith(recorder(() => ({ ok: false, retryable: false })).transport).dispatch();
 
-      const entries = await new NotificationLogReader().list(db, { status: ['failed'] });
+      const entries = await new NotificationLogReader().list(db, {
+        visibility: Visibility.EVERYTHING,
+        status: ['failed'],
+      });
       assert.equal(entries.length, 1);
       const [entry] = entries;
       assert.ok(entry !== undefined);
@@ -556,13 +560,13 @@ describe(
       await dispatcherWith(recorder().transport).dispatch();
 
       const log = new NotificationLogReader();
-      const all = await log.list(db);
+      const all = await log.list(db, { visibility: Visibility.EVERYTHING });
       assert.deepEqual(
         all.map((entry) => entry.id),
         [second, second - 1],
         'newest first',
       );
-      const one = await log.list(db, { sensorId: sensorAt(1) });
+      const one = await log.list(db, { visibility: Visibility.EVERYTHING, sensorId: sensorAt(1) });
       assert.deepEqual(
         one.map((entry) => entry.sensorName),
         ['HTTP'],
@@ -575,12 +579,16 @@ describe(
       for (let index = 0; index < 5; index += 1) ids.push(await queue(templateId));
 
       const log = new NotificationLogReader();
-      const first = await log.list(db, { limit: 2 });
+      const first = await log.list(db, { visibility: Visibility.EVERYTHING, limit: 2 });
       assert.deepEqual(
         first.map((entry) => entry.id),
         [ids[4], ids[3]],
       );
-      const next = await log.list(db, { limit: 2, before: first[1]?.id ?? 0 });
+      const next = await log.list(db, {
+        visibility: Visibility.EVERYTHING,
+        limit: 2,
+        before: first[1]?.id ?? 0,
+      });
       assert.deepEqual(
         next.map((entry) => entry.id),
         [ids[2], ids[1]],

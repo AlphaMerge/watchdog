@@ -315,7 +315,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       const session = await login(guarded, { login: 'ops', password: 'correct-horse-battery' });
       const response = await guarded.inject({
         method: 'GET',
-        url: '/api/v1/objects/root',
+        // A route every account may call: `ops` holds no grant, and the root now needs one
+        // (`A-12`) — which is the authorisation hook answering, not this guard.
+        url: '/api/v1/objects/tops',
         headers: { cookie: cookieFrom(session.headers['set-cookie']) },
       });
       assert.equal(response.statusCode, 200);

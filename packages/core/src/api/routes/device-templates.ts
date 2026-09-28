@@ -5,7 +5,7 @@ import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import type { DiscoveryService } from '../../discovery/service.js';
-import { COMPUTES, READS, computesOn, onObject } from '../authorization.js';
+import { COMPUTES, READS, computesOn, onObject, onDerivedObject } from '../authorization.js';
 
 export interface DeviceTemplateRouteOptions {
   templates: DeviceTemplateCatalogue;
@@ -193,7 +193,11 @@ export function deviceTemplateRoutes(
     app.get(
       '/discovery/:id/plan',
       {
-        config: READS,
+        // What a run found, so the run's own bar: read on the group it provisions into (`A-12`).
+        config: onDerivedObject('read', 'this run', async (request) => {
+          const run = await discovery.get((request.params as { id: number }).id);
+          return run?.groupId ?? null;
+        }),
         schema: {
           tags: ['discovery'],
           summary: 'What a run’s hosts would produce',

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AccessRight, AccessService } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
-import { atLeast, lower } from '../auth/access.js';
+import { atLeast, lower, Visibility } from '../auth/access.js';
 
 /**
  * Who may call a route (`A-11`).
@@ -63,9 +63,10 @@ export type RouteAccess =
       /**
        * Absent means "not this request", not "refuse it".
        *
-       * Only ever true for a body field a route's own schema makes optional — `targetParentId`
-       * on a clone, which defaults to cloning in place. A required field that is missing is
-       * still a refusal, because the alternative is a guard that a caller turns off by omission.
+       * Only ever true for a field a route's own schema makes optional — `targetParentId` on a
+       * clone, which defaults to cloning in place, or a listing's scope, which defaults to
+       * everything the caller can see (`A-12`). A required field that is missing is still a
+       * refusal, because the alternative is a guard that a caller turns off by omission.
        */
       optional?: boolean;
     }
@@ -88,6 +89,16 @@ export type RouteAccess =
       what: string;
       of: (request: FastifyRequest) => Promise<number | null>;
     }
+  /**
+   * A right on the root: the installation as a whole (`A-12`).
+   *
+   * For the routes whose answer describes everything at once — the root's own detail, Core
+   * Health, delivery health, the Prometheus scrape — rather than any one branch. An account
+   * granted a branch was given that branch, and the name of the installation, its queue depths
+   * and the list of its probes are outside it; an account that can read the root was given the
+   * whole of it, holes aside.
+   */
+  | { kind: 'installation'; needed: AccessRight }
   /**
    * Every one of these, in order.
    *
@@ -200,6 +211,50 @@ function objectIdFor(
 }
 
 /**
+ * How each request resolves what its caller may see, installed by the hook below (`A-12`).
+ *
+ * Keyed by the request rather than decorated onto it, and resolved at most once however many
+ * queries a handler runs. Absent only where the authorisation layer was never registered — a
+ * build with no accounts at all — which is the one case where "everything" is the truth rather
+ * than a default.
+ */
+const sights = new WeakMap<FastifyRequest, { once: () => Promise<Visibility>; fresh: Sight }>();
+
+/** Resolves what a principal may see, afresh each time it is called. */
+export interface Sight {
+  (): Promise<Visibility>;
+  /** Names the principal, so a caller resolving for many sockets can ask once per account. */
+  readonly key: string;
+}
+
+const EVERYONE: Sight = Object.assign(() => Promise.resolve(Visibility.EVERYTHING), {
+  key: 'everyone',
+});
+
+/**
+ * What the caller of this request may see of the object tree (`A-12`).
+ *
+ * The argument every listing passes to its service. Everything when the authorisation layer is
+ * off, as every other bar in this file is; a refusal on a `PUBLIC` route, which has no principal
+ * to see through and must not be able to list the tree by asking.
+ */
+export function visibilityOf(request: FastifyRequest): Promise<Visibility> {
+  const sight = sights.get(request);
+  return sight === undefined ? Promise.resolve(Visibility.EVERYTHING) : sight.once();
+}
+
+/**
+ * How to ask again, for as long as this request's principal is around (`A-12`).
+ *
+ * The stream's: a WebSocket is one request that lives for days, and every subscription on it
+ * has to see the grants as they are when it subscribes rather than as they were when the socket
+ * opened — so it holds this rather than the answer `visibilityOf` memoised.
+ */
+export function sightOf(request: FastifyRequest): Sight {
+  return sights.get(request)?.fresh ?? EVERYONE;
+}
+
+/**
  * Refuses a request whose account, role or token does not reach the declared bar.
  *
  * Registered once, globally, and reads the declaration off the route — so it runs for routes
@@ -223,13 +278,32 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
     if (declared === undefined) {
       throw new AuthError('AUTH_FORBIDDEN', 'this route declares no authorisation');
     }
-    if (declared.kind === 'public') return;
-    if (!options.required) return;
+    if (declared.kind === 'public') {
+      const nobody: Sight = Object.assign(
+        () =>
+          Promise.reject(
+            new AuthError('AUTH_REQUIRED', 'a public route has nobody to see through'),
+          ),
+        { key: 'nobody' },
+      );
+      sights.set(request, { once: nobody, fresh: nobody });
+      return;
+    }
+    if (!options.required) {
+      sights.set(request, { once: EVERYONE, fresh: EVERYONE });
+      return;
+    }
 
     const principal = request.principal;
     if (principal === undefined) {
       throw new AuthError('AUTH_REQUIRED', 'this request needs a session; log in first');
     }
+
+    const fresh: Sight = Object.assign(() => options.access.visibilityFor(principal), {
+      key: `${String(principal.userId)}:${principal.role}:${principal.scope ?? ''}`,
+    });
+    let resolved: Promise<Visibility> | undefined;
+    sights.set(request, { once: () => (resolved ??= fresh()), fresh });
 
     await enforce(options.access, request, principal, declared);
   });
@@ -262,6 +336,11 @@ async function enforce(
         scope: principal.scope ?? '',
       });
     }
+    return;
+  }
+
+  if (declared.kind === 'installation') {
+    await access.requireFor(principal, await access.rootId(), declared.needed);
     return;
   }
 
@@ -349,6 +428,10 @@ export const COMPUTES = { access: { kind: 'read' }, changes: false } as const sa
 };
 export const WRITES = { access: { kind: 'write' } } as const satisfies { access: RouteAccess };
 export const ADMIN = { access: { kind: 'admin' } } as const satisfies { access: RouteAccess };
+/** Read on the root: a route whose answer is about the whole installation (`A-12`). */
+export const INSTALLATION = {
+  access: { kind: 'installation', needed: 'read' },
+} as const satisfies { access: RouteAccess };
 export const SELF = { access: { kind: 'self' } } as const satisfies { access: RouteAccess };
 
 /**
@@ -415,9 +498,29 @@ export function onDerivedObject(
   return { access: { kind: 'derived', needed, what, of } };
 }
 
-/** A right on the object named by a query parameter — the sensor a preview renders against. */
-export function onQueryObject(needed: AccessRight, param: string): { access: RouteAccess } {
-  return { access: { kind: 'object', needed, param, from: 'query' } };
+/**
+ * A right on the object named by a query parameter — the sensor a preview renders against.
+ *
+ * `optional` is for a *scope*: `?objectId=` on the alarms, `?parentId=` on the object list. Left
+ * out, the listing covers everything the caller can see; given, it has to name an object the
+ * caller can read (`A-12`). Serving the visible part of a hidden scope instead would answer
+ * "which of my sensors are beneath object 4711", which is a question about the shape of a branch
+ * the caller cannot see.
+ */
+export function onQueryObject(
+  needed: AccessRight,
+  param: string,
+  opts: { optional?: boolean } = {},
+): { access: RouteAccess } {
+  return {
+    access: {
+      kind: 'object',
+      needed,
+      param,
+      from: 'query',
+      ...(opts.optional === true ? { optional: true } : {}),
+    },
+  };
 }
 
 /** The same, on a route that computes and stores nothing. */

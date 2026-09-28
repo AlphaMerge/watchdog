@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import type { Visibility } from '../auth/access.js';
 import type { SensorState } from '../state/tables.js';
 import type { NotificationReason } from './chain.js';
 
@@ -25,6 +26,12 @@ export interface NotificationLogEntry {
 }
 
 export interface NotificationLogQuery {
+  /**
+   * Whose log this is (`A-12`). A notification is about a sensor, and one about a sensor the
+   * reader cannot see is absent — its message is that sensor's failure message. A deleted
+   * sensor's notifications are an administrator's alone, as its state log is.
+   */
+  readonly visibility: Visibility;
   readonly status?: readonly string[];
   readonly sensorId?: number;
   readonly templateId?: number;
@@ -70,8 +77,20 @@ const MAX_LIMIT = 200;
  * and an offset page would show them a row twice or not at all.
  */
 export class NotificationLogReader {
-  async list(q: Queryable, query: NotificationLogQuery = {}): Promise<NotificationLogEntry[]> {
+  async list(q: Queryable, query: NotificationLogQuery): Promise<NotificationLogEntry[]> {
     const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const values: unknown[] = [
+      query.status === undefined || query.status.length === 0 ? null : [...query.status],
+      query.sensorId ?? null,
+      query.templateId ?? null,
+      query.before ?? null,
+      limit,
+    ];
+    const visible = query.visibility.where(
+      'r.sensor_id',
+      (value) => `$${String(values.push(value))}`,
+      { mayBeDeleted: true },
+    );
     const rows = await q.query<Row>(
       `
       SELECT r.id::text AS id, r.at, r.sensor_id::text AS sensor_id, o.name AS sensor_name,
@@ -85,16 +104,11 @@ export class NotificationLogReader {
         AND ($2::bigint IS NULL OR r.sensor_id = $2)
         AND ($3::bigint IS NULL OR r.template_id = $3)
         AND ($4::bigint IS NULL OR r.id < $4)
+        AND ${visible}
       ORDER BY r.id DESC
       LIMIT $5
       `,
-      [
-        query.status === undefined || query.status.length === 0 ? null : [...query.status],
-        query.sensorId ?? null,
-        query.templateId ?? null,
-        query.before ?? null,
-        limit,
-      ],
+      values,
     );
     return rows.map(toEntry);
   }

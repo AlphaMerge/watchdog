@@ -1,5 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
+import type { Visibility } from '../auth/access.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
 /**
@@ -41,6 +43,9 @@ export interface Alarm {
    *
    * Both, because an alarm without its place is unactionable: "Ping is down" on an installation
    * with forty devices names nothing. The ids make each step a link.
+   *
+   * **Only the steps the reader can see** (`A-12`). The containers above a granted branch are
+   * outside it, so a customer's alarm reads from their own group down.
    */
   readonly path: readonly number[];
   readonly pathNames: readonly string[];
@@ -51,6 +56,12 @@ export interface Alarm {
 }
 
 export interface AlarmQuery {
+  /**
+   * Whose alarms these are (`A-12`). An alarm on a sensor the reader cannot see is absent, and
+   * absent from `total` and `counts` too — a chip saying "3 down" over a list of two is the hole
+   * announcing itself.
+   */
+  readonly visibility: Visibility;
   /** Scope to one object and everything beneath it. Absent means the whole installation. */
   readonly objectId?: number;
   /** Which of `ALARM_STATES` to include. Absent means all of them. */
@@ -120,6 +131,11 @@ export class AlarmService {
     // established. That ordering is what lets the severity chips keep counting a kind the reader
     // has currently filtered out — a chip that hides its own subject is a chip that lies.
     const values: unknown[] = [ALARM_STATES, query.objectId ?? null];
+    const bind = (value: unknown): string => `$${String(values.push(value))}`;
+    // Part of the scan, so it is part of the scope: what the reader cannot see is neither listed
+    // nor counted (`A-12`).
+    const visibleSensor = query.visibility.where('r.object_id', bind);
+    const visibleStep = query.visibility.where('chain.id', bind);
     const where: string[] = [`state = ANY($${String(values.push(states))}::sensor_state_kind[])`];
     if (query.priorityMin !== undefined) {
       where.push(`priority >= $${String(values.push(query.priorityMin))}`);
@@ -180,6 +196,7 @@ export class AlarmService {
                r.acknowledged_at, r.acknowledged_until, r.consecutive_failures
         FROM sensor_runtime r
         WHERE r.state = ANY($1::sensor_state_kind[])
+          AND ${visibleSensor}
       ),
       chain AS (
         SELECT a.sensor_id, o.id, o.parent_id, o.name, o.priority, 0 AS depth
@@ -189,31 +206,39 @@ export class AlarmService {
         SELECT chain.sensor_id, p.id, p.parent_id, p.name, chain.priority, chain.depth + 1
         FROM chain
         JOIN object p ON p.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+      ),
+      -- Each step marked once, so the ids and the names are trimmed by the same answer.
+      sighted AS (
+        SELECT chain.*, ${visibleStep} AS visible FROM chain
       ),
       placed AS (
         SELECT sensor_id,
                max(priority) AS priority,
-               array_agg(id ORDER BY depth DESC) AS path,
-               array_agg(name ORDER BY depth DESC) AS path_names
-        FROM chain
+               -- The whole chain, for scoping; the visible steps, for showing (A-12).
+               array_agg(id ORDER BY depth DESC) AS chain_ids,
+               array_agg(id ORDER BY depth DESC) FILTER (WHERE visible) AS path,
+               array_agg(name ORDER BY depth DESC) FILTER (WHERE visible) AS path_names,
+               min(name) FILTER (WHERE depth = 0) AS name
+        FROM sighted
         GROUP BY sensor_id
       ),
       scoped AS (
-        SELECT a.sensor_id, p.path, p.path_names, p.priority,
+        SELECT a.sensor_id, p.name, p.path, p.path_names, p.priority,
                a.state, a.cause, a.message, a.since, a.consecutive_failures,
                a.acknowledged_at IS NOT NULL AS acknowledged,
                a.acknowledged_until
         FROM alarming a
         JOIN placed p ON p.sensor_id = a.sensor_id
-        -- Branch scoping is "is this object anywhere in the chain", which is the same array the
+        -- Branch scoping is "is this object anywhere in the chain", which is the same walk the
         -- names came from. No second query, and no separate notion of "beneath".
-        WHERE $2::bigint IS NULL OR $2::bigint = ANY(p.path)
+        WHERE $2::bigint IS NULL OR $2::bigint = ANY(p.chain_ids)
       ),
       filtered AS (
         SELECT * FROM scoped WHERE ${where.join(' AND ')}
       )
       SELECT f.sensor_id::text AS sensor_id,
-             f.path_names[array_length(f.path_names, 1)] AS name,
+             f.name,
              f.state, f.cause, f.message, f.since, f.priority,
              f.path::text[] AS path, f.path_names,
              f.acknowledged, f.acknowledged_until, f.consecutive_failures,
@@ -233,7 +258,11 @@ export class AlarmService {
     if (first === undefined) {
       // No rows means no counts either — but the scope may still hold alarms the state filter
       // excluded, so the chips are read separately rather than reported as zero.
-      return { items: [], total: 0, counts: await this.#counts(q, query.objectId ?? null) };
+      return {
+        items: [],
+        total: 0,
+        counts: await this.#counts(q, query.objectId ?? null, query.visibility),
+      };
     }
 
     return {
@@ -257,19 +286,31 @@ export class AlarmService {
   }
 
   /** The per-state chips when the filtered list came back empty. */
-  async #counts(q: Queryable, objectId: number | null): Promise<Record<string, number>> {
+  async #counts(
+    q: Queryable,
+    objectId: number | null,
+    visibility: Visibility,
+  ): Promise<Record<string, number>> {
+    const values: unknown[] = [ALARM_STATES, objectId];
+    const visibleSensor = visibility.where(
+      'r.object_id',
+      (value) => `$${String(values.push(value))}`,
+    );
     const rows = await q.query<{ state: string; n: string }>(
       `
       WITH RECURSIVE alarming AS (
         SELECT r.object_id AS sensor_id, r.state
         FROM sensor_runtime r
         WHERE r.state = ANY($1::sensor_state_kind[])
+          AND ${visibleSensor}
       ),
       chain AS (
-        SELECT a.sensor_id, o.id, o.parent_id FROM alarming a JOIN object o ON o.id = a.sensor_id
+        SELECT a.sensor_id, o.id, o.parent_id, 0 AS depth
+        FROM alarming a JOIN object o ON o.id = a.sensor_id
         UNION ALL
-        SELECT chain.sensor_id, p.id, p.parent_id
+        SELECT chain.sensor_id, p.id, p.parent_id, chain.depth + 1
         FROM chain JOIN object p ON p.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       )
       SELECT a.state, count(*)::text AS n
       FROM alarming a
@@ -277,7 +318,7 @@ export class AlarmService {
          OR EXISTS (SELECT 1 FROM chain c WHERE c.sensor_id = a.sensor_id AND c.id = $2::bigint)
       GROUP BY a.state
       `,
-      [ALARM_STATES, objectId],
+      values,
     );
     const counts: Record<string, number> = {};
     for (const row of rows) counts[row.state] = Number(row.n);

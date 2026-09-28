@@ -245,7 +245,8 @@ export interface PauseView {
   pausedUntil: string | null;
   message: string;
   actor: { kind: string; label: string | null } | null;
-  inheritedFrom: { objectId: number; name: string } | null;
+  /** `name` is null when this account cannot see the object the pause comes from (`A-12`). */
+  inheritedFrom: { objectId: number; name: string | null } | null;
 }
 
 /** `GET /sensors/:id/state` — the whole answer for one sensor (`M-02`). */
@@ -352,7 +353,8 @@ export interface TriggerView {
   enabled: boolean;
   summary: string;
   inherited: boolean;
-  definedOn: { objectId: number; name: string };
+  /** `name` is null when this account cannot see the object it is defined on (`A-12`). */
+  definedOn: { objectId: number; name: string | null };
   createdAt: string;
   updatedAt: string;
 }

@@ -22,7 +22,13 @@ import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
-import { READS, registerAuthorization, type RouteAccess } from './authorization.js';
+import {
+  INSTALLATION,
+  READS,
+  registerAuthorization,
+  visibilityOf,
+  type RouteAccess,
+} from './authorization.js';
 import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
 import { validatorSalt } from './preconditions.js';
 import { authRoutes } from './routes/auth.js';
@@ -31,7 +37,7 @@ import { accessRoutes } from './routes/access.js';
 import { tokenRoutes } from './routes/tokens.js';
 import type { AccountService } from '../auth/accounts.js';
 import type { GroupService } from '../auth/groups.js';
-import type { AccessService } from '../auth/access.js';
+import type { AccessService, Visibility } from '../auth/access.js';
 import type { TokenService } from '../auth/tokens.js';
 import type { TotpService } from '../auth/totp.js';
 import type { SessionService } from '../auth/sessions.js';
@@ -414,12 +420,12 @@ export class ApiServer {
           route: `${String(route.method)} ${route.url}`,
           why: this.#exempting,
         });
-        return;
-      }
-      const schema = route.schema as { response?: unknown } | undefined;
-      if (schema?.response === undefined) {
+      } else if ((route.schema as { response?: unknown } | undefined)?.response === undefined) {
         this.#undeclared.push(`${String(route.method)} ${route.url}`);
       }
+      // **Listed whether or not it is exempt from the response schema** (`A-12`). An exemption
+      // is about what the body is, not about who may read it — and returning early here once left
+      // `/metrics` and a map's background out of every sweep that walks this list.
       const access = route.config?.access;
       if (access === undefined) return;
       // A route says so when it changes nothing; everything else is assumed to.
@@ -467,6 +473,32 @@ export class ApiServer {
     rightsIn?: string;
   }[] {
     return this.#routes;
+  }
+
+  /**
+   * A scrape body without the series of probes this reader cannot see (`A-12`).
+   *
+   * The registry is one shared object, rendered once for everybody, so the filter is over the
+   * rendered lines: every per-probe series carries `probe="<id>"`, and a probe carved out of the
+   * reader's view takes its name and its counts with it. Everything else is the installation's
+   * own and stays — the route already required read on the root to get this far.
+   */
+  async #withoutHiddenProbes(body: string, visibility: Visibility): Promise<string> {
+    if (visibility.everything) return body;
+    const values: unknown[] = [];
+    const visible = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
+    const rows = await this.#db.query<{ id: string }>(
+      `SELECT o.id::text AS id FROM object o WHERE o.kind = 'probe' AND ${visible}`,
+      values,
+    );
+    const seen = new Set(rows.map((row) => row.id));
+    return body
+      .split('\n')
+      .filter((line) => {
+        const probe = /[{,]probe="([^"]*)"/.exec(line)?.[1];
+        return probe === undefined || seen.has(probe);
+      })
+      .join('\n');
   }
 
   async build(version: string, service: ObjectService): Promise<void> {
@@ -782,7 +814,11 @@ export class ApiServer {
           // Read, and a token scoped to read is enough: a scraper never writes. Declared like
           // every other route now rather than checked inline in the handler (`A-11`) — the
           // inline check was correct and was also the only one in the installation.
-          config: READS,
+          //
+          // **Read on the root, not merely a login** (`A-12`). The body names every probe and
+          // counts its sensors; an account granted one branch was not given that, and the
+          // installation's own queue depths are not a branch's either.
+          config: INSTALLATION,
           schema: {
             tags: ['meta'],
             summary: 'Prometheus scrape endpoint — text format, not JSON',
@@ -795,7 +831,7 @@ export class ApiServer {
               'because an empty body would be recorded as every series vanishing at once.',
           },
         },
-        async (_request, reply) => {
+        async (request, reply) => {
           const exporter = metrics();
           if (exporter === undefined) {
             // 503 in the scraper's own terms: an empty body would be recorded as "every series
@@ -807,7 +843,9 @@ export class ApiServer {
             return reply;
           }
           const { body, contentType } = await exporter.scrape();
-          await reply.header('content-type', contentType).send(body);
+          await reply
+            .header('content-type', contentType)
+            .send(await this.#withoutHiddenProbes(body, await visibilityOf(request)));
           return reply;
         },
       );

@@ -1,4 +1,5 @@
 import type { Logger } from '@ms/shared';
+import type { Visibility } from '../auth/access.js';
 import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
@@ -29,7 +30,7 @@ export interface TriggerView {
   readonly enabled: boolean;
   readonly summary: string;
   readonly inherited: boolean;
-  readonly definedOn: { readonly objectId: ObjectId; readonly name: string };
+  readonly definedOn: { readonly objectId: ObjectId; readonly name: string | null };
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -61,9 +62,18 @@ export class TriggerService {
    * source is the whole point — a trigger an operator cannot find is one they cannot turn off,
    * and the object it is defined on is the only place they can.
    */
-  async effectiveFor(objectId: ObjectId): Promise<TriggerView[]> {
+  async effectiveFor(objectId: ObjectId, visibility: Visibility): Promise<TriggerView[]> {
     const triggers = await this.#repo.effectiveFor(this.#db, objectId);
-    return triggers.map((trigger) => this.#view(trigger, trigger.inherited, trigger.definedOn));
+    const visible = await visibility.visibleAmong(
+      this.#db,
+      triggers.map((trigger) => trigger.definedOn.objectId),
+    );
+    return triggers.map((trigger) =>
+      this.#view(trigger, trigger.inherited, {
+        objectId: trigger.definedOn.objectId,
+        name: visible.has(trigger.definedOn.objectId) ? trigger.definedOn.name : null,
+      }),
+    );
   }
 
   /**
@@ -196,7 +206,7 @@ export class TriggerService {
       updatedAt: Date;
     },
     inherited: boolean,
-    definedOn: { objectId: ObjectId; name: string },
+    definedOn: { objectId: ObjectId; name: string | null },
   ): TriggerView {
     // **Readable even when this build does not know the kind** (`P-139`). One row of an
     // unrecognised kind used to make the whole list throw, so an operator could not see any of

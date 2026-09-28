@@ -49,7 +49,8 @@ export const pauseViewSchema = {
       type: ['object', 'null'],
       additionalProperties: false,
       required: ['objectId', 'name'],
-      properties: { objectId: { type: 'integer' }, name: { type: 'string' } },
+      // Null when the caller cannot see the object the pause comes from (`A-12`).
+      properties: { objectId: { type: 'integer' }, name: { type: ['string', 'null'] } },
     },
     /** The schedule in effect here (`M-09`), whether it is monitoring, and where it is set. */
     schedule: {
@@ -71,8 +72,9 @@ export const pauseViewSchema = {
       required: ['masterId', 'masterName', 'masterState', 'holding', 'releasesAt', 'definedOn'],
       properties: {
         masterId: { type: 'integer' },
-        masterName: { type: 'string' },
-        masterState: { type: 'string' },
+        // Both null when the caller cannot see the master (`A-12`); `holding` is this object's.
+        masterName: { type: ['string', 'null'] },
+        masterState: { type: ['string', 'null'] },
         holding: { type: 'boolean' },
         releasesAt: { type: ['string', 'null'] },
         definedOn: { type: 'integer' },

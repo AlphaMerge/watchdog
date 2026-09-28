@@ -3,7 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import type { ScheduleInput, ScheduleService } from '../../schedules/service.js';
-import { READS, WRITES } from '../authorization.js';
+import { READS, WRITES, visibilityOf } from '../authorization.js';
 
 export interface ScheduleRouteOptions {
   schedules: ScheduleService;
@@ -48,7 +48,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
         },
       },
     },
-    async () => ({ items: await schedules.list() }),
+    async (request) => ({ items: await schedules.list(await visibilityOf(request)) }),
   );
 
   app.get<{ Params: { id: number } }>(
@@ -62,7 +62,7 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
         response: { 200: { $ref: 'ms:schedule' } },
       },
     },
-    async (request) => schedules.get(request.params.id),
+    async (request) => schedules.get(request.params.id, await visibilityOf(request)),
   );
 
   app.post<{ Body: ScheduleInput }>(

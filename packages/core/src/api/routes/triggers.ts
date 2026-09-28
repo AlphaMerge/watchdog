@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import { triggerKinds } from '../../triggers/definition.js';
 import type { TriggerInput, TriggerService } from '../../triggers/service.js';
-import { READS, onDerivedObject, onObject } from '../authorization.js';
+import { READS, onDerivedObject, onObject, visibilityOf } from '../authorization.js';
 
 export interface TriggerRouteOptions {
   triggers: TriggerService;
@@ -43,12 +43,15 @@ const triggerViewSchema = {
     /** One line for the tab, built from the settings by the kind itself. */
     summary: { type: 'string' },
     inherited: { type: 'boolean' },
-    /** The object the trigger is defined on — the only place it can be edited or removed. */
+    /**
+     * The object the trigger is defined on — the only place it can be edited or removed. `name`
+     * is null when the caller cannot see that object (`A-12`).
+     */
     definedOn: {
       type: 'object',
       additionalProperties: false,
       required: ['objectId', 'name'],
-      properties: { objectId: { type: 'integer' }, name: { type: 'string' } },
+      properties: { objectId: { type: 'integer' }, name: { type: ['string', 'null'] } },
     },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
@@ -136,7 +139,9 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
           'Own and inherited together, nearest first, each naming the object it is defined on ' +
           '— which is the only place it can be edited or removed. A trigger on the root applies ' +
           'to every sensor in the installation. Unlike an inherited *setting*, an inherited ' +
-          'trigger does not displace a nearer one: both fire.',
+          'trigger does not displace a nearer one: both fire. A trigger inherited from an ' +
+          'object the caller cannot see is still listed, because it still fires — with that ' +
+          'object’s name null.',
         params: idParams,
         response: {
           200: {
@@ -157,7 +162,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
       void reply.header('cache-control', 'no-store');
       return {
         objectId: request.params.id,
-        items: await triggers.effectiveFor(request.params.id),
+        items: await triggers.effectiveFor(request.params.id, await visibilityOf(request)),
       };
     },
   );

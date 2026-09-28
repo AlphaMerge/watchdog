@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import type { CoreHealthService } from '../../health/core-health.js';
 import type { ProbeHealthService } from '../../health/probe-health.js';
 import { toHttpError } from '../errors.js';
-import { READS } from '../authorization.js';
+import { INSTALLATION, onObject } from '../authorization.js';
 
 export interface HealthRoutesOptions {
   /**
@@ -42,7 +42,8 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
   app.get(
     '/core-health',
     {
-      config: READS,
+      // The installation's own numbers, so the installation's bar (`A-12`).
+      config: INSTALLATION,
       schema: {
         tags: ['health'],
         summary: 'How the core itself is doing, right now',
@@ -99,7 +100,9 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
   app.get<{ Params: { id: number } }>(
     '/probes/:id/health',
     {
-      config: READS,
+      // One probe's numbers and message, so a right on that probe (`A-12`). A role check let an
+      // account granted one branch read the connection state of every probe by id.
+      config: onObject('read'),
       schema: {
         tags: ['health'],
         summary: 'How one probe is doing, right now',

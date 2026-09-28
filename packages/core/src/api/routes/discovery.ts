@@ -13,7 +13,14 @@ import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
 import type { RediscoveryService } from '../../discovery/rediscovery.js';
-import { COMPUTES, READS, onBodyObject, onDerivedObject, onObject } from '../authorization.js';
+import {
+  COMPUTES,
+  onBodyObject,
+  onDerivedObject,
+  onObject,
+  onQueryObject,
+  visibilityOf,
+} from '../authorization.js';
 
 export interface DiscoveryRouteOptions {
   discovery: DiscoveryService;
@@ -84,6 +91,16 @@ const runSchema = {
  */
 export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOptions): void {
   const { discovery } = options;
+  /**
+   * A run is read with a right on the group it provisions into, as it is cancelled with one
+   * (`A-12`). Its hosts are addresses and fingerprints on somebody's network, and a role check
+   * handed every run in the installation to an account granted one branch.
+   */
+  const toReadRun = onDerivedObject('read', 'this run', async (request) => {
+    const run = await discovery.get((request.params as { id: number }).id);
+    return run?.groupId ?? null;
+  });
+
   app.addSchema(runSchema);
 
   app.post(
@@ -261,7 +278,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id',
     {
-      config: READS,
+      config: toReadRun,
       schema: {
         tags: ['discovery'],
         summary: 'A run and how far it has got',
@@ -280,7 +297,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/summary',
     {
-      config: READS,
+      config: toReadRun,
       schema: {
         tags: ['discovery'],
         summary: 'What a run did — scanned, found, created, errors',
@@ -422,7 +439,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/hosts',
     {
-      config: READS,
+      config: toReadRun,
       schema: {
         tags: ['discovery'],
         summary: 'The addresses a run found alive',
@@ -580,7 +597,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/problems',
     {
-      config: READS,
+      config: toReadRun,
       schema: {
         tags: ['discovery'],
         summary: 'What a run could not create, and why',
@@ -692,7 +709,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.get(
       '/discovery/schedules',
       {
-        config: READS,
+        // The schedules provisioning into groups the caller can read, and `groupId` has to be
+        // one of them (`A-12`).
+        config: onQueryObject('read', 'groupId', { optional: true }),
         schema: {
           tags: ['discovery'],
           summary: 'Rediscovery schedules',
@@ -718,7 +737,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request: FastifyRequest) => {
         const { groupId } = request.query as { groupId?: number };
-        return { items: await rediscovery.list(groupId) };
+        return { items: await rediscovery.list(await visibilityOf(request), groupId) };
       },
     );
 

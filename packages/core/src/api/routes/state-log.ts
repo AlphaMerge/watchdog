@@ -3,7 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { SensorState, SensorStateCause } from '../../state/tables.js';
-import { READS } from '../authorization.js';
+import { onQueryObject, visibilityOf } from '../authorization.js';
 import {
   StateLogError,
   STATE_LOG_CAUSES,
@@ -124,7 +124,8 @@ export function stateLogRoutes(app: FastifyInstance, options: StateLogRoutesOpti
   app.get<{ Querystring: LogQueryString }>(
     '/state-log',
     {
-      config: READS,
+      // The caller's sensors only, and a scope has to be an object the caller can read (`A-12`).
+      config: onQueryObject('read', 'objectId', { optional: true }),
       schema: {
         tags: ['state'],
         summary: 'Every state change, newest first',
@@ -133,7 +134,9 @@ export function stateLogRoutes(app: FastifyInstance, options: StateLogRoutesOpti
           '`objectId` — a sensor id gives that sensor’s log. Filter with `state` and `cause`, ' +
           'both repeatable. Page with `before`, using `nextBefore` from the previous page. ' +
           '`durationMs` is null on the state a sensor is still in, and is measured against the ' +
-          'real next transition rather than the next one on this page.',
+          'real next transition rather than the next one on this page.\n\n' +
+          'Only sensors the caller can read appear. A deleted sensor’s history outlives it, but ' +
+          'nothing records which branch it was in, so only an administrator sees it.',
         querystring: logQuery,
         response: { 200: { $ref: 'ms:stateLogPage' } },
       },
@@ -143,6 +146,7 @@ export function stateLogRoutes(app: FastifyInstance, options: StateLogRoutesOpti
       void reply.header('cache-control', 'no-store');
 
       const query: StateLogQuery = {
+        visibility: await visibilityOf(request),
         limit,
         ...(objectId === undefined ? {} : { objectId }),
         ...(from === undefined ? {} : { from: parseInstant(from, 'from') }),

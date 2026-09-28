@@ -435,7 +435,7 @@ describe(
       assert.ok(!ids.includes(snmpId));
     });
 
-    it('names the master in the state history, so the outage is findable', async () => {
+    it('names the master in the state history by id, so the outage is findable', async () => {
       await masterForDevice();
       await setState(pingId, 'down');
       await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
@@ -444,11 +444,13 @@ describe(
         'SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1',
         [httpId],
       );
-      const message = rows[0]?.message ?? '';
       // The sensor, not the device: an operator reading this needs the object that is down, and
       // "core-switch is Down" would name something that has no state of its own.
-      assert.ok(message.includes('Ping'), message);
-      assert.ok(message.includes('Down'), message);
+      //
+      // **By id, and not by name** (`A-12`). This row is the dependent's history, read by
+      // everybody who can read the dependent, and the master can be in a branch they were never
+      // granted. The pause view names it to whoever may see it.
+      assert.equal(rows[0]?.message, `master #${String(pingId)} is Down`);
     });
 
     it('holds a sensor created while the master is already Down', async () => {

@@ -1,6 +1,7 @@
 import type { Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
+import type { Visibility } from '../auth/access.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import {
   settingRegistry,
@@ -269,28 +270,34 @@ export class ObjectService {
    * Effective values are resolved for the whole page in one query per key. A route that looped
    * the single-object resolver would issue `rows × keys` round trips; `resolveForObjects`
    * exists for exactly this. Paths are the same bargain: one walk for the page (`P-214`).
+   *
+   * **Every method that returns more than the object it was asked about takes a `Visibility`,
+   * and it is not optional** (`A-12`). The routes pass the caller's; an internal caller that
+   * really means the whole tree passes `Visibility.EVERYTHING` and says so.
    */
   async list(
     filter: ObjectFilter,
     page: PageRequest,
+    visibility: Visibility,
     expand: ListExpansions = {},
   ): Promise<Page<ObjectSummary>> {
-    const result = await this.#repo.list(this.#db, filter, page);
+    const result = await this.#repo.list(this.#db, filter, page, visibility);
     if (result.items.length === 0) return result;
     let items = result.items;
     const effectiveKeys = expand.effective ?? [];
     if (effectiveKeys.length > 0) items = await this.#attachEffective(items, effectiveKeys);
-    if (expand.path === true) items = await this.#attachPaths(items);
+    if (expand.path === true) items = await this.#attachPaths(items, visibility);
     return items === result.items ? result : { ...result, items };
   }
 
   async subtree(
     id: ObjectId,
     options: SubtreeOptions,
+    visibility: Visibility,
     effectiveKeys: readonly string[] = [],
   ): Promise<SubtreeResult> {
     await this.get(id);
-    const result = await this.#repo.subtree(this.#db, id, options);
+    const result = await this.#repo.subtree(this.#db, id, options, visibility);
     if (effectiveKeys.length === 0 || result.items.length === 0) return result;
     return { ...result, items: await this.#attachEffective(result.items, effectiveKeys) };
   }
@@ -301,14 +308,36 @@ export class ObjectService {
    * A caller that wants totals asks for totals. Reading a page of the tree and counting it is
    * how an overview came to claim 930 sensors on a system running five thousand.
    */
-  async counts(id: ObjectId): Promise<SubtreeCounts> {
+  async counts(id: ObjectId, visibility: Visibility): Promise<SubtreeCounts> {
     await this.get(id);
-    return this.#repo.subtreeCounts(this.#db, id);
+    return this.#repo.subtreeCounts(this.#db, id, visibility);
   }
 
-  async ancestors(id: ObjectId): Promise<ObjectRef[]> {
+  /**
+   * Totals over everything the reader can see (`A-12`) — the overview's numbers.
+   *
+   * Counted from the root with the reader's visibility rather than summed over its tops, because
+   * tops nest: a grant re-opened inside a hole is a top of its own *and* inside its branch's
+   * subtree, and a sum would count it twice.
+   */
+  async visibleCounts(visibility: Visibility): Promise<SubtreeCounts> {
+    const root = await this.#repo.getRoot(this.#db);
+    return this.#repo.subtreeCounts(this.#db, root.id, visibility);
+  }
+
+  async ancestors(id: ObjectId, visibility: Visibility): Promise<ObjectRef[]> {
     await this.get(id);
-    return this.#repo.ancestors(this.#db, id);
+    return this.#repo.ancestors(this.#db, id, visibility);
+  }
+
+  /** How many of this object's children the reader can see (`A-12`). */
+  async visibleChildCount(id: ObjectId, visibility: Visibility): Promise<number> {
+    return this.#repo.visibleChildCount(this.#db, id, visibility);
+  }
+
+  /** Where the reader's tree starts: the root, or the tops of the branches it was granted. */
+  async tops(visibility: Visibility): Promise<ObjectSummary[]> {
+    return this.#repo.tops(this.#db, visibility);
   }
 
   async channels(id: ObjectId): Promise<ChannelRecord[]> {
@@ -1007,6 +1036,32 @@ export class ObjectService {
         message: acknowledgement?.message ?? '',
       };
     });
+  }
+
+  /**
+   * A pause view with what belongs to objects the reader cannot see taken out (`A-12`).
+   *
+   * A sensor's pause can come from a container above the branch it was granted, and its master
+   * can sit in a branch it was not. Both are this object's own facts with another object's name in
+   * them; the ids stay, as references, and the names and the master's state go.
+   */
+  async pauseSeenBy(view: PauseView, visibility: Visibility): Promise<PauseView> {
+    const named = [view.inheritedFrom?.objectId, view.dependency?.masterId].filter(
+      (one): one is ObjectId => one !== undefined,
+    );
+    const visible = await visibility.visibleAmong(this.#db, named);
+    const { inheritedFrom, dependency } = view;
+    return {
+      ...view,
+      inheritedFrom:
+        inheritedFrom === null || visible.has(inheritedFrom.objectId)
+          ? inheritedFrom
+          : { objectId: inheritedFrom.objectId, name: null },
+      dependency:
+        dependency === null || visible.has(dependency.masterId)
+          ? dependency
+          : { ...dependency, masterName: null, masterState: null },
+    };
   }
 
   /** Why this object is paused, and whether this is the one to resume. */
@@ -2137,10 +2192,14 @@ export class ObjectService {
    * listing's keyset query stays the one query it was, and a row whose object went between the
    * two reads simply carries no path rather than a wrong one.
    */
-  async #attachPaths(items: readonly ObjectSummary[]): Promise<ObjectSummary[]> {
+  async #attachPaths(
+    items: readonly ObjectSummary[],
+    visibility: Visibility,
+  ): Promise<ObjectSummary[]> {
     const paths = await this.#repo.paths(
       this.#db,
       items.map((item) => item.id),
+      visibility,
     );
     return items.map((item) => {
       const path = paths.get(item.id);

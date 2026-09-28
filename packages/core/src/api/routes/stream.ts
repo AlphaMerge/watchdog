@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { describeError } from '@ms/shared';
 import type { Database } from '../../db/pool.js';
 import type { StateBroadcaster, StateEvent, StateSnapshot } from '../../state/stream.js';
-import { READS } from '../authorization.js';
+import { READS, sightOf } from '../authorization.js';
 
 export interface StreamRouteOptions {
   db: Database;
@@ -113,7 +113,12 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'takes a fresh snapshot, which is also how a client resyncs — there is no cursor. ' +
           'A client that cannot keep up is sent `overflow` and detached rather than being ' +
           'quietly trimmed, because a tree missing a change looks exactly like a tree that is ' +
-          'up to date.',
+          'up to date.\n\n' +
+          '"Everything" is everything the caller can read: sensors it cannot are neither in the ' +
+          'snapshot nor streamed, and every `path` carries only the steps it can read. ' +
+          'Subscribing to an object it cannot read is answered with a `problem` frame. When ' +
+          'what the caller may see changes — a grant revoked, a group left — the socket is sent ' +
+          '`overflow` with that reason, and subscribing again takes a snapshot of the new view.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -122,6 +127,14 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
     (socket, request) => {
       let detach: (() => void) | undefined;
       let closed = false;
+      /**
+       * Which subscription is current. Resolving the caller's visibility is a query, so a second
+       * `subscribe` can arrive while the first is still asking — and without this both would
+       * attach, and only the second could ever be detached.
+       */
+      let generation = 0;
+      // Afresh for every subscription (`A-12`): the socket can outlive the grants it opened with.
+      const sight = sightOf(request);
 
       const backlog = socketBacklog(socket);
 
@@ -140,8 +153,23 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
 
       send({ type: 'hello', seq: stream.seq, protocol: PROTOCOL });
 
+      // A function rather than an inline test: `closed` changes in a callback across the awaits
+      // below, and a condition written out twice is narrowed to its first answer.
+      const superseded = (mine: number): boolean => mine !== generation || closed;
+
       const subscribe = async (objectId: number | null): Promise<void> => {
         unsubscribe();
+        const mine = (generation += 1);
+        const visibility = await sight();
+        if (superseded(mine)) return;
+        if (objectId !== null && !(await stream.canSee(db, objectId, visibility))) {
+          if (superseded(mine)) return;
+          // The same answer `GET /objects/:id` gives, as a frame: a subscription to a hidden
+          // object would stream the visible sensors beneath it, which says where they sit.
+          send({ type: 'problem', reason: 'this account may not read that object' });
+          return;
+        }
+        if (superseded(mine)) return;
         // Attached first. Anything that commits from here on is queued for this subscriber, so
         // the snapshot below cannot miss a change that happens while it is being read.
         // Set if the cut-off gives up on this socket while the snapshot below is being read.
@@ -154,10 +182,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
             send: (event) => {
               backlog.wrote(send({ type: 'state', ...event }));
             },
-            overflow: () => {
+            overflow: (reason) => {
               cutOff.dropped = true;
               detach = undefined;
-              send({ type: 'overflow', reason: 'too far behind; subscribe again' });
+              send({ type: 'overflow', reason: reason ?? 'too far behind; subscribe again' });
             },
             // What `ws` has accepted and not yet written, less a snapshot still going out. The
             // one number that actually grows when a client stops reading — a browser tab
@@ -167,10 +195,14 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
             backlog: backlog.report,
           },
           objectId,
+          { visibility, key: sight.key, resolve: sight },
         );
         // A snapshot supersedes everything before it, so the event accounting starts again from
         // here and its own bytes are never counted. See `socketBacklog`.
-        const frame = { type: 'snapshot' as const, ...(await stream.snapshot(db, objectId)) };
+        const frame = {
+          type: 'snapshot' as const,
+          ...(await stream.snapshot(db, objectId, visibility)),
+        };
         // Detached while the snapshot was being read — sending it now would append megabytes to a
         // socket the cut-off has already given up on, which is the amplification `P-70` closes.
         if (cutOff.dropped) return;

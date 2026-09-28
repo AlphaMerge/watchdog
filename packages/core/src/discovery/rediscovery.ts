@@ -1,3 +1,4 @@
+import type { Visibility } from '../auth/access.js';
 import type { Logger } from '@ms/shared';
 import type { DiscoveryLevel } from '@ms/shared';
 import { isActiveAt, type ScheduleDefinition } from '../schedules/definition.js';
@@ -194,16 +195,19 @@ export class RediscoveryService {
     return row === undefined ? null : read(row);
   }
 
-  async list(groupId?: number): Promise<RediscoverySchedule[]> {
-    const rows =
-      groupId === undefined
-        ? await this.#db.query<Record<string, unknown>>(
-            `SELECT * FROM discovery_schedule ORDER BY id`,
-          )
-        : await this.#db.query<Record<string, unknown>>(
-            `SELECT * FROM discovery_schedule WHERE group_id = $1 ORDER BY id`,
-            [groupId],
-          );
+  /**
+   * The schedules provisioning into groups the reader can see (`A-12`) — a schedule's name, range
+   * and cadence describe a branch of somebody's network.
+   */
+  async list(visibility: Visibility, groupId?: number): Promise<RediscoverySchedule[]> {
+    const values: unknown[] = [groupId ?? null];
+    const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
+    const rows = await this.#db.query<Record<string, unknown>>(
+      `SELECT * FROM discovery_schedule
+       WHERE ($1::bigint IS NULL OR group_id = $1) AND ${visible}
+       ORDER BY id`,
+      values,
+    );
     return rows.map(read);
   }
 

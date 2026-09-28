@@ -8,6 +8,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -503,7 +504,11 @@ describe(
         assert.equal(result.object.name, 'Clone of Berlin DC');
 
         // Descendants keep their own names — renaming a whole subtree surprises nobody well.
-        const cloned = await h.service.subtree(result.object.id, { maxDepth: 10, limit: 100 });
+        const cloned = await h.service.subtree(
+          result.object.id,
+          { maxDepth: 10, limit: 100 },
+          Visibility.EVERYTHING,
+        );
         const names = cloned.items.map((i) => i.name).sort();
         assert.deepEqual(names, [
           'Clone of Berlin DC',
@@ -514,7 +519,11 @@ describe(
           'switch-02',
         ]);
 
-        const sourceStillThere = await h.service.subtree(source, { maxDepth: 10, limit: 100 });
+        const sourceStillThere = await h.service.subtree(
+          source,
+          { maxDepth: 10, limit: 100 },
+          Visibility.EVERYTHING,
+        );
         assert.equal(sourceStillThere.items.length, 6);
       });
 
@@ -604,6 +613,7 @@ describe(
         const siblings = await h.service.list(
           { parentId: probeId },
           { limit: 50, sort: 'name', cursor: null },
+          Visibility.EVERYTHING,
         );
         const clones = siblings.items.filter((i) => i.name === 'Clone of Switch template');
         assert.equal(clones.length, 2);

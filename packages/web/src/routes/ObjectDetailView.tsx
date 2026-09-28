@@ -491,18 +491,23 @@ function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
         </span>
       )}
       {view.message !== '' && <span className="text-text-muted">— {view.message}</span>}
-      {view.inheritedFrom !== null && (
-        <span>
-          by{' '}
-          <Link
-            to={`/objects/${String(view.inheritedFrom.objectId)}`}
-            className="underline underline-offset-2"
-          >
-            {view.inheritedFrom.name}
-          </Link>
-          , which is where it can be resumed
-        </span>
-      )}
+      {view.inheritedFrom !== null &&
+        (view.inheritedFrom.name === null ? (
+          // Paused from above the branch this account was granted: it can say so, and not by
+          // what — the container is outside what it may see (`A-12`).
+          <span>by an object outside your view</span>
+        ) : (
+          <span>
+            by{' '}
+            <Link
+              to={`/objects/${String(view.inheritedFrom.objectId)}`}
+              className="underline underline-offset-2"
+            >
+              {view.inheritedFrom.name}
+            </Link>
+            , which is where it can be resumed
+          </span>
+        ))}
       {view.actor?.label !== null && view.actor !== null && (
         <span className="text-text-muted">({view.actor.label})</span>
       )}

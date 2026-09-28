@@ -1,6 +1,7 @@
 import type { Queryable } from '../db/pool.js';
 import type { SensorState } from '../state/tables.js';
 import type { AlarmPhase, NotificationReason } from './chain.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /** Where a sensor currently is, as the engine reads it. */
 export interface SensorStanding {
@@ -458,9 +459,10 @@ export class AlarmRepository {
     const rows = await q.query<{ id: string }>(
       `
       WITH RECURSIVE subtree AS (
-        SELECT o.id, o.kind FROM object o WHERE o.id = $1
+        SELECT o.id, o.kind, 0 AS depth FROM object o WHERE o.id = $1
         UNION ALL
-        SELECT c.id, c.kind FROM object c JOIN subtree ON c.parent_id = subtree.id
+        SELECT c.id, c.kind, subtree.depth + 1 FROM object c JOIN subtree ON c.parent_id = subtree.id
+        WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
       )
       -- Qualified: an unqualified ORDER BY resolves to the output column, which is text here,
       -- so the cap would keep an arbitrary lexicographic slice rather than the lowest ids.

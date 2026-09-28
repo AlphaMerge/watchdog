@@ -3,7 +3,7 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { ALARM_STATES, type AlarmService, type AlarmSort } from '../../state/alarms.js';
 import type { SensorState } from '../../state/tables.js';
-import { READS } from '../authorization.js';
+import { onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface AlarmRouteOptions {
   alarms: AlarmService;
@@ -99,7 +99,10 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
   app.get<{ Querystring: AlarmQueryString }>(
     '/alarms',
     {
-      config: READS,
+      // What the caller can see, and nothing it cannot (`A-12`). A scope has to be an object the
+      // caller can read; the visible alarms beneath a hidden one would say where they sit in a
+      // branch the caller was not shown.
+      config: onQueryObject('read', 'objectId', { optional: true }),
       schema: {
         tags: ['state'],
         summary: 'Every sensor that is currently in an alarm state, worst first',
@@ -110,7 +113,9 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
           'in coverage rather than a fault. Reporting either as an alarm is how a list becomes ' +
           'one an operator scrolls past. `objectId` scopes to that object and everything ' +
           'beneath it. `counts` is per state across the whole scope and ignores the `state` ' +
-          'filter, so a severity chip can still say how many it is hiding.',
+          'filter, so a severity chip can still say how many it is hiding.\n\n' +
+          'Only sensors the caller can read are listed or counted, and `path` and `pathNames` ' +
+          'carry only the steps the caller can read.',
         querystring: alarmQuery,
         response: { 200: { $ref: 'ms:alarmPage' } },
       },
@@ -122,6 +127,7 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
       const { state, objectId, priorityMin, includeAcknowledged, sort, limit } = request.query;
       const states = state === undefined ? undefined : Array.isArray(state) ? state : [state];
       return alarms.list({
+        visibility: await visibilityOf(request),
         ...(objectId === undefined ? {} : { objectId }),
         ...(states === undefined ? {} : { states }),
         ...(priorityMin === undefined ? {} : { priorityMin }),

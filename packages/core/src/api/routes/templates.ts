@@ -12,7 +12,15 @@ import {
   SUMMARISATION_MODES,
 } from '../../notifications/summarisation.js';
 import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
-import { READS, WRITES, computesOn, every, onBodyObject, onQueryObject } from '../authorization.js';
+import {
+  READS,
+  WRITES,
+  computesOn,
+  every,
+  onBodyObject,
+  onQueryObject,
+  visibilityOf,
+} from '../authorization.js';
 
 export interface TemplateRouteOptions {
   templates: TemplateService;
@@ -403,14 +411,15 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         description:
           '`CAPABILITIES.MD §5.2`’s reverse lookup, and the reason a delete can be refused with ' +
           'a list rather than a shrug. A trigger names its templates inside a JSON document, so ' +
-          'no foreign key can enforce the reference — this is the query that stands in for one.',
+          'no foreign key can enforce the reference — this is the query that stands in for one. ' +
+          'Only triggers on objects the caller can read are listed.',
         params: idParams,
         response: { 200: { $ref: 'ms:templateUsedBy' } },
       },
     },
     async (request) => ({
       templateId: request.params.id,
-      items: await templates.usedBy(request.params.id),
+      items: await templates.usedBy(request.params.id, await visibilityOf(request)),
     }),
   );
 
@@ -437,7 +446,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         response: { 200: { $ref: 'ms:templatePreview' } },
       },
     },
-    async (request) => templates.preview(request.params.id, request.query.sensorId),
+    async (request) =>
+      templates.preview(request.params.id, request.query.sensorId, await visibilityOf(request)),
   );
 
   app.post<{ Body: { template: TemplateInput; sensorId: number } }>(
@@ -468,7 +478,12 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         response: { 200: { $ref: 'ms:templatePreview' } },
       },
     },
-    async (request) => templates.previewDraft(request.body.template, request.body.sensorId),
+    async (request) =>
+      templates.previewDraft(
+        request.body.template,
+        request.body.sensorId,
+        await visibilityOf(request),
+      ),
   );
 
   if (tester !== undefined) {

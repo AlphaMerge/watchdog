@@ -1,5 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
+import { Visibility } from '../auth/access.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import type { ObjectId } from '../objects/types.js';
@@ -23,6 +25,9 @@ import {
 
 /** The migration's own default, repeated here so a create with no mode agrees with the column. */
 const DEFAULT_WINDOW_SECONDS = 900;
+
+/** What a preview says in place of a container its reader cannot see (`A-12`). */
+const HIDDEN_NAME = '(outside your view)';
 
 /** Who a message goes to. Only `address` resolves until `A-01` and `A-02` exist. */
 export interface Recipient {
@@ -274,7 +279,11 @@ export class TemplateRepository {
    * The *which fields* question is `triggerKinds.templatesIn`'s, not SQL's: each kind declares
    * which of its settings are template references, so a new kind cannot be missed here.
    */
-  async usedBy(q: Queryable, templateId: number): Promise<TemplateUse[]> {
+  async usedBy(q: Queryable, templateId: number, visibility: Visibility): Promise<TemplateUse[]> {
+    const values: unknown[] = [];
+    // A trigger names the object it is defined on, so one on an object the reader cannot see is
+    // absent from the reader's answer (`A-12`).
+    const visible = visibility.where('t.object_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{
       id: string;
       kind: string;
@@ -286,7 +295,9 @@ export class TemplateRepository {
               t.object_id::text AS object_id, o.name AS object_name
        FROM notification_trigger t
        JOIN object o ON o.id = t.object_id
+       WHERE ${visible}
        ORDER BY t.id`,
+      values,
     );
 
     const uses: TemplateUse[] = [];
@@ -359,10 +370,13 @@ export class TemplateService {
     return this.#view(stored);
   }
 
-  /** Which triggers name this template (`CAPABILITIES.MD §5.2`). */
-  async usedBy(id: number): Promise<TemplateUse[]> {
+  /**
+   * Which triggers name this template (`CAPABILITIES.MD §5.2`), among those on objects the
+   * reader can see (`A-12`).
+   */
+  async usedBy(id: number, visibility: Visibility): Promise<TemplateUse[]> {
     await this.get(id);
-    return this.#repo.usedBy(this.#db, id);
+    return this.#repo.usedBy(this.#db, id, visibility);
   }
 
   /**
@@ -374,10 +388,10 @@ export class TemplateService {
    * outage is finding out too late. Read-only, and rendered against the sensor's actual state
    * rather than an invented one — `N-14`'s send-test uses the same rendering.
    */
-  async preview(id: number, sensorId: ObjectId): Promise<RenderedPreview> {
+  async preview(id: number, sensorId: ObjectId, visibility: Visibility): Promise<RenderedPreview> {
     const stored = await this.#repo.get(this.#db, id);
     if (stored === null) throw notFound(id);
-    const context = await this.#contextFor(sensorId, id);
+    const context = await this.#contextFor(sensorId, id, visibility);
     return { templateId: id, sensorId, ...render(stored, context) };
   }
 
@@ -394,14 +408,29 @@ export class TemplateService {
    * same `#parse` every write does, so a draft that could not be saved is refused here with the
    * same message rather than previewing something the operator cannot keep.
    */
-  async previewDraft(input: TemplateInput, sensorId: ObjectId): Promise<RenderedPreview> {
+  async previewDraft(
+    input: TemplateInput,
+    sensorId: ObjectId,
+    visibility: Visibility,
+  ): Promise<RenderedPreview> {
     const draft = this.#parse(input, null);
-    const context = await this.#contextFor(sensorId, null);
+    const context = await this.#contextFor(sensorId, null, visibility);
     return { templateId: null, sensorId, ...render(draft, context) };
   }
 
-  /** The facts a message is rendered against: one sensor, as it stands right now. */
-  async #contextFor(sensorId: ObjectId, templateId: number | null): Promise<MessageContext> {
+  /**
+   * The facts a message is rendered against: one sensor, as it stands right now.
+   *
+   * **With the containers the reader cannot see left unnamed** (`A-12`). `%probe` is the probe
+   * above a customer's branch, and `%device` over a sensor re-granted inside a hole is a device
+   * they were refused; a real notification goes to whoever the template names and says it all,
+   * but a preview goes to whoever asked.
+   */
+  async #contextFor(
+    sensorId: ObjectId,
+    templateId: number | null,
+    visibility: Visibility,
+  ): Promise<MessageContext> {
     if (this.#contexts === undefined) {
       throw new ObjectError('OBJECT_INVALID', 'this build cannot preview a template', {
         context: { templateId: templateId ?? 0, phase: 'templates' },
@@ -442,7 +471,35 @@ export class TemplateService {
         context: { objectId: sensorId, phase: 'templates' },
       });
     }
-    return context;
+    if (visibility.everything) return context;
+
+    // The nearest of each kind, as the loader picks them, and which of those the reader cannot see.
+    const values: unknown[] = [sensorId];
+    const visible = visibility.where('nearest.id', (value) => `$${String(values.push(value))}`);
+    const hidden = await this.#db.query<{ kind: string }>(
+      `WITH RECURSIVE chain AS (
+         SELECT o.id, o.parent_id, o.kind, 0 AS depth FROM object o WHERE o.id = $1
+         UNION ALL
+         SELECT p.id, p.parent_id, p.kind, chain.depth + 1
+         FROM object p JOIN chain ON p.id = chain.parent_id
+         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+       )
+       SELECT nearest.kind::text AS kind
+       FROM (
+         SELECT DISTINCT ON (kind) id, kind FROM chain
+         WHERE kind IN ('device', 'group', 'probe')
+         ORDER BY kind, depth
+       ) AS nearest
+       WHERE NOT (${visible})`,
+      values,
+    );
+    const outside = new Set(hidden.map((row) => row.kind));
+    return {
+      ...context,
+      deviceName: outside.has('device') ? HIDDEN_NAME : context.deviceName,
+      groupName: outside.has('group') ? HIDDEN_NAME : context.groupName,
+      probeName: outside.has('probe') ? HIDDEN_NAME : context.probeName,
+    };
   }
 
   async create(actor: Actor, input: TemplateInput): Promise<TemplateView> {
@@ -518,7 +575,9 @@ export class TemplateService {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
 
-      const uses = await this.#repo.usedBy(q, id);
+      // Every use, whoever is asking: a template still in use must not be deleted from under a
+      // trigger the caller happens not to be able to see.
+      const uses = await this.#repo.usedBy(q, id, Visibility.EVERYTHING);
       if (uses.length > 0) {
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',

@@ -23,6 +23,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -401,7 +402,7 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
       settings: { state: 'warning', initialTemplateId: id + 999 },
     });
 
-    const uses = await templates.usedBy(id);
+    const uses = await templates.usedBy(id, Visibility.EVERYTHING);
     assert.equal(uses.length, 2, 'once per trigger, not once per field');
     assert.deepEqual(uses.map((use) => use.triggerKind).sort(), ['state', 'threshold']);
     const [first] = uses;

@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import type { Visibility } from '../auth/access.js';
 import type { Actor, AuditSink, ScheduleAudit } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import { builtInSchedules } from './built-in.js';
@@ -125,19 +126,25 @@ export class ScheduleService {
     return inserted;
   }
 
-  async list(now = new Date()): Promise<ScheduleView[]> {
+  /** `usedBy` counts only the objects the reader can see (`A-12`). */
+  async list(visibility: Visibility, now = new Date()): Promise<ScheduleView[]> {
     const [schedules, usage] = await Promise.all([
       this.#repo.list(this.#db),
-      this.#repo.usageCounts(this.#db),
+      this.#repo.usageCounts(this.#db, visibility),
     ]);
     return schedules.map((schedule) => toView(schedule, usage.get(schedule.id) ?? 0, now));
   }
 
-  async get(id: number, now = new Date()): Promise<ScheduleView> {
+  /**
+   * One schedule. `usedBy` is the count `list` would give it — which it was not: this took the
+   * length of `usedBy`'s fifty-row page, the mistake `P-129` fixed for the delete refusal, and
+   * counted objects in every branch (`A-12`).
+   */
+  async get(id: number, visibility: Visibility, now = new Date()): Promise<ScheduleView> {
     const schedule = await this.#repo.get(this.#db, id);
     if (schedule === null) throw notFound(id);
-    const usage = await this.#repo.usedBy(this.#db, id);
-    return toView(schedule, usage.length, now);
+    const usage = await this.#repo.usageCounts(this.#db, visibility);
+    return toView(schedule, usage.get(id) ?? 0, now);
   }
 
   async create(actor: Actor, input: ScheduleInput, now = new Date()): Promise<ScheduleView> {

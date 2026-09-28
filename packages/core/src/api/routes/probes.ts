@@ -1,7 +1,7 @@
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { ProbeRegistryError, type ProbeRegistry } from '../../probes/registry.js';
-import { ADMIN, READS } from '../authorization.js';
+import { ADMIN } from '../authorization.js';
 
 export interface ProbeRoutesOptions {
   registry: ProbeRegistry;
@@ -73,7 +73,11 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.get(
     '/probes',
     {
-      config: READS,
+      // **An administrator's list, like every decision taken on it** (`A-12`). Approving,
+      // revoking and fencing a probe are all `ADMIN`; the queue they are taken from names every
+      // probe in the installation, the address each last called from and what it is allowed to
+      // call from — infrastructure, and nothing a branch of the tree was ever granted.
+      config: ADMIN,
       schema: {
         tags: ['probes'],
         summary: 'Every probe this core knows, and what was decided about it',

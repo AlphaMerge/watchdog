@@ -10,6 +10,7 @@ import {
 import type { Database } from '../db/pool.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /**
  * Probe Health, evaluated by the core (`P-13`, and `P-04`'s remaining half).
@@ -227,13 +228,14 @@ export class ProbeHealthService {
     this.#sweeps += 1;
     const sensors = await this.#db.query<SensorRow>(
       `WITH RECURSIVE up AS (
-         SELECT o.id AS sensor_id, o.id, o.parent_id, o.kind
+         SELECT o.id AS sensor_id, o.id, o.parent_id, o.kind, 0 AS depth
          FROM object o
          JOIN sensor_config sc ON sc.object_id = o.id
          WHERE sc.type = $1
          UNION ALL
-         SELECT up.sensor_id, parent.id, parent.parent_id, parent.kind
+         SELECT up.sensor_id, parent.id, parent.parent_id, parent.kind, up.depth + 1
          FROM object parent JOIN up ON parent.id = up.parent_id
+         WHERE up.depth < ${String(MAX_WALK_DEPTH)}
        )
        SELECT sc.object_id::text AS id,
               sc.params AS params,

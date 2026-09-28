@@ -50,14 +50,17 @@ const FOUND = {
   nextCursor: null,
 };
 
-/** Records every URL asked for; answers the root, any search, and an empty level otherwise. */
+/**
+ * Records every URL asked for; answers where the tree starts — the root, for an account that can
+ * read it — any search, and an empty level otherwise.
+ */
 function stubFetch(): string[] {
   const asked: string[] = [];
   vi.stubGlobal('fetch', (url: string) => {
     asked.push(url);
     const body =
-      url === '/api/v1/objects/root'
-        ? { ...ROOT, version: 1 }
+      url === '/api/v1/objects/tops'
+        ? { items: [summary(ROOT.id, ROOT.kind, ROOT.name, [])] }
         : url.includes('q=')
           ? FOUND
           : { items: [], nextCursor: null };
@@ -102,9 +105,9 @@ describe('the tree search’s results', () => {
         <TreeView />
       </MemoryRouter>,
     );
-    // The box is there from the start; the results wait for the root, as the tree does.
+    // The box is there from the start; the results wait for where the tree starts, as it does.
     await waitFor(() => {
-      expect(asked).toContain('/api/v1/objects/root');
+      expect(asked).toContain('/api/v1/objects/tops');
     });
     fireEvent.change(screen.getByLabelText('Search objects'), { target: { value: text } });
     await screen.findAllByRole('link', { name: 'Ping' });

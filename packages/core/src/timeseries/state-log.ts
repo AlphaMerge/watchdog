@@ -1,5 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
+import type { Visibility } from '../auth/access.js';
 import {
   SENSOR_STATE_CAUSES,
   SENSOR_STATES,
@@ -39,6 +41,12 @@ export interface StateLogEntry {
 }
 
 export interface StateLogQuery {
+  /**
+   * Whose log this is (`A-12`). A transition of a sensor the reader cannot see is absent — and so
+   * is every transition of a sensor that has been deleted, unless the reader sees everything:
+   * nothing records which branch it was in, so nothing can say who else may read it.
+   */
+  readonly visibility: Visibility;
   /** Scope to one object and everything beneath it. Absent means the whole installation. */
   readonly objectId?: number;
   readonly from?: Date;
@@ -49,8 +57,6 @@ export interface StateLogQuery {
   readonly before?: string;
   readonly limit: number;
 }
-
-const MAX_WALK_DEPTH = 1000;
 
 /** The cursor's shape, checked before it reaches SQL. */
 const CURSOR = /^(?<millis>\d{1,15}):(?<sensorId>\d{1,19})$/;
@@ -102,6 +108,15 @@ export class StateLogService {
     const values: unknown[] = [];
     const where: string[] = [];
 
+    // Inside the page query, so a page of 100 is 100 of the reader's and the cursor runs over
+    // what they can see (`A-12`).
+    if (!query.visibility.everything) {
+      where.push(
+        query.visibility.where('s.sensor_id', (value) => `$${String(values.push(value))}`, {
+          mayBeDeleted: true,
+        }),
+      );
+    }
     if (query.objectId !== undefined) {
       // The subtree, not the object: "what happened under the London group" is the question the
       // Logs view asks, and a sensor is only ever a leaf of it.

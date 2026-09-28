@@ -188,7 +188,8 @@ export interface PauseView {
   readonly pausedUntil: string | null;
   readonly message: string;
   readonly actor: { readonly kind: string; readonly label: string | null } | null;
-  readonly inheritedFrom: { readonly objectId: ObjectId; readonly name: string } | null;
+  /** `name` is null when the reader cannot see the object the pause comes from (`A-12`). */
+  readonly inheritedFrom: { readonly objectId: ObjectId; readonly name: string | null } | null;
   /**
    * The schedule in effect here, if any (`M-09`).
    *
@@ -210,11 +211,15 @@ export interface PauseView {
    * `holding` is the question an operator is really asking — "is this paused because something
    * else is down, and what" — and `masterName` is what makes the answer actionable. A master
    * never holds itself, which is what keeps it scanning while its dependents wait.
+   *
+   * **`masterName` and `masterState` are null when the reader cannot see the master** (`A-12`).
+   * `holding` stays: whether this object is held is this object's own fact, and it is the one an
+   * operator needs — what the master is called and how it is doing are the master's.
    */
   readonly dependency: {
     readonly masterId: ObjectId;
-    readonly masterName: string;
-    readonly masterState: string;
+    readonly masterName: string | null;
+    readonly masterState: string | null;
     readonly holding: boolean;
     /** When the recovery delay releases the dependents, or `null` if none is running. */
     readonly releasesAt: string | null;

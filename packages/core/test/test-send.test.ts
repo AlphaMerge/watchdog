@@ -5,6 +5,7 @@ import type { OutgoingMessage } from '../src/notifications/delivery/transport.js
 import { NotificationTester } from '../src/notifications/test-send.js';
 import { TemplateService } from '../src/notifications/templates.js';
 import { DatabaseAuditSink } from '../src/audit/store.js';
+import { Visibility } from '../src/auth/access.js';
 import { ScheduleService } from '../src/schedules/service.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
@@ -316,7 +317,7 @@ describe(
       it('renders text that has never been saved, against the sensor as it stands', async () => {
         // A preview that only ever showed the last saved version would answer a question nobody
         // asked: the operator is looking at the edit they just made.
-        const preview = await templates.previewDraft(draft, sensorId);
+        const preview = await templates.previewDraft(draft, sensorId, Visibility.EVERYTHING);
         assert.equal(preview.templateId, null, 'there is no template to name');
         assert.equal(preview.sensorId, sensorId);
         assert.match(preview.subject, /on .* is /);
@@ -325,14 +326,18 @@ describe(
 
       it('creates nothing', async () => {
         const before = (await templates.list()).length;
-        await templates.previewDraft(draft, sensorId);
+        await templates.previewDraft(draft, sensorId, Visibility.EVERYTHING);
         assert.equal((await templates.list()).length, before);
       });
 
       it('refuses a draft that could not be saved, with the same message', async () => {
         // Previewing something the operator cannot keep would be a preview of a lie.
         await assert.rejects(
-          templates.previewDraft({ ...draft, subject: 'hello %sensorr' }, sensorId),
+          templates.previewDraft(
+            { ...draft, subject: 'hello %sensorr' },
+            sensorId,
+            Visibility.EVERYTHING,
+          ),
           (error: unknown) =>
             /placeholders this build does not know/.test((error as Error).message),
         );
@@ -372,8 +377,9 @@ describe(
       });
 
       it('refuses a sensor that is not there', async () => {
-        await assert.rejects(templates.previewDraft(draft, 999_999), (error: unknown) =>
-          /no sensor 999999/.test((error as Error).message),
+        await assert.rejects(
+          templates.previewDraft(draft, 999_999, Visibility.EVERYTHING),
+          (error: unknown) => /no sensor 999999/.test((error as Error).message),
         );
       });
 
@@ -381,8 +387,8 @@ describe(
         // The two paths must not drift: one loads from the row and one takes the input, and both
         // go through the same `render`.
         const id = await template({ subject: draft.subject, body: draft.body });
-        const saved = await templates.preview(id, sensorId);
-        const unsaved = await templates.previewDraft(draft, sensorId);
+        const saved = await templates.preview(id, sensorId, Visibility.EVERYTHING);
+        const unsaved = await templates.previewDraft(draft, sensorId, Visibility.EVERYTHING);
         assert.equal(unsaved.subject, saved.subject);
         assert.equal(unsaved.body, saved.body);
       });

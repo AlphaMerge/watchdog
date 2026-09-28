@@ -10,6 +10,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 /**
  * State-history retention that cannot lose current state (`S-15`).
@@ -215,7 +216,11 @@ describe('state-history retention', { skip: available ? false : 'no database' },
     await sweep(365);
 
     const log = new StateLogService({ db, logger: silent });
-    const page = await log.list({ objectId: quietId, limit: 10 });
+    const page = await log.list({
+      visibility: Visibility.EVERYTHING,
+      objectId: quietId,
+      limit: 10,
+    });
     assert.equal(page.items.length, 1);
     const entry = page.items[0];
     assert.ok(entry !== undefined);
@@ -227,7 +232,7 @@ describe('state-history retention', { skip: available ? false : 'no database' },
   it('leaves the state a real transition writes unmarked', async () => {
     await place(busyId, 1);
     const log = new StateLogService({ db, logger: silent });
-    const page = await log.list({ objectId: busyId, limit: 10 });
+    const page = await log.list({ visibility: Visibility.EVERYTHING, objectId: busyId, limit: 10 });
     assert.equal(page.items[0]?.carried, false);
   });
 });

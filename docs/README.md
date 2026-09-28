@@ -146,6 +146,7 @@ measurement is not a claim.
 - [What "no timer leaks across thousands of sensors" costs](findings/2026-08-26-notification-timers.md)
 - [The tree build was two measurements wearing one name](findings/2026-09-08-tree-build-was-two-measurements.txt) (`P-193`)
 - [Whether a filling database slows creates, and the noise that swallowed the question](findings/2026-09-08-tree-build-fill-and-noise.txt) (`P-194`)
+- [Object visibility on the read paths: the approach, and what it costs at 20,000 sensors](findings/2026-09-28-object-visibility.md) (`A-12`)
 
 **Reports**
 

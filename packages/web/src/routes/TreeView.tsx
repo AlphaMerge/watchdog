@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { request, useApi, ApiError } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
-import type { ObjectDetail, ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
+import type { ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { VirtualList } from '../components/VirtualList';
@@ -47,9 +47,11 @@ const PAGE = 500;
  * both called `Ping` read alike until one was opened.
  */
 export function TreeView(): React.JSX.Element {
-  const root = useApi<ObjectDetail>('/objects/root');
-  const rootId = root.status === 'ready' ? root.data.id : null;
-  const live = useStateStream(rootId);
+  const tops = useApi<{ items: ObjectSummary[] }>('/objects/tops');
+  const loaded = tops.status === 'ready' ? tops.data : null;
+  // Once per answer, not per render: the branches reset their tree when this changes.
+  const start = useMemo(() => (loaded === null ? null : startOf(loaded.items)), [loaded]);
+  const live = useStateStream(start?.streamId ?? null);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState('');
 
@@ -95,17 +97,55 @@ export function TreeView(): React.JSX.Element {
         </div>
       </div>
 
-      {root.status === 'error' && <ErrorPanel error={root.error} retry={root.reload} />}
-      {root.status === 'loading' && <Loading what="the tree" />}
+      {tops.status === 'error' && <ErrorPanel error={tops.error} retry={tops.reload} />}
+      {tops.status === 'loading' && <Loading what="the tree" />}
+      {start?.kind === 'nothing' && (
+        <Empty because="An administrator grants access to parts of the tree.">
+          Nothing in the tree has been shared with this account.
+        </Empty>
+      )}
 
-      {rootId !== null &&
+      {start !== null &&
+        start.kind !== 'nothing' &&
         (searching ? (
           <SearchResults query={query.trim()} tag={tag.trim()} live={live.states} />
         ) : (
-          <Branches rootId={rootId} live={live.states} />
+          <Branches start={start} live={live.states} />
         ))}
     </div>
   );
+}
+
+/**
+ * Where the tree starts (`A-12`).
+ *
+ * The root's children, for an account that can read the root — the tree as it always was. For
+ * one granted a few branches, the tops of those branches: the containers above them are outside
+ * what it was granted, so they are never shown, and the branches are the first level instead.
+ * They sit under a key no object has, so the rest of the tree loads and expands exactly as it
+ * does beneath the root. The stream follows: the root's subtree, or everything the account can
+ * see, which for that account is the same thing.
+ */
+type TreeStart =
+  | { readonly kind: 'root'; readonly parentId: number; readonly streamId: number }
+  | {
+      readonly kind: 'branches';
+      readonly parentId: typeof ABOVE_THE_TOPS;
+      readonly tops: readonly ObjectSummary[];
+      readonly streamId: null;
+    }
+  | { readonly kind: 'nothing'; readonly streamId: null };
+
+/** The parent key the tops are held under. Object ids start at 1. */
+const ABOVE_THE_TOPS = 0;
+
+function startOf(tops: readonly ObjectSummary[]): TreeStart {
+  const [first] = tops;
+  if (first === undefined) return { kind: 'nothing', streamId: null };
+  if (tops.length === 1 && first.kind === 'root') {
+    return { kind: 'root', parentId: first.id, streamId: first.id };
+  }
+  return { kind: 'branches', parentId: ABOVE_THE_TOPS, tops, streamId: null };
 }
 
 /**
@@ -133,12 +173,13 @@ function StreamIndicator({ status }: { status: StreamStatus }): React.JSX.Elemen
 }
 
 function Branches({
-  rootId,
+  start,
   live,
 }: {
-  rootId: number;
+  start: Exclude<TreeStart, { kind: 'nothing' }>;
   live: ReadonlyMap<number, LiveState>;
 }): React.JSX.Element {
+  const rootId = start.parentId;
   const [tree, setTree] = useState<TreeState>(EMPTY_TREE);
   const [failed, setFailed] = useState<ApiError | null>(null);
 
@@ -171,10 +212,17 @@ function Branches({
       });
   }, []);
 
-  useEffect(() => {
+  const reset = useCallback(() => {
+    if (start.kind === 'branches') {
+      // Already in hand: `/objects/tops` is the first level, and there is no parent to ask.
+      setTree({ ...EMPTY_TREE, children: new Map([[ABOVE_THE_TOPS, start.tops]]) });
+      return;
+    }
     setTree(EMPTY_TREE);
-    load(rootId);
-  }, [rootId, load]);
+    load(start.parentId);
+  }, [start, load]);
+
+  useEffect(reset, [reset]);
 
   const toggle = useCallback(
     (object: ObjectSummary) => {
@@ -238,8 +286,7 @@ function Branches({
         error={failed}
         retry={() => {
           setFailed(null);
-          setTree(EMPTY_TREE);
-          load(rootId);
+          reset();
         }}
       />
     );

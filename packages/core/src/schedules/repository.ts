@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import type { Visibility } from '../auth/access.js';
 import type { ObjectId } from '../objects/types.js';
 import { SCHEDULE_ID } from '../settings/registry.js';
 import {
@@ -261,14 +262,22 @@ export class ScheduleRepository {
     return rows.map((row) => ({ ruleId: Number(row.id), name: row.name }));
   }
 
-  /** How many objects name each schedule. One query for a list that shows usage per row. */
-  async usageCounts(q: Queryable): Promise<Map<number, number>> {
+  /**
+   * How many objects name each schedule. One query for a list that shows usage per row.
+   *
+   * **Among the objects the reader can see** (`A-12`): a schedule belongs to the installation,
+   * but the objects using it belong to branches, and a count of them would say how busy a branch
+   * the reader was not given is. A delete still counts every use — see `usedByCount`.
+   */
+  async usageCounts(q: Queryable, visibility: Visibility): Promise<Map<number, number>> {
+    const values: unknown[] = [SCHEDULE_ID.key];
+    const visible = visibility.where('object_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ schedule_id: string; uses: string }>(
       `SELECT (value #>> '{}') AS schedule_id, count(*)::text AS uses
        FROM object_setting
-       WHERE key = $1 AND jsonb_typeof(value) = 'number'
+       WHERE key = $1 AND jsonb_typeof(value) = 'number' AND ${visible}
        GROUP BY 1`,
-      [SCHEDULE_ID.key],
+      values,
     );
     return new Map(rows.map((row) => [Number(row.schedule_id), Number(row.uses)]));
   }

@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
+import { Visibility } from '../src/auth/access.js';
 import { diffObjects } from '../src/audit/diff.js';
 import type { Database } from '../src/db/pool.js';
 import type { Mutation } from '../src/objects/audit.js';
@@ -295,7 +296,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
       settings: { state: 'warning', initialLatencySeconds: 60 },
     });
 
-    const effective = await triggers.effectiveFor(sensorId);
+    const effective = await triggers.effectiveFor(sensorId, Visibility.EVERYTHING);
     assert.equal(effective.length, 3, 'all three apply; none displaces another');
     assert.deepEqual(
       effective.map((trigger) => trigger.summary),
@@ -308,7 +309,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     // The only place it can be edited or removed. A trigger an operator cannot find is one
     // they cannot turn off.
     await triggers.create(testActor, groupId, downTrigger);
-    const [inherited] = await triggers.effectiveFor(sensorId);
+    const [inherited] = await triggers.effectiveFor(sensorId, Visibility.EVERYTHING);
     assert.ok(inherited !== undefined);
     assert.equal(inherited.inherited, true);
     assert.equal(inherited.definedOn.objectId, groupId);
@@ -318,24 +319,28 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
   it('applies a root trigger to every sensor in the installation', async () => {
     await triggers.create(testActor, h.rootId, downTrigger);
     for (const id of [sensorId, otherSensorId, deviceId, probeId]) {
-      const effective = await triggers.effectiveFor(id);
+      const effective = await triggers.effectiveFor(id, Visibility.EVERYTHING);
       assert.equal(effective.length, 1, `object ${String(id)} should inherit the root trigger`);
     }
   });
 
   it('does not reach across a branch', async () => {
     await triggers.create(testActor, deviceId, downTrigger);
-    assert.equal((await triggers.effectiveFor(otherSensorId)).length, 0);
-    assert.equal((await triggers.effectiveFor(groupId)).length, 0, 'nor upward');
+    assert.equal((await triggers.effectiveFor(otherSensorId, Visibility.EVERYTHING)).length, 0);
+    assert.equal(
+      (await triggers.effectiveFor(groupId, Visibility.EVERYTHING)).length,
+      0,
+      'nor upward',
+    );
   });
 
   it('follows the object, not a copy: moving a sensor changes what applies to it', async () => {
     await triggers.create(testActor, deviceId, downTrigger);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 1);
+    assert.equal((await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length, 1);
 
     await h.service.move(testActor, sensorId, otherDeviceId, { kind: 'none' });
     assert.equal(
-      (await triggers.effectiveFor(sensorId)).length,
+      (await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length,
       0,
       'inheritance is resolved from where the object is now',
     );
@@ -364,7 +369,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     for (const id of [sensorId, otherSensorId]) {
       assert.deepEqual(
         (batch.get(id) ?? []).map((trigger) => trigger.id),
-        (await triggers.effectiveFor(id)).map((trigger) => trigger.id),
+        (await triggers.effectiveFor(id, Visibility.EVERYTHING)).map((trigger) => trigger.id),
         `the batch and the tab should agree about ${String(id)}`,
       );
     }
@@ -392,16 +397,16 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     // graphs and the uptime, and stop telling anybody about it.
     await triggers.create(testActor, h.rootId, downTrigger);
     await triggers.create(testActor, groupId, loadTrigger);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 2);
+    assert.equal((await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length, 2);
 
     await fence(deviceId, false);
     assert.deepEqual(
-      await triggers.effectiveFor(sensorId),
+      await triggers.effectiveFor(sensorId, Visibility.EVERYTHING),
       [],
       'nothing above the fence reaches the sensor',
     );
     assert.equal(
-      (await triggers.effectiveFor(otherSensorId)).length,
+      (await triggers.effectiveFor(otherSensorId, Visibility.EVERYTHING)).length,
       2,
       'and the branch beside it is untouched',
     );
@@ -414,7 +419,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     await fence(deviceId, false);
     const own = await triggers.create(testActor, deviceId, loadTrigger);
 
-    const effective = await triggers.effectiveFor(sensorId);
+    const effective = await triggers.effectiveFor(sensorId, Visibility.EVERYTHING);
     assert.deepEqual(
       effective.map((trigger) => trigger.id),
       [own.id],
@@ -434,7 +439,9 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     await fence(deviceId, false);
 
     for (const id of [sensorId, otherSensorId]) {
-      const tab = (await triggers.effectiveFor(id)).map((trigger) => trigger.id).sort();
+      const tab = (await triggers.effectiveFor(id, Visibility.EVERYTHING))
+        .map((trigger) => trigger.id)
+        .sort();
       const batch = ((await repo.effectiveForSensors(db, [id])).get(id) ?? [])
         .map((trigger) => trigger.id)
         .sort();
@@ -445,9 +452,13 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
   it('lets the fence come down again', async () => {
     await triggers.create(testActor, h.rootId, downTrigger);
     await fence(deviceId, false);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 0);
+    assert.equal((await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length, 0);
     await fence(deviceId, true);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 1, 'and everything comes back');
+    assert.equal(
+      (await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length,
+      1,
+      'and everything comes back',
+    );
   });
 
   it('records the change, because who gets told is worth finding afterwards', async () => {
@@ -469,7 +480,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     // answer for a disabled trigger is nothing.
     const created = await triggers.create(testActor, deviceId, { ...downTrigger, enabled: false });
 
-    const tab = await triggers.effectiveFor(sensorId);
+    const tab = await triggers.effectiveFor(sensorId, Visibility.EVERYTHING);
     assert.equal(tab.length, 1);
     assert.equal(tab[0]?.enabled, false);
 
@@ -632,7 +643,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
 
     const removed = await app.inject({ method: 'DELETE', url: `/api/v1/triggers/${String(id)}` });
     assert.equal(removed.statusCode, 200);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 0);
+    assert.equal((await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length, 0);
   });
 
   it('reports bad settings as the caller’s mistake, naming the field', async () => {
@@ -671,7 +682,7 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
       created.id,
     ]);
 
-    const listed = await triggers.effectiveFor(sensorId);
+    const listed = await triggers.effectiveFor(sensorId, Visibility.EVERYTHING);
     assert.equal(listed.length, 1, 'the list still answers');
     const only = listed[0];
     assert.ok(only !== undefined);
@@ -679,7 +690,11 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
     assert.match(only.summary, /does not know the trigger kind/);
 
     await triggers.delete(testActor, created.id);
-    assert.equal((await triggers.effectiveFor(sensorId)).length, 0, 'and the row can be cleared');
+    assert.equal(
+      (await triggers.effectiveFor(sensorId, Visibility.EVERYTHING)).length,
+      0,
+      'and the row can be cleared',
+    );
   });
 
   it('404s for a trigger that is not there', async () => {

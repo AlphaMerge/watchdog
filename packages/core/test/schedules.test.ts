@@ -37,6 +37,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -565,7 +566,7 @@ describe(
     });
 
     async function officeHours(): Promise<number> {
-      const list = await schedules.list(INSIDE);
+      const list = await schedules.list(Visibility.EVERYTHING, INSIDE);
       const office = list.find((schedule) => schedule.name.startsWith('Office hours'));
       assert.ok(office !== undefined, 'the built-in office-hours schedule should be seeded');
       return office.id;
@@ -631,7 +632,7 @@ describe(
       });
 
       assert.equal(await schedules.seedBuiltIns(), 0, 'a second seed inserts nothing');
-      const again = await schedules.get(id);
+      const again = await schedules.get(id, Visibility.EVERYTHING);
       assert.equal(again.periods, 'mo:09:00-mo:17:00', 'the edit survived');
       assert.equal(again.builtIn, true);
 
@@ -741,7 +742,7 @@ describe(
         grid,
         polarity: 'inactive',
       });
-      const view = await schedules.get(created.id);
+      const view = await schedules.get(created.id, Visibility.EVERYTHING);
       assert.equal(view.polarity, 'active', 'the grid is what it says it is');
       // Monday is marked and Sunday is not, so Monday is monitored.
       assert.equal((view.grid[0] ?? [])[9], true);
@@ -1115,7 +1116,7 @@ describe(
 
       await h.service.clearSetting(testActor, deviceId, SCHEDULE_ID.key);
       await schedules.delete(testActor, id);
-      await assert.rejects(() => schedules.get(id));
+      await assert.rejects(() => schedules.get(id, Visibility.EVERYTHING));
     });
 
     it('reports how many objects hold it, not how many the page returned', async () => {

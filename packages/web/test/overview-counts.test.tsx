@@ -36,8 +36,7 @@ function stubFetch(routes: Record<string, unknown>): string[] {
 }
 
 const ROUTES = {
-  '/api/v1/objects/root': { id: 1, kind: 'root', name: 'Root', version: 1 },
-  '/api/v1/objects/1/counts': COUNTS,
+  '/api/v1/objects/counts': COUNTS,
   '/api/v1/sensor-types': { items: [{ id: 'icmp.ping', category: 'availability' }] },
   '/api/v1/openapi.json': { info: { version: '0.1.0' } },
 };
@@ -84,7 +83,21 @@ describe('the overview’s totals', () => {
     // The regression, stated as the request that is no longer made: a page of the tree cannot
     // answer this question, so it is not asked for.
     expect(asked.some((url) => url.includes('/tree'))).toBe(false);
-    expect(asked).toContain('/api/v1/objects/1/counts');
+    expect(asked).toContain('/api/v1/objects/counts');
+  });
+
+  it('counts what the account can see, without asking for the root (`A-12`)', async () => {
+    // An account granted one customer's branch may not read the root, and an overview that
+    // started there answered it with an error page. The totals come from what it can see.
+    const asked = stubFetch(ROUTES);
+    render(
+      <MemoryRouter>
+        <Overview />
+      </MemoryRouter>,
+    );
+
+    await expectTile('Sensors', '5,051');
+    expect(asked.some((url) => url.includes('/objects/root'))).toBe(false);
   });
 
   it('breaks the sensors down by state, and says nothing about the states with none', async () => {

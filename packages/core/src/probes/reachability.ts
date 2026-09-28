@@ -1,4 +1,5 @@
 import { describeError, type Logger } from '@ms/shared';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /**
  * Which probes are reachable, and what that means for their sensors (`R-05`).
@@ -419,10 +420,11 @@ export class ProbeReachability {
       // row only to throw it away — and so the empty-list case is one array parameter rather
       // than a second statement.
       `WITH RECURSIVE below AS (
-         SELECT id, kind FROM object WHERE id = $1
+         SELECT id, kind, 0 AS depth FROM object WHERE id = $1
          UNION ALL
-         SELECT child.id, child.kind
+         SELECT child.id, child.kind, below.depth + 1
          FROM object child JOIN below ON child.parent_id = below.id
+         WHERE below.depth < ${String(MAX_WALK_DEPTH)}
        )
        SELECT below.id::text AS id
        FROM below

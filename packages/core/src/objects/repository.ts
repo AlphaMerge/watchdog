@@ -1,4 +1,6 @@
 import type { Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
+import type { Visibility } from '../auth/access.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
 import { SENSOR_STATES, type SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
@@ -26,16 +28,6 @@ import type {
   SubtreeResult,
   UpdateObjectInput,
 } from './types.js';
-
-/**
- * A hard ceiling on every recursive walk.
- *
- * Cycles are prevented three ways over — a trigger, a pre-check and the tree lock — but a
- * recursive CTE over a cyclic tree does not return a wrong answer, it never returns at all.
- * For a monitoring system a hang is the worst failure mode there is, so every walk is bounded.
- * Migration 001's own cycle check uses the same 1,000-hop limit.
- */
-const MAX_WALK_DEPTH = 1000;
 
 /** One advisory-lock namespace for every structural change to the tree. */
 const TREE_LOCK = `hashtext('ms:object-tree')::bigint`;
@@ -100,15 +92,22 @@ const DETAIL_FROM = `
 /**
  * `hasChildren` is an EXISTS that stops at the first row, not a count: a disclosure triangle
  * needs a boolean, and an exact count per row costs a lateral aggregate on every page.
+ *
+ * **It counts only children the reader can see** (`A-12`). A device whose one sensor has been
+ * carved out with `none` has no children as far as that reader is concerned, and a disclosure
+ * triangle that opened onto nothing would be the hole announcing itself. Every row it is asked of
+ * is one the reader can see, so the condition is `Visibility.whereChildOfVisible`'s, with no walk.
  */
-const SUMMARY_COLUMNS = `
+function summaryColumns(children: string): string {
+  return `
   o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.version, o.sort_order,
-  EXISTS (SELECT 1 FROM object c WHERE c.parent_id = o.id) AS has_children,
+  EXISTS (SELECT 1 FROM object c WHERE c.parent_id = o.id AND ${children}) AS has_children,
   dc.host, sc.type AS sensor_type, sr.state,
   -- The clock, not just the row: a pause whose deadline has passed is not a pause, and the
   -- sweep that deletes the row runs on a coarse timer (M-08).
   (op.object_id IS NOT NULL AND (op.paused_until IS NULL OR op.paused_until > now())) AS paused
 `;
+}
 
 /**
  * The order every listing of children uses (S-14).
@@ -290,13 +289,24 @@ export class ObjectRepository {
    * 12.3 ms and 40,344 buffers against 0.2 ms and ~150 for the keyset equivalent — and an
    * offset silently skips and duplicates rows while discovery is provisioning into the tree.
    */
-  async list(q: Queryable, filter: ObjectFilter, page: PageRequest): Promise<Page<ObjectSummary>> {
+  async list(
+    q: Queryable,
+    filter: ObjectFilter,
+    page: PageRequest,
+    visibility: Visibility,
+  ): Promise<Page<ObjectSummary>> {
     const where: string[] = [];
     const values: unknown[] = [];
     const add = (value: unknown): string => {
       values.push(value);
       return `$${String(values.length)}`;
     };
+
+    // **Inside the query, not after it** (`A-12`). Filtering a page once it has come back hands
+    // a caller 37 rows for `limit=100` and a cursor that skips; as a condition here, the limit,
+    // the cursor and the "is there a next page" row are all counted over what the reader can
+    // see.
+    if (!visibility.everything) where.push(visibility.where('o.id', add));
 
     if (filter.parentId !== undefined) where.push(`o.parent_id = ${add(filter.parentId)}`);
     if (filter.kinds !== undefined && filter.kinds.length > 0) {
@@ -388,11 +398,22 @@ export class ObjectRepository {
       page.sort === 'name' ? 'o.name, o.id' : page.sort === 'manual' ? SIBLING_ORDER : 'o.id';
     const limit = add(page.limit + 1); // one extra row answers "is there a next page?"
 
+    // **The page is chosen first, and only its rows are joined to the rest** (`A-12`). With
+    // visibility in the `WHERE`, a reader granted a quarter of the tree has thousands of rows that
+    // match before the `LIMIT`, and joining each to its configuration, runtime and pause before
+    // sorting cost more than choosing them — 20,000 index lookups for a page of 100. The filters
+    // read only the object and a device's host, so the inner query can decide the page alone.
     const rows = await q.query<SummaryRow>(
-      `SELECT ${SUMMARY_COLUMNS} ${DETAIL_FROM}
-       ${where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`}
-       ORDER BY ${order}
-       LIMIT ${limit}`,
+      `SELECT ${summaryColumns(visibility.whereChildOfVisible('c.id', add))} ${DETAIL_FROM}
+       WHERE o.id IN (
+         SELECT o.id
+         FROM object o
+         LEFT JOIN device_config dc ON dc.object_id = o.id
+         ${where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`}
+         ORDER BY ${order}
+         LIMIT ${limit}
+       )
+       ORDER BY ${order}`,
       values,
     );
 
@@ -414,7 +435,19 @@ export class ObjectRepository {
    * class of bug (separator-bearing names) for a case the UI does not have — a truncated
    * response degrades to lazy expansion through `list`.
    */
-  async subtree(q: Queryable, id: ObjectId, options: SubtreeOptions): Promise<SubtreeResult> {
+  async subtree(
+    q: Queryable,
+    id: ObjectId,
+    options: SubtreeOptions,
+    visibility: Visibility,
+  ): Promise<SubtreeResult> {
+    const values: unknown[] = [id, options.maxDepth, options.limit + 1, options.kinds ?? null];
+    const add = (value: unknown): string => `$${String(values.push(value))}`;
+    // **A `none` carved below a readable root is honoured** (`A-12`): the route checks the root,
+    // and this is what checks everything under it. The walk still descends through a hole,
+    // because a grant further down can re-open it and the resolver says that object is readable.
+    const visible = visibility.where('o.id', add);
+    const children = visibility.whereChildOfVisible('c.id', add);
     const rows = await q.query<SummaryRow & { depth: number }>(
       `
       WITH RECURSIVE walk AS (
@@ -430,14 +463,15 @@ export class ObjectRepository {
         JOIN walk ON c.parent_id = walk.id
         WHERE walk.depth + 1 <= $2
       )
-      SELECT ${SUMMARY_COLUMNS}, walk.depth
+      SELECT ${summaryColumns(children)}, walk.depth
       ${DETAIL_FROM}
       JOIN walk ON walk.id = o.id
-      WHERE $4::object_kind[] IS NULL OR o.kind = ANY($4::object_kind[]) OR walk.depth = 0
+      WHERE ($4::object_kind[] IS NULL OR o.kind = ANY($4::object_kind[]) OR walk.depth = 0)
+        AND ${visible}
       ORDER BY walk.path
       LIMIT $3
       `,
-      [id, options.maxDepth, options.limit + 1, options.kinds ?? null],
+      values,
     );
 
     const truncated = rows.length > options.limit;
@@ -447,8 +481,81 @@ export class ObjectRepository {
     };
   }
 
-  /** Root-first, excluding the object itself — the breadcrumb U-03 renders. */
-  async ancestors(q: Queryable, id: ObjectId): Promise<ObjectRef[]> {
+  /**
+   * How many of this object's children the reader can see (`A-12`).
+   *
+   * `childCount` on a detail counts every child, which is right for everybody who sees them all
+   * and a count of the hole for anybody who does not. Asked only for a reader who does not, and
+   * only of an object that reader may read — the detail route's own bar — so a child is visible
+   * unless it is a hidden boundary itself, and there is no walk to pay for.
+   */
+  async visibleChildCount(q: Queryable, id: ObjectId, visibility: Visibility): Promise<number> {
+    const values: unknown[] = [id];
+    const visible = visibility.whereChildOfVisible(
+      'c.id',
+      (value) => `$${String(values.push(value))}`,
+    );
+    const rows = await q.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM object c WHERE c.parent_id = $1 AND ${visible}`,
+      values,
+    );
+    return rows[0]?.n ?? 0;
+  }
+
+  /**
+   * The objects the reader can see whose parent it cannot — where its tree starts (`A-12`).
+   *
+   * The root, for anybody who can see it. For an account granted a few branches, the tops of
+   * those branches: the containers above them are outside what it was granted, so its tree cannot
+   * start at the root and be navigated down, and this is how it starts at the branches instead.
+   * **And a grant re-opened inside a hole**, because its parent is hidden and so no expansion
+   * reaches it — "no visible ancestor" would drop it, and the account would be granted an object
+   * it has no way to find.
+   *
+   * **Only a boundary can be a top.** Visibility changes only where a grant sits, and the root is
+   * visible only through a grant on itself, so a visible object under a hidden parent is always a
+   * visible boundary. Those are a handful, and each is kept when its parent is hidden.
+   */
+  async tops(q: Queryable, visibility: Visibility): Promise<ObjectSummary[]> {
+    const values: unknown[] = [];
+    const add = (value: unknown): string => `$${String(values.push(value))}`;
+    const children = visibility.whereChildOfVisible('c.id', add);
+
+    const candidates = visibility.seenBoundaries();
+    if (candidates === null) {
+      const rows = await q.query<SummaryRow>(
+        `SELECT ${summaryColumns(children)} ${DETAIL_FROM} WHERE o.parent_id IS NULL`,
+        values,
+      );
+      return rows.map(toSummary);
+    }
+    if (candidates.length === 0) return [];
+
+    const ids = add(candidates);
+    const parent = visibility.where('o.parent_id', add);
+    const rows = await q.query<SummaryRow>(
+      `
+      SELECT ${summaryColumns(children)}
+      ${DETAIL_FROM}
+      WHERE o.id = ANY(${ids}::bigint[])
+        AND (o.parent_id IS NULL OR NOT ${parent})
+      ORDER BY o.name, o.id
+      `,
+      values,
+    );
+    return rows.map(toSummary);
+  }
+
+  /**
+   * Root-first, excluding the object itself — the breadcrumb U-03 renders.
+   *
+   * **Trimmed to what the reader can see** (`A-12`). The containers above a granted branch are
+   * outside it: a customer granted one group gets a breadcrumb that starts at that group, and
+   * never learns what the probe above it is called.
+   */
+  async ancestors(q: Queryable, id: ObjectId, visibility: Visibility): Promise<ObjectRef[]> {
+    const values: unknown[] = [id];
+    const visible = visibility.where('id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ id: string; kind: ObjectKind; name: string; depth: number }>(
       `
       WITH RECURSIVE chain AS (
@@ -463,9 +570,9 @@ export class ObjectRepository {
         JOIN chain ON parent.id = chain.parent_id
         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       )
-      SELECT id, kind, name, depth FROM chain WHERE depth > 0 ORDER BY depth DESC
+      SELECT id, kind, name, depth FROM chain WHERE depth > 0 AND ${visible} ORDER BY depth DESC
       `,
-      [id],
+      values,
     );
     return rows.map((row) => ({ id: Number(row.id), kind: row.kind, name: row.name }));
   }
@@ -478,7 +585,11 @@ export class ObjectRepository {
    * single statement. An id with no row gets no entry, rather than an empty path that would read
    * as "directly under nothing": the object was deleted between the caller's read and this one.
    */
-  async paths(q: Queryable, ids: readonly ObjectId[]): Promise<Map<ObjectId, ObjectRef[]>> {
+  async paths(
+    q: Queryable,
+    ids: readonly ObjectId[],
+    visibility: Visibility,
+  ): Promise<Map<ObjectId, ObjectRef[]>> {
     const out = new Map<ObjectId, ObjectRef[]>();
     if (ids.length === 0) return out;
 
@@ -507,16 +618,27 @@ export class ObjectRepository {
       [ids],
     );
 
+    const chains = new Map<ObjectId, typeof rows>();
     for (const row of rows) {
       const origin = Number(row.origin);
-      let path = out.get(origin);
-      if (path === undefined) {
-        path = [];
-        out.set(origin, path);
-      }
+      const chain = chains.get(origin);
+      if (chain === undefined) chains.set(origin, [row]);
+      else chain.push(row);
+    }
+    for (const [origin, chain] of chains) {
+      // **Trimmed to what the reader can see** (`A-12`), by the rule the breadcrumb follows: the
+      // containers above a granted branch are outside it, and a hole in the middle of a path is
+      // skipped. Decided on the whole root-first chain, the object included, which is what
+      // `Visibility.trim` needs — a boundary anywhere on it can change the answer below it.
+      const seen = new Set(visibility.trim(chain.map((row) => Number(row.id))));
       // Depth 0 is the object itself: read so that an existing root still gets its empty path,
       // and left out of that path, as `ancestors` leaves it out of the breadcrumb.
-      if (row.depth > 0) path.push({ id: Number(row.id), kind: row.kind, name: row.name });
+      out.set(
+        origin,
+        chain
+          .filter((row) => row.depth > 0 && seen.has(Number(row.id)))
+          .map((row) => ({ id: Number(row.id), kind: row.kind, name: row.name })),
+      );
     }
     return out;
   }
@@ -920,7 +1042,11 @@ export class ObjectRepository {
    * everything which is not a sensor, so the walk — the expensive half — happens once. That
    * leaves at most a dozen rows: four kinds, and eight states under one of them.
    */
-  async subtreeCounts(q: Queryable, id: ObjectId): Promise<SubtreeCounts> {
+  async subtreeCounts(q: Queryable, id: ObjectId, visibility: Visibility): Promise<SubtreeCounts> {
+    const values: unknown[] = [id];
+    // **Absent, not counted** (`A-12`). A total that included a hole would say how many sensors
+    // are down in a branch the reader cannot see.
+    const visible = visibility.where('s.id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ kind: ObjectKind; state: SensorState | null; n: number }>(
       `
       WITH RECURSIVE subtree AS (
@@ -937,9 +1063,10 @@ export class ObjectRepository {
              count(*)::int AS n
       FROM subtree s
       LEFT JOIN sensor_runtime sr ON sr.object_id = s.id AND s.kind = 'sensor'
+      WHERE ${visible}
       GROUP BY 1, 2
       `,
-      [id],
+      values,
     );
 
     const objects = { probe: 0, group: 0, device: 0, sensor: 0, total: 0 };

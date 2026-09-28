@@ -37,6 +37,40 @@ account in a group with `full` on a device may still only read it. `GET /objects
 effective` answers "what may this account actually do here, and *where did that come from*",
 which is what makes a refusal debuggable rather than mysterious.
 
+### What an account can see
+
+**An object an account may not read is absent** — from the tree and its search, the alarms, the
+state log, the notification log, a map's sensor lists, the live stream and every count and total
+beside them. Not greyed out and not counted: a total that included it would say how many sensors
+are down in a branch the account was never shown.
+
+**The containers above a granted branch are outside it.** An account granted `Customer A` sees
+`Customer A` and everything in it, and never the probe or the root above it — so its tree starts
+at the branches it was granted rather than at the root, its breadcrumbs start there too, and the
+overview counts those branches. A grant made inside a hole it cannot see is a starting point of
+its own.
+
+A few consequences are worth knowing before somebody reports them as bugs:
+
+- **A scope naming an object the account cannot read is refused**, not answered with an empty
+  list: `?objectId=` on the alarms or the state log, `?parentId=` on the tree, a stream
+  subscription to one object. Serving the visible part of a hidden branch would answer "which of
+  my sensors are under object 4711", which is a question about a branch the account cannot see.
+- **Something inherited from a hidden container is shown, and the container is not named.** A
+  trigger defined on the probe above a customer's branch fires for the customer's sensors, and
+  the triggers tab lists it "from an object outside your view". A pause inherited from above, a
+  dependency on a master in somebody else's branch and a template preview's `%probe` say the same.
+  A pause's *message* is shown as written: it becomes the state of every sensor the pause holds,
+  and it was written for the people whose sensors those are.
+- **The installation's own health is not a branch's.** Core Health, notification health and
+  `/metrics` need `read` on the root; the list of probes needs an administrator; a probe's health
+  needs `read` on that probe.
+- **The history of a deleted sensor is visible to administrators only.** Nothing records which
+  branch it was in, so there is no grant left to read it through.
+- **A change of grant reaches an open page at the next state change.** The live stream checks for
+  one each time it has something to deliver, and a page whose view has changed is told to start
+  again — which it does, on its own, with what it may see now.
+
 ### API tokens
 
 A token carries **the rights of the account that owns it, never more**, and can be given less. It

@@ -11,6 +11,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 /**
  * Scheduled rediscovery (`D-07`), against a real database.
@@ -158,7 +159,11 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
         () => create({ cadence: 'daily', cadenceMinute: 2_000 }),
         (error: unknown) => error instanceof Error && /between 0 and 1439/.test(error.message),
       );
-      assert.equal((await rediscovery.list()).length, 0, 'and nothing was recorded');
+      assert.equal(
+        (await rediscovery.list(Visibility.EVERYTHING)).length,
+        0,
+        'and nothing was recorded',
+      );
     });
 
     it('refuses a time zone the system does not know', async () => {
@@ -334,8 +339,8 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       });
       await create({ name: 'Weekly', groupId: other.id, cadence: 'weekly', cadenceWeekday: 6 });
 
-      assert.equal((await rediscovery.list()).length, 2);
-      const mine = await rediscovery.list(groupId);
+      assert.equal((await rediscovery.list(Visibility.EVERYTHING)).length, 2);
+      const mine = await rediscovery.list(Visibility.EVERYTHING, groupId);
       assert.deepEqual(
         mine.map((s) => s.name),
         ['Nightly'],

@@ -1,6 +1,7 @@
 import type { Database, Queryable } from '../db/pool.js';
+import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { AccessService } from '../auth/access.js';
-import { atLeast } from '../auth/access.js';
+import { atLeast, Visibility } from '../auth/access.js';
 import type { HistoryService, SensorValues } from '../timeseries/history.js';
 import { readGeoView, type GeoView } from './geo.js';
 import type { MapViewer } from './service.js';
@@ -138,7 +139,7 @@ export class MapResolver {
     }
 
     const [lists, latest] = await Promise.all([
-      this.#sensorLists(q, [...listRoots]),
+      this.#sensorLists(q, [...listRoots], audience),
       this.#history.latestForSensors([...tableSensors]),
     ]);
 
@@ -257,10 +258,34 @@ export class MapResolver {
    * **Ranked per root rather than limited per query**, because the limit is a property of one
    * widget: a hundred sensors under *each* root, not a hundred across all of them, which is what
    * a plain `LIMIT` over the union would have meant.
+   *
+   * **A `none` carved below the root is honoured** (`A-12`). `#visible` checked the widget's root
+   * and nothing under it, so a viewer who could read a group read every sensor in it, holes
+   * included — names, states and failure messages. The viewer's visibility is a condition in the
+   * ranking, so the hundred are a hundred the viewer may see. A public map resolves against
+   * nobody (`ADR-002`: its widget list is its authorisation).
    */
-  async #sensorLists(q: Queryable, roots: readonly number[]): Promise<Map<number, SensorLine[]>> {
+  async #sensorLists(
+    q: Queryable,
+    roots: readonly number[],
+    audience: MapAudience,
+  ): Promise<Map<number, SensorLine[]>> {
     const lists = new Map<number, SensorLine[]>();
     if (roots.length === 0) return lists;
+
+    const visibility =
+      audience.kind === 'public'
+        ? Visibility.EVERYTHING
+        : await this.#access.visibilityFor(
+            {
+              userId: audience.viewer.userId,
+              role: audience.viewer.role,
+              ...(audience.viewer.scope === undefined ? {} : { scope: audience.viewer.scope }),
+            },
+            q,
+          );
+    const values: unknown[] = [[...roots], SENSORS_PER_LIST];
+    const visible = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
 
     const rows = await q.query<{
       root: string;
@@ -270,9 +295,10 @@ export class MapResolver {
       message: string;
     }>(
       `WITH RECURSIVE below AS (
-         SELECT o.id AS root, o.id AS id FROM object o WHERE o.id = ANY($1::bigint[])
+         SELECT o.id AS root, o.id AS id, 0 AS depth FROM object o WHERE o.id = ANY($1::bigint[])
          UNION ALL
-         SELECT b.root, c.id FROM object c JOIN below b ON c.parent_id = b.id
+         SELECT b.root, c.id, b.depth + 1 FROM object c JOIN below b ON c.parent_id = b.id
+         WHERE b.depth < ${String(MAX_WALK_DEPTH)}
        ),
        ranked AS (
          SELECT b.root::text AS root, o.id::text AS id, o.name,
@@ -281,10 +307,10 @@ export class MapResolver {
          FROM below b
          JOIN object o ON o.id = b.id
          JOIN sensor_runtime r ON r.object_id = o.id
-         WHERE o.kind = 'sensor'
+         WHERE o.kind = 'sensor' AND ${visible}
        )
        SELECT root, id, name, state, message FROM ranked WHERE rn <= $2 ORDER BY root, rn`,
-      [[...roots], SENSORS_PER_LIST],
+      values,
     );
 
     for (const root of roots) lists.set(root, []);

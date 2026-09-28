@@ -11765,7 +11765,7 @@ because each is a decision rather than a defect:
       so they were asserting against a wall of 403s that no credential could leak through.
       Mutation 4/4.
 
-- [ ] **A-12 — Lists, search, alarms, the state log and the stream ignore object rights** · L ·
+- [x] **A-12 — Lists, search, alarms, the state log and the stream ignore object rights** · L ·
       A-03, A-11 · Found 2026-09-27 while scoping `V2-04`. `administration.md` says a right is
       what a group may do to a branch and that `none` "carves a hole in a branch", and `A-03` built
       `resolveMany` because "a list view would otherwise be one walk per row" — **but no list view
@@ -11814,6 +11814,93 @@ because each is a decision rather than a defect:
 
       **Blocks `L-02`**: a library is one more list of sensors assembled across branches, and it
       should be built on the rule rather than become the seventh route to need it.
+
+      **A-12 outcome.** The approach is written down first, in
+      `findings/2026-09-28-object-visibility.md`, and does not contradict `ADR-001`: no new
+      service, one migration, the rule still in PostgreSQL. **A principal's right can only change
+      at an object carrying a grant for one of its groups** — its *boundaries*, a handful — so
+      `AccessService.visibilityFor` labels those with `resolveMany`'s own SQL (`rightsOf`, now one
+      function both call) and the role and scope ceilings, and everything else is structure:
+      `Visibility.where` walks down from the boundaries that disagree with the root and stops at any
+      boundary, giving a `NOT IN` or `IN` condition every listing puts in its own `WHERE`, so a
+      page of 100 is 100, the keyset cursor does not skip and a total counts nothing hidden; the
+      stream checks an event's path against the labels in TypeScript, with no query per event.
+      `A-03`'s agreement test is extended to all three consumers — SQL condition, path check and
+      path trimming, plus the walk-free child rule below — on 40 randomised grant sets for four
+      principals, object by object.
+
+      **Everything the ticket listed now filters inside its query**: the object list and search,
+      `tree`, `counts`, `hasChildren`/`childCount`, the alarms with their `total` and `counts`, the
+      state log, the notification log, the map's sensor lists and the stream's snapshot; plus what
+      the sweep turned up — `templates/:id/used-by`, schedule usage counts, rediscovery schedules,
+      discovery runs by group, `/metrics` probe lines. The containers above a granted branch are
+      outside it: paths and breadcrumbs are trimmed — a search row's `include=path` (`P-214`) by the
+      same `Visibility.trim` — `GET /objects/tops` is where such an account's
+      tree starts, `GET /objects/counts` is its overview, and `/objects/root`, Core Health,
+      notification health and `/metrics` need `read` on the root (`INSTALLATION`). A scope naming a
+      hidden object is refused, not emptied. A deleted sensor's history is an administrator's only:
+      nothing records which branch it was in.
+
+      **The stream has its own visibility per socket**, resolved when it subscribes, and **grants
+      change while it stays open**: migration 052 keeps a single-row `access_epoch`, bumped by
+      statement triggers on grants, membership, administrator groups and `parent_id` — a row, not a
+      sequence, because it must not move before the grant commits. The epoch rides the ancestry
+      query each published batch already makes; when it has moved, restricted sockets re-resolve,
+      and one whose view changed gets `overflow` with the reason instead of the batch. The client
+      already resubscribes on `overflow`.
+
+      **The sweep is `object-visibility.test.ts`**, the shape of `A-10`'s: every registered `GET`,
+      as a branch account, with every id it can see and every query parameter the route's OpenAPI
+      entry declares, visible ids and hidden ones, must not contain a marker put on every object
+      outside the branch — including the root and the probe above it — nor may the stream, live or
+      in its snapshot. An administrator's pass over the same fixture is the control that the markers
+      are reachable. It found a second kind of leak the ticket had not listed, **a visible object's
+      own fact naming a hidden one**, and each is fixed by keeping the id and dropping the name:
+      the trigger tab's `definedOn` for a trigger inherited from above the branch; the pause view's
+      `inheritedFrom`, `masterName` and `masterState`; **the dependent's state history, which
+      wrote `master #14 (core-switch) is Down`** into rows everybody who reads the dependent reads,
+      now `master #14 is Down` (`dependencies.test.ts` pinned the name and now pins the id); a
+      template preview's `%probe`/`%group`/`%device`; and `settings?asChildOf=` and
+      `PUT /dependency`'s `masterId` now need `read` on what they name. It also found
+      **`server.routes` never listed a route exempt from the response schema** — the `onRoute`
+      hook returned first — so `/metrics` and a map's background had been outside `A-10`'s sweep
+      since each was added. Left deliberately: a pause's message, which becomes the held sensors'
+      own history, and inherited settings and tags, which are the visible object's effective values.
+
+      **The walks are bounded**: the alarm chain, the stream's ancestry and snapshot walks, the map
+      sensor-list CTE, the message context's chain, `sensorsUnder` in two places, Probe Health's
+      sweep and `credentialKindsInScope` now stop at `MAX_WALK_DEPTH`, which moved to `db/walk.ts`.
+
+      **Cost at 20,000 sensors** (`test/perf/visibility-performance.test.ts`, six principals from an
+      administrator to one granted every probe, which is the largest walk there is): every path
+      inside its budget for every principal, by at least three times. The worst, every probe, pays
+      44 ms for a page of the list against the administrator's 1.8, 76 for a page of alarms (16),
+      55 for the overview's counts (40) and 182 for a 20,000-sensor snapshot (142); resolving any
+      principal takes 1–1.5 ms. Taken at 0.07 load per CPU with `ms-server` stopped; a run under
+      0.55 per CPU, twelve minutes earlier, is recorded beside it and was inside budget too.
+      Measuring it first found the list paying for the walk twice and joining every visible sensor
+      to its detail tables before the `LIMIT`; `hasChildren` and `childCount` now use
+      `whereChildOfVisible` — beneath a visible object only a hidden boundary is hidden, so no walk —
+      and the list chooses its page of ids before joining.
+
+      **Web**: the tree starts at `/objects/tops` and says so when nothing is shared; the overview
+      counts `/objects/counts`; an inherited trigger or pause whose source is hidden reads "from an
+      object outside your view". `administration.md` has a new "What an account can see".
+
+      Tests: 11 in `object-visibility.test.ts` (the sweep — libraries too, since `L-01` landed
+      under it, a library the team was not given absent from the list and 404 by id — its control, the stream, paging with no
+      short page, subtree and overview counts without holes, `hasChildren` and `childCount`, alarm
+      totals and trimmed paths, seven refused scopes and the dependency write, `tops` including a
+      re-granted sensor and not a boundary under a visible parent, a revoked grant resyncing one
+      socket and not another); 4 in `access-rights.test.ts` (the randomised agreement, admin and
+      none-scoped, a deleted object, the epoch moving on grant, membership and move and not on
+      rename); 3 web cases for where the tree starts and 1 for the overview. Mutation 27/27:
+      the child-of-visible rule answering yes to every child, and removing the condition from each
+      of the list, `hasChildren`, `tree`, `childCount`, ancestors, a search row's `path`,
+      counts, alarms, state log, notification log, map lists, `used-by` and rediscovery; the stream's
+      snapshot, live filter, subscribe check and epoch resync; `tops`; the trigger, pause and
+      preview names; the dependency message; exempt routes left out of `server.routes`; and the
+      `asChildOf`, `masterId` and alarm-scope guards — each killed by a named A-12 test.
 
 - [x] **A-13 — Any account can make a report render through anybody's eyes** · S · E-03 · Found
       2026-09-27 while scoping `V2-04`, by reading the code; not yet reproduced over HTTP, so the
@@ -11969,6 +12056,25 @@ because each is a decision rather than a defect:
       identical; two web cases folded into one. Mutation 2/2: the reason put back for everybody,
       and a subtler leak marking only the hidden tile — each killed by the HTTP attack test and the
       resolver case.
+
+- [ ] **A-16 — Answers to writes still name objects the writer cannot see** · S · A-12 · Found
+      2026-09-28 by `A-12`'s sweep, which covers every `GET` and the stream and so could not reach
+      these. Each is an answer to a caller who holds `write` on the object in the request, which
+      is why `A-12` left them: they are refusals and echoes, not listings. But each names, counts
+      or renders something outside the caller's branch:
+
+      | Route | What it says |
+      | --- | --- |
+      | `DELETE /objects/:id/pause` | the 409 names the container a pause is inherited from, and a holding master, by id **and name** (`refuseResume`) |
+      | `POST /templates/:id/test` | echoes the rendered message — `%probe`, `%group`, `%device` included — to the caller as well as sending it |
+      | `DELETE /templates/:id`, `DELETE /schedules/:id` | the refusal lists or counts the triggers and assignments still using it, on objects the caller cannot see |
+
+      **Done when** a writer granted one branch learns nothing outside it from any of these, asserted
+      by extending `object-visibility.test.ts` to the mutating routes it can reach, and the refusals
+      still tell an administrator exactly what to fix. `refuseResume` already takes a null name and
+      prints the id alone; the pause view's `pauseSeenBy` and the preview's unnamed containers are
+      the shapes to follow. A refusal that counts uses the caller cannot see should say that there
+      are some, not how many.
 
 - [ ] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
       Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor, timestamp

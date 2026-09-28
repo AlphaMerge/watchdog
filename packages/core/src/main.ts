@@ -123,6 +123,7 @@ import { ProbeQueryService } from './probes/queries.js';
 import { SensorStateService } from './state/service.js';
 import { ConfigChangeNotifier } from './probes/notifier.js';
 import { BUILD, VERSION } from './version.js';
+import { MAX_WALK_DEPTH } from './db/walk.js';
 
 const USAGE = `ms-core ${describeBuild(BUILD)}
 
@@ -1477,9 +1478,10 @@ async function sensorsInGroup(
 async function credentialKindsInScope(db: Database, groupId: number): Promise<Set<string>> {
   const rows = await db.query<{ kind: string }>(
     `WITH RECURSIVE ancestry AS (
-       SELECT id, parent_id FROM object WHERE id = $1
+       SELECT id, parent_id, 0 AS depth FROM object WHERE id = $1
        UNION ALL
-       SELECT o.id, o.parent_id FROM object o JOIN ancestry a ON o.id = a.parent_id
+       SELECT o.id, o.parent_id, a.depth + 1 FROM object o JOIN ancestry a ON o.id = a.parent_id
+       WHERE a.depth < ${String(MAX_WALK_DEPTH)}
      )
      SELECT DISTINCT cs.kind FROM credential_set cs JOIN ancestry a ON a.id = cs.object_id`,
     [groupId],

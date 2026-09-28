@@ -15,6 +15,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -155,8 +156,12 @@ describe(
       ]);
     }
 
-    async function list(query: Parameters<AlarmService['list']>[0]): Promise<AlarmPage> {
-      return alarms.list(query);
+    // The whole tree, spelled out: these are about what an alarm is, and `object-visibility`
+    // is where what a reader may see of them is tested (`A-12`).
+    async function list(
+      query: Omit<Parameters<AlarmService['list']>[0], 'visibility'>,
+    ): Promise<AlarmPage> {
+      return alarms.list({ visibility: Visibility.EVERYTHING, ...query });
     }
 
     // -----------------------------------------------------------------------------------------
