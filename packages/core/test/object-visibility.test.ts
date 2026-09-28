@@ -1654,6 +1654,349 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       }
     });
   });
+
+  /**
+   * `A-35`: a delete destroys a subtree, a move carries it and a clone copies it, and each of
+   * them used to take a hole with it. `write` on a device whose sensor is carved `none` was a way
+   * to destroy that sensor, to count what the hole holds, and to make a readable copy of it.
+   */
+  describe('changes that take a subtree with them (A-35)', () => {
+    let tenancyId = 0;
+    let boxId = 0;
+    let boxPingId = 0;
+    let boxHoleId = 0;
+    let boxReadOnlyId = 0;
+    let spareId = 0;
+    let auditorsId = 0;
+    let operatorId = 0;
+
+    before(async () => {
+      const create = async (input: Record<string, unknown>): Promise<number> =>
+        (await harness.service.create(testActor, input as never)).id;
+      tenancyId = await create({ kind: 'group', parentId: branchId, name: 'a-tenancy' });
+      boxId = await create({
+        kind: 'device',
+        parentId: tenancyId,
+        name: 'a-box',
+        host: '10.0.1.1',
+      });
+      boxPingId = await create({
+        kind: 'sensor',
+        parentId: boxId,
+        name: 'a-box-ping',
+        sensorType: 'icmp.ping',
+      });
+      boxHoleId = await create({
+        kind: 'sensor',
+        parentId: boxId,
+        name: `${MARK}-box-hole`,
+        sensorType: 'icmp.ping',
+      });
+      boxReadOnlyId = await create({
+        kind: 'sensor',
+        parentId: boxId,
+        name: 'a-box-read-only',
+        sensorType: 'icmp.ping',
+      });
+      spareId = await create({ kind: 'group', parentId: branchId, name: 'a-spare' });
+      auditorsId = (await groups.create({ name: 'Auditors' }, testActor)).id;
+      const operator = await db.query<{ id: string }>(
+        `SELECT id::text AS id FROM user_account WHERE login = 'operator'`,
+      );
+      operatorId = Number(operator[0]?.id);
+      // The harness only captures; the audit assertion reads the entries as they are stored.
+      harness.audit.also = new DatabaseAuditSink();
+    });
+
+    after(() => {
+      harness.audit.also = undefined;
+    });
+
+    /** `write` on the tenancy and on a spare group beside it, and the box's hole carved `none`. */
+    async function carve(hole: 'none' | 'read' = 'none'): Promise<void> {
+      await access.grant(tenancyId, teamId, 'write', actorNamed('visibility'));
+      await access.grant(spareId, teamId, 'write', actorNamed('visibility'));
+      await access.grant(boxHoleId, teamId, hole, actorNamed('visibility'));
+    }
+
+    const exists = async (id: number): Promise<boolean> =>
+      (await db.query('SELECT 1 FROM object WHERE id = $1', [id])).length === 1;
+
+    const childrenOf = async (id: number): Promise<string[]> =>
+      (
+        await db.query<{ name: string }>(
+          'SELECT name FROM object WHERE parent_id = $1 ORDER BY name',
+          [id],
+        )
+      ).map((row) => row.name);
+
+    it('refuses to delete or move an object with anything beneath it the caller may not change', async () => {
+      // `read` as well as `none`: a delete destroys a read-only sensor as surely as a hidden one,
+      // and a move changes what it inherits.
+      for (const hole of ['none', 'read'] as const) {
+        await carve(hole);
+        const direct = await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/objects/${String(boxHoleId)}`,
+          headers: as('operator'),
+        });
+        assert.equal(direct.statusCode, 403, `${hole}: the hole itself is refused`);
+
+        // The whole subtree, from the device and from the group above it — and naming the true
+        // count, which is what the refusal used to hand over, unlocks nothing.
+        for (const url of [
+          `/api/v1/objects/${String(boxId)}`,
+          `/api/v1/objects/${String(boxId)}?expectedDescendants=3`,
+          `/api/v1/objects/${String(tenancyId)}?expectedDescendants=4`,
+        ]) {
+          const refused = await app.inject({ method: 'DELETE', url, headers: as('operator') });
+          assert.equal(refused.statusCode, 403, `${hole}: ${url}: ${refused.body}`);
+          const error = refused.json<{
+            error: { code: string; details: Record<string, unknown> };
+          }>().error;
+          assert.equal(error.code, 'AUTH_FORBIDDEN');
+          // **Not an oracle** (`A-16`): no count, no name, no right, nothing to retry with.
+          assert.deepEqual(error.details, {}, refused.body);
+          assert.doesNotMatch(refused.body, new RegExp(MARK));
+          assert.doesNotMatch(refused.body, /\b[34]\b.*other objects|retryWith|"held"/);
+        }
+
+        const moved = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(boxId)}/move`,
+          headers: as('operator'),
+          payload: { targetParentId: spareId },
+        });
+        assert.equal(moved.statusCode, 403, `${hole}: ${moved.body}`);
+
+        // The bulk route, which read the count out of the refusal and retried with it.
+        for (const payload of [
+          { ids: [boxId, tenancyId], operation: 'delete', cascade: true },
+          { ids: [boxId], operation: 'move', targetParentId: spareId },
+        ]) {
+          const bulk = await app.inject({
+            method: 'POST',
+            url: '/api/v1/objects/bulk',
+            headers: as('operator'),
+            payload,
+          });
+          assert.equal(bulk.statusCode, 200, bulk.body);
+          const report = bulk.json<{
+            succeeded: number;
+            outcomes: { objectId: number; ok: boolean; problem?: string; deleted?: number }[];
+          }>();
+          assert.equal(report.succeeded, 0, `${hole}: ${payload.operation}: ${bulk.body}`);
+          for (const outcome of report.outcomes) {
+            assert.equal(
+              outcome.problem,
+              'this account may not change everything beneath that object',
+            );
+            assert.equal(outcome.deleted, undefined);
+          }
+        }
+
+        for (const id of [tenancyId, boxId, boxPingId, boxHoleId, boxReadOnlyId]) {
+          assert.ok(await exists(id), `${hole}: ${String(id)} was destroyed`);
+        }
+        assert.deepEqual(await childrenOf(tenancyId), ['a-box'], `${hole}: the box was moved`);
+      }
+
+      // The control: with the hole granted back, the same move is allowed, and a subtree with
+      // nothing beneath it the operator may not change is deleted as it always was.
+      await carve();
+      await access.grant(boxHoleId, teamId, 'write', actorNamed('visibility'));
+      for (const targetParentId of [spareId, tenancyId]) {
+        const moved = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(boxId)}/move`,
+          headers: as('operator'),
+          payload: { targetParentId },
+        });
+        assert.equal(moved.statusCode, 200, moved.body);
+      }
+      const doomed = (
+        await harness.service.create(testActor, {
+          kind: 'device',
+          parentId: tenancyId,
+          name: 'a-doomed',
+          host: '10.0.1.9',
+        } as never)
+      ).id;
+      await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: doomed,
+        name: 'a-doomed-ping',
+        sensorType: 'icmp.ping',
+      } as never);
+      const deleted = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/objects/${String(doomed)}?expectedDescendants=1`,
+        headers: as('operator'),
+      });
+      assert.equal(deleted.statusCode, 200, deleted.body);
+      assert.equal(deleted.json<{ deleted: { total: number } }>().deleted.total, 2);
+    });
+
+    it('clones only what the caller can see, and the copy keeps its source’s grants', async () => {
+      await carve();
+      // Another group's carve-out on something the operator *can* see, and the operator's own
+      // `read` on another: both are the source's exceptions, and a copy without them was open to
+      // everyone who can read where it lands.
+      await access.grant(branchId, auditorsId, 'read', actorNamed('visibility'));
+      await access.grant(boxPingId, auditorsId, 'none', actorNamed('visibility'));
+      await access.grant(boxReadOnlyId, teamId, 'read', actorNamed('visibility'));
+
+      const cloned = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(boxId)}/clone`,
+        headers: as('operator'),
+        payload: { targetParentId: spareId },
+      });
+      assert.equal(cloned.statusCode, 201, cloned.body);
+      assert.doesNotMatch(cloned.body, new RegExp(MARK));
+      const result = cloned.json<{
+        object: { id: number };
+        clonedCount: { total: number; sensor: number };
+      }>();
+      // The box and the two sensors the operator can see; the hole is neither copied nor counted.
+      assert.deepEqual([result.clonedCount.total, result.clonedCount.sensor], [3, 2]);
+      assert.deepEqual(await childrenOf(result.object.id), ['a-box-ping', 'a-box-read-only']);
+
+      const copies = await db.query<{ name: string; group_name: string; right_: string }>(
+        `SELECT o.name, g.name AS group_name, a.right_::text AS right_
+         FROM object o
+         JOIN object_access a ON a.object_id = o.id
+         JOIN user_group g ON g.id = a.group_id
+         WHERE o.parent_id = $1
+         ORDER BY o.name, g.name`,
+        [result.object.id],
+      );
+      assert.deepEqual(
+        copies.map((row) => [row.name, row.group_name, row.right_]),
+        [
+          ['a-box-ping', 'Auditors', 'none'],
+          ['a-box-read-only', 'Customer A team', 'read'],
+        ],
+      );
+      const readOnlyCopy = (
+        await db.query<{ id: string }>(
+          `SELECT id::text AS id FROM object WHERE parent_id = $1 AND name = 'a-box-read-only'`,
+          [result.object.id],
+        )
+      )[0];
+      assert.ok(readOnlyCopy);
+      const held = await access.resolveFor(
+        { userId: operatorId, role: 'readwrite' },
+        Number(readOnlyCopy.id),
+      );
+      assert.equal(held.right, 'read', 'the copy inherited write from where it landed');
+
+      // Each carried grant is in the audit log as a grant made by the cloner, beside the clone.
+      const entries = await db.query<{ action: string; actor_label: string; object_id: string }>(
+        `SELECT action, actor_label, object_id::text AS object_id FROM audit_log
+         WHERE object_id IN (SELECT id FROM object WHERE parent_id = $1 OR id = $1)
+         ORDER BY id`,
+        [result.object.id],
+      );
+      assert.deepEqual(
+        entries.map((entry) => [entry.action, entry.actor_label]),
+        [
+          ['object.cloned', 'operator'],
+          ['grant.set', 'operator'],
+          ['grant.set', 'operator'],
+        ],
+      );
+
+      // In place, and in bulk: the same walk, so the same answer.
+      const inPlace = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(boxId)}/clone`,
+        headers: as('operator'),
+        payload: {},
+      });
+      assert.equal(inPlace.statusCode, 201, inPlace.body);
+      assert.deepEqual(await childrenOf(inPlace.json<{ object: { id: number } }>().object.id), [
+        'a-box-ping',
+        'a-box-read-only',
+      ]);
+      const bulk = await app.inject({
+        method: 'POST',
+        url: '/api/v1/objects/bulk',
+        headers: as('operator'),
+        payload: { ids: [boxId], operation: 'clone', targetParentId: spareId },
+      });
+      assert.equal(bulk.statusCode, 200, bulk.body);
+      const createdId = bulk.json<{ outcomes: { createdId?: number }[] }>().outcomes[0]?.createdId;
+      assert.ok(createdId !== undefined, bulk.body);
+      assert.deepEqual(await childrenOf(createdId), ['a-box-ping', 'a-box-read-only']);
+
+      // The control: an administrator's clone copies the hole, grant and all.
+      const whole = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(boxId)}/clone`,
+        headers: as('admin'),
+        payload: { targetParentId: spareId },
+      });
+      assert.equal(whole.statusCode, 201, whole.body);
+      const wholeId = whole.json<{ object: { id: number } }>().object.id;
+      assert.deepEqual(await childrenOf(wholeId), [
+        'a-box-ping',
+        'a-box-read-only',
+        `${MARK}-box-hole`,
+      ]);
+      const holeCopy = await db.query<{ right_: string }>(
+        `SELECT a.right_::text AS right_ FROM object o JOIN object_access a ON a.object_id = o.id
+         WHERE o.parent_id = $1 AND o.name = $2 AND a.group_id = $3`,
+        [wholeId, `${MARK}-box-hole`, teamId],
+      );
+      assert.deepEqual(
+        holeCopy.map((row) => row.right_),
+        ['none'],
+        'the copied hole is still a hole to the team',
+      );
+    });
+
+    it('refuses a clone made in place where the caller may not write (A-35)', async () => {
+      // The fixture's own shape: `write` granted on the device, and only `read` on the branch
+      // it hangs in. Naming the branch as the destination was refused (`G06`); leaving the
+      // destination out put the copy there all the same.
+      const named = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(deviceId)}/clone`,
+        headers: as('operator'),
+        payload: { targetParentId: branchId },
+      });
+      assert.equal(named.statusCode, 403, named.body);
+      for (const payload of [undefined, {}, { name: 'a-web01 again' }]) {
+        const inPlace = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(deviceId)}/clone`,
+          headers: as('operator'),
+          ...(payload === undefined ? {} : { payload }),
+        });
+        assert.equal(inPlace.statusCode, 403, inPlace.body);
+        assert.equal(
+          inPlace.json<{ error: { message: string } }>().error.message,
+          'this action needs write on the object that a clone made in place belongs to',
+        );
+      }
+      assert.deepEqual(
+        (await childrenOf(branchId)).filter((name) => name.includes('a-web01')),
+        ['a-web01'],
+        'a copy landed in the branch',
+      );
+
+      // The control: `write` on the branch, and the same request is allowed.
+      await access.grant(branchId, teamId, 'write', actorNamed('visibility'));
+      const allowed = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(deviceId)}/clone`,
+        headers: as('operator'),
+        payload: { name: 'a-web01 again' },
+      });
+      assert.equal(allowed.statusCode, 201, allowed.body);
+    });
+  });
 });
 
 /**

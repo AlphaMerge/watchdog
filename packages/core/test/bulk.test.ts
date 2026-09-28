@@ -9,6 +9,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 /**
  * Bulk operations over a selection (`D-09`).
@@ -80,7 +81,12 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
   describe('the selection', () => {
     it('applies an operation once to an id given twice', async () => {
       const one = await device('web01');
-      const report = await bulk.apply(testActor, [one, one, one], { kind: 'resume' });
+      const report = await bulk.apply(
+        testActor,
+        [one, one, one],
+        { kind: 'resume' },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.requested, 1, 'the duplicates are collapsed');
       assert.equal(report.duplicates, 2, 'and counted rather than silently dropped');
       assert.equal(report.outcomes.length, 1);
@@ -89,7 +95,7 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
     it('refuses a selection larger than one operator ever made by hand', async () => {
       const ids = Array.from({ length: MAX_BULK + 1 }, (_, at) => at + 1);
       await assert.rejects(
-        () => bulk.apply(testActor, ids, { kind: 'resume' }),
+        () => bulk.apply(testActor, ids, { kind: 'resume' }, Visibility.EVERYTHING),
         (error: unknown) => error instanceof Error && /at most 500 objects/.test(error.message),
       );
     });
@@ -103,6 +109,7 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
         {
           kind: 'resume',
         },
+        Visibility.EVERYTHING,
       );
       assert.equal(report.requested, 1);
     });
@@ -114,11 +121,16 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       // deleted underneath them wants thirty-nine done and a line naming the fortieth.
       const first = await device('web01');
       const third = await device('web03');
-      const report = await bulk.apply(testActor, [first, 999_999, third], {
-        kind: 'setting',
-        key: 'scan.intervalSeconds',
-        value: 300,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [first, 999_999, third],
+        {
+          kind: 'setting',
+          key: 'scan.intervalSeconds',
+          value: 300,
+        },
+        Visibility.EVERYTHING,
+      );
 
       assert.equal(report.succeeded, 2);
       assert.equal(report.failed, 1);
@@ -140,7 +152,12 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       // "It failed" is not a diagnosis. A device may not hold a device, and the message that
       // says so is already written.
       const one = await device('web01');
-      const report = await bulk.apply(testActor, [probeId], { kind: 'move', targetParentId: one });
+      const report = await bulk.apply(
+        testActor,
+        [probeId],
+        { kind: 'move', targetParentId: one },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.failed, 1);
       assert.match(report.outcomes[0]?.problem ?? '', /probe|not be a child|not movable/i);
     });
@@ -151,12 +168,22 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const one = await device('web01');
       await sensor(one, 'Ping');
 
-      const refused = await bulk.apply(testActor, [one], { kind: 'delete', cascade: false });
+      const refused = await bulk.apply(
+        testActor,
+        [one],
+        { kind: 'delete', cascade: false },
+        Visibility.EVERYTHING,
+      );
       assert.equal(refused.failed, 1);
       assert.equal(refused.outcomes[0]?.code, 'OBJECT_NOT_EMPTY');
       assert.notEqual(await harness.service.get(one), null, 'and it is still there');
 
-      const done = await bulk.apply(testActor, [one], { kind: 'delete', cascade: true });
+      const done = await bulk.apply(
+        testActor,
+        [one],
+        { kind: 'delete', cascade: true },
+        Visibility.EVERYTHING,
+      );
       assert.equal(done.succeeded, 1);
       assert.equal(done.outcomes[0]?.deleted, 2, 'the device and its sensor');
     });
@@ -168,10 +195,15 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const parent = await device('web01');
       const child = await sensor(parent, 'Ping');
 
-      const report = await bulk.apply(testActor, [parent, child], {
-        kind: 'delete',
-        cascade: true,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [parent, child],
+        {
+          kind: 'delete',
+          cascade: true,
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.succeeded, 1);
       assert.equal(report.failed, 1);
       assert.equal(
@@ -185,10 +217,15 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       // absence, and dressing it up as "removed earlier" would hide a real disagreement.
       const parent = await device('web01');
       await sensor(parent, 'Ping');
-      const report = await bulk.apply(testActor, [parent, 999_999], {
-        kind: 'delete',
-        cascade: true,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [parent, 999_999],
+        {
+          kind: 'delete',
+          cascade: true,
+        },
+        Visibility.EVERYTHING,
+      );
       assert.match(report.outcomes[1]?.problem ?? '', /does not exist/);
     });
   });
@@ -198,16 +235,26 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const first = await device('web01');
       const second = await device('web02');
 
-      const paused = await bulk.apply(testActor, [first, second], {
-        kind: 'pause',
-        request: { kind: 'indefinite' },
-        message: 'patching',
-      });
+      const paused = await bulk.apply(
+        testActor,
+        [first, second],
+        {
+          kind: 'pause',
+          request: { kind: 'indefinite' },
+          message: 'patching',
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(paused.succeeded, 2);
       assert.equal((await harness.service.pauseState(first)).paused, true);
       assert.equal((await harness.service.pauseState(second)).paused, true);
 
-      const resumed = await bulk.apply(testActor, [first, second], { kind: 'resume' });
+      const resumed = await bulk.apply(
+        testActor,
+        [first, second],
+        { kind: 'resume' },
+        Visibility.EVERYTHING,
+      );
       assert.equal(resumed.succeeded, 2);
       assert.equal((await harness.service.pauseState(first)).paused, false);
     });
@@ -223,10 +270,15 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const first = await device('web01');
       const second = await device('web02');
 
-      const report = await bulk.apply(testActor, [first, second], {
-        kind: 'move',
-        targetParentId: other,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [first, second],
+        {
+          kind: 'move',
+          targetParentId: other,
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.succeeded, 2);
       assert.equal((await harness.service.get(first)).parentId, other);
       assert.equal((await harness.service.get(second)).parentId, other);
@@ -243,10 +295,15 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const first = await device('web01');
       await sensor(first, 'Ping');
 
-      const report = await bulk.apply(testActor, [first], {
-        kind: 'clone',
-        targetParentId: other,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [first],
+        {
+          kind: 'clone',
+          targetParentId: other,
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.succeeded, 1);
       const made = report.outcomes[0]?.createdId;
       assert.ok(made !== undefined, 'the new id is in the report, not left to be looked up');
@@ -260,16 +317,26 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       // the null reached the setting's own schema, which wants an integer.
       const first = await device('web01');
       const second = await device('web02');
-      await bulk.apply(testActor, [first, second], {
-        kind: 'setting',
-        key: 'scan.intervalSeconds',
-        value: 300,
-      });
+      await bulk.apply(
+        testActor,
+        [first, second],
+        {
+          kind: 'setting',
+          key: 'scan.intervalSeconds',
+          value: 300,
+        },
+        Visibility.EVERYTHING,
+      );
 
-      const report = await bulk.apply(testActor, [first, second], {
-        kind: 'revertSetting',
-        key: 'scan.intervalSeconds',
-      });
+      const report = await bulk.apply(
+        testActor,
+        [first, second],
+        {
+          kind: 'revertSetting',
+          key: 'scan.intervalSeconds',
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.succeeded, 2);
       const settings = await harness.service.settings(first);
       const interval = settings.find((one) => one.key === 'scan.intervalSeconds');
@@ -281,11 +348,16 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       // The bulk layer does not validate settings and must not: the registry's schema is the
       // one place that knows, and every object reports its own refusal.
       const first = await device('web01');
-      const report = await bulk.apply(testActor, [first], {
-        kind: 'setting',
-        key: 'scan.intervalSeconds',
-        value: null,
-      });
+      const report = await bulk.apply(
+        testActor,
+        [first],
+        {
+          kind: 'setting',
+          key: 'scan.intervalSeconds',
+          value: null,
+        },
+        Visibility.EVERYTHING,
+      );
       assert.equal(report.failed, 1);
     });
 
@@ -296,11 +368,16 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
       const second = await device('web02');
       harness.audit.recorded.length = 0;
 
-      await bulk.apply(testActor, [first, second], {
-        kind: 'setting',
-        key: 'scan.intervalSeconds',
-        value: 600,
-      });
+      await bulk.apply(
+        testActor,
+        [first, second],
+        {
+          kind: 'setting',
+          key: 'scan.intervalSeconds',
+          value: 600,
+        },
+        Visibility.EVERYTHING,
+      );
       const touched = harness.audit.recorded.filter((one) => one.action === 'setting.set');
       assert.deepEqual(
         touched.map((one) => one.objectId).sort((a, b) => a - b),

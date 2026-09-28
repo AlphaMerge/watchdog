@@ -7,6 +7,7 @@ import {
   type ScratchDatabase,
 } from '../support/database.js';
 import { buildHarness, testActor, type Harness } from '../support/tree.js';
+import { Visibility } from '../../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -86,6 +87,7 @@ describe(
           target.id,
           'Clone of Big group',
           5_000,
+          Visibility.EVERYTHING,
         );
         return { result, elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1e6 };
       });

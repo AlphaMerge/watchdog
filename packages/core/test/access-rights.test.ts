@@ -4,6 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import {
   AccessService,
   atLeast,
+  lower,
   type AccessPrincipal,
   type AccessRight,
 } from '../src/auth/access.js';
@@ -459,9 +460,11 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       return paths;
     }
 
-    it('agrees on every object, for every role and scope, over randomised grants', async () => {
-      // A second probe with nested groups, so there is depth to put holes in: root → probe →
-      // group → group → device → sensor, beside the fixture's own branch.
+    /**
+     * A second probe with nested groups, so there is depth to put holes in: root → probe →
+     * group → group → device → sensor, beside the fixture's own branch.
+     */
+    async function buildNestedTree(): Promise<void> {
       const probe = await harness.service.create(testActor, {
         kind: 'probe',
         parentId: harness.rootId,
@@ -497,31 +500,41 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
           }
         }
       }
+    }
 
+    /** Every role and scope a right is resolved for. */
+    const principalsOf = (): { name: string; principal: AccessPrincipal }[] => [
+      { name: 'readwrite', principal: { userId, role: 'readwrite' } },
+      { name: 'readonly', principal: { userId, role: 'readonly' } },
+      { name: 'read-scoped token', principal: { userId, role: 'readwrite', scope: 'read' } },
+      { name: 'none-scoped token', principal: { userId, role: 'readwrite', scope: 'none' } },
+    ];
+
+    /** Scatters two to eight grants over the tree, from this seed's sequence. */
+    async function scatterGrants(next: () => number, ids: readonly number[]): Promise<void> {
+      await db.query('DELETE FROM object_access');
+      const groupIds = [alphaId, betaId, gammaId];
+      const grants = 2 + Math.floor(next() * 7);
+      for (let g = 0; g < grants; g += 1) {
+        const on = ids[Math.floor(next() * ids.length)] ?? harness.rootId;
+        const group = groupIds[Math.floor(next() * groupIds.length)] ?? alphaId;
+        const right = RIGHTS[Math.floor(next() * RIGHTS.length)] ?? 'none';
+        await access.grant(on, group, right, actorNamed('agreement'));
+      }
+    }
+
+    it('agrees on every object, for every role and scope, over randomised grants', async () => {
+      await buildNestedTree();
       const paths = await pathsOfEverything();
       const ids = [...paths.keys()].sort((a, b) => a - b);
-      const groupIds = [alphaId, betaId, gammaId];
-      const principals: { name: string; principal: AccessPrincipal }[] = [
-        { name: 'readwrite', principal: { userId, role: 'readwrite' } },
-        { name: 'readonly', principal: { userId, role: 'readonly' } },
-        { name: 'read-scoped token', principal: { userId, role: 'readwrite', scope: 'read' } },
-        { name: 'none-scoped token', principal: { userId, role: 'readwrite', scope: 'none' } },
-      ];
+      const principals = principalsOf();
 
       let comparisons = 0;
       let visibleSeen = 0;
       let hiddenSeen = 0;
       let childrenChecked = 0;
       for (let seed = 1; seed <= 40; seed += 1) {
-        const next = random(seed);
-        await db.query('DELETE FROM object_access');
-        const grants = 2 + Math.floor(next() * 7);
-        for (let g = 0; g < grants; g += 1) {
-          const on = ids[Math.floor(next() * ids.length)] ?? harness.rootId;
-          const group = groupIds[Math.floor(next() * groupIds.length)] ?? alphaId;
-          const right = RIGHTS[Math.floor(next() * RIGHTS.length)] ?? 'none';
-          await access.grant(on, group, right, actorNamed('agreement'));
-        }
+        await scatterGrants(random(seed), ids);
 
         for (const { name, principal } of principals) {
           const expected = await access.resolveManyFor(principal, ids);
@@ -588,6 +601,65 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       assert.ok(visibleSeen > 500, `only ${String(visibleSeen)} visible answers`);
       assert.ok(hiddenSeen > 500, `only ${String(hiddenSeen)} hidden answers`);
       assert.ok(childrenChecked > 1000, `only ${String(childrenChecked)} children checked`);
+    });
+
+    it('finds the weakest right beneath every object, for every role and scope (A-35)', async () => {
+      // **The claim `resolveSubtreesFor` rests on**: that the rights held anywhere in a subtree
+      // are the ones at its top and at the boundaries inside it. Checked against the obvious
+      // answer — `resolveManyFor` on every object, and the least of them over each subtree.
+      await buildNestedTree();
+      const paths = await pathsOfEverything();
+      const ids = [...paths.keys()].sort((a, b) => a - b);
+      const within = new Map<number, number[]>(ids.map((id) => [id, []]));
+      for (const [id, path] of paths) for (const step of path) within.get(step)?.push(id);
+
+      let comparisons = 0;
+      let narrower = 0;
+      // Twice the seeds of the test above: a subtree weaker than its top needs a grant beneath a
+      // readable one that lowers the right for *both* the account's groups, and forty seeds make
+      // only about thirty.
+      for (let seed = 1; seed <= 80; seed += 1) {
+        await scatterGrants(random(seed), ids);
+        for (const { name, principal } of principalsOf()) {
+          const expected = await access.resolveManyFor(principal, ids);
+          const answered = await access.resolveSubtreesFor(principal, ids);
+          for (const id of ids) {
+            const own = expected.get(id) ?? 'none';
+            const weakest = (within.get(id) ?? []).reduce<AccessRight>(
+              (least, below) => lower(least, expected.get(below) ?? 'none'),
+              own,
+            );
+            const where = `seed ${String(seed)}, ${name}, object ${String(id)}`;
+            assert.deepEqual(answered.get(id), { own, weakest }, where);
+            comparisons += 1;
+            if (weakest !== own) narrower += 1;
+          }
+        }
+      }
+      // Not vacuous: a subtree weaker than its top — the case the ticket is about — came up
+      // dozens of times, so an answer that returned the top's right for everything would have
+      // failed. Seeded, so the count is fixed; the floor is there for a change to the scatter.
+      assert.ok(comparisons > 10_000, `only ${String(comparisons)} comparisons`);
+      assert.ok(narrower > 30, `only ${String(narrower)} subtrees weaker than their top`);
+    });
+
+    it('gives an administrator its ceiling beneath everything, holes and all (A-35)', async () => {
+      assert.equal((await access.resolveSubtreesFor({ userId, role: 'readwrite' }, [])).size, 0);
+      await access.grant(sensorId, alphaId, 'none', actorNamed('agreement'));
+      const admins = (await groups.list()).find((g) => g.isAdmin);
+      assert.ok(admins);
+      await groups.addMember(admins.id, userId, testActor);
+      assert.deepEqual(
+        (await access.resolveSubtreesFor({ userId, role: 'admin' }, [probeId])).get(probeId),
+        { own: 'full', weakest: 'full' },
+      );
+      // The ceilings still apply to an administrator's token, as `resolveManyFor`'s do.
+      assert.deepEqual(
+        (await access.resolveSubtreesFor({ userId, role: 'admin', scope: 'read' }, [probeId])).get(
+          probeId,
+        ),
+        { own: 'read', weakest: 'read' },
+      );
     });
 
     it('sees everything as an administrator, and nothing through a none-scoped token', async () => {

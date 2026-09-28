@@ -35,12 +35,14 @@ import {
   WRITES,
   every,
   onBodyObject,
+  onDerivedObject,
   onObject,
   onQueryObject,
+  onSubtree,
   toAcknowledge,
   visibilityOf,
 } from '../authorization.js';
-import { atLeast, type AccessService } from '../../auth/access.js';
+import { atLeast, type AccessService, type SubtreeAccess } from '../../auth/access.js';
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
 interface RefusedOutcome {
@@ -55,29 +57,46 @@ interface RefusedOutcome {
  *
  * Batched: `resolveManyFor` is one query for the whole selection, because a bulk request is
  * exactly the shape that turns a per-object walk into six hundred round trips.
+ *
+ * `subtree` is for an operation that takes everything beneath each object with it — a delete,
+ * a move — and asks for `write` on all of it, as `onSubtree` does for one object (`A-35`).
+ * Without it a cascading delete of a device read the count out of the refusal and destroyed
+ * the sensor carved out of it.
  */
 async function partitionByRight(
   access: AccessService | undefined,
   authorizing: boolean,
   request: FastifyRequest,
   ids: readonly number[],
+  subtree: boolean,
 ): Promise<{ allowed: number[]; refused: RefusedOutcome[] }> {
   const principal = request.principal;
   if (!authorizing || access === undefined || principal === undefined) {
     return { allowed: [...ids], refused: [] };
   }
-  const rights = await access.resolveManyFor(principal, ids);
+  const rights: ReadonlyMap<number, SubtreeAccess> = subtree
+    ? await access.resolveSubtreesFor(principal, ids)
+    : new Map(
+        [...(await access.resolveManyFor(principal, ids))].map(([id, right]) => [
+          id,
+          { own: right, weakest: right },
+        ]),
+      );
   const allowed: number[] = [];
   const refused: RefusedOutcome[] = [];
   for (const id of ids) {
-    if (atLeast(rights.get(id) ?? 'none', 'write')) {
+    const right = rights.get(id) ?? { own: 'none', weakest: 'none' };
+    if (atLeast(right.weakest, 'write')) {
       allowed.push(id);
       continue;
     }
     refused.push({
       objectId: id,
       ok: false,
-      problem: 'this account may not change that object',
+      // Says that there is something beneath, and never what or how much (`A-16`).
+      problem: atLeast(right.own, 'write')
+        ? 'this account may not change everything beneath that object'
+        : 'this account may not change that object',
       code: 'AUTH_FORBIDDEN',
     });
   }
@@ -652,7 +671,10 @@ export async function objectRoutes(
   app.delete<{ Params: { id: number }; Querystring: { expectedDescendants?: number } }>(
     '/objects/:id',
     {
-      config: onObject('write'),
+      // **Everything beneath it, not just the object** (`A-35`). A delete destroys the subtree,
+      // and there is no recycle bin: `write` on a device whose sensor is carved `none` must not
+      // be a way to destroy the sensor — nor its refusal a way to count what the hole holds.
+      config: onSubtree('write'),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -740,8 +762,10 @@ export async function objectRoutes(
     {
       // **Both ends** (`G06`). Taking the object needs `write` on it; putting it somewhere needs
       // `write` there. Checking only the source lets an operator relocate a device into a branch
-      // they were denied — and out of the branch whose owners could see it.
-      config: every(onObject('write'), onBodyObject('write', 'targetParentId')),
+      // they were denied — and out of the branch whose owners could see it. And taking it means
+      // taking everything beneath it (`A-35`): a move carries a hole with it and changes what it
+      // inherits, which is a change to objects the caller may not change.
+      config: every(onSubtree('write'), onBodyObject('write', 'targetParentId')),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -773,9 +797,23 @@ export async function objectRoutes(
   }>(
     '/objects/:id/clone',
     {
-      // Both ends, and the destination is optional because a clone with no `targetParentId`
-      // copies in place — where the source right has already been resolved (`G06`).
-      config: every(onObject('write'), onBodyObject('write', 'targetParentId', { optional: true })),
+      // Both ends (`G06`). With no `targetParentId` the copy lands beside its source, in the
+      // source's parent, and that is a second object: `write` on the source says nothing about
+      // it when the source is itself where a grant was made, so it is asked for as `POST
+      // /objects` asks for `write` on the parent (`A-35`). What beneath the source is copied is
+      // the service's to decide, from the caller's visibility.
+      config: every(
+        onObject('write'),
+        onBodyObject('write', 'targetParentId', { optional: true }),
+        onDerivedObject('write', 'a clone made in place', (request) => {
+          const body = request.body as { targetParentId?: unknown } | null | undefined;
+          if (body?.targetParentId !== undefined && body.targetParentId !== null) {
+            return Promise.resolve(null);
+          }
+          // An integer by now: `onObject` above refuses a path id that is not one.
+          return service.parentOf(Number((request.params as { id: unknown }).id));
+        }),
+      ),
       schema: {
         tags: ['objects'],
         params: idParams,
@@ -791,7 +829,12 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      const result = await service.clone(actorFor(request), request.params.id, request.body ?? {});
+      const result = await service.clone(
+        actorFor(request),
+        request.params.id,
+        request.body ?? {},
+        await visibilityOf(request),
+      );
       await reply
         .status(201)
         .header('Location', `/api/v1/objects/${String(result.object.id)}`)
@@ -915,11 +958,23 @@ export async function objectRoutes(
       // failure rows for one it may not. The route's own description promises neither.
       const sent = request.body.ids;
       const unique = [...new Set(sent)];
-      const { allowed, refused } = await partitionByRight(access, authorizing, request, unique);
+      const operation = request.body.operation;
+      const { allowed, refused } = await partitionByRight(
+        access,
+        authorizing,
+        request,
+        unique,
+        operation === 'delete' || operation === 'move',
+      );
       const applied =
         allowed.length === 0
           ? { succeeded: 0, failed: 0, outcomes: [] }
-          : await bulk.apply(actorFor(request), allowed, operationFrom(request.body));
+          : await bulk.apply(
+              actorFor(request),
+              allowed,
+              operationFrom(request.body),
+              await visibilityOf(request),
+            );
       await reply.send({
         ...applied,
         // `requested` is the selection after collapsing, which is what `BulkReport` documents

@@ -263,9 +263,14 @@ describe(
       });
 
       it('gives a cloned sensor one too, which is the path an insert beside create would miss', async () => {
-        const clone = await harness.service.clone(testActor, deviceId, {
-          name: `clone-${String(process.hrtime.bigint())}`,
-        });
+        const clone = await harness.service.clone(
+          testActor,
+          deviceId,
+          {
+            name: `clone-${String(process.hrtime.bigint())}`,
+          },
+          Visibility.EVERYTHING,
+        );
         const sensors = await db.query<{ id: string }>(
           `SELECT o.id::text AS id FROM object o
            WHERE o.parent_id = $1 AND o.kind = 'sensor'`,

@@ -69,6 +69,13 @@ export type RouteAccess =
        * refusal, because the alternative is a guard that a caller turns off by omission.
        */
       optional?: boolean;
+      /**
+       * The right on everything beneath the object too, for a change that takes the subtree with
+       * it: a delete destroys it and a move carries it (`A-35`). A `none` carved beneath an
+       * object the caller may write is otherwise a hole they cannot touch directly and can
+       * destroy by deleting its parent.
+       */
+      subtree?: boolean;
     }
   /**
    * A right on an object this request does not name, found by asking (`P-154`).
@@ -78,9 +85,11 @@ export type RouteAccess =
    * declare is the role, which is how "a read-only account could delete every trigger" became
    * "any account with `readwrite` could delete every trigger" instead of being fixed.
    *
-   * Resolving to null means the row does not exist: the hook allows the request through so the
-   * handler answers its own 404. A guard that answered 403 for a missing id would turn every
-   * route into an existence oracle.
+   * Resolving to null means there is nothing for this declaration to check. Usually the row does
+   * not exist: the hook allows the request through so the handler answers its own 404, because a
+   * guard that answered 403 for a missing id would turn every route into an existence oracle.
+   * Inside an `every` it can also mean the request is not the shape this part covers, as
+   * `optional` does for an absent field: a clone made in place (`A-35`).
    */
   | {
       kind: 'derived';
@@ -387,7 +396,12 @@ async function enforce(
     if (objectId === undefined) return;
 
     if (declared.kind === 'object') {
+      // The object first, so a caller refused the object itself hears the ordinary refusal
+      // with what they hold, and only a caller who may take it learns there is more beneath.
       await access.requireFor(principal, objectId, declared.needed);
+      if (declared.subtree === true) {
+        await access.requireSubtreeFor(principal, objectId, declared.needed);
+      }
       return;
     }
 
@@ -482,10 +496,23 @@ export function onObject(needed: AccessRight, param = 'id'): { access: RouteAcce
 }
 
 /**
+ * A right on the object named by a route parameter and on everything beneath it (`A-35`).
+ *
+ * For a change that takes the whole subtree with it — a delete, a move. Not for one that only
+ * reaches beneath by inheritance: a pause or a setting on a container flows into a hole the way
+ * every inherited value does, and changes nothing that is stored there.
+ */
+export function onSubtree(needed: AccessRight, param = 'id'): { access: RouteAccess } {
+  return { access: { kind: 'object', needed, param, subtree: true } };
+}
+
+/**
  * A right on the object named by a field of the request body — the parent of a creation.
  *
- * `optional` is for a field the route's own schema makes optional, and nothing else: a clone
- * with no `targetParentId` clones in place, so there is no second object to have a right on.
+ * `optional` is for a field the route's own schema makes optional, and nothing else. **An absent
+ * field is not "no second object"**: a clone with no `targetParentId` lands in its source's
+ * parent, which is a second object, and `write` on the source says nothing about it when the
+ * source is itself where a grant was made. That route declares the parent separately (`A-35`).
  */
 export function onBodyObject(
   needed: AccessRight,

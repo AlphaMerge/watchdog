@@ -478,7 +478,7 @@ describe(
           [source],
         );
 
-        const result = await h.service.clone(testActor, source, {});
+        const result = await h.service.clone(testActor, source, {}, Visibility.EVERYTHING);
 
         assert.equal(result.clonedCount.trigger, 1);
         const copied = await scratch.db.query<{ n: string }>(
@@ -492,7 +492,12 @@ describe(
         const source = await buildSubtree(probeId);
         const target = await group(probeId, 'Target');
 
-        const result = await h.service.clone(testActor, source, { targetParentId: target });
+        const result = await h.service.clone(
+          testActor,
+          source,
+          { targetParentId: target },
+          Visibility.EVERYTHING,
+        );
 
         assert.equal(result.clonedCount.total, 6, '2 groups + 2 devices + 2 sensors');
         assert.equal(result.clonedCount.group, 2);
@@ -534,7 +539,12 @@ describe(
         await h.service.setSetting(testActor, slow, INTERVAL, 900);
 
         const d = await device(fast, 'switch-01');
-        const result = await h.service.clone(testActor, d, { targetParentId: slow });
+        const result = await h.service.clone(
+          testActor,
+          d,
+          { targetParentId: slow },
+          Visibility.EVERYTHING,
+        );
 
         // Nothing of its own was set, so nothing was copied...
         assert.deepEqual(await h.resolver.own(result.object.id), {});
@@ -558,7 +568,7 @@ describe(
           [d, Buffer.from('SECRET-CANARY')],
         );
 
-        const result = await h.service.clone(testActor, source, {});
+        const result = await h.service.clone(testActor, source, {}, Visibility.EVERYTHING);
 
         assert.deepEqual(result.droppedCredentialKinds, ['snmp']);
 
@@ -579,7 +589,7 @@ describe(
           ['rtt', 'loss'],
         );
 
-        const result = await h.service.clone(testActor, s, {});
+        const result = await h.service.clone(testActor, s, {}, Visibility.EVERYTHING);
         const clonedChannels = await h.service.channels(result.object.id);
 
         assert.deepEqual(
@@ -596,19 +606,21 @@ describe(
 
       it('refuses to clone the root or a probe', async () => {
         assert.equal(
-          (await rejects(() => h.service.clone(testActor, h.rootId, {}))).code,
+          (await rejects(() => h.service.clone(testActor, h.rootId, {}, Visibility.EVERYTHING)))
+            .code,
           'OBJECT_NOT_CLONEABLE',
         );
         assert.equal(
-          (await rejects(() => h.service.clone(testActor, probeId, {}))).code,
+          (await rejects(() => h.service.clone(testActor, probeId, {}, Visibility.EVERYTHING)))
+            .code,
           'OBJECT_NOT_CLONEABLE',
         );
       });
 
       it('clones twice in place, because sibling names are deliberately not unique', async () => {
         const g = await group(probeId, 'Switch template');
-        await h.service.clone(testActor, g, {});
-        await h.service.clone(testActor, g, {});
+        await h.service.clone(testActor, g, {}, Visibility.EVERYTHING);
+        await h.service.clone(testActor, g, {}, Visibility.EVERYTHING);
 
         const siblings = await h.service.list(
           { parentId: probeId },
@@ -629,7 +641,14 @@ describe(
         // insert, by which point clone_map is populated and rows are going in.
         const error = await rejectsAny(() =>
           h.service.batch('shared', async (q, repo) => {
-            const copied = await repo.copySubtree(q, source, probeId, 'Doomed clone', 5_000);
+            const copied = await repo.copySubtree(
+              q,
+              source,
+              probeId,
+              'Doomed clone',
+              5_000,
+              Visibility.EVERYTHING,
+            );
             // Rows are now written inside this transaction; abandon it.
             throw new Error(`clone wrote ${String(copied.counts.total)} objects, now rolling back`);
           }),
@@ -645,7 +664,7 @@ describe(
 
         const error = await rejects(() =>
           h.service.batch('shared', async (q, repo) =>
-            repo.copySubtree(q, source, probeId, 'Too big', 2),
+            repo.copySubtree(q, source, probeId, 'Too big', 2, Visibility.EVERYTHING),
           ),
         );
 
@@ -662,8 +681,22 @@ describe(
         const target = await group(probeId, 'Target');
 
         const results = await h.service.batch('shared', async (q, repo) => {
-          const first = await repo.copySubtree(q, source, target, 'First clone', 5_000);
-          const second = await repo.copySubtree(q, source, target, 'Second clone', 5_000);
+          const first = await repo.copySubtree(
+            q,
+            source,
+            target,
+            'First clone',
+            5_000,
+            Visibility.EVERYTHING,
+          );
+          const second = await repo.copySubtree(
+            q,
+            source,
+            target,
+            'Second clone',
+            5_000,
+            Visibility.EVERYTHING,
+          );
           return [first, second];
         });
 

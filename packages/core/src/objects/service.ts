@@ -262,6 +262,17 @@ export class ObjectService {
     return this.#redact(object);
   }
 
+  /**
+   * The object's parent, or null when there is no such object or it is the root.
+   *
+   * For the clone route's guard, which has to ask for `write` on where a clone made in place
+   * lands before the handler runs (`A-35`).
+   */
+  async parentOf(id: ObjectId): Promise<ObjectId | null> {
+    const object = await this.#repo.get(this.#db, id);
+    return object?.parentId ?? null;
+  }
+
   async getRoot(): Promise<ObjectDetail> {
     return this.#redact(await this.#repo.getRoot(this.#db));
   }
@@ -1965,7 +1976,20 @@ export class ObjectService {
     });
   }
 
-  async clone(actor: Actor, id: ObjectId, input: CloneInput): Promise<CloneResult> {
+  /**
+   * Copies an object and what `visibility` sees beneath it (`A-35`).
+   *
+   * The copy carries its source's configuration, its triggers and its grants, and none of what
+   * the caller cannot see: a hole beneath the source is left out, and the answer counts only
+   * what was copied. The route passes the caller's visibility; a caller that means the whole
+   * tree passes `Visibility.EVERYTHING` and says so.
+   */
+  async clone(
+    actor: Actor,
+    id: ObjectId,
+    input: CloneInput,
+    visibility: Visibility,
+  ): Promise<CloneResult> {
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeShared(q);
 
@@ -1995,6 +2019,7 @@ export class ObjectService {
         targetParentId,
         rootName,
         this.#maxCloneObjects,
+        visibility,
       );
 
       const cloneRoot = await this.#repo.get(q, copied.cloneRootId);
@@ -2043,6 +2068,17 @@ export class ObjectService {
             clonedCount: copied.counts,
             droppedCredentialKinds: copied.droppedCredentialKinds as CredentialKind[],
           },
+          // One entry per carried grant, as a grant made by hand writes (`A-17`), so each copy's
+          // history says who can see it and "who gave that group this?" is answered by the clone.
+          ...copied.grants.map((grant): Mutation => ({
+            action: 'grant.set',
+            objectId: grant.objectId,
+            subject: { kind: 'object', id: grant.objectId },
+            groupId: grant.groupId,
+            groupName: grant.groupName,
+            before: null,
+            after: grant.right,
+          })),
         ],
         new Date(),
       );

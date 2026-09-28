@@ -13024,6 +13024,100 @@ because each is a decision rather than a defect:
       named, a superseded snapshot sent, a failure detaching the replacement, a held change sent
       before the snapshot, and each of the three bounds removed.
 
+- [x] **A-35 — A delete, a move or a clone takes the holes beneath what it names** · M · A-12 ·
+      Found 2026-09-28 in `A-12`'s second review round. `DELETE /objects/:id` checked `write` on
+      the object it was given and then destroyed everything beneath it, so an operator with
+      `write` on a device whose sensor was carved `none` was refused the sensor and destroyed it
+      by deleting the device. There is no recycle bin. The refusal on the way said how many
+      objects the subtree held: `OBJECT_NOT_EMPTY` gave a count and a `retryWith`, and
+      `OBJECT_SUBTREE_CHANGED` gave `actual`. `GET /objects/:id/counts` has left hidden objects
+      out since `A-12`, so the difference counted the hole. `POST /objects/bulk` with `cascade`
+      read that count and retried with it. A move carried the hole the same way.
+      `copySubtree` walked the whole subtree too and copied no `object_access` row, so the copy
+      of the hole inherited the caller's `write`. That exposed names, hosts, settings and
+      triggers, and the hidden sensors' `writeOnly` parameters (SNMP communities and v3 keys, a
+      script's `secret`) on a device the caller could point anywhere. It also dropped every other
+      group's carve-out on whatever it copied. A clone with no `targetParentId` landed in the
+      source's parent with no check at all. `onBodyObject`'s doc said there was "no second object
+      to have a right on", and `write` granted on the source says nothing about its parent.
+
+      **Done when:**
+      - a delete or a move needs `write` on everything it takes, and its refusal counts nothing;
+      - a clone copies only what its caller can see, keeps the grants on what it copies, and
+        counts only that;
+      - a clone made in place needs `write` where it lands;
+      - the bulk route does the same per id;
+      - each is asserted against a hole.
+
+      **A-35 outcome.**
+      - **Refused, not partly done.** A delete cannot leave a child without its parent, and a
+        move cannot leave one behind. So a subtree holding anything the caller may not change,
+        `none` or `read`, is refused whole.
+        - `onSubtree('write')` declares this on `DELETE /objects/:id` and on the source of
+          `POST /objects/:id/move`.
+        - `AccessService.resolveSubtreesFor` answers it by resolving only the caller's boundaries
+          inside the subtree, with `resolveManyFor`. Nothing changes between two boundaries, so
+          the set is the size of the grants, not of the subtree. An administrator short-circuits.
+        - The bulk route asks the same question for `delete` and `move`, in one query for the
+          whole selection.
+      - **The refusal says there is something, and nothing more** (`A-16`). It gives no count, no
+        name and no right, because `none` against `read` would say which objects there are to
+        find. It comes before the handler, so `OBJECT_NOT_EMPTY` and `OBJECT_SUBTREE_CHANGED` are
+        reached only by a caller who may change the whole subtree, and who can see everything they
+        count. A bulk row says "this account may not change everything beneath that object".
+      - **A clone copies what its maker can see**, rather than being refused. Its source
+        survives, and the caller asked for a copy of what they see.
+        - `copySubtree` takes the caller's visibility and stops its walk at every hidden child
+          (`whereChildOfVisible`). A hole is neither copied nor counted. A grant that re-opens
+          something deeper inside a hole is not copied either, since a copy cannot hold a child
+          without its parent.
+        - The copied objects' grants, every group's, are copied the way their settings are: own
+          rows only, `granted_by` included. Each one is a `grant.set` entry by the cloner, beside
+          `object.cloned`.
+        - The insert is skipped when there is nothing to carry, because it bumps the access
+          epoch whether or not it inserts anything.
+        - `ObjectService.clone` and `BulkService.apply` take the visibility as a required
+          argument, as `list` does.
+      - **A clone made in place needs `write` on the source's parent**, as `POST /objects` does.
+        The check is a `derived` part that returns nothing when the body names a destination.
+        `onBodyObject`'s doc no longer says there is no second object.
+      - **Not changed: inheritance.** A pause or a setting on a container still reaches its
+        holes, as every inherited value does, and stores nothing on them.
+        `administration.md` says so beside the new rules.
+
+      Tests:
+      - 3 new in `object-visibility.test.ts`, on a tenancy with a hole in it:
+        - With the hole `none` and then `read`, the operator is refused on every delete, whether
+          or not it names the true count; on the move; and on both in bulk. The refusal names
+          nothing, and every object survives. With the hole closed, the move and a plain delete
+          work.
+        - Direct, in-place and bulk clones copy the two visible sensors and count 3, not 4.
+          Another group's `none` and the operator's own `read` travel with the copies, and the
+          operator holds `read` on the read-only copy, not `write` from where it landed. Each
+          carried grant is audited. An administrator's clone copies the hole, and it is still a
+          hole to the team.
+        - An in-place clone of the fixture's `write` device, whose parent is `read`, is refused
+          with or without a body, and is allowed once the parent is `write`.
+      - 2 new in `access-rights.test.ts`:
+        - `resolveSubtreesFor` agrees with the minimum of `resolveManyFor` over every subtree:
+          80 seeds, four principals, and more than thirty subtrees weaker than their top.
+        - An administrator gets its ceiling beneath a hole, and a read token caps it.
+
+      Mutation 8/8, each caught by the test written for it:
+      - the route ignoring `subtree`;
+      - the bulk route partitioning by the object alone;
+      - `resolveSubtreesFor` ignoring its boundaries, or seeing only those two levels down;
+      - the clone walk admitting hidden children;
+      - the clone carrying no grants, or auditing none;
+      - the in-place clone unchecked.
+
+      The first attempt at the walk mutant dropped a bound placeholder, so the clone answered 500.
+      It was caught for the wrong reason and was rewritten.
+
+      **Found on the way, not fixed here:** an in-place `POST /objects/:id/clone` with no body is
+      answered 400 "body must be object", although the route's own comment says a bodiless clone
+      is legitimate. `{}` works.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

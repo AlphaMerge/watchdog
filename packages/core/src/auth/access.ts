@@ -93,6 +93,14 @@ const DENIED: ResolvedAccess = {
   viaAdminGroup: false,
 };
 
+/** What a principal may do to an object, and the least it may do anywhere beneath it (`A-35`). */
+export interface SubtreeAccess {
+  /** On the object itself: `resolveManyFor`'s answer. */
+  own: AccessRight;
+  /** The weakest right on the object or on anything in the subtree beneath it. */
+  weakest: AccessRight;
+}
+
 /** Who a right is resolved for: an account, its role, and the scope of the credential in use. */
 export interface AccessPrincipal {
   userId: number;
@@ -634,6 +642,103 @@ export class AccessService {
     const capped = new Map<number, AccessRight>();
     for (const [id, right] of granted) capped.set(id, ceilingFor(principal, right));
     return capped;
+  }
+
+  /**
+   * What this principal may do to each object, and the least it may do anywhere beneath it
+   * (`A-35`).
+   *
+   * For the changes that take a whole subtree with them. A delete destroys everything beneath
+   * the object and a move carries it, so `write` on the object alone is the wrong question: an
+   * operator with `write` on a device whose sensor was carved `none` was refused that sensor,
+   * and then destroyed it by deleting the device.
+   *
+   * **Only the principal's boundaries are resolved.** Between two of them every group's nearest
+   * grant is the same row (`boundariesOf`), so the rights held anywhere in a subtree are the
+   * right on its top and the rights on the boundaries inside it. That is a set the size of the
+   * grants, however many sensors the subtree holds, and `resolveManyFor` resolves it, so this
+   * cannot disagree with that method about any one object.
+   *
+   * An administrator short-circuits, as in `resolve`, and nothing is walked.
+   */
+  async resolveSubtreesFor(
+    principal: AccessPrincipal,
+    objectIds: readonly number[],
+    q: Queryable = this.#db,
+  ): Promise<Map<number, SubtreeAccess>> {
+    const result = new Map<number, SubtreeAccess>();
+    if (objectIds.length === 0) return result;
+
+    const admin = await q.query<{ admin: boolean }>(`SELECT ${administers('$1')} AS admin`, [
+      principal.userId,
+    ]);
+    if (admin[0]?.admin === true) {
+      const right = ceilingFor(principal, 'full');
+      for (const id of objectIds) result.set(id, { own: right, weakest: right });
+      return result;
+    }
+
+    const inside = await q.query<{ top: string; boundary: string }>(
+      `
+      WITH RECURSIVE subtree AS (
+        SELECT id AS top, id, 0 AS depth FROM object WHERE id = ANY($2::bigint[])
+
+        UNION ALL
+
+        SELECT subtree.top, c.id, subtree.depth + 1
+        FROM object c
+        JOIN subtree ON c.parent_id = subtree.id
+        WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT DISTINCT s.top::text AS top, s.id::text AS boundary
+      FROM subtree s
+      WHERE s.depth > 0 AND s.id = ANY(${boundariesOf('$1')})
+      `,
+      [principal.userId, [...objectIds]],
+    );
+
+    const beneath = new Map<number, number[]>();
+    const asked = new Set<number>(objectIds);
+    for (const row of inside) {
+      const top = Number(row.top);
+      const boundary = Number(row.boundary);
+      beneath.set(top, [...(beneath.get(top) ?? []), boundary]);
+      asked.add(boundary);
+    }
+
+    const rights = await this.resolveManyFor(principal, [...asked], q);
+    for (const id of objectIds) {
+      const own = rights.get(id) ?? 'none';
+      let weakest = own;
+      for (const boundary of beneath.get(id) ?? []) {
+        weakest = lower(weakest, rights.get(boundary) ?? 'none');
+      }
+      result.set(id, { own, weakest });
+    }
+    return result;
+  }
+
+  /**
+   * Throws unless the principal holds this right on the object and on everything beneath it
+   * (`A-35`).
+   *
+   * **The refusal says that there is something, and never what or how much** (`A-16`). It names
+   * no object, no count and no right: whether the hole is `none` or `read` would tell the caller
+   * which objects there are to find.
+   */
+  async requireSubtreeFor(
+    principal: AccessPrincipal,
+    objectId: number,
+    needed: AccessRight,
+    q: Queryable = this.#db,
+  ): Promise<void> {
+    const resolved = (await this.resolveSubtreesFor(principal, [objectId], q)).get(objectId);
+    if (resolved !== undefined && atLeast(resolved.weakest, needed)) return;
+    throw new AuthError(
+      'AUTH_FORBIDDEN',
+      `this action needs ${needed} on everything beneath that object, and this account does not hold it on all of it`,
+      { objectId, needed, reach: 'subtree' },
+    );
   }
 
   /**

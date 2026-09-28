@@ -1,6 +1,7 @@
 import { describeError, type Logger } from '@ms/shared';
 import { ObjectError } from './errors.js';
 import type { ObjectService } from './service.js';
+import type { Visibility } from '../auth/access.js';
 import type { Actor } from './audit.js';
 import type { ObjectId } from './types.js';
 import type { PauseRequest } from '../state/pause.js';
@@ -105,10 +106,15 @@ export class BulkService {
     this.#logger = options.logger.child({ component: 'bulk' });
   }
 
+  /**
+   * `visibility` is the caller's, for the one operation that reads beneath what it names: a
+   * clone copies only what its caller can see (`A-35`). Required for the reason `list`'s is.
+   */
   async apply(
     actor: Actor,
     ids: readonly ObjectId[],
     operation: BulkOperation,
+    visibility: Visibility,
   ): Promise<BulkReport> {
     // Collapsed rather than refused: a tree UI can hand the same id over twice — a row selected
     // and its ancestor's "select all" — and applying an operation twice is at best wasted work
@@ -139,7 +145,7 @@ export class BulkService {
         outcomes.push({
           objectId: id,
           ok: true,
-          ...(await this.#one(actor, id, operation, alreadyGone)),
+          ...(await this.#one(actor, id, operation, visibility, alreadyGone)),
         });
       } catch (error) {
         outcomes.push({
@@ -171,6 +177,7 @@ export class BulkService {
     actor: Actor,
     id: ObjectId,
     operation: BulkOperation,
+    visibility: Visibility,
     alreadyGone: Set<ObjectId>,
   ): Promise<Partial<BulkOutcome>> {
     switch (operation.kind) {
@@ -184,9 +191,12 @@ export class BulkService {
         await this.#objects.move(actor, id, operation.targetParentId, { kind: 'none' });
         return {};
       case 'clone': {
-        const result = await this.#objects.clone(actor, id, {
-          targetParentId: operation.targetParentId,
-        });
+        const result = await this.#objects.clone(
+          actor,
+          id,
+          { targetParentId: operation.targetParentId },
+          visibility,
+        );
         return { createdId: result.object.id };
       }
       case 'setting':

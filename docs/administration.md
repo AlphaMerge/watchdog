@@ -71,6 +71,18 @@ A few consequences are worth knowing before somebody reports them as bugs:
   Revoking the maker's grant, or disabling the account, narrows or blanks every link it made. A
   link made before this rule existed, by a login that has since been renamed or deleted, is blank
   after the upgrade for the same reason: nobody is left to see through. Make a new one.
+- **Deleting or moving an object needs `write` on everything beneath it.** A delete destroys the
+  subtree and a move carries it, so `write` on a device is not enough when a sensor beneath it
+  was carved `none`, or granted only `read`. The refusal says there is something beneath that
+  the account may not change, and never what or how much. An administrator, or a grant that
+  closes the hole, is how such a subtree is deleted or moved.
+- **A clone copies what its maker can see.** A hole beneath the source is left out and not
+  counted. The copy keeps the source's own grants, every group's, so a hole carved for somebody
+  else is still a hole in the copy. A clone made in place lands in the source's parent, and needs
+  `write` there as a clone into any other parent does.
+- **A pause or a setting on a container still reaches into its holes**, as every inherited value
+  does. It stores nothing on the hidden objects, and acknowledging or forcing an error on the
+  container reaches only the sensors its caller can see.
 - **The history of a deleted sensor is visible to administrators only.** Nothing records which
   branch it was in, so there is no grant left to read it through.
 - **A change of grant reaches an open page at the next state change.** The live stream checks for

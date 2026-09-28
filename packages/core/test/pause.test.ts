@@ -24,6 +24,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -524,9 +525,14 @@ describe(
       // S-03. A clone carries its source's configuration and none of its credentials, so
       // scanning immediately would be a burst of authentication failures on a device an
       // operator has not finished setting up.
-      const clone = await h.service.clone(testActor, deviceId, {
-        name: `clone-${String(process.hrtime.bigint())}`,
-      });
+      const clone = await h.service.clone(
+        testActor,
+        deviceId,
+        {
+          name: `clone-${String(process.hrtime.bigint())}`,
+        },
+        Visibility.EVERYTHING,
+      );
       const view = await h.service.pauseState(clone.object.id);
       assert.equal(view.paused, true);
       assert.equal(view.resumable, true);

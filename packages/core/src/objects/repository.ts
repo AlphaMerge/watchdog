@@ -1,6 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
-import type { Visibility } from '../auth/access.js';
+import type { AccessRight, Visibility } from '../auth/access.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
 import { SENSOR_STATES, type SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
@@ -185,6 +185,15 @@ function toSummary(row: SummaryRow): ObjectSummary {
     ...(row.state === null ? {} : { state: row.state }),
     ...(row.paused ? { paused: true } : {}),
   };
+}
+
+/** A grant a clone carried from its source onto one of the copies (`A-35`). */
+export interface CopiedGrant {
+  /** The copy it now sits on. */
+  objectId: ObjectId;
+  groupId: number;
+  groupName: string;
+  right: AccessRight;
 }
 
 /**
@@ -1424,6 +1433,17 @@ export class ObjectRepository {
    * statements rather than 5,000 round trips.
    *
    * Never reads `credential_set.secret`, and never copies a credential row at all.
+   *
+   * **Only what `visibility` sees is copied** (`A-35`), and the source must be visible to it —
+   * the route's `write` on the source is what makes it so. The walk stops at every hidden child,
+   * so a `none` carved beneath the source is neither copied nor counted: copied, it would be a
+   * readable, writable duplicate of a hole, carrying the hidden sensors' `writeOnly` parameters,
+   * and the count would say how many objects the hole holds.
+   *
+   * **The grants on the copied objects are copied too**, every group's, as their settings are:
+   * own rows only, so the copy inherits from where it lands and keeps the exceptions its source
+   * was given. Without them a `none` carved for another group on something the caller can see
+   * vanished from the copy, and that group read it. They are returned for the audit.
    */
   async copySubtree(
     q: Queryable,
@@ -1431,7 +1451,13 @@ export class ObjectRepository {
     targetParentId: ObjectId,
     rootName: string,
     maxObjects: number,
-  ): Promise<{ cloneRootId: ObjectId; counts: CloneCounts; droppedCredentialKinds: string[] }> {
+    visibility: Visibility,
+  ): Promise<{
+    cloneRootId: ObjectId;
+    counts: CloneCounts;
+    droppedCredentialKinds: string[];
+    grants: CopiedGrant[];
+  }> {
     // Suppresses the ETag bump on side-table inserts: these objects are seconds old and no
     // client holds a validator for them. O(rows) extra UPDATEs become zero.
     await q.query(`SET LOCAL ms.bulk_load = 'on'`);
@@ -1447,6 +1473,13 @@ export class ObjectRepository {
       ) ON COMMIT DROP
     `);
 
+    // Every row the walk admits has a visible parent, which is the one shape
+    // `whereChildOfVisible` answers for without a walk of its own.
+    const walkValues: unknown[] = [sourceId];
+    const seen = visibility.whereChildOfVisible(
+      'c.id',
+      (value) => `$${String(walkValues.push(value))}`,
+    );
     await q.query(
       `
       WITH RECURSIVE src AS (
@@ -1454,12 +1487,12 @@ export class ObjectRepository {
         UNION ALL
         SELECT c.id, c.parent_id, src.depth + 1
         FROM object c JOIN src ON c.parent_id = src.id
-        WHERE src.depth < ${String(MAX_WALK_DEPTH)}
+        WHERE src.depth < ${String(MAX_WALK_DEPTH)} AND ${seen}
       )
       INSERT INTO clone_map (src_id, new_id, depth)
       SELECT id, nextval(pg_get_serial_sequence('object', 'id')), depth FROM src
       `,
-      [sourceId],
+      walkValues,
     );
 
     const sizeRows = await q.query<{ count: string; max_depth: number }>(
@@ -1558,6 +1591,34 @@ export class ObjectRepository {
       SELECT count(*) AS count FROM inserted
     `);
 
+    // Asked before it is written because the insert bumps the access epoch whether or not it
+    // inserts anything (migration 052), and most clones carry no grant at all: a bulk clone of
+    // five hundred devices would otherwise send every open stream back to re-resolve.
+    const granted = await q.query<{ any: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1 FROM object_access a JOIN clone_map m ON m.src_id = a.object_id
+      ) AS any
+    `);
+    const grantRows =
+      granted[0]?.any === true
+        ? await q.query<{
+            object_id: string;
+            group_id: string;
+            name: string;
+            right_: AccessRight;
+          }>(`
+            WITH inserted AS (
+              INSERT INTO object_access (object_id, group_id, right_, granted_by)
+              SELECT m.new_id, a.group_id, a.right_, a.granted_by
+              FROM clone_map m JOIN object_access a ON a.object_id = m.src_id
+              RETURNING object_id, group_id, right_
+            )
+            SELECT i.object_id::text AS object_id, i.group_id::text AS group_id, g.name, i.right_
+            FROM inserted i JOIN user_group g ON g.id = i.group_id
+            ORDER BY i.object_id, lower(g.name)
+          `)
+        : [];
+
     const droppedRows = await q.query<{ kind: string }>(`
       SELECT DISTINCT cs.kind
       FROM credential_set cs JOIN clone_map m ON m.src_id = cs.object_id
@@ -1588,6 +1649,12 @@ export class ObjectRepository {
       cloneRootId: Number(rootRows[0]?.new_id),
       counts,
       droppedCredentialKinds: droppedRows.map((row) => row.kind),
+      grants: grantRows.map((row) => ({
+        objectId: Number(row.object_id),
+        groupId: Number(row.group_id),
+        groupName: row.name,
+        right: row.right_,
+      })),
     };
   }
 
