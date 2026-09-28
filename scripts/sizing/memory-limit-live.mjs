@@ -12,11 +12,15 @@
 // set so the working set is 85% of it (the warning); with the ceiling below the working set and
 // swap available, which is the installed unit on a host with swap; and the same with
 // `MemorySwapMax=0`, held for two, followed by the installed ceiling again to see whether the
-// probe comes back.
+// probe comes back. Under a start limit (`P-215`) a probe killed at every start ends in `failed`
+// instead, and each restore then starts it again by hand, as an operator would. Last, with the
+// probe's stages done, two of the core's (`P-215`): started ahead of a stopped PostgreSQL, held
+// past `TimeoutStartSec`, which shows whether it waits or is killed; and started with a
+// configuration it refuses, which shows whether it stops at once or restarts into the refusal.
 // Every five seconds it records what systemd and the kernel say about the service, what the core's
 // live route says, and the sensor's state; at the end, what the sweep stored in `sample`.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const API = 'http://127.0.0.1:8080/api/v1';
 const TOKEN = process.env.MS_TOKEN;
@@ -47,10 +51,18 @@ async function api(method, path, body) {
 }
 
 // ---- What systemd and the kernel say about the probe's service. ----
-/** The unit's main process, how often it has been restarted, and why it last stopped. */
-function unit() {
+/**
+ * A unit's main process, how often it has been restarted, why it last stopped, and what it last
+ * told systemd — `STATUS=`, which is where the core says what it is waiting for (`P-215`).
+ */
+function unit(name = 'ms-probe') {
   const fields = Object.fromEntries(
-    sh('systemctl', ['show', '-p', 'MainPID,NRestarts,ActiveState,SubState,Result', 'ms-probe'])
+    sh('systemctl', [
+      'show',
+      '-p',
+      'MainPID,NRestarts,ActiveState,SubState,Result,StatusText,ExecMainStatus',
+      name,
+    ])
       .split('\n')
       .map((entry) => [entry.slice(0, entry.indexOf('=')), entry.slice(entry.indexOf('=') + 1)]),
   );
@@ -59,7 +71,29 @@ function unit() {
     restarts: Number(fields.NRestarts),
     state: `${fields.ActiveState}/${fields.SubState}`,
     result: fields.Result,
+    exitStatus: Number(fields.ExecMainStatus),
+    status: fields.StatusText,
   };
+}
+/** A `systemctl` that may fail, recorded rather than thrown: failing is often the finding. */
+function tryCtl(args) {
+  try {
+    sh('systemctl', args);
+    return null;
+  } catch (error) {
+    return String(error.stderr ?? error).trim();
+  }
+}
+/**
+ * Starts a unit systemd has given up on, the way an operator must after `P-215`'s start limit:
+ * `reset-failed`, then `start`. A unit still going round needs neither, and gets neither.
+ */
+function revive(name) {
+  const before = unit(name);
+  if (!before.state.startsWith('failed')) return;
+  tryCtl(['reset-failed', name]);
+  const error = tryCtl(['start', '--no-block', name]);
+  emit({ kind: 'revive', unit: name, was: before.state, result: before.result, error });
 }
 /**
  * The service's cgroup directory, from its main process. Read from `/proc` rather than from
@@ -271,6 +305,7 @@ await stage('ceiling at 85%', HOLD_MS);
 setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
 await stage('ceiling below the working set, swap available', HOLD_MS);
 restore();
+revive('ms-probe');
 await stage('restored', 30_000);
 setProperty('MemorySwapMax=0');
 setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
@@ -279,6 +314,7 @@ setProperty(`${CEILING}=${String(Math.floor(workingSet() * 0.9))}`);
 await stage('ceiling below the working set, no swap', 2 * HOLD_MS);
 restore();
 setProperty('MemorySwapMax=infinity');
+revive('ms-probe');
 await stage('restored', HOLD_MS);
 
 // ---- What the sweep stored. ----
@@ -320,7 +356,9 @@ for (const entry of journal.split('\n')) {
   const match = /^(\d+\.\d+) \S+ ([^:]+): (.*)$/.exec(entry);
   if (
     match === null ||
-    !/oom|OOM|watchdog|Watchdog|result|restart|killed|Started|Main process/.test(match[3])
+    !/oom|OOM|watchdog|Watchdog|result|restart|killed|Started|Main process|too quickly|start-limit/.test(
+      match[3],
+    )
   )
     continue;
   emit({
@@ -328,5 +366,109 @@ for (const entry of journal.split('\n')) {
     at: Math.round((Number(match[1]) * 1_000 - start) / 100) / 10,
     from: match[2],
     message: match[3],
+  });
+}
+
+// ---- P-215: the core's two start-up cases. Last, because both stop things the stages above need. ----
+/** Polls a unit every two seconds for `hold`, or until `done` says so. */
+async function watch(name, stageName, hold, done = () => false) {
+  emit({ kind: 'stage', stage: stageName });
+  const until = Date.now() + hold;
+  for (;;) {
+    const now = unit(name);
+    emit({ kind: 'unit', stage: stageName, unit: name, ...now });
+    if (done(now) || Date.now() >= until) return now;
+    await sleep(2_000);
+  }
+}
+
+// A core started ahead of its database. Held for ninety seconds — past `TimeoutStartSec=60` — so
+// that a wait without `EXTEND_TIMEOUT_USEC` would be killed here and show as a restart.
+tryCtl(['stop', 'ms-core']);
+tryCtl(['stop', 'postgresql']);
+const coreBefore = unit('ms-core').restarts;
+tryCtl(['start', '--no-block', 'ms-core']);
+const waited = await watch('ms-core', 'core started, database stopped', 90_000);
+tryCtl(['start', 'postgresql']);
+const cameUp = await watch(
+  'ms-core',
+  'database started',
+  90_000,
+  (now) => now.state === 'active/running',
+);
+emit({
+  kind: 'verdict',
+  case: 'core waits for its database',
+  stateAt90s: waited.state,
+  statusAt90s: waited.status,
+  restartsWhileWaiting: waited.restarts - coreBefore,
+  finalState: cameUp.state,
+});
+
+// A configuration the core refuses. Twenty seconds is four `RestartSec`s: a unit that restarted
+// into the refusal would show it here.
+const configFile = '/etc/ms/core.json';
+const original = readFileSync(configFile, 'utf8');
+const refusedBefore = unit('ms-core').restarts;
+try {
+  writeFileSync(configFile, '{ "this is": not json');
+  emit({ kind: 'set', property: `${configFile} made unreadable` });
+  tryCtl(['restart', 'ms-core']);
+  const refused = await watch('ms-core', 'configuration refused', 20_000);
+  emit({
+    kind: 'verdict',
+    case: 'a refused configuration stops at once',
+    state: refused.state,
+    exitStatus: refused.exitStatus,
+    restarts: refused.restarts - refusedBefore,
+  });
+} finally {
+  writeFileSync(configFile, original);
+  emit({ kind: 'set', property: `${configFile} restored` });
+}
+revive('ms-core');
+await watch('ms-core', 'configuration restored', 60_000, (now) => now.state === 'active/running');
+
+// Whether an operator's own restarts count against the limit. Six in quick succession, the way
+// somebody debugging does them: if the sixth is refused, `administration.md` has to say so.
+tryCtl(['reset-failed', 'ms-probe']);
+const manual = [];
+for (let attempt = 1; attempt <= 6; attempt += 1) {
+  const error = tryCtl(['restart', 'ms-probe']);
+  manual.push({ attempt, refused: error !== null, error: error?.slice(0, 200) ?? null });
+  await sleep(1_000);
+}
+emit({
+  kind: 'verdict',
+  case: 'manual restarts count toward the limit',
+  attempts: manual,
+  after: unit('ms-probe').state,
+});
+tryCtl(['reset-failed', 'ms-probe']);
+tryCtl(['start', '--no-block', 'ms-probe']);
+
+const coreJournal = sh('journalctl', [
+  '-u',
+  'ms-core',
+  '--no-pager',
+  '--output=short-unix',
+  '--since',
+  `@${String(Math.floor(start / 1_000))}`,
+]);
+for (const entry of coreJournal.split('\n')) {
+  const match = /^(\d+\.\d+) \S+ ([^:]+): (.*)$/.exec(entry);
+  if (
+    match === null ||
+    !/waiting for PostgreSQL|database is reachable|gave up waiting|result|restart|too quickly|Configuration error|Started|status=78/.test(
+      match[3],
+    )
+  )
+    continue;
+  emit({
+    kind: 'journal',
+    unit: 'ms-core',
+    at: Math.round((Number(match[1]) * 1_000 - start) / 100) / 10,
+    from: match[2],
+    message: match[3].slice(0, 400),
   });
 }

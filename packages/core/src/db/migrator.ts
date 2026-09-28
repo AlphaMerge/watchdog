@@ -48,6 +48,38 @@ export interface MigrationStatus {
 
 const LOCK_KEY = 4_919_201_5; // arbitrary but fixed: advisory lock namespace for schema changes
 
+/** How often a running migration says it is still running. */
+const PROGRESS_INTERVAL_MS = 15_000;
+
+/** One migration under way: which, and for how long so far. */
+export interface MigrationProgress {
+  readonly migration: Migration;
+  readonly elapsedMs: number;
+}
+
+export interface MigratorOptions {
+  readonly db: Database;
+  readonly logger: Logger;
+  readonly migrations: readonly Migration[];
+  /**
+   * Called as each migration starts and then every `progressIntervalMs` until it ends (`P-215`).
+   *
+   * **A migration at start-up is a start the supervisor can kill.** `autoMigrate` is on by
+   * default, so every upgrade migrates inside `TimeoutStartSec`, and a migration longer than that
+   * — an index on the samples hypertable of a large installation — was killed mid-way, restarted
+   * into the same migration and killed again: an upgrade that could never finish. The core wires
+   * this to `Lifecycle.starting`, which keeps systemd waiting and puts the migration's name in
+   * `systemctl status`.
+   *
+   * **Repeated for as long as it runs, not one slice per migration.** A fixed extension per
+   * migration only moves the deadline: a migration longer than the slice is killed exactly as
+   * before. A migration that is genuinely stuck — waiting on a lock — is then stuck in plain view,
+   * named, with its elapsed time, rather than killed half-way and started again.
+   */
+  readonly onProgress?: (progress: MigrationProgress) => void;
+  readonly progressIntervalMs?: number;
+}
+
 function checksum(migration: Migration): string {
   return createHash('sha256')
     .update(`${String(migration.id)}\n${migration.name}\n${migration.up}`)
@@ -66,9 +98,13 @@ export class Migrator {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #migrations: readonly Migration[];
+  readonly #onProgress: ((progress: MigrationProgress) => void) | undefined;
+  readonly #progressIntervalMs: number;
 
-  constructor(options: { db: Database; logger: Logger; migrations: readonly Migration[] }) {
+  constructor(options: MigratorOptions) {
     this.#db = options.db;
+    this.#onProgress = options.onProgress;
+    this.#progressIntervalMs = options.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
     this.#logger = options.logger.child({ component: 'migrator' });
     this.#migrations = [...options.migrations].sort((a, b) => a.id - b.id);
 
@@ -217,6 +253,20 @@ export class Migrator {
     const startedAt = process.hrtime.bigint();
     const record = `INSERT INTO schema_migration (id, name, checksum) VALUES ($1, $2, $3)`;
     const values = [migration.id, migration.name, checksum(migration)];
+    const elapsedMs = (): number => Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+    this.#logger.info({ id: migration.id, name: migration.name }, 'applying migration');
+    this.#onProgress?.({ migration, elapsedMs: 0 });
+    const progress = setInterval(() => {
+      const elapsed = elapsedMs();
+      this.#logger.info(
+        { id: migration.id, name: migration.name, elapsedMs: Math.round(elapsed) },
+        'migration still running',
+      );
+      this.#onProgress?.({ migration, elapsedMs: elapsed });
+    }, this.#progressIntervalMs);
+    // A timer must not be what keeps a process alive whose migration has already thrown.
+    progress.unref();
 
     try {
       if (migration.transactional === false) {
@@ -233,14 +283,12 @@ export class Migrator {
         context: { id: migration.id, name: migration.name, direction: 'up' },
         cause,
       });
+    } finally {
+      clearInterval(progress);
     }
 
     this.#logger.info(
-      {
-        id: migration.id,
-        name: migration.name,
-        elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1e6,
-      },
+      { id: migration.id, name: migration.name, elapsedMs: elapsedMs() },
       'migration applied',
     );
   }

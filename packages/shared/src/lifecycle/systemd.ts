@@ -21,6 +21,19 @@ export interface ServiceNotifier {
   watchdog(): void;
   stopping(status?: string): void;
   status(text: string): void;
+  /**
+   * Ask for more time to finish starting (`P-215`), as `EXTEND_TIMEOUT_USEC`.
+   *
+   * `TimeoutStartSec` is a single deadline, and a service that is legitimately waiting — for a
+   * database still in crash recovery — would otherwise be killed at it and counted as a failed
+   * start. This does not buy unlimited time: the service must send it again before `ms` runs
+   * out, so a wait that stops making progress still ends at systemd's hand. Needs systemd 236.
+   *
+   * The status travels in the same datagram, because every call here is its own spawn and two
+   * spawns are not ordered: `systemctl status` could otherwise show the previous attempt's reason
+   * beside this attempt's deadline.
+   */
+  extendTimeout(ms: number, status?: string): void;
 }
 
 const NOOP_NOTIFIER: ServiceNotifier = {
@@ -29,6 +42,7 @@ const NOOP_NOTIFIER: ServiceNotifier = {
   watchdog: () => undefined,
   stopping: () => undefined,
   status: () => undefined,
+  extendTimeout: () => undefined,
 };
 
 function send(args: string[], logger: Logger): void {
@@ -57,6 +71,16 @@ export function createServiceNotifier(logger: Logger, env = process.env): Servic
     },
     status: (text) => {
       send([pidArg, `STATUS=${text}`], logger);
+    },
+    extendTimeout: (ms, status) => {
+      send(
+        [
+          pidArg,
+          `EXTEND_TIMEOUT_USEC=${String(Math.max(0, Math.round(ms)) * 1000)}`,
+          ...(status === undefined ? [] : [`STATUS=${status}`]),
+        ],
+        logger,
+      );
     },
   };
 }

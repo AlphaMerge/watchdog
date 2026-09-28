@@ -110,6 +110,18 @@ export class Lifecycle {
     });
   }
 
+  /**
+   * Says the service is still starting and why, and asks the supervisor for `ms` more (`P-215`).
+   *
+   * For a start that is *waiting* rather than failing — the core on a database in crash recovery.
+   * Without it, `TimeoutStartSec` ends the wait and systemd counts a failed start, which is the
+   * count a start limit acts on: a database slow to recover would look exactly like a service
+   * that can never start. Call it again before `ms` runs out, or the supervisor stops waiting.
+   */
+  starting(status: string, ms: number): void {
+    this.#notifier.extendTimeout(ms, status);
+  }
+
   /** Signals readiness to the supervisor and starts the watchdog heartbeat. */
   ready(status?: string): void {
     this.#notifier.ready(status);

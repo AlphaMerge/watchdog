@@ -12,6 +12,7 @@ import {
   readMachineMemory,
   runConfigCheck,
   type CoreConfig,
+  type Lifecycle,
   type Logger,
 } from '@ms/shared';
 import { sensorTypesFor, standardCatalogue, withheldReason } from '@ms/sensors';
@@ -80,6 +81,7 @@ import { Database } from './db/pool.js';
 import { Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
 import { refuseSchema } from './db/schema-gate.js';
+import { waitForDatabase } from './db/wait.js';
 import { loadLookups } from './lookups/loader.js';
 import { loadDeviceTemplates } from './device-templates/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
@@ -182,14 +184,37 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return { command: 'serve', migrateAction: 'status', steps: 1 };
 }
 
+/** How often a migration running at start-up reports that it still is (`P-215`). */
+const MIGRATION_PROGRESS_MS = 15_000;
+
+/**
+ * How much more start-up time each report asks for: three reports' worth, so a single late tick
+ * cannot let `TimeoutStartSec` land mid-migration.
+ */
+const MIGRATION_EXTEND_MS = 3 * MIGRATION_PROGRESS_MS;
+
 /**
  * Brings the schema up to date at start-up when `database.autoMigrate` is set.
  *
  * Failing to migrate is fatal. A core running against a schema it does not understand writes
  * data it cannot read back, and that is worse than not starting.
  */
-async function migrateOnStart(db: Database, logger: Logger): Promise<void> {
-  const migrator = new Migrator({ db, logger, migrations: MIGRATIONS });
+async function migrateOnStart(db: Database, logger: Logger, lifecycle: Lifecycle): Promise<void> {
+  const migrator = new Migrator({
+    db,
+    logger,
+    migrations: MIGRATIONS,
+    progressIntervalMs: MIGRATION_PROGRESS_MS,
+    // **An upgrade must be able to finish** (`P-215`). Each report asks systemd for three
+    // intervals more, so one late timer tick never costs a migration half-applied.
+    onProgress: ({ migration, elapsedMs }) => {
+      lifecycle.starting(
+        `applying migration ${String(migration.id)} (${migration.name}), ` +
+          `${String(Math.round(elapsedMs / 1000))} s so far`,
+        MIGRATION_EXTEND_MS,
+      );
+    },
+  });
   const { applied } = await migrator.up();
   if (applied.length === 0) logger.debug('schema already up to date');
 }
@@ -213,7 +238,20 @@ async function serve(): Promise<void> {
   const db = new Database({ config: config.database, logger });
   lifecycle.onShutdown({ name: 'database', timeoutMs: 5_000, run: () => db.close() });
 
-  const { serverVersion } = await db.check();
+  // **Waited for, not merely tried** (`P-215`). This is the one start-time failure of the core that
+  // waiting fixes — a database still in crash recovery, or started a moment after us — and until
+  // it was waited for here, systemd's restart every five seconds was the only thing waiting for
+  // it. That made a start limit unsafe: it would stop a core with a slow database exactly as it
+  // stops one that can never fit under its memory ceiling.
+  const { serverVersion } = await waitForDatabase({
+    check: () => db.check(),
+    logger,
+    target: db.description,
+    attemptTimeoutMs: config.database.connectTimeoutMs,
+    starting: (status, ms) => {
+      lifecycle.starting(status, ms);
+    },
+  });
   const store = new SqlTimeSeriesStore();
   // Which engine, and what it can do. Reported rather than assumed: a database started under
   // the Apache licence has no compaction, and the housekeeping loop needs to know that before
@@ -230,7 +268,7 @@ async function serve(): Promise<void> {
   );
 
   if (config.database.autoMigrate) {
-    await migrateOnStart(db, logger);
+    await migrateOnStart(db, logger, lifecycle);
   } else {
     // Refusing to start is the safe failure: the alternative is running against a schema this
     // build was not written for. `refuseSchema` knows all three ways that happens (`H-03`).

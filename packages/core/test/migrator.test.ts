@@ -294,3 +294,87 @@ describe(
     });
   },
 );
+
+/**
+ * `P-215`: a migration at start-up is a start the supervisor can kill, so it reports progress for
+ * as long as it runs. A fixed slice per migration would only have moved the deadline.
+ */
+describe(
+  'a migration that runs long',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let db: Database;
+
+    before(async () => {
+      scratch = await createScratchDatabase('migratorprogress');
+      db = scratch.db;
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    it('reports as it starts and then on every interval until it ends, and never after', async () => {
+      const slow: Migration = {
+        id: 9101,
+        name: 'slow',
+        up: 'SELECT pg_sleep(0.45); CREATE TABLE slow_thing (id int PRIMARY KEY)',
+        down: 'DROP TABLE slow_thing',
+      };
+      const reports: { id: number; elapsedMs: number }[] = [];
+      const subject = new Migrator({
+        db,
+        logger: silentLogger,
+        migrations: [slow],
+        progressIntervalMs: 100,
+        onProgress: ({ migration, elapsedMs }) => {
+          reports.push({ id: migration.id, elapsedMs });
+        },
+      });
+
+      await subject.up();
+      const atEnd = reports.length;
+
+      assert.deepEqual(reports[0], { id: 9101, elapsedMs: 0 }, 'one report before any work');
+      // 450 ms of work at a 100 ms interval: at least three more, however busy the database is.
+      assert.ok(atEnd >= 4, `expected reports throughout, got ${String(atEnd)}`);
+      const elapsed = reports.map((report) => report.elapsedMs);
+      assert.deepEqual(
+        elapsed,
+        [...elapsed].sort((a, b) => a - b),
+        'elapsed time only goes forward',
+      );
+
+      // And the timer is gone: a report after the migration ended would keep extending a start
+      // that is no longer migrating.
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.equal(reports.length, atEnd);
+      assert.ok(await tableExists(db, 'slow_thing'));
+    });
+
+    it('stops reporting when a migration fails, too', async () => {
+      const broken: Migration = {
+        id: 9102,
+        name: 'broken',
+        up: 'SELECT pg_sleep(0.25); SELECT * FROM no_such_table',
+        down: null,
+      };
+      let reports = 0;
+      const subject = new Migrator({
+        db,
+        logger: silentLogger,
+        migrations: [broken],
+        progressIntervalMs: 50,
+        onProgress: () => {
+          reports += 1;
+        },
+      });
+
+      await assert.rejects(subject.up(), MigrationError);
+      const atFailure = reports;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(reports, atFailure);
+    });
+  },
+);

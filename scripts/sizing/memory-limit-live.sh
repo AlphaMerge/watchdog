@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Probe Health's memory-limit channel on a real systemd install, and what the shipped unit does to
-# a probe past its ceiling (`P-210`, `P-213`).
+# Probe Health's memory-limit channel on a real systemd install, what the shipped unit does to a
+# probe past its ceiling (`P-210`, `P-213`), and how the units' start limit and the core's start-up
+# waits behave (`P-215`).
 #
 #     scripts/sizing/memory-limit-live.sh [out.jsonl]
 #
@@ -8,7 +9,7 @@
 # the probe runs under the shipped `ms-probe.service` — its memory ceiling, its watchdog and
 # `ProtectControlGroups` included — and then runs `memory-limit-live.mjs` inside it, which moves
 # the probe's ceiling under it and records what systemd, the kernel, the core and the sensor say.
-# About fifteen minutes, half of it the smoke test. The box is removed at the end.
+# About twenty minutes, half of it the smoke test. The box is removed at the end.
 #
 # Development only. It throttles the probe in that box on purpose; nothing outside it is touched.
 set -euo pipefail
@@ -64,7 +65,7 @@ done
   exit 1
 }
 
-echo "==> measuring (about seven minutes) into ${out}"
+echo "==> measuring (about eleven minutes) into ${out}"
 if ! docker exec -e MS_TOKEN="${token}" "${box}" node /tmp/memory-limit-live.mjs >"${out}"; then
   echo "the measurement failed; the probe's and the core's journals follow" >&2
   docker exec "${box}" journalctl -u ms-probe --no-pager -n 40 >&2 || true

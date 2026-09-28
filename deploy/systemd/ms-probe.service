@@ -10,6 +10,19 @@ After=network-online.target
 Wants=network-online.target
 # The local probe should follow the core, but must not fail if the core is down — it spools.
 After=ms-core.service
+# **The restart loop ends, where an operator sees it** (P-215). A probe whose work does not fit
+# under MemoryMax is killed a few seconds into every start and goes round every 10-14 s. After
+# five starts inside ten minutes systemd refuses the sixth: the unit is `failed`, `systemctl status`
+# says "start request repeated too quickly", and the core raises one or two alarms on the link
+# rather than one per round (36-45 an hour without this, 1-2 with it). It lives in [Unit]
+# because systemd 229 moved it there; in [Service] it is silently ignored. Ten minutes rather
+# than five so that it also stops a probe that lasts a minute or two before the ceiling takes it:
+# any loop under two minutes a round. Nothing in the probe's start waits on anything else, so this
+# only ever stops a probe that cannot start. After raising
+# the ceiling, `systemctl reset-failed ms-probe` and start it. RestartSteps= would back off
+# instead of stopping, but needs systemd 254; Debian 12 and RHEL 9 ship 252.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -19,6 +32,10 @@ TimeoutStartSec=60
 WatchdogSec=30
 Restart=on-failure
 RestartSec=5s
+# Exit 78 (EX_CONFIG) is a configuration the service refused to start with (P-215). Restarting
+# reads the same file and refuses again, every five seconds, for ever; stopping at once puts the
+# reason at the top of `systemctl status` instead of under a thousand copies of itself.
+RestartPreventExitStatus=78
 
 User=ms-probe
 Group=ms-probe

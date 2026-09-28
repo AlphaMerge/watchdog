@@ -37,6 +37,7 @@ const notifier: ServiceNotifier = {
   watchdog: () => undefined,
   stopping: () => undefined,
   status: () => undefined,
+  extendTimeout: () => undefined,
 };
 
 async function probe(order: 'spool-closed-first' | 'spool-closed-last') {

@@ -4559,9 +4559,90 @@ because each is a decision rather than a defect:
       permanent; the units either end the loop where an operator sees it (`failed`, *start request
       repeated too quickly*, with `StartLimitIntervalSec=` in `[Unit]`, where it has lived since
       systemd 229) or keep it, with the reason in the unit comment; the choice is measured with
-      `scripts/sizing/memory-limit-live.sh`; and a scenario test shows a restarting probe raising
-      one alarm. `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and
-      RHEL 9 ship 252.
+      `scripts/sizing/memory-limit-live.sh`; and a scenario test gives, **as the worst case over
+      every phase** of loop against sweep, how many alarms a restarting probe raises for each loop
+      shape, with and without the limit. **This ticket does not meet *one outage, one alarm***: a
+      start limit bounds the storm and cannot end it at one, and neither can anything at the unit or
+      the link. That is carried by `M-18`, and the outcome here says so rather than redefining it.
+      `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and RHEL 9 ship
+      252.
+
+      **P-215, so far — not ticked, because the live run is outstanding.**
+      `docs/findings/2026-09-28-start-exits.md`. Every start-time exit of both services is listed,
+      by whether waiting fixes it: **the probe has none** — it reports ready before it hears from
+      the core — and **the core has two**, its first query against a PostgreSQL still recovering,
+      and a migration that outlasts `TimeoutStartSec`. Both now wait inside the process:
+      `waitForDatabase` retries only the failures waiting fixes, for five minutes a round, logging
+      every attempt and extending the start timeout; the migrator reports every 15 s for as long
+      as each migration runs, so an upgrade can finish and a stuck one is named in
+      `systemctl status`. With nothing left relying on restarts to wait, **both units get
+      `StartLimitIntervalSec=600`, burst 5, in `[Unit]`**, and `RestartPreventExitStatus=78` so a
+      refused configuration stops at once. systemd refuses the **sixth** start in the window, so it
+      stops any loop under two minutes a round; a first design divided by four, chose 300 s, and
+      would never have stopped a probe connected a minute a round. A database that stays down puts
+      at most two starts in any ten minutes.
+
+      **Alarms, worst case over every phase, an hour:** the measured loop 36–45 without the limit,
+      **1–2 with it** (two at 41% of phases); connected 60 s a round, 9–14 → **1–4**. **This does not
+      meet *one outage, one alarm***, and nothing at the unit or the link can: that is `M-18`.
+
+      **Verified:** the suites (shared 249, probe 320, core 2,695); `systemd-analyze verify` on
+      both units under systemd 252 and 255, clean, with a mutation — `StartLimitIntervalSec` moved
+      into `[Service]` — caught by both. **Outstanding:** the live run in
+      `scripts/sizing/memory-limit-live.sh`, which failed twice in Docker Desktop's BuildKit before
+      reaching this ticket's code. It proves the probe reaching `failed` and coming back, the core
+      waiting past `TimeoutStartSec`, exit 78 stopping at once, and whether manual restarts count
+      toward the burst. Tick this when it has run.
+
+- [ ] **M-18 — a flapping Probe Health link alarm re-fires on every Down that follows a brief Up** ·
+      M · M-17, P-215 · Measured in `P-215`: a probe killed at its memory ceiling and restarted
+      connects for a few seconds each round, and the core's
+      thirty-second Probe Health sweep sees it Up between outages. `ms.probe.link` is a lookup, so
+      it is immediate, and state triggers default `initialLatencySeconds` to 0, so every Down after
+      an Up is a new notification: 36–45 an hour for the measured loop with nothing stopping it.
+      `P-215`'s start limit bounds that — one or two for the measured loop, up to four for a probe
+      connected a minute a round — **and cannot make it one**: two alarms at 41% of phases for the
+      measured loop. `CLAUDE.md`'s *one outage, one alarm* is not met.
+
+      **What does not work, measured, so nobody tries it again:** holding the link Down until a
+      connection has lasted 15–30 s, from `connectedForMs`, which `ProbeLink` already carries. It
+      fixes only the shortest loop and makes a sixty-second one *worse*, 4 alarms → 6, because it
+      adds a Down stretch at the start of every connection for the sweep to see. A start limit of
+      burst 2 would give one for the measured loop, and trips on three manual restarts in ten
+      minutes.
+
+      **The hard part is "genuine".** Flap suppression in the alarm engine must stop a Down that
+      follows a brief Up from re-firing, and must still alarm on a real second outage after a real
+      recovery — a probe that came back, ran for an hour, and went again. Where the line between
+      those sits, and whether it is time connected, results delivered or something else, is the
+      design. **Done when** every loop shape in `P-215`'s table produces exactly one alarm, asserted
+      as the worst case over phase in `probe-restart-scenario.test.ts`; a second outage after a
+      genuine recovery still alarms, with the test that says what "genuine" means; and
+      `alarm-storm.test.ts` still passes.
+
+- [ ] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
+      queue filled** · M · P-206, P-207 · Seen 2026-09-28, on the dev VM, with ms-server's probe at
+      its usual ~5,000 sensors: **4.76 GiB resident and 337% CPU**, with the VM at 457 MB available,
+      swap exhausted and a load of 75 on 8 CPUs. Its last output was a burst of *check queue is full,
+      refusing a check* with `queued: 1000`, the pool's bound — backpressure working. Then **nothing
+      for thirteen minutes**, with the CPU still pinned across several threads, until it was stopped.
+      Not a stale build: its `runner/pool.js` carried `P-207`'s `WORKER_YOUNG_GENERATION_MB`, and
+      `P-206`/`P-207` measured this probe's peak at 2,473 MiB and settling to ~1.7 GiB. So something
+      grew that neither measured.
+
+      Two things are wrong, and the second is worse. **It grew**, which on a machine shared with the
+      core and its database is `P-206`'s condition again. **And it went silent while alive**, which
+      breaks *backpressure is visible, never silent*: a probe whose log has stopped cannot say what
+      state it is in, and Probe Health can say only what the probe last sent. The cause of the
+      silence is a guess until measured — V8 collecting garbage it cannot free while the VM pages
+      underneath it would look exactly like this.
+
+      **Done when** the growth is reproduced on purpose — a starvation harness putting a CPU hog
+      beside the probe rather than waiting for other work to overload the VM, sampled the way
+      `scripts/sizing/probe-memory-sampler.mjs` sampled `P-206` — and attributed: the main heap,
+      the workers, or buffers held for refused or in-flight checks; the silence is explained; and
+      Probe Health can say what state a probe in that condition is in. Needs heavy VM time, booked
+      with whoever is scheduling the machine.
 
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read

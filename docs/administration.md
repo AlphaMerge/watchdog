@@ -235,11 +235,28 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   the OOM killer* and *Failed with result 'oom-kill'*, and `systemctl status ms-probe` shows the
   result.
 - **It restarts five seconds later**, and if the same work needs the same memory it is killed
-  again, for as long as nothing changes — systemd never gives up at this pace (`P-215`).
-  `systemctl show -p NRestarts ms-probe` counts the rounds. The core shows the probe Down with
-  "Link to the core is 0", and `memoryLimitUsage` as a gap, not as 100%.
-- **Raising the ceiling ends it.** The next restart comes up under the new one without anybody
-  starting it.
+  again. **After five starts inside ten minutes systemd refuses the sixth** (`P-215`): the unit is
+  `failed`, and `systemctl status ms-probe` says *start request repeated too quickly*. The measured
+  loop gets there in about a minute; any loop under two minutes a round gets there.
+  `systemctl show -p NRestarts ms-probe` counts the rounds it took. The core shows the probe Down
+  with "Link to the core is 0", and `memoryLimitUsage` as a gap, not as 100%.
+- **One or two alarms, not one.** The core sweeps Probe Health every thirty seconds, and a probe
+  that connects for a few seconds each round can be seen Up between two outages. Five rounds are
+  enough for that to happen once, so expect one alarm or two; before the start limit it was one
+  every round, 36–45 an hour. Bringing it to one is `M-18`.
+- **Raising the ceiling, then starting it again, ends it.** If the unit is already `failed`:
+
+  ```
+  systemctl set-property ms-probe MemoryMax=8G
+  systemctl reset-failed ms-probe
+  systemctl start ms-probe
+  ```
+
+  If it is still going round, the next restart comes up under the new ceiling by itself.
+- **The core behaves the same way, and says nothing while it does.** A core killed at its ceiling
+  on every start ends in `failed` too, and since the core is what raises alarms, nothing in this
+  system reports it. Only the host's own monitoring, or a check from another machine, will notice;
+  this project ships neither.
 
 To raise a ceiling, set it with `systemctl`, which applies it at once, keeps it across reboots and
 leaves the shipped unit file alone for the next upgrade to replace:
@@ -254,6 +271,70 @@ killed by its own 30-second watchdog within 25, and restarted into the same stan
 as nobody intervened (`P-213`, `docs/findings/2026-09-28-memory-ceiling.md`). Where a unit does
 set one, `memoryLimitUsage` measures against it, and can read past 100% — which is what its error
 limit is for.
+
+### A core that is still starting
+
+A core does not report itself running until it can serve, and there are two things it will wait
+for rather than fail on (`P-215`, [findings](findings/2026-09-28-start-exits.md)). **Core Health cannot tell you about either**, because the core is
+not up yet: the service log and `systemctl status ms-core` are the only places they show. Both keep
+systemd waiting on purpose, so the unit sits in `activating` rather than failing and restarting.
+
+**Waiting for PostgreSQL.** A database still in crash recovery, or started a moment after the
+core, is waited for, up to five minutes:
+
+```
+Status: "waiting for PostgreSQL at db.example.com:5432/monitoring: PostgreSQL is starting up or recovering (attempt 7, 41 s)"
+```
+
+Every attempt is logged with its reason. After five minutes the core exits, and systemd starts it
+again five seconds later, which waits another five minutes. A database that stays down is
+therefore waited for indefinitely, in five-minute rounds — at most two starts in any ten minutes,
+which never reaches the unit's start limit. What it does **not** wait for is a wrong password, a database that does not exist, or
+a permission refused. Those fail at once, because waiting would only postpone the error message.
+A host name that does not resolve *is* waited for, because at boot it may not be published yet,
+so check that the name in the log is the one you meant.
+
+**Applying a migration.** An upgrade migrates the schema at start-up when `database.autoMigrate`
+is set, which it is by default. A migration reports itself every fifteen seconds for as long as it
+runs, however long that is:
+
+```
+Status: "applying migration 51 (report-pdf), 340 s so far"
+```
+
+A migration on a large installation can legitimately take many minutes. Let it finish. **Do not
+restart or kill the core to hurry it**: every migration but the first-install ones runs in a
+single transaction, so killing the core rolls that transaction back and the next start begins the
+same migration again from nothing.
+
+**If the elapsed time keeps climbing and nothing else is happening, the migration is almost
+certainly waiting for a lock.** Changing a table needs that table to itself, and a single open
+transaction anywhere — a `psql` session someone left in `BEGIN`, a long `pg_dump`, a report
+query — holds it off indefinitely. Find what is in the way:
+
+```sql
+SELECT waiting.pid                   AS core_pid,
+       blocker.pid                   AS blocking_pid,
+       blocker.usename,
+       blocker.application_name,
+       blocker.client_addr,
+       now() - blocker.xact_start    AS transaction_open_for,
+       blocker.state,
+       left(blocker.query, 80)       AS last_statement
+FROM pg_stat_activity waiting
+CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS b(pid)
+JOIN pg_stat_activity blocker ON blocker.pid = b.pid
+WHERE waiting.application_name = 'ms-core';
+```
+
+An `idle in transaction` session with a long `transaction_open_for` is the usual answer. Ask
+whoever owns it to commit or roll back. If they can't be found and you are sure it holds nothing
+you need, end it with `SELECT pg_terminate_backend(<blocking_pid>);`. The migration continues by
+itself the moment the lock is free, with no restart needed.
+
+A configuration the core or the probe refuses — exit status 78 — is not retried at all: the unit
+stops at once with the reason at the top of `systemctl status`, rather than restarting every five
+seconds into the same refusal. Fix the file, then `systemctl reset-failed` and start it.
 
 ### Prometheus
 

@@ -15,6 +15,8 @@ function fakeNotifier(): ServiceNotifier & { calls: string[] } {
     watchdog: () => calls.push('watchdog'),
     stopping: () => calls.push('stopping'),
     status: () => calls.push('status'),
+    extendTimeout: (ms: number, status?: string) =>
+      calls.push(`extend ${String(ms)} ${status ?? ''}`.trimEnd()),
   };
 }
 
@@ -141,6 +143,16 @@ describe('Lifecycle', () => {
     await lifecycle.shutdown({ kind: 'requested', detail: 'test' });
 
     assert.deepEqual(notifier.calls, ['ready', 'stopping']);
+  });
+
+  it('asks for more start-up time with the reason in the same notification (P-215)', () => {
+    const { lifecycle, notifier } = harness();
+
+    lifecycle.starting('waiting for PostgreSQL', 17_000);
+
+    // One call carrying both: two separate notifications are two spawns, and two spawns are not
+    // ordered, so `systemctl status` could show one attempt's reason beside another's deadline.
+    assert.deepEqual(notifier.calls, ['extend 17000 waiting for PostgreSQL']);
   });
 });
 
