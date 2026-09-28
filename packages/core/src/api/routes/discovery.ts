@@ -20,6 +20,7 @@ import {
   onObject,
   onQueryObject,
   visibilityOf,
+  auditGap,
 } from '../authorization.js';
 
 export interface DiscoveryRouteOptions {
@@ -200,8 +201,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     '/discovery',
     {
       // A discovery run provisions devices and sensors into `groupId`, which makes it a creation
-      // under a parent named in the body — the case `onBodyObject` exists for (`G05`).
-      config: onBodyObject('write', 'groupId'),
+      // under a parent named in the body — the case `onBodyObject` exists for (`G05`). What it
+      // provisions is audited as the objects it creates; who started the sweep is not recorded
+      // anywhere yet — `discovery_run.created_by` exists and nothing fills it (`A-20`).
+      config: { ...onBodyObject('write', 'groupId'), ...auditGap('A-20') },
       schema: {
         tags: ['discovery'],
         summary: 'Start a discovery run',
@@ -491,10 +494,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     '/discovery/:id/cancel',
     {
       // The run belongs to a group, and so does the right to stop it (`G05`).
-      config: onDerivedObject('write', 'this run', async (request) => {
-        const run = await discovery.get((request.params as { id: number }).id);
-        return run?.groupId ?? null;
-      }),
+      config: {
+        ...onDerivedObject('write', 'this run', async (request) => {
+          const run = await discovery.get((request.params as { id: number }).id);
+          return run?.groupId ?? null;
+        }),
+        ...auditGap('A-20'),
+      },
       schema: {
         tags: ['discovery'],
         summary: 'Stop a run',
@@ -746,7 +752,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       {
         // Same shape as starting a run, and with `autoProvision` it is a standing instruction to
         // keep creating objects in that group (`G05`).
-        config: onBodyObject('write', 'groupId'),
+        config: { ...onBodyObject('write', 'groupId'), ...auditGap('A-20') },
         schema: {
           tags: ['discovery'],
           summary: 'Create a rediscovery schedule',
@@ -827,10 +833,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       {
         // Enabling a schedule with `autoProvision` set is how objects start appearing in a
         // group on their own, so it is guarded on that group (`G05`).
-        config: onDerivedObject('write', 'this schedule', async (request) => {
-          const schedule = await rediscovery.get((request.params as { id: number }).id);
-          return schedule?.groupId ?? null;
-        }),
+        config: {
+          ...onDerivedObject('write', 'this schedule', async (request) => {
+            const schedule = await rediscovery.get((request.params as { id: number }).id);
+            return schedule?.groupId ?? null;
+          }),
+          ...auditGap('A-20'),
+        },
         schema: {
           tags: ['discovery'],
           summary: 'Turn a schedule on or off',
@@ -867,10 +876,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     app.delete(
       '/discovery/schedules/:id',
       {
-        config: onDerivedObject('write', 'this schedule', async (request) => {
-          const schedule = await rediscovery.get((request.params as { id: number }).id);
-          return schedule?.groupId ?? null;
-        }),
+        config: {
+          ...onDerivedObject('write', 'this schedule', async (request) => {
+            const schedule = await rediscovery.get((request.params as { id: number }).id);
+            return schedule?.groupId ?? null;
+          }),
+          ...auditGap('A-20'),
+        },
         schema: {
           tags: ['discovery'],
           summary: 'Delete a schedule',

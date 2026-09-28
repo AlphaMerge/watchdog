@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
   libraryAuditSinks,
+  mapAuditSinks,
   objectAuditSinks,
   reportAuditSinks,
   scheduleAuditSinks,
@@ -74,6 +75,7 @@ describe('what each audited service tells', () => {
     assert.ok(!triggerAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!reportAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!libraryAuditSinks(all).includes(all.reachabilitySync));
+    assert.ok(!mapAuditSinks(all).includes(all.reachabilitySync));
   });
 
   it('leaves the result cache and the alarm chain out of a schedule edit', () => {
@@ -96,12 +98,14 @@ describe('what each audited service tells', () => {
     assert.deepEqual(triggerAuditSinks(all).map(all.named), ['database', 'logging', 'triggerSync']);
   });
 
-  it('keeps a report run and a library edit to the record alone', () => {
-    // Neither changes anything a probe, a cache, a schedule or an alarm chain holds: a report
-    // moved data past a boundary, and a library changed what somebody is shown when they next
-    // read it (`L-01`). Anything else on these lists would be work for a change it cannot act on.
+  it('keeps reports, libraries and maps to the record alone', () => {
+    // None changes anything a probe, a cache, a schedule or an alarm chain holds: a report moved
+    // data past a boundary, and a library or a map changed what somebody is shown when they next
+    // open it (`L-01`, `A-17`). Anything else on these lists would be work for a change it cannot
+    // act on.
     const all = sinks();
     assert.deepEqual(reportAuditSinks(all).map(all.named), ['database', 'logging']);
     assert.deepEqual(libraryAuditSinks(all).map(all.named), ['database', 'logging']);
+    assert.deepEqual(mapAuditSinks(all).map(all.named), ['database', 'logging']);
   });
 });

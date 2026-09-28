@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { AccessRight } from '../auth/access.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { ChannelProcessing } from './types.js';
 import type {
@@ -375,7 +376,169 @@ export type Mutation =
       objectId: null;
       libraryId: number;
       before: LibraryAudit;
+    }
+  | {
+      /**
+       * A group was granted a right on something, or had one changed (`A-17`).
+       *
+       * **One action for all four kinds of grant**, because "who gave that group `full`?" is one
+       * question whatever the thing is, and a person asking it should not need to know which of
+       * four tables to search. `subject` says what the grant is on. `objectId` is set for an
+       * object grant alone, so the entry also appears in that object's own history; a map, a
+       * report and a library are not tree objects and their grants carry null, as their edits do.
+       *
+       * `before` is null when the group held no grant here — a new grant, rather than a change
+       * of one. Granting `none` is not revoking: `none` overrides what the group inherits, and a
+       * revoke restores it (`AccessService.revoke`), so the two are different entries.
+       */
+      action: 'grant.set';
+      objectId: ObjectId | null;
+      subject: GrantSubject;
+      groupId: number;
+      groupName: string;
+      before: AccessRight | null;
+      after: AccessRight;
+    }
+  | {
+      /** A group's grant was taken away. A revoke that found nothing to take writes no entry. */
+      action: 'grant.revoked';
+      objectId: ObjectId | null;
+      subject: GrantSubject;
+      groupId: number;
+      groupName: string;
+      before: AccessRight;
+    }
+  | {
+      /**
+       * A map was created, changed or removed (`A-17`).
+       *
+       * Unaudited from `G-01` until here, while the repository's header said "rights and audit
+       * in the service". `objectId` is null for the reason a library's is.
+       */
+      action: 'map.created';
+      objectId: null;
+      mapId: number;
+      after: MapAudit;
+    }
+  | {
+      action: 'map.updated';
+      objectId: null;
+      mapId: number;
+      before: MapAudit;
+      after: MapAudit;
+    }
+  | {
+      action: 'map.deleted';
+      objectId: null;
+      mapId: number;
+      before: MapAudit;
+    }
+  | {
+      /** A background was stored, replacing whatever was there (`G-05`). The file, never its bytes. */
+      action: 'map.background.set';
+      objectId: null;
+      mapId: number;
+      before: MapBackgroundAudit | null;
+      after: MapBackgroundAudit;
+    }
+  | {
+      action: 'map.background.removed';
+      objectId: null;
+      mapId: number;
+      before: MapBackgroundAudit;
+    }
+  | {
+      /**
+       * A public link was minted (`G-06`). **A grant to everybody**, so it is audited as surely as
+       * a grant to a group — and it carries the label, the prefix and the expiry, never the
+       * token: a share link in the audit log is a share link in every backup of it.
+       */
+      action: 'map.share.created';
+      objectId: null;
+      mapId: number;
+      shareId: number;
+      label: string;
+      prefix: string;
+      expiresAt: Date;
+    }
+  | {
+      action: 'map.share.revoked';
+      objectId: null;
+      mapId: number;
+      shareId: number;
+    }
+  | {
+      /**
+       * A report was created, changed or removed (`A-17`).
+       *
+       * `report.ran` records a report rendering through somebody's eyes; these record who pointed
+       * it there. `runAs` is in the diff for that reason — changing it is the edit that decides
+       * what the next scheduled document contains.
+       */
+      action: 'report.created';
+      objectId: null;
+      reportId: number;
+      after: ReportAudit;
+    }
+  | {
+      action: 'report.updated';
+      objectId: null;
+      reportId: number;
+      before: ReportAudit;
+      after: ReportAudit;
+    }
+  | {
+      action: 'report.deleted';
+      objectId: null;
+      reportId: number;
+      before: ReportAudit;
     };
+
+/** What a grant is on (`A-17`). */
+export type GrantSubject =
+  | { readonly kind: 'object'; readonly id: number }
+  | { readonly kind: 'map'; readonly id: number }
+  | { readonly kind: 'report'; readonly id: number }
+  | { readonly kind: 'library'; readonly id: number };
+
+/**
+ * A map as the audit log records it.
+ *
+ * The layout one item per line, each as its own JSON: a canvas has no shape a sentence fits, and
+ * a line per widget still lets a diff be read as "this tile moved" rather than as one changed blob.
+ */
+export interface MapAudit {
+  readonly name: string;
+  readonly description: string;
+  readonly priority: number;
+  readonly layout: string;
+}
+
+/** A background as the audit log records it: what the file was, never what was in it. */
+export interface MapBackgroundAudit {
+  readonly mediaType: string;
+  readonly digest: string;
+  readonly width: number;
+  readonly height: number;
+  readonly bytes: number;
+}
+
+/**
+ * A report as the audit log records it.
+ *
+ * The structured parts as compact JSON: they are small, a person can read them, and a text
+ * rendering of each would be a second description of the report to keep in step with the first.
+ */
+export interface ReportAudit {
+  readonly name: string;
+  readonly description: string;
+  readonly kind: string;
+  readonly subjects: string;
+  readonly span: string;
+  readonly outputs: string;
+  readonly schedule: string;
+  readonly runAs: string;
+}
 
 /**
  * A library as the audit log records it.
@@ -599,5 +762,52 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         libraryId: mutation.libraryId,
         name: mutation.after.name,
       };
+    case 'grant.set':
+      return {
+        action: mutation.action,
+        subject: mutation.subject,
+        groupId: mutation.groupId,
+        before: mutation.before,
+        after: mutation.after,
+      };
+    case 'grant.revoked':
+      return {
+        action: mutation.action,
+        subject: mutation.subject,
+        groupId: mutation.groupId,
+        before: mutation.before,
+      };
+    case 'map.created':
+    case 'map.deleted':
+      return {
+        action: mutation.action,
+        mapId: mutation.mapId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'map.updated':
+      return { action: mutation.action, mapId: mutation.mapId, name: mutation.after.name };
+    case 'map.background.set':
+      return { action: mutation.action, mapId: mutation.mapId, digest: mutation.after.digest };
+    case 'map.background.removed':
+      return { action: mutation.action, mapId: mutation.mapId, digest: mutation.before.digest };
+    case 'map.share.created':
+      return {
+        action: mutation.action,
+        mapId: mutation.mapId,
+        shareId: mutation.shareId,
+        label: mutation.label,
+        expiresAt: mutation.expiresAt.toISOString(),
+      };
+    case 'map.share.revoked':
+      return { action: mutation.action, mapId: mutation.mapId, shareId: mutation.shareId };
+    case 'report.created':
+    case 'report.deleted':
+      return {
+        action: mutation.action,
+        reportId: mutation.reportId,
+        name: 'after' in mutation ? mutation.after.name : mutation.before.name,
+      };
+    case 'report.updated':
+      return { action: mutation.action, reportId: mutation.reportId, name: mutation.after.name };
   }
 }

@@ -38,7 +38,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -146,7 +146,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       contexts,
     });
     const history = new HistoryService({ db, logger: silent });
-    const maps = new MapService({ db, repository: new MapRepository(), logger: silent });
+    const maps = new MapService({
+      db,
+      repository: new MapRepository(),
+      audit: new DatabaseAuditSink(),
+      logger: silent,
+    });
     const libraries = new LibraryService({
       db,
       repository: new LibraryRepository(),
@@ -400,7 +405,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
             ],
           },
         },
-        'operator',
+        actorNamed('operator'),
       )
     ).id;
 

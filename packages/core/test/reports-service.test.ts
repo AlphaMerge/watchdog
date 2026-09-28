@@ -9,7 +9,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, actorNamed } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 const available = await databaseAvailable();
 
@@ -37,7 +38,12 @@ describe(
       scratch = await createScratchDatabase('reportsvc');
       db = scratch.db;
       harness = await buildHarness(db);
-      reports = new ReportService({ db, repository: new ReportRepository(), logger: silent });
+      reports = new ReportService({
+        db,
+        repository: new ReportRepository(),
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      });
       administrator = await makeUser([await makeGroup('r-administrators', true)], 'admin');
     });
 
@@ -100,7 +106,7 @@ describe(
         report.id,
         report.version,
         { runAs: login },
-        administrator.login,
+        actorNamed(administrator.login),
       );
 
     describe('access, answered the same way a map answers it', () => {
@@ -110,7 +116,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `mine-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
 
         assert.equal(await reports.rightFor(viewer(user.id), report.id), 'full');
@@ -128,7 +134,7 @@ describe(
         ]) {
           const name = `refused-${who.role}-${String(seq)}`;
           await assert.rejects(
-            () => reports.create(who, { name, kind: 'table_only' }, user.login),
+            () => reports.create(who, { name, kind: 'table_only' }, actorNamed(user.login)),
             (error: unknown) => {
               assert.equal((error as { code: string }).code, 'REPORT_FORBIDDEN');
               return true;
@@ -139,7 +145,7 @@ describe(
         await reports.create(
           { userId: user.id, role: 'readwrite', scope: 'write' },
           { name: `allowed-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
       });
 
@@ -148,7 +154,7 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `secret-${String(seq)}`, kind: 'graph_only' },
-          owner.login,
+          actorNamed(owner.login),
         );
         const stranger = await makeUser([await makeGroup(`r-stranger-${String(seq)}`)]);
 
@@ -166,7 +172,7 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `admin-sees-${String(seq)}`, kind: 'sensor_list' },
-          owner.login,
+          actorNamed(owner.login),
         );
         const admin = await makeUser([await makeGroup(`r-admins-${String(seq)}`, true)]);
 
@@ -178,7 +184,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `capped-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
 
         assert.equal(await reports.rightFor(viewer(user.id, 'readonly'), report.id), 'read');
@@ -193,7 +199,7 @@ describe(
               report.id,
               report.version,
               { description: 'no' },
-              user.login,
+              actorNamed(user.login),
             ),
           /may not write/,
         );
@@ -202,7 +208,7 @@ describe(
       it('lists only what the viewer may see, and everything for an administrator', async () => {
         const name = `listed-${String(seq)}`;
         const user = await makeUser([await makeGroup(`r-list-mine-${String(seq)}`)]);
-        await reports.create(viewer(user.id), { name, kind: 'top_uptime' }, user.login);
+        await reports.create(viewer(user.id), { name, kind: 'top_uptime' }, actorNamed(user.login));
 
         const stranger = await makeUser([await makeGroup(`r-list-other-${String(seq)}`)]);
         const admin = await makeUser([await makeGroup(`r-list-admin-${String(seq)}`, true)]);
@@ -218,7 +224,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `conc-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
 
         const first = await reports.update(
@@ -226,7 +232,7 @@ describe(
           report.id,
           report.version,
           { description: 'first' },
-          user.login,
+          actorNamed(user.login),
         );
         assert.equal(first.version, report.version + 1);
 
@@ -237,7 +243,7 @@ describe(
               report.id,
               report.version,
               { description: 'second' },
-              user.login,
+              actorNamed(user.login),
             ),
           (error: unknown) => {
             assert.equal((error as { code: string }).code, 'REPORT_CHANGED');
@@ -255,26 +261,45 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `granting-${String(seq)}`, kind: 'table_only' },
-          owner.login,
+          actorNamed(owner.login),
         );
 
         const editorGroup = await makeGroup(`r-g-editor-${String(seq)}`);
         const editor = await makeUser([editorGroup]);
-        await reports.grant(viewer(owner.id), report.id, editorGroup, 'write', owner.login);
+        await reports.grant(
+          viewer(owner.id),
+          report.id,
+          editorGroup,
+          'write',
+          actorNamed(owner.login),
+        );
         assert.equal(await reports.rightFor(viewer(editor.id), report.id), 'write');
 
         await assert.rejects(
-          () => reports.grant(viewer(editor.id), report.id, editorGroup, 'full', editor.login),
+          () =>
+            reports.grant(
+              viewer(editor.id),
+              report.id,
+              editorGroup,
+              'full',
+              actorNamed(editor.login),
+            ),
           /may not full/,
         );
 
         // Granting twice is a correction, not a collision.
-        await reports.grant(viewer(owner.id), report.id, editorGroup, 'read', owner.login);
+        await reports.grant(
+          viewer(owner.id),
+          report.id,
+          editorGroup,
+          'read',
+          actorNamed(owner.login),
+        );
         const grants = await reports.grants(viewer(owner.id), report.id);
         assert.equal(grants.filter((one) => one.groupId === editorGroup).length, 1);
         assert.equal(grants.find((one) => one.groupId === editorGroup)?.right, 'read');
 
-        await reports.revoke(viewer(owner.id), report.id, editorGroup, owner.login);
+        await reports.revoke(viewer(owner.id), report.id, editorGroup, actorNamed(owner.login));
         assert.equal(await reports.rightFor(viewer(editor.id), report.id), 'none');
       });
 
@@ -283,10 +308,11 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `nogroup-${String(seq)}`, kind: 'table_only' },
-          owner.login,
+          actorNamed(owner.login),
         );
         await assert.rejects(
-          () => reports.grant(viewer(owner.id), report.id, 999_999, 'read', owner.login),
+          () =>
+            reports.grant(viewer(owner.id), report.id, 999_999, 'read', actorNamed(owner.login)),
           /there is no group/,
         );
       });
@@ -296,17 +322,23 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `deleted-${String(seq)}`, kind: 'table_only' },
-          owner.login,
+          actorNamed(owner.login),
         );
         const writerGroup = await makeGroup(`r-del-writer-${String(seq)}`);
         const writer = await makeUser([writerGroup]);
-        await reports.grant(viewer(owner.id), report.id, writerGroup, 'write', owner.login);
+        await reports.grant(
+          viewer(owner.id),
+          report.id,
+          writerGroup,
+          'write',
+          actorNamed(owner.login),
+        );
 
         await assert.rejects(
-          () => reports.remove(viewer(writer.id), report.id, writer.login),
+          () => reports.remove(viewer(writer.id), report.id, actorNamed(writer.login)),
           /may not full/,
         );
-        await reports.remove(viewer(owner.id), report.id, owner.login);
+        await reports.remove(viewer(owner.id), report.id, actorNamed(owner.login));
 
         const rows = await db.query<{ total: string }>(
           `SELECT count(*)::text AS total FROM report_access WHERE report_id = $1`,
@@ -324,7 +356,7 @@ describe(
           { name: `ctx-${String(seq)}`, kind: 'table_only' },
           // Typed in a different case than the account is stored as. Both halves of the context
           // have to agree, or the refusal message names something nobody can look up.
-          user.login.toUpperCase(),
+          actorNamed(user.login.toUpperCase()),
         );
 
         assert.equal(report.runAsUserId, user.id);
@@ -340,7 +372,7 @@ describe(
             reports.create(
               viewer(user.id, 'admin'),
               { name: `ghost-${String(seq)}`, kind: 'table_only', runAs: 'nobody-at-all' },
-              user.login,
+              actorNamed(user.login),
             ),
           (error: unknown) => {
             assert.equal((error as { code: string }).code, 'REPORT_USER_NOT_FOUND');
@@ -353,7 +385,7 @@ describe(
             reports.create(
               viewer(user.id, 'admin'),
               { name: `blank-${String(seq)}`, kind: 'table_only', runAs: '   ' },
-              user.login,
+              actorNamed(user.login),
             ),
           /needs an account to render through/,
         );
@@ -380,7 +412,7 @@ describe(
               reports.create(
                 viewer(owner.id),
                 { name: `borrowed-${runAs}-${String(seq)}`, kind: 'table_only', runAs },
-                owner.login,
+                actorNamed(owner.login),
               ),
             refused,
           );
@@ -391,7 +423,7 @@ describe(
             reports.create(
               { userId: administrator.id, role: 'admin', scope: 'write' },
               { name: `borrowed-token-${String(seq)}`, kind: 'table_only', runAs: target.login },
-              administrator.login,
+              actorNamed(administrator.login),
             ),
           refused,
         );
@@ -399,7 +431,7 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `own-eyes-${String(seq)}`, kind: 'table_only', runAs: owner.login.toUpperCase() },
-          owner.login,
+          actorNamed(owner.login),
         );
         assert.equal(report.runAsUserId, owner.id, 'naming yourself is not borrowing anything');
         await assert.rejects(
@@ -409,7 +441,7 @@ describe(
               report.id,
               report.version,
               { runAs: target.login },
-              owner.login,
+              actorNamed(owner.login),
             ),
           refused,
         );
@@ -427,11 +459,17 @@ describe(
         const report = await reports.create(
           viewer(owner.id),
           { name: `whose-${String(seq)}`, kind: 'table_only' },
-          owner.login,
+          actorNamed(owner.login),
         );
         const writerGroup = await makeGroup(`r-ctx3-writer-${String(seq)}`);
         const writer = await makeUser([writerGroup]);
-        await reports.grant(viewer(owner.id), report.id, writerGroup, 'write', owner.login);
+        await reports.grant(
+          viewer(owner.id),
+          report.id,
+          writerGroup,
+          'write',
+          actorNamed(owner.login),
+        );
 
         // The same holder, editing anything else, is fine.
         const edited = await reports.update(
@@ -439,7 +477,7 @@ describe(
           report.id,
           report.version,
           { description: 'a writer may do this' },
-          writer.login,
+          actorNamed(writer.login),
         );
         assert.equal(edited.description, 'a writer may do this');
 
@@ -450,7 +488,7 @@ describe(
               report.id,
               edited.version,
               { runAs: writer.login },
-              writer.login,
+              actorNamed(writer.login),
             ),
           /may not full/,
         );
@@ -466,7 +504,7 @@ describe(
               report.id,
               edited.version,
               { runAs: writer.login },
-              owner.login,
+              actorNamed(owner.login),
             ),
           /only an administrator/,
         );
@@ -486,7 +524,7 @@ describe(
           await reports.create(
             viewer(owner.id),
             { name: `orphaned-${String(seq)}`, kind: 'table_only' },
-            owner.login,
+            actorNamed(owner.login),
           ),
           doomed.login,
         );
@@ -512,7 +550,7 @@ describe(
           await reports.create(
             viewer(owner.id),
             { name: `repointed-${String(seq)}`, kind: 'table_only' },
-            owner.login,
+            actorNamed(owner.login),
           ),
           doomed.login,
         );
@@ -524,7 +562,7 @@ describe(
           report.id,
           broken.version,
           { runAs: owner.login },
-          owner.login,
+          actorNamed(owner.login),
         );
         assert.equal(fixed.runAsUserId, owner.id);
         assert.equal(fixed.runAsLogin, owner.login);
@@ -537,7 +575,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `span-default-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
         assert.deepEqual(report.span, { kind: 'month', offset: 1 });
       });
@@ -548,7 +586,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `span-kept-${String(seq)}`, kind: 'graph_only', span },
-          user.login,
+          actorNamed(user.login),
         );
         assert.deepEqual((await reports.get(viewer(user.id), report.id)).span, span);
       });
@@ -562,7 +600,7 @@ describe(
             reports.create(
               viewer(user.id),
               { name: `span-bad-${String(seq)}`, kind: 'table_only', span: { kind: 'fortnight' } },
-              user.login,
+              actorNamed(user.login),
             ),
           /no report span called/,
         );
@@ -570,7 +608,7 @@ describe(
         const report = await reports.create(
           viewer(user.id),
           { name: `span-edit-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
         await assert.rejects(
           () =>
@@ -579,7 +617,7 @@ describe(
               report.id,
               report.version,
               { span: { kind: 'month', timezone: 'Mars/Olympus_Mons' } },
-              user.login,
+              actorNamed(user.login),
             ),
           /not a time zone this system knows/,
         );
@@ -595,7 +633,12 @@ describe(
       it('refuses a blank name, an over-long one, and a duplicate whatever its case', async () => {
         const user = await makeUser([await makeGroup(`r-v-${String(seq)}`)]);
         await assert.rejects(
-          () => reports.create(viewer(user.id), { name: '  ', kind: 'table_only' }, user.login),
+          () =>
+            reports.create(
+              viewer(user.id),
+              { name: '  ', kind: 'table_only' },
+              actorNamed(user.login),
+            ),
           /1 to 100/,
         );
         await assert.rejects(
@@ -603,21 +646,21 @@ describe(
             reports.create(
               viewer(user.id),
               { name: 'x'.repeat(101), kind: 'table_only' },
-              user.login,
+              actorNamed(user.login),
             ),
           /1 to 100/,
         );
         await reports.create(
           viewer(user.id),
           { name: `Dup-${String(seq)}`, kind: 'table_only' },
-          user.login,
+          actorNamed(user.login),
         );
         await assert.rejects(
           () =>
             reports.create(
               viewer(user.id),
               { name: `dup-${String(seq)}`, kind: 'table_only' },
-              user.login,
+              actorNamed(user.login),
             ),
           /already exists/,
         );
@@ -630,7 +673,7 @@ describe(
             reports.create(
               viewer(user.id),
               { name: `kind-${String(seq)}`, kind: 'graph_and_tabel' },
-              user.login,
+              actorNamed(user.login),
             ),
           /no report template called/,
         );
@@ -645,7 +688,7 @@ describe(
             kind: 'sensor_list',
             subjects: { objectIds: [7, 7, 9] },
           },
-          user.login,
+          actorNamed(user.login),
         );
         assert.deepEqual(report.subjects.objectIds, [7, 9]);
 
@@ -658,7 +701,7 @@ describe(
                 kind: 'sensor_list',
                 subjects: { objectIds: Array.from({ length: 501 }, (_, i) => i + 1) },
               },
-              user.login,
+              actorNamed(user.login),
             ),
           /at most 500 objects/,
         );
@@ -667,7 +710,7 @@ describe(
             reports.create(
               viewer(user.id),
               { name: `bad-${String(seq)}`, kind: 'sensor_list', subjects: { objectIds: [0] } },
-              user.login,
+              actorNamed(user.login),
             ),
           /is not an object id/,
         );
@@ -691,7 +734,7 @@ describe(
             kind: 'sensor_list',
             subjects: { objectIds: [objectId] },
           },
-          user.login,
+          actorNamed(user.login),
         );
 
         await db.query(`DELETE FROM object WHERE id = $1`, [objectId]);

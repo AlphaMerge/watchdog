@@ -16,13 +16,11 @@ import {
  * Everything about a library that decides something (`L-01`).
  *
  * **The shape `MapService` has, on the same access rules**, because a library is the third flat
- * entity and `FlatAccess` is where the rules now live. Two things differ from a map, and both are
- * deliberate:
+ * entity and `FlatAccess` is where the rules now live.
  *
- * - **Every create, edit and delete is audited**, in the transaction that makes it. A library
- *   decides what a group of people are shown, and narrowing a rule is a change nobody notices
- *   until the day a failure is not on the screen. Maps and reports are not audited; that is a gap
- *   of theirs, and a library does not join it.
+ * - **Every create, edit and delete is audited**, in the transaction that makes it, and every
+ *   grant through `FlatAccess` (`A-17`). A library decides what a group of people are shown, and
+ *   narrowing a rule is a change nobody notices until the day a failure is not on the screen.
  * - **The nodes are refused whole when they do not fit** — `nodes.ts` says why a library is
  *   stricter at the write than a map is.
  *
@@ -57,7 +55,7 @@ const MAX_DESCRIPTION = 1000;
 export class LibraryService {
   readonly #db: Database;
   readonly #repository: LibraryRepository;
-  readonly #access = new FlatAccess(LIBRARY_GRANTS);
+  readonly #access: FlatAccess;
   readonly #audit: AuditSink;
   readonly #logger: Logger;
 
@@ -65,6 +63,7 @@ export class LibraryService {
     this.#db = options.db;
     this.#repository = options.repository;
     this.#audit = options.audit;
+    this.#access = new FlatAccess(LIBRARY_GRANTS, options.audit);
     this.#logger = options.logger.child({ component: 'libraries' });
   }
 
@@ -147,7 +146,7 @@ export class LibraryService {
       if (await this.#repository.nameTaken(tx, name, null)) throw nameTaken(name, null);
 
       const library = await this.#repository.create(tx, { name, description, priority, nodes });
-      await this.#access.grantCreator(tx, library.id, viewer, labelOf(actor));
+      await this.#access.grantCreator(tx, library.id, viewer, actor, now);
       await this.#audit.record(
         tx,
         actor,
@@ -253,9 +252,7 @@ export class LibraryService {
 
   /**
    * Granting needs `full`: a `write` holder may arrange the nodes, not decide who else sees them.
-   *
-   * **Logged, not audited**, as every grant in this system is — object, map and report grants
-   * alike. `L-01` records that as a gap of its own rather than closing it for one entity of four.
+   * Audited by `FlatAccess`, before and after, in this transaction (`A-17`).
    */
   async grant(
     viewer: LibraryViewer,
@@ -263,10 +260,11 @@ export class LibraryService {
     id: number,
     groupId: number,
     right: AccessRight,
+    now = new Date(),
   ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      if ((await this.#access.grant(tx, id, groupId, right, labelOf(actor))) === 'no-such-group') {
+      if ((await this.#access.grant(tx, id, groupId, right, actor, now)) === 'no-such-group') {
         throw new LibraryError(
           'LIBRARY_GROUP_NOT_FOUND',
           `group ${String(groupId)} does not exist`,
@@ -280,18 +278,19 @@ export class LibraryService {
     });
   }
 
-  async revoke(viewer: LibraryViewer, actor: Actor, id: number, groupId: number): Promise<void> {
+  async revoke(
+    viewer: LibraryViewer,
+    actor: Actor,
+    id: number,
+    groupId: number,
+    now = new Date(),
+  ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      await this.#access.revoke(tx, id, groupId);
+      await this.#access.revoke(tx, id, groupId, actor, now);
       this.#logger.info({ libraryId: id, groupId, actor }, 'library access revoked');
     });
   }
-}
-
-/** Who granted a right, as `granted_by` stores it: a login, or nothing for a non-person. */
-function labelOf(actor: Actor): string {
-  return actor.kind === 'user' ? actor.login : '';
 }
 
 function auditOf(library: {

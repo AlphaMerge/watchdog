@@ -88,7 +88,11 @@ export interface ReportRow {
 export type ReportGrant = FlatGrant;
 
 /** Where a report's grants live, for `FlatAccess` (`L-01`). */
-export const REPORT_GRANTS: GrantTable = { table: 'report_access', key: 'report_id' };
+export const REPORT_GRANTS: GrantTable = {
+  table: 'report_access',
+  key: 'report_id',
+  subject: 'report',
+};
 
 interface RawReport {
   id: string;

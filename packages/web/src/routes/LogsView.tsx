@@ -33,15 +33,25 @@ const TABS: readonly TabDefinition[] = [
   { id: 'system', label: 'System events' },
 ];
 
-/** The action prefixes the core filters on, in the order it lists them. */
+/**
+ * The action prefixes the core filters on, in the order it lists them.
+ *
+ * Held to the core's `AUDIT_CATEGORIES` by `audit-categories.test.ts`: this list fell three behind
+ * the server before anything compared them, and an entry with no chip is one nobody filters to.
+ */
 const CATEGORIES = [
   'object',
   'setting',
+  'credential',
   'channel',
   'trigger',
   'template',
   'schedule',
   'sensor',
+  'report',
+  'library',
+  'map',
+  'grant',
 ] as const;
 
 const STATES: readonly SensorState[] = [

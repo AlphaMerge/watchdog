@@ -12077,8 +12077,8 @@ because each is a decision rather than a defect:
       are some, not how many.
 
 - [ ] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
-      Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor, timestamp
-      and diff", and three kinds of change never reach `audit_log`:
+      Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor,
+      timestamp and diff", and three kinds of change never reach `audit_log`:
 
       - **Every grant.** `AccessService.grant` and `.revoke` (the object grants behind
         `api/routes/access.ts`) and `FlatAccess.grant` and `.revoke` (map, report and library
@@ -12120,6 +12120,24 @@ because each is a decision rather than a defect:
       - `AUDIT_CATEGORIES` gains `map` and `grant` (or `access`), and the Logs view's chips follow.
         The web list is already missing `report` and `credential`, which the server has.
 
+      **A-17 part 1 of 2, landed.** Maps (including backgrounds and share links), reports, and the
+      grants on maps, reports and libraries are audited, in the transaction, with before and
+      after. Every grant is one action, `grant.set` or `grant.revoked`, under a new `grant`
+      category, whatever it is on; `FlatAccess` records them itself, so the one place granting is
+      written is the one place it is audited, and a creator's own grant is recorded too.
+      `AUDIT_CATEGORIES` gained `map` and `grant`, and the Logs view's chips gained those and the
+      three it had fallen behind by (`credential`, `report`, `library`), held to the core's list by
+      `audit-categories.test.ts`. `audit-sweep.test.ts` is the sweep: every route with
+      `changes: true`, derived from `server.routes`, called as an administrator with a fixture,
+      must leave a row or carry `notAudited(why)` or `auditGap(ticket)` beside its handler; a
+      route with neither fails by name. It found `A-20`. It also plants an SNMP community and
+      asserts no row it caused contains it. `flat-audit.test.ts` holds what the entries say, and
+      proves the transaction with a sink that records and then throws: map, report and grant
+      each leave no row and no change. Mutation 3/3: a map edit that records nothing, a grant that
+      records nothing, and a map create recorded outside its transaction, each killed.
+      **Part 2** is object grants (`AccessService.grant` and `.revoke`), declared
+      `auditGap('A-17')` until `A-12`'s rewrite of `auth/access.ts` lands.
+
       **Found while drafting, and deliberately not in this ticket's done-when:** identity changes
       are not audited either — groups and their members, accounts and their roles, passwords,
       tokens and TOTP. Adding an account to an administrator group is the largest escalation this
@@ -12157,6 +12175,28 @@ because each is a decision rather than a defect:
       next to administrator-group membership added and removed. Plant a password, a token, a TOTP
       secret and a recovery code, then assert that no audit row contains any of them in any
       encoding, as `A-10` does for credentials.
+
+- [ ] **A-20 — Probe trust and rediscovery rules change without an audit entry** · M · A-17 ·
+      Found by `A-17`'s sweep, which declares these routes against this ticket. `ProbeRegistry`
+      and `RediscoveryService` call no audit sink, and neither do their routes:
+
+      - **Probe trust, first.** `POST /probes/:gid/approve` and `/revoke`,
+        `PUT /probes/:gid/allow-from`, `DELETE /probes/:gid`. Approving a probe admits a machine
+        that runs checks with the core's credentials, which is as much a grant as anything in
+        `A-17`, and today nothing durable says who admitted it.
+      - **Rediscovery rules.** `POST /discovery/schedules`, `/:id/enabled` and
+        `DELETE /discovery/schedules/:id`: standing configuration that creates objects on a
+        timer.
+      - **Discovery runs, decided rather than left out.** `POST /discovery` and `/:id/cancel` are
+        actions, not configuration, but "who started that sweep of the subnet?" needs an answer,
+        and today it has none: `discovery_run.created_by` exists (migration 025) and the route
+        never fills it. The ticket decides between auditing runs and filling that column (plus
+        who cancelled), and says which in each route's own declaration — as an entry, or as a
+        `notAudited` naming the record that answers the question instead.
+
+      **Done when** each of those changes writes an entry in its own transaction with who, what,
+      and the before and after — a probe named by its gid and name, never by its enrolment key —
+      and every `A-20` declaration `A-17`'s sweep carries is gone and the sweep still passes.
 
 ### Panel round two — notifications, schedules, triggers
 

@@ -1,5 +1,14 @@
 import type { Queryable } from '../db/pool.js';
-import type { Actor, AuditSink, LibraryAudit, Mutation, ScheduleAudit } from '../objects/audit.js';
+import type {
+  Actor,
+  AuditSink,
+  LibraryAudit,
+  MapAudit,
+  MapBackgroundAudit,
+  Mutation,
+  ReportAudit,
+  ScheduleAudit,
+} from '../objects/audit.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { ChannelProcessing } from '../objects/types.js';
 import type { ObjectKind } from '../objects/types.js';
@@ -63,6 +72,8 @@ export const AUDIT_CATEGORIES = [
   'sensor',
   'report',
   'library',
+  'map',
+  'grant',
 ] as const;
 
 /**
@@ -478,6 +489,126 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         })),
       };
 
+    case 'grant.set':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          subject: mutation.subject.kind,
+          subjectId: mutation.subject.id,
+          groupId: mutation.groupId,
+          group: mutation.groupName,
+        },
+        diff: [{ field: 'grant.right', before: mutation.before, after: mutation.after }],
+      };
+
+    case 'grant.revoked':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          subject: mutation.subject.kind,
+          subjectId: mutation.subject.id,
+          groupId: mutation.groupId,
+          group: mutation.groupName,
+        },
+        // `after: null`, not `none`: a revoke restores what the group inherits, which `none`
+        // would override. The two are different grants, and the diff must not make them look
+        // alike.
+        diff: [{ field: 'grant.right', before: mutation.before, after: null }],
+      };
+
+    case 'map.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId, name: mutation.after.name },
+        diff: created(MAP_FIELDS, mutation.after, 'map'),
+      };
+
+    case 'map.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId, name: mutation.after.name },
+        diff: changed(MAP_FIELDS, mutation.before, mutation.after, 'map'),
+      };
+
+    case 'map.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId, name: mutation.before.name },
+        diff: deleted(MAP_FIELDS, mutation.before, 'map'),
+      };
+
+    case 'map.background.set':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId },
+        diff:
+          mutation.before === null
+            ? created(BACKGROUND_FIELDS, mutation.after, 'map.background')
+            : changed(BACKGROUND_FIELDS, mutation.before, mutation.after, 'map.background'),
+      };
+
+    case 'map.background.removed':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId },
+        diff: deleted(BACKGROUND_FIELDS, mutation.before, 'map.background'),
+      };
+
+    case 'map.share.created':
+      return {
+        ...base,
+        objectKind: null,
+        // The label, the prefix and the expiry — never the token, which exists only in the
+        // response that minted it (`G-06`).
+        summary: {
+          mapId: mutation.mapId,
+          shareId: mutation.shareId,
+          label: mutation.label,
+          prefix: mutation.prefix,
+          expiresAt: mutation.expiresAt.toISOString(),
+        },
+        diff: [],
+      };
+
+    case 'map.share.revoked':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { mapId: mutation.mapId, shareId: mutation.shareId },
+        diff: [],
+      };
+
+    case 'report.created':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { reportId: mutation.reportId, name: mutation.after.name },
+        diff: created(REPORT_FIELDS, mutation.after, 'report'),
+      };
+
+    case 'report.updated':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { reportId: mutation.reportId, name: mutation.after.name },
+        diff: changed(REPORT_FIELDS, mutation.before, mutation.after, 'report'),
+      };
+
+    case 'report.deleted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { reportId: mutation.reportId, name: mutation.before.name },
+        diff: deleted(REPORT_FIELDS, mutation.before, 'report'),
+      };
+
     case 'setting.set':
       return {
         ...base,
@@ -656,6 +787,75 @@ const LIBRARY_FIELDS = [
   'priority',
   'nodes',
 ] as const satisfies readonly (keyof LibraryAudit)[];
+
+const MAP_FIELDS = [
+  'name',
+  'description',
+  'priority',
+  'layout',
+] as const satisfies readonly (keyof MapAudit)[];
+
+const BACKGROUND_FIELDS = [
+  'mediaType',
+  'digest',
+  'width',
+  'height',
+  'bytes',
+] as const satisfies readonly (keyof MapBackgroundAudit)[];
+
+const REPORT_FIELDS = [
+  'name',
+  'description',
+  'kind',
+  'subjects',
+  'span',
+  'outputs',
+  'schedule',
+  'runAs',
+] as const satisfies readonly (keyof ReportAudit)[];
+
+/**
+ * The diff of a flat entity, in the three shapes every one of them has (`A-17`).
+ *
+ * The schedule and library cases above spell these out by hand, and were written before a third
+ * and fourth entity arrived; these are that pattern named once. Every field on a create and a
+ * delete, and only what moved on an update, because an update listing all eight fields of a
+ * report would not say which one somebody changed.
+ */
+function created<T extends object>(
+  fields: readonly (keyof T & string)[],
+  after: T,
+  prefix: string,
+): FieldChange[] {
+  return fields.map((field) => ({
+    field: `${prefix}.${field}`,
+    before: null,
+    after: after[field],
+  }));
+}
+
+function changed<T extends object>(
+  fields: readonly (keyof T & string)[],
+  before: T,
+  after: T,
+  prefix: string,
+): FieldChange[] {
+  return fields
+    .filter((field) => before[field] !== after[field])
+    .map((field) => ({ field: `${prefix}.${field}`, before: before[field], after: after[field] }));
+}
+
+function deleted<T extends object>(
+  fields: readonly (keyof T & string)[],
+  before: T,
+  prefix: string,
+): FieldChange[] {
+  return fields.map((field) => ({
+    field: `${prefix}.${field}`,
+    before: before[field],
+    after: null,
+  }));
+}
 
 const LIMIT_FIELDS = [
   'enabled',

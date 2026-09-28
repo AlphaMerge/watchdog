@@ -23,6 +23,7 @@ import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
   libraryAuditSinks,
+  mapAuditSinks,
   objectAuditSinks,
   reportAuditSinks,
   scheduleAuditSinks,
@@ -848,7 +849,12 @@ async function serve(): Promise<void> {
   // API, which is a different statement from having no maps. That was the right shape and the
   // wrong wiring: until here, the only caller passing one was a test, so every route `G-01`
   // shipped answered 404 in the service somebody actually runs.
-  const maps = new MapService({ db, repository: new MapRepository(), logger });
+  const maps = new MapService({
+    db,
+    repository: new MapRepository(),
+    audit: new CompositeAuditSink(mapAuditSinks(auditSinks)),
+    logger,
+  });
   // Reads through the same `AccessService` the object API uses and the same `HistoryService`
   // the sensor pages use: a widget must not become a second, more permissive way to read a
   // sensor, and a tile's number must not be a fresher-looking answer than the detail page's.
@@ -939,7 +945,7 @@ async function serve(): Promise<void> {
     },
   });
   const reports = {
-    service: new ReportService({ db, repository: reportRepository, logger }),
+    service: new ReportService({ db, repository: reportRepository, audit: reportAudit, logger }),
     context: reportContext,
     // And through the same `HistoryService` the sensor pages use, so a report and the graph an
     // operator checks it against cannot disagree about an hour (`E-04`).

@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import type { Actor, AuditSink, GrantSubject, Mutation } from '../objects/audit.js';
 import type { AccountRole } from './accounts.js';
 import { atLeast, cappedBy, lower, type AccessRight } from './access.js';
 
@@ -47,9 +48,9 @@ export interface FlatGrant {
  * `string` here would be one refactor away from an injection.
  */
 export type GrantTable =
-  | { readonly table: 'map_access'; readonly key: 'map_id' }
-  | { readonly table: 'report_access'; readonly key: 'report_id' }
-  | { readonly table: 'library_access'; readonly key: 'library_id' };
+  | { readonly table: 'map_access'; readonly key: 'map_id'; readonly subject: 'map' }
+  | { readonly table: 'report_access'; readonly key: 'report_id'; readonly subject: 'report' }
+  | { readonly table: 'library_access'; readonly key: 'library_id'; readonly subject: 'library' };
 
 /** Which rows of an entity a viewer may list: all of them, or those granted to these groups. */
 export type ListScope =
@@ -102,11 +103,28 @@ export function grantedTo(grants: GrantTable, idColumn: string, groupsParam: str
     )`;
 }
 
+/**
+ * Who granted a right, as a `granted_by` column stores it: a login, or nothing for a non-person.
+ *
+ * The audit entry carries the whole actor; this column is the short answer a grants list shows.
+ */
+export function grantedByLabel(actor: Actor): string {
+  return actor.kind === 'user' ? actor.login.slice(0, 64) : '';
+}
+
 export class FlatAccess {
   readonly #grants: GrantTable;
+  readonly #audit: AuditSink;
 
-  constructor(grants: GrantTable) {
+  /**
+   * @param audit where every grant change is recorded, in the caller's transaction (`A-17`).
+   *   Required, and here rather than in each service, so that the one place granting is written
+   *   is the one place it is audited — three services each remembering to record it is how three
+   *   services forgot to.
+   */
+  constructor(grants: GrantTable, audit: AuditSink) {
     this.#grants = grants;
+    this.#audit = audit;
   }
 
   /**
@@ -162,17 +180,29 @@ export class FlatAccess {
     q: Queryable,
     id: number,
     viewer: FlatViewer,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<number | undefined> {
-    const primary = await q.query<{ group_id: string }>(
-      `SELECT group_id FROM user_group_member
-       WHERE user_id = $1 ORDER BY is_primary DESC, group_id LIMIT 1`,
+    const primary = await q.query<{ group_id: string; name: string }>(
+      `SELECT m.group_id, g.name FROM user_group_member m JOIN user_group g ON g.id = m.group_id
+       WHERE m.user_id = $1 ORDER BY m.is_primary DESC, m.group_id LIMIT 1`,
       [viewer.userId],
     );
-    const raw = primary[0]?.group_id;
-    if (raw === undefined) return undefined;
-    const groupId = Number(raw);
+    const row = primary[0];
+    if (row === undefined) return undefined;
+    const groupId = Number(row.group_id);
     await this.#upsert(q, id, groupId, 'full', actor);
+    // Audited like any other grant: it is one, and it is the grant that decides who can see a
+    // new thing at all.
+    await this.#record(q, actor, now, {
+      action: 'grant.set',
+      objectId: null,
+      subject: this.#subject(id),
+      groupId,
+      groupName: row.name,
+      before: null,
+      after: 'full',
+    });
     return groupId;
   }
 
@@ -210,24 +240,70 @@ export class FlatAccess {
     id: number,
     groupId: number,
     right: AccessRight,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<'granted' | 'no-such-group'> {
-    const group = await q.query<{ id: string }>(`SELECT id FROM user_group WHERE id = $1`, [
-      groupId,
-    ]);
-    if (group.length === 0) return 'no-such-group';
+    const { table, key } = this.#grants;
+    // The group and what it held here, in one read: the audit entry needs both, and the check
+    // that the group exists is this same row.
+    const found = await q.query<{ name: string; right_: AccessRight | null }>(
+      `SELECT g.name, a.right_ FROM user_group g
+       LEFT JOIN ${table} a ON a.group_id = g.id AND a.${key} = $1
+       WHERE g.id = $2`,
+      [id, groupId],
+    );
+    const group = found[0];
+    if (group === undefined) return 'no-such-group';
     await this.#upsert(q, id, groupId, right, actor);
+    await this.#record(q, actor, now, {
+      action: 'grant.set',
+      objectId: null,
+      subject: this.#subject(id),
+      groupId,
+      groupName: group.name,
+      before: group.right_,
+      after: right,
+    });
     return 'granted';
   }
 
-  /** Takes a group's grant away. False when it held none, which is not an error. */
-  async revoke(q: Queryable, id: number, groupId: number): Promise<boolean> {
+  /**
+   * Takes a group's grant away. False when it held none, which is not an error — and writes no
+   * audit entry, because nothing changed.
+   */
+  async revoke(
+    q: Queryable,
+    id: number,
+    groupId: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<boolean> {
     const { table, key } = this.#grants;
-    const rows = await q.query<{ id: string }>(
-      `DELETE FROM ${table} WHERE ${key} = $1 AND group_id = $2 RETURNING ${key} AS id`,
+    const rows = await q.query<{ right_: AccessRight; name: string }>(
+      `DELETE FROM ${table} a USING user_group g
+       WHERE a.${key} = $1 AND a.group_id = $2 AND g.id = a.group_id
+       RETURNING a.right_, g.name`,
       [id, groupId],
     );
-    return rows.length > 0;
+    const removed = rows[0];
+    if (removed === undefined) return false;
+    await this.#record(q, actor, now, {
+      action: 'grant.revoked',
+      objectId: null,
+      subject: this.#subject(id),
+      groupId,
+      groupName: removed.name,
+      before: removed.right_,
+    });
+    return true;
+  }
+
+  #subject(id: number): GrantSubject {
+    return { kind: this.#grants.subject, id };
+  }
+
+  async #record(q: Queryable, actor: Actor, now: Date, mutation: Mutation): Promise<void> {
+    await this.#audit.record(q, actor, [mutation], now);
   }
 
   async #upsert(
@@ -235,7 +311,7 @@ export class FlatAccess {
     id: number,
     groupId: number,
     right: AccessRight,
-    actor: string,
+    actor: Actor,
   ): Promise<void> {
     const { table, key } = this.#grants;
     await q.query(
@@ -243,7 +319,7 @@ export class FlatAccess {
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (${key}, group_id)
        DO UPDATE SET right_ = EXCLUDED.right_, granted_at = now(), granted_by = EXCLUDED.granted_by`,
-      [id, groupId, right, actor],
+      [id, groupId, right, grantedByLabel(actor)],
     );
   }
 

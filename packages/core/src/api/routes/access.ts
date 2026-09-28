@@ -4,7 +4,7 @@ import type { AccessRight, AccessService } from '../../auth/access.js';
 import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import { actorFor, requireRole } from '../authentication.js';
-import { ADMIN, READS } from '../authorization.js';
+import { ADMIN, READS, auditGap } from '../authorization.js';
 
 export interface AccessRoutesOptions {
   access: AccessService;
@@ -171,7 +171,9 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/objects/:id/access/:groupId',
     {
-      config: ADMIN,
+      // `A-17`'s own second half: object grants are audited once `A-12`'s rewrite of
+      // `auth/access.ts` has landed, and this declaration goes with it.
+      config: { ...ADMIN, ...auditGap('A-17') },
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],
@@ -220,7 +222,9 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.delete<{ Params: { id: number; groupId: number } }>(
     '/objects/:id/access/:groupId',
     {
-      config: ADMIN,
+      // `A-17`'s own second half: object grants are audited once `A-12`'s rewrite of
+      // `auth/access.ts` has landed, and this declaration goes with it.
+      config: { ...ADMIN, ...auditGap('A-17') },
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],

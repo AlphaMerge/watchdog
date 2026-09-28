@@ -10,7 +10,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, actorNamed } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 const available = await databaseAvailable();
 
@@ -51,7 +52,12 @@ describe('a report’s security context', { skip: available ? false : 'no databa
     const harness = await buildHarness(db);
     rootId = harness.rootId;
     const repository = new ReportRepository();
-    reports = new ReportService({ db, repository, logger: silent });
+    reports = new ReportService({
+      db,
+      repository,
+      audit: new DatabaseAuditSink(),
+      logger: silent,
+    });
     context = new ReportContext({
       db,
       repository,
@@ -178,7 +184,7 @@ describe('a report’s security context', { skip: available ? false : 'no databa
     const report = await reports.create(
       viewer(owner.id),
       { name: `scenario-${String(seq)}`, kind: 'sensor_list', subjects: { objectIds: subjects } },
-      owner.login,
+      actorNamed(owner.login),
     );
     if (runAs === owner.login) return report;
     return reports.update(
@@ -186,7 +192,7 @@ describe('a report’s security context', { skip: available ? false : 'no databa
       report.id,
       report.version,
       { runAs },
-      administrator.login,
+      actorNamed(administrator.login),
     );
   };
 
@@ -234,7 +240,13 @@ describe('a report’s security context', { skip: available ? false : 'no databa
       const salesUser = await makeUser([salesGroup]);
       const report = await reportAs(salesUser, salesUser.login);
       // Grant the ops team full access to the *report*. It still contains only sales data.
-      await reports.grant(viewer(salesUser.id), report.id, opsGroup, 'full', salesUser.login);
+      await reports.grant(
+        viewer(salesUser.id),
+        report.id,
+        opsGroup,
+        'full',
+        actorNamed(salesUser.login),
+      );
 
       const resolved = await context.subjectsFor(
         await reports.get(viewer(salesUser.id), report.id),

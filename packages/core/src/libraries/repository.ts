@@ -24,7 +24,11 @@ export interface LibraryRow {
 export type LibraryGrant = FlatGrant;
 
 /** Where a library's grants live, for `FlatAccess`. */
-export const LIBRARY_GRANTS: GrantTable = { table: 'library_access', key: 'library_id' };
+export const LIBRARY_GRANTS: GrantTable = {
+  table: 'library_access',
+  key: 'library_id',
+  subject: 'library',
+};
 
 interface RawLibrary {
   id: string;

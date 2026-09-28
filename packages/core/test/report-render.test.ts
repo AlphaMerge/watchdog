@@ -14,7 +14,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, actorNamed } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 const available = await databaseAvailable();
 const HOUR = 3_600_000;
@@ -59,7 +60,12 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
       access: new AccessService({ db, logger: silent }),
       logger: silent,
     });
-    reports = new ReportService({ db, repository, logger: silent });
+    reports = new ReportService({
+      db,
+      repository,
+      audit: new DatabaseAuditSink(),
+      logger: silent,
+    });
     history = new HistoryService({ db, logger: silent });
     // Counted, so a test can say whether the renderer read anything before it refused (`P-203`).
     const read = history.forSensor.bind(history);
@@ -200,7 +206,7 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
           resolutionSeconds: 3_600,
         },
       },
-      author.login,
+      actorNamed(author.login),
     );
     return renderer.build(report, new Date(base.getTime() + 5 * HOUR));
   };
@@ -286,7 +292,7 @@ describe('rendering a report', { skip: available ? false : 'no database' }, () =
         kind: 'table_only',
         subjects: { objectIds: [sensorId] },
       },
-      author.login,
+      actorNamed(author.login),
     );
     // Read it back *before* disabling, so the row the renderer is handed is the ordinary one and
     // the refusal has to come from resolving the context rather than from a stale flag.

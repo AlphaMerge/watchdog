@@ -20,6 +20,7 @@ import {
   onBodyObject,
   onQueryObject,
   visibilityOf,
+  notAudited,
 } from '../authorization.js';
 
 export interface TemplateRouteOptions {
@@ -494,7 +495,10 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         // bar for editing one — but this route renders against a *sensor* the caller names, and
         // that sensor is in the tree. Optional because rendering against the example sensor
         // names nothing to have a right on (`R07`).
-        config: every(WRITES, onBodyObject('read', 'sensorId', { optional: true })),
+        config: {
+          ...every(WRITES, onBodyObject('read', 'sensorId', { optional: true })),
+          ...notAudited('sends one message and changes nothing it is sent through'),
+        },
         schema: {
           tags: ['templates'],
           summary: 'Send a test notification through this template',

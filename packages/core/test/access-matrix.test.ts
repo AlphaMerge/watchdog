@@ -156,7 +156,12 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // declares a bar above read" never met them — and every one of their routes declared
       // `READS`, so a read-only account and a read-scoped token created both. Their per-map and
       // per-report rights are decided in their services, which is what `rightsIn` declares.
-      maps: new MapService({ db, repository: new MapRepository(), logger: silent }),
+      maps: new MapService({
+        db,
+        repository: new MapRepository(),
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      }),
       mapResolver: new MapResolver({ db, access, history }),
       // **Libraries from their first commit** (`L-01`), which is the lesson `A-14` taught: a
       // route group the harness does not pass is one the sweeps below never call.
@@ -167,7 +172,12 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         logger: silent,
       }),
       reports: {
-        service: new ReportService({ db, repository: reportRepository, logger: silent }),
+        service: new ReportService({
+          db,
+          repository: reportRepository,
+          audit: new DatabaseAuditSink(),
+          logger: silent,
+        }),
         context: reportContext,
         renderer: reportRenderer,
         runner: new ReportRunner({

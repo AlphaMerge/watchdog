@@ -17,7 +17,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from '../support/database.js';
-import { buildHarness, silent, testActor } from '../support/tree.js';
+import { buildHarness, silent, testActor, actorNamed } from '../support/tree.js';
+import { DatabaseAuditSink } from '../../src/audit/store.js';
 
 const available = await databaseAvailable();
 
@@ -178,7 +179,12 @@ describe(
         access: new AccessService({ db, logger: silent }),
         logger: silent,
       });
-      reports = new ReportService({ db, repository, logger: silent });
+      reports = new ReportService({
+        db,
+        repository,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      });
 
       const started = Date.now();
       const probe = await harness.service.create(testActor, {
@@ -294,7 +300,7 @@ describe(
           subjects: { objectIds: sensorIds.slice(0, count) },
           span: { kind: span, offset: 1, timezone: 'UTC' },
         },
-        author.login,
+        actorNamed(author.login),
       );
     };
 

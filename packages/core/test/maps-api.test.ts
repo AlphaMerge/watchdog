@@ -9,7 +9,7 @@ import { GroupService } from '../src/auth/groups.js';
 import { AccessService } from '../src/auth/access.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { MapRepository } from '../src/maps/repository.js';
 import { MapResolver } from '../src/maps/resolver.js';
@@ -78,7 +78,12 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       db,
       audit: new AuditRepository(),
       catalogue: testCatalogue(),
-      maps: new MapService({ db, repository: new MapRepository(), logger: silent }),
+      maps: new MapService({
+        db,
+        repository: new MapRepository(),
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      }),
       mapResolver: new MapResolver({ db, access, history }),
       // An installation that has a tile source, so the geo cases can tell "not configured" apart
       // from "configured and deliberately withheld" (`ADR-004` Decisions 1 and 4).

@@ -8,6 +8,7 @@ import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
 import { MapError } from '../../maps/errors.js';
 import { MAX_IMAGE_BYTES } from '../../maps/images.js';
+import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
 
 /**
@@ -358,7 +359,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     },
     async (request, reply) => {
       const viewer = viewerOf(request);
-      const created = await maps.create(viewer, request.body, request.principal?.login ?? '');
+      const created = await maps.create(viewer, request.body, actorFor(request));
       return reply.code(201).send(serialise(created));
     },
   );
@@ -386,7 +387,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         id,
         expectedVersion(request.headers['if-match'], id),
         request.body,
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return serialise(updated);
     },
@@ -460,7 +461,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         viewerOf(request),
         Number(request.params.id),
         { label: request.body.label, expiresAt },
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(201).send({ share: serialiseShare(made.share), token: made.token });
     },
@@ -484,7 +485,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         viewerOf(request),
         Number(request.params.id),
         Number(request.params.shareId),
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(204).send();
     },
@@ -529,7 +530,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         viewerOf(request),
         Number(request.params.id),
         body,
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return { ...stored, uploadedAt: stored.uploadedAt.toISOString() };
     },
@@ -547,11 +548,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request, reply) => {
-      await maps.removeBackground(
-        viewerOf(request),
-        Number(request.params.id),
-        request.principal?.login ?? '',
-      );
+      await maps.removeBackground(viewerOf(request), Number(request.params.id), actorFor(request));
       return reply.code(204).send();
     },
   );
@@ -568,11 +565,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request, reply) => {
-      await maps.remove(
-        viewerOf(request),
-        Number(request.params.id),
-        request.principal?.login ?? '',
-      );
+      await maps.remove(viewerOf(request), Number(request.params.id), actorFor(request));
       return reply.code(204).send();
     },
   );
@@ -644,7 +637,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         Number(request.params.id),
         Number(request.params.groupId),
         request.body.right,
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(204).send();
     },
@@ -665,7 +658,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         viewerOf(request),
         Number(request.params.id),
         Number(request.params.groupId),
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(204).send();
     },

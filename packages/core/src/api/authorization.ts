@@ -147,8 +147,23 @@ declare module 'fastify' {
      * others. Never set on a route whose subject *is* in the tree: there, `onObject` is the check.
      */
     rightsIn?: string;
+    /**
+     * Why this route, which changes something, writes no audit entry (`A-17`).
+     *
+     * Absent means it does, and the audit sweep calls it to prove so. Present means one of two
+     * things, said here beside the handler so a reviewer can hold the claim against the code:
+     * `exempt`, because what it changes is not configuration — a session, a test send — or
+     * `gap`, because it should and does not yet, owned by the named ticket. A gap is a debt with
+     * a name; the ticket that pays it removes the declaration.
+     */
+    audit?: AuditDeclaration;
   }
 }
+
+/** See `audit` on the route config. */
+export type AuditDeclaration =
+  | { readonly kind: 'exempt'; readonly why: string }
+  | { readonly kind: 'gap'; readonly ticket: string };
 
 /** The roles that satisfy each account-level requirement. */
 const ROLES: Readonly<Record<'read' | 'write' | 'admin', readonly AccountRole[]>> = {
@@ -444,6 +459,21 @@ export const SELF = { access: { kind: 'self' } } as const satisfies { access: Ro
  */
 export function writesIn(service: string): { access: RouteAccess; rightsIn: string } {
   return { access: { kind: 'write' }, rightsIn: service };
+}
+
+/**
+ * A route that changes something other than configuration, and so writes no audit entry.
+ *
+ * For the handful that genuinely are that — starting or ending a session, a test send — and for
+ * nothing an operator would come to the audit log looking for (`A-17`).
+ */
+export function notAudited(why: string): { audit: AuditDeclaration } {
+  return { audit: { kind: 'exempt', why } };
+}
+
+/** A route that should write an audit entry and does not yet; `ticket` is what fixes it. */
+export function auditGap(ticket: string): { audit: AuditDeclaration } {
+  return { audit: { kind: 'gap', ticket } };
 }
 
 /** A right on the object named by a route parameter. */

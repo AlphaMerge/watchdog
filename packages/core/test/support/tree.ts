@@ -29,6 +29,17 @@ export const silent = pino({ level: 'silent' });
 export const testActor: Actor = { kind: 'system', component: 'test' };
 
 /**
+ * A person, by login, for a service that records who acted and uses the login as well (`A-17`).
+ *
+ * The login is what matters to the callers: a report renders as its creator when nobody else is
+ * named, and a grant's `granted_by` is the login. The id is not an account, and nothing that takes
+ * one of these looks it up.
+ */
+export function actorNamed(login: string): Actor {
+  return { kind: 'user', userId: 0, login };
+}
+
+/**
  * Captures what the service would have written to the audit log.
  *
  * `persist` makes the sink actually write through the `Queryable` it was handed. That is the

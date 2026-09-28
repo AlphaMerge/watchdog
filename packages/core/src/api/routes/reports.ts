@@ -21,6 +21,7 @@ import type { Database } from '../../db/pool.js';
 import type { ReportFormatter } from '../../reports/formatter.js';
 import { MAX_PDF_PAGES } from '../../reports/pdf.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
+import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
 
 /**
@@ -583,11 +584,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request, reply) => {
-      const created = await reports.create(
-        viewerOf(request),
-        request.body,
-        request.principal?.login ?? '',
-      );
+      const created = await reports.create(viewerOf(request), request.body, actorFor(request));
       return reply.code(201).send(serialise(created, new Date()));
     },
   );
@@ -620,7 +617,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         id,
         expectedVersion(request.headers['if-match'], id),
         request.body,
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return serialise(updated, new Date());
     },
@@ -638,11 +635,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request, reply) => {
-      await reports.remove(
-        viewerOf(request),
-        Number(request.params.id),
-        request.principal?.login ?? '',
-      );
+      await reports.remove(viewerOf(request), Number(request.params.id), actorFor(request));
       return reply.code(204).send();
     },
   );
@@ -828,7 +821,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         Number(request.params.id),
         Number(request.params.groupId),
         request.body.right,
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(204).send();
     },
@@ -849,7 +842,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         viewerOf(request),
         Number(request.params.id),
         Number(request.params.groupId),
-        request.principal?.login ?? '',
+        actorFor(request),
       );
       return reply.code(204).send();
     },

@@ -26,7 +26,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, actorNamed } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 const available = await databaseAvailable();
 
@@ -63,7 +64,12 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
     repository = new ReportRepository();
     runs = new ReportRunRepository();
     outputs = new ReportOutputRepository();
-    reports = new ReportService({ db, repository, logger: silent });
+    reports = new ReportService({
+      db,
+      repository,
+      audit: new DatabaseAuditSink(),
+      logger: silent,
+    });
     clock = new Date('2026-09-11T05:00:00.000Z');
     formatter = new ReportFormatter({ logger: silent });
     delivery = new ReportDelivery({
@@ -160,7 +166,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
         span: { kind: 'day', offset: 1, timezone: 'UTC' },
         outputs: outputsDocument,
       },
-      author.login,
+      actorNamed(author.login),
     );
     return runner.runNow(report, author.login);
   };

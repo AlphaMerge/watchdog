@@ -1,7 +1,14 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { atLeast, type AccessRight } from '../auth/access.js';
-import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
+import {
+  FlatAccess,
+  ceilingOf,
+  grantedByLabel,
+  verdict,
+  type FlatViewer,
+} from '../auth/flat-access.js';
+import type { Actor, AuditSink, MapAudit, MapBackgroundAudit } from '../objects/audit.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
 import { createHash } from 'node:crypto';
 import { readImage } from './images.js';
@@ -34,6 +41,11 @@ export type MapViewer = FlatViewer;
 export interface MapServiceOptions {
   readonly db: Database;
   readonly repository: MapRepository;
+  /**
+   * Where every change to a map and its grants is recorded, in the change's transaction
+   * (`A-17`). Required, so a build cannot wire maps and forget to record what is done to them.
+   */
+  readonly audit: AuditSink;
   readonly logger: Logger;
 }
 
@@ -46,12 +58,15 @@ const MAX_SHARE_MS = 365 * 24 * 60 * 60 * 1000;
 export class MapService {
   readonly #db: Database;
   readonly #repository: MapRepository;
-  readonly #access = new FlatAccess(MAP_GRANTS);
+  readonly #access: FlatAccess;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
 
   constructor(options: MapServiceOptions) {
     this.#db = options.db;
     this.#repository = options.repository;
+    this.#audit = options.audit;
+    this.#access = new FlatAccess(MAP_GRANTS, options.audit);
     this.#logger = options.logger.child({ component: 'maps' });
   }
 
@@ -131,7 +146,8 @@ export class MapService {
   async create(
     viewer: MapViewer,
     input: { name: string; description?: string; priority?: number; layout?: MapLayout },
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<MapRow> {
     if (!atLeast(ceilingOf(viewer), 'write')) {
       throw new MapError('MAP_FORBIDDEN', 'this account may not create maps', {
@@ -160,7 +176,13 @@ export class MapService {
       }
 
       const map = await this.#repository.create(tx, { name, description, priority, layout });
-      await this.#access.grantCreator(tx, map.id, viewer, actor);
+      await this.#audit.record(
+        tx,
+        actor,
+        [{ action: 'map.created', objectId: null, mapId: map.id, after: auditOf(map) }],
+        now,
+      );
+      await this.#access.grantCreator(tx, map.id, viewer, actor, now);
 
       this.#logger.info({ mapId: map.id, name, actor }, 'map created');
       return map;
@@ -178,7 +200,8 @@ export class MapService {
     id: number,
     expectedVersion: number,
     patch: { name?: string; description?: string; priority?: number; layout?: MapLayout },
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<MapRow> {
     return this.#db.tx(async (tx) => {
       const current = await this.require(viewer, id, 'write', tx);
@@ -210,15 +233,35 @@ export class MapService {
       const updated = await this.#repository.update(tx, id, expectedVersion, next);
       if (updated === undefined) throw changedUnderneath(id, expectedVersion, current.version);
 
+      await this.#audit.record(
+        tx,
+        actor,
+        [
+          {
+            action: 'map.updated',
+            objectId: null,
+            mapId: id,
+            before: auditOf(current),
+            after: auditOf(updated),
+          },
+        ],
+        now,
+      );
       this.#logger.info({ mapId: id, actor, version: updated.version }, 'map updated');
       return updated;
     });
   }
 
-  async remove(viewer: MapViewer, id: number, actor: string): Promise<void> {
+  async remove(viewer: MapViewer, id: number, actor: Actor, now = new Date()): Promise<void> {
     await this.#db.tx(async (tx) => {
-      await this.require(viewer, id, 'full', tx);
+      const current = await this.require(viewer, id, 'full', tx);
       await this.#repository.remove(tx, id);
+      await this.#audit.record(
+        tx,
+        actor,
+        [{ action: 'map.deleted', objectId: null, mapId: id, before: auditOf(current) }],
+        now,
+      );
       this.#logger.info({ mapId: id, actor }, 'map deleted');
     });
   }
@@ -250,7 +293,7 @@ export class MapService {
     viewer: MapViewer,
     id: number,
     request: { label: string; expiresAt: Date },
-    actor: string,
+    actor: Actor,
   ): Promise<{ share: MapShare; token: string }> {
     const label = request.label.trim();
     if (label === '' || label.length > MAX_SHARE_LABEL) {
@@ -293,8 +336,24 @@ export class MapService {
         tokenHash: minted.tokenHash,
         prefix: minted.prefix,
         expiresAt: request.expiresAt,
-        createdBy: actor,
+        createdBy: grantedByLabel(actor),
       });
+      await this.#audit.record(
+        tx,
+        actor,
+        [
+          {
+            action: 'map.share.created',
+            objectId: null,
+            mapId: id,
+            shareId: share.id,
+            label: share.label,
+            prefix: share.prefix,
+            expiresAt: share.expiresAt,
+          },
+        ],
+        now,
+      );
       // The label and the expiry, never the token: a share link in the journal is a share link in
       // whatever ships the journal somewhere else.
       this.#logger.info(
@@ -305,10 +364,16 @@ export class MapService {
     });
   }
 
-  async revokeShare(viewer: MapViewer, id: number, shareId: number, actor: string): Promise<void> {
+  async revokeShare(
+    viewer: MapViewer,
+    id: number,
+    shareId: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      const revoked = await this.#repository.revokeShare(tx, id, shareId, actor);
+      const revoked = await this.#repository.revokeShare(tx, id, shareId, grantedByLabel(actor));
       if (!revoked) {
         throw new MapError(
           'MAP_NOT_FOUND',
@@ -318,6 +383,12 @@ export class MapService {
           },
         );
       }
+      await this.#audit.record(
+        tx,
+        actor,
+        [{ action: 'map.share.revoked', objectId: null, mapId: id, shareId }],
+        now,
+      );
       this.#logger.info({ mapId: id, actor, shareId }, 'map share link revoked');
     });
   }
@@ -385,7 +456,8 @@ export class MapService {
     viewer: MapViewer,
     id: number,
     bytes: Buffer,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<MapBackground> {
     const facts = readImage(bytes);
     if ('problem' in facts) {
@@ -397,13 +469,14 @@ export class MapService {
     const digest = createHash('sha256').update(bytes).digest('hex');
     return this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'write', tx);
+      const replaced = await this.#repository.background(tx, id);
       await this.#repository.putBackground(tx, id, {
         mediaType: facts.mediaType,
         digest,
         width: facts.width,
         height: facts.height,
         bytes,
-        uploadedBy: actor,
+        uploadedBy: grantedByLabel(actor),
       });
       this.#logger.info(
         { mapId: id, actor, mediaType: facts.mediaType, bytes: bytes.length, digest },
@@ -412,6 +485,20 @@ export class MapService {
       const stored = await this.#repository.background(tx, id);
       /* c8 ignore next -- it was written in this transaction */
       if (stored === undefined) throw mapNotFound(id);
+      await this.#audit.record(
+        tx,
+        actor,
+        [
+          {
+            action: 'map.background.set',
+            objectId: null,
+            mapId: id,
+            before: replaced === undefined ? null : backgroundAuditOf(replaced),
+            after: backgroundAuditOf(stored),
+          },
+        ],
+        now,
+      );
       return stored;
     });
   }
@@ -437,11 +524,33 @@ export class MapService {
     });
   }
 
-  async removeBackground(viewer: MapViewer, id: number, actor: string): Promise<void> {
+  async removeBackground(
+    viewer: MapViewer,
+    id: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'write', tx);
+      const before = await this.#repository.background(tx, id);
       const removed = await this.#repository.removeBackground(tx, id);
-      if (removed) this.#logger.info({ mapId: id, actor }, 'map background removed');
+      // Nothing removed, nothing recorded: removing a background that is not there changes
+      // nothing, the same rule a revoke that found no grant follows.
+      if (!removed || before === undefined) return;
+      await this.#audit.record(
+        tx,
+        actor,
+        [
+          {
+            action: 'map.background.removed',
+            objectId: null,
+            mapId: id,
+            before: backgroundAuditOf(before),
+          },
+        ],
+        now,
+      );
+      this.#logger.info({ mapId: id, actor }, 'map background removed');
     });
   }
 
@@ -456,11 +565,12 @@ export class MapService {
     id: number,
     groupId: number,
     right: AccessRight,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      if ((await this.#access.grant(tx, id, groupId, right, actor)) === 'no-such-group') {
+      if ((await this.#access.grant(tx, id, groupId, right, actor, now)) === 'no-such-group') {
         throw new MapError('MAP_GROUP_NOT_FOUND', `group ${String(groupId)} does not exist`, {
           context: { mapId: id, phase: 'grant' },
           details: { groupId },
@@ -470,13 +580,64 @@ export class MapService {
     });
   }
 
-  async revoke(viewer: MapViewer, id: number, groupId: number, actor: string): Promise<void> {
+  async revoke(
+    viewer: MapViewer,
+    id: number,
+    groupId: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      await this.#access.revoke(tx, id, groupId);
+      await this.#access.revoke(tx, id, groupId, actor, now);
       this.#logger.info({ mapId: id, groupId, actor }, 'map access revoked');
     });
   }
+}
+
+/** A map as the audit log records it. */
+function auditOf(map: MapRow): MapAudit {
+  return {
+    name: map.name,
+    description: map.description,
+    priority: map.priority,
+    layout: layoutText(map.layout),
+  };
+}
+
+/**
+ * A layout as lines: each item of a list on its own, prefixed by the list it is in.
+ *
+ * **Read as `unknown`, the way the resolver reads it.** Nothing holds the column to having
+ * `widgets` — the route accepts any object and `G-02` keeps what it cannot parse — so an audit that
+ * assumed the shape would turn a strange save into a 500. And the whole layout, not the widgets:
+ * connectors and the geographical view are edits too.
+ */
+function layoutText(layout: unknown): string {
+  if (typeof layout !== 'object' || layout === null || Array.isArray(layout)) {
+    return JSON.stringify(layout);
+  }
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(layout)) {
+    if (Array.isArray(value) && value.length > 0) {
+      for (const item of value) lines.push(`${key}: ${JSON.stringify(item)}`);
+    } else {
+      // An empty list is said, as `widgets: []`: rendered as no lines it would read the same as a
+      // layout that had no such list at all.
+      lines.push(`${key}: ${JSON.stringify(value)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function backgroundAuditOf(background: MapBackground): MapBackgroundAudit {
+  return {
+    mediaType: background.mediaType,
+    digest: background.digest,
+    width: background.width,
+    height: background.height,
+    bytes: background.bytes,
+  };
 }
 
 function validName(raw: string): string {

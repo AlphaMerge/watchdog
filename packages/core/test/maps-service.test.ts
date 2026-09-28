@@ -8,7 +8,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent } from './support/tree.js';
+import { buildHarness, silent, actorNamed } from './support/tree.js';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 
 const available = await databaseAvailable();
 
@@ -31,7 +32,12 @@ describe(
       scratch = await createScratchDatabase('mapsvc');
       db = scratch.db;
       await buildHarness(db);
-      maps = new MapService({ db, repository: new MapRepository(), logger: silent });
+      maps = new MapService({
+        db,
+        repository: new MapRepository(),
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+      });
     });
 
     after(async () => {
@@ -81,7 +87,11 @@ describe(
       // than a test.
       const group = await makeGroup(`creators-${String(seq)}`);
       const user = await makeUser([group]);
-      const map = await maps.create(viewer(user), { name: `mine-${String(seq)}` }, 'tester');
+      const map = await maps.create(
+        viewer(user),
+        { name: `mine-${String(seq)}` },
+        actorNamed('tester'),
+      );
 
       assert.equal(await maps.rightFor(viewer(user), map.id), 'full');
       assert.equal((await maps.get(viewer(user), map.id)).id, map.id);
@@ -100,7 +110,7 @@ describe(
       ]) {
         const name = `refused-${who.role}-${String(seq)}`;
         await assert.rejects(
-          () => maps.create(who, { name }, 'tester'),
+          () => maps.create(who, { name }, actorNamed('tester')),
           (error: unknown) => {
             assert.equal((error as { code: string }).code, 'MAP_FORBIDDEN');
             return true;
@@ -112,7 +122,7 @@ describe(
       await maps.create(
         { userId: user, role: 'readwrite', scope: 'write' },
         { name: `allowed-${String(seq)}` },
-        'tester',
+        actorNamed('tester'),
       );
     });
 
@@ -120,7 +130,11 @@ describe(
       // Answering 403 for a map that exists and 404 for one that does not is an oracle: anybody
       // could enumerate ids and learn how many maps an installation has.
       const owner = await makeUser([await makeGroup(`owner-${String(seq)}`)]);
-      const map = await maps.create(viewer(owner), { name: `secret-${String(seq)}` }, 'tester');
+      const map = await maps.create(
+        viewer(owner),
+        { name: `secret-${String(seq)}` },
+        actorNamed('tester'),
+      );
       const stranger = await makeUser([await makeGroup(`stranger-${String(seq)}`)]);
 
       await assert.rejects(
@@ -136,7 +150,11 @@ describe(
       // "May do anything, including to things that do not exist yet" is not a grant, and must not
       // depend on a row that somebody can delete.
       const owner = await makeUser([await makeGroup(`owner2-${String(seq)}`)]);
-      const map = await maps.create(viewer(owner), { name: `admin-sees-${String(seq)}` }, 'tester');
+      const map = await maps.create(
+        viewer(owner),
+        { name: `admin-sees-${String(seq)}` },
+        actorNamed('tester'),
+      );
       const admin = await makeUser([await makeGroup(`admins-${String(seq)}`, true)]);
 
       assert.equal(await maps.rightFor(viewer(admin), map.id), 'full');
@@ -147,11 +165,22 @@ describe(
       // full on a map still holds read.
       const group = await makeGroup(`capped-${String(seq)}`);
       const user = await makeUser([group]);
-      const map = await maps.create(viewer(user), { name: `capped-map-${String(seq)}` }, 'tester');
+      const map = await maps.create(
+        viewer(user),
+        { name: `capped-map-${String(seq)}` },
+        actorNamed('tester'),
+      );
 
       assert.equal(await maps.rightFor(viewer(user, 'readonly'), map.id), 'read');
       await assert.rejects(
-        () => maps.update(viewer(user, 'readonly'), map.id, map.version, { priority: 5 }, 'x'),
+        () =>
+          maps.update(
+            viewer(user, 'readonly'),
+            map.id,
+            map.version,
+            { priority: 5 },
+            actorNamed('x'),
+          ),
         /may not write/,
       );
     });
@@ -159,7 +188,11 @@ describe(
     it('caps an account’s right by a token’s scope as well', async () => {
       const group = await makeGroup(`scoped-${String(seq)}`);
       const user = await makeUser([group]);
-      const map = await maps.create(viewer(user), { name: `scoped-map-${String(seq)}` }, 'tester');
+      const map = await maps.create(
+        viewer(user),
+        { name: `scoped-map-${String(seq)}` },
+        actorNamed('tester'),
+      );
       assert.equal(
         await maps.rightFor({ userId: user, role: 'readwrite', scope: 'read' }, map.id),
         'read',
@@ -173,7 +206,7 @@ describe(
       const name = `listed-${String(seq)}`;
       const mine = await makeGroup(`list-mine-${String(seq)}`);
       const user = await makeUser([mine]);
-      await maps.create(viewer(user), { name }, 'tester');
+      await maps.create(viewer(user), { name }, actorNamed('tester'));
 
       const stranger = await makeUser([await makeGroup(`list-other-${String(seq)}`)]);
       const admin = await makeUser([await makeGroup(`list-admin-${String(seq)}`, true)]);
@@ -187,14 +220,24 @@ describe(
     describe('concurrent editing, which a designer makes ordinary', () => {
       it('refuses a write against a version that has moved on', async () => {
         const user = await makeUser([await makeGroup(`conc-${String(seq)}`)]);
-        const map = await maps.create(viewer(user), { name: `conc-${String(seq)}` }, 'tester');
+        const map = await maps.create(
+          viewer(user),
+          { name: `conc-${String(seq)}` },
+          actorNamed('tester'),
+        );
 
-        const first = await maps.update(viewer(user), map.id, map.version, { priority: 4 }, 'a');
+        const first = await maps.update(
+          viewer(user),
+          map.id,
+          map.version,
+          { priority: 4 },
+          actorNamed('a'),
+        );
         assert.equal(first.version, map.version + 1);
 
         // The second designer still holds the version they opened.
         await assert.rejects(
-          () => maps.update(viewer(user), map.id, map.version, { priority: 2 }, 'b'),
+          () => maps.update(viewer(user), map.id, map.version, { priority: 2 }, actorNamed('b')),
           (error: unknown) => {
             assert.equal((error as { code: string }).code, 'MAP_CHANGED');
             assert.deepEqual((error as { details: unknown }).details, {
@@ -210,26 +253,34 @@ describe(
     describe('granting', () => {
       it('needs full, so a write holder cannot decide who else sees the map', async () => {
         const owner = await makeUser([await makeGroup(`g-owner-${String(seq)}`)]);
-        const map = await maps.create(viewer(owner), { name: `granting-${String(seq)}` }, 'tester');
+        const map = await maps.create(
+          viewer(owner),
+          { name: `granting-${String(seq)}` },
+          actorNamed('tester'),
+        );
 
         const editorGroup = await makeGroup(`g-editor-${String(seq)}`);
         const editor = await makeUser([editorGroup]);
-        await maps.grant(viewer(owner), map.id, editorGroup, 'write', 'tester');
+        await maps.grant(viewer(owner), map.id, editorGroup, 'write', actorNamed('tester'));
 
         assert.equal(await maps.rightFor(viewer(editor), map.id), 'write');
         await assert.rejects(
-          () => maps.grant(viewer(editor), map.id, editorGroup, 'full', 'editor'),
+          () => maps.grant(viewer(editor), map.id, editorGroup, 'full', actorNamed('editor')),
           /may not full/,
         );
       });
 
       it('replaces a grant rather than failing, because granting twice is a correction', async () => {
         const owner = await makeUser([await makeGroup(`g2-owner-${String(seq)}`)]);
-        const map = await maps.create(viewer(owner), { name: `regrant-${String(seq)}` }, 'tester');
+        const map = await maps.create(
+          viewer(owner),
+          { name: `regrant-${String(seq)}` },
+          actorNamed('tester'),
+        );
         const other = await makeGroup(`g2-other-${String(seq)}`);
 
-        await maps.grant(viewer(owner), map.id, other, 'read', 'tester');
-        await maps.grant(viewer(owner), map.id, other, 'write', 'tester');
+        await maps.grant(viewer(owner), map.id, other, 'read', actorNamed('tester'));
+        await maps.grant(viewer(owner), map.id, other, 'write', actorNamed('tester'));
 
         const grants = await maps.grants(viewer(owner), map.id);
         assert.equal(grants.filter((one) => one.groupId === other).length, 1);
@@ -238,22 +289,30 @@ describe(
 
       it('refuses a grant to a group that does not exist', async () => {
         const owner = await makeUser([await makeGroup(`g3-owner-${String(seq)}`)]);
-        const map = await maps.create(viewer(owner), { name: `nogroup-${String(seq)}` }, 'tester');
+        const map = await maps.create(
+          viewer(owner),
+          { name: `nogroup-${String(seq)}` },
+          actorNamed('tester'),
+        );
         await assert.rejects(
-          () => maps.grant(viewer(owner), map.id, 999_999, 'read', 'tester'),
+          () => maps.grant(viewer(owner), map.id, 999_999, 'read', actorNamed('tester')),
           /does not exist/,
         );
       });
 
       it('takes access away again on revoke', async () => {
         const owner = await makeUser([await makeGroup(`g4-owner-${String(seq)}`)]);
-        const map = await maps.create(viewer(owner), { name: `revoked-${String(seq)}` }, 'tester');
+        const map = await maps.create(
+          viewer(owner),
+          { name: `revoked-${String(seq)}` },
+          actorNamed('tester'),
+        );
         const group = await makeGroup(`g4-other-${String(seq)}`);
         const user = await makeUser([group]);
 
-        await maps.grant(viewer(owner), map.id, group, 'read', 'tester');
+        await maps.grant(viewer(owner), map.id, group, 'read', actorNamed('tester'));
         assert.equal(await maps.rightFor(viewer(user), map.id), 'read');
-        await maps.revoke(viewer(owner), map.id, group, 'tester');
+        await maps.revoke(viewer(owner), map.id, group, actorNamed('tester'));
         assert.equal(await maps.rightFor(viewer(user), map.id), 'none');
       });
     });
@@ -261,18 +320,21 @@ describe(
     describe('validation', () => {
       it('refuses a blank name and one that is too long', async () => {
         const user = await makeUser([await makeGroup(`v-${String(seq)}`)]);
-        await assert.rejects(() => maps.create(viewer(user), { name: '   ' }, 'x'), /1 to 100/);
         await assert.rejects(
-          () => maps.create(viewer(user), { name: 'x'.repeat(101) }, 'x'),
+          () => maps.create(viewer(user), { name: '   ' }, actorNamed('x')),
+          /1 to 100/,
+        );
+        await assert.rejects(
+          () => maps.create(viewer(user), { name: 'x'.repeat(101) }, actorNamed('x')),
           /1 to 100/,
         );
       });
 
       it('refuses a duplicate name whatever its case', async () => {
         const user = await makeUser([await makeGroup(`v2-${String(seq)}`)]);
-        await maps.create(viewer(user), { name: `Dup-${String(seq)}` }, 'x');
+        await maps.create(viewer(user), { name: `Dup-${String(seq)}` }, actorNamed('x'));
         await assert.rejects(
-          () => maps.create(viewer(user), { name: `dup-${String(seq)}` }, 'x'),
+          () => maps.create(viewer(user), { name: `dup-${String(seq)}` }, actorNamed('x')),
           /already exists/,
         );
       });
@@ -280,14 +342,19 @@ describe(
       it('refuses a priority outside 1..5', async () => {
         const user = await makeUser([await makeGroup(`v3-${String(seq)}`)]);
         await assert.rejects(
-          () => maps.create(viewer(user), { name: `p-${String(seq)}`, priority: 9 }, 'x'),
+          () =>
+            maps.create(viewer(user), { name: `p-${String(seq)}`, priority: 9 }, actorNamed('x')),
           /1 to 5/,
         );
       });
 
       it('trims the name, so two maps cannot differ by a space', async () => {
         const user = await makeUser([await makeGroup(`v4-${String(seq)}`)]);
-        const map = await maps.create(viewer(user), { name: `  Trimmed-${String(seq)}  ` }, 'x');
+        const map = await maps.create(
+          viewer(user),
+          { name: `  Trimmed-${String(seq)}  ` },
+          actorNamed('x'),
+        );
         assert.equal(map.name, `Trimmed-${String(seq)}`);
       });
     });

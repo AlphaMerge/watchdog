@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { ProbeConfigService } from '../../probes/config.js';
 import type { ProbeQueryService } from '../../probes/queries.js';
-import { onObject } from '../authorization.js';
+import { notAudited, onObject } from '../authorization.js';
 
 /**
  * Running one check now, with the request waiting on it (`R-09`).
@@ -62,7 +62,10 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
   app.post<{ Params: { id: number }; Body: { timeoutMs?: number } }>(
     '/sensors/:id/check',
     {
-      config: onObject('write'),
+      config: {
+        ...onObject('write'),
+        ...notAudited('runs the check once and returns what it said; no configuration changes'),
+      },
       schema: {
         tags: ['sensors'],
         summary: 'Run this sensor’s check now and return what it said',

@@ -29,6 +29,7 @@ import {
   READS,
   registerAuthorization,
   visibilityOf,
+  type AuditDeclaration,
   type RouteAccess,
 } from './authorization.js';
 import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
@@ -337,6 +338,7 @@ export class ApiServer {
     access: RouteAccess;
     changes: boolean;
     rightsIn?: string;
+    audit?: AuditDeclaration;
   }[] = [];
   /** Non-null while registering routes that are exempt, holding the reason. */
   #exempting: string | null = null;
@@ -440,6 +442,8 @@ export class ApiServer {
       const changes = route.config?.changes ?? true;
       // And where the right on its subject is decided, when that is not the object tree (`A-14`).
       const rightsIn = route.config?.rightsIn;
+      // And why it writes no audit entry, when it does not (`A-17`).
+      const audit = route.config?.audit;
       for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
         this.#routes.push({
           method,
@@ -447,6 +451,7 @@ export class ApiServer {
           access,
           changes,
           ...(rightsIn === undefined ? {} : { rightsIn }),
+          ...(audit === undefined ? {} : { audit }),
         });
       }
     });
@@ -479,6 +484,7 @@ export class ApiServer {
     access: RouteAccess;
     changes: boolean;
     rightsIn?: string;
+    audit?: AuditDeclaration;
   }[] {
     return this.#routes;
   }

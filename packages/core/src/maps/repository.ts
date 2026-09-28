@@ -70,7 +70,11 @@ export interface MapShare {
 export type MapGrant = FlatGrant;
 
 /** Where a map's grants live, for `FlatAccess` (`L-01`). */
-export const MAP_GRANTS: GrantTable = { table: 'map_access', key: 'map_id' };
+export const MAP_GRANTS: GrantTable = {
+  table: 'map_access',
+  key: 'map_id',
+  subject: 'map',
+};
 
 interface RawMap {
   id: string;

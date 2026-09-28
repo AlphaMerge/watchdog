@@ -2,6 +2,7 @@ import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { atLeast, type AccessRight } from '../auth/access.js';
 import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
+import type { Actor, AuditSink, ReportAudit } from '../objects/audit.js';
 import { ReportError, changedUnderneath, invisible, reportNotFound } from './errors.js';
 import {
   REPORT_GRANTS,
@@ -35,6 +36,11 @@ export type ReportViewer = FlatViewer;
 export interface ReportServiceOptions {
   readonly db: Database;
   readonly repository: ReportRepository;
+  /**
+   * Where every change to a report and its grants is recorded, in the change's transaction
+   * (`A-17`). The same sinks `report.ran` goes to.
+   */
+  readonly audit: AuditSink;
   readonly logger: Logger;
 }
 
@@ -82,12 +88,15 @@ export interface ReportInput {
 export class ReportService {
   readonly #db: Database;
   readonly #repository: ReportRepository;
-  readonly #access = new FlatAccess(REPORT_GRANTS);
+  readonly #access: FlatAccess;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
 
   constructor(options: ReportServiceOptions) {
     this.#db = options.db;
     this.#repository = options.repository;
+    this.#audit = options.audit;
+    this.#access = new FlatAccess(REPORT_GRANTS, options.audit);
     this.#logger = options.logger.child({ component: 'reports' });
   }
 
@@ -162,7 +171,12 @@ export class ReportService {
    * `MapService.create` gives: a new report has no right for the role and the token to cap, so
    * they are the whole check, and they were not consulted.
    */
-  async create(viewer: ReportViewer, input: ReportInput, actor: string): Promise<ReportRow> {
+  async create(
+    viewer: ReportViewer,
+    input: ReportInput,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<ReportRow> {
     if (!atLeast(ceilingOf(viewer), 'write')) {
       throw new ReportError('REPORT_FORBIDDEN', 'this account may not create reports', {
         context: { phase: 'create' },
@@ -182,7 +196,9 @@ export class ReportService {
 
     return this.#db.tx(async (tx) => {
       await this.#refuseDuplicateName(tx, name, null);
-      const runAs = await this.#resolveContext(tx, viewer, input.runAs ?? actor, null);
+      // The creator's own login when nobody was named: a report renders as whoever made it
+      // unless an administrator said otherwise (`A-13`).
+      const runAs = await this.#resolveContext(tx, viewer, input.runAs ?? loginOf(actor), null);
 
       const report = await this.#repository.create(tx, {
         name,
@@ -196,7 +212,13 @@ export class ReportService {
         runAsLogin: runAs.login,
       });
 
-      await this.#access.grantCreator(tx, report.id, viewer, actor);
+      await this.#audit.record(
+        tx,
+        actor,
+        [{ action: 'report.created', objectId: null, reportId: report.id, after: auditOf(report) }],
+        now,
+      );
+      await this.#access.grantCreator(tx, report.id, viewer, actor, now);
 
       this.#logger.info(
         { reportId: report.id, name, kind, runAs: runAs.login, actor },
@@ -222,7 +244,8 @@ export class ReportService {
     id: number,
     expectedVersion: number,
     patch: Partial<ReportInput>,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<ReportRow> {
     return this.#db.tx(async (tx) => {
       const current = await this.require(viewer, id, 'write', tx);
@@ -257,17 +280,37 @@ export class ReportService {
       const updated = await this.#repository.update(tx, id, expectedVersion, next);
       if (updated === undefined) throw changedUnderneath(id, expectedVersion, current.version);
 
+      await this.#audit.record(
+        tx,
+        actor,
+        [
+          {
+            action: 'report.updated',
+            objectId: null,
+            reportId: id,
+            before: auditOf(current),
+            after: auditOf(updated),
+          },
+        ],
+        now,
+      );
       this.#logger.info({ reportId: id, actor, version: updated.version }, 'report updated');
       return updated;
     });
   }
 
   /** Deleting needs `full`: a report is a grantable thing, and removing one removes its grants. */
-  async remove(viewer: ReportViewer, id: number, actor: string): Promise<void> {
+  async remove(viewer: ReportViewer, id: number, actor: Actor, now = new Date()): Promise<void> {
     await this.#db.tx(async (tx) => {
-      await this.require(viewer, id, 'full', tx);
+      const current = await this.require(viewer, id, 'full', tx);
       const gone = await this.#repository.remove(tx, id);
       if (!gone) throw reportNotFound(id);
+      await this.#audit.record(
+        tx,
+        actor,
+        [{ action: 'report.deleted', objectId: null, reportId: id, before: auditOf(current) }],
+        now,
+      );
       this.#logger.warn({ reportId: id, actor }, 'report deleted');
     });
   }
@@ -282,11 +325,12 @@ export class ReportService {
     id: number,
     groupId: number,
     right: AccessRight,
-    actor: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      if ((await this.#access.grant(tx, id, groupId, right, actor)) === 'no-such-group') {
+      if ((await this.#access.grant(tx, id, groupId, right, actor, now)) === 'no-such-group') {
         throw new ReportError('REPORT_GROUP_NOT_FOUND', `there is no group ${String(groupId)}`, {
           context: { reportId: id, phase: 'grant' },
           details: { groupId },
@@ -296,10 +340,16 @@ export class ReportService {
     });
   }
 
-  async revoke(viewer: ReportViewer, id: number, groupId: number, actor: string): Promise<void> {
+  async revoke(
+    viewer: ReportViewer,
+    id: number,
+    groupId: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      await this.#access.revoke(tx, id, groupId);
+      await this.#access.revoke(tx, id, groupId, actor, now);
       this.#logger.info({ reportId: id, groupId, actor }, 'report access revoked');
     });
   }
@@ -444,4 +494,23 @@ function validSubjects(raw: ReportSubjects): ReportSubjects {
     );
   }
   return { objectIds: [...seen] };
+}
+
+/** The login an actor acts as, or nothing for a component or an anonymous caller. */
+function loginOf(actor: Actor): string {
+  return actor.kind === 'user' ? actor.login : '';
+}
+
+/** A report as the audit log records it. */
+function auditOf(report: ReportRow): ReportAudit {
+  return {
+    name: report.name,
+    description: report.description,
+    kind: report.kind,
+    subjects: JSON.stringify(report.subjects),
+    span: JSON.stringify(report.span),
+    outputs: JSON.stringify(report.outputs),
+    schedule: JSON.stringify(report.schedule),
+    runAs: report.runAsLogin,
+  };
 }

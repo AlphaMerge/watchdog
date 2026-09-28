@@ -1,7 +1,7 @@
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { ProbeRegistryError, type ProbeRegistry } from '../../probes/registry.js';
-import { ADMIN } from '../authorization.js';
+import { ADMIN, auditGap } from '../authorization.js';
 
 export interface ProbeRoutesOptions {
   registry: ProbeRegistry;
@@ -110,7 +110,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.post(
     '/probes/:gid/approve',
     {
-      config: ADMIN,
+      config: { ...ADMIN, ...auditGap('A-20') },
       schema: {
         tags: ['probes'],
         summary: 'Approve a probe onto a branch of the tree',
@@ -160,7 +160,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.post(
     '/probes/:gid/revoke',
     {
-      config: ADMIN,
+      config: { ...ADMIN, ...auditGap('A-20') },
       schema: {
         tags: ['probes'],
         summary: 'Refuse a probe from now on',
@@ -195,7 +195,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.put(
     '/probes/:gid/allow-from',
     {
-      config: ADMIN,
+      config: { ...ADMIN, ...auditGap('A-20') },
       schema: {
         tags: ['probes'],
         summary: 'Narrow where one probe may connect from',
@@ -227,7 +227,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
   app.delete(
     '/probes/:gid',
     {
-      config: ADMIN,
+      config: { ...ADMIN, ...auditGap('A-20') },
       schema: {
         tags: ['probes'],
         summary: 'Forget a probe entirely',

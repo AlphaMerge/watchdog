@@ -11,7 +11,7 @@ import { GroupService } from '../src/auth/groups.js';
 import { AccessService } from '../src/auth/access.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { ReportRepository } from '../src/reports/repository.js';
 import { ReportService } from '../src/reports/service.js';
@@ -137,7 +137,12 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       audit: new AuditRepository(),
       catalogue: testCatalogue(),
       reports: {
-        service: new ReportService({ db, repository: reportRepository, logger: silent }),
+        service: new ReportService({
+          db,
+          repository: reportRepository,
+          audit: new DatabaseAuditSink(),
+          logger: silent,
+        }),
         context: reportContext,
         renderer: reportRenderer,
         runner: reportRunner,

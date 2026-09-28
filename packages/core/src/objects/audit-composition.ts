@@ -69,6 +69,17 @@ export function reportAuditSinks(all: AuditSinkSet): AuditSink[] {
 }
 
 /**
+ * Editing a map, its background, its share links or its grants (`A-17`).
+ *
+ * **The record and nothing else**, for a library's reason: a map is drawn from what the resolver
+ * reads when somebody opens it, so no probe, cache, schedule or alarm chain holds anything a map
+ * edit could leave stale.
+ */
+export function mapAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
+/**
  * Editing a library (`L-01`).
  *
  * **The record and nothing else**, for the reason a report's is: a library holds rules about what
