@@ -272,4 +272,38 @@ looks like a pass unless you read the result; it now records the result too. The
 `systemctl reset-failed ms-core ms-probe` before every case that starts a unit, and after the smoke
 test, so that each case counts only its own starts. **Anything else that drives the services
 through several starts in ten minutes, `H-15`'s rehearsal included, needs the same.**
-The whole run is to be repeated with that fix, and `P-215` is ticked when it shows exit 78.
+
+## The rerun, with the harness fixed
+
+The same script, 2026-09-28 about 17:32 UTC, raw records in
+`2026-09-28-start-limit-live-rerun.jsonl`. This time other sessions' suites ran beside it (a
+quiet window was not needed for the case it existed for): load at the start was 24.67 / 24.34 /
+16.57 on 8 CPUs, about three times what the first run saw.
+
+**A refused configuration stops at once.** With `core.json` unreadable and the start limit
+cleared, the restart read the file and stopped: *Configuration error: Configuration file is not
+valid JSON*, *Main process exited, code=exited, status=78/CONFIG*, *Failed with result
+'exit-code'*. It stayed `failed` for the whole 21 s stage, four `RestartSec`s, with **no
+restarts**. With the file restored, `reset-failed` and a start brought it back.
+
+The other two cases repeated. The core waited 76.5 s for PostgreSQL over 16 attempts, still
+`activating` at the stage's 90 s mark, with no restarts. Five manual restarts succeeded and the
+sixth was refused.
+
+**The probe's loop under this load is not a measurement of the loop.** Kills came 16.7, 19.1,
+16.5 and 15.5 s apart, 11–14 s into each start rather than 0.6 s. That is the same ceiling on a
+starved machine. Five kills fitted in the stage, so it ended before the sixth start would have been
+refused. The first run's 5.6–5.8 s rounds are the loop's numbers.
+
+**systemd's watchdog killed both services under this load, and neither was doing anything.** The
+probe schedules no sensors in this box. It was killed at 511 s with *Watchdog timeout (limit
+30s)!* and SIGABRT, which took 34 s to finish, and the core was killed twice, at 520 s and 736 s
+(*Failed with result 'watchdog'*). The first run, at a third of the load, had none. The services
+ping the watchdog every 15 s by spawning `systemd-notify --pid=<pid> WATCHDOG=1`, one process
+per ping. The likeliest cause is that the pings arrived late or not at all: the helper is slow to
+spawn on a starved machine, or exits before PID 1 attributes its message. An event loop blocked
+for 30 s in an idle service is the less likely cause, and none of this is measured yet. **It
+matters more because of this ticket.** Every watchdog kill is a start, and five starts in ten
+minutes now leave a unit `failed`, where before it restarted for ever. A host loaded like this
+for long enough could stop the core and leave it stopped, and the core in `failed` is silent. That
+is `P-220`, to be measured rather than argued here.

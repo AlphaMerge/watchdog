@@ -4539,7 +4539,7 @@ because each is a decision rather than a defect:
       paths, wrapping at 375 px with no horizontal scroll, one request.
 
 
-- [ ] **P-215 — a probe past its `MemoryMax` is killed and restarted for ever** · S · P-213 ·
+- [x] **P-215 — a probe past its `MemoryMax` is killed and restarted for ever** · S · P-213 ·
       Measured in `P-213`: a probe whose start-up does not fit under its ceiling is killed by the
       kernel 4.7–8.8 s into every start, restarted 5 s later, and goes round every 10–14 s until
       somebody raises the ceiling. The loop is now fast and says why (`oom-kill`), but nothing ends
@@ -4567,7 +4567,7 @@ because each is a decision rather than a defect:
       `RestartSteps=` would back off instead, but needs systemd 254, and Debian 12 and RHEL 9 ship
       252.
 
-      **P-215, so far — not ticked, because exit 78 is not yet exercised live.**
+      **P-215, done.**
       `docs/findings/2026-09-28-start-exits.md`. Every start-time exit of both services is listed,
       by whether waiting fixes it: **the probe has none** — it reports ready before it hears from
       the core — and **the core has two**, its first query against a PostgreSQL still recovering,
@@ -4594,9 +4594,12 @@ because each is a decision rather than a defect:
       `reset-failed` and a start brought it back. The core waited 93 s for PostgreSQL, still
       `activating` at 90 s past `TimeoutStartSec=60`, with no restarts. Manual restarts count: the
       sixth in a row is refused, and `administration.md` says to `reset-failed` while iterating.
-      **Outstanding:** exit 78. That case was refused by the start limit before the core read its
-      file, because the smoke test and the earlier cases had used the five starts; the harness now
-      clears the limit before each case. Tick this when a rerun shows exit 78.
+      Exit 78 was not exercised on that run: the smoke test and the earlier cases had used the core's
+      five starts, so the limit refused its restart before it read the file. The harness now clears
+      the limit before each case. **The rerun** showed an unreadable `core.json` stopping the core at
+      once, `status=78/CONFIG`, `failed`, no restarts. It ran at load 24.67 on 8 CPUs, where
+      systemd's watchdog killed both idle services, the core twice. With the start limit, enough of
+      those leave the core `failed`: that is `P-220`.
 
 - [ ] **M-18 — a flapping Probe Health link alarm re-fires on every Down that follows a brief Up** ·
       M · M-17, P-215 · Measured in `P-215`: a probe killed at its memory ceiling and restarted
@@ -4647,6 +4650,30 @@ because each is a decision rather than a defect:
       the workers, or buffers held for refused or in-flight checks; the silence is explained; and
       Probe Health can say what state a probe in that condition is in. Needs heavy VM time, booked
       with whoever is scheduling the machine.
+
+- [ ] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
+      toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs
+      with other sessions' suites beside it: the probe, scheduling no sensors, killed at *Watchdog
+      timeout (limit 30s)!* with SIGABRT, which took 34 s to finish; the core killed twice in
+      216 s. The quiet run, at a third of the load, had none. Both ping every 15 s by spawning
+      `systemd-notify --pid=<pid> WATCHDOG=1`, one process per ping, because Node's `dgram` has
+      no unix-datagram sockets. **Why it outranks `P-216`:** `P-215` made every watchdog kill a
+      start toward five in ten minutes, so a host that is only busy can leave the core `failed`,
+      silent, when the machine is under strain, the worst time for a monitor to stop.
+
+      Pings late or dropped, or an event loop blocked for 30 s, is a guess until measured, and the
+      fix depends on which. **Done when** a CPU hog in the smoke box reproduces the kills, with
+      pings sent counted against pings received (`WatchdogTimestamp`, or systemd's debug log) and
+      event-loop lag sampled at the same time; the fix is chosen within its constraints and
+      measured to stop the kills under the same hog. The constraints: no native `sd_notify` module
+      (a compiler at install breaks the standalone constraint); a longer `WatchdogSec` alone only
+      moves the threshold; and whether the systemd versions an installation meets (Debian 12's
+      252, Ubuntu 24.04's 255) attribute a short-lived sender's notification reliably, with the
+      version that fixed it cited. **The start-limit interaction is settled explicitly**: whether
+      a watchdog kill should count at all and whether any directive separates it; if none does,
+      the burst and interval that keep a crash loop ending in `failed` while a loaded host is
+      restarted, with the arithmetic in the findings as `P-215` did it. A measurement: book the
+      window, because a CPU hog in the box flakes other sessions' timing tests.
 
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
@@ -13938,7 +13965,13 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       **It proves the procedure and nothing about the product.** Simulators are not "100 real
       devices", and what this VM can show about endurance `H-01`'s 24-hour soak at 5,047 sensors
       already showed. **Never tick `H-09` from it.** A heavy run on the shared machine — announce
-      it, and run it when the machine is quiet.
+      it, and run it when the machine is quiet. **Run `systemctl reset-failed ms-core ms-probe`
+      before any step that starts a unit**: every start counts toward the units' five in ten minutes,
+      an operator's included, and the install, restart-everything and re-runs use them up. `P-215`'s
+      own harness had a case refused by the start limit for exactly this
+      (`docs/findings/2026-09-28-start-exits.md`). **Record every watchdog kill and the host's
+      load** beside each step: `P-215`'s rerun saw systemd's watchdog kill idle services at load 24
+      on 8 CPUs (`P-220`), and a kill in the rehearsal is a finding, not noise.
 
 - [x] **H-16 — The Linux-only 1.0 documentation** · S · H-10 · 1.0 is Linux-only (decided
       2026-09-28), and four places still promise Windows. **Done when** each says plainly that 1.0
