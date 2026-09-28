@@ -81,9 +81,10 @@ export interface ObjectRoutesOptions {
   /**
    * Folded into the cache validator for inheritance-bearing responses. The last input to a
    * resolved setting is its registry default, which lives in code — so an upgrade has to
-   * invalidate the caches even when no row changed.
+   * invalidate the caches even when no row changed. See `validatorSalt` for why this is the
+   * commit and not the version (`H-11`).
    */
-  buildVersion: string;
+  validatorSalt: string;
   /**
    * Present whenever authentication is on, and the bulk route is why (`A-11`).
    *
@@ -303,7 +304,7 @@ export async function objectRoutes(
   app: FastifyInstance,
   options: ObjectRoutesOptions,
 ): Promise<void> {
-  const { service, buildVersion, bulk, access } = options;
+  const { service, validatorSalt, bulk, access } = options;
   const authorizing = options.authorizing ?? false;
 
   const sendDetail = async (
@@ -330,7 +331,7 @@ export async function objectRoutes(
 
   /** Undefined rather than null, so `etagFor` falls back to the plain version tag. */
   const validatorFor = async (id: number): Promise<string | undefined> =>
-    (await service.chainValidator(id, buildVersion)) ?? undefined;
+    (await service.chainValidator(id, validatorSalt)) ?? undefined;
 
   // ── 1. list ──────────────────────────────────────────────────────────────────────────────
   app.get<{ Querystring: ListQuery }>(

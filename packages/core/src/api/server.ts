@@ -2,6 +2,7 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifySwagger from '@fastify/swagger';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import {
@@ -23,6 +24,7 @@ import { logIfUnexpected, toHttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
 import { READS, registerAuthorization, type RouteAccess } from './authorization.js';
 import { registerCsrfGuard, registerRateLimit, registerSecurityHeaders } from './hardening.js';
+import { validatorSalt } from './preconditions.js';
 import { authRoutes } from './routes/auth.js';
 import { groupRoutes } from './routes/groups.js';
 import { accessRoutes } from './routes/access.js';
@@ -279,6 +281,8 @@ export class ApiServer {
   readonly #db: Database;
   readonly #audit: AuditRepository;
   readonly #build: BuildIdentity;
+  /** Computed once: a validator issued by this process must match the next one it checks. */
+  readonly #validatorSalt: string;
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
   readonly #maps: MapService | undefined;
@@ -347,6 +351,7 @@ export class ApiServer {
     this.#db = options.db;
     this.#audit = options.audit;
     this.#build = options.build ?? { version: options.version, commit: null, dirty: false };
+    this.#validatorSalt = validatorSalt(this.#build, randomUUID());
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#maps = options.maps;
@@ -603,7 +608,7 @@ export class ApiServer {
       async (scope) => {
         await scope.register(objectRoutes, {
           service,
-          buildVersion: version,
+          validatorSalt: this.#validatorSalt,
           // Built here rather than taken as an option: it holds no state and wraps the service
           // it is given, so there is nothing for a caller to configure or get wrong (`D-09`).
           bulk: new BulkService({ objects: service, logger: this.#logger }),

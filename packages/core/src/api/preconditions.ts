@@ -1,3 +1,4 @@
+import { isExactBuild, type BuildIdentity } from '@ms/shared';
 import { ObjectError } from '../objects/errors.js';
 import type { Precondition } from '../objects/types.js';
 
@@ -20,6 +21,24 @@ import type { Precondition } from '../objects/types.js';
  */
 export function etagFor(version: number, chain?: string): string {
   return chain === undefined ? `W/"${String(version)}"` : `W/"${String(version)}-${chain}"`;
+}
+
+/**
+ * What the chain validator is salted with, so that one build never revalidates a response
+ * another build rendered (`S-13`, `H-11`).
+ *
+ * The last input to a resolved setting is its registry default, which lives in code — so the
+ * salt has to change whenever the code might have. The version could not stand for the code:
+ * every build said `0.1.0`, and an upgrade between two of them served a `304` for a default the
+ * new build had changed. **An exact build is salted with its commit.** A build that cannot say
+ * what it is — no commit, or uncommitted changes on top of one — is salted with the process that
+ * issued the validator: the tag then dies with that process, which costs a client one full
+ * response after a restart and never costs it a stale one.
+ */
+export function validatorSalt(build: BuildIdentity, instance: string): string {
+  return isExactBuild(build)
+    ? `${build.version}+${build.commit}`
+    : `${build.version}+instance:${instance}`;
 }
 
 const ETAG = /^(?:W\/)?"(\d+)(?:-[0-9a-f]{1,64})?"$/;
