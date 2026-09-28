@@ -159,7 +159,7 @@ to the core. In production there is no dev server: `ms-core` serves the built as
 The proxy rewrites `Host`, so a write from `:5173` reaches the core looking cross-origin and the
 CSRF guard would refuse it. `dev/core.json` lists both spellings of the dev server in
 `api.allowedOrigins`, which is the same key an install behind a reverse proxy on a different
-hostname needs, for the same reason (`A-11`).
+hostname needs, for the same reason (`A-19`).
 
 ### Starting again from nothing
 

@@ -190,7 +190,7 @@ describe('the CSRF guard', () => {
 });
 
 /**
- * The allowlist (`A-11`).
+ * The allowlist (`A-19`).
  *
  * It exists because **a proxy that rewrites `Host` makes a same-site request look cross-origin**:
  * Vite's `changeOrigin` sends `Origin: http://127.0.0.1:5173` with `Host: 127.0.0.1:8080`, and so

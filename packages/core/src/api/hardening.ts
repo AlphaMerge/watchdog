@@ -104,7 +104,7 @@ export function registerSecurityHeaders(
 export interface CsrfOptions {
   logger: Logger;
   /**
-   * Extra origins to accept — a UI served from somewhere other than the API (`A-11`).
+   * Extra origins to accept — a UI served from somewhere other than the API (`A-19`).
    *
    * The case is not exotic: **any proxy that rewrites `Host` produces it**. Vite's
    * `changeOrigin` does in development, so the UI on `:5173` forwards to the core on `:8080`

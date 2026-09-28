@@ -5363,7 +5363,7 @@ because each is a decision rather than a defect:
       and it was deleted rather than tested around; the other was the fixture giving an array and
       its items the same title, which let the fallback pass for the feature.
 
-      **Filed on the way past: `A-11`.** Driving the real form in a browser found that the
+      **Filed on the way past: `A-19`.** Driving the real form in a browser found that the
       `dev:ui` profile cannot save anything — the cross-origin write guard takes an
       `allowedOrigins` list that no caller ever passes.
 - [x] **U-13 — Mapping editor for REST Custom** · M · T-16, U-04 · The form that writes
@@ -11626,7 +11626,7 @@ because each is a decision rather than a defect:
       its compiled output behind, which that test exists to notice.
 
       Tests: 18 for the hardening layer, 7 for the sensor SSRF guard.
-- [x] **A-11 — `allowedOrigins` is an option nothing can set** · S · A-09 · The cross-origin
+- [x] **A-19 — `allowedOrigins` is an option nothing can set** · S · A-09 · The cross-origin
       write guard in `api/hardening.ts` takes an `allowedOrigins` list and **no caller ever passes
       one** — it is not in the config schema, not in `main.ts`, and not in `dev/core.json`. So the
       only origin that can write is the one serving the API, and every other is refused with "this
@@ -11639,7 +11639,7 @@ because each is a decision rather than a defect:
       key for the same reason. Worth doing before `H-07`'s documentation set describes a
       development setup that does not work.
 
-      **A-11 outcome.** `api.allowedOrigins` is now a config key, defaulting to `[]`; `server.ts`
+      **A-19 outcome.** `api.allowedOrigins` is now a config key, defaulting to `[]`; `server.ts`
       passes it to `registerCsrfGuard` (not `main.ts` — the api block reaches the server whole);
       `dev/core.json` lists both spellings of the dev server. The guard itself is unchanged.
 
@@ -11670,6 +11670,12 @@ because each is a decision rather than a defect:
       unlisted still refused, and three shapes refused at startup — plus 2 in `auth-api.test.ts`
       for the wiring itself, which is the half `hardening.test.ts` cannot see and the half that
       was missing. Mutation 6/6, each killed by a named test rather than by the compiler.
+
+      **(Was a second `A-11` until 2026-09-28.)** This ticket was filed first, on 2026-08-29, and
+      "Every route declares who may call it" reused the number on 2026-09-05. That one kept it,
+      because the code, `ADR-002` and the findings cite it by that name. The nine citations that
+      meant this ticket now say `A-19`. Commit messages from before the rename still say `A-11`
+      for both.
 - [x] **A-10 — Access-control test matrix** · L · A-03…A-05 · Every combination of role, group
       and tree position; explicit test that no route leaks a credential to a read-only user.
 

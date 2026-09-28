@@ -28,7 +28,7 @@ serves it — so nothing needs a configured base URL.
 The proxy sets `changeOrigin`, so the core sees `Host: 127.0.0.1:8080` alongside
 `Origin: http://127.0.0.1:5173` and the CSRF guard would read a same-site write as a cross-origin
 one. `dev/core.json` names both spellings of the dev server in `api.allowedOrigins`; a production
-install behind a reverse proxy on its own hostname needs the same key (`A-11`).
+install behind a reverse proxy on its own hostname needs the same key (`A-19`).
 
 For production, `scripts/package.sh` runs `vite build` and stages `dist` into the tarball;
 `install.sh` puts it at `/opt/ms/web`, and `api.webRoot` in `core.json` points there. An empty

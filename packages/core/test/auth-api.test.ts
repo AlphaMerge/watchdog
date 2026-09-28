@@ -572,10 +572,10 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   });
 
   /**
-   * That the configured origins reach the guard (`A-11`).
+   * That the configured origins reach the guard (`A-19`).
    *
    * `hardening.test.ts` proves what the guard does with a list; what it cannot prove is that
-   * anything hands it one — which is the bug `A-11` was. The wiring is a single field on a
+   * anything hands it one — which is the bug `A-19` was. The wiring is a single field on a
    * single call, and the failure it had was that nobody wrote it.
    */
   describe('the configured origin allowlist', () => {

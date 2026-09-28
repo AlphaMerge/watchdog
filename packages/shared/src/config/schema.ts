@@ -346,7 +346,7 @@ export interface CoreConfig {
      */
     webRoot: string;
     /**
-     * Origins whose writes are accepted even though they are not this API's own (`A-11`).
+     * Origins whose writes are accepted even though they are not this API's own (`A-19`).
      *
      * The CSRF guard compares the browser's `Origin` against the request's `Host`, and a proxy
      * that rewrites `Host` — Vite's `changeOrigin` in development, and most reverse proxies in
