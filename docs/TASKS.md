@@ -14084,6 +14084,39 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       release 1.1" from its generator, so the note survives regeneration. `sizing.md`'s Windows
       gap cited `H-09`, and now cites `H-17`. `CLAUDE.md` and `ADR-001` are unchanged.
 
+- [ ] **H-19 — A v1 core still loads `pdfkit` and `fontkit`** · S · H-12 · `H-12` left it said:
+      the report routes import `MAX_PDF_PAGES` from `reports/pdf.ts`, and they and the
+      housekeeper import `mediaTypeOf` from `reports/delivery.ts`, so both modules, and the PDF
+      stack behind them, load in a build that constructs no reports. **Done when** those two
+      constants live in a module that loads nothing heavy; `profile.ts` imports
+      `reports/wiring.ts` dynamically, inside the full profile's branch; and a test starts a v1
+      core's module graph and asserts that neither `pdfkit` nor `fontkit` is among the modules it
+      loaded, alongside a full one where both are, so that the check can fail.
+
+- [ ] **H-20 — A package can claim an exact commit it is not** · M · H-11 · Found on 2026-09-28
+      by an independent review of `H-11`…`H-13`, and each of the three confirmed by two
+      verifiers. `H-11` exists so that a field-test bug report names exactly one body of code,
+      and each of these breaks that:
+      - **`dist` is not rebuilt from the tree that was inspected.** `package.sh` reads `git
+        status`, then runs `npm run build`, an incremental `tsc -b` with no clean step, and
+        copies `dist`. A mutation-restore that leaves a source older than its output ships the
+        mutant stamped `dirty: false`, and the output of a deleted source ships too.
+      - **Dirty detection fails open.** A `git status` that errors has its stderr discarded, its
+        empty output reads as clean, and `MS_BUILD_DIRTY` counts as dirty only when it is exactly
+        `1`, so `true` means clean. The check also runs before a build that takes minutes, so an
+        edit made during the build goes unrecorded. `smoke-install.sh` and `smoke-packages.sh`
+        repeat the same pattern.
+      - **Runtime dependencies are not pinned.** `package.sh` writes a fresh `package.json` from
+        caret ranges and runs `npm install` without the committed `package-lock.json`. Two
+        packagings of one commit on different days can ship different `fastify`, `pg` or `ssh2`
+        versions under an identical `build.json`.
+
+      **Done when** `dist` is built clean, or verified against `src`, from the tree whose commit
+      is stamped; dirty detection fails closed, validates `MS_BUILD_DIRTY`, and is checked again
+      after the build; the staged application installs from the lockfile (`npm ci` against a
+      staged lock) and `build.json` records the lock's hash; and each is mutated once — an old
+      output behind a newer source, a `git` that errors, a lock changed after staging.
+
 ---
 
 ## Release 1.1 — Windows
