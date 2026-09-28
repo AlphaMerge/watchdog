@@ -12068,6 +12068,88 @@ because each is a decision rather than a defect:
       and a subtler leak marking only the hidden tile — each killed by the HTTP attack test and the
       resolver case.
 
+- [ ] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
+      Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor, timestamp
+      and diff", and three kinds of change never reach `audit_log`:
+
+      - **Every grant.** `AccessService.grant` and `.revoke` (the object grants behind
+        `api/routes/access.ts`) and `FlatAccess.grant` and `.revoke` (map, report and library
+        grants) write a log line and nothing else. A grant is the change an audit log is opened
+        to find — "who gave that group `full` on the customer branch?" — and today the answer is
+        in a journal with its own retention, if it is anywhere.
+      - **Map create, edit and delete** (`MapService`), including backgrounds and share links. A
+        share link is a grant to everybody (`ADR-002`), and minting one is not recorded.
+      - **Report create, edit and delete** (`ReportService`). Only `report.ran` is audited
+        (`E-08`), so the log shows a report rendering through somebody's eyes and never shows who
+        pointed it there.
+
+      Both repositories' header comments say "rights and audit in the service": the design
+      assumed an audit that was never written. Triggers, templates and schedules *are* audited in
+      their services, which is where the absence of a route-level call misleads a reader. Libraries
+      are audited from their first commit (`L-01`), and their grants are held to this ticket.
+
+      **Done when:**
+
+      - Every grant change on objects, maps, reports and libraries, and every map and report
+        create, edit and delete — share links and backgrounds included — writes an entry with
+        who, what, and the before and after.
+      - **The entry is written in the change's transaction**, through the `AuditSink` the
+        service already composes (`P-111`). A row for a change that rolled back is a false record,
+        and a change with no row is the gap this closes. Each gets a test that makes the write fail
+        after the audit call and finds no row.
+      - **A sweep that cannot be satisfied by a list.** Every route in `server.routes` with
+        `changes: true` is called as an administrator and must leave at least one new
+        `audit_log` row, derived the way `A-10`'s sweep is derived, so a mutating route added
+        tomorrow fails it by existing. Login, logout and a test send change no configuration and
+        carry an exemption *declared in the route's own source*, next to its `changes` flag,
+        rather than in the test, as `rightsIn` is declared (`A-14`). A password change, TOTP
+        enrolment and disable, and regenerating recovery codes are **not** exempt: they are
+        security events, which is what an audit log is for, and they are declared as `A-18`'s
+        gap below.
+      - **Redaction holds.** No entry carries a `writeOnly` value. A share link's entry carries the
+        label, prefix and expiry, never the token, as its log line already does. `S-10`'s canary
+        grep of the whole table covers the new actions.
+      - `AUDIT_CATEGORIES` gains `map` and `grant` (or `access`), and the Logs view's chips follow.
+        The web list is already missing `report` and `credential`, which the server has.
+
+      **Found while drafting, and deliberately not in this ticket's done-when:** identity changes
+      are not audited either — groups and their members, accounts and their roles, passwords,
+      tokens and TOTP. Adding an account to an administrator group is the largest escalation this
+      system has, and it is recorded nowhere durable. **They are `A-18`.** This ticket's sweep
+      declares their routes as a known gap under `A-18`, in each route's own source beside its
+      `changes` flag, and `A-18` removes the declarations.
+
+- [ ] **A-18 — Identity changes leave no audit entry** · M · A-17 · Found 2026-09-28 while drafting
+      `A-17`, and built on it: its sweep and its `AuditSink` pattern are what this uses. Nothing
+      durable records who changed who may do what. No audit sink is called by any of these, in the
+      service or in its route:
+
+      | Service | Changes that write nothing |
+      | --- | --- |
+      | `GroupService` | `create`, `update`, `delete`, `addMember`, `removeMember`, `setPrimary` |
+      | `AccountService` | `create`, `update` (the role included), `delete`, `changePassword` |
+      | `TokenService` | `issue`, `revoke`, `revokeAllFor` |
+      | `TotpService` | `confirmEnrolment`, `disable`, `regenerateRecoveryCodes` |
+
+      Object grants (`AccessService.grant` and `.revoke`) are `A-17`'s, with every other grant.
+
+      **Adding an account to an administrator group is the largest escalation this system has**, and
+      today it leaves no record. The same is true of a `readonly` account made `readwrite` and a
+      token issued for somebody else's account.
+
+      **Done when** every identity-changing route's `A-17` gap declaration is gone and `A-17`'s
+      sweep passes without them, and each change writes one entry by `A-17`'s rules:
+      - in the mutation's own transaction, so a rolled-back change leaves no entry;
+      - naming the actor, the account/group/token affected, and the value before and after;
+      - never carrying a secret. A token entry records its prefix, never the token. A password
+        change records that it happened, never a hash. A TOTP entry records enabled, disabled or
+        codes regenerated, never the secret or a recovery code.
+
+      **The case to test hardest is a role change**, with the before and after role both asserted,
+      next to administrator-group membership added and removed. Plant a password, a token, a TOTP
+      secret and a recovery code, then assert that no audit row contains any of them in any
+      encoding, as `A-10` does for credentials.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
