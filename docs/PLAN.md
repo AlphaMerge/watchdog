@@ -165,9 +165,23 @@ list — and verified that `date_bin` reproduces `time_bucket` exactly
 
 All four exit criteria are met and measured:
 
-- **Create a 5,000-object tree via the API in under 30 seconds** — **20.9 to 25.7 seconds**
-  over real HTTP with a serial client across four runs, 6.5 to 7.2 s with eight in flight, and
-  **2.2 s in one request** via `P-19`'s bulk route.
+- **Create a 5,000-object tree via the API in under 30 seconds** — **2.6 to 3.5 s in one
+  request** via `P-19`'s bulk route, whoever sends it: 2.8 s unauthenticated, 2.6 s as an
+  administrator's API token and 3.5 s as a non-administrator's, 88% spare or more (`P-225`,
+  2026-09-29, a booked window).
+
+  **Met through the bulk route, and only through it.** The serial figures below measured a server
+  with no authentication wired, so no request resolved a token, asked whether its caller could
+  write the parent, or met the rate limit. With authentication, the same serial build takes
+  **35.7 s as an administrator and 44.7 s as anyone else**, against 27.1 s unauthenticated in the
+  same run: 1.7 and 3.5 ms a create. At the default per-account limit, 1,200 requests a minute, no
+  account can build that way at all: five windows, at least four minutes (`A-39`). So the
+  provisioning path is bulk, the serial numbers are the cost of the request path rather than
+  evidence for the criterion, and `P-235` takes the largest avoidable part of that cost
+  (`docs/findings/2026-09-29-tree-build-with-authentication.md`).
+
+  Unauthenticated, as measured until `P-225`: **20.9 to 25.7 seconds** over real HTTP with a
+  serial client across four runs, 6.5 to 7.2 s with eight in flight, and 2.2 s in one request.
 
   **These numbers replace the ones this document carried until 2026-09-08, and the correction is
   larger than the drift it corrects.** The serial figure was quoted at 27.6 s with "about 4%

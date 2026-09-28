@@ -1,6 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { before, describe, it } from 'node:test';
-import { ApiServer } from '../../src/api/server.js';
+import { ApiServer, type ApiServerOptions } from '../../src/api/server.js';
+import { AccessService } from '../../src/auth/access.js';
+import { AccountService } from '../../src/auth/accounts.js';
+import { GroupService } from '../../src/auth/groups.js';
+import { SessionService } from '../../src/auth/sessions.js';
+import { LoginThrottle } from '../../src/auth/throttle.js';
+import { TokenService } from '../../src/auth/tokens.js';
+import { TotpService } from '../../src/auth/totp.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../../src/audit/store.js';
 import type { Database } from '../../src/db/pool.js';
 import { LoggingAuditSink } from '../../src/objects/audit.js';
@@ -14,7 +21,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from '../support/database.js';
-import { buildHarness, silent } from '../support/tree.js';
+import { buildHarness, silent, testActor } from '../support/tree.js';
 
 const available = await databaseAvailable();
 
@@ -25,10 +32,39 @@ const available = await databaseAvailable();
  * Over real HTTP against a listening server, not `inject`: "via the API" includes the socket, the
  * connection pooling and the JSON on the wire, and a measurement that quietly skipped those would
  * be answering an easier question than the one the criterion asks. Every write goes through the
- * routes, the service, the audit sink and the database exactly as production assembles them.
+ * routes, the service, the audit sink and the database as production assembles them.
+ *
+ * **Including authentication, since `P-225`.** This file said "exactly as production" for as long
+ * as it built its server with no `auth`, so no request resolved a token or asked whether its
+ * caller could write the parent — the two lookups production makes on every one, one of them a
+ * recursive walk for anybody who is not an administrator. Each build now runs three ways: as an
+ * administrator's API token, as a non-administrator's token holding `write` at the root, and with
+ * no authentication at all, which is what the committed numbers before `P-225` measured and is
+ * kept so the difference is the cost of authentication and nothing else.
+ *
+ * **The per-account rate limit is raised for the two authenticated callers, and only here.** At
+ * the default, 1,200 requests a minute, one account's serial build is refused at request 1,201;
+ * this file measures what a request costs, and a limiter measures how many one account may make.
+ * `A-39` is the policy.
  */
-const TARGET_OBJECTS = 5_000;
+const TARGET_OBJECTS = Number(process.env['MS_BENCH_TREE_OBJECTS'] ?? 5_000);
 const BUDGET_MS = 30_000;
+/**
+ * Set only to check the harness: a smaller tree, one sample, and numbers that are not a
+ * measurement of anything. 1,500 still reaches sensors, so every level of the walk is exercised.
+ */
+const CHECKING_HARNESS = TARGET_OBJECTS !== 5_000;
+
+/** Who makes the requests. */
+type Caller = 'anonymous' | 'admin' | 'operator';
+const CALLERS: readonly Caller[] = ['anonymous', 'admin', 'operator'];
+const CALLER_LABEL: Readonly<Record<Caller, string>> = {
+  anonymous: 'no auth',
+  admin: 'admin token',
+  operator: 'non-admin',
+};
+/** Far above anything a build sends in a window; see the file comment. */
+const RAISED_LIMIT = 1_000_000;
 
 interface Create {
   kind: 'group' | 'device' | 'sensor';
@@ -103,7 +139,7 @@ describe(
      * from a trend that means something. A budget with 7% of headroom left cannot be watched
      * with an unreplicated number.
      */
-    const SAMPLES = 3;
+    const SAMPLES = CHECKING_HARNESS ? 1 : 3;
 
     /**
      * **Each variant is built into its own empty database.** It used not to be: all three ran in
@@ -125,13 +161,72 @@ describe(
       base: string;
       rootId: number;
       db: Database;
+      /** What every request carries: the caller's token, or nothing. */
+      headers: Record<string, string>;
       close: () => Promise<void>;
     }
 
+    /**
+     * The authentication `main.ts` wires, and an API token for the caller — what a provisioning
+     * script holds. The non-administrator's `write` is at the root, so every create walks from its
+     * parent to the root to find it: the longest walk this tree has.
+     */
+    async function authFor(
+      db: Database,
+      rootId: number,
+      caller: Exclude<Caller, 'anonymous'>,
+    ): Promise<{ auth: NonNullable<ApiServerOptions['auth']>; headers: Record<string, string> }> {
+      const audit = new DatabaseAuditSink();
+      const accounts = new AccountService({ audit, db, logger: silent });
+      const groups = new GroupService({ audit, db, logger: silent });
+      const access = new AccessService({ db, audit, logger: silent });
+      const tokens = new TokenService({ audit, db, logger: silent });
+
+      const account = await accounts.create(
+        {
+          login: caller,
+          password: 'correct-horse-battery',
+          role: caller === 'admin' ? 'admin' : 'readwrite',
+        },
+        testActor,
+      );
+      if (caller === 'admin') {
+        const admins = (await groups.list()).find((group) => group.isAdmin);
+        assert.ok(admins, 'the built-in Administrators group');
+        await groups.addMember(admins.id, account.id, testActor);
+      } else {
+        const team = await groups.create({ name: 'Provisioning' }, testActor);
+        await groups.addMember(team.id, account.id, testActor);
+        await access.grant(rootId, team.id, 'write', testActor);
+      }
+      const { secret } = await tokens.issue(
+        { userId: account.id, role: account.role },
+        // A token is `read` unless it is issued more, and a provisioning script is issued `write`.
+        { name: 'provisioning script', scope: 'write' },
+        testActor,
+      );
+
+      return {
+        auth: {
+          accounts,
+          sessions: new SessionService({ db, logger: silent }),
+          throttle: new LoginThrottle({ db, logger: silent }),
+          groups,
+          access,
+          tokens,
+          totp: new TotpService({ audit, db, logger: silent }),
+          required: true,
+        },
+        headers: { authorization: `Bearer ${secret}` },
+      };
+    }
+
     /** A database, its migrations, the production wiring and a listening server. */
-    async function fixture(): Promise<Fixture> {
+    async function fixture(caller: Caller): Promise<Fixture> {
       const scratch: ScratchDatabase = await createScratchDatabase('treebuild');
       const harness = await buildHarness(scratch.db);
+      const wired =
+        caller === 'anonymous' ? undefined : await authFor(scratch.db, harness.rootId, caller);
 
       // The production wiring, audit sinks included: an install that writes no audit entries is
       // not the install anyone runs, and the write is inside every mutation's transaction.
@@ -159,6 +254,7 @@ describe(
         db: scratch.db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
+        ...(wired === undefined ? {} : { auth: wired.auth, rateLimit: { max: RAISED_LIMIT } }),
       });
       await server.build('9.9.9', service);
       const address = await server.start();
@@ -167,6 +263,7 @@ describe(
         base: `http://127.0.0.1:${String(address.port)}/api/v1`,
         rootId: harness.rootId,
         db: scratch.db,
+        headers: wired?.headers ?? {},
         close: async () => {
           await server.stop();
           await scratch.drop();
@@ -175,13 +272,13 @@ describe(
     }
 
     async function create(
-      base: string,
+      f: Fixture,
       body: Record<string, unknown>,
       parentId: number,
     ): Promise<number> {
-      const response = await fetch(`${base}/objects`, {
+      const response = await fetch(`${f.base}/objects`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...f.headers },
         body: JSON.stringify({ ...body, parentId }),
       });
       const text = await response.text();
@@ -190,14 +287,9 @@ describe(
     }
 
     /** Builds the plan level by level; within a level the requests are independent. */
-    async function build(
-      base: string,
-      rootId: number,
-      concurrency: number,
-      label = 'probe',
-    ): Promise<number> {
+    async function build(f: Fixture, concurrency: number, label = 'probe'): Promise<number> {
       const ids = new Map<string, number>();
-      const probeId = await create(base, { kind: 'probe', name: `probe-${label}` }, rootId);
+      const probeId = await create(f, { kind: 'probe', name: `probe-${label}` }, f.rootId);
       ids.set(`probe-${label}`, probeId);
 
       const work = plan(`probe-${label}`);
@@ -211,7 +303,7 @@ describe(
             slice.map(async (item) => {
               const parentId = ids.get(item.parentKey);
               assert.ok(parentId, `no parent for ${item.key}`);
-              return [item.key, await create(base, item.body, parentId)] as const;
+              return [item.key, await create(f, item.body, parentId)] as const;
             }),
           );
           for (const [key, id] of created) ids.set(key, id);
@@ -233,14 +325,14 @@ describe(
     }
 
     /** One `POST /objects/tree` of 5,000 objects, timed. */
-    async function bulkBuild(base: string, rootId: number, label = 'probe'): Promise<number> {
-      const probeId = await create(base, { kind: 'probe', name: `probe-${label}` }, rootId);
+    async function bulkBuild(f: Fixture, label = 'probe'): Promise<number> {
+      const probeId = await create(f, { kind: 'probe', name: `probe-${label}` }, f.rootId);
       const body = bulkBody(probeId, label);
 
       const startedAt = process.hrtime.bigint();
-      const response = await fetch(`${base}/objects/tree`, {
+      const response = await fetch(`${f.base}/objects/tree`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...f.headers },
         body: JSON.stringify(body),
       });
       const text = await response.text();
@@ -269,10 +361,12 @@ describe(
       return Number(rows[0]?.count);
     }
 
-    async function oneBulk(): Promise<{ ms: number; objects: number; channels: number }> {
-      const f = await fixture();
+    async function oneBulk(
+      caller: Caller,
+    ): Promise<{ ms: number; objects: number; channels: number }> {
+      const f = await fixture(caller);
       try {
-        const ms = await bulkBuild(f.base, f.rootId);
+        const ms = await bulkBuild(f);
 
         // The channels too: a bulk path that wrote the objects and forgot what makes a sensor
         // useful would be faster and worthless.
@@ -286,31 +380,39 @@ describe(
       }
     }
 
-    async function oneSerial(concurrency: number): Promise<{ ms: number; objects: number }> {
-      const f = await fixture();
+    async function oneSerial(
+      caller: Caller,
+      concurrency: number,
+    ): Promise<{ ms: number; objects: number }> {
+      const f = await fixture(caller);
       try {
-        const ms = await build(f.base, f.rootId, concurrency);
+        const ms = await build(f, concurrency);
         return { ms, objects: await treeSize(f.db) };
       } finally {
         await f.close();
       }
     }
 
-    const samples: Sample[] = [];
+    const samples = new Map<Caller, Sample[]>(CALLERS.map((caller) => [caller, []]));
+    const of = (caller: Caller): Sample[] => samples.get(caller) ?? [];
 
     before(async () => {
+      // The callers take turns within each run rather than one after another, so drift over the
+      // run — a warming cache, a filling disk — lands on all three alike.
       for (let run = 0; run < SAMPLES; run += 1) {
-        const bulk = await oneBulk();
-        const serial = await oneSerial(1);
-        const concurrent = await oneSerial(8);
-        samples.push({
-          bulkMs: bulk.ms,
-          serialMs: serial.ms,
-          concurrentMs: concurrent.ms,
-          objects: serial.objects,
-          bulkObjects: bulk.objects,
-          channels: bulk.channels,
-        });
+        for (const caller of CALLERS) {
+          const bulk = await oneBulk(caller);
+          const serial = await oneSerial(caller, 1);
+          const concurrent = await oneSerial(caller, 8);
+          of(caller).push({
+            bulkMs: bulk.ms,
+            serialMs: serial.ms,
+            concurrentMs: concurrent.ms,
+            objects: serial.objects,
+            bulkObjects: bulk.objects,
+            channels: bulk.channels,
+          });
+        }
       }
     });
 
@@ -321,7 +423,7 @@ describe(
       const mid = median(ms);
       const spread = Math.max(...ms) - Math.min(...ms);
       process.stdout.write(
-        `      ${label.padEnd(15)}${(mid / 1_000).toFixed(1).padStart(5)} s  ` +
+        `      ${label.padEnd(26)}${(mid / 1_000).toFixed(1).padStart(5)} s  ` +
           `${`${Math.round((TARGET_OBJECTS / mid) * 1_000).toLocaleString('en-GB')} objects/s`.padStart(18)}  ` +
           `${`${Math.round(((BUDGET_MS - mid) / BUDGET_MS) * 100).toString()}% spare`.padStart(10)}  ` +
           `[${ms.map((one) => (one / 1_000).toFixed(1)).join(', ')}] spread ` +
@@ -330,67 +432,84 @@ describe(
       return mid;
     };
 
-    it('creates the same tree in one request, which is what P-19 is for', () => {
-      // **The measurement the ticket exists for**, over the same HTTP, against the same wiring,
-      // building the same 5,000 objects. What changes is not how the tree is described but what
-      // is paid to write it: one request, one transaction and one tree lock instead of five
-      // thousand of each.
-      for (const sample of samples) {
-        assert.equal(sample.bulkObjects, TARGET_OBJECTS, 'the tree is the size claimed');
-        assert.ok(sample.channels > 0, 'the sensors have channels');
+    it('creates the tree in one request inside its budget, whoever asks (P-19, P-225)', () => {
+      // **The criterion's evidence**, over the same HTTP, building the same 5,000 objects, with the
+      // authentication production runs. One request, one transaction and one tree lock instead of
+      // five thousand of each — and one token lookup and one rights check, which is why this is
+      // what a provisioning script should call.
+      if (CHECKING_HARNESS) {
+        process.stdout.write(
+          `\n    CHECKING THE HARNESS (MS_BENCH_TREE_OBJECTS=${String(TARGET_OBJECTS)}): ` +
+            'one sample, and none of these numbers is a measurement\n',
+        );
       }
-
       process.stdout.write(
         `\n    measured, the same ${TARGET_OBJECTS.toLocaleString('en-GB')} objects in ` +
-          `**one** request (P-19), ${String(SAMPLES)} samples:\n`,
+          `**one** request (P-19), ${String(SAMPLES)} samples each:\n`,
       );
-      const bulkMs = report(
-        'bulk',
-        samples.map((one) => one.bulkMs),
-      );
-
-      assert.ok(
-        bulkMs < BUDGET_MS,
-        `one request took ${(bulkMs / 1_000).toFixed(1)} s against a ${String(BUDGET_MS / 1_000)} s budget`,
-      );
+      for (const caller of CALLERS) {
+        for (const sample of of(caller)) {
+          assert.equal(sample.bulkObjects, TARGET_OBJECTS, 'the tree is the size claimed');
+          assert.ok(sample.channels > 0, 'the sensors have channels');
+        }
+        const bulkMs = report(
+          `bulk, ${CALLER_LABEL[caller]}`,
+          of(caller).map((one) => one.bulkMs),
+        );
+        assert.ok(
+          bulkMs < BUDGET_MS,
+          `one request as ${caller} took ${(bulkMs / 1_000).toFixed(1)} s against a ` +
+            `${String(BUDGET_MS / 1_000)} s budget`,
+        );
+      }
     });
 
-    it('creates a 5,000-object tree through the API inside its budget', () => {
-      for (const sample of samples) {
-        assert.equal(sample.objects, TARGET_OBJECTS, 'the tree is the size claimed');
+    it('measures what one object per request costs, with and without authentication', () => {
+      for (const caller of CALLERS) {
+        for (const sample of of(caller)) {
+          assert.equal(sample.objects, TARGET_OBJECTS, 'the tree is the size claimed');
+        }
       }
 
       process.stdout.write(
-        `\n    measured, ${TARGET_OBJECTS.toLocaleString('en-GB')} objects over HTTP ` +
-          `(1 probe, 100 groups, 1,300 devices, the rest sensors), budget ` +
-          `${String(BUDGET_MS / 1_000)} s, ${String(SAMPLES)} samples each into its own\n` +
-          `    empty database (P-193 — they used to share one, so only bulk started from empty):\n`,
+        `\n    measured, ${TARGET_OBJECTS.toLocaleString('en-GB')} objects over HTTP one per ` +
+          `request (1 probe, 100 groups, 1,300 devices, the rest sensors), ${String(SAMPLES)} ` +
+          'samples each into its own\n' +
+          `    empty database (P-193). The rate limit is RAISED for the authenticated callers; see ` +
+          'below:\n',
       );
 
-      // Serial first, because that is what a provisioning script written the obvious way does,
-      // and the criterion should be met without anyone having to be clever.
-      const serialMs = report(
-        'serial',
-        samples.map((one) => one.serialMs),
-      );
-      // And then the way a client that knows about the shared tree lock would do it.
-      report(
-        '8 in flight',
-        samples.map((one) => one.concurrentMs),
-      );
+      // Serial first, because that is what a provisioning script written the obvious way does;
+      // then the way a client that knows about the shared tree lock would do it.
+      for (const caller of CALLERS) {
+        report(
+          `serial, ${CALLER_LABEL[caller]}`,
+          of(caller).map((one) => one.serialMs),
+        );
+      }
+      for (const caller of CALLERS) {
+        report(
+          `8 in flight, ${CALLER_LABEL[caller]}`,
+          of(caller).map((one) => one.concurrentMs),
+        );
+      }
+      const creates = TARGET_OBJECTS;
+      const windows = Math.ceil(creates / 1_200);
       process.stdout.write(
-        `      baseline after S-16 was 21.0 s; Phase 3 costs each create a sensor_runtime row\n` +
-          `      (M-02) and a guard against a paused ancestor (M-08) — see P-19\n` +
+        `      "% spare" is against the 30 s criterion, which these do not carry: bulk does\n` +
+          `      (P-225). No account can build this way at these speeds in production. The rate\n` +
+          `      limit allows one account 1,200 requests a minute, so ${creates.toLocaleString('en-GB')} ` +
+          `creates need\n` +
+          `      ${String(windows)} windows, at least ${String(windows - 1)} ` +
+          `minute${windows - 1 === 1 ? '' : 's'}, whatever a ` +
+          `request costs (A-39).\n` +
+          `      baseline after S-16 was 21.0 s unauthenticated; Phase 3 costs each create a\n` +
+          `      sensor_runtime row (M-02) and a guard against a paused ancestor (M-08) — see P-19.\n` +
           `      The spread above is WITHIN one run and understates the uncertainty. Four quiet\n` +
-          `      runs on 2026-09-08 put the serial median at 20.9, 22.0, 23.2 and 25.7 s — a\n` +
-          `      fifth of the number — while bulk moved 0.1 s and eight-in-flight 0.7 s. The\n` +
-          `      noise scales with the round-trips, so only serial has much (P-194). Do not read\n` +
-          `      a change smaller than a couple of seconds here as a change in the code.\n`,
-      );
-
-      assert.ok(
-        serialMs < BUDGET_MS,
-        `a serial build took ${(serialMs / 1_000).toFixed(1)} s against a ${String(BUDGET_MS / 1_000)} s budget`,
+          `      runs on 2026-09-08 put the unauthenticated serial median at 20.9, 22.0, 23.2 and\n` +
+          `      25.7 s, while bulk moved 0.1 s and eight-in-flight 0.7 s. The noise scales with\n` +
+          `      the round-trips, so only serial has much (P-194). Read the cost of\n` +
+          `      authentication from the medians of one run, not across runs.\n`,
       );
     });
 
@@ -418,19 +537,22 @@ describe(
       /** Trees of 5,000 already in the database before the measured build starts. */
       const FILLS = [0, 1, 2, 4];
 
+      // Unauthenticated, as it was measured before `P-225`, so its committed curve stays
+      // comparable: the question is how a write's cost grows, and authentication's lookups are the
+      // same size in an empty installation as in a full one.
       const measure = async (
         trees: number,
-        run: (base: string, rootId: number) => Promise<number>,
+        run: (f: Fixture) => Promise<number>,
       ): Promise<number> => {
-        const f = await fixture();
+        const f = await fixture('anonymous');
         try {
           // Filled through the bulk path because it is ten times faster and `P-19` asserts the
           // rows it writes are the rows the serial path writes — the fill is state, not a
           // measurement, and how it got there must not matter.
           for (let tree = 0; tree < trees; tree += 1) {
-            await bulkBuild(f.base, f.rootId, `fill${String(tree)}`);
+            await bulkBuild(f, `fill${String(tree)}`);
           }
-          return await run(f.base, f.rootId);
+          return await run(f);
         } finally {
           await f.close();
         }
@@ -455,8 +577,8 @@ describe(
         [[...FILLS].reverse(), down],
       ] as const) {
         for (const trees of pass) {
-          const bulk = await measure(trees, (base, rootId) => bulkBuild(base, rootId));
-          const serial = await measure(trees, (base, rootId) => build(base, rootId, 1));
+          const bulk = await measure(trees, (f) => bulkBuild(f));
+          const serial = await measure(trees, (f) => build(f, 1));
           into.set(trees, { bulk, serial });
         }
       }

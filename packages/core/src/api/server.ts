@@ -288,6 +288,12 @@ export interface ApiServerOptions {
   stream?: StateBroadcaster;
   /** Narrower bounds on each stream socket, for a test that has to reach them (`A-30`). */
   streamLimits?: Partial<StreamLimits>;
+  /**
+   * A different ceiling for the per-client rate limit, for a benchmark that measures what a
+   * request costs rather than how many one account may make (`P-225`). Not a setting: `A-39`
+   * makes the limit one, and until then production always has the default.
+   */
+  rateLimit?: { max: number };
 }
 
 /**
@@ -338,6 +344,7 @@ export class ApiServer {
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #streamLimits: Partial<StreamLimits>;
+  readonly #rateLimit: { max: number } | undefined;
   readonly #undeclared: string[] = [];
   /** Routes that declared no `access`, which makes `build` throw (`A-11`). */
   readonly #unauthorized: string[] = [];
@@ -412,6 +419,7 @@ export class ApiServer {
     this.#tester = options.tester;
     this.#stream = options.stream;
     this.#streamLimits = options.streamLimits ?? {};
+    this.#rateLimit = options.rateLimit;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -618,7 +626,7 @@ export class ApiServer {
         logger: this.#logger,
         allowedOrigins: this.#config.allowedOrigins,
       });
-      registerRateLimit(this.#app, { logger: this.#logger });
+      registerRateLimit(this.#app, { logger: this.#logger, ...this.#rateLimit });
       // **After authentication, before every route** (`A-11`). Authentication answers who this
       // is; this answers whether they may. Both are global hooks for the same reason: a check
       // wired per route is a check the next route forgets.

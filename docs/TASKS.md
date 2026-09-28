@@ -5640,6 +5640,71 @@ because each is a decision rather than a defect:
       core restart (all misses) and the clear that follows a move. The numbers are measured in a
       quiet window and committed to `docs/findings/`.
 
+- [x] **P-225 — the tree-build criterion was measured on a server with no authentication** · M ·
+      P-15, P-19, A-09 · Found 2026-09-28 by the second review round.
+      `tree-build-performance.test.ts` built `ApiServer` without `auth`, so no create resolved a
+      token, none asked whether its caller could write the parent, and none met the per-account
+      rate limit. Production does all three on every request. Its `requireAuthentication: true` was a config field that does
+      nothing without `auth` wired, and the file said its writes went through the stack "exactly
+      as production assembles them". `PLAN.md`'s Phase 1 record, 20.9 to 25.7 s serial against the
+      30 s budget, was a path no production request takes.
+
+      The harness now builds the same 5,000 objects three ways: an administrator's API token, a
+      non-administrator's token holding `write` at the root (the longest rights walk the tree has),
+      and no authentication, kept so the difference is authentication and nothing else. The
+      callers are interleaved within each sample. The rate limit is raised for the authenticated
+      callers in the fixture only (`ApiServerOptions.rateLimit`, which `A-39` replaces with a
+      setting). Measured in a booked window, 2026-09-29, 3 samples each into its own empty
+      database:
+
+      | | no auth | admin token | non-admin token |
+      | --- | --- | --- | --- |
+      | one request (`P-19`) | 2.8 s | 2.6 s | 3.5 s |
+      | serial, one object per request | 27.1 s | 35.7 s | 44.7 s |
+      | 8 in flight | 8.9 s | 11.5 s | 12.1 s |
+
+      **The criterion holds for every caller through the bulk route, 88% spare or more.** It never
+      held as a real caller on the serial path: authentication costs 1.7 ms per create for an
+      administrator and 3.5 ms for anyone else, and every sample of each caller is clear of every
+      sample of the one before it. At the default rate limit no account can build that way anyway:
+      five windows, at least four minutes (`A-39`). The per-create cost was profiled statement by
+      statement; the most expensive part is the writer's sight, which nearly every write resolves
+      and never reads (`P-235`). `docs/findings/2026-09-29-tree-build-with-authentication.md`.
+
+- [ ] **P-235 — `writerFor` resolves the writer's sight on every write; only sensor types that
+      read other objects need it (A-29)** · S · A-29, P-225 · Found 2026-09-29 profiling
+      `P-225`'s per-create cost. Authentication adds three queries to a create for an administrator
+      and four for anyone else. The most expensive of them is `visibilityFor`, the writer's sight:
+      the administrator check, the access epoch and every grant, in one query. `writerFor`
+      resolves it eagerly for every write, so `A-29` can check what a sensor's parameters name.
+      Its only consumer is `assertMayName` (`sensor-reads.ts`), which runs only for types in
+      `readingTypes()`. A group, device or Ping create pays for it and never reads it.
+
+      Per sensor create, 1,000 serial creates per caller, pg driver wrapped. The times were taken
+      under load (1.06 per CPU, another client on the database), so the counts are exact and the
+      times indicative:
+
+      | Statement | admin | non-admin |
+      | --- | --- | --- |
+      | token lookup | 1 / 1.3 ms | 1 / 1.3 ms |
+      | permission check, administrator `EXISTS` (`AccessService.resolve`) | 1 / 0.9 ms | 1 / 0.9 ms |
+      | permission check, rights walk | — | 1 / 1.9 ms |
+      | **writer's sight (`visibilityFor`)** | **1 / 3.2 ms** | **1 / 3.3 ms** |
+
+      Make `Writer.voucher.sees` lazy, resolved on first use and memoised per request. **Resolve it
+      through the write's own transaction, never a separate query on the pool:** a voucher computed
+      against a different snapshot from the write it vouches for would reopen the race `A-29`
+      closed. Note that today's eager sight is not resolved that way. `writerFor` reads it on the
+      pool before the transaction opens, so this is a change to make, not one to preserve. Not in
+      scope: the administrator fact is asked twice per request, once by the permission check and
+      once inside the sight.
+
+      **Done when** authentication adds three queries to a non-administrator's `POST /objects`
+      where it added four, and two to an administrator's where it added three; a sensor type that
+      reads other objects still has its writer's sight checked, inside the write's transaction,
+      with `A-29`'s tests unchanged and passing; and the next quiet `P-225` run records the
+      difference.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;
