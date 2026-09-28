@@ -48,3 +48,15 @@ export class DiscoveryError extends AppError {
     return DISCOVERY_ERROR_STATUS[this.code];
   }
 }
+
+/**
+ * A discovery run that is not there, and one the caller may not see: one answer (`A-37`).
+ *
+ * The routes addressed by a run's id throw it for an id nobody used, and the authorisation guard
+ * throws it for a run in a group the caller cannot read, so trying ids learns nothing.
+ */
+export function runNotFound(id: number): DiscoveryError {
+  return new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no discovery run ${String(id)}`, {
+    context: { id },
+  });
+}

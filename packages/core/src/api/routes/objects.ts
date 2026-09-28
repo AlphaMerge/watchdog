@@ -44,6 +44,7 @@ import {
   writerFor,
 } from '../authorization.js';
 import { atLeast, type AccessService, type SubtreeAccess } from '../../auth/access.js';
+import { AuthError } from '../../auth/errors.js';
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
 interface RefusedOutcome {
@@ -806,14 +807,32 @@ export async function objectRoutes(
       config: every(
         onObject('write'),
         onBodyObject('write', 'targetParentId', { optional: true }),
-        onDerivedObject('write', 'a clone made in place', (request) => {
-          const body = request.body as { targetParentId?: unknown } | null | undefined;
-          if (body?.targetParentId !== undefined && body.targetParentId !== null) {
-            return Promise.resolve(null);
-          }
-          // An integer by now: `onObject` above refuses a path id that is not one.
-          return service.parentOf(Number((request.params as { id: unknown }).id));
-        }),
+        onDerivedObject(
+          'write',
+          'a clone made in place',
+          async (request) => {
+            const body = request.body as { targetParentId?: unknown } | null | undefined;
+            if (body?.targetParentId !== undefined && body.targetParentId !== null) {
+              return { kind: 'unasked' };
+            }
+            // An integer by now: `onObject` above refuses a path id that is not one. The root
+            // has no parent, and cloning it is the service's to refuse.
+            const parent = await service.parentOf(Number((request.params as { id: unknown }).id));
+            return parent === null ? { kind: 'unasked' } : { kind: 'object', id: parent };
+          },
+          // The source is one the caller may write, so it is not absent. Its parent is one they
+          // may not see, so the refusal does not name it.
+          (request) =>
+            new AuthError(
+              'AUTH_FORBIDDEN',
+              'a clone made in place goes beside its source, and this account may not write there',
+              {
+                objectId: Number((request.params as { id: unknown }).id),
+                needed: 'write',
+                via: 'a clone made in place',
+              },
+            ),
+        ),
       ),
       schema: {
         tags: ['objects'],

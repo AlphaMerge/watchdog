@@ -3,8 +3,8 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { actorFor } from '../authentication.js';
 import { triggerKinds } from '../../triggers/definition.js';
-import type { TriggerInput, TriggerService } from '../../triggers/service.js';
-import { READS, onDerivedObject, onObject, visibilityOf } from '../authorization.js';
+import { triggerNotFound, type TriggerInput, type TriggerService } from '../../triggers/service.js';
+import { READS, onObject, onObjectOf, visibilityOf } from '../authorization.js';
 
 export interface TriggerRouteOptions {
   triggers: TriggerService;
@@ -196,9 +196,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
       // only bar that can be read off the path is `readwrite` — which would let any account
       // with that role rewrite every trigger in the installation, including on objects it is
       // refused sight of. The right that matters is on the object the trigger is defined on.
-      config: onDerivedObject('write', 'this trigger', (request) =>
-        triggers.objectOf((request.params as { id: number }).id),
-      ),
+      config: onObjectOf('write', 'this trigger', (id) => triggers.objectOf(id), triggerNotFound),
       schema: {
         tags: ['triggers'],
         summary: 'Replace a trigger',
@@ -218,9 +216,7 @@ export function triggerRoutes(app: FastifyInstance, options: TriggerRouteOptions
     {
       // The same bar as replacing it, for the same reason (`R09`) — and deleting a trigger is
       // how alarming for a sensor stops without anything looking wrong.
-      config: onDerivedObject('write', 'this trigger', (request) =>
-        triggers.objectOf((request.params as { id: number }).id),
-      ),
+      config: onObjectOf('write', 'this trigger', (id) => triggers.objectOf(id), triggerNotFound),
       schema: {
         tags: ['triggers'],
         summary: 'Remove a trigger',

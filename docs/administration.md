@@ -56,6 +56,10 @@ A few consequences are worth knowing before somebody reports them as bugs:
   list: `?objectId=` on the alarms or the state log, `?parentId=` on the tree, a stream
   subscription to one object. Serving the visible part of a hidden branch would answer "which of
   my sensors are under object 4711", which is a question about a branch the account cannot see.
+- **A trigger, a discovery run or a rediscovery schedule in a branch the account cannot see is not
+  found.** Asked for by its own id, it gets the same 404, in the same words, as an id nobody has
+  used, so trying ids says nothing about another branch. One the account can see but may not
+  change is refused, and the refusal names the object it belongs to.
 - **Something inherited from a hidden container is shown, and the container is not named.** A
   trigger defined on the probe above a customer's branch fires for the customer's sensors, and
   the triggers tab lists it "from an object outside your view". A pause inherited from above, a

@@ -81,8 +81,8 @@ export class TriggerService {
    *
    * Exists for the authorisation guard: `/triggers/:id` is addressed by the trigger, and the
    * right that decides whether a caller may replace or delete it is the one on the object whose
-   * alarms it governs. Null rather than a throw, because "no such trigger" is the handler's 404
-   * and a guard that answered 403 to it would be an existence oracle.
+   * alarms it governs. Null rather than a throw: the guard answers it with `triggerNotFound`,
+   * as it answers a trigger on an object the caller may not see (`A-37`).
    */
   async objectOf(id: number): Promise<ObjectId | null> {
     return (await this.#repo.get(this.#db, id))?.objectId ?? null;
@@ -123,7 +123,7 @@ export class TriggerService {
     const now = new Date();
     return this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
-      if (before === null) throw notFound(id);
+      if (before === null) throw triggerNotFound(id);
 
       await this.#repo.update(q, id, write);
       await this.#audit.record(
@@ -149,7 +149,7 @@ export class TriggerService {
     const now = new Date();
     await this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
-      if (before === null) throw notFound(id);
+      if (before === null) throw triggerNotFound(id);
 
       await this.#repo.delete(q, id);
       await this.#audit.record(
@@ -186,7 +186,7 @@ export class TriggerService {
 
   async #loaded(q: Parameters<TriggerRepository['get']>[0], id: number): Promise<TriggerView> {
     const stored = await this.#repo.get(q, id);
-    if (stored === null) throw notFound(id);
+    if (stored === null) throw triggerNotFound(id);
     const owner = await q.query<{ name: string }>('SELECT name FROM object WHERE id = $1', [
       stored.objectId,
     ]);
@@ -230,7 +230,8 @@ export class TriggerService {
   }
 }
 
-function notFound(id: number): ObjectError {
+/** A trigger that is not there, and one on an object the caller may not see (`A-37`). */
+export function triggerNotFound(id: number): ObjectError {
   return new ObjectError('OBJECT_NOT_FOUND', `no trigger ${String(id)}`, {
     context: { phase: 'triggers' },
     details: { triggerId: id },

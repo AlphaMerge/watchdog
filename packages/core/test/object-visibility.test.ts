@@ -1316,9 +1316,18 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       }
     });
 
+    /** An error answer, as a caller could compare two: the id they sent taken out. */
+    const answerFor = (response: { statusCode: number; body: string }, id: number): string => {
+      const { error } = JSON.parse(response.body) as { error: Record<string, unknown> };
+      return (
+        `${String(response.statusCode)} ${String(error['code'])} ` +
+        String(error['message']).replace(String(id), '<id>')
+      );
+    };
+
     it('answers a hidden rediscovery rule as an id nobody used, on every route that takes one', async () => {
-      // `D-11`. A writer on the branch, so the guard's 403 — which names the object — is what a
-      // hidden rule would get if it were found, and an unused id gets the handler's 404.
+      // `D-11`. A writer on the branch, so a 403 from the guard, naming the rule's group, is
+      // what a hidden rule got before `A-37`, and an unused id gets the route's 404.
       const routes: [string, 'POST' | 'PATCH' | 'DELETE', string, unknown][] = [
         ['switch', 'POST', '/enabled', { enabled: true }],
         ['edit', 'PATCH', '', { name: 'taken over' }],
@@ -1333,11 +1342,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
             headers: { ...as('operator'), 'if-match': 'W/"1"' },
             ...(payload === undefined ? {} : { payload: payload as never }),
           });
-          const error = response.json<{ error: Record<string, unknown> }>().error;
-          answers.push(
-            `${String(response.statusCode)} ${String(error['code'])} ` +
-              String(error['message']).replace(String(id), '<id>'),
-          );
+          answers.push(answerFor(response, id));
         }
         assert.equal(answers[0], answers[1], what);
         assert.match(answers[0] ?? '', /^404 /, what);
@@ -1349,6 +1354,41 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal(rows[0]?.name, `${MARK}-rediscovery`, 'and the rule is as it was');
     });
 
+    it('answers a hidden discovery run as an id nobody used, on every route that takes one (A-37)', async () => {
+      // The guard answered 403 with the run's group in it, where an unused id got the route's
+      // 404, and the problems and plan routes answered an unused id with an empty list.
+      const routes: ['GET' | 'POST', string][] = [
+        ['GET', ''],
+        ['GET', '/summary'],
+        ['GET', '/hosts'],
+        ['GET', '/problems'],
+        ['GET', '/plan'],
+        ['POST', '/cancel'],
+      ];
+      for (const [method, suffix] of routes) {
+        const answers = [];
+        for (const id of [hiddenRunId, 999_999]) {
+          const response = await app.inject({
+            method,
+            url: `/api/v1/discovery/${String(id)}${suffix}`,
+            headers: as('operator'),
+          });
+          answers.push(answerFor(response, id));
+        }
+        assert.equal(answers[0], answers[1], `${method} ${suffix}`);
+        assert.equal(
+          answers[0],
+          '404 DISCOVERY_RUN_NOT_FOUND there is no discovery run <id>',
+          `${method} ${suffix}`,
+        );
+      }
+      const run = await db.query<{ status: string }>(
+        `SELECT status FROM discovery_run WHERE id = $1`,
+        [hiddenRunId],
+      );
+      assert.notEqual(run[0]?.status, 'cancelled', 'and the run was not stopped');
+    });
+
     it('refuses a scope naming an object outside the branch', async () => {
       for (const url of [
         `/api/v1/alarms?objectId=${String(probeId)}`,
@@ -1356,7 +1396,6 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         `/api/v1/objects?parentId=${String(probeId)}`,
         `/api/v1/notification-requests?sensorId=${String(otherSensorId)}`,
         `/api/v1/discovery/schedules?groupId=${String(otherGroupId)}`,
-        `/api/v1/discovery/${String(hiddenRunId)}`,
         `/api/v1/objects/${String(pingId)}/settings?asChildOf=${String(probeId)}`,
         `/api/v1/templates/${String(templateId)}/preview?sensorId=${String(otherSensorId)}`,
         '/api/v1/objects/root',
@@ -2048,6 +2087,36 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         payload: { name: 'a-web01 again' },
       });
       assert.equal(allowed.statusCode, 201, allowed.body);
+    });
+
+    it('refuses one beside a parent the caller cannot see without naming the parent (A-37)', async () => {
+      // `a-regranted` hangs in the carved-out device. Given `write` on the sensor, the caller
+      // may take it, and may not see where a copy made in place would land.
+      await access.grant(regrantedId, teamId, 'write', actorNamed('visibility'));
+      try {
+        const inPlace = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(regrantedId)}/clone`,
+          headers: as('operator'),
+        });
+        assert.equal(inPlace.statusCode, 403, inPlace.body);
+        const { error } = inPlace.json<{
+          error: { message: string; context: Record<string, unknown> };
+        }>();
+        assert.equal(
+          error.message,
+          'a clone made in place goes beside its source, and this account may not write there',
+        );
+        assert.deepEqual(error.context, {
+          objectId: regrantedId,
+          needed: 'write',
+          via: 'a clone made in place',
+        });
+        assert.ok(!inPlace.body.includes(MARK), inPlace.body);
+        assert.doesNotMatch(inPlace.body, new RegExp(`\\b${String(carvedDeviceId)}\\b`, 'u'));
+      } finally {
+        await access.grant(regrantedId, teamId, 'read', actorNamed('visibility'));
+      }
     });
   });
 

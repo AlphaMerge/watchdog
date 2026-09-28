@@ -8,7 +8,7 @@ import {
   parseIpRange,
   type DiscoveryLevel,
 } from '@ms/shared';
-import { DiscoveryError } from '../../discovery/errors.js';
+import { DiscoveryError, runNotFound } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
@@ -17,8 +17,8 @@ import { etagFor } from '../preconditions.js';
 import {
   COMPUTES,
   onBodyObject,
-  onDerivedObject,
   onObject,
+  onObjectOf,
   onQueryObject,
   visibilityOf,
 } from '../authorization.js';
@@ -96,12 +96,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   /**
    * A run is read with a right on the group it provisions into, as it is cancelled with one
    * (`A-12`). Its hosts are addresses and fingerprints on somebody's network, and a role check
-   * handed every run in the installation to an account granted one branch.
+   * handed every run in the installation to an account granted one branch. A run in a group
+   * the caller cannot read is not there, in the words an unused id gets (`A-37`).
    */
-  const toReadRun = onDerivedObject('read', 'this run', async (request) => {
-    const run = await discovery.get((request.params as { id: number }).id);
-    return run?.groupId ?? null;
-  });
+  const groupOfRun = async (id: number): Promise<number | null> =>
+    (await discovery.get(id))?.groupId ?? null;
+  const toReadRun = onObjectOf('read', 'this run', groupOfRun, runNotFound);
 
   app.addSchema(runSchema);
 
@@ -294,7 +294,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     async (request) => {
       const { id } = request.params as { id: number };
       const run = await discovery.get(id);
-      if (run === null) throw notFound(id);
+      if (run === null) throw runNotFound(id);
       return run;
     },
   );
@@ -436,7 +436,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     async (request) => {
       const { id } = request.params as { id: number };
       const summary = await discovery.summary(id);
-      if (summary === null) throw notFound(id);
+      if (summary === null) throw runNotFound(id);
       return summary;
     },
   );
@@ -487,7 +487,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     async (request) => {
       const { id } = request.params as { id: number };
       const { limit } = request.query as { limit?: number };
-      if ((await discovery.get(id)) === null) throw notFound(id);
+      if ((await discovery.get(id)) === null) throw runNotFound(id);
       return { items: await discovery.hosts(id, limit ?? 1_000) };
     },
   );
@@ -496,12 +496,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     '/discovery/:id/cancel',
     {
       // The run belongs to a group, and so does the right to stop it (`G05`).
-      config: {
-        ...onDerivedObject('write', 'this run', async (request) => {
-          const run = await discovery.get((request.params as { id: number }).id);
-          return run?.groupId ?? null;
-        }),
-      },
+      config: onObjectOf('write', 'this run', groupOfRun, runNotFound),
       schema: {
         tags: ['discovery'],
         summary: 'Stop a run',
@@ -519,7 +514,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       // A run that exists but has already finished is not an error worth a 404: the operator
       // asked for it to stop and it is stopped. Anything else is genuinely missing.
       const existing = await discovery.get(id);
-      if (existing === null) throw notFound(id);
+      if (existing === null) throw runNotFound(id);
       return existing;
     },
   );
@@ -532,10 +527,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         // This is the route that actually creates the devices, and the group it creates them in
         // is on the run rather than in the request — so the right is resolved by asking the run
         // (`G05`).
-        config: onDerivedObject('write', 'this run', async (request) => {
-          const run = await discovery.get((request.params as { id: number }).id);
-          return run?.groupId ?? null;
-        }),
+        config: onObjectOf('write', 'this run', groupOfRun, runNotFound),
         schema: {
           tags: ['discovery'],
           summary: 'Create the devices and sensors this run found',
@@ -595,7 +587,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request: FastifyRequest) => {
         const { id } = request.params as { id: number };
-        if ((await discovery.get(id)) === null) throw notFound(id);
+        if ((await discovery.get(id)) === null) throw runNotFound(id);
         // The caller, not the address they called from: every object this creates is audited
         // under this actor, and "anonymous" beside a device an administrator provisioned is a
         // record saying nobody did it (`A-20`).
@@ -634,6 +626,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     },
     async (request: FastifyRequest) => {
       const { id } = request.params as { id: number };
+      // Not an empty list: that is the answer for a run that went cleanly (`A-37`).
+      if ((await discovery.get(id)) === null) throw runNotFound(id);
       return { items: await discovery.problems(id) };
     },
   );
@@ -729,22 +723,16 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     /**
      * The group a rule provisions into, for the routes addressed by a rule's id (`D-11`).
      *
-     * **Found through the caller's visibility, and absent when it is outside it** (`A-16`). The
-     * guard answers a caller without the right with a 403 naming the object, which is right for
-     * a rule they can see and an oracle for one they cannot: a hidden rule's id would answer 403
-     * with its group's id where an unused one answers 404. So a hidden rule is not found, in the
-     * words an unused id gets, before the guard is asked anything.
-     *
-     * Runs before the params are validated, so an id that is not one is left for validation to
-     * refuse as the 400 it is rather than reaching the database as text.
+     * A rule in a group the caller cannot read is not there, in the words an unused id gets: the
+     * guard answers both with `noSuchRule`, so trying ids learns nothing about another branch
+     * (`A-16`, `A-37`).
      */
-    const ruleGroup = onDerivedObject('write', 'this schedule', async (request) => {
-      const id = Number((request.params as { id?: unknown }).id);
-      if (!Number.isSafeInteger(id) || id < 1) return null;
-      const rule = await rediscovery.find(id, await visibilityOf(request));
-      if (rule === null) throw noSuchRule(id);
-      return rule.groupId;
-    });
+    const ruleGroup = onObjectOf(
+      'write',
+      'this schedule',
+      async (id) => (await rediscovery.get(id))?.groupId ?? null,
+      noSuchRule,
+    );
 
     app.get(
       '/discovery/schedules',
@@ -1021,10 +1009,4 @@ function parse(text: string): ReturnType<typeof parseIpRange> {
     }
     throw error;
   }
-}
-
-function notFound(id: number): DiscoveryError {
-  return new DiscoveryError('DISCOVERY_RUN_NOT_FOUND', `there is no discovery run ${String(id)}`, {
-    context: { id },
-  });
 }

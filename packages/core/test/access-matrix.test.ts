@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer, requiresNothing } from '../src/api/server.js';
+import type { RouteAccess } from '../src/api/authorization.js';
 import { AccessService, type AccessRight } from '../src/auth/access.js';
 import { AccountService, type AccountRole } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
@@ -44,6 +45,8 @@ import {
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
+type ServerOptions = ConstructorParameters<typeof ApiServer>[0];
+
 /**
  * `PLAN.md` Phase 9's exit criteria, as tests (`A-10`).
  *
@@ -77,6 +80,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
   let triggers: TriggerService;
   let rediscovery: RediscoveryService;
   let formatter: ReportFormatter;
+  let optionsFor: (required: boolean) => ServerOptions;
 
   let probeId = 0;
   let deviceId = 0;
@@ -141,13 +145,14 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       siteName: 'matrix',
     });
 
-    server = new ApiServer({
+    // The one construction, so a second server with the layer off is the same server (`A-37`).
+    optionsFor = (required: boolean): ServerOptions => ({
       config: {
         host: '127.0.0.1',
         port: 0,
         webRoot: '',
         allowedOrigins: [],
-        requireAuthentication: true,
+        requireAuthentication: required,
       },
       logger: silent,
       version: '9.9.9',
@@ -255,9 +260,10 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         access,
         tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
-        required: true,
+        required,
       },
     });
+    server = new ApiServer(optionsFor(true));
     server.app.addHook('onRoute', (route) => {
       for (const method of [route.method].flat()) {
         bodies.push({ method, url: route.url, body: route.schema?.body });
@@ -381,6 +387,25 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     });
   });
 
+  /**
+   * What `:id` means on this route.
+   *
+   * **A derived guard is only proved by a row that exists** (`R07`). `/triggers/:id` and the
+   * discovery routes resolve their object by looking the id up, and a lookup that finds
+   * nothing is allowed through on purpose so the handler can answer its own 404 — which is
+   * indistinguishable, from outside, from a route with no guard at all. Filling these with
+   * the real rows created above is what makes the refusal the first answer.
+   */
+  const idFor = (url: string): number => {
+    // `server.routes` records the registered url, prefix and all, so this matches on the path
+    // below `/api/v1` rather than on the whole thing.
+    const path = url.replace('/api/v1', '');
+    if (path.startsWith('/triggers/')) return triggerId;
+    if (path.startsWith('/discovery/schedules/')) return scheduleId;
+    if (path.startsWith('/discovery/:id')) return runId;
+    return sensorId;
+  };
+
   describe('every combination of role, group and tree position', () => {
     interface Case {
       role: AccountRole;
@@ -452,25 +477,6 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
      *   2. **Is that bar actually enforced?** Every one of them is called as a read-only
      *      account, which must be refused by all of them.
      */
-    /**
-     * What `:id` means on this route.
-     *
-     * **A derived guard is only proved by a row that exists** (`R07`). `/triggers/:id` and the
-     * discovery routes resolve their object by looking the id up, and a lookup that finds
-     * nothing is allowed through on purpose so the handler can answer its own 404 — which is
-     * indistinguishable, from outside, from a route with no guard at all. Filling these with
-     * the real rows created above is what makes the refusal the first answer.
-     */
-    const idFor = (url: string): number => {
-      // `server.routes` records the registered url, prefix and all, so this matches on the path
-      // below `/api/v1` rather than on the whole thing.
-      const path = url.replace('/api/v1', '');
-      if (path.startsWith('/triggers/')) return triggerId;
-      if (path.startsWith('/discovery/schedules/')) return scheduleId;
-      if (path.startsWith('/discovery/:id')) return runId;
-      return sensorId;
-    };
-
     const fillWrite = (url: string): string =>
       url
         .replaceAll(':id', String(idFor(url)))
@@ -696,8 +702,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
           headers: asRole('readwrite'),
           payload,
         });
-        // A derived route that finds its row through the caller's visibility answers a row they
-        // cannot see as absent (`D-11`; every derived route, once `A-37` lands). That is the
+        // A derived route answers a row the caller cannot see as absent (`A-37`). That is the
         // refusal and not a gap: `idFor` fills these with rows that exist, so a route with no
         // guard would have changed the row, not failed to find it.
         const hidden = response.statusCode === 404 && route.access.kind === 'derived';
@@ -979,6 +984,119 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         }
       }
       assert.deepEqual(allowed, [], 'a read-scoped token was not refused by these');
+    });
+  });
+
+  describe('a row the caller may not see (A-37)', () => {
+    /** Whether a declaration asks a `derived` question anywhere in it. */
+    const derives = (access: RouteAccess): boolean =>
+      access.kind === 'derived' || (access.kind === 'every' && access.of.some(derives));
+
+    /** An answer as a caller could compare two: everything in it, the id they sent aside. */
+    const answerFor = (response: { statusCode: number; body: string }, id: number): string => {
+      const { error } = JSON.parse(response.body) as { error?: Record<string, unknown> };
+      const { correlationId: _, ...said } = error ?? {};
+      return `${String(response.statusCode)} ${JSON.stringify(said)}`.replace(
+        new RegExp(`\\b${String(id)}\\b`, 'gu'),
+        '<id>',
+      );
+    };
+
+    it('is answered as an id nobody used, on every route that finds its object by asking', async () => {
+      // The guard answered a row on an object the caller holds nothing on with a 403 naming
+      // that object, where an unused id reached the handler's 404, or its empty list. Now the
+      // two must be one answer: the status, the code, the words and the context, the id aside.
+      //
+      // **Twice for a route that takes a body**, with one that validates and one that does not.
+      // An unused id let through to the handler meets validation first, so a malformed body
+      // would answer it 400 and a hidden row 404, and the ids would be told apart that way.
+      await db.query('DELETE FROM object_access');
+      const unused = 2_147_480_000;
+      const routes = server.routes.filter((route) => derives(route.access));
+      const names = routes.map((route) => `${route.method} ${route.url}`);
+      for (const expected of [
+        'PUT /api/v1/triggers/:id',
+        'GET /api/v1/discovery/:id',
+        'GET /api/v1/discovery/:id/plan',
+        'PATCH /api/v1/discovery/schedules/:id',
+        'POST /api/v1/objects/:id/clone',
+      ]) {
+        assert.ok(names.includes(expected), `${expected} was not swept; swept ${names.join(', ')}`);
+      }
+
+      const differ: string[] = [];
+      const hidden = new Map<string, string>();
+      for (const route of routes) {
+        const bodies =
+          route.method === 'GET' || route.method === 'DELETE'
+            ? [undefined]
+            : [{ enabled: true, name: 'swept', kind: 'state', settings: {} }, ['not', 'a', 'body']];
+        for (const body of bodies) {
+          const answers: string[] = [];
+          for (const id of [idFor(route.url), unused]) {
+            const response = await app.inject({
+              method: route.method as 'POST',
+              url: route.url.replaceAll(':id', String(id)),
+              headers: { ...asRole('readwrite'), 'if-match': 'W/"1"' },
+              ...(body === undefined ? {} : { payload: body }),
+            });
+            answers.push(answerFor(response, id));
+          }
+          const [seen, never] = answers;
+          hidden.set(`${route.method} ${route.url}`, seen ?? '');
+          if (seen !== never) {
+            differ.push(
+              `${route.method} ${route.url}\n  hidden: ${seen ?? ''}\n  unused: ${never ?? ''}`,
+            );
+          }
+        }
+      }
+      assert.deepEqual(differ, [], 'a hidden row was answered differently from an unused id');
+
+      // And the answer is the route's not-found, so the sweep above was not comparing two
+      // refusals that happen to agree for some other reason.
+      assert.match(hidden.get('PUT /api/v1/triggers/:id') ?? '', /^404 .*OBJECT_NOT_FOUND/u);
+      assert.match(
+        hidden.get('GET /api/v1/discovery/:id') ?? '',
+        /^404 .*DISCOVERY_RUN_NOT_FOUND/u,
+      );
+      assert.match(
+        hidden.get('PATCH /api/v1/discovery/schedules/:id') ?? '',
+        /^404 .*there is no rediscovery schedule <id>/u,
+      );
+
+      // An id that is not one is nobody's row: validation refuses it, before any lookup.
+      const malformed: string[] = [];
+      for (const route of routes) {
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: route.url.replaceAll(':id', 'x'),
+          headers: asRole('readwrite'),
+        });
+        if (response.statusCode !== 400) {
+          malformed.push(`${route.method} ${route.url} -> ${String(response.statusCode)}`);
+        }
+      }
+      assert.deepEqual(malformed, [], 'an id that is not one reached a lookup');
+    });
+
+    it('answers an unused run id with 404 when the layer is off, not with an empty list', async () => {
+      // With the layer on, the guard answers an unused id before any handler runs. With it off
+      // the handlers answer, and the problems and plan routes answered with an empty list: what
+      // a run that went cleanly, or found nothing, says.
+      const open = new ApiServer(optionsFor(false));
+      await open.build('9.9.9', harness.service);
+      try {
+        for (const suffix of ['', '/summary', '/hosts', '/problems', '/plan']) {
+          const response = await open.app.inject({
+            method: 'GET',
+            url: `/api/v1/discovery/2147480000${suffix}`,
+          });
+          assert.equal(response.statusCode, 404, `${suffix}: ${response.body}`);
+        }
+      } finally {
+        await open.app.close();
+      }
     });
   });
 

@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
+import { runNotFound } from '../../discovery/errors.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { Visibility } from '../../auth/access.js';
 import { ObjectError } from '../../objects/errors.js';
@@ -12,7 +13,7 @@ import {
   READS,
   computesOn,
   onObject,
-  onDerivedObject,
+  onObjectOf,
   visibilityOf,
 } from '../authorization.js';
 
@@ -207,10 +208,12 @@ export function deviceTemplateRoutes(
       '/discovery/:id/plan',
       {
         // What a run found, so the run's own bar: read on the group it provisions into (`A-12`).
-        config: onDerivedObject('read', 'this run', async (request) => {
-          const run = await discovery.get((request.params as { id: number }).id);
-          return run?.groupId ?? null;
-        }),
+        config: onObjectOf(
+          'read',
+          'this run',
+          async (id) => (await discovery.get(id))?.groupId ?? null,
+          runNotFound,
+        ),
         schema: {
           tags: ['discovery'],
           summary: 'What a run’s hosts would produce',
@@ -255,6 +258,8 @@ export function deviceTemplateRoutes(
       async (request: FastifyRequest) => {
         const { id } = request.params as { id: number };
         const { credentials, limit } = request.query as { credentials?: string; limit?: number };
+        // Not an empty plan: that is the answer for a run that found nothing (`A-37`).
+        if ((await discovery.get(id)) === null) throw runNotFound(id);
         const available = new Set(
           (credentials ?? '')
             .split(',')

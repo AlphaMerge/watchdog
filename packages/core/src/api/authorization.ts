@@ -27,6 +27,19 @@ import type { Writer } from '../objects/sensor-reads.js';
  * schemas get, for the same reason: a rule a new endpoint has to remember is a rule a new
  * endpoint will eventually forget, and the failure here is silent and total.
  */
+/**
+ * What a `derived` declaration's lookup found (`A-37`).
+ *
+ * `unasked` is a request this declaration has nothing to say about. An id that is not an id is
+ * left for validation to refuse as the 400 it is. Inside an `every`, it is a request that is not
+ * the shape this part covers, as `optional` is for an absent field: a clone given somewhere to
+ * go is not a clone made in place (`A-35`).
+ */
+export type Derived =
+  | { readonly kind: 'object'; readonly id: number }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unasked' };
+
 export type RouteAccess =
   /**
    * No principal needed at all. Login, logout, health.
@@ -87,18 +100,21 @@ export type RouteAccess =
    * declare is the role, which is how "a read-only account could delete every trigger" became
    * "any account with `readwrite` could delete every trigger" instead of being fixed.
    *
-   * Resolving to null means there is nothing for this declaration to check. Usually the row does
-   * not exist: the hook allows the request through so the handler answers its own 404, because a
-   * guard that answered 403 for a missing id would turn every route into an existence oracle.
-   * Inside an `every` it can also mean the request is not the shape this part covers, as
-   * `optional` does for an absent field: a clone made in place (`A-35`).
+   * **A row that is not there and a row the caller may not see are one answer, `absent`**
+   * (`A-37`). The guard gives it for both, so they cannot differ: not in status, not in words,
+   * and not by one reaching the body's validation and the other not. It is the route's own
+   * not-found, the same function the handler throws, so an unused id reads the same whether the
+   * guard or the handler noticed. A 403 here would have named the object the hidden row belongs
+   * to, and answered a hidden id differently from an unused one.
    */
   | {
       kind: 'derived';
       needed: AccessRight;
       /** What is being looked up, for the refusal's context. */
       what: string;
-      of: (request: FastifyRequest) => Promise<number | null>;
+      of: (request: FastifyRequest) => Promise<Derived>;
+      /** The route's answer for a row that is not there, given to a caller who may not see it. */
+      absent: (request: FastifyRequest) => Error;
     }
   /**
    * A right on the root: the installation as a whole (`A-12`).
@@ -430,19 +446,21 @@ async function enforce(
   }
 
   if (declared.kind === 'derived') {
-    const objectId = await declared.of(request);
-    // Null is "there is no such row", which is the handler's 404 to answer and not the guard's
-    // 403 — see the declaration.
-    if (objectId === null) return;
-    const resolved = await access.resolveFor(principal, objectId);
+    const found = await declared.of(request);
+    if (found.kind === 'unasked') return;
+    if (found.kind === 'absent') throw declared.absent(request);
+    const resolved = await access.resolveFor(principal, found.id);
     if (atLeast(resolved.right, declared.needed)) return;
+    // Below `read` the caller may not know the row is there at all, so they are told what an
+    // unused id is told — see the declaration.
+    if (!atLeast(resolved.right, 'read')) throw declared.absent(request);
     // Named, because "this action needs write on that object" is unhelpful for a route whose
     // path holds no object id: the operator has to be told *which* object the id they sent
-    // turned out to be about.
+    // turned out to be about. They can see it, so naming it tells them nothing new.
     throw new AuthError(
       'AUTH_FORBIDDEN',
       `this action needs ${declared.needed} on the object that ${declared.what} belongs to`,
-      { objectId, held: resolved.right, needed: declared.needed, via: declared.what },
+      { objectId: found.id, held: resolved.right, needed: declared.needed, via: declared.what },
     );
   }
 
@@ -607,13 +625,48 @@ export function every(...declared: readonly { access: RouteAccess }[]): { access
  *
  * For the routes addressed by something that *belongs* to an object rather than by the object:
  * `/triggers/:id` is a trigger id, and the right that matters is on the object it is defined on.
+ * `absent` is what the route answers for a row that is not there, and the guard gives it to a
+ * caller who may not see the row as well (`A-37`).
  */
 export function onDerivedObject(
   needed: AccessRight,
   what: string,
-  of: (request: FastifyRequest) => Promise<number | null>,
+  of: (request: FastifyRequest) => Promise<Derived>,
+  absent: (request: FastifyRequest) => Error,
 ): { access: RouteAccess } {
-  return { access: { kind: 'derived', needed, what, of } };
+  return { access: { kind: 'derived', needed, what, of, absent } };
+}
+
+/**
+ * A right on the object that the row addressed by `:id` belongs to (`A-37`).
+ *
+ * The shape every derived route but the in-place clone has: a trigger, a discovery run, a
+ * rediscovery rule. `objectOf` finds the object, or null when there is no such row, and `absent`
+ * is the route's not-found for that id. An id that is not one is left for validation to refuse.
+ */
+export function onObjectOf(
+  needed: AccessRight,
+  what: string,
+  objectOf: (id: number) => Promise<number | null>,
+  absent: (id: number) => Error,
+): { access: RouteAccess } {
+  // Before validation, so the parameter is still the text of the path.
+  const idOf = (request: FastifyRequest): number => {
+    const id = Number((request.params as { id?: unknown }).id);
+    return Number.isSafeInteger(id) && id >= 1 ? id : 0;
+  };
+  return onDerivedObject(
+    needed,
+    what,
+    async (request): Promise<Derived> => {
+      const id = idOf(request);
+      if (id === 0) return { kind: 'unasked' };
+      const objectId = await objectOf(id);
+      return objectId === null ? { kind: 'absent' } : { kind: 'object', id: objectId };
+    },
+    // Only ever asked after the lookup above found an id to ask about.
+    (request) => absent(idOf(request)),
+  );
 }
 
 /**

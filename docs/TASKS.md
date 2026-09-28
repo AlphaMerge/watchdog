@@ -13544,6 +13544,64 @@ because each is a decision rather than a defect:
       answered 400 "body must be object", although the route's own comment says a bodiless clone
       is legitimate. `{}` works.
 
+- [x] **A-37 — The `derived` guard tells a hidden row from a missing one** · S · A-12, D-11 ·
+      Found by `D-11`, which fixed it for the three rediscovery-rule routes. A route addressed by a
+      row that belongs to an object (a trigger, a discovery run, a rediscovery rule) looks the
+      row up and asks for a right on its object. When the row did not exist, the guard let the
+      request through to the handler's 404. When it existed on an object the caller could not
+      read, the guard answered 403 with that object's id in the context. So trying ids told a
+      hidden row from an unused id and named the object it hung on. The problems and plan routes
+      answered an unused run id with an empty list, which made the difference plainer still.
+      `object-visibility.test.ts` asserted the 403 for a hidden run.
+
+      **Done when** the guard answers a hidden row and an unused id identically, and a sweep
+      asserts that of every `derived` route.
+
+      **A-37 outcome.**
+      - **Decided: both are the route's own 404, not both a 403.** `A-12` makes a row on a hidden
+        object absent from every list, and `D-11` answered a hidden rule as an unused id. A 403
+        for both would have the guard override every handler's 404, and would tell a writer with a
+        stale id that they lack a right on an object that does not exist. The object guard is
+        unchanged: for anyone but an administrator it already answers a hidden object and a
+        missing one with the same 403, `held: none`.
+      - **Fixed once, in the guard.** A `derived` declaration now carries `absent`, the route's
+        not-found. Its lookup returns a discriminated `Derived`: `object`, `absent` or `unasked`.
+        The guard throws `absent` for a row it cannot find and for one on an object the caller
+        cannot read. It does so before validation, so a malformed body cannot tell them apart by
+        getting one of them a 400. A caller who can see the object and lacks the right still gets
+        the 403 naming it.
+      - `onObjectOf(needed, what, objectOf, absent)` is the shape of every derived route but one.
+        An id that is not one is `unasked` and left for validation's 400. The triggers use
+        `triggerNotFound`, the runs `runNotFound` (now in `discovery/errors.ts`) and the rules
+        `noSuchRule`. `RediscoveryService.find` is gone, since the guard now does what it did for
+        the rules.
+      - **The in-place clone** is the one derived part that is not a row. Its source is one the
+        caller may write, so it is not absent. A parent the caller cannot see gets a 403 that does
+        not name the parent.
+      - The problems and plan routes answer an unused run with the 404 as well, which matters with
+        the authorisation layer off, where the guard does not run.
+
+      Tests. `access-matrix` sweeps every route whose declaration asks a `derived` question, found
+      from the route table, as a writer granted nothing. It compares a real row with an unused id,
+      and for a route with a body it does so once with a body that validates and once with one that
+      does not. The status, code, words and context must match, the id aside. It also checks that
+      the answer is the route's not-found and that a malformed id gets validation's 400. Another
+      case builds the same server with the layer off and gets a 404 for an unused run on all five
+      run reads. `object-visibility` replaces the hidden run's 403 with a test in the shape of
+      `D-11`'s: six run routes, a hidden run against an unused id, the same 404, and the run not
+      cancelled. It adds an in-place clone beside a hidden parent, refused without naming it.
+
+      Mutation 7/7:
+      - the guard refusing a hidden row with the 403 again (4 tests fail);
+      - the guard passing an absent row on to the handler (the sweep's malformed body);
+      - `onObjectOf` looking up an id that is not one;
+      - the problems route, or the plan route, answering an unused run with an empty list (the
+        test with the layer off);
+      - a hidden rule, or a hidden trigger, answered with another route's not-found.
+
+      The first trigger mutant matched both trigger routes, so it was never applied. It was rerun
+      against the replace route alone.
+
 - [x] **A-38 — How long a session lasts is not a setting, so a v1 wall display cannot stay
       signed in** · S · A-01, A-34 · Found 2026-09-28 by `A-34`, which made it visible. A session
       ends after 12 hours idle and 7 days at most, both constants in `SessionService`. An open

@@ -408,24 +408,6 @@ export class RediscoveryService {
   }
 
   /**
-   * One rule, if its group is one the reader can see (`D-11`), by the rule `list` uses.
-   *
-   * A rule in a branch the reader cannot see is absent, not forbidden: the routes addressed by a
-   * rule's id answer it exactly as they answer an id that was never used, so trying ids learns
-   * nothing about another branch (`A-16`).
-   */
-  async find(id: number, visibility: Visibility): Promise<RediscoverySchedule | null> {
-    const values: unknown[] = [id];
-    const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `SELECT * FROM discovery_schedule WHERE id = $1 AND ${visible}`,
-      values,
-    );
-    const row = rows[0];
-    return row === undefined ? null : read(row);
-  }
-
-  /**
    * The schedules provisioning into groups the reader can see (`A-12`) — a schedule's name, range
    * and cadence describe a branch of somebody's network.
    */
