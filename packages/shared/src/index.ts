@@ -36,13 +36,15 @@ export type { ServiceNotifier } from './lifecycle/systemd.js';
 
 export {
   BUILD_MANIFEST,
+  BUILD_PROFILES,
+  DEVELOPMENT_PROFILE,
   DEVELOPMENT_VERSION,
   describeBuild,
   isExactBuild,
   parseBuildManifest,
-  readBuildIdentity,
+  readBuildStamp,
 } from './build/identity.js';
-export type { BuildIdentity } from './build/identity.js';
+export type { BuildIdentity, BuildProfile, BuildStamp } from './build/identity.js';
 
 export {
   DEFAULT_MAX_FRAME_BYTES,

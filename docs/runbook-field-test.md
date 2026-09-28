@@ -188,7 +188,9 @@ curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/build
 ```
 
 A `commit` of `null`, or `"dirty": true`, means the build cannot say exactly what code it is.
-Re-cut the candidate rather than field-testing it.
+Re-cut the candidate rather than field-testing it. So does a `profile` other than `v1`, or a
+`subsystems` with anything `true`: the candidate is the v1 build (`H-12`), and maps, reports and
+libraries are not part of what this test is about.
 
 The numbers that decide the criterion:
 

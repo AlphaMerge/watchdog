@@ -5,11 +5,12 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import {
+  DEVELOPMENT_PROFILE,
   DEVELOPMENT_VERSION,
   describeBuild,
   isExactBuild,
   parseBuildManifest,
-  readBuildIdentity,
+  readBuildStamp,
 } from '../src/index.js';
 
 /**
@@ -18,6 +19,9 @@ import {
  * Every build said `0.1.0`. The failure worth guarding against now is the quiet one: a manifest
  * that is present and wrong being read as "unknown" or, worse, as something it is not — a short
  * or mistyped commit that names no code, accepted because it looked like one.
+ *
+ * And what it contains (`H-12`): a v1 build must never become the full one because its stamp
+ * went missing, or because somebody set an environment variable.
  */
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
@@ -32,45 +36,76 @@ describe('the build manifest', () => {
   it('reads what the packaging step wrote', () => {
     writeFileSync(
       join(dir, 'exact.json'),
-      JSON.stringify({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false }),
+      JSON.stringify({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
     );
-    assert.deepEqual(readBuildIdentity(at('exact.json'), {}), {
+    assert.deepEqual(readBuildStamp(at('exact.json'), {}), {
       version: '1.0.0-rc.1',
       commit: COMMIT,
       dirty: false,
+      profile: 'v1',
     });
   });
 
+  it('takes the profile from the manifest and never from the environment', () => {
+    writeFileSync(
+      join(dir, 'v1.json'),
+      JSON.stringify({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
+    );
+    // The overlay an operator could set: it must not turn a v1 package into the full one.
+    const stamp = readBuildStamp(at('v1.json'), {
+      MS_BUILD_PROFILE: 'full',
+      MS_BUILD_VERSION: '9.9.9',
+    });
+    assert.equal(stamp.profile, 'v1');
+    assert.equal(stamp.version, '1.0.0-rc.1');
+  });
+
   it('is a working tree when there is no manifest, and does not guess a commit', () => {
-    assert.deepEqual(readBuildIdentity(at('absent.json'), {}), {
+    assert.deepEqual(readBuildStamp(at('absent.json'), {}), {
       version: DEVELOPMENT_VERSION,
       commit: null,
       dirty: false,
+      profile: DEVELOPMENT_PROFILE,
     });
     // A harness may still label a run; that is a version, never a commit.
-    assert.deepEqual(readBuildIdentity(at('absent.json'), { MS_BUILD_VERSION: '9.9.9' }), {
+    assert.deepEqual(readBuildStamp(at('absent.json'), { MS_BUILD_VERSION: '9.9.9' }), {
       version: '9.9.9',
       commit: null,
       dirty: false,
+      profile: DEVELOPMENT_PROFILE,
     });
+  });
+
+  it('builds everything from a working tree, unless a test asks for v1', () => {
+    assert.equal(DEVELOPMENT_PROFILE, 'full');
+    assert.equal(readBuildStamp(at('absent.json'), { MS_BUILD_PROFILE: 'v1' }).profile, 'v1');
+    assert.throws(
+      () => readBuildStamp(at('absent.json'), { MS_BUILD_PROFILE: 'V1' }),
+      /MS_BUILD_PROFILE names a profile this build does not know: "V1"/,
+    );
   });
 
   it('refuses a manifest that is present and damaged, rather than starting unidentified', () => {
     writeFileSync(join(dir, 'torn.json'), '{"version": "1.0.0", "commi');
-    assert.throws(() => readBuildIdentity(at('torn.json'), {}), /torn\.json is not JSON/);
+    assert.throws(() => readBuildStamp(at('torn.json'), {}), /torn\.json is not JSON/);
   });
 
   it('refuses what is not a build identity', () => {
+    const v1 = { profile: 'v1' };
     const cases: [unknown, RegExp][] = [
       [[], /expected an object/],
-      [{ commit: COMMIT, dirty: false }, /no version/],
-      [{ version: ' ', commit: COMMIT, dirty: false }, /no version/],
+      [{ commit: COMMIT, dirty: false, ...v1 }, /no version/],
+      [{ version: ' ', commit: COMMIT, dirty: false, ...v1 }, /no version/],
       // Short, upper-case and padded ids all look like commits and name none exactly.
-      [{ version: '1.0.0', commit: COMMIT.slice(0, 12), dirty: false }, /not a full commit id/],
-      [{ version: '1.0.0', commit: COMMIT.toUpperCase(), dirty: false }, /not a full commit id/],
-      [{ version: '1.0.0', commit: ` ${COMMIT}`, dirty: false }, /not a full commit id/],
-      [{ version: '1.0.0', commit: COMMIT }, /whether the tree was modified/],
-      [{ version: '1.0.0', commit: COMMIT, dirty: 'no' }, /whether the tree was modified/],
+      [{ version: '1', commit: COMMIT.slice(0, 12), dirty: false, ...v1 }, /not a full commit id/],
+      [{ version: '1', commit: COMMIT.toUpperCase(), dirty: false, ...v1 }, /not a full commit id/],
+      [{ version: '1', commit: ` ${COMMIT}`, dirty: false, ...v1 }, /not a full commit id/],
+      [{ version: '1', commit: COMMIT, ...v1 }, /whether the tree was modified/],
+      [{ version: '1', commit: COMMIT, dirty: 'no', ...v1 }, /whether the tree was modified/],
+      // A package from before `H-12`, and one naming a profile nobody defined. Neither is `full`.
+      [{ version: '1', commit: COMMIT, dirty: false }, /which profile it was built as/],
+      [{ version: '1', commit: COMMIT, dirty: false, profile: 'v2' }, /profile .* not know: "v2"/],
+      [{ version: '1', commit: COMMIT, dirty: false, profile: null }, /not know: null/],
     ];
     for (const [manifest, error] of cases) {
       assert.throws(
@@ -83,8 +118,11 @@ describe('the build manifest', () => {
 
   it('accepts an unknown commit, which is an honest answer', () => {
     assert.deepEqual(
-      parseBuildManifest(JSON.stringify({ version: '1.0.0', commit: null, dirty: false }), 'm'),
-      { version: '1.0.0', commit: null, dirty: false },
+      parseBuildManifest(
+        JSON.stringify({ version: '1.0.0', commit: null, dirty: false, profile: 'full' }),
+        'm',
+      ),
+      { version: '1.0.0', commit: null, dirty: false, profile: 'full' },
     );
   });
 });
@@ -101,16 +139,16 @@ describe('an exact build', () => {
 describe('describing a build', () => {
   it('says what it knows, and says when it does not', () => {
     assert.equal(
-      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false }),
-      '1.0.0-rc.1 (commit 0123456789ab)',
+      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
+      '1.0.0-rc.1 (v1 profile, commit 0123456789ab)',
     );
     assert.equal(
-      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: true }),
-      '1.0.0-rc.1 (commit 0123456789ab, with uncommitted changes)',
+      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: true, profile: 'v1' }),
+      '1.0.0-rc.1 (v1 profile, commit 0123456789ab, with uncommitted changes)',
     );
     assert.equal(
-      describeBuild({ version: DEVELOPMENT_VERSION, commit: null, dirty: false }),
-      '0.0.0-dev (commit unknown)',
+      describeBuild({ version: DEVELOPMENT_VERSION, commit: null, dirty: false, profile: 'full' }),
+      '0.0.0-dev (full profile, commit unknown)',
     );
   });
 });

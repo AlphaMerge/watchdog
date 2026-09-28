@@ -2,7 +2,12 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
 import type { SensorType } from '../src/contract.js';
-import { standardCatalogue } from '../src/index.js';
+import {
+  sensorTypesFor,
+  standardCatalogue,
+  WITHHELD_FROM_V1,
+  withheldReason,
+} from '../src/index.js';
 import { exampleTypes, pingType, snmpType } from './support/example-types.js';
 
 function catalogue(): SensorCatalogue {
@@ -340,6 +345,49 @@ describe('the built-in catalogue', () => {
 
   it('is sealed, so nothing can register a type after boot', () => {
     assert.equal(standardCatalogue().sealed, true);
+  });
+
+  describe('the v1 build profile (`H-12`)', () => {
+    // Named here rather than read back from `WITHHELD_FROM_V1`, so that withholding one more type,
+    // or putting one back, is a line somebody has to change in a test as well as in the list.
+    const withheld = [
+      'flow.netflow',
+      'windows.cpu',
+      'windows.memory',
+      'windows.service',
+      'windows.volume',
+    ];
+
+    it('carries everything but flow and the Windows types', () => {
+      const full = standardCatalogue(sensorTypesFor('full')).ids();
+      const v1 = standardCatalogue(sensorTypesFor('v1')).ids();
+      assert.deepEqual(
+        full.filter((id) => !v1.includes(id)),
+        withheld,
+      );
+      // And nothing in v1 that the full build lacks: a profile only ever takes away.
+      assert.deepEqual(
+        v1.filter((id) => !full.includes(id)),
+        [],
+      );
+      assert.deepEqual([...WITHHELD_FROM_V1.keys()].sort(), withheld);
+    });
+
+    it('carries everything in the full profile, the working tree’s', () => {
+      assert.deepEqual(standardCatalogue(sensorTypesFor('full')).ids(), standardCatalogue().ids());
+    });
+
+    it('says why a withheld type is missing, and only in v1', () => {
+      for (const id of withheld) {
+        assert.ok(withheldReason('v1', id), `${id} is withheld without a reason`);
+        assert.equal(withheldReason('full', id), undefined);
+      }
+      assert.match(withheldReason('v1', 'windows.cpu') ?? '', /Windows is release 1\.1/);
+      assert.match(withheldReason('v1', 'flow.netflow') ?? '', /flow monitoring is v2/);
+      // A type nobody ever built is unknown, not withheld.
+      assert.equal(withheldReason('v1', 'nope.missing'), undefined);
+      assert.equal(withheldReason('v1', 'icmp.ping'), undefined);
+    });
   });
 
   it('ships thresholds only on the sensors that watch this system', () => {

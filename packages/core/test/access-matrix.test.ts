@@ -334,6 +334,23 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
 
   const asRole = (role: string) => ({ cookie: cookies.get(role) ?? '' });
 
+  // `H-12`. The other direction of `conditional-get.test.ts`'s "says what it constructed": this
+  // harness passes maps, reports and libraries, so a server that reported them missing here would
+  // have the web UI hide working features.
+  it('says it offers every subsystem it was given', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/build',
+      headers: asRole('readonly'),
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json<{ subsystems: unknown }>().subsystems, {
+      maps: true,
+      reports: true,
+      libraries: true,
+    });
+  });
+
   describe('every combination of role, group and tree position', () => {
     interface Case {
       role: AccountRole;

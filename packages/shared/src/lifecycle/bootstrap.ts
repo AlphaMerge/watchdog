@@ -1,5 +1,5 @@
 import type { JSONSchemaType } from 'ajv';
-import type { BuildIdentity } from '../build/identity.js';
+import type { BuildStamp } from '../build/identity.js';
 import { loadConfig, type ConfigSources } from '../config/load.js';
 import type { ServiceConfig } from '../config/schema.js';
 import { ConfigError, describeError } from '../errors/app-error.js';
@@ -12,8 +12,11 @@ export interface BootstrapOptions<T> {
   argv?: readonly string[];
   env?: NodeJS.ProcessEnv;
   version: string;
-  /** Logged with the version, so the first line of a journal says which code wrote it (`H-11`). */
-  build?: BuildIdentity;
+  /**
+   * Logged with the version, so the first line of a journal says which code wrote it (`H-11`)
+   * and what that build contains (`H-12`).
+   */
+  build?: BuildStamp;
 }
 
 export interface BootstrappedService<T> {
@@ -70,7 +73,11 @@ export function bootstrap<T extends { service: ServiceConfig }>(
       version: options.version,
       ...(options.build === undefined
         ? {}
-        : { commit: options.build.commit, uncommittedChanges: options.build.dirty }),
+        : {
+            commit: options.build.commit,
+            uncommittedChanges: options.build.dirty,
+            profile: options.build.profile,
+          }),
       node: process.version,
       configFile: sources.file,
       envOverrides: sources.envOverrides,

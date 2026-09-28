@@ -4,7 +4,8 @@
 # Layout inside the tarball:
 #   bin/ms-core, bin/ms-probe     launcher scripts
 #   app/{core,probe,shared}/dist  compiled JavaScript
-#   app/*/build.json              which build this is: version, commit, uncommitted changes (H-11)
+#   app/*/build.json              which build this is: version, commit, uncommitted changes (H-11),
+#                                 and its profile (H-12)
 #   app/node_modules              production dependencies, including native addons
 #   bin/ms-backup, bin/ms-restore the backup and restore procedure (H-04)
 #   deploy/systemd/*.service      unit files
@@ -46,6 +47,19 @@ if [ -n "${commit}" ] && ! [[ "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "error: the commit must be a full 40-character id, not '${commit}'" >&2
   exit 1
 fi
+
+# What this build contains (`H-12`). `v1` is the release candidate — no flow, maps, reports or
+# libraries, and no sensor types a Linux probe cannot run — and it is the default, so cutting a
+# candidate needs nobody to remember a flag. `full` is everything on `main`. Stamped here and
+# nowhere else: the services refuse a manifest without one rather than guessing.
+profile="${MS_BUILD_PROFILE:-v1}"
+case "${profile}" in
+  v1 | full) ;;
+  *)
+    echo "error: MS_BUILD_PROFILE must be v1 or full, not '${profile}'" >&2
+    exit 1
+    ;;
+esac
 arch="$(uname -m)"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -76,11 +90,11 @@ out="${repo_root}/release/${name}-${version}-${os}-${arch}.tar.gz"
 
 if [ -z "${commit}" ]; then
   echo "warning: this build cannot say which commit it is — set MS_BUILD_COMMIT" >&2
-  echo "==> building ${version} at an unknown commit for ${os}/${arch}"
+  echo "==> building ${version} (${profile}) at an unknown commit for ${os}/${arch}"
 elif [ "${dirty}" = "1" ]; then
-  echo "==> building ${version} at ${commit} with uncommitted changes, for ${os}/${arch}"
+  echo "==> building ${version} (${profile}) at ${commit} with uncommitted changes, for ${os}/${arch}"
 else
-  echo "==> building ${version} at ${commit} for ${os}/${arch}"
+  echo "==> building ${version} (${profile}) at ${commit} for ${os}/${arch}"
 fi
 rm -rf "${stage}"
 mkdir -p "${stage}" "${repo_root}/release"
@@ -108,10 +122,15 @@ for pkg in "${packages[@]}"; do
   # file rather than the launcher's environment, because WinSW starts `node.exe` on `main.js`
   # directly and never runs the launcher.
   node -e '
-    const [, file, version, commit, dirty] = process.argv;
-    const manifest = { version, commit: commit === "" ? null : commit, dirty: dirty === "1" };
+    const [, file, version, commit, dirty, profile] = process.argv;
+    const manifest = {
+      version,
+      commit: commit === "" ? null : commit,
+      dirty: dirty === "1",
+      profile,
+    };
     require("node:fs").writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-  ' "${stage}/app/${pkg}/build.json" "${version}" "${commit}" "${dirty}"
+  ' "${stage}/app/${pkg}/build.json" "${version}" "${commit}" "${dirty}" "${profile}"
 done
 
 echo "==> installing production dependencies"

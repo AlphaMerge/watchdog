@@ -1,4 +1,5 @@
-import { snmpPool, sshPool, standardCatalogue } from '@ms/sensors';
+import { snmpPool, sshPool } from '@ms/sensors';
+import { missingTypeError, probeCatalogue } from '../catalogue.js';
 import type { CheckContext, CheckExecution, CheckRegistry, SessionCounters } from './types.js';
 
 /**
@@ -9,13 +10,17 @@ import type { CheckContext, CheckExecution, CheckRegistry, SessionCounters } fro
  * which the pool reports as its own phase rather than as one more failing check — the
  * distinction matters, because a missing type fails identically for ever and no amount of
  * retrying will change it.
+ *
+ * The catalogue is this build's profile of the built-in set (`H-12`), so a v1 probe carries no
+ * flow and no Windows types, and says so by name when it is asked for one.
  */
-const catalogue = standardCatalogue();
+const catalogue = probeCatalogue();
 
 const registry: CheckRegistry = {
   execute(sensorType: string, context: CheckContext): Promise<CheckExecution> {
-    // `type()` throws SensorTypeError('UNKNOWN_SENSOR_TYPE') naming the id, which is the
-    // message an operator needs: which sensor type, not "cannot read property of undefined".
+    // An `UNKNOWN_SENSOR_TYPE` naming the id, which is the message an operator needs: which
+    // sensor type, and — when this build's profile left it out — why.
+    if (!catalogue.has(sensorType)) return Promise.reject(missingTypeError(sensorType));
     return catalogue.type(sensorType).execute(context);
   },
 

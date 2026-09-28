@@ -8,7 +8,6 @@ import {
   type ProbeConfig,
   type SensorAssignment,
 } from '@ms/shared';
-import { standardCatalogue } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
@@ -34,6 +33,7 @@ import { LIVE_SOURCES } from './discovery/sources.js';
 import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
+import { probeCatalogue } from './catalogue.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -233,8 +233,11 @@ async function main(): Promise<void> {
   const listenerFor = new Map<string, string>();
   // And which run in a process of their own (`P-03`), asked the same way and for the same reason.
   const isolated = new Set<string>();
-  for (const summary of standardCatalogue().summaries()) {
-    const declaration = standardCatalogue().declaration(summary.id);
+  // This build's catalogue (`H-12`), the one its workers run, so a v1 probe maps no listener to a
+  // type it does not carry.
+  const catalogue = probeCatalogue();
+  for (const summary of catalogue.summaries()) {
+    const declaration = catalogue.declaration(summary.id);
     if (declaration.listener !== undefined) listenerFor.set(summary.id, declaration.listener);
     if (declaration.isolation === 'process') isolated.add(summary.id);
   }

@@ -1127,9 +1127,9 @@ This API, as an OpenAPI 3 document
 
 ### `GET /api/v1/build`
 
-Which build is serving: its version and the commit it was packaged from
+Which build is serving: its version, the commit it was packaged from, and what it contains
 
-**200** { version, commit, dirty }
+**200** { version, commit, dirty, profile, subsystems }
 
 ## notifications
 

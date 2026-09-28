@@ -256,8 +256,10 @@ so a message with none of that is itself a finding worth reporting.
 
 **Say which build it is.** The version alone does not: before `H-11` every build said `0.1.0`.
 Each installed service carries a `build.json` with its version, the commit it was packaged from,
-and whether that tree had uncommitted changes — the core answers the same at `GET /api/v1/build`
-(read scope), and the first `starting` line in the journal logs it:
+whether that tree had uncommitted changes, and its profile — `v1` for the release candidate,
+`full` for everything on `main` (`H-12`). The core answers the same at `GET /api/v1/build` (read
+scope), with the optional subsystems it actually constructed, and the first `starting` line in the
+journal logs it:
 
 ```bash
 cat /opt/ms/app/core/build.json /opt/ms/app/probe/build.json

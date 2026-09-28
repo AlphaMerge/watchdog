@@ -77,6 +77,7 @@ export {
   type SensorTypeSummary,
 } from './catalogue.js';
 
+import type { BuildProfile } from '@ms/shared';
 import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
 import { icmpPing } from './types/icmp-ping.js';
@@ -182,6 +183,42 @@ export const BUILT_IN_SENSOR_TYPES: readonly SensorType[] = [
   windowsService,
   windowsVolume,
 ];
+
+const WINDOWS_IS_1_1 =
+  'it runs PowerShell on a Windows probe, and 1.0 is Linux-only — Windows is release 1.1';
+
+/**
+ * The built-in types the v1 build profile leaves out (`H-12`), each with the reason an operator
+ * reads when a probe is asked for one anyway.
+ *
+ * Keyed by the types' own ids rather than by strings typed here, so a renamed type cannot quietly
+ * stop being withheld. **Withheld, not removed**: every one of them stays in the tree and in the
+ * full profile.
+ */
+export const WITHHELD_FROM_V1: ReadonlyMap<string, string> = new Map([
+  // Never constructed by a shipped probe even in the full profile (`B-07`), so in v1 a flow
+  // sensor could only fail for ever.
+  [flowCollector.id, 'flow monitoring is v2 (`V2-01`)'],
+  [windowsCpu.id, WINDOWS_IS_1_1],
+  [windowsMemory.id, WINDOWS_IS_1_1],
+  [windowsService.id, WINDOWS_IS_1_1],
+  [windowsVolume.id, WINDOWS_IS_1_1],
+]);
+
+/** The built-in types a build of `profile` carries, in catalogue order. */
+export function sensorTypesFor(profile: BuildProfile): readonly SensorType[] {
+  if (profile === 'full') return BUILT_IN_SENSOR_TYPES;
+  return BUILT_IN_SENSOR_TYPES.filter((type) => !WITHHELD_FROM_V1.has(type.id));
+}
+
+/**
+ * Why a build of `profile` does not carry `id`, or undefined when it does or never heard of it.
+ *
+ * For the message, not the decision: the catalogue decides by not containing the type.
+ */
+export function withheldReason(profile: BuildProfile, id: string): string | undefined {
+  return profile === 'v1' ? WITHHELD_FROM_V1.get(id) : undefined;
+}
 
 export function standardCatalogue(
   types: readonly SensorType[] = BUILT_IN_SENSOR_TYPES,

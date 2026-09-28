@@ -6,10 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import {
+  BUILD_PROFILES,
+  DEVELOPMENT_PROFILE,
   describeError,
   newCorrelationId,
   withCorrelation,
-  type BuildIdentity,
+  type BuildStamp,
   type Logger,
 } from '@ms/shared';
 import type { CoreConfig } from '@ms/shared';
@@ -112,10 +114,11 @@ export interface ApiServerOptions {
   logger: Logger;
   version: string;
   /**
-   * Which build is serving, for `GET /api/v1/build` (`H-11`). Absent in the route tests; a
-   * server without one reports its version and no commit, which is what it knows.
+   * Which build is serving, for `GET /api/v1/build` (`H-11`), and what it was built to contain
+   * (`H-12`). Absent in the route tests; a server without one reports its version, no commit and
+   * the working tree's profile, which is what it knows.
    */
-  build?: BuildIdentity;
+  build?: BuildStamp;
   service: ObjectService;
   history: HistoryService;
   db: Database;
@@ -286,7 +289,7 @@ export class ApiServer {
   readonly #alarms: AlarmService;
   readonly #db: Database;
   readonly #audit: AuditRepository;
-  readonly #build: BuildIdentity;
+  readonly #build: BuildStamp;
   /** Computed once: a validator issued by this process must match the next one it checks. */
   readonly #validatorSalt: string;
   readonly #catalogue: SensorCatalogue;
@@ -356,7 +359,12 @@ export class ApiServer {
     this.#alarms = new AlarmService({ db: options.db, logger: this.#logger });
     this.#db = options.db;
     this.#audit = options.audit;
-    this.#build = options.build ?? { version: options.version, commit: null, dirty: false };
+    this.#build = options.build ?? {
+      version: options.version,
+      commit: null,
+      dirty: false,
+      profile: DEVELOPMENT_PROFILE,
+    };
     this.#validatorSalt = validatorSalt(this.#build, randomUUID());
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
@@ -877,12 +885,14 @@ export class ApiServer {
         config: READS,
         schema: {
           tags: ['meta'],
-          summary: 'Which build is serving: its version and the commit it was packaged from',
+          summary:
+            'Which build is serving: its version, the commit it was packaged from, and what it ' +
+            'contains',
           response: {
             200: {
               type: 'object',
               additionalProperties: false,
-              required: ['version', 'commit', 'dirty'],
+              required: ['version', 'commit', 'dirty', 'profile', 'subsystems'],
               properties: {
                 version: { type: 'string' },
                 commit: {
@@ -897,12 +907,42 @@ export class ApiServer {
                     'Packaged with uncommitted changes on top of `commit`, so the commit ' +
                     'names the nearest code rather than this code.',
                 },
+                profile: {
+                  type: 'string',
+                  enum: [...BUILD_PROFILES],
+                  description:
+                    'What the build was packaged to contain: `v1` is the release candidate, ' +
+                    'without the v2 subsystems; `full` is everything.',
+                },
+                subsystems: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['maps', 'reports', 'libraries'],
+                  description:
+                    'Which optional subsystems this server constructed. One that is false has ' +
+                    'no routes here at all, and a client should not offer it.',
+                  properties: {
+                    maps: { type: 'boolean' },
+                    reports: { type: 'boolean' },
+                    libraries: { type: 'boolean' },
+                  },
+                },
               },
             },
           },
         },
       },
-      () => this.#build,
+      // **What was constructed, not what the profile says should have been** (`H-12`). The web
+      // UI hides what is false here, so it asks the thing that registers the routes rather than
+      // a name for a set of them that could drift from it.
+      () => ({
+        ...this.#build,
+        subsystems: {
+          maps: this.#maps !== undefined,
+          reports: this.#reports !== undefined,
+          libraries: this.#libraries !== undefined,
+        },
+      }),
     );
 
     // The web UI, served by the core itself — ADR-001 Decision 8, no second web server to

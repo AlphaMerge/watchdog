@@ -170,9 +170,13 @@ echo "==> asserting the installed build says which commit it is"
 # `H-11`. Every build said `0.1.0` and nothing else. Compared with the manifest that was installed
 # and, when this script packaged it, with the commit it packaged — not merely "a commit came
 # back", which a build reporting somebody else's would satisfy.
+#
+# The route answers the manifest and then what the server constructed (`H-12`), in that order:
+# the response schema lists the manifest's fields in the order `package.sh` writes them. So the
+# served document is the installed one with its closing brace replaced by `,"subsystems":…`.
 installed="$(docker exec "${container}" cat /opt/ms/app/core/build.json 2>/dev/null | tr -d ' \n' || true)"
 served="$(ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/build 2>/dev/null || true)"
-if [ -z "${served}" ] || [ "${served}" != "${installed}" ]; then
+if [ -z "${served}" ] || [ -z "${installed}" ] || [[ "${served}" != "${installed%\}},\"subsystems\":{"* ]]; then
   echo "    GET /api/v1/build: FAILED — served '${served}', installed '${installed}'" >&2
   failed=1
 elif [ -n "${build_commit:-}" ] && ! matches "\"commit\":\"${build_commit}\"" printf '%s' "${served}"; then

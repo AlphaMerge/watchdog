@@ -1,7 +1,7 @@
 import { testCatalogue } from './support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import type { BuildIdentity } from '@ms/shared';
+import type { BuildIdentity, BuildStamp } from '@ms/shared';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
@@ -288,7 +288,13 @@ describe(
      * Another core over the same database — which is what an upgrade, or a restart, looks like to
      * a client holding a validator the previous one issued.
      */
-    async function core(version: string, build?: BuildIdentity): Promise<FastifyInstance> {
+    // The salt tests are about the identity; the profile is the working tree's unless one is named.
+    async function core(
+      version: string,
+      build?: BuildIdentity | BuildStamp,
+    ): Promise<FastifyInstance> {
+      const stamp: BuildStamp | undefined =
+        build === undefined || 'profile' in build ? build : { ...build, profile: 'full' };
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -299,7 +305,7 @@ describe(
         },
         logger: silent,
         version,
-        ...(build === undefined ? {} : { build }),
+        ...(stamp === undefined ? {} : { build: stamp }),
         service: h.service,
         history: new HistoryService({ db, logger: silent }),
         db,
@@ -373,15 +379,34 @@ describe(
       }
     });
 
-    it('says which build is serving', async () => {
-      const serving = await core('0.1.0', { version: '0.1.0', commit: COMMIT_A, dirty: true });
+    it('says which build is serving, and what it constructed', async () => {
+      const serving = await core('0.1.0', {
+        version: '0.1.0',
+        commit: COMMIT_A,
+        dirty: true,
+        profile: 'v1',
+      });
       const response = await serving.inject({ method: 'GET', url: '/api/v1/build' });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(response.json(), { version: '0.1.0', commit: COMMIT_A, dirty: true });
+      // This server was given no maps, reports or libraries, so it says it has none — whatever
+      // its profile says. What the UI hides is what was not registered (`H-12`).
+      assert.deepEqual(response.json(), {
+        version: '0.1.0',
+        commit: COMMIT_A,
+        dirty: true,
+        profile: 'v1',
+        subsystems: { maps: false, reports: false, libraries: false },
+      });
 
       // A server nobody told reports the version it was given and no commit — not a guess.
       const untold = await (await core('9.9.9')).inject({ method: 'GET', url: '/api/v1/build' });
-      assert.deepEqual(untold.json(), { version: '9.9.9', commit: null, dirty: false });
+      assert.deepEqual(untold.json(), {
+        version: '9.9.9',
+        commit: null,
+        dirty: false,
+        profile: 'full',
+        subsystems: { maps: false, reports: false, libraries: false },
+      });
     });
   },
 );
