@@ -69,7 +69,9 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   children ever having been loaded.
 - **Search** matches names and device hosts, as a case-insensitive substring — `10.1.` or
   `berlin.example` finds the device — and there is a tag filter beside it. Results come back
-  flat, with the path written out — which is what somebody searching actually wants.
+  flat, in one request: each row is the name, the kind, a device's host, the tags and a
+  sensor's state. **Not the path** — two sensors both called `Ping` read alike until one is
+  opened.
 - **Full keyboard navigation**, to the ARIA tree pattern: arrows move and expand, `Home`/`End`
   jump to the ends, `Enter` or `Space` opens the row. Collapsing a branch you were inside keeps
   focus somewhere real rather than dropping it.

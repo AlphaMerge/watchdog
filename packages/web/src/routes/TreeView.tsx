@@ -41,8 +41,9 @@ const PAGE = 500;
  * that.
  *
  * **Search goes to the server and comes back flat.** A filtered *tree* needs every match's
- * ancestors, which is a second round trip per match; a flat result list with the path written
- * out is what somebody searching actually wants, and it is one request.
+ * ancestors, which is a second round trip per match; a flat list is one request. Its rows do not
+ * carry the path to each match — `GET /objects` returns a parent id, not ancestors — so two
+ * sensors both called `Ping` read alike until one is opened.
  */
 export function TreeView(): React.JSX.Element {
   const root = useApi<ObjectDetail>('/objects/root');
