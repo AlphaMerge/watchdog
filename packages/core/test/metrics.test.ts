@@ -88,7 +88,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
           deferredReactions: 0,
           writeMs: { p95: 12.5 },
         }),
-        stream: () => ({ overflowed: 2 }),
+        stream: () => ({ overflowed: 2, severed: 0 }),
         probes: () => ({ probesDown: 1, probesSilent: 2 }),
         alarms: () => ({ fired: 6, nextWakeAt: null }),
         reports: () => ({

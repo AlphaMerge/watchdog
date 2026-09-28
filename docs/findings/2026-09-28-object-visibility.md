@@ -276,5 +276,10 @@ a test shown to fail before its fix.
 **Reported, and not this ticket's:** a change that commits while a subscriber's snapshot is being
 read is sent *before* the snapshot frame, and the client replaces its state wholesale on a
 snapshot — so that sensor shows its older state until it next changes. It predates `A-12` (`U-02`
-ordered attach-then-snapshot for exactly this, and the order on the wire undoes it).
+ordered attach-then-snapshot for exactly this, and the order on the wire undoes it). **`A-30`
+fixes it**: what arrives while the snapshot is read is held, and sent after the snapshot frame.
+The same ticket closes four narrower races the review found around the epoch — a snapshot read
+past a revoke, an attach during a catch-up, a resolution per batch rather than per account, and a
+replaced subscription answering after its replacement — and the one the second round found in
+the socket itself: nothing bounded what a client that stopped reading could make the core queue.
 

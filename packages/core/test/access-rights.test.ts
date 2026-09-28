@@ -656,6 +656,21 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       );
       assert.equal(await epoch(), before, 'a rename moved it, which re-resolves every stream');
     });
+
+    it('moves it for a group’s admin flag, and not for its name or description (A-30)', async () => {
+      // The trigger is `UPDATE OF is_admin`, decided by the SET list: naming the column to write
+      // it back unchanged made every edit of a group a grant change for every open stream.
+      const before = await access.epoch();
+      await groups.update(
+        gammaId,
+        { name: 'gamma, renamed', description: 'described' },
+        actorNamed('test'),
+      );
+      assert.equal(await access.epoch(), before, 'renaming a group moved it');
+
+      await groups.update(gammaId, { isAdmin: true }, actorNamed('test'));
+      assert.ok((await access.epoch()) > before, 'making a group the administrators did not');
+    });
   });
 
   describe('requiring a right', () => {

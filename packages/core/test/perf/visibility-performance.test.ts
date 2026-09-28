@@ -197,7 +197,7 @@ describe(
 
       for (const [name, principal] of principals) {
         const visibility = await access.visibilityFor(principal);
-        const snapshot = await stream.snapshot(db, null, visibility);
+        const { snapshot } = await stream.snapshot(db, null, visibility);
         const page = await alarms.list({ limit: 100, visibility });
         const counts = await harness.service.visibleCounts(visibility);
 

@@ -42,6 +42,7 @@ function sources(
     deferredReactions: number;
     p95: number;
     overflowed: number;
+    severed: number;
     probesDown: number;
     probesSilent: number;
     pending: number;
@@ -79,7 +80,7 @@ function sources(
       deferredReactions: overrides.deferredReactions ?? 0,
       writeMs: { p95: overrides.p95 ?? 0 },
     }),
-    stream: () => ({ overflowed: overrides.overflowed ?? 0 }),
+    stream: () => ({ overflowed: overrides.overflowed ?? 0, severed: overrides.severed ?? 0 }),
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
       nextWakeAt: overrides.nextWakeAt ?? null,
@@ -342,6 +343,9 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['dependencyPauses'], 3);
       assert.equal(reading['writeLatency'], 12.5);
       assert.equal(reading['streamCutoffs'], 2);
+      // And a socket the route closed outright is one more client the core stopped serving (`A-30`).
+      const closedToo = await build({ overflowed: 2, severed: 3 }).read();
+      assert.equal(closedToo['streamCutoffs'], 5);
       assert.equal(reading['probesDown'], 1);
       assert.equal(reading['notifyPending'], 9);
       assert.equal(reading['notifyFailed'], 4);

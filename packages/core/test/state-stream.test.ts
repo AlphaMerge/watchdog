@@ -1,9 +1,16 @@
 import { strict as assert } from 'node:assert';
+import { connect } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import type { QueryResultRow } from 'pg';
 import { ApiServer } from '../src/api/server.js';
-import { contained, STREAM_MAX_PAYLOAD_BYTES } from '../src/api/routes/stream.js';
+import {
+  contained,
+  STREAM_LIMITS,
+  STREAM_MAX_PAYLOAD_BYTES,
+  type StreamLimits,
+} from '../src/api/routes/stream.js';
 import { AuditRepository } from '../src/audit/store.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import {
@@ -290,7 +297,7 @@ describe(
       await scan([sensorId, otherSensorId], false, new Date());
       assert.equal(seen.events.length, 2);
       for (const event of seen.events) assert.equal('seq' in event, false);
-      const snapshot = await stream.snapshot(db, null, Visibility.EVERYTHING);
+      const { snapshot } = await stream.snapshot(db, null, Visibility.EVERYTHING);
       assert.equal('seq' in snapshot, false);
     });
 
@@ -298,7 +305,7 @@ describe(
       await scan([sensorId, otherSensorId], false, new Date(Date.now() - 60_000));
       await scan([sensorId, otherSensorId], false, new Date());
 
-      const snapshot = await stream.snapshot(db, deviceId, Visibility.EVERYTHING);
+      const { snapshot } = await stream.snapshot(db, deviceId, Visibility.EVERYTHING);
       assert.equal(snapshot.objectId, deviceId);
       assert.equal(snapshot.truncated, false);
       assert.deepEqual(
@@ -319,7 +326,7 @@ describe(
       stream.subscribe(seen.subscriber, null, EVERYONE);
       await scan([sensorId], false, new Date());
 
-      const snapshot = await stream.snapshot(db, null, Visibility.EVERYTHING);
+      const { snapshot } = await stream.snapshot(db, null, Visibility.EVERYTHING);
       const [event] = seen.events;
       assert.ok(event !== undefined, 'the change arrived on the stream');
       assert.equal(seen.events.length, 1);
@@ -334,7 +341,7 @@ describe(
     it('says a subtree is bigger than one snapshot rather than truncating quietly', async () => {
       const small = new StateBroadcaster({ logger: silent, snapshotLimit: 1 });
       await scan([sensorId, otherSensorId], false, new Date());
-      const snapshot = await small.snapshot(db, null, Visibility.EVERYTHING);
+      const { snapshot } = await small.snapshot(db, null, Visibility.EVERYTHING);
       assert.equal(snapshot.entries.length, 1);
       assert.equal(snapshot.truncated, true);
     });
@@ -467,6 +474,135 @@ describe(
     });
 
     // ---------------------------------------------------------------------------------------
+    // Grants that move while it works (`A-30`).
+    // ---------------------------------------------------------------------------------------
+
+    async function epochNow(): Promise<number> {
+      const rows = await db.query<{ value: string }>(
+        'SELECT value::text AS value FROM access_epoch',
+      );
+      return Number(rows[0]?.value);
+    }
+
+    /** What a grant change does to the counter, without a grant to undo afterwards. */
+    async function grantsMoved(): Promise<number> {
+      await db.query('UPDATE access_epoch SET value = value + 1');
+      return epochNow();
+    }
+
+    it('says which epoch a snapshot was read at, even an empty one', async () => {
+      const epoch = await epochNow();
+      assert.equal((await stream.snapshot(db, null, Visibility.EVERYTHING)).epoch, epoch);
+      const empty = await stream.snapshot(db, null, Visibility.nothing(epoch));
+      assert.deepEqual(empty.snapshot.entries, []);
+      assert.equal(empty.epoch, epoch, 'an empty snapshot still says when it was read');
+    });
+
+    it('confirms a snapshot only through a view that is still the account’s', async () => {
+      const at = 7;
+      let asked = 0;
+      const sight = (answer: Visibility): StreamSight => ({
+        visibility: Visibility.everything(at),
+        key: 'confirming',
+        resolve: () => {
+          asked += 1;
+          return Promise.resolve(answer);
+        },
+      });
+
+      assert.equal(await stream.confirm(sight(Visibility.nothing(at)), at), true);
+      assert.equal(asked, 0, 'nothing moved, so nothing is asked');
+
+      const same = sight(Visibility.everything(at + 1));
+      assert.equal(await stream.confirm(same, at + 1), true);
+      assert.equal(same.visibility.epoch, at + 1, 'and the sight is brought up to date');
+
+      assert.equal(await stream.confirm(sight(Visibility.nothing(at + 1)), at + 1), false);
+      assert.equal(stream.stats.resynced, 1, 'a changed view is a resync, and counted');
+    });
+
+    it('sends a batch to nobody who attached while it was checking for moved grants', async () => {
+      // A view resolved before a grant change, attaching while a batch published after it is still
+      // asking the others again. The check has already chosen whom to ask, so without a horizon
+      // this one is sent the batch through the view the change took away.
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      const checked = recorder();
+      const late = recorder();
+      stream.subscribe(checked.subscriber, null, {
+        visibility: Visibility.everything(stale),
+        key: 'checked',
+        resolve: () => {
+          stream.subscribe(late.subscriber, null, {
+            visibility: Visibility.everything(stale),
+            key: 'late',
+            resolve: () => Promise.resolve(Visibility.nothing(moved)),
+          });
+          return Promise.resolve(Visibility.everything(moved));
+        },
+      });
+
+      await scan([sensorId], false, new Date());
+      assert.equal(checked.events.length, 1, 'the one it checked is sent the change');
+      assert.deepEqual(late.events, [], 'the one it never checked was sent it anyway');
+
+      // The next batch checks it, finds its view gone, and sends it back to the start.
+      await scan([otherSensorId], false, new Date());
+      assert.deepEqual(late.events, []);
+      assert.equal(late.overflowed, true);
+    });
+
+    it('asks once per account however many batches noticed the same move', async () => {
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      let asked = 0;
+      // Three tabs of one account.
+      const tabs = [recorder(), recorder(), recorder()];
+      for (const tab of tabs) {
+        stream.subscribe(tab.subscriber, null, {
+          visibility: Visibility.everything(stale),
+          key: 'one-account',
+          resolve: () => {
+            asked += 1;
+            return Promise.resolve(Visibility.everything(moved));
+          },
+        });
+      }
+
+      // Two batches in flight at once, as ingestion commits them: both have read their ancestry
+      // before either looks at a subscriber.
+      let arrived = 0;
+      let bothRead = (): void => undefined;
+      const together = new Promise<void>((resolve) => {
+        bothRead = resolve;
+      });
+      const inStep: Queryable = {
+        async query<T extends QueryResultRow>(text: string, values?: readonly unknown[]) {
+          const rows = await db.query<T>(text, values);
+          arrived += 1;
+          if (arrived === 2) bothRead();
+          await together;
+          return rows;
+        },
+      };
+      const change = (id: number) => ({
+        sensorId: id,
+        state: 'down' as const,
+        previousState: 'up' as const,
+        cause: 'scan' as const,
+        message: 'no ICMP reply',
+        at: new Date(),
+      });
+      await Promise.all([
+        stream.publish(inStep, [change(sensorId)]),
+        stream.publish(inStep, [change(otherSensorId)]),
+      ]);
+
+      assert.equal(asked, 1, 'one account and one move, asked once per batch in flight');
+      for (const tab of tabs) assert.equal(tab.events.length, 2);
+    });
+
+    // ---------------------------------------------------------------------------------------
     // Over a real socket.
     // ---------------------------------------------------------------------------------------
 
@@ -576,7 +712,9 @@ describe(
     });
 
     /** A server with the stream on it, and what a socket connects to (`P-217`). */
-    async function streaming(): Promise<{ server: ApiServer; url: string }> {
+    async function streaming(
+      limits: Partial<StreamLimits> = {},
+    ): Promise<{ server: ApiServer; url: string }> {
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -593,6 +731,7 @@ describe(
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
         stream,
+        streamLimits: limits,
       });
       await server.build('9.9.9', h.service);
       const address = await server.start();
@@ -671,8 +810,9 @@ describe(
         // `null` and `{"subscribe":null}` are JSON, and the handler read them straight off a cast.
         // `ws` emits `message` synchronously, so each was an `uncaughtException` and the core shut
         // down — one frame, from any account that may read. Every frame below has to come back as a
-        // `problem` on a socket that still subscribes afterwards.
-        const { server, url } = await streaming();
+        // `problem` on a socket that still subscribes afterwards. More of them than a socket is
+        // answered by default (`A-30`), which has its own case below: this one is about every shape.
+        const { server, url } = await streaming({ problems: 1_000 });
         const open = () => connected(url);
 
         const junk: (string | Uint8Array)[] = [
@@ -737,6 +877,112 @@ describe(
           await server.stop();
         });
         assert.deepEqual(uncaught, [], 'a frame reached the process');
+      },
+    );
+
+    it(
+      'stops answering a socket that keeps sending what it cannot use (A-30)',
+      { timeout: 30_000 },
+      async () => {
+        // Each refusal was answered, on a socket that stayed open: a seven-byte frame bought a reply
+        // twenty times its size, as often as a client cared to send one.
+        const { server, url } = await streaming();
+        const client = await connected(url);
+        try {
+          for (let n = 0; n <= STREAM_LIMITS.problems; n += 1) client.socket.send('5');
+          assert.equal(await client.closed(), 1008);
+          assert.equal(
+            client.frames.filter((frame) => frame['type'] === 'problem').length,
+            STREAM_LIMITS.problems,
+          );
+          assert.equal(stream.stats.severed, 1, 'and it is counted on Core Health');
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    it(
+      'closes a socket that subscribes faster than any client needs to (A-30)',
+      { timeout: 30_000 },
+      async () => {
+        const { server, url } = await streaming({ subscribesPerMinute: 3 });
+        const client = await connected(url);
+        try {
+          for (let n = 0; n < 3; n += 1) {
+            client.socket.send(JSON.stringify({ subscribe: {} }));
+            await client.count('snapshot', n + 1);
+          }
+          client.socket.send(JSON.stringify({ subscribe: {} }));
+          assert.equal(await client.closed(), 1008);
+          assert.equal(stream.stats.severed, 1);
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    it(
+      'closes a socket that stops reading before it holds more than its bound (A-30)',
+      { timeout: 60_000 },
+      async () => {
+        // A client that stops reading and keeps sending: every reply queued in the core's memory,
+        // with nothing to stop it short of `MemoryMax`. A raw TCP client, because a `ws` client
+        // resumes its own socket and so cannot be made to stop reading from outside.
+        const bound = 32 * 1024;
+        const junk = 50_000;
+        const { server, url } = await streaming({ socketBytes: bound, problems: junk * 2 });
+        const { port } = new URL(url);
+        const client = connect({ host: '127.0.0.1', port: Number(port) });
+        try {
+          await new Promise<void>((resolve, reject) => {
+            client.once('connect', resolve);
+            client.once('error', reject);
+          });
+          client.write(
+            'GET /api/v1/stream HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n' +
+              'Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+              'Sec-WebSocket-Version: 13\r\n\r\n',
+          );
+          await new Promise<void>((resolve) => {
+            client.once('data', () => {
+              resolve();
+            });
+          });
+          // Nothing read from here on.
+          client.pause();
+
+          // `5`, masked with a zero key, fifty thousand times: seven bytes each way in, some 150
+          // back as a `problem`. Unbounded, that is 7 MiB queued for a client reading none of it.
+          const frame = Buffer.from([0x81, 0x81, 0, 0, 0, 0, 0x35]);
+          client.write(Buffer.concat(Array.from({ length: junk }, () => frame)));
+
+          const deadline = Date.now() + 30_000;
+          while (stream.stats.severed === 0 && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.equal(stream.stats.severed, 1, 'the socket was never closed');
+
+          // What it can still read is what the kernel held when the core let go, not the 7 MiB.
+          let received = 0;
+          client.on('data', (chunk: Buffer) => {
+            received += chunk.length;
+          });
+          const ended = new Promise<void>((resolve) => {
+            client.once('close', () => {
+              resolve();
+            });
+          });
+          client.resume();
+          await ended;
+          assert.ok(
+            received < (junk * 150) / 2,
+            `${String(received)} bytes reached a client that read none of them`,
+          );
+        } finally {
+          client.destroy();
+          await server.stop();
+        }
       },
     );
 

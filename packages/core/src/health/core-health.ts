@@ -37,7 +37,7 @@ export interface CoreHealthSources {
     writeMs: { p95: number };
   };
   /** `StateBroadcaster.stats()` — subscribers cut off for falling behind. */
-  stream: () => { overflowed: number };
+  stream: () => { overflowed: number; severed: number };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
   /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
@@ -251,7 +251,9 @@ export class CoreHealthService {
           ? null
           : Math.round(queues.delivery.oldestPendingAgeMs / 1_000),
       notifyFailed: queues.delivery.failed,
-      streamCutoffs: stream.overflowed,
+      // Subscribers cut off, and sockets closed outright (`A-30`): a client the core stopped
+      // serving either way.
+      streamCutoffs: stream.overflowed + stream.severed,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,

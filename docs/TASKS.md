@@ -12829,6 +12829,78 @@ because each is a decision rather than a defect:
       tests. Mutation 2/2: the check removed from `start` (3 tests fail), and removed from
       `create` (2 tests fail).
 
+- [x] **A-30 — The live stream races grants, its own subscriptions and its clients** · M · A-12,
+      A-21 · Found 2026-09-28 in `A-12`'s review, and widened by its second round. Six ways the
+      stream sent what it should not have, or sent it in the wrong order, none of them on the
+      normal path `A-12`'s sweep walks.
+      - **A snapshot read past a revoke.** The view is resolved in one statement and the snapshot
+        read in the next; a grant revoked between them was read straight past, and nothing sent
+        the socket back until some later change happened to be published.
+      - **An attach during a catch-up.** `#catchUp` chose whom to re-resolve, then waited; a
+        subscriber attaching meanwhile, through a view resolved before the grants moved, was
+        sent the batch through it.
+      - **A burst of resolutions.** Every batch in flight noticed the same grant change and asked
+        again for every account on its own; and `GroupService.update` wrote `is_admin` back on
+        every edit, which the epoch's `UPDATE OF is_admin` trigger reads as a grant change, so a
+        rename re-resolved every stream in the installation.
+      - **A replaced subscription.** Its snapshot, read after its replacement's, was still sent
+        and put the old scope back on screen; and its failure detached its healthy replacement.
+      - **The order on the wire.** A change committed while a snapshot was being read was sent
+        *before* the snapshot frame, which the client applies wholesale — so the sensor showed its
+        older state until it next changed. `U-02` attached first for exactly this; the wire
+        undid it. This is the race the findings for `A-12` reported and left.
+      - **No bound on what a socket is sent.** A client that stopped reading and kept sending
+        made the core queue a snapshot per subscribe, or a `problem` twenty times the size of a
+        seven-byte frame, without limit — each snapshot resetting the accounting that would have
+        noticed — until `MemoryMax`: `P-217`'s outcome, by another route, from any account that
+        may read.
+
+      **Done when** each is closed with a test shown to fail against the code before its fix, the
+      bound is counted on Core Health, and the findings for `A-12` say this ticket fixed the race
+      they left.
+
+      **A-30 outcome.**
+      - **The snapshot reads the epoch in its own statement**, and `StateBroadcaster.confirm`
+        re-resolves when it moved since the view was resolved: the same answer brings the sight up
+        to date, a different one is a counted resync, and the socket gets `overflow` instead of a
+        snapshot of what it may no longer see. The epoch travels beside the snapshot, never in the
+        frame, for `A-21`'s reason.
+      - **A horizon, not an epoch, decides who a batch skips.** `#catchUp` records the last
+        attachment it looked at and `#deliver` skips anything after it: such a subscriber
+        attached after the batch committed, so the snapshot it is about to read holds the change.
+        Skipping by epoch instead would lose events for a long-attached subscriber whose sight a
+        concurrent batch had just brought forward.
+      - **One resolution per account and epoch**, shared across batches in flight, and
+        `GroupService.update` names `is_admin` only when it is being set.
+      - **A replaced subscription is gone**: its snapshot is not sent after its replacement's, and
+        its failure is logged and leaves its replacement alone.
+      - **What arrives while a snapshot is read is held and sent after it**, numbered after it,
+        and counted against the backlog so that a slow read cannot hold a flood.
+      - **Every frame is bounded where it is sent.** A socket holding more than 16 MiB unsent is
+        terminated; one subscribing more than 30 times a minute, or sending a sixth frame the
+        stream cannot use, is closed with 1008 (the first five are still answered, which is what
+        `P-217` promised). Each counts as `severed` in the stream's stats, which Core Health adds
+        to `streamCutoffs`. The limits are one table, `STREAM_LIMITS`, and the route's API
+        description is written from it.
+
+      Tests:
+      - `object-visibility.test.ts`: four cases that put a hook between the route and its
+        snapshot read — a change committed during the read arrives after the snapshot frame; a
+        revoke during it gets `overflow` and no snapshot; a replaced subscription's snapshot never
+        follows its replacement's; its failure leaves the replacement streaming.
+      - `state-stream.test.ts`: the snapshot's epoch, empty or not; `confirm`; a subscriber
+        attached during a catch-up is skipped and then sent back to the start; two batches in
+        flight ask once for three tabs of one account; and the three bounds — the last one with a
+        raw TCP client that really stops reading, because a `ws` client resumes its own socket.
+      - `access-rights.test.ts`: a group rename leaves the epoch alone, and its admin flag moves it.
+      - `core-health.test.ts`: `streamCutoffs` counts severed sockets.
+      - `P-217`'s junk-frame case raises the problem limit, since it sends every shape on one
+        socket.
+
+      Mutation 10/10: confirming nothing, no horizon, no shared resolution, `is_admin` always
+      named, a superseded snapshot sent, a failure detaching the replacement, a held change sent
+      before the snapshot, and each of the three bounds removed.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

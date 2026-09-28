@@ -153,16 +153,23 @@ export class GroupService {
       );
     }
 
+    // **`is_admin` is named only when it is being set** (`A-30`). The access epoch's trigger fires
+    // on `UPDATE OF is_admin`, which Postgres decides from the SET list and not from whether the
+    // value moved — so writing it back unchanged made every rename and every description edit a
+    // grant change, and every open stream in the installation resolved its view again for it.
+    const values: unknown[] = [id, request.name ?? null, request.description ?? null];
+    const setAdmin =
+      request.isAdmin === undefined ? '' : `is_admin = $${String(values.push(request.isAdmin))},`;
     const rows = await q.query<GroupRow>(
       `UPDATE user_group g
        SET name = COALESCE($2, name),
            description = COALESCE($3, description),
-           is_admin = COALESCE($4, is_admin),
+           ${setAdmin}
            updated_at = now()
        WHERE g.id = $1
        RETURNING ${COLUMNS},
                  (SELECT count(*) FROM user_group_member m WHERE m.group_id = g.id) AS member_count`,
-      [id, request.name ?? null, request.description ?? null, request.isAdmin ?? null],
+      values,
     );
     const row = rows[0];
     if (row === undefined) throw new AuthError('GROUP_NOT_FOUND', `no group with id ${String(id)}`);

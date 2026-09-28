@@ -77,7 +77,7 @@ import { healthRoutes } from './routes/health.js';
 import type { NotificationTester } from '../notifications/test-send.js';
 import { templateRoutes, TEMPLATE_SCHEMAS } from './routes/templates.js';
 import { notificationRoutes, NOTIFICATION_SCHEMAS } from './routes/notifications.js';
-import { STREAM_MAX_PAYLOAD_BYTES, streamRoutes } from './routes/stream.js';
+import { STREAM_MAX_PAYLOAD_BYTES, streamRoutes, type StreamLimits } from './routes/stream.js';
 import type { StateBroadcaster } from '../state/stream.js';
 import { triggerRoutes, TRIGGER_SCHEMAS } from './routes/triggers.js';
 import { AUDIT_SCHEMAS } from './schemas/audit.js';
@@ -270,6 +270,8 @@ export interface ApiServerOptions {
    * reading — which is slower and correct, rather than a socket that connects and says nothing.
    */
   stream?: StateBroadcaster;
+  /** Narrower bounds on each stream socket, for a test that has to reach them (`A-30`). */
+  streamLimits?: Partial<StreamLimits>;
 }
 
 /**
@@ -319,6 +321,7 @@ export class ApiServer {
   readonly #metrics: (() => MetricsExporter | undefined) | undefined;
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
+  readonly #streamLimits: Partial<StreamLimits>;
   readonly #undeclared: string[] = [];
   /** Routes that declared no `access`, which makes `build` throw (`A-11`). */
   readonly #unauthorized: string[] = [];
@@ -392,6 +395,7 @@ export class ApiServer {
     this.#metrics = options.metrics;
     this.#tester = options.tester;
     this.#stream = options.stream;
+    this.#streamLimits = options.streamLimits ?? {};
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -789,7 +793,11 @@ export class ApiServer {
           });
         }
         if (this.#stream !== undefined) {
-          await scope.register(streamRoutes, { db: this.#db, stream: this.#stream });
+          await scope.register(streamRoutes, {
+            db: this.#db,
+            stream: this.#stream,
+            limits: this.#streamLimits,
+          });
         }
         if (this.#deliveryHealth !== undefined) {
           await scope.register(notificationRoutes, {

@@ -6,13 +6,51 @@ import { Ajv } from 'ajv';
 import type { FastifyInstance } from 'fastify';
 import { describeError } from '@ms/shared';
 import type { Database } from '../../db/pool.js';
-import type { StateBroadcaster, StateEvent, StateSnapshot } from '../../state/stream.js';
+import type {
+  StateBroadcaster,
+  StateEvent,
+  StateSnapshot,
+  StreamSight,
+} from '../../state/stream.js';
 import { READS, sightOf } from '../authorization.js';
 
 export interface StreamRouteOptions {
   db: Database;
   stream: StateBroadcaster;
+  /** The bounds below, narrowed by a test that needs to reach them (`A-30`). */
+  limits?: Partial<StreamLimits>;
 }
+
+/**
+ * What one stream socket may cost the core before it is closed (`A-30`).
+ *
+ * **The outbound side had no bound at all.** `P-217` capped what a client may send in one frame,
+ * and `P-60` cut off a subscriber whose *events* backed up — but every frame goes through one
+ * `send`, and a client that stopped reading while it kept sending could make the core queue
+ * replies without limit: a full snapshot per `{"subscribe":{}}`, each resetting the event
+ * accounting that would have noticed, or a `problem` twenty times the size of a seven-byte frame.
+ * The kernel buffers what it can and Node the rest, in the core's own memory, until `MemoryMax`
+ * ends it — `P-217`'s outcome by another route, from any account that may read.
+ */
+export interface StreamLimits {
+  /**
+   * Bytes a socket may hold unsent. Past it the socket is closed outright — a frame telling it
+   * why would queue behind everything it is not reading. Room for the largest snapshot
+   * (`snapshotLimit` sensors, about 5 MiB at 20,000) and the event backlog behind it, three
+   * times over, so a client that is reading is never near it.
+   */
+  readonly socketBytes: number;
+  /** Subscriptions in any minute. The web client makes one per socket and one per resync. */
+  readonly subscribesPerMinute: number;
+  /** Frames refused as malformed before the socket stops being answered and is closed. */
+  readonly problems: number;
+}
+
+export const STREAM_LIMITS: StreamLimits = {
+  socketBytes: 16 * 1024 * 1024,
+  subscribesPerMinute: 30,
+  problems: 5,
+};
 
 /** What a client sends. Anything else is answered with a `problem` frame and ignored. */
 interface ClientFrame {
@@ -170,6 +208,7 @@ export function socketBacklog(socket: { readonly bufferedAmount: number }): {
  */
 export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions): void {
   const { db, stream } = options;
+  const limits: StreamLimits = { ...STREAM_LIMITS, ...options.limits };
 
   app.get(
     '/stream',
@@ -195,7 +234,12 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           '\n\n`seq` numbers the `state` frames this socket has been sent, from 1 and across ' +
           'every subscription it makes; `hello` carries 0 and a `snapshot` the number of the last ' +
           '`state` frame before it. It is the socket’s own count, so a gap means a frame was ' +
-          'lost and never that something changed outside what the caller can see.',
+          'lost and never that something changed outside what the caller can see.' +
+          `\n\nA socket is closed with 1008 when it subscribes more than ` +
+          `${String(STREAM_LIMITS.subscribesPerMinute)} times in a minute, or sends more than ` +
+          `${String(STREAM_LIMITS.problems)} frames the stream cannot use — each of those is ` +
+          'answered with `problem` — and closed outright when it stops reading and ' +
+          `${String(STREAM_LIMITS.socketBytes / 1024 / 1024)} MiB queue up unsent.`,
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -215,17 +259,54 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
 
       const backlog = socketBacklog(socket);
 
-      /** Returns the bytes handed to `ws`, so a snapshot can be discounted from the backlog. */
+      const unsubscribe = (): void => {
+        detach?.();
+        detach = undefined;
+      };
+
+      /**
+       * Stops serving this socket, and counts it on Core Health (`A-30`). `terminate` when it is not
+       * reading — a close frame would only queue behind the rest — and `close` with the reason
+       * otherwise, so a client that is listening learns why.
+       */
+      const sever = (reason: string, how: 'close' | 'terminate'): void => {
+        if (closed) return;
+        closed = true;
+        unsubscribe();
+        stream.severed();
+        request.log.warn({ login: request.principal?.login, reason }, 'a stream socket was closed');
+        if (how === 'terminate') socket.terminate();
+        else socket.close(1008, reason);
+      };
+
+      /**
+       * Returns the bytes handed to `ws`, so a snapshot can be discounted from the backlog.
+       *
+       * **Every frame is bounded here, whatever it is** (`A-30`): a snapshot, an event, a reply.
+       */
       const send = (frame: ServerFrame): number => {
         if (closed || socket.readyState !== socket.OPEN) return 0;
+        if (socket.bufferedAmount > limits.socketBytes) {
+          sever('it is not reading what it is sent', 'terminate');
+          return 0;
+        }
         const text = JSON.stringify(frame);
         socket.send(text);
         return Buffer.byteLength(text);
       };
 
-      const unsubscribe = (): void => {
-        detach?.();
-        detach = undefined;
+      /** When each recent subscription arrived, oldest first, for `limits.subscribesPerMinute`. */
+      const subscribed: number[] = [];
+      /** Frames refused as malformed so far, for `limits.problems`. */
+      let refused = 0;
+      /** Answers a malformed frame, until there have been too many to go on answering. */
+      const refuse = (reason: string): void => {
+        refused += 1;
+        if (refused > limits.problems) {
+          sever('too many frames it could not use', 'close');
+          return;
+        }
+        send({ type: 'problem', reason });
       };
 
       // The `state` frames this socket has been sent, and nothing else (`A-21`). See `ServerFrame`.
@@ -237,9 +318,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       // below, and a condition written out twice is narrowed to its first answer.
       const superseded = (mine: number): boolean => mine !== generation || closed;
 
-      const subscribe = async (objectId: number | null): Promise<void> => {
-        unsubscribe();
-        const mine = (generation += 1);
+      const open = async (mine: number, objectId: number | null): Promise<void> => {
         const visibility = await sight();
         if (superseded(mine)) return;
         if (objectId !== null && !(await stream.canSee(db, objectId, visibility))) {
@@ -257,68 +336,134 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         // their initial value here, because the compiler cannot see the callback that changes
         // them run. A property read after an intervening call is not narrowed away.
         const cutOff = { dropped: false };
+        /**
+         * **Held until the snapshot has gone, then sent after it** (`A-30`). A change committed
+         * while the snapshot was being read used to be sent straight away — *before* the snapshot
+         * frame — and the client replaces its whole state on a snapshot, so the snapshot, read a
+         * moment earlier, painted over it and the sensor showed its older state until it next
+         * changed. The order `U-02` chose, attach and then read, only works if the wire keeps it.
+         * What is held counts against the backlog, so a snapshot slow enough to hold a flood cuts
+         * the socket off rather than growing without bound.
+         */
+        const held: { events: StateEvent[] | null; bytes: number } = { events: [], bytes: 0 };
+        const deliver = (event: StateEvent): void => {
+          numbered += 1;
+          backlog.wrote(send({ type: 'state', seq: numbered, ...event }));
+        };
+        const seeing: StreamSight = { visibility, key: sight.key, resolve: sight };
         detach = stream.subscribe(
           {
             send: (event) => {
-              numbered += 1;
-              backlog.wrote(send({ type: 'state', seq: numbered, ...event }));
+              if (held.events === null) {
+                deliver(event);
+                return;
+              }
+              held.events.push(event);
+              held.bytes += Buffer.byteLength(JSON.stringify(event));
             },
             overflow: (reason) => {
               cutOff.dropped = true;
+              held.events = [];
+              held.bytes = 0;
               detach = undefined;
               send({ type: 'overflow', reason: reason ?? 'too far behind; subscribe again' });
             },
-            // What `ws` has accepted and not yet written, less a snapshot still going out. The
-            // one number that actually grows when a client stops reading — a browser tab
-            // suspended in the background does exactly that, and nothing else here would notice
-            // (`P-60`) — but counting our own snapshot against it cuts off healthy clients on a
-            // large installation (`P-66`).
-            backlog: backlog.report,
+            // What `ws` has accepted and not yet written, less a snapshot still going out, plus
+            // what is held for after it. The one number that actually grows when a client stops
+            // reading — a browser tab suspended in the background does exactly that, and nothing
+            // else here would notice (`P-60`) — but counting our own snapshot against it cuts off
+            // healthy clients on a large installation (`P-66`).
+            backlog: () => backlog.report() + held.bytes,
           },
           objectId,
-          { visibility, key: sight.key, resolve: sight },
+          seeing,
         );
-        // A snapshot supersedes everything before it, so the event accounting starts again from
-        // here and its own bytes are never counted. See `socketBacklog`.
-        const snapshot = await stream.snapshot(db, objectId, visibility);
-        // Numbered once it has been read: every `state` frame sent while it was being read is
-        // counted in it, and every one sent after it carries a higher number.
-        const frame = { type: 'snapshot' as const, seq: numbered, ...snapshot };
-        // Detached while the snapshot was being read — sending it now would append megabytes to a
-        // socket the cut-off has already given up on, which is the amplification `P-70` closes.
-        if (cutOff.dropped) return;
-        backlog.snapshot();
-        send(frame);
-      };
-
-      const receive = (raw: Buffer): void => {
-        if (raw.length > MAX_CLIENT_FRAME_BYTES) {
-          send({ type: 'problem', reason: 'that frame is larger than any subscription' });
-          return;
-        }
-        let frame: unknown;
-        try {
-          frame = JSON.parse(raw.toString('utf8'));
-        } catch {
-          send({ type: 'problem', reason: 'that was not JSON' });
-          return;
-        }
-        if (!isClientFrame(frame)) {
+        // Whether this subscription is still the one to answer. A function for the reason
+        // `superseded` is: `cutOff.dropped` read inline is narrowed to its first answer.
+        const gone = (): boolean => superseded(mine) || cutOff.dropped;
+        const { snapshot, epoch } = await stream.snapshot(db, objectId, visibility);
+        // Replaced while the snapshot was being read (`A-30`): the newer subscription has its own
+        // snapshot coming, and this one arriving after it would put the old scope back on screen.
+        // Or cut off while it was being read — sending it now would append megabytes to a socket
+        // the cut-off has already given up on, which is the amplification `P-70` closes.
+        if (gone()) return;
+        // Read through a view that grants have since changed (`A-30`): the snapshot would paint
+        // what this account may no longer see. Sent back to the start, as `#catchUp` would.
+        if (!(await stream.confirm(seeing, epoch))) {
+          if (gone()) return;
+          unsubscribe();
           send({
-            type: 'problem',
-            reason:
-              'the only message this stream takes is {"subscribe":{}} or ' +
-              '{"subscribe":{"objectId":<a positive integer>}}',
+            type: 'overflow',
+            reason: 'what this account may see has changed; subscribe again',
           });
           return;
         }
-        void subscribe(frame.subscribe.objectId ?? null).catch((error: unknown) => {
+        if (gone()) return;
+        // Numbered once it has been read: every `state` frame sent before it is counted in it, and
+        // every one after it — the held ones first — carries a higher number.
+        const frame = { type: 'snapshot' as const, seq: numbered, ...snapshot };
+        // A snapshot supersedes everything before it, so the event accounting starts again from
+        // here and its own bytes are never counted. See `socketBacklog`.
+        backlog.snapshot();
+        send(frame);
+        const waiting = held.events ?? [];
+        held.events = null;
+        held.bytes = 0;
+        for (const event of waiting) deliver(event);
+      };
+
+      const subscribe = (objectId: number | null): void => {
+        // **Paced** (`A-30`). Each one reads a snapshot, and one replacing another before it has
+        // been read still costs the read; a client subscribing this often is not a tree.
+        const now = performance.now();
+        while (subscribed.length > 0 && now - (subscribed[0] ?? now) >= 60_000) subscribed.shift();
+        if (subscribed.length >= limits.subscribesPerMinute) {
+          sever('it subscribed too often', 'close');
+          return;
+        }
+        subscribed.push(now);
+        unsubscribe();
+        const mine = (generation += 1);
+        void open(mine, objectId).catch((error: unknown) => {
+          // **Only the subscription that failed** (`A-30`). One replaced while it was reading has
+          // nothing left on this socket; detaching here would detach its replacement, which is
+          // healthy, and tell the client to resubscribe for no reason it could act on.
+          if (superseded(mine)) {
+            request.log.warn(
+              { err: describeError(error) },
+              'a replaced stream subscription failed; its replacement stands',
+            );
+            return;
+          }
           // A failed snapshot leaves the client attached but with nothing to apply the events
           // to, which is worse than telling it to try again.
           unsubscribe();
           request.log.error({ err: describeError(error) }, 'a stream subscription failed');
           send({ type: 'problem', reason: 'the snapshot could not be read; subscribe again' });
         });
+      };
+
+      const receive = (raw: Buffer): void => {
+        if (closed) return;
+        if (raw.length > MAX_CLIENT_FRAME_BYTES) {
+          refuse('that frame is larger than any subscription');
+          return;
+        }
+        let frame: unknown;
+        try {
+          frame = JSON.parse(raw.toString('utf8'));
+        } catch {
+          refuse('that was not JSON');
+          return;
+        }
+        if (!isClientFrame(frame)) {
+          refuse(
+            'the only message this stream takes is {"subscribe":{}} or ' +
+              '{"subscribe":{"objectId":<a positive integer>}}',
+          );
+          return;
+        }
+        subscribe(frame.subscribe.objectId ?? null);
       };
 
       const hang = (): void => {

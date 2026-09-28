@@ -49,6 +49,18 @@ export interface StateSnapshot {
   readonly truncated: boolean;
 }
 
+/**
+ * A snapshot, and the access epoch it was read at (`A-30`).
+ *
+ * **Apart, so the epoch is never sent.** It counts every grant change in the installation, and a
+ * subscriber who could watch it move would learn when grants change in branches it cannot see —
+ * `A-21`'s lesson about a number that belongs to the installation rather than to the socket.
+ */
+export interface SnapshotRead {
+  readonly snapshot: StateSnapshot;
+  readonly epoch: number | null;
+}
+
 export interface StreamStats {
   /** Subscribers currently attached. */
   readonly subscribers: number;
@@ -71,6 +83,13 @@ export interface StreamStats {
    * client that cannot keep up; this is about the server knowing better than the client does.
    */
   readonly resynced: number;
+  /**
+   * Sockets the stream route closed rather than answer again (`A-30`): one that stopped reading
+   * what it was sent, one subscribing faster than any client needs to, one that kept sending
+   * frames it had been told were wrong. Beside `overflowed` on Core Health, because both are a
+   * client the core stopped serving to protect everybody else.
+   */
+  readonly severed: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -134,6 +153,8 @@ interface Attached {
   readonly subscriber: StateSubscriber;
   readonly objectId: ObjectId | null;
   readonly sight: StreamSight;
+  /** When it attached, in attachments: what `#catchUp` compares with its horizon (`A-30`). */
+  readonly order: number;
 }
 
 /**
@@ -159,11 +180,20 @@ export class StateBroadcaster {
   readonly #backlogLimit: number;
   readonly #snapshotLimit: number;
   readonly #attached = new Set<Attached>();
+  /**
+   * Resolutions in flight, by principal and the epoch that sent for them (`A-30`). Publishes run
+   * concurrently — every committed batch is one — and each noticed the same grant change and asked
+   * again for every account on its own, so one change under ingestion load cost an account one
+   * resolution per batch in flight rather than one.
+   */
+  readonly #resolving = new Map<string, Promise<Visibility>>();
+  #attachments = 0;
   #published = 0;
   #delivered = 0;
   #overflowed = 0;
   #unwatched = 0;
   #resynced = 0;
+  #severed = 0;
 
   constructor(options: StateBroadcasterOptions) {
     this.#logger = options.logger.child({ component: 'stream' });
@@ -179,7 +209,13 @@ export class StateBroadcaster {
       overflowed: this.#overflowed,
       unwatched: this.#unwatched,
       resynced: this.#resynced,
+      severed: this.#severed,
     };
+  }
+
+  /** Counts a socket the stream route closed to protect the core (`A-30`). See `StreamStats`. */
+  severed(): void {
+    this.#severed += 1;
   }
 
   /** Whether anything is listening. The guard every publish path checks first. */
@@ -200,7 +236,8 @@ export class StateBroadcaster {
     objectId: ObjectId | null,
     sight: StreamSight,
   ): () => void {
-    const attached: Attached = { subscriber, objectId, sight };
+    this.#attachments += 1;
+    const attached: Attached = { subscriber, objectId, sight, order: this.#attachments };
     this.#attached.add(attached);
     return () => this.#attached.delete(attached);
   }
@@ -276,7 +313,7 @@ export class StateBroadcaster {
     // **Grants change while sockets stay open** (`A-12`). The epoch came back with the ancestry,
     // so noticing costs no round trip; only a batch published after a grant change pays for
     // re-resolving, and only for the subscribers whose answer was read at another epoch.
-    if (epoch !== null) await this.#catchUp(epoch);
+    const horizon = epoch === null ? this.#attachments : await this.#catchUp(epoch);
 
     let sent = 0;
     for (const change of changes) {
@@ -295,34 +332,42 @@ export class StateBroadcaster {
         message: change.message,
         at: change.at.toISOString(),
       };
-      sent += this.#deliver(event);
+      sent += this.#deliver(event, horizon);
     }
     return sent;
   }
 
   /**
-   * The current state of a subtree.
+   * The current state of a subtree, and the access epoch it was read at.
    *
    * Taken *after* the subscriber is attached, so nothing can happen in the gap: an event that
-   * lands between the two is queued and delivered afterwards, and applying it a second time sets
-   * the state it already has. The alternative ordering loses changes and looks fine.
+   * lands between the two is held by the route until this has been sent, and delivered after it
+   * (`A-30`), where applying it a second time sets the state it already has. The alternative
+   * ordering loses changes and looks fine.
+   *
+   * **The epoch is read in the same statement as the rows** (`A-30`), so the two are one moment.
+   * `visibility` was resolved in an earlier one, and a grant revoked in between would otherwise
+   * be read straight past: the sensors it hid are in the snapshot, and nothing sends the socket
+   * back until some later change happens to be published. `confirm` is what the caller does with
+   * it.
    */
   async snapshot(
     q: Queryable,
     objectId: ObjectId | null,
     visibility: Visibility,
-  ): Promise<StateSnapshot> {
+  ): Promise<SnapshotRead> {
     const values: unknown[] = [objectId, this.#snapshotLimit + 1];
     // Inside the query, so the limit counts only sensors the subscriber may see (`A-12`).
     const visible = visibility.where('covered.id', (value) => `$${String(values.push(value))}`);
-    const rows = await q.query<{
-      sensor_id: string;
+    const read = await q.query<{
+      sensor_id: string | null;
       name: string;
       path: string[];
       state: SensorState;
       cause: SensorStateCause;
       message: string;
       since: Date;
+      epoch: string;
     }>(
       `
       -- Two walks. Up first, to get the subtree root's own ancestors, then down. The paths a
@@ -346,17 +391,30 @@ export class StateBroadcaster {
         SELECT c.id, covered.path || c.id, covered.depth + 1
         FROM object c JOIN covered ON c.parent_id = covered.id
         WHERE covered.depth < ${String(MAX_WALK_DEPTH)}
+      ),
+      picked AS (
+        SELECT covered.id, o.name, covered.path, sr.state, sr.cause, sr.message, sr.since
+        FROM covered
+        JOIN object o ON o.id = covered.id
+        JOIN sensor_runtime sr ON sr.object_id = covered.id
+        WHERE o.kind = 'sensor' AND ${visible}
+        ORDER BY covered.id
+        LIMIT $2
       )
-      SELECT covered.id::text AS sensor_id, o.name, covered.path::text[] AS path,
-             sr.state, sr.cause, sr.message, sr.since
-      FROM covered
-      JOIN object o ON o.id = covered.id
-      JOIN sensor_runtime sr ON sr.object_id = covered.id
-      WHERE o.kind = 'sensor' AND ${visible}
-      ORDER BY covered.id
-      LIMIT $2
+      -- One row even when nothing is picked, so an empty snapshot still says when it was read.
+      SELECT picked.id::text AS sensor_id, picked.name, picked.path::text[] AS path,
+             picked.state, picked.cause, picked.message, picked.since,
+             (SELECT value::text FROM access_epoch) AS epoch
+      FROM (SELECT 1) AS one
+      LEFT JOIN picked ON true
+      ORDER BY picked.id
       `,
       values,
+    );
+    const first = read[0];
+    const epoch = first === undefined ? null : Number(first.epoch);
+    const rows = read.filter(
+      (row): row is typeof row & { sensor_id: string } => row.sensor_id !== null,
     );
 
     const truncated = rows.length > this.#snapshotLimit;
@@ -367,20 +425,67 @@ export class StateBroadcaster {
       );
     }
     return {
-      objectId,
-      truncated,
-      entries: rows.slice(0, this.#snapshotLimit).map((row) => ({
-        sensorId: Number(row.sensor_id),
-        sensorName: row.name,
-        // The same steps an event for this sensor would carry, so a client matching one against
-        // the other finds the same tree (`A-12`).
-        path: visibility.trim(row.path.map(Number)),
-        state: row.state,
-        cause: row.cause,
-        message: row.message,
-        since: row.since.toISOString(),
-      })),
+      epoch,
+      snapshot: {
+        objectId,
+        truncated,
+        entries: rows.slice(0, this.#snapshotLimit).map((row) => ({
+          sensorId: Number(row.sensor_id),
+          sensorName: row.name,
+          // The same steps an event for this sensor would carry, so a client matching one against
+          // the other finds the same tree (`A-12`).
+          path: visibility.trim(row.path.map(Number)),
+          state: row.state,
+          cause: row.cause,
+          message: row.message,
+          since: row.since.toISOString(),
+        })),
+      },
     };
+  }
+
+  /**
+   * Whether a snapshot read at `epoch` may still be sent through `sight` (`A-30`).
+   *
+   * True when nothing moved between resolving the sight and reading the snapshot, or when it
+   * moved and asking again gives the same answer — in which case the sight is brought up to date,
+   * so the next published batch does not ask a third time. False when the answer changed: the
+   * snapshot was read through a view this account no longer has, and must not be sent. That is a
+   * resync, counted as one, and the caller says so the way `#catchUp` does.
+   *
+   * Rejects when the resolution fails; the caller already treats a snapshot it could not read as
+   * a subscription to refuse.
+   */
+  async confirm(sight: StreamSight, epoch: number | null): Promise<boolean> {
+    const seen = sight.visibility.epoch;
+    if (epoch === null || seen === null || seen === epoch) return true;
+    const next = await this.#resolve(sight, epoch);
+    if (next.sameAs(sight.visibility)) {
+      sight.visibility = next;
+      return true;
+    }
+    this.#resynced += 1;
+    return false;
+  }
+
+  /**
+   * What `sight` may see now, asked once per principal however many batches noticed the same
+   * epoch at the same time (`A-30`).
+   *
+   * Keyed by the epoch as well as the principal: an answer being fetched for an older epoch may
+   * already be stale for a newer one, and waiting on it would carry the staleness forward.
+   */
+  #resolve(sight: StreamSight, epoch: number): Promise<Visibility> {
+    const key = `${sight.key}@${String(epoch)}`;
+    const inFlight = this.#resolving.get(key);
+    if (inFlight !== undefined) return inFlight;
+    const pending = sight.resolve();
+    this.#resolving.set(key, pending);
+    const settle = (): void => {
+      if (this.#resolving.get(key) === pending) this.#resolving.delete(key);
+    };
+    pending.then(settle, settle);
+    return pending;
   }
 
   /**
@@ -395,8 +500,14 @@ export class StateBroadcaster {
    * **A resolution that fails cuts the subscriber off rather than guessing.** It must not reject
    * — see `publish` — and the one answer that cannot leak is to stop sending until the client
    * has subscribed again, which resolves afresh or fails where the failure can be reported.
+   *
+   * Returns its horizon, the last attachment it looked at, which is how `#deliver` knows the ones
+   * it did not (`A-30`): a subscriber that attached while this was waiting was never examined,
+   * and is skipped for this batch rather than sent it through a view resolved before the grants
+   * moved.
    */
-  async #catchUp(epoch: number): Promise<void> {
+  async #catchUp(epoch: number): Promise<number> {
+    const horizon = this.#attachments;
     const stale = [...this.#attached].filter((attached) => {
       const seen = attached.sight.visibility.epoch;
       // Different, not older (`A-25`): the counter only rises in a running database, but a
@@ -404,20 +515,13 @@ export class StateBroadcaster {
       // then never be told again until the counter passed it.
       return seen !== null && seen !== epoch;
     });
-    if (stale.length === 0) return;
+    if (stale.length === 0) return horizon;
 
-    const resolving = new Map<string, Promise<Visibility>>();
     await Promise.all(
       stale.map(async (attached) => {
-        let pending = resolving.get(attached.sight.key);
-        if (pending === undefined) {
-          pending = attached.sight.resolve();
-          resolving.set(attached.sight.key, pending);
-        }
-
         let next: Visibility | null;
         try {
-          next = await pending;
+          next = await this.#resolve(attached.sight, epoch);
         } catch (error) {
           this.#logger.warn(
             { err: describeError(error) },
@@ -440,12 +544,24 @@ export class StateBroadcaster {
         );
       }),
     );
+    return horizon;
   }
 
-  /** Fans one event out to whoever asked for that subtree and may see it. */
-  #deliver(event: StateEvent): number {
+  /**
+   * Fans one event out to whoever asked for that subtree and may see it.
+   *
+   * **Not to a subscriber that attached after `horizon`** (`A-30`). `#catchUp` never examined it
+   * — it attached while the check waited on a resolution, or between its return and this — and
+   * its view may have been resolved before the grants moved. Skipping it loses nothing: it
+   * attached after this batch committed, so the snapshot it is about to read already holds the
+   * change, and the next batch examines it. Its epoch is not the test: a subscriber attached long
+   * ago can have had its sight brought forward by a concurrent batch, and skipping that one would
+   * lose the change.
+   */
+  #deliver(event: StateEvent, horizon: number): number {
     let sent = 0;
     for (const attached of this.#attached) {
+      if (attached.order > horizon) continue;
       if (attached.objectId !== null && !event.path.includes(attached.objectId)) continue;
       // Checked against the path the event already carries, so fanning out to a hundred
       // sockets is a hundred walks of a short array and not a hundred queries (`A-12`).

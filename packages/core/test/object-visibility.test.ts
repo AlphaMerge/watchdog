@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, before, beforeEach, describe, it, type TestContext } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { ApiServer } from '../src/api/server.js';
@@ -30,7 +30,7 @@ import { MapService } from '../src/maps/service.js';
 import { MapResolver } from '../src/maps/resolver.js';
 import { LibraryRepository } from '../src/libraries/repository.js';
 import { LibraryService } from '../src/libraries/service.js';
-import { StateBroadcaster } from '../src/state/stream.js';
+import { StateBroadcaster, type SnapshotRead } from '../src/state/stream.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -1452,6 +1452,169 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         );
       } finally {
         branch.terminate();
+      }
+    });
+  });
+
+  describe('while a subscription’s snapshot is being read (A-30)', () => {
+    /**
+     * Puts `around` between the stream route and the snapshot it reads, so a test can commit a
+     * change, revoke a grant or hold the read at exactly the moment the races need. Restored
+     * with the test.
+     */
+    function aroundSnapshot(
+      t: TestContext,
+      around: (read: () => Promise<SnapshotRead>, call: number) => Promise<SnapshotRead>,
+    ): void {
+      const read = stream.snapshot.bind(stream);
+      let calls = 0;
+      t.mock.method(stream, 'snapshot', (...args: Parameters<StateBroadcaster['snapshot']>) => {
+        calls += 1;
+        return around(() => read(...args), calls);
+      });
+    }
+
+    async function watching(): Promise<{ socket: WebSocket; frames: string[] }> {
+      const socket = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      const frames: string[] = [];
+      socket.on('message', (raw: Buffer) => frames.push(raw.toString('utf8')));
+      return { socket, frames };
+    }
+
+    const typed = (frames: readonly string[], type: string): Record<string, unknown>[] =>
+      frames
+        .map((frame) => JSON.parse(frame) as Record<string, unknown>)
+        .filter((frame) => frame['type'] === type);
+
+    it('sends a change committed during the read after the snapshot, not before it', async (t) => {
+      // Up, so that the failure committed below is a change to publish.
+      await scan([pingId], true);
+      aroundSnapshot(t, async (read) => {
+        const rows = await read();
+        // Committed after the rows were read and before the frame goes out: the snapshot says Up.
+        await scan([pingId], false);
+        return rows;
+      });
+      const { socket, frames } = await watching();
+      try {
+        socket.send(JSON.stringify({ subscribe: {} }));
+        const snapshot = await waitFor(socket, frames, 'snapshot');
+        const entries = snapshot['entries'] as { sensorId: number; state: string }[];
+        assert.equal(entries.find((entry) => entry.sensorId === pingId)?.state, 'up');
+
+        const at = frames.findIndex((frame) => frame.includes('"type":"snapshot"'));
+        const change = await waitFor(socket, frames, 'state', at + 1);
+        assert.equal(change['sensorId'], pingId);
+        assert.equal(
+          frames.slice(0, at).some((frame) => frame.includes('"type":"state"')),
+          false,
+          'a change was sent before the snapshot that paints over it',
+        );
+        // Numbered after the snapshot, which counts none of them.
+        assert.equal(snapshot['seq'], 0);
+        assert.equal(change['seq'], 1);
+      } finally {
+        socket.terminate();
+      }
+    });
+
+    it('does not send a snapshot read through a view revoked while it was read', async (t) => {
+      aroundSnapshot(t, async (read) => {
+        // After the view was resolved and before the rows are read: a-web01 is taken away, and
+        // a-ping and a-held with it.
+        await access.grant(deviceId, teamId, 'none', actorNamed('visibility'));
+        return read();
+      });
+      const { socket, frames } = await watching();
+      try {
+        socket.send(JSON.stringify({ subscribe: {} }));
+        const overflow = await waitFor(socket, frames, 'overflow');
+        assert.match(String(overflow['reason']), /may see has changed/);
+        assert.deepEqual(typed(frames, 'snapshot'), [], 'a snapshot of the old view was sent');
+        assert.equal(frames.join('').includes('a-ping'), false);
+      } finally {
+        socket.terminate();
+      }
+    });
+
+    it('never sends a replaced subscription’s snapshot after its replacement’s', async (t) => {
+      let release = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let first: Promise<SnapshotRead> | undefined;
+      let reading = (): void => undefined;
+      const reached = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      aroundSnapshot(t, (read, call) => {
+        if (call !== 1) return read();
+        reading();
+        first = gate.then(read);
+        return first;
+      });
+      await scan([pingId], true);
+      const { socket, frames } = await watching();
+      try {
+        // The device first, slowly; then everything, which replaces it before it has been read.
+        socket.send(JSON.stringify({ subscribe: { objectId: deviceId } }));
+        // Replaced once its read has begun, not before: earlier, it never reaches the read at all.
+        await reached;
+        socket.send(JSON.stringify({ subscribe: {} }));
+        const replacement = await waitFor(socket, frames, 'snapshot');
+        assert.equal(replacement['objectId'], null);
+
+        release();
+        await first;
+        // A change after it, so whatever the replaced read would send has gone out before this.
+        const mark = frames.length;
+        await scan([pingId], false);
+        await waitFor(socket, frames, 'state', mark);
+        assert.deepEqual(
+          typed(frames, 'snapshot').map((frame) => frame['objectId']),
+          [null],
+          'the replaced subscription’s snapshot arrived after its replacement’s',
+        );
+      } finally {
+        socket.terminate();
+      }
+    });
+
+    it('leaves a replacement alone when the subscription it replaced fails', async (t) => {
+      let release = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let first: Promise<unknown> | undefined;
+      let reading = (): void => undefined;
+      const reached = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      aroundSnapshot(t, (read, call) => {
+        if (call !== 1) return read();
+        reading();
+        const failing = gate.then(() => Promise.reject(new Error('the first read failed')));
+        first = failing.catch(() => undefined);
+        return failing;
+      });
+      await scan([pingId], true);
+      const { socket, frames } = await watching();
+      try {
+        socket.send(JSON.stringify({ subscribe: { objectId: deviceId } }));
+        // Replaced once its read has begun, not before: earlier, it never reaches the read at all.
+        await reached;
+        socket.send(JSON.stringify({ subscribe: {} }));
+        await waitFor(socket, frames, 'snapshot');
+
+        release();
+        await first;
+        const mark = frames.length;
+        await scan([pingId], false);
+        const change = await waitFor(socket, frames, 'state', mark);
+        assert.equal(change['sensorId'], pingId, 'the replacement was detached by the failure');
+        assert.deepEqual(typed(frames, 'problem'), [], 'the client was told to resubscribe');
+      } finally {
+        socket.terminate();
       }
     });
   });
