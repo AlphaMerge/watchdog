@@ -13441,12 +13441,38 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `S-11` and `H-06` moved there), `B-07`, and `H-09`'s hardware list. Ticked when all of them
       existed, which was its own done-when.
 
-- [ ] **H-11 — Build provenance** · S · H-10 · Every build said `0.1.0`, so two builds a month
+- [x] **H-11 — Build provenance** · S · H-10 · Every build said `0.1.0`, so two builds a month
       apart were one build to an operator, a bug report and the runbook. **Done when** every build
       carries its version and the full commit it was packaged from, `GET /api/v1/build` answers
       with them, and the cache validator that is salted with the build (`S-13`) is salted with the
       commit — **a correctness bug, not bookkeeping**: an upgrade between two `0.1.0` builds that
       changed a registry default served a `304` for the old value. Test first.
+
+      **H-11 outcome.** Each packaged service carries `app/<service>/build.json`: the version, the
+      full commit, and whether the tree had uncommitted changes. `package.sh` writes it beside
+      `dist`, and `src/version.ts` in the core and the probe reads it. It is a file rather than
+      the launcher's environment because WinSW starts `node.exe` on `main.js` directly and never
+      runs the launcher. A working tree has no manifest and says so (`0.0.0-dev`, commit
+      unknown). A manifest that exists and does not parse stops the service, rather than letting
+      it start unidentified. `GET /api/v1/build` answers the same at read scope, and `--help` and
+      the first `starting` line say it too. Inside the toolchain container `git` cannot see a
+      worktree's repository, so `smoke-install.sh` reads the commit on the host and passes it in
+      as `MS_BUILD_COMMIT`.
+
+      **The validator bug, test first.** The salt was the version, and every version was `0.1.0`.
+      The two new tests in `conditional-get.test.ts` failed on the first commit with
+      `304 !== 200`, and pass on the second. An exact build is now salted with `version+commit`.
+      A build with no commit, or with uncommitted changes, is salted per process, so it keeps no
+      validator across a restart rather than keeping a wrong one.
+
+      **Proved in a package**, 2026-09-28, at `cf5a896`: `MS_SMOKE_DISTRO=ubuntu
+      scripts/smoke-install.sh` passed. The installed box answered `GET /api/v1/build` with
+      `{"version":"0.1.0","commit":"cf5a896d…","dirty":false}`, equal to the installed
+      `build.json`, and the tarball's own manifests named the same commit. The first attempt
+      never reached a box: resolving `FROM ubuntu:24.04` timed out in Docker. The rerun used the
+      same tarball. Not run: `smoke-packages.sh` and the MSI. The `.deb`, the `.rpm` and the MSI
+      all package what `package.sh` staged, so they carry the same manifest, but no package
+      format other than the tarball has been installed with it.
 
 - [ ] **H-12 — The v1 build profile** · M · H-11 · Option C of the proposal: a build profile
       stamped by `package.sh` beside the version and commit, not a key in `core.json`. **Done

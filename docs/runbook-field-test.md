@@ -13,7 +13,7 @@ that gets run badly or not at all.
 
 | | Last verified | How |
 | --- | --- | --- |
-| Clean install on Ubuntu | **2026-09-03, locally** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
+| Clean install on Ubuntu | **2026-09-28, locally** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
 | Clean install on Debian | 2026-09-03, locally | `scripts/smoke-install.sh` |
 | `.deb` and `.rpm` install, upgrade, remove | 2026-09-03, locally | `scripts/smoke-packages.sh` |
 | Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
