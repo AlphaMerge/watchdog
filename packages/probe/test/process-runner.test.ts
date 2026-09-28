@@ -255,13 +255,14 @@ describe('process runner', () => {
     // 20 s service budget. A stop that arrived while a script hung ran the budget out here, the
     // pool's drain and the spool's close never ran, and the probe exited 1.
     const { runner, seen } = runnerOf();
-    runner.submit(request(60, 'test.slow', { delayMs: 8_000, timeoutMs: 20_000 }));
+    runner.submit(request(60, 'test.slow', { delayMs: 60_000, timeoutMs: 90_000 }));
     await until(() => runner.stats().running === 1, 'the check to start');
 
     const startedAt = performance.now();
     await runner.stop({ drainMs: 200 });
     const tookMs = performance.now() - startedAt;
-    assert.ok(tookMs < 2_000, `stop took ${String(Math.round(tookMs))} ms with a 200 ms window`);
+    // Under half the check's minute, so no load makes waiting it out look like the window.
+    assert.ok(tookMs < 30_000, `stop took ${String(Math.round(tookMs))} ms with a 200 ms window`);
 
     assert.deepEqual(
       seen.map((one) => [one.result.sensorId, one.meta.phase]),

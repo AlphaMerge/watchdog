@@ -5047,6 +5047,38 @@ because each is a decision rather than a defect:
       a 200 ms window while a check sleeps for 8 s. `check-pool.test.ts` counts failed starts over
       two seconds: 66 before, under 20 now. `lifecycle.test.ts` expects the extension on stop.
 
+- [x] **P-234 — probe tests that asserted how fast the machine was** · S · P-21 · Found in
+      bc8184's `S-19` probe run, which failed at 336/337: check-pool's *takes the median* test saw
+      the estimate go from 21 to 85 ms. It passed 3 of 3 alone. The median was right and the input
+      was not. Under load a 20 ms check measured 20 or 85 ms by turns, the median of nine sat on
+      the boundary, and one outlier and a trimmed window moved it across. A unit test that depends
+      on machine load is what the `npm test` / `test:perf` split exists to prevent.
+
+      **Fixed.** The median is `typicalOf(window, now, windowMs)` in `pool.ts`, a function of its
+      arguments, and `typicalDurationMs` calls it. Its tests hand it durations and a clock: one
+      timeout among nine ordinary checks, a workload at two speeds, and the window with its floor
+      of eight. **The same shape elsewhere in the probe suite**, each a small absolute ceiling
+      standing in for "much faster than the thing ruled out":
+      - `check-pool` *learns what a type costs*: `fast < 100` → a lower bound on the 300 ms sleep
+        and `fast < slow`;
+      - `check-pool` *reports a timeout when it happens*: `< 1_000` → under half the 10 s grace it
+        rules out;
+      - `check-pool` *returned when the check did*: `< 4_000` against a 5 s drain → a 60 s drain,
+        and `< 30_000`;
+      - `check-pool` *abandons a check that outlives the drain window*: `< 3_000` → under half the
+        check's 60 s;
+      - `query-runner` *bounds the check by the core's deadline*: `< 5_000` → under half the
+        sensor's minute;
+      - `process-runner` *stops waiting at the drain window* (`P-227`'s own): `< 2_000` against an
+        8 s check → a 60 s check, and `< 30_000`.
+
+      The rule these follow: a timing assertion in `npm test` bounds against the alternative it
+      rules out, at no more than half of it, and makes that alternative long. A floor on a sleep is
+      always safe, because a timer never fires early. An absolute budget belongs in `test:perf`.
+      None of these was one. Left alone: the lower bounds in the `P-46` window tests, the backoff
+      count in `P-227`'s start-failure test (load only lowers it), and the fake clocks in
+      `probe-health-report`.
+
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
       `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a

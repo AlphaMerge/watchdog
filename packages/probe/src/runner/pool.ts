@@ -513,23 +513,11 @@ export class CheckPool {
    * not exist.
    */
   typicalDurationMs(sensorType: string): number | undefined {
-    const window = this.#runByType.get(sensorType);
-    if (window === undefined || window.length === 0) return undefined;
-
-    // Samples are appended in order, so the first fresh one bounds every later one.
-    const cutoff = process.hrtime.bigint() - BigInt(this.#durationWindowMs) * 1_000_000n;
-    let fresh = 0;
-    for (const sample of window) {
-      if (sample.at >= cutoff) break;
-      fresh += 1;
-    }
-    const from = Math.min(fresh, Math.max(0, window.length - MIN_DURATION_SAMPLES));
-
-    const sorted = window
-      .slice(from)
-      .map((sample) => sample.ms)
-      .sort((a, b) => a - b);
-    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))];
+    return typicalOf(
+      this.#runByType.get(sensorType) ?? [],
+      process.hrtime.bigint(),
+      this.#durationWindowMs,
+    );
   }
 
   /**
@@ -1275,9 +1263,42 @@ function clear(job: Job): void {
 }
 
 /** One measured check duration and when it was measured, for the sizing window (`P-46`). */
-interface DurationSample {
+export interface DurationSample {
+  /** `process.hrtime.bigint()` when the check finished. */
   readonly at: bigint;
   readonly ms: number;
+}
+
+/**
+ * The median of the samples inside `windowMs` of `now`, keeping at least `MIN_DURATION_SAMPLES`
+ * however old, or `undefined` for none (`CheckPool.typicalDurationMs`).
+ *
+ * **A function of its arguments alone** (`P-234`), so a test hands it durations and a clock. The
+ * test through a running pool compared real check durations, and under load a 20 ms check
+ * measured 20 ms or 85 ms by turns. The median of nine sat on the boundary between the two, and
+ * one outlier moved it from 21 to 85, which read as the median failing when it was the input.
+ */
+export function typicalOf(
+  window: readonly DurationSample[],
+  now: bigint,
+  windowMs: number,
+): number | undefined {
+  if (window.length === 0) return undefined;
+
+  // Samples are appended in order, so the first fresh one bounds every later one.
+  const cutoff = now - BigInt(windowMs) * 1_000_000n;
+  let fresh = 0;
+  for (const sample of window) {
+    if (sample.at >= cutoff) break;
+    fresh += 1;
+  }
+  const from = Math.min(fresh, Math.max(0, window.length - MIN_DURATION_SAMPLES));
+
+  const sorted = window
+    .slice(from)
+    .map((sample) => sample.ms)
+    .sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.5))];
 }
 
 function record(window: number[], value: number): void {

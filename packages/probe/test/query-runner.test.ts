@@ -145,7 +145,8 @@ describe('the probe’s query runner', () => {
     assert.ok(result !== undefined);
     assert.equal(result.outcome, 'error');
     assert.ok(
-      result.durationMs < 5_000,
+      // Under half the sensor's own minute, not an absolute budget (`P-234`).
+      result.durationMs < 30_000,
       `waited ${String(result.durationMs)} ms for a 1,000 ms deadline`,
     );
   });

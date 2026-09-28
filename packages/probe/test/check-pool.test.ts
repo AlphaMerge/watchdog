@@ -13,6 +13,7 @@ import {
   WORKER_YOUNG_GENERATION_MB,
   type ResultMeta,
 } from '../src/runner/index.js';
+import { typicalOf } from '../src/runner/pool.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
 
@@ -156,7 +157,9 @@ describe('check pool', () => {
     assert.ok(entry);
     assert.equal(entry.result.outcome, 'error');
     assert.equal(entry.meta.phase, 'timeout');
-    assert.ok(elapsed < 1_000, `the result arrived after ${String(elapsed)} ms`);
+    // Against the alternative, the check giving up at `abortGraceMs` (10 s), and at half of it
+    // rather than an absolute budget, so a loaded machine cannot fail it (`P-234`).
+    assert.ok(elapsed < 5_000, `the result arrived after ${String(elapsed)} ms`);
     assert.equal(pool.stats().timedOut, 1);
   });
 
@@ -282,8 +285,9 @@ describe('check pool', () => {
     pool.submit(request(94, 'test.ok'));
 
     const startedAt = Date.now();
-    await pool.stop({ drainMs: 5_000 });
-    assert.ok(Date.now() - startedAt < 4_000, 'returned when the check did, not at the bound');
+    // A bound far past the check, so returning early is told from waiting it out on any machine.
+    await pool.stop({ drainMs: 60_000 });
+    assert.ok(Date.now() - startedAt < 30_000, 'returned when the check did, not at the bound');
     const phases = Object.fromEntries(seen.map((one) => [one.result.sensorId, one.meta.phase]));
     assert.deepEqual(phases, { 93: 'execute', 94: 'pool-stopped' }, 'the queued one never started');
     assert.equal(seen.find((one) => one.result.sensorId === 93)?.result.outcome, 'ok');
@@ -297,7 +301,8 @@ describe('check pool', () => {
     const startedAt = Date.now();
     await pool.stop({ drainMs: 150 });
     const took = Date.now() - startedAt;
-    assert.ok(took >= 140 && took < 3_000, `bounded by the window: ${String(took)} ms`);
+    // Under half the check's own 60 s, which is what waiting on it would cost (`P-234`).
+    assert.ok(took >= 140 && took < 30_000, `bounded by the window: ${String(took)} ms`);
     assert.deepEqual(
       seen.map((one) => one.meta.phase),
       ['pool-stopped'],
@@ -661,7 +666,7 @@ describe('sizing the ceiling from the work (P-34)', () => {
 
     assert.equal(pool.typicalDurationMs('test.slow'), undefined, 'nothing measured yet');
 
-    for (let i = 0; i < 5; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 120 }));
+    for (let i = 0; i < 5; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 300 }));
     for (let i = 10; i < 15; i += 1) pool.submit(request(i, 'test.ok'));
     await until(() => seen.length === 10, 'both types to finish');
 
@@ -671,31 +676,56 @@ describe('sizing the ceiling from the work (P-34)', () => {
 
     // The numbers that matter are the *separation*, not the absolutes — a worker's own overhead
     // is in both. A pooled median would describe neither type, which is why this is per type.
-    assert.ok(slow >= 100, `a 120 ms check measured ${String(slow)} ms`);
-    assert.ok(fast < 100, `an immediate check measured ${String(fast)} ms`);
-    assert.ok(slow > fast * 2, 'and the two are not confusable');
+    // **Only a lower bound on a sleep, and a comparison** (`P-234`): a timer never fires early,
+    // so the first holds on any machine, and load slows both types rather than swapping them. An
+    // absolute ceiling on the immediate one (`< 100`) was a statement about the machine.
+    assert.ok(slow >= 290, `a 300 ms check measured ${String(slow)} ms`);
+    assert.ok(
+      fast < slow,
+      `an immediate check measured ${String(fast)} ms, the slow one ${String(slow)}`,
+    );
   });
 
-  it('takes the median, so one timeout does not resize the pool', async () => {
+  it('takes the median, so one timeout does not resize the pool', () => {
     // The reason this is a median and not a mean. A single check that ran to its timeout is in
     // the window too, and a mean would let it claim the workload is thirty times heavier than
     // it is — sizing the pool for a workload that does not exist.
-    const { pool, seen } = await poolOf({ size: 4, minSize: 4 });
+    //
+    // **Durations and a clock handed in, not measured** (`P-234`). Through a running pool this
+    // compared real check durations, and on a loaded machine a 20 ms check measured 20 or 85 ms
+    // by turns: the median of nine landed on the boundary and one outlier moved it from 21 to 85,
+    // which is the input changing, not the median failing.
+    const now = 1_000_000_000_000n;
+    const at = (msAgo: number): bigint => now - BigInt(msAgo) * 1_000_000n;
+    const ordinary = Array.from({ length: 9 }, (_, i) => ({ at: at(900 - i * 100), ms: 20 }));
+    assert.equal(typicalOf(ordinary, now, 30_000), 20);
 
-    for (let i = 0; i < 9; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 20 }));
-    await until(() => seen.length === 9, 'the ordinary checks');
-    const ordinary = pool.typicalDurationMs('test.slow');
-    assert.ok(ordinary !== undefined);
+    const withTimeout = [...ordinary, { at: at(0), ms: 30_000 }];
+    assert.equal(typicalOf(withTimeout, now, 30_000), 20, 'one timeout does not move it');
+    const mean = withTimeout.reduce((sum, one) => sum + one.ms, 0) / withTimeout.length;
+    assert.ok(mean > 3_000, 'where a mean would have sized for a check a hundred times heavier');
+  });
 
-    pool.submit(request(99, 'test.slow', { delayMs: 400 }));
-    await until(() => seen.length === 10, 'the outlier');
+  it('reads a workload of two speeds as the one most checks have', () => {
+    // The shape the loaded machine produced: some checks at 20 ms and some at 85. The estimate is
+    // one of the real durations, never an average of the two, and follows whichever is the most.
+    const now = 1_000_000_000_000n;
+    const samples = (fast: number, slow: number) => [
+      ...Array.from({ length: fast }, (_, i) => ({ at: now - BigInt(i) * 1_000_000n, ms: 20 })),
+      ...Array.from({ length: slow }, (_, i) => ({ at: now - BigInt(i) * 1_000_000n, ms: 85 })),
+    ];
+    assert.equal(typicalOf(samples(6, 3), now, 30_000), 20);
+    assert.equal(typicalOf(samples(3, 6), now, 30_000), 85);
+  });
 
-    const after = pool.typicalDurationMs('test.slow');
-    assert.ok(after !== undefined);
-    assert.ok(
-      after < ordinary + 60,
-      `one 400 ms outlier moved the estimate from ${String(ordinary)} to ${String(after)}`,
-    );
+  it('drops samples older than the window, but keeps the last eight', () => {
+    const now = 1_000_000_000_000n;
+    const ago = (ms: number): bigint => now - BigInt(ms) * 1_000_000n;
+    const stale = Array.from({ length: 20 }, () => ({ at: ago(60_000), ms: 5 }));
+    const fresh = Array.from({ length: 12 }, () => ({ at: ago(1_000), ms: 120 }));
+    assert.equal(typicalOf([...stale, ...fresh], now, 30_000), 120, 'the stale ones age out');
+    assert.equal(typicalOf(stale.slice(0, 3), now, 30_000), 5, 'a quiet type still answers');
+    assert.equal(typicalOf([], now, 30_000), undefined, 'and a type never run does not');
   });
 
   it('raises the ceiling without allocating, and lets the pump use it', async () => {
