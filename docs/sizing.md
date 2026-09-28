@@ -277,4 +277,4 @@ Say so rather than guess, and these are the gaps:
 - **Remote probes over a real network**, including a saturated or lossy link.
 - **`exe.script` sensors that genuinely compute.** Every measurement models checks that wait for
   a packet, which is what the protocol sensors do and is not what a script doing arithmetic does.
-- **Windows.** No measurement on Windows Server exists (`H-06`, `H-09`).
+- **Windows.** No measurement on Windows Server exists (`H-06`, `H-17`) — Windows is release 1.1.

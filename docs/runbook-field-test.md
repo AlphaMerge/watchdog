@@ -1,9 +1,12 @@
 # Release candidate field test (H-09)
 
-`PLAN.md` Phase 10's exit criterion:
+`PLAN.md` Phase 10's exit criterion for 1.0:
 
-> A clean install on Ubuntu and on Windows Server, monitoring 100 real devices for a week without
-> intervention.
+> A clean install on Ubuntu, monitoring 100 real devices for a week without intervention.
+
+**1.0 is Linux-only** (decided 2026-09-28, `H-10`). The criterion used to name Windows Server as
+well; that half is release 1.1's field test, `H-17`, and its steps are the last section of this
+runbook — moved there whole, not deleted.
 
 This is the procedure for running it. It exists because the test needs hardware and a week of
 wall-clock that no CI job has, and a test that has to be designed before it can be run is a test
@@ -18,7 +21,6 @@ that gets run badly or not at all.
 | `.deb` and `.rpm` install, upgrade, remove | 2026-09-03, locally | `scripts/smoke-packages.sh` |
 | Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
 | 5,000 sensors for 24 h | 2026-08-30 | `docs/findings/2026-08-30-soak-24h.md` |
-| MSI installs on Windows | **never** | CI's `windows-install` job, which has not run (`H-06`) |
 
 > **"Last verified" is a date, not a guarantee, and that is deliberate.** These four used to read
 > "in CI", which stopped being true the moment the workflow was disabled — a table telling you
@@ -27,8 +29,8 @@ that gets run badly or not at all.
 > about to field-test**, rather than trusting this row, and update the date. If CI is running
 > again by then, say so here and the rule can go back to trusting it.
 
-**What this runbook adds is what those cannot reach**: Windows Server, real devices that answer
-in ways a simulator does not, and a week of unattended running.
+**What this runbook adds is what those cannot reach**: real devices that answer in ways a
+simulator does not, and a week of unattended running.
 
 > **Say which build you are testing, and mean it.** This runbook was written when `main` was v1
 > plus `H-06`. It is not any more: flow monitoring (Phase 11) and maps (Phase 12) have landed on
@@ -42,18 +44,13 @@ in ways a simulator does not, and a week of unattended running.
 
 ## Before you start
 
-- **A Windows Server host.** Note what this is and is not: `windows-latest` on GitHub Actions is
-  Windows Server 2022, and `H-06`'s `windows-install` job installs the MSI there — so the
-  *installer* has a machine that can prove it, whenever CI is running. What it cannot reach is
-  this runbook: a hundred real devices for a week is hardware and wall-clock, not a job. If that
-  job has still never run when you start, then this is the first time the MSI is installed
-  anywhere, and you should expect to find things — file them rather than patching around them.
-- **An Ubuntu host** for the core, unless you are testing the Windows core.
+- **An Ubuntu host** for the core.
 - **100 devices you did not choose for being easy.** A field test against a hundred identical
   Linux VMs proves the scheduler and nothing about the sensor catalogue. Aim for a spread: some
   switches, some Windows servers, some appliances with slow SNMP agents, at least one device
   behind a firewall that drops rather than refuses, and at least one that is intermittently
-  unreachable on purpose.
+  unreachable on purpose. Monitor the Windows servers by ping, port, HTTP, TLS and SNMP: the four
+  WMI types need a probe on Windows, and are 1.1's.
 - **A week you are not going to touch it.** "Without intervention" is the criterion. Restarting a
   service to see whether that helps ends the run.
 
@@ -63,20 +60,6 @@ Ubuntu core, from the package rather than the tarball — that is what an operat
 
 ```bash
 sudo dpkg -i ms_<version>_amd64.deb
-```
-
-Windows Server, elevated:
-
-```powershell
-msiexec /i ms-<version>-x64.msi /l*v install.log
-```
-
-**Keep `install.log`.** The MSI has not been installed before, and if it fails, that log is the
-finding. Check afterwards that the services registered and the firewall rules exist:
-
-```powershell
-Get-Service ms-core, ms-probe
-Get-NetFirewallRule -DisplayName 'MonitoringSystem *'
 ```
 
 ## 2. Restart everything, once, before you start counting
@@ -96,8 +79,8 @@ sudo systemctl restart ms-core ms-probe
 Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned. A
 probe that is connected but scheduling nothing is the shape that defect took.
 
-Repeat on Windows. **Anything that only breaks on restart is invisible to every other test we
-have**, which is exactly why it is step 2 and not an afterthought.
+**Anything that only breaks on restart is invisible to every other test we have**, which is
+exactly why it is step 2 and not an afterthought.
 
 ## 3. Set the alarms that make "without intervention" observable
 
@@ -225,4 +208,50 @@ was worth more as a ticket than as a paragraph.
 
 Tick `H-09` only if the week ran clean. A field test that found things and got them fixed is a
 successful field test and an unmet exit criterion; those are different facts and the plan should
-carry both.
+carry both. `H-09` is the Linux week; the Windows week is `H-17`, below, and neither ticks the
+other.
+
+---
+
+## Release 1.1 — the Windows half (`H-17`)
+
+**Not part of 1.0.** These are the Windows steps of the procedure above, moved here on 2026-09-28
+(`H-16`) when 1.0 became Linux-only, and kept as they were. Run them on a 1.1 candidate, once
+`H-06` (the MSI), `S-11` (TimescaleDB on Windows) and `T-25` (the `windows.*` queries against
+Windows) have landed. Steps 2 to 6 above apply as written, with what follows added to them.
+
+| | Last verified | How |
+| --- | --- | --- |
+| MSI installs on Windows | **never** | CI's `windows-install` job, which has not run (`H-06`) |
+
+### Before you start
+
+- **A Windows Server host.** Note what this is and is not: `windows-latest` on GitHub Actions is
+  Windows Server 2022, and `H-06`'s `windows-install` job installs the MSI there — so the
+  *installer* has a machine that can prove it, whenever CI is running. What it cannot reach is
+  this runbook: a hundred real devices for a week is hardware and wall-clock, not a job. If that
+  job has still never run when you start, then this is the first time the MSI is installed
+  anywhere, and you should expect to find things — file them rather than patching around them.
+- Among the devices, **Windows servers monitored over WMI**, from a probe on Windows — the four
+  `windows.*` types, which the Linux test cannot reach.
+
+### Install
+
+Windows Server, elevated:
+
+```powershell
+msiexec /i ms-<version>-x64.msi /l*v install.log
+```
+
+**Keep `install.log`.** The MSI has not been installed before, and if it fails, that log is the
+finding. Check afterwards that the services registered and the firewall rules exist:
+
+```powershell
+Get-Service ms-core, ms-probe
+Get-NetFirewallRule -DisplayName 'MonitoringSystem *'
+```
+
+### Restart
+
+Repeat step 2 on Windows: restart both services once the devices are added, and check Probe
+Health the same way. Anything that only breaks on restart is invisible to every other test.

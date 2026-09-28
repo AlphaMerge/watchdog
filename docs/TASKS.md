@@ -13727,7 +13727,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       already showed. **Never tick `H-09` from it.** A heavy run on the shared machine — announce
       it, and run it when the machine is quiet.
 
-- [ ] **H-16 — The Linux-only 1.0 documentation** · S · H-10 · 1.0 is Linux-only (decided
+- [x] **H-16 — The Linux-only 1.0 documentation** · S · H-10 · 1.0 is Linux-only (decided
       2026-09-28), and four places still promise Windows. **Done when** each says plainly that 1.0
       does not run on Windows and that Windows is 1.1:
       - `docs/installation.md:18` — the requirements row "Linux with systemd, or Windows with
@@ -13742,6 +13742,27 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
       `CLAUDE.md`'s first hard constraint does not change: it constrains what is built, and
       Windows is still built for. Nor do `ADR-001`'s decisions.
+
+      **Done.** Each place says it in words:
+      - `installation.md`'s requirements row: "Linux with systemd. **1.0 does not run on
+        Windows**", and which three things are 1.1's.
+      - `README.md`'s description of production, and what the Windows work is waiting for.
+      - `PLAN.md` Phase 10: the exit criterion is now **1.0** (Ubuntu, `H-09`) and **1.1**
+        (Windows Server, `H-17`), and the MSI deliverable is 1.1's. A paragraph says why and names
+        the five 1.1 tickets. `S-11`, `T-10`, `H-06` and Phase 8's probe installer point at 1.1
+        too, so no row reads as a 1.0 gap.
+      - `CAPABILITIES.MD` §3.5: the four rows keep `[V1]` and say "not in 1.0: needs a Windows
+        probe, 1.1", and so does §8's "Cross-platform probes". There is **no fourth marker**.
+        Instead the legend says that `[V1]` is the 1.x line and that a row not in 1.0 says so, so a
+        count of `[V1]` rows, as `H-10` §1 made, is not read as 1.0's scope.
+      - `runbook-field-test.md` quotes 1.0's criterion. Its Windows steps are its last section,
+        "Release 1.1 — the Windows half (`H-17`)", moved whole: the host, the MSI install and its
+        checks, the restart, and the MSI's row of what is already proved.
+
+      Two places the entry did not list said it by omission, and now say it outright:
+      `sensor-reference.md` lists the four `windows.*` types, and now marks them "not in 1.0 —
+      release 1.1" from its generator, so the note survives regeneration. `sizing.md`'s Windows
+      gap cited `H-09`, and now cites `H-17`. `CLAUDE.md` and `ADR-001` are unchanged.
 
 ---
 

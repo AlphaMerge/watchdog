@@ -3,8 +3,10 @@
 A PRTG-class infrastructure monitoring system in Node.js and TypeScript.
 
 Probes run checks against your devices, the core stores the results, evaluates state and sends
-notifications. Production is a **standalone native service** — systemd on Linux, WinSW on
-Windows — with PostgreSQL as its only always-on dependency.
+notifications. Production is a **standalone native service** under systemd, with PostgreSQL as
+its only always-on dependency. **1.0 runs on Linux only.** Windows — the WinSW service, the MSI and
+the four WMI sensor types — is release 1.1: its code stays in the tree, and what it waits for is a
+Windows machine to prove it on (`docs/TASKS.md`, _Release 1.1 — Windows_).
 
 **Status: Phases 0–9 complete; Phase 10 (hardening and release) in progress.** The object model,
 the scheduler, the state machine, notifications, the web UI, ~43 sensor types, discovery, remote

@@ -15,7 +15,7 @@ procedure below is a tarball and a shell script.
 
 | | |
 | --- | --- |
-| OS | Linux with systemd, or Windows with WinSW |
+| OS | Linux with systemd. **1.0 does not run on Windows** — the Windows service (WinSW), its MSI and the four `windows.*` sensor types are release 1.1 (`TASKS.md`, *Release 1.1 — Windows*) |
 | Node.js | 22 or newer, on `PATH` |
 | PostgreSQL | with the TimescaleDB extension available — 17 is what everything here is measured and tested on |
 | `openssl` | on `PATH` — the installer issues the probe-channel certificates with it |

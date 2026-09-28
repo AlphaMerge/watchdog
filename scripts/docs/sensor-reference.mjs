@@ -137,15 +137,31 @@ for (const summary of summaries) {
 }
 const categories = [...byCategory.keys()].sort();
 
+// A category that is in the catalogue but not in every release, said where a reader meets it:
+// in the index and under its heading. 1.0 is Linux-only (`H-10`, `H-16`), and these types need a
+// probe running on Windows.
+const RELEASE_NOTES = {
+  Windows: {
+    short: 'not in 1.0 — release 1.1',
+    long:
+      '**Not in 1.0, which is Linux-only.** These types run PowerShell’s CIM cmdlets from a ' +
+      'probe *on* Windows, and 1.0 installs no probe there, so the v1 build profile leaves them ' +
+      'out of its catalogue (`H-12`). They are release 1.1’s, once `T-25` has run them against ' +
+      'Windows — none of their queries ever has.',
+  },
+};
+
 say(`${String(summaries.length)} types in ${String(categories.length)} categories.`, '');
 for (const category of categories) {
   const ids = byCategory.get(category).map((one) => `\`${one.id}\``);
-  say(`- **${category}** — ${ids.join(', ')}`);
+  const release = RELEASE_NOTES[category];
+  say(`- **${category}** — ${ids.join(', ')}${release === undefined ? '' : ` (${release.short})`}`);
 }
 say('', '---', '');
 
 for (const category of categories) {
   say(`## ${category}`, '');
+  if (RELEASE_NOTES[category] !== undefined) say(RELEASE_NOTES[category].long, '');
 
   for (const summary of byCategory.get(category)) {
     const declaration = catalogue.declaration(summary.id);

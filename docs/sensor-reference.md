@@ -17,7 +17,7 @@ What a type is *for* is documented where its author wrote it, in `packages/senso
 - **System** — `ms.core.health`, `ms.probe.health`
 - **Traffic** — `flow.netflow`
 - **Web** — `http.advanced`, `http.content`, `http.request`, `http.transaction`, `rest.custom`, `tls.certificate`, `tls.security`
-- **Windows** — `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume`
+- **Windows** — `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` (not in 1.0 — release 1.1)
 
 ---
 
@@ -1334,6 +1334,8 @@ cost: **medium**
 - **Timeout per version** (`timeoutMs`) — Applied to each handshake separately. This sensor makes one per TLS version, so a wholly unreachable host costs four of these — set the scan interval in hours, not minutes. What it measures changes when somebody edits a configuration file, not from one minute to the next.
 
 ## Windows
+
+**Not in 1.0, which is Linux-only.** These types run PowerShell’s CIM cmdlets from a probe *on* Windows, and 1.0 installs no probe there, so the v1 build profile leaves them out of its catalogue (`H-12`). They are release 1.1’s, once `T-25` has run them against Windows — none of their queries ever has.
 
 ### `windows.cpu`
 

@@ -13,6 +13,11 @@ we actually build and in what order.
 | `[V2]`  | Deferred to a later release                                      |
 | `[OUT]` | Deliberately out of scope — PRTG-specific, or not worth the cost |
 
+`[V1]` covers the 1.x line, not 1.0 alone. **1.0 is Linux-only** (decided 2026-09-28, `H-10`), so
+a `[V1]` row that needs Windows says **not in 1.0 … 1.1** beside its marker, and its work is
+`TASKS.md`'s *Release 1.1 — Windows*. A count of `[V1]` rows is the 1.x scope; for 1.0, leave those
+out.
+
 Sources: the Paessler PRTG Manual (`paessler.com/manuals/prtg`) and Paessler Helpdesk KB,
 researched 2026-08-24. Where two Paessler pages disagree, both figures are given.
 
@@ -168,18 +173,23 @@ account for most real deployments.
 SNMP v1, v2c and v3 (auth + priv) are all required. Note Paessler's scaling caveat: v3 is
 limited by per-request crypto cost and does not scale simply by adding CPU.
 
-### 3.5 Windows `[V1]` (subset) / `[V2]` (rest)
+### 3.5 Windows `[V1]` (subset, not in 1.0 — 1.1) / `[V2]` (rest)
 
-| Sensor                                                  | Description                           | Scope  |
-| ------------------------------------------------------- | ------------------------------------- | ------ |
-| Windows CPU Load                                        | CPU utilisation                       | `[V1]` |
-| WMI Memory                                              | Memory usage                          | `[V1]` |
-| WMI Volume                                              | Logical disk free space / usage       | `[V1]` |
-| WMI Service                                             | Named service running state           | `[V1]` |
-| WMI Event Log                                           | Event log entries matching filters    | `[V2]` |
-| WMI Custom / WMI Custom String                          | Arbitrary WQL query                   | `[V2]` |
-| PerfCounter Custom                                      | Arbitrary Windows performance counter | `[V2]` |
-| Windows Process / Print Queue / Pagefile / Network Card | Windows-native specifics              | `[V2]` |
+| Sensor                                                  | Description                           | Scope                                           |
+| ------------------------------------------------------- | ------------------------------------- | ----------------------------------------------- |
+| Windows CPU Load                                        | CPU utilisation                       | `[V1]` — not in 1.0: needs a Windows probe, 1.1 |
+| WMI Memory                                              | Memory usage                          | `[V1]` — not in 1.0: needs a Windows probe, 1.1 |
+| WMI Volume                                              | Logical disk free space / usage       | `[V1]` — not in 1.0: needs a Windows probe, 1.1 |
+| WMI Service                                             | Named service running state           | `[V1]` — not in 1.0: needs a Windows probe, 1.1 |
+| WMI Event Log                                           | Event log entries matching filters    | `[V2]`                                          |
+| WMI Custom / WMI Custom String                          | Arbitrary WQL query                   | `[V2]`                                          |
+| PerfCounter Custom                                      | Arbitrary Windows performance counter | `[V2]`                                          |
+| Windows Process / Print Queue / Pagefile / Network Card | Windows-native specifics              | `[V2]`                                          |
+
+**Not in 1.0**, which is Linux-only: these four run PowerShell's CIM cmdlets from a probe *on*
+Windows, and 1.0 installs no probe there. They stay in the tree and in the full build, the v1 build
+profile leaves them out of 1.0's catalogue (`H-12`), and they come back in 1.1 once `T-25` has run
+them against Windows — none of their queries ever has.
 
 Implementation note: there is no maintained WMI client for Node. Windows checks go through a
 PowerShell `Get-CimInstance` shell-out from a probe running on Windows (`T-09`) — one such probe
@@ -420,7 +430,7 @@ Template features:
 | TLS on the probe channel     | PRTG offers TLS 1.2/1.3 security levels                                                                                                                                                                                                                                                                          | `[V1]` |
 | Probe identity + approval    | Each probe gets a GID; the core holds one or more access keys the probe must present, an allowed-source-IP list, and a deny-by-GID list to revoke a single probe. Done in `R-01`: an unapproved probe is welcomed, heartbeats and receives **no configuration**, so it waits in a queue rather than being trusted for connecting; the key it presents afterwards is its own, issued once at approval | `[V1]` |
 | Buffering across disconnects | PRTG caches up to 500,000 results **in RAM only** — a probe restart during the outage loses them. Our design should improve on this with a disk-backed spool                                                                                                                                                     | `[V1]` |
-| Cross-platform probes        | PRTG's newer "multi-platform" probes run on Linux; classic probes are Windows-only                                                                                                                                                                                                                               | `[V1]` |
+| Cross-platform probes        | PRTG's newer "multi-platform" probes run on Linux; classic probes are Windows-only                                                                                                                                                                                                                               | `[V1]` — Linux in 1.0; a probe on Windows is not in 1.0: 1.1 (`R-10`) |
 | **Failover cluster**         | 1 primary master + up to 4 failover nodes (5 total). Active-active: every node monitors everything independently and keeps its own database, so load scales _up_ with node count. Config is edited on the master only and pushed in real time. Only the acting master sends notifications. Inter-node port 23570 | `[V2]` |
 | Cluster caveats              | The admin password is not synchronised; remote probes connect only to the primary master; multi-platform probes can't be cluster remote probes; monitoring gaps from node outages are not backfilled                                                                                                             | —      |
 
