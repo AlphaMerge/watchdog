@@ -1,9 +1,18 @@
 import { strict as assert } from 'node:assert';
+import { createServer, type Server, type Socket } from 'node:net';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
-import type { Logger } from '@ms/shared';
-import { DatabaseError } from '../src/db/pool.js';
-import { classifyDatabaseFailure, DATABASE_WAIT_MS, waitForDatabase } from '../src/db/wait.js';
+import { ConfigError, type Logger } from '@ms/shared';
+import { Database, DatabaseError } from '../src/db/pool.js';
+import {
+  AFTER_DATABASE_MS,
+  classifyDatabaseFailure,
+  DATABASE_WAIT_MS,
+  waitForDatabase,
+  type DatabaseFailureKind,
+} from '../src/db/wait.js';
+import { databaseAvailable, silentLogger, testDatabaseConfig } from './support/database.js';
+import { shippedUnit, startLimitOf } from './support/units.js';
 
 /** What `pg` throws, shaped as `Database` wraps it: a `DatabaseError` whose cause carries the code. */
 function wrapped(code: string, message = `failure ${code}`): DatabaseError {
@@ -61,22 +70,42 @@ function run(outcomes: readonly (Error | 'ok')[], maxWaitMs = DATABASE_WAIT_MS):
 }
 
 describe('classifyDatabaseFailure', () => {
-  const cases: readonly [string, Error, boolean][] = [
-    ['nothing listening yet', wrapped('ECONNREFUSED'), true],
-    ['PostgreSQL in crash recovery', wrapped('57P03', 'the database system is starting up'), true],
-    ['no connection slots', wrapped('53300'), true],
-    ['resolver not up at boot', wrapped('EAI_AGAIN'), true],
+  // The codes. The code-less failures are provoked from the real driver below, not built here.
+  const cases: readonly [string, Error, DatabaseFailureKind][] = [
+    ['nothing listening yet', wrapped('ECONNREFUSED'), 'transient'],
+    [
+      'PostgreSQL in crash recovery',
+      wrapped('57P03', 'the database system is starting up'),
+      'transient',
+    ],
+    ['PostgreSQL shut down under the check', wrapped('57P01'), 'transient'],
+    ['PostgreSQL crashed under the check', wrapped('57P02'), 'transient'],
+    ['no connection slots', wrapped('53300'), 'transient'],
+    ['resolver not up at boot', wrapped('EAI_AGAIN'), 'transient'],
     // P-209's own failure. Ambiguous — a typo or a name not yet published — so the bound decides.
-    ['a name that does not resolve', wrapped('ENOTFOUND', 'getaddrinfo ENOTFOUND postgres'), true],
-    ['network unreachable', wrapped('ENETUNREACH'), true],
-    ['wrong password', wrapped('28P01', 'password authentication failed for user "ms"'), false],
-    ['no such database', wrapped('3D000', 'database "monitoring" does not exist'), false],
-    ['permission refused', wrapped('42501'), false],
-    ['something nobody anticipated', new Error('the unexpected'), false],
+    [
+      'a name that does not resolve',
+      wrapped('ENOTFOUND', 'getaddrinfo ENOTFOUND postgres'),
+      'transient',
+    ],
+    ['network unreachable', wrapped('ENETUNREACH'), 'transient'],
+    ['a socket file not there yet', wrapped('ENOENT'), 'transient'],
+    ['a clock not yet set at boot', wrapped('CERT_NOT_YET_VALID'), 'transient'],
+    [
+      'wrong password',
+      wrapped('28P01', 'password authentication failed for user "ms"'),
+      'configuration',
+    ],
+    ['a user pg_hba.conf refuses', wrapped('28000'), 'configuration'],
+    ['no such database', wrapped('3D000', 'database "monitoring" does not exist'), 'configuration'],
+    ['permission refused', wrapped('42501'), 'configuration'],
+    ['an untrusted certificate', wrapped('DEPTH_ZERO_SELF_SIGNED_CERT'), 'configuration'],
+    ['something nobody anticipated', new Error('the unexpected'), 'unknown'],
   ];
-  for (const [name, error, transient] of cases) {
-    it(`${transient ? 'waits for' : 'does not wait for'} ${name}`, () => {
-      assert.equal(classifyDatabaseFailure(error).transient, transient);
+  for (const [name, error, kind] of cases) {
+    it(`classes ${name} as ${kind}`, () => {
+      assert.equal(classifyDatabaseFailure(error).kind, kind);
+      assert.equal(classifyDatabaseFailure(error).transient, kind === 'transient');
     });
   }
 
@@ -101,24 +130,29 @@ describe('classifyDatabaseFailure', () => {
     assert.equal(failure.transient, true);
     assert.equal(failure.code, 'ECONNREFUSED');
   });
-
-  it("treats pg-pool's code-less connect timeout as transient", () => {
-    const failure = classifyDatabaseFailure(
-      new DatabaseError('cannot connect to the database', {
-        cause: new Error('timeout exceeded when trying to connect'),
-      }),
-    );
-    assert.equal(failure.transient, true);
-  });
 });
 
 describe('waitForDatabase (P-215)', () => {
-  it('returns at once, and says nothing, when the database is already up', async () => {
+  it('returns at once, and logs nothing, when the database is already up', async () => {
     const r = run(['ok']);
     assert.deepEqual(await r.result, { serverVersion: 'PostgreSQL 17.5' });
     assert.equal(r.calls(), 1);
     assert.deepEqual(r.slept, []);
     assert.deepEqual(r.lines, []);
+  });
+
+  it('covers the first attempt, and the rest of start-up after the last, with an extension (P-222)', async () => {
+    const r = run(['ok']);
+    await r.result;
+    // Before the first attempt: its own worst case and a margin, so a connectTimeoutMs longer
+    // than TimeoutStartSec is not killed before it can fail. After it: a fresh budget for
+    // everything that follows, which the last attempt's extension alone did not leave.
+    assert.deepEqual(
+      r.extended.map((call) => call.ms),
+      [10_000 + 5_000, AFTER_DATABASE_MS],
+    );
+    assert.match(r.extended[0]?.status ?? '', /^connecting to PostgreSQL at db\.example\.test/);
+    assert.match(r.extended[1]?.status ?? '', /is reachable/);
   });
 
   it('waits out a database in crash recovery, logging every attempt with its reason', async () => {
@@ -150,20 +184,35 @@ describe('waitForDatabase (P-215)', () => {
     // the deadline can never land between the sleep ending and the connection giving up.
     assert.deepEqual(
       r.extended.map((call) => call.ms),
-      [1_000 + 10_000 + 5_000, 2_000 + 10_000 + 5_000],
+      [10_000 + 5_000, 1_000 + 10_000 + 5_000, 2_000 + 10_000 + 5_000, AFTER_DATABASE_MS],
     );
-    assert.match(r.extended[0]?.status ?? '', /^waiting for PostgreSQL at db\.example\.test/);
-    assert.match(r.extended[1]?.status ?? '', /attempt 2/);
+    assert.match(r.extended[1]?.status ?? '', /^waiting for PostgreSQL at db\.example\.test/);
+    assert.match(r.extended[2]?.status ?? '', /attempt 2/);
   });
 
-  it('fails at once on a failure waiting cannot fix, with the original error', async () => {
+  it('refuses a configuration the database refused, as a ConfigError, so the core exits 78 (P-222)', async () => {
     const denied = wrapped('28P01', 'password authentication failed for user "ms"');
     const r = run([denied, 'ok']);
 
-    await assert.rejects(r.result, (error) => error === denied);
+    await assert.rejects(r.result, (error) => {
+      assert.ok(error instanceof ConfigError);
+      assert.equal(error.cause, denied);
+      assert.match(
+        error.message,
+        /db\.example\.test:5432\/monitoring refused the password \(28P01\)/,
+      );
+      assert.match(error.message, /password authentication failed for user "ms"/);
+      return true;
+    });
     assert.equal(r.calls(), 1, 'a wrong password is not retried');
     assert.deepEqual(r.slept, []);
-    assert.deepEqual(r.extended, []);
+  });
+
+  it('fails at once, with the original error, on a failure nobody has classified', async () => {
+    const odd = new Error('the unexpected');
+    const r = run([odd, 'ok']);
+    await assert.rejects(r.result, (error) => error === odd);
+    assert.equal(r.calls(), 1);
   });
 
   it('names the host it could not resolve, so a typo reads as one', async () => {
@@ -201,24 +250,201 @@ describe('waitForDatabase (P-215)', () => {
    * An earlier version of this test said five starts span four rounds and pinned 75 s. That is
    * the arithmetic for a limit that trips *on* the fifth start, which is not what systemd does.
    */
-  it('makes rounds against a database that stays down too slow for the start limit to count', () => {
-    // As in deploy/systemd/ms-{core,probe}.service.
-    const START_LIMIT_INTERVAL_MS = 600_000;
-    const START_LIMIT_BURST = 5;
-    const RESTART_SEC_MS = 5_000;
+  for (const name of ['ms-core', 'ms-probe'] as const) {
+    it(`makes rounds against a database that stays down too slow for ${name}'s start limit to count`, () => {
+      // Read from the shipped unit (`P-222`): a copy here let the unit change and every test pass.
+      const { intervalMs, burst, restartMs } = startLimitOf(shippedUnit(name));
 
-    const roundMs = DATABASE_WAIT_MS + RESTART_SEC_MS;
-    // The most starts any one window can hold: one at its very start, and one per whole round.
-    const mostStartsInAWindow = 1 + Math.floor(START_LIMIT_INTERVAL_MS / roundMs);
-    assert.ok(
-      mostStartsInAWindow <= START_LIMIT_BURST,
-      `a database that stays down would put ${String(mostStartsInAWindow)} starts in a window, ` +
-        `and the start after them would be refused`,
-    );
-    assert.equal(mostStartsInAWindow, 2);
+      const roundMs = DATABASE_WAIT_MS + restartMs;
+      // The most starts any one window can hold: one at its very start, and one per whole round.
+      const mostStartsInAWindow = 1 + Math.floor(intervalMs / roundMs);
+      assert.ok(
+        mostStartsInAWindow <= burst,
+        `a database that stays down would put ${String(mostStartsInAWindow)} starts in a window, ` +
+          `and the start after them would be refused`,
+      );
 
-    // And the slowest loop the same limit still stops: five whole rounds inside the window.
-    const slowestStoppedRoundMs = START_LIMIT_INTERVAL_MS / START_LIMIT_BURST;
-    assert.equal(slowestStoppedRoundMs, 120_000);
+      // And the loop the limit exists for, killed at MemoryMax 10–14 s a round, is still stopped:
+      // five whole rounds must fit inside the window, with room for a two-minute round.
+      const slowestStoppedRoundMs = intervalMs / burst;
+      assert.ok(
+        slowestStoppedRoundMs >= 60_000,
+        `the start limit would stop only loops faster than ${String(slowestStoppedRoundMs / 1000)} s a round`,
+      );
+    });
+  }
+});
+
+/**
+ * The failures start-up actually meets, provoked from the real driver and pool (`P-222`).
+ *
+ * The first version of the classifier was tested against errors built by hand, one of which carried
+ * the message of a pg-pool branch start-up never takes; it passed, and a database behind a
+ * firewall that drops packets left the core `failed`. Every case here goes through
+ * `Database.check()`, so the error is whatever `pg` and `pg-pool` really throw.
+ */
+describe('classifyDatabaseFailure, against the real driver (P-222)', () => {
+  async function listening(
+    onSocket: (socket: Socket) => void,
+  ): Promise<{ server: Server; port: number }> {
+    const server = createServer(onSocket);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    return { server, port: address.port };
+  }
+
+  async function failureFrom(
+    host: string,
+    port: number,
+    overrides: { password?: string; connectTimeoutMs?: number } = {},
+  ) {
+    const db = new Database({
+      config: {
+        ...testDatabaseConfig(),
+        host,
+        port,
+        connectTimeoutMs: 400,
+        poolSize: 2,
+        ...overrides,
+      },
+      logger: silentLogger,
+    });
+    try {
+      const error: unknown = await db.check().then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      assert.ok(error !== undefined, 'the check succeeded');
+      return classifyDatabaseFailure(error);
+    } finally {
+      await db.close();
+    }
+  }
+
+  /** A PostgreSQL ErrorResponse, sent in answer to the startup message. */
+  function errorResponse(code: string, message: string): Buffer {
+    const fields = Buffer.from(`SFATAL\0VFATAL\0C${code}\0M${message}\0\0`, 'utf8');
+    const header = Buffer.alloc(5);
+    header.write('E', 0, 'ascii');
+    header.writeInt32BE(fields.length + 4, 1);
+    return Buffer.concat([header, fields]);
+  }
+
+  it('waits for a host that accepts the connection and never answers, as a packet-dropping firewall looks', async () => {
+    const held: Socket[] = [];
+    const { server, port } = await listening((socket) => held.push(socket));
+    try {
+      const failure = await failureFrom('127.0.0.1', port);
+      assert.equal(failure.kind, 'transient', failure.reason);
+    } finally {
+      for (const socket of held) socket.destroy();
+      server.close();
+    }
   });
+
+  it('waits for a host that closes the connection before answering', async () => {
+    const { server, port } = await listening((socket) => socket.destroy());
+    try {
+      const failure = await failureFrom('127.0.0.1', port);
+      assert.equal(failure.kind, 'transient', failure.reason);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('waits for a port with nothing listening', async () => {
+    const { server, port } = await listening(() => undefined);
+    await new Promise<void>((resolve) =>
+      server.close(() => {
+        resolve();
+      }),
+    );
+    const failure = await failureFrom('127.0.0.1', port);
+    assert.equal(failure.kind, 'transient');
+    assert.equal(failure.code, 'ECONNREFUSED');
+  });
+
+  it('waits for a unix-socket directory whose socket is not there', async () => {
+    const failure = await failureFrom('/nonexistent-ms-p222-socket-dir', 5432);
+    assert.equal(failure.kind, 'transient', failure.reason);
+    assert.equal(failure.code, 'ENOENT');
+  });
+
+  for (const [code, kind] of [
+    ['57P03', 'transient'],
+    ['57P01', 'transient'],
+    ['53300', 'transient'],
+    ['28P01', 'configuration'],
+    ['3D000', 'configuration'],
+  ] as const) {
+    it(`classes a server answering ${code} as ${kind}`, async () => {
+      const { server, port } = await listening((socket) => {
+        socket.once('data', () => socket.end(errorResponse(code, `the server said ${code}`)));
+      });
+      try {
+        const failure = await failureFrom('127.0.0.1', port);
+        assert.equal(failure.kind, kind, failure.reason);
+        assert.equal(failure.code, code);
+      } finally {
+        server.close();
+      }
+    });
+  }
+
+  it("refuses an empty password against the test PostgreSQL, the way a fresh install's is", async (t) => {
+    if (!(await databaseAvailable())) {
+      t.skip('no PostgreSQL');
+      return;
+    }
+    const config = testDatabaseConfig();
+    const failure = await failureFrom(config.host, config.port, {
+      password: '',
+      connectTimeoutMs: 5_000,
+    }).catch((error: unknown) => {
+      // A server that trusts every local connection lets the check through.
+      if (error instanceof assert.AssertionError) return null;
+      throw error;
+    });
+    if (failure === null) {
+      t.skip('the test PostgreSQL does not ask for a password');
+      return;
+    }
+    assert.equal(failure.kind, 'configuration', failure.reason);
+  });
+
+  it('refuses a wrong password against the test PostgreSQL', async (t) => {
+    if (!(await databaseAvailable())) {
+      t.skip('no PostgreSQL');
+      return;
+    }
+    const config = testDatabaseConfig();
+    const failure = await failureFrom(config.host, config.port, {
+      password: 'certainly-not-the-password',
+      connectTimeoutMs: 5_000,
+    }).catch((error: unknown) => {
+      if (error instanceof assert.AssertionError) return null;
+      throw error;
+    });
+    if (failure === null) {
+      t.skip('the test PostgreSQL does not ask for a password');
+      return;
+    }
+    assert.equal(failure.kind, 'configuration', failure.reason);
+    assert.equal(failure.code, '28P01');
+  });
+});
+
+describe('the shipped units (P-222)', () => {
+  for (const name of ['ms-core', 'ms-probe'] as const) {
+    it(`${name} sets its start limit in [Unit], where systemd reads it, and stops at exit 78`, () => {
+      const unit = shippedUnit(name);
+      // In [Service], systemd warns "Unknown key" and ignores it, and the restart loop never ends.
+      assert.equal(unit.get('Service')?.get('StartLimitIntervalSec'), undefined);
+      assert.equal(unit.get('Service')?.get('StartLimitBurst'), undefined);
+      assert.ok(unit.get('Unit')?.get('StartLimitIntervalSec') !== undefined);
+      assert.ok(unit.get('Unit')?.get('StartLimitBurst') !== undefined);
+      assert.equal(unit.get('Service')?.get('RestartPreventExitStatus'), '78');
+    });
+  }
 });

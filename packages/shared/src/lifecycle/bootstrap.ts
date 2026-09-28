@@ -4,6 +4,7 @@ import { loadConfig, type ConfigSources } from '../config/load.js';
 import type { ServiceConfig } from '../config/schema.js';
 import { ConfigError, describeError } from '../errors/app-error.js';
 import { createLogger, type Logger } from '../logging/logger.js';
+import { EX_CONFIG } from './exit.js';
 import { Lifecycle } from './lifecycle.js';
 
 export interface BootstrapOptions<T> {
@@ -53,7 +54,7 @@ export function bootstrap<T extends { service: ServiceConfig }>(
     process.stderr.write(
       `${error instanceof ConfigError ? 'Configuration error' : 'Startup failed'}: ${described.message}\n`,
     );
-    process.exit(78); // EX_CONFIG
+    process.exit(EX_CONFIG);
   }
 
   const logger = createLogger({

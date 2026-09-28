@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { Migrator, MigrationError } from '../src/db/migrator.js';
+import { Client } from 'pg';
+import { MIGRATION_LOCK_KEY, Migrator, MigrationError, type LockWait } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import type { Migration } from '../src/db/migrations/types.js';
 import type { Database } from '../src/db/pool.js';
@@ -8,6 +9,7 @@ import {
   createScratchDatabase,
   databaseAvailable,
   silentLogger,
+  testDatabaseConfig,
   type ScratchDatabase,
 } from './support/database.js';
 
@@ -492,6 +494,134 @@ describe(
       const atFailure = reports;
       await new Promise((resolve) => setTimeout(resolve, 250));
       assert.equal(reports, atFailure);
+    });
+  },
+);
+
+/**
+ * `P-222`: the lock every migration run takes comes before any migration, so a core waiting on it
+ * reported nothing, was killed at `TimeoutStartSec` five times and ended `failed`. And `down`
+ * reverted by number, which is not "the most recent" on a database that applied out of order.
+ */
+describe(
+  'the migration lock, and the order migrations were applied in (P-222)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+
+    before(async () => {
+      scratch = await createScratchDatabase('migratorlock');
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    it('says who holds the lock for as long as it waits, and migrates the moment it is free', async () => {
+      const config = testDatabaseConfig();
+      const holder = new Client({
+        host: config.host,
+        port: config.port,
+        database: scratch.name,
+        user: config.user,
+        password: config.password,
+        application_name: 'p222-lock-holder',
+      });
+      await holder.connect();
+      try {
+        const [row] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+        await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+
+        const waits: LockWait[] = [];
+        const subject = new Migrator({
+          db: scratch.db,
+          logger: silentLogger,
+          migrations: [trivial],
+          progressIntervalMs: 100,
+          lockPollMs: 20,
+          onLockWait: (wait) => waits.push(wait),
+        });
+        const running = subject.up();
+        // Until three reports, however slow the machine: the count is the claim, not the timing.
+        const deadline = Date.now() + 10_000;
+        while (waits.length < 3 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+
+        assert.ok(
+          waits.length >= 3,
+          `expected a report at once and on every interval, got ${String(waits.length)}`,
+        );
+        assert.ok(
+          (waits[0]?.elapsedMs ?? Infinity) < 100,
+          'the first report comes at the first refusal',
+        );
+        assert.equal(
+          waits[0]?.holder?.pid,
+          row?.pid,
+          'the holder is named, so an operator can end it',
+        );
+        assert.equal(waits[0]?.holder?.application, 'p222-lock-holder');
+        assert.equal(
+          await tableExists(scratch.db, 'trivial_thing'),
+          false,
+          'nothing ran under the wait',
+        );
+
+        await holder.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
+        const { applied } = await running;
+        assert.deepEqual(
+          applied.map((m) => m.id),
+          [9001],
+        );
+        const reportedAtEnd = waits.length;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        assert.equal(waits.length, reportedAtEnd, 'no report once the lock is held');
+      } finally {
+        await holder.end();
+      }
+    });
+
+    it('applies a gap below the newest migration, and rolls back what was applied last first', async () => {
+      // 9001 is applied by the test above; 9003 goes on next, and then 9002 arrives late, the way
+      // 052 did after 053 on 2026-09-28.
+      const third: Migration = {
+        id: 9003,
+        name: 'third',
+        up: 'CREATE TABLE third_thing (id int PRIMARY KEY)',
+        down: 'DROP TABLE third_thing',
+      };
+      await migrator(scratch.db, [trivial, third]).up();
+      const late = migrator(scratch.db, [trivial, second, third]);
+      const { applied } = await late.up();
+      assert.deepEqual(
+        applied.map((m) => m.id),
+        [9002],
+      );
+
+      const first = await late.down();
+      assert.deepEqual(
+        first.reverted.map((m) => m.id),
+        [9002],
+        'the migration applied last goes first, not the highest number',
+      );
+      assert.equal(await tableExists(scratch.db, 'third_thing'), true, "9003's table is untouched");
+
+      const next = await late.down();
+      assert.deepEqual(
+        next.reverted.map((m) => m.id),
+        [9003],
+      );
+    });
+
+    it('marks a schema this build will not run against as a refusal, not a failure', async () => {
+      // 9003 was reverted above and 9001 is applied; a build that knows only 9002 finds an
+      // applied migration it does not define.
+      await assert.rejects(migrator(scratch.db, [second]).up(), (error) => {
+        assert.ok(error instanceof MigrationError);
+        assert.equal(error.refusal, true);
+        return true;
+      });
     });
   },
 );

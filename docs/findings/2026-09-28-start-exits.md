@@ -34,6 +34,8 @@ that is routinely unavailable at boot is never a failed start.
 | **Working set exceeds `MemoryMax`** | after READY, as the pool grows | **No** — this is the loop |
 
 **Every start-time exit of the probe is permanent.** Nothing about it relies on systemd to retry.
+**Except one, missed here:** a listener on a specific address the host has not been given yet
+fails with `EADDRNOTAVAIL`, which fixes itself (`P-222`, below).
 A start limit on the probe costs nothing that waiting would have recovered.
 
 ## The core
@@ -107,6 +109,7 @@ What a kill mid-migration leaves behind, checked in `migrator.ts` rather than as
    bounded, **logged on every attempt with the reason**, and reported to systemd as `STATUS=`
    with `EXTEND_TIMEOUT_USEC` so that `TimeoutStartSec` does not end the wait. Credentials and a
    missing database fail at once. After this, every exit of the core's start is permanent too.
+   **Not so, as shipped:** see *What this audit missed* below (`P-222`).
 3. **Migrations report progress for as long as they run.** Each migration reports as it starts
    and every 15 s after, and the core turns each report into `Lifecycle.starting` — 45 s more,
    and `applying migration 51 (report-pdf), 340 s so far` in `systemctl status`. **Not one fixed
@@ -146,8 +149,9 @@ under **two minutes a round** — every ceiling loop measured with eight times t
 slower ones a 6 GiB probe would make. A database that stays down puts at most **two** starts in any
 ten-minute window, against the six it would take. Longer than two minutes a round is a probe that
 works for a while between kills — closer to a leak than to a service that cannot start — and
-restarting it is right. `database-wait.test.ts` pins both halves, so changing either constant
-fails a test.
+restarting it is right. `database-wait.test.ts` pins both halves, reading the limit from the
+shipped units themselves since `P-222` (before that it pinned a copy of them, and editing a unit
+failed nothing).
 
 ## What the loop costs in alarms, and what the limit buys
 
@@ -307,3 +311,51 @@ matters more because of this ticket.** Every watchdog kill is a start, and five 
 minutes now leave a unit `failed`, where before it restarted for ever. A host loaded like this
 for long enough could stop the core and leave it stopped, and the core in `failed` is silent. That
 is `P-220`, to be measured rather than argued here.
+
+## What this audit missed (`P-222`)
+
+A review of the landed code found start failures that a restart used to fix and that the start
+limit had made permanent. Every one broke the premise the limit rests on: that nothing a restart
+could fix costs a start. That premise is now the stated rule, with the one table of every start
+failure and what the service does with it, in `administration.md`, *What a start failure does*.
+
+- **A database that drops packets was classed permanent.** At start-up the pool has no clients,
+  so every attempt takes `pg-pool`'s new-connection path, whose timeout is the code-less
+  *Connection terminated due to connection timeout*. The classifier knew only *timeout exceeded
+  when trying to connect*, which is the queued-caller path start-up never takes. Its test built
+  that error by hand, so it passed. The core exited 1 on the first attempt, went round every 16 s,
+  and was `failed` at about 80 s. It stayed there after the database came back. Now the
+  classifier reads the libraries' own code-less failures, and each case is provoked from the real
+  driver: a server that accepts and never answers, one that closes at once, a closed port, a
+  missing unix socket, and a server answering with a SQLSTATE. Removing the new message patterns
+  fails four tests.
+- **Also classed permanent, and transient:** `ENOENT` for a unix-socket host whose PostgreSQL is
+  stopped, `57P01` and `57P02`, and a connection closed before the server answered.
+- **What the database refuses now exits 78.** A wrong or absent password, a user `pg_hba.conf`
+  refuses, a database that does not exist, an untrusted certificate, and a schema this build will
+  not run against. These used to exit 1 and go round five times in 35 s. A fresh install, whose
+  example `core.json` has an empty password, left the core `failed` with the limit spent. Then
+  `installation.md`'s own `systemctl restart`, after setting the password, was refused. Exit 78
+  uses one start. The guide now runs `reset-failed` first anyway.
+- **The migration lock was waited on in silence.** `pg_advisory_lock` blocked before any
+  migration reported progress. A core behind a lock held by a hand-run `migrate`, or by a dead
+  core's session that PostgreSQL keeps for about two hours, was killed at `TimeoutStartSec` five
+  times and ended `failed`. It is now tried every second, and every fifteen seconds it reports the
+  holder's pid, application, address and state to `systemctl status`.
+- **Two waits were outside any extension.** Nothing covered the first attempt before it failed,
+  so a `connectTimeoutMs` over 55 s could never finish it. After the database answered,
+  everything else had only the last attempt's extension left. Now there is an extension before
+  the first attempt and 60 s after the database answers.
+- **`EADDRNOTAVAIL` at boot.** A listener on a specific address waits up to five minutes a round
+  for the host to have it. This covers `api.host`, `probeEndpoint.host`, and the syslog and trap
+  listeners.
+- **The tests pinned copies of the units.** `database-wait.test.ts` and
+  `probe-restart-scenario.test.ts` now read `StartLimitIntervalSec`, `StartLimitBurst` and
+  `RestartSec` from `deploy/systemd/`. A test fails if either unit puts the limit in `[Service]`
+  or drops `RestartPreventExitStatus=78`.
+- **The live harness subtracted a baseline that systemd had already zeroed.** `reset-failed` and
+  a manual restart both reset `NRestarts`, so the refused-configuration verdict could read `-1`.
+  It reports the count as read now.
+- **`migrate down` reverted by number, not by when a migration was applied.** On a database that
+  applied 052 after 053, "the most recent" meant 053, and its tables were dropped. It now follows
+  `applied_at`, and `up` warns when it applies a migration numbered below one already applied.

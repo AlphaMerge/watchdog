@@ -11,9 +11,12 @@ Wants=network-online.target
 # **The restart loop ends, where an operator sees it** (P-215) — for a core killed at MemoryMax
 # on every start, systemd refuses the sixth start inside ten minutes and leaves the unit
 # `failed` with "start request repeated too quickly". This is safe for the core only because it no longer relies on restarts
-# to wait for anything: a PostgreSQL still recovering is waited for inside the process, for up to
-# five minutes a round (packages/core/src/db/wait.ts), and a long migration keeps systemd waiting
-# for as long as it runs. A database that stays down puts at most two starts in any ten minutes.
+# to wait for anything (P-215, P-222): a database that is not there yet is waited for inside the
+# process, five minutes a round (packages/core/src/db/wait.ts), and so is a listen address not yet
+# assigned; the migration lock and a long migration keep systemd waiting for as long as they last;
+# and what only a person can fix — a password PostgreSQL refuses, a schema this build will not run
+# against — exits 78, which is not restarted. A database that stays down puts at most two starts
+# in any ten minutes. The table is in docs/administration.md, "What a start failure does".
 # **A core in `failed` is silent**: it is the thing that raises alarms, so only something outside
 # this system notices it — the host's own monitoring, or a check from another machine. This
 # project ships none, and the loop this replaces was just as silent while hiding its reason.

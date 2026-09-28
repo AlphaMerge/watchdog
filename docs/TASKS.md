@@ -4694,6 +4694,19 @@ because each is a decision rather than a defect:
       editor says why rather than offering a list that fails to load. Until it lands, users and
       groups are set over the API, and the editor round-trips a recipient's `kind` unchanged.
 
+- [ ] **M-21 — one memory squeeze on a single-host install raises two alarms** · S · P-208, M-17 ·
+      Found by review. Core Health's and Probe Health's `memoryAvailable` both carry
+      `lowerWarning: 20, lowerError: 10`, and on the default installation, a local probe beside the
+      core, both read the same `/proc/meminfo`. `administration.md`'s *What to watch* recommends an
+      alarm on both. A host at 8% available sends both sensors Down in the same sweep: two alarms
+      for one condition. Summarisation turns the second into a digest entry rather than a second
+      immediate message. Both are still Down in the alarm list, and no scenario test covers it,
+      which `CLAUDE.md` requires of anything that can multiply alarms. Core Health's
+      `probesSilent` already goes without a limit for exactly this reason. **Done when** a
+      scenario test shows one alarm for one squeeze on a single-host install, and the choice is
+      written where the channels are declared: which sensor owns a machine-wide reading when both
+      read the same machine, and what the other does.
+
 - [ ] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
       queue filled** · M · P-206, P-207 · Seen 2026-09-28, on the dev VM, with ms-server's probe at
       its usual ~5,000 sensors: **4.76 GiB resident and 337% CPU**, with the VM at 457 MB available,
@@ -4770,6 +4783,48 @@ because each is a decision rather than a defect:
       Mutations caught: a new literal code thrown; a code passed as a variable; a subclass
       passing a variable to `super`; a code dropped from the table (the enumeration and the sweep
       both); a stale entry; the fallback reverted to always-500.
+
+- [x] **P-222 — start-up failures `P-215` made permanent** · M · P-215 · Found by review of
+      `P-215`'s landed code. The start limit is safe only if nothing a restart could fix costs a
+      start, and several did. **A database that drops packets** was classed permanent. Start-up
+      takes `pg-pool`'s new-connection path, whose timeout is the code-less *Connection terminated
+      due to connection timeout*, and the classifier knew only the queued-caller message. Its test
+      built that message by hand. So the core was `failed` in about 80 s and stayed there after the
+      database returned. `ENOENT` on a unix-socket host, `57P01`/`57P02` and a connection closed
+      before answering were misclassified the same way. **What the database refuses** (a password,
+      including the empty one every fresh install starts with, a user, a database, a certificate)
+      and **a schema the core will not run against** exited 1. They went round five times in 35 s,
+      so `installation.md`'s own restart after step 3 was refused. **The migration advisory lock**
+      was waited on silently before any extension, and a core behind it was killed five times.
+      **The first database attempt** and **everything after the wait** were outside any extension.
+      **`EADDRNOTAVAIL`** at boot, for a listener on an address not yet assigned, was a permanent
+      exit. **The tests pinned copies of the units' values**, and the live harness subtracted an
+      `NRestarts` baseline systemd had already zeroed. **`migrate down`** reverted by number, so on
+      a database that applied 052 after 053 it dropped 053's tables.
+
+      **Fixed.** The database failure is classed transient, configuration or unknown by what it
+      says. Codes are read down the whole chain, then the libraries' code-less failures by their
+      text. Configuration throws a `ConfigError`, and both services' `main()` exit 78 for that
+      (`startFailure`). An extension goes before the first attempt and 60 s after the database
+      answers. The lock is tried every second, and every 15 s the holder's pid, application,
+      address and state go to `systemctl status`. The four listen sites wait for their address
+      (`waitForLocalAddress`, five minutes a round). `refuseSchema` and the migrator's own
+      refusals (a newer schema, an edited migration) exit 78. `down` follows `applied_at`, and `up`
+      warns when it fills a gap. **The rule is written down**: `administration.md`, *What a start
+      failure does*, has one table of every start failure and what the service does with it.
+      `installation.md` and `troubleshooting.md` now `reset-failed` before starting.
+
+      **Tests.** `database-wait.test.ts` provokes each code-less failure from the real driver: a
+      server that never answers, one that closes, a closed port, a missing socket, and SQLSTATEs
+      answered by a fake server. It also covers an empty and a wrong password against the test
+      PostgreSQL. Removing the new patterns fails four tests. The same file checks the extensions,
+      the `ConfigError`, and the start-limit arithmetic read from both shipped units. It also fails
+      if either unit sets the limit in `[Service]` or drops `RestartPreventExitStatus=78`.
+      `migrator.test.ts` has a holder named while it holds the lock, and the migration run the
+      moment it lets go. It also covers a gap applied and rolled back first, and a refusal marked
+      as one. `start-failure.test.ts` covers the exit mapping and the address wait.
+      `probe-restart-scenario.test.ts` reads its limit from `ms-probe.service`.
+      `docs/findings/2026-09-28-start-exits.md`, *What this audit missed*.
 
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read

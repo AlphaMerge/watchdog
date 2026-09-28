@@ -137,8 +137,15 @@ restart every time, because the alternative is finding out from `journalctl` wit
 already down.
 
 ```bash
+sudo systemctl reset-failed ms-core
 sudo systemctl restart ms-core
 ```
+
+The install already started the core once, with the example's empty password, and PostgreSQL
+refused it. That refusal stops the core at once (exit 78) rather than restarting it, but every
+start counts toward the unit's limit of five in ten minutes, the install's own included, so
+`reset-failed` first makes sure this one is not refused (`P-222`;
+[what a start failure does](administration.md#what-a-start-failure-does)).
 
 ## 4. The first administrator
 

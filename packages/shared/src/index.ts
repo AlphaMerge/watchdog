@@ -32,6 +32,9 @@ export type { LifecycleOptions, ShutdownHook, ShutdownReason } from './lifecycle
 export { bootstrap } from './lifecycle/bootstrap.js';
 export type { BootstrapOptions, BootstrappedService } from './lifecycle/bootstrap.js';
 export { createServiceNotifier, watchdogIntervalMs } from './lifecycle/systemd.js';
+export { EX_CONFIG, startFailure } from './lifecycle/exit.js';
+export { ADDRESS_WAIT_MS, waitForLocalAddress } from './lifecycle/address-wait.js';
+export type { AddressWaitOptions } from './lifecycle/address-wait.js';
 export type { ServiceNotifier } from './lifecycle/systemd.js';
 
 export {

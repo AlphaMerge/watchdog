@@ -12,6 +12,9 @@ import {
   type CoreConfig,
   type Lifecycle,
   type Logger,
+  ConfigError,
+  startFailure,
+  waitForLocalAddress,
 } from '@ms/shared';
 import { withheldReason } from '@ms/sensors';
 import { ApiServer } from './api/server.js';
@@ -78,7 +81,7 @@ import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
 import { Database } from './db/pool.js';
-import { Migrator } from './db/migrator.js';
+import { MigrationError, Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
 import { refuseSchema } from './db/schema-gate.js';
 import { waitForDatabase } from './db/wait.js';
@@ -209,8 +212,34 @@ async function migrateOnStart(db: Database, logger: Logger, lifecycle: Lifecycle
         MIGRATION_EXTEND_MS,
       );
     },
+    // **The lock comes before any migration, and is waited for in view too** (`P-222`). A core
+    // blocked on it used to send nothing, be killed at `TimeoutStartSec` five times and end
+    // `failed`; now `systemctl status` names the session holding it.
+    onLockWait: ({ elapsedMs, holder }) => {
+      const who =
+        holder === null
+          ? 'another session'
+          : `PostgreSQL session ${String(holder.pid)} (${holder.application || 'no application name'}` +
+            (holder.clientAddress === null ? '' : ` from ${holder.clientAddress}`) +
+            (holder.state === null ? '' : `, ${holder.state}`) +
+            `${holder.stateForSeconds === null ? '' : ` for ${String(holder.stateForSeconds)} s`})`;
+      lifecycle.starting(
+        `waiting for the migration lock, held by ${who}, ` +
+          `${String(Math.round(elapsedMs / 1000))} s so far`,
+        MIGRATION_EXTEND_MS,
+      );
+    },
   });
-  const { applied } = await migrator.up();
+  let applied: readonly unknown[];
+  try {
+    ({ applied } = await migrator.up());
+  } catch (error) {
+    // A schema this build will not run against is the operator's to settle, not a restart's.
+    if (error instanceof MigrationError && error.refusal) {
+      throw new ConfigError(error.message, { cause: error });
+    }
+    throw error;
+  }
   if (applied.length === 0) logger.debug('schema already up to date');
 }
 
@@ -269,7 +298,9 @@ async function serve(): Promise<void> {
     // build was not written for. `refuseSchema` knows all three ways that happens (`H-03`).
     const status = await new Migrator({ db, logger, migrations: MIGRATIONS }).status();
     const refusal = refuseSchema(status);
-    if (refusal !== null) throw new Error(refusal);
+    // Exit 78, not 1 (`P-222`): restarting finds the same schema, and five restarts used up the
+    // start limit, so the restart after `ms-core migrate up` was refused.
+    if (refusal !== null) throw new ConfigError(refusal);
   }
 
   const resolver = new InheritanceResolver({ db, logger });
@@ -1001,6 +1032,15 @@ async function serve(): Promise<void> {
     stream,
   });
   await api.build(VERSION, service);
+  // A specific address that this host does not have yet, at boot, is waited for (`P-222`).
+  await waitForLocalAddress({
+    address: config.api.host,
+    what: 'API',
+    logger,
+    starting: (status, ms) => {
+      lifecycle.starting(status, ms);
+    },
+  });
   await api.start();
   lifecycle.onShutdown({ name: 'api', timeoutMs: 5_000, run: () => api.stop() });
 
@@ -1112,6 +1152,14 @@ async function serve(): Promise<void> {
   configNotifier.attach(probeEndpoint);
   // So approving or re-pointing a probe reaches the connection it already has (`P-189`).
   probeRegistry.attach(probeEndpoint);
+  await waitForLocalAddress({
+    address: config.probeEndpoint.host,
+    what: 'probe endpoint',
+    logger,
+    starting: (status, ms) => {
+      lifecycle.starting(status, ms);
+    },
+  });
   await probeEndpoint.start();
   lifecycle.onShutdown({
     name: 'config-push',
@@ -1328,8 +1376,9 @@ async function main(): Promise<void> {
 // Only run when executed as a program, so tests can import the parser.
 if (process.argv[1] !== undefined && import.meta.filename === realpathSync(process.argv[1])) {
   main().catch((error: unknown) => {
-    process.stderr.write(`fatal: ${describeError(error).message}\n`);
-    process.exit(1);
+    const { status, line } = startFailure(error);
+    process.stderr.write(line);
+    process.exit(status);
   });
 }
 

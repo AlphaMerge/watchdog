@@ -18,14 +18,34 @@ you have one id, `journalctl … | grep <id>` gives you the whole story of that 
 ## The core will not start
 
 Read the reason before doing anything — the refusals are deliberate and each has one correct
-remedy.
+remedy. `sudo systemctl status ms-core` shows it at the top, and `journalctl -u ms-core` has the
+rest. [What a start failure does](administration.md#what-a-start-failure-does) says which failures
+the core waits out by itself and which it stops on.
+
+**After fixing the cause, start it with `reset-failed` first.** A refusal (`Configuration error:`,
+exit 78) stops the core at once, but every start counts toward the unit's limit of five in ten
+minutes, yours included, and a unit past it answers *start request repeated too quickly*:
+
+```bash
+sudo systemctl reset-failed ms-core
+sudo systemctl start ms-core
+```
 
 **"the database has N migration(s) this build does not know"** — the database was migrated by a
 newer `ms-core`. Install the matching release. Do not migrate backwards; the refusal is what
 stops a newer schema from being written by an older build that misunderstands it. A backup taken
 before that upgrade is the other way out.
 
-**"N schema migration(s) are pending and autoMigrate is off"** — run `ms-core migrate up`.
+**"N schema migration(s) are pending and autoMigrate is off"** — run `ms-core migrate up`, then
+start the core as above.
+
+**"PostgreSQL at … refused the password" / "… has no such database" / "… refused this user"** —
+the `database` section of `/etc/ms/core.json` does not match the database. A fresh install says
+this until step 3 of the installation guide sets the password.
+
+**"waiting for the migration lock, held by PostgreSQL session N"** — not a failure: the core is
+waiting, and says for whom. See
+[a core that is still starting](administration.md#a-core-that-is-still-starting).
 
 **"N applied migration(s) no longer match this build"** — the schema and the record of it
 disagree, so neither applying nor rolling back is safe. This means a migration file changed after

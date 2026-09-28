@@ -20,6 +20,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { shippedUnit, startLimitOf } from './support/units.js';
 
 const available = await databaseAvailable();
 
@@ -38,13 +39,14 @@ const HOUR = 3_600_000;
 
 const notifications = (n: number): string => `${String(n)} notification${n === 1 ? '' : 's'}`;
 
-/** systemd's start limit, as `deploy/systemd/ms-{core,probe}.service` set it. */
+/** systemd's start limit. */
 interface StartLimit {
   readonly burst: number;
   readonly intervalMs: number;
 }
 
-const SHIPPED_LIMIT: StartLimit = { burst: 5, intervalMs: 600_000 };
+/** Read from `deploy/systemd/ms-probe.service`, so editing the unit re-runs this arithmetic (`P-222`). */
+const SHIPPED_LIMIT: StartLimit = startLimitOf(shippedUnit('ms-probe'));
 
 /**
  * A probe being killed and restarted, as the link to it looks from the core.

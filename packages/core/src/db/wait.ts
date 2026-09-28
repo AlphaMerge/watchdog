@@ -1,12 +1,13 @@
-import { AppError, describeError, type Logger } from '@ms/shared';
+import { AppError, ConfigError, describeError, type Logger } from '@ms/shared';
 
 /**
  * Waiting for PostgreSQL at start-up, inside the process (`P-215`).
  *
- * **The one start-time failure of the core that waiting fixes.** Every other way `serve()` can fail
- * before it is ready — a schema it refuses, a certificate that is missing, a port already bound —
- * is still wrong five seconds later (`docs/findings/2026-09-28-start-exits.md`). A database in
- * crash recovery, or one that simply started a moment after us, is not. Until this existed the
+ * **The start-time failure of the core that waiting fixes most often.** A database in crash
+ * recovery, one that started a moment after us, or one behind a network that is not up yet is
+ * still there five minutes later; a schema the core refuses or a password the database refuses is
+ * still wrong. `docs/administration.md`, *What a start failure does*, has every case and what the
+ * core does with it (`P-215`, `P-222`). Until this existed the
  * first query threw, the process exited 1, and `Restart=on-failure` five seconds later was the
  * whole mechanism for waiting. That is also what made a start limit unsafe: `StartLimitBurst`
  * counts every restart, so a limit that stops a core killed at its memory ceiling would equally
@@ -37,16 +38,29 @@ const MAX_DELAY_MS = 5_000;
  */
 const EXTEND_MARGIN_MS = 5_000;
 
+/**
+ * What a failure to reach the database means for start-up (`P-222`; the table is in
+ * `docs/administration.md`, *What a start failure does*).
+ *
+ * - `transient`: the database is not there *yet*, or not reachable *yet*. Waited for, in rounds.
+ * - `configuration`: the database answered and refused what this core was configured with — a
+ *   password, a user, a database name, TLS. Restarting reads the same file and is refused again,
+ *   so the core exits 78 (`EX_CONFIG`) and systemd does not restart it.
+ * - `unknown`: nothing recognised it. Exits 1, and systemd restarts it, as every failure did before.
+ */
+export type DatabaseFailureKind = 'transient' | 'configuration' | 'unknown';
+
 /** Whether waiting could fix a failure to reach the database, and why, in words for a log. */
 export interface DatabaseFailure {
+  readonly kind: DatabaseFailureKind;
   readonly transient: boolean;
-  /** Node's `code` or PostgreSQL's SQLSTATE, whichever the failure carried. */
+  /** Node's `code`, PostgreSQL's SQLSTATE or TLS's reason, whichever the failure carried. */
   readonly code: string | undefined;
   readonly reason: string;
 }
 
 /**
- * Errors that describe a database that is not there *yet*.
+ * Codes that describe a database that is not there, or not reachable, *yet*.
  *
  * Node's socket and resolver codes and PostgreSQL's SQLSTATEs share one namespace here, because
  * `pg` puts either on `.code` and callers have no other way to tell them apart.
@@ -54,9 +68,16 @@ export interface DatabaseFailure {
 const TRANSIENT_CODES: ReadonlyMap<string, string> = new Map([
   ['ECONNREFUSED', 'nothing is listening yet'],
   ['ECONNRESET', 'the connection was reset'],
+  ['ECONNABORTED', 'the connection was aborted'],
+  ['EPIPE', 'the connection was closed while starting'],
   ['ETIMEDOUT', 'the connection timed out'],
   ['EHOSTUNREACH', 'the host is unreachable'],
+  ['EHOSTDOWN', 'the host is down'],
   ['ENETUNREACH', 'the network is unreachable'],
+  ['ENETDOWN', 'the network is down'],
+  // A unix-socket host (`/var/run/postgresql`): PostgreSQL removes its socket file when it stops,
+  // so "not running" is ENOENT there where it is ECONNREFUSED over TCP.
+  ['ENOENT', 'the socket file is not there: PostgreSQL is not running yet'],
   // The resolver is not up yet, which at boot is ordinary.
   ['EAI_AGAIN', 'the name could not be resolved yet'],
   // **Ambiguous, and retried anyway** (`P-209` died on exactly this: `getaddrinfo ENOTFOUND
@@ -64,10 +85,67 @@ const TRANSIENT_CODES: ReadonlyMap<string, string> = new Map([
   // DNS record behind a slow DHCP lease — is not. Neither can be told from the other here, so the
   // bound decides, and the log line names the host so that a typo is readable as one.
   ['ENOTFOUND', 'the name does not resolve'],
+  // A clock not yet set at boot makes every certificate look issued in the future.
+  ['CERT_NOT_YET_VALID', "the server's certificate is not valid yet: is this host's clock set?"],
   // `cannot_connect_now`: starting up, shutting down, or in crash recovery.
   ['57P03', 'PostgreSQL is starting up or recovering'],
+  // A connection PostgreSQL ended as it shut down or crashed.
+  ['57P01', 'PostgreSQL was shut down by an administrator'],
+  ['57P02', 'PostgreSQL crashed and is restarting'],
   ['53300', 'PostgreSQL has no connection slots free'],
+  ['08006', 'the connection to PostgreSQL failed'],
+  ['08001', 'PostgreSQL could not be reached'],
 ]);
+
+/**
+ * Codes that say the database answered and refused what this core was configured with.
+ *
+ * Nothing here gets better by waiting, and a core that restarted into them five times used up
+ * the units' start limit, so that the operator's own restart after fixing the file was refused.
+ */
+const CONFIGURATION_CODES: ReadonlyMap<string, string> = new Map([
+  ['28P01', 'refused the password'],
+  ['28000', 'refused this user (pg_hba.conf, or a role that may not log in)'],
+  ['3D000', 'has no such database'],
+  ['42501', 'refused this user permission to connect'],
+  ['DEPTH_ZERO_SELF_SIGNED_CERT', 'presented a self-signed certificate this core does not trust'],
+  ['SELF_SIGNED_CERT_IN_CHAIN', 'presented a certificate chain this core does not trust'],
+  ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'presented a certificate this core cannot verify'],
+  [
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'presented a certificate whose issuer this core does not trust',
+  ],
+  ['ERR_TLS_CERT_ALTNAME_INVALID', 'presented a certificate for a different host name'],
+  ['CERT_HAS_EXPIRED', 'presented an expired certificate'],
+]);
+
+/**
+ * Failures `pg` and `pg-pool` raise with no code at all, recognised by their text — the only
+ * place here that reads messages, and only because the libraries leave nothing else to switch on.
+ * Each is the library's own wording (`pg-pool` 3, `pg` 8), and each has a test that provokes it
+ * from the real driver rather than building the error by hand.
+ */
+const TRANSIENT_MESSAGES: readonly [RegExp, string][] = [
+  // `pg-pool`'s own timer on a *new* connection — every attempt at start-up, when the pool has
+  // no clients. A host that drops packets rather than refusing them gives exactly this.
+  [/Connection terminated due to connection timeout/i, 'the connection timed out'],
+  // The same timer, for a caller queued behind a full pool.
+  [/timeout exceeded when trying to connect/i, 'the connection timed out'],
+  // `pg`'s own `connectionTimeoutMillis`, when it fires before the pool's.
+  [/^timeout expired$/i, 'the connection timed out'],
+  // The server, or something in front of it, closed the socket before answering.
+  [/Connection terminated unexpectedly/i, 'the connection was closed before PostgreSQL answered'],
+];
+
+const CONFIGURATION_MESSAGES: readonly [RegExp, string][] = [
+  // `database.password` empty or absent while the server asks for SCRAM: every fresh install
+  // before step 3 of `installation.md`.
+  [
+    /client password must be a (non-empty )?string/i,
+    'asked for a password, and none is configured',
+  ],
+  [/The server does not support SSL connections/i, 'does not accept TLS, and `database.ssl` is on'],
+];
 
 /**
  * Every `.code` along an error's `cause` chain, outermost first.
@@ -103,33 +181,42 @@ function messages(error: unknown): string[] {
   return found;
 }
 
+function verdict(
+  kind: DatabaseFailureKind,
+  code: string | undefined,
+  reason: string,
+): DatabaseFailure {
+  return { kind, transient: kind === 'transient', code, reason };
+}
+
 /**
- * Decides whether waiting could fix this.
+ * Decides what a failure to reach the database means: wait, refuse, or neither known.
  *
- * **Permanent unless shown otherwise.** Bad credentials (`28P01`), a database that does not exist
- * (`3D000`), a permission refused — retrying those for five minutes only postpones the sentence an
- * operator needs, so anything not recognised fails at once, as every start failure did before.
+ * **By what the error says happened, not by which codes someone thought of** (`P-222`). The first
+ * version recognised one code-less timeout — the one `pg-pool` raises for a caller queued behind a
+ * full pool, which start-up never is — so a database behind a firewall that drops packets was
+ * classed permanent, and under the units' start limit the core was `failed` in eighty seconds and
+ * stayed there after the database came back. Codes are read first, down the whole chain; the
+ * libraries' code-less failures are read by their text after that.
  */
 export function classifyDatabaseFailure(error: unknown): DatabaseFailure {
   const all = codes(error);
   for (const code of all) {
-    const reason = TRANSIENT_CODES.get(code);
-    if (reason !== undefined) return { transient: true, code, reason };
+    const transient = TRANSIENT_CODES.get(code);
+    if (transient !== undefined) return verdict('transient', code, transient);
+    const configuration = CONFIGURATION_CODES.get(code);
+    if (configuration !== undefined) return verdict('configuration', code, configuration);
   }
-  // `pg-pool` rejects a connection that outlasts `connectTimeoutMs` with a bare `Error` and no
-  // code at all, so this one is recognised by its text — the only place here that does that, and
-  // only because the library leaves nothing else to switch on.
-  if (
-    all.length === 0 &&
-    messages(error).some((text) => /timeout exceeded when trying to connect/i.test(text))
-  ) {
-    return { transient: true, code: undefined, reason: 'the connection timed out' };
+  const texts = messages(error);
+  for (const [pattern, reason] of CONFIGURATION_MESSAGES) {
+    if (texts.some((text) => pattern.test(text))) return verdict('configuration', all[0], reason);
   }
-  return {
-    transient: false,
-    code: all[0],
-    reason: describeError(error).message,
-  };
+  if (all.length === 0) {
+    for (const [pattern, reason] of TRANSIENT_MESSAGES) {
+      if (texts.some((text) => pattern.test(text))) return verdict('transient', undefined, reason);
+    }
+  }
+  return verdict('unknown', all[0], describeError(error).message);
 }
 
 export interface DatabaseWaitOptions {
@@ -150,11 +237,24 @@ export interface DatabaseWaitOptions {
 }
 
 /**
+ * How long the rest of start-up is given once the database answers. `EXTEND_TIMEOUT_USEC` only
+ * ever moves systemd's deadline later, so without this a wait that ran past `TimeoutStartSec` left
+ * everything after it — schema, sweeps, listeners — only what the last attempt's extension had
+ * over (`P-222`).
+ */
+export const AFTER_DATABASE_MS = 60_000;
+
+/**
  * `check()`, repeated while the failure is one that waiting fixes and the bound allows.
  *
- * Returns what `check()` returns. Throws the last error unchanged once the bound is reached or the
- * failure is permanent, so what reaches `main().catch` — and the journal — is the same diagnosis
- * the core gave before this existed.
+ * Returns what `check()` returns. A failure waiting fixes is thrown unchanged once the bound is
+ * reached, and the process exits 1 so that systemd starts it again. A failure that only a changed
+ * configuration fixes is thrown at once as a `ConfigError`, which exits 78 so that systemd does
+ * not (`P-222`). Anything unrecognised is thrown unchanged at once, as before this existed.
+ *
+ * **Every attempt is inside an extension**, the first included: a `connectTimeoutMs` longer than
+ * `TimeoutStartSec` would otherwise have its first attempt killed, five times, before it could fail
+ * and be retried.
  */
 export async function waitForDatabase(
   options: DatabaseWaitOptions,
@@ -171,6 +271,10 @@ export async function waitForDatabase(
 
   const started = now();
   let delay = FIRST_DELAY_MS;
+  options.starting?.(
+    `connecting to PostgreSQL at ${options.target}`,
+    options.attemptTimeoutMs + EXTEND_MARGIN_MS,
+  );
   for (let attempt = 1; ; attempt += 1) {
     try {
       const result = await options.check();
@@ -180,10 +284,28 @@ export async function waitForDatabase(
           'the database is reachable; continuing start-up',
         );
       }
+      options.starting?.(
+        `PostgreSQL at ${options.target} is reachable; starting`,
+        AFTER_DATABASE_MS,
+      );
       return result;
     } catch (error) {
       const failure = classifyDatabaseFailure(error);
       const waitedMs = now() - started;
+      if (failure.kind === 'configuration') {
+        throw new ConfigError(
+          `PostgreSQL at ${options.target} ${failure.reason}` +
+            (failure.code === undefined ? '' : ` (${failure.code})`) +
+            `: ${describeError(error).message}`,
+          {
+            context: {
+              database: options.target,
+              ...(failure.code === undefined ? {} : { code: failure.code }),
+            },
+            cause: error,
+          },
+        );
+      }
       if (!failure.transient) throw error;
       if (waitedMs + delay > maxWaitMs) {
         logger.error(

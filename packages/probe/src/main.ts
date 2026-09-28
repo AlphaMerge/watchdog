@@ -2,11 +2,12 @@
 import {
   bootstrap,
   describeBuild,
-  describeError,
   probeConfigSchema,
   runConfigCheck,
   type ProbeConfig,
   type SensorAssignment,
+  startFailure,
+  waitForLocalAddress,
 } from '@ms/shared';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
@@ -239,6 +240,15 @@ async function main(): Promise<void> {
       })
     : undefined;
   if (trapListener !== undefined) {
+    // A specific address that this host does not have yet, at boot, is waited for (`P-222`).
+    await waitForLocalAddress({
+      address: config.trapListener.address,
+      what: 'SNMP trap listener',
+      logger,
+      starting: (status, ms) => {
+        lifecycle.starting(status, ms);
+      },
+    });
     await trapListener.start();
     lifecycle.onShutdown({
       name: 'trap-listener',
@@ -260,6 +270,14 @@ async function main(): Promise<void> {
       })
     : undefined;
   if (syslogListener !== undefined) {
+    await waitForLocalAddress({
+      address: config.syslogListener.address,
+      what: 'syslog listener',
+      logger,
+      starting: (status, ms) => {
+        lifecycle.starting(status, ms);
+      },
+    });
     await syslogListener.start();
     lifecycle.onShutdown({
       name: 'syslog-listener',
@@ -511,6 +529,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`fatal: ${describeError(error).message}\n`);
-  process.exit(1);
+  const { status, line } = startFailure(error);
+  process.stderr.write(line);
+  process.exit(status);
 });

@@ -404,7 +404,6 @@ async function watch(name, stageName, hold, done = () => false) {
 tryCtl(['stop', 'ms-core']);
 freshLimit();
 tryCtl(['stop', 'postgresql']);
-const coreBefore = unit('ms-core').restarts;
 tryCtl(['start', '--no-block', 'ms-core']);
 const waited = await watch('ms-core', 'core started, database stopped', 90_000);
 tryCtl(['start', 'postgresql']);
@@ -419,7 +418,8 @@ emit({
   case: 'core waits for its database',
   stateAt90s: waited.state,
   statusAt90s: waited.status,
-  restartsWhileWaiting: waited.restarts - coreBefore,
+  // Zeroed by the `reset-failed` above, so the count is this case's own.
+  restartsWhileWaiting: waited.restarts,
   finalState: cameUp.state,
 });
 
@@ -427,7 +427,6 @@ emit({
 // into the refusal would show it here.
 const configFile = '/etc/ms/core.json';
 const original = readFileSync(configFile, 'utf8');
-const refusedBefore = unit('ms-core').restarts;
 try {
   writeFileSync(configFile, '{ "this is": not json');
   emit({ kind: 'set', property: `${configFile} made unreadable` });
@@ -441,7 +440,9 @@ try {
     // `exit-code` with 78 is the refusal; `start-limit-hit` means the case never ran.
     result: refused.result,
     exitStatus: refused.exitStatus,
-    restarts: refused.restarts - refusedBefore,
+    // No baseline to subtract: `reset-failed` and the manual restart both zero `NRestarts`, so what
+    // it reads now is this case's alone (`P-222`).
+    restarts: refused.restarts,
   });
 } finally {
   writeFileSync(configFile, original);

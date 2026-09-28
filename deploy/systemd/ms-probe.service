@@ -15,11 +15,13 @@ After=ms-core.service
 # five starts inside ten minutes systemd refuses the sixth: the unit is `failed`, `systemctl status`
 # says "start request repeated too quickly", and the core raises one or two alarms on the link
 # rather than one per round (36-45 an hour without this, 1-2 with it). It lives in [Unit]
-# because systemd 229 moved it there; in [Service] it is silently ignored. Ten minutes rather
+# because systemd 229 moved it there; in [Service] systemd warns and ignores it. Ten minutes rather
 # than five so that it also stops a probe that lasts a minute or two before the ceiling takes it:
-# any loop under two minutes a round. Nothing in the probe's start waits on anything else, so this
-# only ever stops a probe that cannot start. After raising
-# the ceiling, `systemctl reset-failed ms-probe` and start it. RestartSteps= would back off
+# any loop under two minutes a round. **Safe only because nothing a restart could fix costs a
+# start** (P-222): a listen address not assigned yet is waited for in the process, five minutes a
+# round, and a refused configuration exits 78, which is not restarted. The table is in
+# docs/administration.md, "What a start failure does". After raising the ceiling,
+# `systemctl reset-failed ms-probe` and start it. RestartSteps= would back off
 # instead of stopping, but needs systemd 254; Debian 12 and RHEL 9 ship 252.
 StartLimitIntervalSec=600
 StartLimitBurst=5

@@ -288,13 +288,14 @@ limit is for.
 
 ### A core that is still starting
 
-A core does not report itself running until it can serve, and there are two things it will wait
-for rather than fail on (`P-215`, [findings](findings/2026-09-28-start-exits.md)). **Core Health cannot tell you about either**, because the core is
-not up yet: the service log and `systemctl status ms-core` are the only places they show. Both keep
-systemd waiting on purpose, so the unit sits in `activating` rather than failing and restarting.
+A core does not report itself running until it can serve, and there are things it will wait for
+rather than fail on (`P-215`, `P-222`; [findings](findings/2026-09-28-start-exits.md)). **Core
+Health cannot tell you about any of them**, because the core is not up yet: the service log and
+`systemctl status ms-core` are the only places they show. Every wait keeps systemd waiting on
+purpose, so the unit sits in `activating` rather than failing and restarting.
 
-**Waiting for PostgreSQL.** A database still in crash recovery, or started a moment after the
-core, is waited for, up to five minutes:
+**Waiting for PostgreSQL.** A database that is not there *yet* is waited for, up to five minutes a
+round:
 
 ```
 Status: "waiting for PostgreSQL at db.example.com:5432/monitoring: PostgreSQL is starting up or recovering (attempt 7, 41 s)"
@@ -302,11 +303,23 @@ Status: "waiting for PostgreSQL at db.example.com:5432/monitoring: PostgreSQL is
 
 Every attempt is logged with its reason. After five minutes the core exits, and systemd starts it
 again five seconds later, which waits another five minutes. A database that stays down is
-therefore waited for indefinitely, in five-minute rounds — at most two starts in any ten minutes,
-which never reaches the unit's start limit. What it does **not** wait for is a wrong password, a database that does not exist, or
-a permission refused. Those fail at once, because waiting would only postpone the error message.
-A host name that does not resolve *is* waited for, because at boot it may not be published yet,
-so check that the name in the log is the one you meant.
+therefore waited for indefinitely, in five-minute rounds, at most two starts in any ten minutes,
+which never reaches the unit's start limit. A host name that does not resolve *is* waited for,
+because at boot it may not be published yet, so check that the name in the log is the one you
+meant. What the database *refuses* is not waited for; see the table below.
+
+**Waiting for the migration lock.** Every migration run takes one lock first, so that two cores
+starting together cannot both migrate. If another session holds it, the core says whose it is:
+
+```
+Status: "waiting for the migration lock, held by PostgreSQL session 81234 (ms-core from 10.0.0.5, idle for 3140 s), 45 s so far"
+```
+
+The holder is almost always an `ms-core migrate` run in progress, which you should let finish, or
+the session of a core whose host died in the middle of an upgrade. PostgreSQL keeps that one
+until TCP keepalive notices, about two hours by default. If the session is `idle` and its client is
+a machine that is down, end it with `SELECT pg_terminate_backend(<pid>);`, and the core carries on
+by itself.
 
 **Applying a migration.** An upgrade migrates the schema at start-up when `database.autoMigrate`
 is set, which it is by default. A migration reports itself every fifteen seconds for as long as it
@@ -346,9 +359,44 @@ whoever owns it to commit or roll back. If they can't be found and you are sure 
 you need, end it with `SELECT pg_terminate_backend(<blocking_pid>);`. The migration continues by
 itself the moment the lock is free, with no restart needed.
 
-A configuration the core or the probe refuses — exit status 78 — is not retried at all: the unit
-stops at once with the reason at the top of `systemctl status`, rather than restarting every five
-seconds into the same refusal. Fix the file, then `systemctl reset-failed` and start it.
+**Waiting for a listen address.** A listener configured on a specific address (`api.host`,
+`probeEndpoint.host`, the probe's syslog and trap listeners) waits up to five minutes a round for
+this host to have that address. At boot a DHCP lease on a second interface, a VLAN, a bridge or a
+virtual IP can arrive after `network-online.target`. The wildcard and loopback defaults never wait.
+
+### What a start failure does
+
+**The rule: the units' start limit is only safe if everything a restart could fix is waited for
+where it happens, or classed as transient.** Five starts inside ten minutes leave a unit `failed`,
+and a `failed` core is silent (`P-215`). So nothing that fixes itself may cost a start, and nothing
+a person must fix may be restarted into: it stops at once, and the next start is yours. This table
+is the one place that says which is which. The code that decides is
+`packages/core/src/db/wait.ts` for the database and `packages/shared/src/lifecycle/` for the rest.
+
+| At start-up                                                                                                 | What the service does                           | What you see                                          |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------- |
+| PostgreSQL not listening, recovering, shutting down, out of connection slots, or its socket file absent     | Waits, five minutes a round                     | `waiting for PostgreSQL at …` in `systemctl status`   |
+| PostgreSQL's host unreachable, dropping packets, or closing the connection before answering                 | Waits, five minutes a round                     | the same, with *the connection timed out* or similar  |
+| The database host name does not resolve, or the resolver is not up                                          | Waits, five minutes a round                     | the same; check the name is the one you meant         |
+| PostgreSQL's certificate not valid *yet* (a clock not set at boot)                                          | Waits, five minutes a round                     | the same                                              |
+| Another session holds the migration lock                                                                    | Waits, for as long as it is held                | `waiting for the migration lock, held by …`           |
+| A migration running                                                                                         | Waits, for as long as it runs                   | `applying migration N (name), … s so far`             |
+| A configured listen address this host does not have yet                                                     | Waits, five minutes a round                     | `waiting for <address> to be assigned to this host …` |
+| A configuration file that is invalid                                                                        | Stops, exit 78, no restart                      | `Configuration error: …`, unit `failed`               |
+| PostgreSQL refuses the password (including none configured), the user, the database name or its permission | Stops, exit 78, no restart                      | `Configuration error: PostgreSQL at … refused …`      |
+| PostgreSQL's certificate untrusted, expired or for another name, or TLS on where the server has none        | Stops, exit 78, no restart                      | `Configuration error: …`                              |
+| The schema is behind with `autoMigrate` off, newer than this build, or an applied migration was edited      | Stops, exit 78, no restart                      | `Configuration error: …`                              |
+| Anything else — a port in use, a missing permission, a crash, a failure nobody has classified               | Exits 1; systemd restarts it, up to the limit   | `fatal: …`; after five in ten minutes, `failed`       |
+
+**After exit 78, fix the cause and start the service**: `sudo systemctl start ms-core` works,
+because the refusal used one start of the five. After a unit is `failed` with *start request
+repeated too quickly*, or whenever you have restarted it several times while trying something,
+clear the count first:
+
+```
+sudo systemctl reset-failed ms-core ms-probe
+sudo systemctl start ms-core ms-probe
+```
 
 ### Prometheus
 
