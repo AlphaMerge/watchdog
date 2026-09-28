@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import {
   AccessService,
@@ -15,7 +16,7 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, testActor } from './support/tree.js';
+import { actorNamed, buildHarness, testActor } from './support/tree.js';
 
 /**
  * Per-object access rights (`A-03`), and `PLAN.md` Phase 9's first exit criterion: **an
@@ -74,7 +75,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     await db.query('DELETE FROM user_account');
     await db.query('DELETE FROM object WHERE parent_id IS NOT NULL');
 
-    access = new AccessService({ db, logger: silentLogger });
+    access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
     accounts = new AccountService({ db, logger: silentLogger });
     groups = new GroupService({ db, logger: silentLogger });
 
@@ -258,7 +259,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
         const idOf = { probe: probeId, group: groupId, device: deviceId, sensor: sensorId };
         const groupOf = { alpha: alphaId, beta: betaId, gamma: gammaId };
         for (const grant of row.grants) {
-          await access.grant(idOf[grant.on], groupOf[grant.group], grant.right, 'test');
+          await access.grant(idOf[grant.on], groupOf[grant.group], grant.right, actorNamed('test'));
         }
         assert.equal(await rightAt(idOf[row.ask]), row.expect);
       });
@@ -267,7 +268,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
   describe('membership is what makes a grant apply', () => {
     it('gives nothing for a group the account has left', async () => {
-      await access.grant(deviceId, alphaId, 'full', 'test');
+      await access.grant(deviceId, alphaId, 'full', actorNamed('test'));
       assert.equal(await rightAt(deviceId), 'full');
 
       await groups.removeMember(alphaId, userId);
@@ -280,7 +281,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
         password: 'correct-horse-battery',
         role: 'readwrite',
       });
-      await access.grant(probeId, alphaId, 'full', 'test');
+      await access.grant(probeId, alphaId, 'full', actorNamed('test'));
       assert.equal((await access.resolve(stranger.id, sensorId)).right, 'none');
     });
   });
@@ -303,7 +304,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       const admins = (await groups.list()).find((g) => g.isAdmin);
       assert.ok(admins);
       await groups.addMember(admins.id, userId);
-      await access.grant(sensorId, alphaId, 'none', 'test');
+      await access.grant(sensorId, alphaId, 'none', actorNamed('test'));
       assert.equal((await access.resolve(userId, sensorId)).right, 'full');
     });
   });
@@ -312,7 +313,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('names the object and group a right came from', async () => {
       // An administrator debugging "why can this person see that?" needs the source, not just
       // the answer.
-      await access.grant(deviceId, alphaId, 'write', 'test');
+      await access.grant(deviceId, alphaId, 'write', actorNamed('test'));
       const resolved = await access.resolve(userId, sensorId);
       assert.equal(resolved.right, 'write');
       assert.equal(resolved.sourceObjectId, deviceId);
@@ -321,7 +322,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     });
 
     it('says a right was explicit when it sits on the object itself', async () => {
-      await access.grant(sensorId, alphaId, 'read', 'test');
+      await access.grant(sensorId, alphaId, 'read', actorNamed('test'));
       const resolved = await access.resolve(userId, sensorId);
       assert.equal(resolved.inherited, false);
       assert.equal(resolved.sourceObjectId, sensorId);
@@ -330,8 +331,8 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
   describe('granting and revoking', () => {
     it('replaces a grant rather than duplicating it', async () => {
-      await access.grant(deviceId, alphaId, 'read', 'test');
-      await access.grant(deviceId, alphaId, 'full', 'test');
+      await access.grant(deviceId, alphaId, 'read', actorNamed('test'));
+      await access.grant(deviceId, alphaId, 'full', actorNamed('test'));
       const grants = await access.grantsOn(deviceId);
       assert.equal(grants.length, 1);
       assert.equal(grants[0]?.right, 'full');
@@ -340,27 +341,27 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('revoking restores inheritance, which granting none does not', async () => {
       // The two are different tools and an administrator needs both: one undoes a mistake, the
       // other carves a hole in a branch somebody else has access to.
-      await access.grant(probeId, alphaId, 'write', 'test');
-      await access.grant(deviceId, alphaId, 'none', 'test');
+      await access.grant(probeId, alphaId, 'write', actorNamed('test'));
+      await access.grant(deviceId, alphaId, 'none', actorNamed('test'));
       assert.equal(await rightAt(sensorId), 'none');
 
-      assert.equal(await access.revoke(deviceId, alphaId), true);
+      assert.equal(await access.revoke(deviceId, alphaId, actorNamed('test')), true);
       assert.equal(await rightAt(sensorId), 'write', 'back to what it inherits');
     });
 
     it('reports revoking something that was never there', async () => {
-      assert.equal(await access.revoke(deviceId, alphaId), false);
+      assert.equal(await access.revoke(deviceId, alphaId, actorNamed('test')), false);
     });
 
     it('refuses a grant on an object that does not exist', async () => {
       await assert.rejects(
-        () => access.grant(999_999, alphaId, 'read', 'test'),
+        () => access.grant(999_999, alphaId, 'read', actorNamed('test')),
         /no such object or group/,
       );
     });
 
     it('goes away with the object it was granted on', async () => {
-      await access.grant(deviceId, alphaId, 'full', 'test');
+      await access.grant(deviceId, alphaId, 'full', actorNamed('test'));
       await harness.service.delete(
         testActor,
         deviceId,
@@ -375,9 +376,9 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
     it('agrees with resolving them one at a time', async () => {
       // The list view asks for a page of objects. A second implementation that disagreed with
       // the first would be an access-control bug that only shows up in a list.
-      await access.grant(probeId, alphaId, 'read', 'test');
-      await access.grant(deviceId, betaId, 'full', 'test');
-      await access.grant(sensorId, alphaId, 'none', 'test');
+      await access.grant(probeId, alphaId, 'read', actorNamed('test'));
+      await access.grant(deviceId, betaId, 'full', actorNamed('test'));
+      await access.grant(sensorId, alphaId, 'none', actorNamed('test'));
 
       const ids = [probeId, groupId, deviceId, sensorId];
       const many = await access.resolveMany(userId, ids);
@@ -513,7 +514,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
           const on = ids[Math.floor(next() * ids.length)] ?? harness.rootId;
           const group = groupIds[Math.floor(next() * groupIds.length)] ?? alphaId;
           const right = RIGHTS[Math.floor(next() * RIGHTS.length)] ?? 'none';
-          await access.grant(on, group, right, 'agreement');
+          await access.grant(on, group, right, actorNamed('agreement'));
         }
 
         for (const { name, principal } of principals) {
@@ -604,7 +605,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       // The state log and the notification log outlive their sensors. A reader granted the root
       // with no holes gets no walk at all — and without `mayBeDeleted` a row naming a sensor that
       // no longer exists would pass, although the resolver answers `none` for it.
-      await access.grant(harness.rootId, alphaId, 'read', 'test');
+      await access.grant(harness.rootId, alphaId, 'read', actorNamed('test'));
       const visibility = await access.visibilityFor({ userId, role: 'readwrite' });
       const gone = 2 ** 40;
       assert.deepEqual(
@@ -629,7 +630,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       const epoch = async (): Promise<number> => access.epoch();
       let before = await epoch();
 
-      await access.grant(deviceId, alphaId, 'read', 'test');
+      await access.grant(deviceId, alphaId, 'read', actorNamed('test'));
       assert.ok((await epoch()) > before, 'a grant did not move it');
       before = await epoch();
 
@@ -653,12 +654,12 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
   describe('requiring a right', () => {
     it('passes when the account holds more than enough', async () => {
-      await access.grant(deviceId, alphaId, 'full', 'test');
+      await access.grant(deviceId, alphaId, 'full', actorNamed('test'));
       await access.require(userId, deviceId, 'read');
     });
 
     it('refuses with what was held and what was needed', async () => {
-      await access.grant(deviceId, alphaId, 'read', 'test');
+      await access.grant(deviceId, alphaId, 'read', actorNamed('test'));
       await assert.rejects(
         () => access.require(userId, deviceId, 'write'),
         (error: unknown) => {

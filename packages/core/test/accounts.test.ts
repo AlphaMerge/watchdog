@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
@@ -178,7 +179,11 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       const account = await accounts.byLogin('admin');
       assert.ok(account !== null, 'the bootstrap account exists');
 
-      const access = new AccessService({ db, logger: silentLogger });
+      const access = new AccessService({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+      });
       const resolved = await access.resolve(account.id, 999_999);
       assert.equal(resolved.right, 'full');
       assert.equal(

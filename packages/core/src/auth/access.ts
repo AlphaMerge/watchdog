@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import type { Actor, AuditSink } from '../objects/audit.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { AccountRole } from './accounts.js';
 import { AuthError } from './errors.js';
@@ -397,18 +398,39 @@ export class Visibility {
   }
 }
 
+/**
+ * Who granted a right, as a `granted_by` column stores it: a login, or nothing for a non-person.
+ *
+ * The audit entry carries the whole actor; this column is the short answer a grants list shows.
+ * Here rather than beside the flat grants that also use it, because they import from this module
+ * and an object grant is the older of the two.
+ */
+export function grantedByLabel(actor: Actor): string {
+  return actor.kind === 'user' ? actor.login.slice(0, 64) : '';
+}
+
 export interface AccessServiceOptions {
   db: Database;
+  /**
+   * Where a grant on an object is recorded, inside the grant's own transaction (`A-17`).
+   *
+   * Required, although most of this service only reads: a grant decides who sees a branch of the
+   * tree, and a sink that could be left out is how one was — object grants went unaudited from
+   * `A-02` until this ticket, while every edit to what they protect was recorded.
+   */
+  audit: AuditSink;
   logger: Logger;
 }
 
 export class AccessService {
   readonly #db: Database;
+  readonly #audit: AuditSink;
   readonly #logger: Logger;
   #rootId: number | undefined;
 
   constructor(options: AccessServiceOptions) {
     this.#db = options.db;
+    this.#audit = options.audit;
     this.#logger = options.logger.child({ component: 'access' });
   }
 
@@ -711,29 +733,70 @@ export class AccessService {
     }));
   }
 
+  /**
+   * Grants a group a right on an object, replacing any it held: granting twice is a correction.
+   *
+   * **Audited in the grant's own transaction** (`A-17`), with what the group held here before, so
+   * "who gave that group `full` on this branch?" has an answer, and a grant that fails leaves no
+   * entry describing it. The entry carries the object's id and so appears in that object's history
+   * beside its edits.
+   *
+   * The group is read rather than its foreign key caught: the entry needs its name and what it held
+   * here, and the check that it exists is that same row. A missing object is still caught at the
+   * insert, which is the last statement before the transaction rolls back.
+   */
   async grant(
     objectId: number,
     groupId: number,
     right: AccessRight,
-    grantedBy: string,
+    actor: Actor,
+    now = new Date(),
   ): Promise<void> {
-    try {
-      await this.#db.query(
-        `INSERT INTO object_access (object_id, group_id, right_, granted_by)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (object_id, group_id)
-         DO UPDATE SET right_ = EXCLUDED.right_, granted_by = EXCLUDED.granted_by,
-                       granted_at = now()`,
-        [objectId, groupId, right, grantedBy.slice(0, 64)],
-      );
-    } catch (error: unknown) {
-      throw new AuthError('ACCESS_TARGET_MISSING', 'no such object or group', {
+    const missing = (cause: string): AuthError =>
+      new AuthError('ACCESS_TARGET_MISSING', 'no such object or group', {
         objectId,
         groupId,
-        cause: error instanceof Error ? error.message.slice(0, 200) : 'unknown',
+        cause,
       });
-    }
-    this.#logger.info({ objectId, groupId, right, grantedBy }, 'access granted');
+    await this.#db.tx(async (q) => {
+      const found = await q.query<{ name: string; right_: AccessRight | null }>(
+        `SELECT g.name, a.right_ FROM user_group g
+         LEFT JOIN object_access a ON a.group_id = g.id AND a.object_id = $1
+         WHERE g.id = $2`,
+        [objectId, groupId],
+      );
+      const group = found[0];
+      if (group === undefined) throw missing('no such group');
+      try {
+        await q.query(
+          `INSERT INTO object_access (object_id, group_id, right_, granted_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (object_id, group_id)
+           DO UPDATE SET right_ = EXCLUDED.right_, granted_by = EXCLUDED.granted_by,
+                         granted_at = now()`,
+          [objectId, groupId, right, grantedByLabel(actor)],
+        );
+      } catch (error: unknown) {
+        throw missing(error instanceof Error ? error.message.slice(0, 200) : 'unknown');
+      }
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'grant.set',
+            objectId,
+            subject: { kind: 'object', id: objectId },
+            groupId,
+            groupName: group.name,
+            before: group.right_,
+            after: right,
+          },
+        ],
+        now,
+      );
+    });
+    this.#logger.info({ objectId, groupId, right, actor }, 'access granted');
   }
 
   /**
@@ -741,14 +804,40 @@ export class AccessService {
    *
    * Not the same as granting `none`: revoking restores inheritance, while `none` *overrides* it.
    * An administrator needs both — one to undo a mistake, the other to carve a hole in a branch
-   * somebody else has access to.
+   * somebody else has access to. Audited as a grant is; a revoke that found nothing to take writes
+   * no entry, because nothing changed.
    */
-  async revoke(objectId: number, groupId: number): Promise<boolean> {
-    const rows = await this.#db.query<{ object_id: string }>(
-      `DELETE FROM object_access WHERE object_id = $1 AND group_id = $2
-       RETURNING object_id::text AS object_id`,
-      [objectId, groupId],
-    );
-    return rows.length > 0;
+  async revoke(
+    objectId: number,
+    groupId: number,
+    actor: Actor,
+    now = new Date(),
+  ): Promise<boolean> {
+    return this.#db.tx(async (q) => {
+      const rows = await q.query<{ right_: AccessRight; name: string }>(
+        `DELETE FROM object_access a USING user_group g
+         WHERE a.object_id = $1 AND a.group_id = $2 AND g.id = a.group_id
+         RETURNING a.right_, g.name`,
+        [objectId, groupId],
+      );
+      const removed = rows[0];
+      if (removed === undefined) return false;
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'grant.revoked',
+            objectId,
+            subject: { kind: 'object', id: objectId },
+            groupId,
+            groupName: removed.name,
+            before: removed.right_,
+          },
+        ],
+        now,
+      );
+      return true;
+    });
   }
 }

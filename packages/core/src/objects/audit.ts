@@ -356,8 +356,7 @@ export type Mutation =
        * Audited because a library decides what a group of people are shown. Somebody narrowing a
        * node's rule has decided that a class of sensor stops appearing in front of whoever works
        * from that library — the change nobody notices until the day a failure is not on the
-       * screen. Maps and reports are not audited at all, which `L-01` records as a gap rather
-       * than widening. Grants are logged and not audited, as every grant in this system is.
+       * screen. Its grants are `grant.set` and `grant.revoked`, as every grant is (`A-17`).
        */
       action: 'library.created';
       objectId: null;

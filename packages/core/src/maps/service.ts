@@ -1,13 +1,7 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import { atLeast, type AccessRight } from '../auth/access.js';
-import {
-  FlatAccess,
-  ceilingOf,
-  grantedByLabel,
-  verdict,
-  type FlatViewer,
-} from '../auth/flat-access.js';
+import { atLeast, grantedByLabel, type AccessRight } from '../auth/access.js';
+import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
 import type { Actor, AuditSink, MapAudit, MapBackgroundAudit } from '../objects/audit.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
 import { createHash } from 'node:crypto';

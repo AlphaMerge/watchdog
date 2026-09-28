@@ -22,6 +22,7 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
+  grantAuditSinks,
   libraryAuditSinks,
   mapAuditSinks,
   objectAuditSinks,
@@ -839,7 +840,11 @@ async function serve(): Promise<void> {
   const accounts = new AccountService({ db, logger });
   const sessions = new SessionService({ db, logger });
   const userGroups = new GroupService({ db, logger });
-  const objectAccess = new AccessService({ db, logger });
+  const objectAccess = new AccessService({
+    db,
+    audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
+    logger,
+  });
   const apiTokens = new TokenService({ db, logger });
   const mfa = new TotpService({ db, logger });
   const loginThrottle = new LoginThrottle({ db, logger });

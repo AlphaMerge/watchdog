@@ -51,7 +51,7 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
     db = scratch.db;
     const harness = await buildHarness(db);
     const accounts = new AccountService({ db, logger: silent });
-    const access = new AccessService({ db, logger: silent });
+    const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
 
     const server = new ApiServer({
       config: {

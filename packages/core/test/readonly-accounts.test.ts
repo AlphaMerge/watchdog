@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { AccessService, cappedBy, type AccessRight } from '../src/auth/access.js';
 import { AccountService, type AccountRole } from '../src/auth/accounts.js';
@@ -10,7 +11,7 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, testActor } from './support/tree.js';
+import { actorNamed, buildHarness, testActor } from './support/tree.js';
 
 /**
  * Read-only account restrictions (`A-04`).
@@ -54,7 +55,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
 
     accounts = new AccountService({ db, logger: silentLogger });
     groups = new GroupService({ db, logger: silentLogger });
-    access = new AccessService({ db, logger: silentLogger });
+    access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -86,7 +87,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // group membership is not a way to undo that.
       const account = await makeAccount('readonly');
       await groups.addMember(teamId, account.id);
-      await access.grant(deviceId, teamId, 'full', 'test');
+      await access.grant(deviceId, teamId, 'full', actorNamed('test'));
 
       assert.equal(
         (await access.resolve(account.id, deviceId)).right,
@@ -102,7 +103,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // "You have full on this device and may not edit it" is incomprehensible without this.
       const account = await makeAccount('readonly');
       await groups.addMember(teamId, account.id);
-      await access.grant(deviceId, teamId, 'full', 'test');
+      await access.grant(deviceId, teamId, 'full', actorNamed('test'));
 
       await assert.rejects(
         () => access.requireFor({ userId: account.id, role: 'readonly' }, deviceId, 'write'),
@@ -118,7 +119,7 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
     it('does not cap a read-write account', async () => {
       const account = await makeAccount('readwrite');
       await groups.addMember(teamId, account.id);
-      await access.grant(deviceId, teamId, 'full', 'test');
+      await access.grant(deviceId, teamId, 'full', actorNamed('test'));
       const resolved = await access.resolveFor({ userId: account.id, role: 'readwrite' }, deviceId);
       assert.equal(resolved.right, 'full');
       assert.equal(resolved.cappedByRole, undefined);

@@ -4,7 +4,7 @@ import type { AccessRight, AccessService } from '../../auth/access.js';
 import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import { actorFor, requireRole } from '../authentication.js';
-import { ADMIN, READS, auditGap } from '../authorization.js';
+import { ADMIN, READS } from '../authorization.js';
 
 export interface AccessRoutesOptions {
   access: AccessService;
@@ -171,9 +171,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/objects/:id/access/:groupId',
     {
-      // `A-17`'s own second half: object grants are audited once `A-12`'s rewrite of
-      // `auth/access.ts` has landed, and this declaration goes with it.
-      config: { ...ADMIN, ...auditGap('A-17') },
+      config: ADMIN,
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],
@@ -209,12 +207,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
     async (request) => {
       const { id, groupId } = request.params;
       const actor = actorFor(request);
-      await access.grant(
-        id,
-        groupId,
-        request.body.right,
-        actor.kind === 'user' ? actor.login : actor.kind,
-      );
+      await access.grant(id, groupId, request.body.right, actor);
       return { items: await access.grantsOn(id) };
     },
   );
@@ -222,9 +215,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
   app.delete<{ Params: { id: number; groupId: number } }>(
     '/objects/:id/access/:groupId',
     {
-      // `A-17`'s own second half: object grants are audited once `A-12`'s rewrite of
-      // `auth/access.ts` has landed, and this declaration goes with it.
-      config: { ...ADMIN, ...auditGap('A-17') },
+      config: ADMIN,
       preHandler: requireRole('admin'),
       schema: {
         tags: ['access'],
@@ -257,7 +248,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
     },
     async (request) => {
       const { id, groupId } = request.params;
-      const removed = await access.revoke(id, groupId);
+      const removed = await access.revoke(id, groupId, actorFor(request));
       return { removed, items: await access.grantsOn(id) };
     },
   );

@@ -93,7 +93,7 @@ describe('delivering a report', { skip: available ? false : 'no database' }, () 
         context: new ReportContext({
           db,
           repository,
-          access: new AccessService({ db, logger: silent }),
+          access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
           logger: silent,
         }),
         history: new HistoryService({ db, logger: silent }),

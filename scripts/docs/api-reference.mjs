@@ -129,7 +129,11 @@ const server = new ApiServer({
     sessions: new SessionService({ db: unusable, logger: silent }),
     throttle: new LoginThrottle({ db: unusable, logger: silent, sleep: () => Promise.resolve() }),
     groups: new GroupService({ db: unusable, logger: silent }),
-    access: new AccessService({ db: unusable, logger: silent }),
+    access: new AccessService({
+      db: unusable,
+      audit: { record: () => Promise.resolve() },
+      logger: silent,
+    }),
     tokens: new TokenService({ db: unusable, logger: silent }),
     totp: new TotpService({ db: unusable, logger: silent }),
     required: true,

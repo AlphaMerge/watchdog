@@ -60,7 +60,7 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
     const accounts = new AccountService({ db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
     const groups = new GroupService({ db, logger: silent });
-    const access = new AccessService({ db, logger: silent });
+    const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const history = new HistoryService({ db, logger: silent });
 
     const server = new ApiServer({

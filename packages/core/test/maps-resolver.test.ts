@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, describe, it } from 'node:test';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { AccessService } from '../src/auth/access.js';
@@ -220,7 +221,7 @@ describe(
 
       resolver = new MapResolver({
         db,
-        access: new AccessService({ db, logger: silent }),
+        access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
         history: new HistoryService({ db, logger: silent }),
       });
 

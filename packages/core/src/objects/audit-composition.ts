@@ -90,6 +90,19 @@ export function libraryAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging];
 }
 
+/**
+ * Granting or revoking a group's right on an object (`A-17`).
+ *
+ * **The record and nothing else**, though the grant is on the tree. What somebody is shown is
+ * resolved when they ask, and the visibility epoch that tells every cached answer it is stale is
+ * bumped by the grant's own statement (`A-12`, migration 052) — so no probe, cache, schedule or
+ * alarm chain holds anything a grant leaves stale. The configuration push above all would be
+ * wrong here: a grant changes who may look at a sensor, never what a probe scans.
+ */
+export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
 /** Editing the trigger library, which changes who is notified and not what is scanned. */
 export function triggerAuditSinks(all: AuditSinkSet): AuditSink[] {
   return [all.database, all.logging, all.triggerSync];

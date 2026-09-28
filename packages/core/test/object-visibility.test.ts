@@ -117,7 +117,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     harness = await buildHarness(db, { states: true });
 
     const accounts = new AccountService({ db, logger: silent });
-    access = new AccessService({ db, logger: silent });
+    access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     groups = new GroupService({ db, logger: silent });
     stream = new StateBroadcaster({ logger: silent });
 
@@ -441,12 +441,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
    */
   beforeEach(async () => {
     await db.query('DELETE FROM object_access');
-    await access.grant(branchId, teamId, 'read', 'visibility');
-    await access.grant(deviceId, teamId, 'write', 'visibility');
-    await access.grant(carvedSensorId, teamId, 'none', 'visibility');
-    await access.grant(carvedDeviceId, teamId, 'none', 'visibility');
-    await access.grant(regrantedId, teamId, 'read', 'visibility');
-    await access.grant(lonelySensorId, teamId, 'none', 'visibility');
+    await access.grant(branchId, teamId, 'read', actorNamed('visibility'));
+    await access.grant(deviceId, teamId, 'write', actorNamed('visibility'));
+    await access.grant(carvedSensorId, teamId, 'none', actorNamed('visibility'));
+    await access.grant(carvedDeviceId, teamId, 'none', actorNamed('visibility'));
+    await access.grant(regrantedId, teamId, 'read', actorNamed('visibility'));
+    await access.grant(lonelySensorId, teamId, 'none', actorNamed('visibility'));
   });
 
   const as = (login: string) => ({ cookie: cookies.get(login) ?? '' });
@@ -952,7 +952,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         await waitFor(admin, adminFrames, 'snapshot');
 
         // The branch is taken away while the socket is open, and then something in it changes.
-        await access.grant(branchId, teamId, 'none', 'visibility');
+        await access.grant(branchId, teamId, 'none', actorNamed('visibility'));
         const mark = branchFrames.length;
         await scan([pingId], true);
 

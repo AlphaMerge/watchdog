@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
+  grantAuditSinks,
   libraryAuditSinks,
   mapAuditSinks,
   objectAuditSinks,
@@ -76,6 +77,7 @@ describe('what each audited service tells', () => {
     assert.ok(!reportAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!libraryAuditSinks(all).includes(all.reachabilitySync));
     assert.ok(!mapAuditSinks(all).includes(all.reachabilitySync));
+    assert.ok(!grantAuditSinks(all).includes(all.reachabilitySync));
   });
 
   it('leaves the result cache and the alarm chain out of a schedule edit', () => {
@@ -107,5 +109,13 @@ describe('what each audited service tells', () => {
     assert.deepEqual(reportAuditSinks(all).map(all.named), ['database', 'logging']);
     assert.deepEqual(libraryAuditSinks(all).map(all.named), ['database', 'logging']);
     assert.deepEqual(mapAuditSinks(all).map(all.named), ['database', 'logging']);
+  });
+
+  it('keeps an object grant to the record alone, although it is on the tree', () => {
+    // What a grant changes is who is shown a branch, and that is resolved when they ask; the
+    // epoch that invalidates a cached answer moves with the grant's own statement (`A-12`). A
+    // configuration push here would send every probe a change none of them scans for (`A-17`).
+    const all = sinks();
+    assert.deepEqual(grantAuditSinks(all).map(all.named), ['database', 'logging']);
   });
 });

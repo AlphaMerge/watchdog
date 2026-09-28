@@ -1,7 +1,7 @@
 import type { Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, GrantSubject, Mutation } from '../objects/audit.js';
 import type { AccountRole } from './accounts.js';
-import { atLeast, cappedBy, lower, type AccessRight } from './access.js';
+import { atLeast, cappedBy, grantedByLabel, lower, type AccessRight } from './access.js';
 
 /**
  * Who may do what to a thing that is not in the object tree: a map, a report, a library (`L-01`).
@@ -101,15 +101,6 @@ export function grantedTo(grants: GrantTable, idColumn: string, groupsParam: str
       WHERE a.${grants.key} = ${idColumn} AND a.group_id = ANY(${groupsParam}::bigint[])
         AND a.right_ <> 'none'
     )`;
-}
-
-/**
- * Who granted a right, as a `granted_by` column stores it: a login, or nothing for a non-person.
- *
- * The audit entry carries the whole actor; this column is the short answer a grants list shows.
- */
-export function grantedByLabel(actor: Actor): string {
-  return actor.kind === 'user' ? actor.login.slice(0, 64) : '';
 }
 
 export class FlatAccess {

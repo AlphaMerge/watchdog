@@ -11,7 +11,7 @@ import { GroupService } from '../src/auth/groups.js';
 import { AccessService } from '../src/auth/access.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -81,7 +81,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           sessions,
           throttle,
           groups: new GroupService({ db, logger: silent }),
-          access: new AccessService({ db, logger: silent }),
+          access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
           tokens: new TokenService({ db, logger: silent }),
           totp: new TotpService({ db, logger: silent }),
           required,

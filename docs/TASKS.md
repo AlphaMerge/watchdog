@@ -12076,7 +12076,7 @@ because each is a decision rather than a defect:
       the shapes to follow. A refusal that counts uses the caller cannot see should say that there
       are some, not how many.
 
-- [ ] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
+- [x] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
       Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor,
       timestamp and diff", and three kinds of change never reach `audit_log`:
 
@@ -12137,6 +12137,21 @@ because each is a decision rather than a defect:
       records nothing, and a map create recorded outside its transaction, each killed.
       **Part 2** is object grants (`AccessService.grant` and `.revoke`), declared
       `auditGap('A-17')` until `A-12`'s rewrite of `auth/access.ts` lands.
+
+      **Part 2 of 2, landed; the ticket is done.** Object grants are audited as every other grant
+      is — `grant.set` and `grant.revoked`, with `subject: object` and the object's id in
+      `object_id`, so an object's own history shows who changed who may see it. `AccessService`
+      takes a required `audit` sink and each grant and revoke is now one transaction: the group's
+      name and previous right read, the write, the entry. A revoke that found nothing writes
+      nothing, and granting `none` stays a `grant.set` — it overrides inheritance, where a revoke
+      restores it. The sink set is `grantAuditSinks`, the record and nothing else: `A-12`'s epoch
+      triggers already tell every cached visibility it is stale, and a configuration push would send
+      probes a change none of them scans for. `granted_by` comes from the actor, as the flat grants'
+      does. The two `auditGap('A-17')` declarations are gone and the sweep calls both routes.
+      `flat-audit.test.ts` adds the object grant's before and after (`none` included), and a failed
+      grant and a failed revoke that each leave no row and no change. Core 2759/2759. Mutation 3/3:
+      an object grant that records nothing, a revoke recorded outside its transaction, and a grant
+      that forgets the previous right, each killed.
 
       **Found while drafting, and deliberately not in this ticket's done-when:** identity changes
       are not audited either — groups and their members, accounts and their roles, passwords,

@@ -41,7 +41,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 
 /**
@@ -100,7 +100,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
     const accounts = new AccountService({ db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
     const throttle = new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() });
-    access = new AccessService({ db, logger: silent });
+    access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     groups = new GroupService({ db, logger: silent });
 
     discovery = new DiscoveryService({
@@ -400,7 +400,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         await db.query('DELETE FROM object_access');
         if (testCase.grant !== 'none-at-all') {
           const objectId = { probe: probeId, device: deviceId, sensor: sensorId }[testCase.at];
-          await access.grant(objectId, teamId, testCase.grant, 'matrix');
+          await access.grant(objectId, teamId, testCase.grant, actorNamed('matrix'));
         }
 
         const response = await app.inject({
@@ -625,7 +625,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // from the account having no grant at all. Without this the sweep would pass on a system
       // where object rights were the only check and the role ceiling did nothing.
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'read', 'matrix');
+      await access.grant(probeId, teamId, 'read', actorNamed('matrix'));
 
       const allowed: string[] = [];
       for (const route of mutating()) {
@@ -693,7 +693,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // principal needed the flag. Both halves are asserted here — the flag opens exactly one
       // door, and opens no others.
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'read', 'matrix');
+      await access.grant(probeId, teamId, 'read', actorNamed('matrix'));
       const id = userIds.get('readonly') ?? 0;
       const acknowledge = async (): Promise<number> =>
         (
@@ -738,7 +738,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // back as ordinary failed outcomes: a selection made in a tree view routinely includes
       // something the operator cannot touch, and failing the whole request would be unusable.
       await db.query('DELETE FROM object_access');
-      await access.grant(deviceId, teamId, 'write', 'matrix');
+      await access.grant(deviceId, teamId, 'write', actorNamed('matrix'));
 
       const response = await app.inject({
         method: 'POST',
@@ -769,7 +769,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // `duplicates: 0` with two identical failure rows for one it may not. The route's own
       // description promises "repeated ids are collapsed and counted" without qualification.
       await db.query('DELETE FROM object_access');
-      await access.grant(deviceId, teamId, 'write', 'matrix');
+      await access.grant(deviceId, teamId, 'write', actorNamed('matrix'));
 
       const send = async (id: number) =>
         (
@@ -820,7 +820,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         'and the refusal must not carry the secret either',
       );
 
-      await access.grant(deviceId, teamId, 'read', 'matrix');
+      await access.grant(deviceId, teamId, 'read', actorNamed('matrix'));
       const allowed = await app.inject({
         method: 'POST',
         url: `/api/v1/objects/${String(deviceId)}/as-template`,
@@ -836,7 +836,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // into a branch they were explicitly denied, or move it out of the branch whose owners
       // could see it.
       await db.query('DELETE FROM object_access');
-      await access.grant(deviceId, teamId, 'write', 'matrix');
+      await access.grant(deviceId, teamId, 'write', actorNamed('matrix'));
 
       for (const operation of ['clone', 'move'] as const) {
         const response = await app.inject({
@@ -988,7 +988,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // passes because a refusal carries no secret — which is a vacuous green of exactly the
       // kind the count below now refuses.
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'read', 'matrix');
+      await access.grant(probeId, teamId, 'read', actorNamed('matrix'));
 
       const leaked: string[] = [];
       let answered = 0;
@@ -1016,7 +1016,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // does not help. A test that only checked the read-only case would pass on a system where
       // the answer was a role check rather than a boundary.
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'full', 'matrix');
+      await access.grant(probeId, teamId, 'full', actorNamed('matrix'));
 
       for (const role of ['readwrite', 'admin']) {
         const leaked: string[] = [];
@@ -1038,7 +1038,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       // configured — a form that cannot distinguish "unset" from "set and hidden" makes somebody
       // retype a secret they did not need to.
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'read', 'matrix');
+      await access.grant(probeId, teamId, 'read', actorNamed('matrix'));
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/objects/${String(sensorId)}`,
@@ -1052,7 +1052,7 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
 
     it('does not leak it through the history routes the criterion names', async () => {
       await db.query('DELETE FROM object_access');
-      await access.grant(probeId, teamId, 'read', 'matrix');
+      await access.grant(probeId, teamId, 'read', actorNamed('matrix'));
       for (const url of [
         `/api/v1/sensors/${String(sensorId)}/history?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z`,
         `/api/v1/sensors/${String(sensorId)}/values`,

@@ -10,6 +10,7 @@ import { ReportService } from '../src/reports/service.js';
 import { LibraryRepository } from '../src/libraries/repository.js';
 import { LibraryService } from '../src/libraries/service.js';
 import type { FlatViewer } from '../src/auth/flat-access.js';
+import { AccessService } from '../src/auth/access.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -20,7 +21,7 @@ import { buildHarness, silent } from './support/tree.js';
 const available = await databaseAvailable();
 
 /**
- * What the audit log says about maps, reports and every flat grant (`A-17`).
+ * What the audit log says about maps, reports and every grant, on the tree or off it (`A-17`).
  *
  * `audit-sweep.test.ts` proves each route writes *an* entry. This says what the entries hold,
  * because an entry that exists and says the wrong thing is worse than none: somebody reads it.
@@ -58,6 +59,8 @@ describe(
     let maps: MapService;
     let reports: ReportService;
     let libraries: LibraryService;
+    let access: AccessService;
+    let rootId = 0;
     let owner: FlatViewer;
     let actor: Actor;
     let groupId = 0;
@@ -77,8 +80,9 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('flataudit');
       db = scratch.db;
-      await buildHarness(db);
+      rootId = (await buildHarness(db)).rootId;
       sink = new FailsAfterRecording();
+      access = new AccessService({ db, audit: sink, logger: silent });
       maps = new MapService({ db, repository: new MapRepository(), audit: sink, logger: silent });
       reports = new ReportService({
         db,
@@ -153,6 +157,31 @@ describe(
           entries.map((row) => [row.summary['group'], row.diff[0]?.before, row.diff[0]?.after]),
           [['auditors', null, 'full']],
         );
+      });
+
+      it('records an object grant against the object, so it is in the history of that object', async () => {
+        await access.grant(rootId, groupId, 'read', actor);
+        assert.equal((await access.grantsOn(rootId))[0]?.grantedBy, 'auditor');
+        await access.grant(rootId, groupId, 'none', actor);
+        await access.revoke(rootId, groupId, actor);
+        assert.equal(await access.revoke(rootId, groupId, actor), false);
+
+        const entries = await rows(
+          `action LIKE 'grant.%' AND summary->>'subject' = 'object'
+           AND object_id = $1 AND (summary->>'groupId')::bigint = $2`,
+          [rootId, groupId],
+        );
+        assert.deepEqual(
+          entries.map((row) => [row.action, row.diff[0]?.before, row.diff[0]?.after]),
+          [
+            ['grant.set', null, 'read'],
+            // `none` is a grant and not a revoke: it overrides what the group inherits, where a
+            // revoke hands the object back to it. And the revoke that found nothing wrote nothing.
+            ['grant.set', 'read', 'none'],
+            ['grant.revoked', 'none', null],
+          ],
+        );
+        assert.ok(entries.every((row) => row.summary['subjectId'] === rootId));
       });
 
       it('records nothing for a revoke that found nothing to take', async () => {
@@ -282,6 +311,23 @@ describe(
             await libraries.grant(owner, actor, library.id, groupId, 'read');
           },
         ],
+        [
+          'an object grant',
+          'grant.set',
+          toReaders,
+          () => access.grant(rootId, groupId, 'write', actor),
+        ],
+        [
+          'an object revoke',
+          'grant.revoked',
+          all('grant.revoked'),
+          async () => {
+            sink.failOn = null;
+            await access.grant(rootId, groupId, 'read', actor);
+            sink.failOn = 'grant.revoked';
+            await access.revoke(rootId, groupId, actor);
+          },
+        ],
       ];
 
       for (const [what, action, count, change] of cases) {
@@ -315,6 +361,14 @@ describe(
             )
           ).length,
           0,
+        );
+        // The grant that failed never landed, and the revoke that failed left the grant before it.
+        assert.deepEqual(
+          await db.query(
+            `SELECT right_ FROM object_access WHERE object_id = $1 AND group_id = $2`,
+            [rootId, groupId],
+          ),
+          [{ right_: 'read' }],
         );
       });
     });

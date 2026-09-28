@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../../src/audit/store.js';
 import { after, before, describe, it } from 'node:test';
 import { AccessService, type AccessPrincipal } from '../../src/auth/access.js';
 import { AccountService } from '../../src/auth/accounts.js';
@@ -11,7 +12,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from '../support/database.js';
-import { buildHarness, silent, type Harness } from '../support/tree.js';
+import { actorNamed, buildHarness, silent, type Harness } from '../support/tree.js';
 
 const available = await databaseAvailable();
 
@@ -67,7 +68,7 @@ describe(
       scratch = await createScratchDatabase('visibility_perf');
       db = scratch.db;
       harness = await buildHarness(db);
-      access = new AccessService({ db, logger: silent });
+      access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
       alarms = new AlarmService({ db, logger: silent });
       stream = new StateBroadcaster({ logger: silent });
       const accounts = new AccountService({ db, logger: silent });
@@ -144,7 +145,7 @@ describe(
         assert.ok(group !== undefined);
         await groups.addMember(group.id, account.id);
         for (const [objectId, right] of grants) {
-          await access.grant(objectId, group.id, right, 'perf');
+          await access.grant(objectId, group.id, right, actorNamed('perf'));
         }
         principals.set(name, { userId: account.id, role: admin ? 'admin' : 'readonly' });
       };

@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { AccessService } from '../src/auth/access.js';
 import { AccountService } from '../src/auth/accounts.js';
@@ -11,7 +12,7 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, testActor } from './support/tree.js';
+import { actorNamed, buildHarness, testActor } from './support/tree.js';
 
 /**
  * API tokens (`A-06`).
@@ -58,7 +59,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
     tokens = new TokenService({ db, logger: silentLogger });
     accounts = new AccountService({ db, logger: silentLogger });
     groups = new GroupService({ db, logger: silentLogger });
-    access = new AccessService({ db, logger: silentLogger });
+    access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silentLogger });
 
     const account = await accounts.create({
       login: 'ops',
@@ -81,7 +82,7 @@ describe('api tokens', { skip: available ? false : 'no database' }, () => {
       host: '127.0.0.1',
     });
     deviceId = device.id;
-    await access.grant(deviceId, teamId, 'full', 'test');
+    await access.grant(deviceId, teamId, 'full', actorNamed('test'));
   });
 
   const ownerOf = () => ({ userId, role: 'readwrite' as const });

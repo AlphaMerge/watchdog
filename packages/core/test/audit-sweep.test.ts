@@ -203,7 +203,15 @@ const FIXTURES: Record<string, Fixture> = {
   },
 
   // -------------------------------------------------------------------------------- grants
-  // Object grants are `A-17`'s as well, and land with `A-12`'s rewrite of `auth/access.ts`.
+  'PUT /api/v1/objects/:id/access/:groupId': async (k) => ({
+    url: `/api/v1/objects/${id(await k.group())}/access/${id(k.teamId)}`,
+    payload: { right: 'read' },
+  }),
+  'DELETE /api/v1/objects/:id/access/:groupId': async (k) => {
+    const url = `/api/v1/objects/${id(await k.group())}/access/${id(k.teamId)}`;
+    await k.post(url, { right: 'read' });
+    return { url };
+  },
 
   // ---------------------------------------------------------------------------------- maps
   'POST /api/v1/maps': (k) =>
@@ -413,7 +421,7 @@ describe(
       harness.audit.also = new DatabaseAuditSink();
 
       const accounts = new AccountService({ db, logger: silent });
-      const access = new AccessService({ db, logger: silent });
+      const access = new AccessService({ db, audit: harness.audit, logger: silent });
       const groups = new GroupService({ db, logger: silent });
       const discovery = new DiscoveryService({
         db,
