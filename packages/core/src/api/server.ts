@@ -4,7 +4,13 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { describeError, newCorrelationId, withCorrelation, type Logger } from '@ms/shared';
+import {
+  describeError,
+  newCorrelationId,
+  withCorrelation,
+  type BuildIdentity,
+  type Logger,
+} from '@ms/shared';
 import type { CoreConfig } from '@ms/shared';
 import type { SensorCatalogue } from '@ms/sensors';
 import type { ObjectService } from '../objects/service.js';
@@ -97,6 +103,11 @@ export interface ApiServerOptions {
   config: CoreConfig['api'];
   logger: Logger;
   version: string;
+  /**
+   * Which build is serving, for `GET /api/v1/build` (`H-11`). Absent in the route tests; a
+   * server without one reports its version and no commit, which is what it knows.
+   */
+  build?: BuildIdentity;
   service: ObjectService;
   history: HistoryService;
   db: Database;
@@ -267,6 +278,7 @@ export class ApiServer {
   readonly #alarms: AlarmService;
   readonly #db: Database;
   readonly #audit: AuditRepository;
+  readonly #build: BuildIdentity;
   readonly #catalogue: SensorCatalogue;
   readonly #lookups: LookupCatalogue;
   readonly #maps: MapService | undefined;
@@ -334,6 +346,7 @@ export class ApiServer {
     this.#alarms = new AlarmService({ db: options.db, logger: this.#logger });
     this.#db = options.db;
     this.#audit = options.audit;
+    this.#build = options.build ?? { version: options.version, commit: null, dirty: false };
     this.#catalogue = options.catalogue;
     this.#lookups = options.lookups ?? new LookupCatalogue().seal();
     this.#maps = options.maps;
@@ -809,6 +822,44 @@ export class ApiServer {
         },
       },
       () => this.#app.swagger(),
+    );
+
+    // **Which build is answering** (`H-11`). Every build said `0.1.0` until this existed, so a
+    // bug report, a field test and an upgrade could not say what they were about. Read-scoped
+    // like the OpenAPI document beside it: the exact commit tells an attacker which advisories
+    // apply, and an unauthenticated caller has no use for it.
+    this.#app.get(
+      '/api/v1/build',
+      {
+        config: READS,
+        schema: {
+          tags: ['meta'],
+          summary: 'Which build is serving: its version and the commit it was packaged from',
+          response: {
+            200: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['version', 'commit', 'dirty'],
+              properties: {
+                version: { type: 'string' },
+                commit: {
+                  type: ['string', 'null'],
+                  description:
+                    'The full commit this build was packaged from; null when that is not ' +
+                    'known — a working tree, or a package made before this route existed.',
+                },
+                dirty: {
+                  type: 'boolean',
+                  description:
+                    'Packaged with uncommitted changes on top of `commit`, so the commit ' +
+                    'names the nearest code rather than this code.',
+                },
+              },
+            },
+          },
+        },
+      },
+      () => this.#build,
     );
 
     // The web UI, served by the core itself — ADR-001 Decision 8, no second web server to

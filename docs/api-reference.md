@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-160 routes.
+161 routes.
 
 ## Conventions
 
@@ -1124,6 +1124,12 @@ Outside `/api/v1` because that is the path every scraper config already assumes,
 This API, as an OpenAPI 3 document
 
 **200** object
+
+### `GET /api/v1/build`
+
+Which build is serving: its version and the commit it was packaged from
+
+**200** { version, commit, dirty }
 
 ## notifications
 

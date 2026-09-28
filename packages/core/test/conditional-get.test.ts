@@ -1,7 +1,8 @@
 import { testCatalogue } from './support/sensor-types.js';
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import type { FastifyInstance } from 'fastify';
+import type { BuildIdentity } from '@ms/shared';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
@@ -283,10 +284,12 @@ describe(
     // The input that is not in the database.
     // ---------------------------------------------------------------------------------------
 
-    it('invalidates across an upgrade, because a resolved default lives in code', async () => {
-      const first = await get(deviceId, { include: 'settings' });
-
-      const upgraded = new ApiServer({
+    /**
+     * Another core over the same database — which is what an upgrade, or a restart, looks like to
+     * a client holding a validator the previous one issued.
+     */
+    async function core(version: string, build?: BuildIdentity): Promise<FastifyInstance> {
+      const server = new ApiServer({
         config: {
           host: '127.0.0.1',
           port: 0,
@@ -295,26 +298,90 @@ describe(
           requireAuthentication: true,
         },
         logger: silent,
-        version: '9.9.10',
+        version,
+        ...(build === undefined ? {} : { build }),
         service: h.service,
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
       });
-      await upgraded.build('9.9.10', h.service);
+      await server.build(version, h.service);
+      return server.app;
+    }
 
-      const response = await upgraded.app.inject({
+    const settingsOf = (on: FastifyInstance, etag?: string): Promise<LightMyRequestResponse> =>
+      on.inject({
         method: 'GET',
         url: `/api/v1/objects/${String(deviceId)}`,
         query: { include: 'settings' },
-        headers: { 'if-none-match': first.etag ?? '' },
+        ...(etag === undefined ? {} : { headers: { 'if-none-match': etag } }),
       });
+
+    it('invalidates across an upgrade, because a resolved default lives in code', async () => {
+      const first = await get(deviceId, { include: 'settings' });
+
+      const response = await settingsOf(await core('9.9.10'), first.etag ?? '');
 
       // Nothing in the database changed. The value of an unset setting still might have, because
       // it comes from the registry — and the registry is code.
       assert.equal(response.statusCode, 200);
       assert.notEqual(response.headers['etag'], first.etag);
+    });
+
+    // `H-11`. The case above is an upgrade that moves the version, and until `H-11` no upgrade
+    // ever did: every build said `0.1.0`, so the one validator input that lives in code was the
+    // same string on every build there has ever been.
+    const COMMIT_A = 'a'.repeat(40);
+    const COMMIT_B = 'b'.repeat(40);
+
+    it('invalidates across an upgrade that keeps the version, because the commit is the code', async () => {
+      const before = await core('0.1.0', { version: '0.1.0', commit: COMMIT_A, dirty: false });
+      const first = await settingsOf(before);
+      assert.equal(first.statusCode, 200);
+
+      const upgraded = await core('0.1.0', { version: '0.1.0', commit: COMMIT_B, dirty: false });
+      const response = await settingsOf(upgraded, String(first.headers['etag']));
+
+      // A 304 here serves the old build's rendering of every default the new one changed.
+      assert.equal(response.statusCode, 200);
+      assert.notEqual(response.headers['etag'], first.headers['etag']);
+    });
+
+    it('keeps a validator across a restart of the same build, or nothing could be cached', async () => {
+      // The other side of the comparison. A salt that changed on every start would pass the case
+      // above and throw away every client's cache on every restart — correct, and pointless.
+      const exact = { version: '0.1.0', commit: COMMIT_A, dirty: false };
+      const first = await settingsOf(await core('0.1.0', exact));
+      const response = await settingsOf(await core('0.1.0', exact), String(first.headers['etag']));
+      assert.equal(response.statusCode, 304);
+    });
+
+    it('keeps none across a restart of a build that cannot say what it is', async () => {
+      // No commit, or uncommitted changes on top of one: the same identity can be two bodies of
+      // code, so the only safe validator is one that dies with the process that issued it.
+      for (const build of [
+        { version: '0.1.0', commit: null, dirty: false },
+        { version: '0.1.0', commit: COMMIT_A, dirty: true },
+      ]) {
+        const first = await settingsOf(await core('0.1.0', build));
+        const response = await settingsOf(
+          await core('0.1.0', build),
+          String(first.headers['etag']),
+        );
+        assert.equal(response.statusCode, 200, JSON.stringify(build));
+      }
+    });
+
+    it('says which build is serving', async () => {
+      const serving = await core('0.1.0', { version: '0.1.0', commit: COMMIT_A, dirty: true });
+      const response = await serving.inject({ method: 'GET', url: '/api/v1/build' });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), { version: '0.1.0', commit: COMMIT_A, dirty: true });
+
+      // A server nobody told reports the version it was given and no commit — not a guess.
+      const untold = await (await core('9.9.9')).inject({ method: 'GET', url: '/api/v1/build' });
+      assert.deepEqual(untold.json(), { version: '9.9.9', commit: null, dirty: false });
     });
   },
 );

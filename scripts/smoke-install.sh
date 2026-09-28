@@ -61,10 +61,17 @@ else
   # whose optional native bindings were never installed for this platform — and the failure is
   # a `vite build` that cannot load rolldown, minutes into a script that looked like it was
   # working. Set MS_SMOKE_HOST_NPM=1 to use the host's, for a CI runner that is the toolchain.
+  # Which commit this is (`H-11`), worked out here: `git` inside the toolchain container cannot
+  # reach a worktree's repository, whose `.git` names a path on the host.
+  build_commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null || true)"
+  build_dirty=0
+  if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then build_dirty=1; fi
   if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ]; then
-    "${repo_root}/scripts/package.sh" >/dev/null
+    MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
+      "${repo_root}/scripts/package.sh" >/dev/null
   else
-    "${repo_root}/scripts/dev.sh" "scripts/package.sh" >/dev/null
+    "${repo_root}/scripts/dev.sh" \
+      "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} scripts/package.sh" >/dev/null
   fi
   tarball="$(ls -t "${repo_root}"/release/ms-*.tar.gz 2>/dev/null | head -1)"
   [ -n "${tarball}" ] && [ -f "${tarball}" ] || {
@@ -157,6 +164,22 @@ else
   echo "    GET /api/v1/objects/root: FAILED" >&2
   docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
   failed=1
+fi
+
+echo "==> asserting the installed build says which commit it is"
+# `H-11`. Every build said `0.1.0` and nothing else. Compared with the manifest that was installed
+# and, when this script packaged it, with the commit it packaged — not merely "a commit came
+# back", which a build reporting somebody else's would satisfy.
+installed="$(docker exec "${container}" cat /opt/ms/app/core/build.json 2>/dev/null | tr -d ' \n' || true)"
+served="$(ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/build 2>/dev/null || true)"
+if [ -z "${served}" ] || [ "${served}" != "${installed}" ]; then
+  echo "    GET /api/v1/build: FAILED — served '${served}', installed '${installed}'" >&2
+  failed=1
+elif [ -n "${build_commit:-}" ] && ! matches "\"commit\":\"${build_commit}\"" printf '%s' "${served}"; then
+  echo "    GET /api/v1/build: FAILED — '${served}' is not ${build_commit}" >&2
+  failed=1
+else
+  echo "    GET /api/v1/build: ${served}"
 fi
 
 echo "==> asserting the shipped catalogue has sensor types in it"

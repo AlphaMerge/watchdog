@@ -6,6 +6,7 @@ import {
   bootstrap,
   coreConfigSchema,
   AvailableMemoryWatch,
+  describeBuild,
   describeError,
   readLimitMemory,
   readMachineMemory,
@@ -121,9 +122,9 @@ import { ProbeConfigService } from './probes/config.js';
 import { ProbeQueryService } from './probes/queries.js';
 import { SensorStateService } from './state/service.js';
 import { ConfigChangeNotifier } from './probes/notifier.js';
-import { VERSION } from './version.js';
+import { BUILD, VERSION } from './version.js';
 
-const USAGE = `ms-core ${VERSION}
+const USAGE = `ms-core ${describeBuild(BUILD)}
 
   ms-core [--config <file>]              run the core server
   ms-core migrate status                 show applied and pending migrations
@@ -202,6 +203,7 @@ async function serve(): Promise<void> {
   const { config, logger, lifecycle } = bootstrap<CoreConfig>({
     schema: coreConfigSchema,
     version: VERSION,
+    build: BUILD,
   });
 
   logger.info(
@@ -1025,6 +1027,7 @@ async function serve(): Promise<void> {
     config: config.api,
     logger,
     version: VERSION,
+    build: BUILD,
     service,
     history,
     db,
@@ -1399,6 +1402,7 @@ async function main(): Promise<void> {
     const { config, logger } = bootstrap<CoreConfig>({
       schema: coreConfigSchema,
       version: VERSION,
+      build: BUILD,
     });
     const exitCode = await runMigrateCommand({
       action: args.migrateAction,

@@ -1,2 +1,16 @@
-/** Stamped by the packaging step; `0.0.0-dev` when running from a working tree. */
-export const VERSION: string = process.env['MS_BUILD_VERSION'] ?? '0.0.0-dev';
+import { BUILD_MANIFEST, readBuildIdentity, type BuildIdentity } from '@ms/shared';
+
+/**
+ * Which build this is, from the manifest `scripts/package.sh` writes beside `dist` (`H-11`).
+ *
+ * Read from a file rather than from the launcher's environment, because not every launcher is
+ * that script: WinSW starts `node.exe` on `main.js` directly, so a Windows service never saw
+ * `MS_BUILD_VERSION` and reported itself as a working tree. `dist/src/version.js` resolves this
+ * to the package directory, wherever it was installed.
+ */
+export const BUILD: BuildIdentity = readBuildIdentity(
+  new URL(`../../${BUILD_MANIFEST}`, import.meta.url),
+);
+
+/** The version alone, where a person reads it. */
+export const VERSION: string = BUILD.version;

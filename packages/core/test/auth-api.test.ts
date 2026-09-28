@@ -341,6 +341,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         '/api/v1/sensor-types',
         '/api/v1/audit',
         '/api/v1/openapi.json',
+        // The exact commit says which advisories apply; that is not for an anonymous caller.
+        '/api/v1/build',
       ]) {
         const response = await guarded.inject({ method: 'GET', url });
         assert.equal(response.statusCode, 401, `${url} answered ${String(response.statusCode)}`);

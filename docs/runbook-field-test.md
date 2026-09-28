@@ -180,6 +180,16 @@ curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/sensors/<prob
 A `read` scope is enough for everything in this section, and is what a token that lives on a
 laptop for a week should have.
 
+**Once, at the start, record which build this is** — it is the first line of the write-up, and
+the answer to "say which build you are testing" (`H-11`):
+
+```bash
+curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/build
+```
+
+A `commit` of `null`, or `"dirty": true`, means the build cannot say exactly what code it is.
+Re-cut the candidate rather than field-testing it.
+
 The numbers that decide the criterion:
 
 - **`memory` on both health sensors.** Flat is the pass. The 24-hour soak measured +1.10 MB/h on

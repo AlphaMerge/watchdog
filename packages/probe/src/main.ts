@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {
   bootstrap,
+  describeBuild,
   describeError,
   probeConfigSchema,
   runConfigCheck,
@@ -32,7 +33,7 @@ import { IdentifyRunner } from './discovery/identify-runner.js';
 import { LIVE_SOURCES } from './discovery/sources.js';
 import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
-import { VERSION } from './version.js';
+import { BUILD, VERSION } from './version.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
   if (requested !== 'none') {
     if (requested === 'usage') {
       process.stderr.write(
-        `ms-probe ${VERSION}\n\n  ms-probe [--config <file>]\n  ms-probe config check\n`,
+        `ms-probe ${describeBuild(BUILD)}\n\n  ms-probe [--config <file>]\n  ms-probe config check\n`,
       );
       process.exitCode = 2;
       return;
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
   const { config, logger, lifecycle } = bootstrap<ProbeConfig>({
     schema: probeConfigSchema,
     version: VERSION,
+    build: BUILD,
   });
 
   logger.info(

@@ -252,7 +252,19 @@ has no hypertables in it.**
 ## When none of this fits
 
 Errors carry context by design — the sensor id, the target, the phase and the underlying error —
-so a message with none of that is itself a finding worth reporting. `docs/findings/` holds the
+so a message with none of that is itself a finding worth reporting.
+
+**Say which build it is.** The version alone does not: before `H-11` every build said `0.1.0`.
+Each installed service carries a `build.json` with its version, the commit it was packaged from,
+and whether that tree had uncommitted changes — the core answers the same at `GET /api/v1/build`
+(read scope), and the first `starting` line in the journal logs it:
+
+```bash
+cat /opt/ms/app/core/build.json /opt/ms/app/probe/build.json
+```
+
+A `commit` of `null` is a package that could not say, which is worth reporting as its own
+finding. `docs/findings/` holds the
 measured investigations behind several of the behaviours above, and
 [`docs/findings/2026-08-29-failure-modes.md`](findings/2026-08-29-failure-modes.md) is the
 row-by-row audit of what this system does when each part of it fails.

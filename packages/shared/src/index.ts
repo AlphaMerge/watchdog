@@ -35,6 +35,16 @@ export { createServiceNotifier, watchdogIntervalMs } from './lifecycle/systemd.j
 export type { ServiceNotifier } from './lifecycle/systemd.js';
 
 export {
+  BUILD_MANIFEST,
+  DEVELOPMENT_VERSION,
+  describeBuild,
+  isExactBuild,
+  parseBuildManifest,
+  readBuildIdentity,
+} from './build/identity.js';
+export type { BuildIdentity } from './build/identity.js';
+
+export {
   DEFAULT_MAX_FRAME_BYTES,
   encodeFrame,
   FrameDecoder,

@@ -4,6 +4,7 @@
 # Layout inside the tarball:
 #   bin/ms-core, bin/ms-probe     launcher scripts
 #   app/{core,probe,shared}/dist  compiled JavaScript
+#   app/*/build.json              which build this is: version, commit, uncommitted changes (H-11)
 #   app/node_modules              production dependencies, including native addons
 #   bin/ms-backup, bin/ms-restore the backup and restore procedure (H-04)
 #   deploy/systemd/*.service      unit files
@@ -28,6 +29,23 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="${MS_BUILD_VERSION:-$(node -p "require('${repo_root}/package.json').version")}"
+
+# Which commit this is (`H-11`). Every build said `0.1.0` until this existed, so nothing could
+# tell two builds apart. `git` answers from a checkout; a worktree seen from inside the toolchain
+# container cannot reach its repository (its `.git` names a path on the host), so the caller can
+# say it instead with MS_BUILD_COMMIT — and MS_BUILD_DIRTY=1 if that tree had uncommitted changes.
+# When neither works the manifest says the commit is unknown, rather than guessing one.
+commit="${MS_BUILD_COMMIT:-}"
+dirty="${MS_BUILD_DIRTY:-0}"
+if [ -z "${commit}" ] && commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null)"; then
+  # Before `npm run build`, and untracked files count: a new source file nobody added is compiled
+  # into `dist` all the same. Ignored files do not — `dist` and `build/` are this script's output.
+  if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then dirty=1; fi
+fi
+if [ -n "${commit}" ] && ! [[ "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "error: the commit must be a full 40-character id, not '${commit}'" >&2
+  exit 1
+fi
 arch="$(uname -m)"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -56,7 +74,14 @@ fi
 stage="${repo_root}/build/${name}-${version}"
 out="${repo_root}/release/${name}-${version}-${os}-${arch}.tar.gz"
 
-echo "==> building ${version} for ${os}/${arch}"
+if [ -z "${commit}" ]; then
+  echo "warning: this build cannot say which commit it is — set MS_BUILD_COMMIT" >&2
+  echo "==> building ${version} at an unknown commit for ${os}/${arch}"
+elif [ "${dirty}" = "1" ]; then
+  echo "==> building ${version} at ${commit} with uncommitted changes, for ${os}/${arch}"
+else
+  echo "==> building ${version} at ${commit} for ${os}/${arch}"
+fi
 rm -rf "${stage}"
 mkdir -p "${stage}" "${repo_root}/release"
 
@@ -79,6 +104,14 @@ for pkg in "${packages[@]}"; do
   rm -rf "${stage}/app/${pkg}/dist/test"
   find "${stage}/app/${pkg}/dist" \
     \( -name '*.d.ts' -o -name '*.d.ts.map' -o -name '*.tsbuildinfo' \) -delete
+  # Which build this is, beside `dist` where each service's `src/version.ts` reads it (`H-11`). A
+  # file rather than the launcher's environment, because WinSW starts `node.exe` on `main.js`
+  # directly and never runs the launcher.
+  node -e '
+    const [, file, version, commit, dirty] = process.argv;
+    const manifest = { version, commit: commit === "" ? null : commit, dirty: dirty === "1" };
+    require("node:fs").writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+  ' "${stage}/app/${pkg}/build.json" "${version}" "${commit}" "${dirty}"
 done
 
 echo "==> installing production dependencies"
