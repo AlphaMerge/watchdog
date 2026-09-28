@@ -112,6 +112,24 @@ describe('checking a configuration', () => {
     assert.match(err.join('\n'), /core\.json/);
   });
 
+  it('fails when it read no file at all, rather than passing on the defaults', () => {
+    // `H-21`. The schema's defaults always validate, so with no file this said "valid" and exited
+    // 0 — and `ms-core config check` with no flag was the pre-restart check the docs gave.
+    const { code, out, err } = check([]);
+    assert.equal(code, 1);
+    assert.equal(out.length, 0, 'nothing that reads as a pass');
+    assert.match(err.join('\n'), /no configuration file was read/);
+    assert.match(err.join('\n'), /--config/);
+
+    // Not rescued by an environment layer, which is overrides for a file and not a configuration.
+    const envOnly = check([], coreConfigSchema, { MS_API__PORT: '7070' });
+    assert.equal(envOnly.code, 1);
+
+    // And the variable the service itself uses is a file as good as the flag.
+    const path = tempFile(JSON.stringify({}));
+    assert.equal(check([], coreConfigSchema, { MS_CONFIG_FILE: path }).code, 0);
+  });
+
   it('fails on JSON that does not parse, saying so', () => {
     const path = tempFile('{ "api": { "port": 8080, }');
     const { code, err } = check(['--config', path]);

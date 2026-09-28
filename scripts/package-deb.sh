@@ -82,10 +82,14 @@ echo "==> laying out ${name} ${version} (${arch})"
 cp -R "${stage}/app" "${root}/opt/ms/app"
 cp -R "${stage}/bin" "${root}/opt/ms/bin"
 [ -d "${stage}/web" ] && cp -R "${stage}/web" "${root}/opt/ms/web"
-[ -d "${repo_root}/docs" ] && cp -R "${repo_root}/docs" "${root}/opt/ms/docs"
+[ -d "${stage}/docs" ] && cp -R "${stage}/docs" "${root}/opt/ms/docs"
 install -d -m 0755 "${root}/opt/ms/etc" "${root}/opt/ms/deploy/systemd" "${root}/opt/ms/libexec"
 cp "${stage}"/etc/*.json "${root}/opt/ms/etc/"
 cp "${stage}"/deploy/systemd/*.service "${root}/opt/ms/deploy/systemd/"
+# **The units are package files, where an upgrade replaces them and dpkg removes them** (`H-21`).
+# An operator's changes go in a drop-in (`systemctl edit`), under /etc, which dpkg never touches.
+install -d -m 0755 "${root}/usr/lib/systemd/system"
+cp "${stage}"/deploy/systemd/*.service "${root}/usr/lib/systemd/system/"
 install -m 0755 "${repo_root}/deploy/setup.sh" "${root}/opt/ms/libexec/ms-setup"
 printf '%s\n' "${version}" > "${root}/opt/ms/VERSION"
 chmod +x "${root}"/opt/ms/bin/*
@@ -95,8 +99,8 @@ chmod +x "${root}"/opt/ms/bin/*
 # chance — rpm noticed docs arriving executable and quietly corrected them, which is a warning
 # today and a difference between two builds of the same version tomorrow. `app/node_modules` is
 # left alone: it has its own executables, and normalising it would break them.
-find "${root}/opt/ms/docs" "${root}/opt/ms/etc" "${root}/opt/ms/deploy" -type f -exec chmod 0644 {} + 2>/dev/null || true
-find "${root}/opt/ms/docs" "${root}/opt/ms/etc" "${root}/opt/ms/deploy" -type d -exec chmod 0755 {} + 2>/dev/null || true
+find "${root}/opt/ms/docs" "${root}/opt/ms/etc" "${root}/opt/ms/deploy" "${root}/usr" -type f -exec chmod 0644 {} + 2>/dev/null || true
+find "${root}/opt/ms/docs" "${root}/opt/ms/etc" "${root}/opt/ms/deploy" "${root}/usr" -type d -exec chmod 0755 {} + 2>/dev/null || true
 chmod 0644 "${root}/opt/ms/VERSION"
 
 installed_kb="$(du -sk "${root}/opt" | cut -f1)"
@@ -146,9 +150,29 @@ esac
 exit 0
 POSTINST
 
-# **Stop on removal, not on upgrade.** dpkg passes "upgrade" here for the old version's prerm
-# during an upgrade, and stopping there would take the service down for the whole unpack rather
-# than for the restart `postinst` does at the end of it.
+# **Stopped before the unpack, not after it** (`H-21`). dpkg renames each new file over the old
+# one and deletes the files the new version dropped, and with apt the `configure` that restarts
+# anything can come long after, at the end of a multi-package run — so the old processes used to
+# run over a new tree for all that time, loading the new modules into the old code and failing
+# checks on the ones that had gone, and indefinitely if `postinst` then refused the configuration.
+# The new version's `preinst` runs before its files are unpacked, which makes it the one script
+# that can stop the services in time, and it runs on the very first upgrade to this version.
+# `ms-setup` in `postinst` starts them again.
+cat > "${root}/DEBIAN/preinst" <<PREINST
+#!/bin/sh
+set -e
+case "\$1" in
+  upgrade)
+    for svc in $(IFS=' '; echo "${services[*]}"); do
+      systemctl stop "ms-\${svc}.service" >/dev/null 2>&1 || true
+    done
+    ;;
+esac
+exit 0
+PREINST
+
+# On removal only: an upgrade's stop is `preinst`'s, above, and the old version's prerm gets
+# "upgrade" here and must leave the services to it.
 cat > "${root}/DEBIAN/prerm" <<PRERM
 #!/bin/sh
 set -e
@@ -167,15 +191,13 @@ PRERM
 # the uninstall section of docs/installation.md documents: those hold the configuration, the
 # credential-vault key and every reading ever taken. Removing them as a side effect of removing
 # the application would destroy data nobody asked to destroy — and the vault key in particular is
-# unrecoverable, so every stored credential would go with it.
+# unrecoverable, so every stored credential would go with it. The units are package files and go
+# with the package; an operator's drop-ins under /etc/systemd/system are theirs, and stay.
 cat > "${root}/DEBIAN/postrm" <<POSTRM
 #!/bin/sh
 set -e
 case "\$1" in
   remove|purge)
-    for svc in $(IFS=' '; echo "${services[*]}"); do
-      rm -f "/etc/systemd/system/ms-\${svc}.service"
-    done
     systemctl daemon-reload >/dev/null 2>&1 || true
     ;;
 esac
@@ -186,7 +208,8 @@ fi
 exit 0
 POSTRM
 
-chmod 0755 "${root}/DEBIAN/postinst" "${root}/DEBIAN/prerm" "${root}/DEBIAN/postrm"
+chmod 0755 "${root}/DEBIAN/preinst" "${root}/DEBIAN/postinst" "${root}/DEBIAN/prerm" \
+  "${root}/DEBIAN/postrm"
 
 echo "==> building ${out}"
 dpkg-deb --root-owner-group --build "${root}" "${out}" >/dev/null

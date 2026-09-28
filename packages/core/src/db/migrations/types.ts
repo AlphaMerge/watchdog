@@ -10,7 +10,15 @@ export interface Migration {
   /** Monotonic and stable. Never renumber a migration that has shipped. */
   readonly id: number;
   readonly name: string;
-  /** Applied inside a transaction, unless `transactional` is false. */
+  /**
+   * Applied inside a transaction, unless `transactional` is false.
+   *
+   * **Checksummed, every byte of it, once it has shipped** — messages and hints included. The
+   * migrator stores a hash of `id`, `name` and `up`, and a database whose record disagrees with
+   * the build refuses to start as drifted. So a shipped migration's `RAISE … HINT` cannot be
+   * improved: rewording 004's licence hint would have stopped every installed core (`H-21`).
+   * Better advice goes in the docs, or in code that runs outside a migration.
+   */
   readonly up: string;
   /**
    * Every schema change ships with a tested rollback (CLAUDE.md). `null` means the change is

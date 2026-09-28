@@ -1,0 +1,100 @@
+# MonitoringSystem core server.
+#
+# Production is a standalone native service (CLAUDE.md hard constraint 1). No container
+# runtime, no orchestrator. Install with deploy/install.sh.
+
+[Unit]
+Description=MonitoringSystem core server
+Documentation=file:/opt/ms/docs
+After=network-online.target postgresql.service
+Wants=network-online.target
+# **The restart loop ends, where an operator sees it** (P-215) — for a core killed at MemoryMax
+# on every start, systemd refuses the sixth start inside ten minutes and leaves the unit
+# `failed` with "start request repeated too quickly". This is safe for the core only because it no longer relies on restarts
+# to wait for anything (P-215, P-222): a database that is not there yet is waited for inside the
+# process, five minutes a round (packages/core/src/db/wait.ts), and so is a listen address not yet
+# assigned; the migration lock and a long migration keep systemd waiting for as long as they last;
+# and what only a person can fix — a password PostgreSQL refuses, a schema this build will not run
+# against — exits 78, which is not restarted. A database that stays down puts at most two starts
+# in any ten minutes. The table is in docs/administration.md, "What a start failure does".
+# **A core in `failed` is silent**: it is the thing that raises alarms, so only something outside
+# this system notices it — the host's own monitoring, or a check from another machine. This
+# project ships none, and the loop this replaces was just as silent while hiding its reason.
+# After fixing the cause, `systemctl reset-failed ms-core` and start it.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# Type=notify so systemd learns about readiness from the process rather than guessing, and so
+# WatchdogSec has something to watch. NotifyAccess=all is required because Node cannot write to
+# an AF_UNIX SOCK_DGRAM socket and we reach $NOTIFY_SOCKET through the systemd-notify helper
+# (see packages/shared/src/lifecycle/systemd.ts).
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=60
+
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5s
+# Exit 78 (EX_CONFIG) is a configuration the service refused to start with (P-215). Restarting
+# reads the same file and refuses again, every five seconds, for ever; stopping at once puts the
+# reason at the top of `systemctl status` instead of under a thousand copies of itself.
+RestartPreventExitStatus=78
+
+User=ms-core
+Group=ms-core
+
+Environment=NODE_ENV=production
+Environment=MS_CONFIG_FILE=/etc/ms/core.json
+ExecStart=/opt/ms/bin/ms-core
+
+WorkingDirectory=/var/lib/ms-core
+StateDirectory=ms-core
+LogsDirectory=ms-core
+RuntimeDirectory=ms-core
+
+# The database password is delivered as a credential rather than an environment variable; the
+# config loader dereferences *__FROM_FILE. Create it with:
+#   systemd-creds encrypt --name=db-password plaintext /etc/ms/db-password.cred
+#LoadCredentialEncrypted=db-password:/etc/ms/db-password.cred
+#Environment=MS_DATABASE__PASSWORD__FROM_FILE=%d/db-password
+
+# Graceful shutdown: SIGTERM, drain, exit. Must exceed service.shutdownTimeoutMs (default 20s).
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+
+# --- Hardening ---------------------------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ReadWritePaths=/var/lib/ms-core /var/log/ms-core
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# V8 needs writable-executable pages for its JIT; this one cannot be enabled.
+MemoryDenyWriteExecute=no
+
+# --- Resource limits ---------------------------------------------------------------------
+# Sized for the v1 target of 5,000 sensors on 8 cores / 16 GB (CAPABILITIES.MD §13).
+# One memory ceiling, and it kills: no MemoryHigh, for the reason ms-probe.service gives (P-213) —
+# a throttled service stalls until the watchdog kills it, and restarts into the same stall. Core
+# Health's `memoryLimitUsage` warns at 80% of it, which catches a core that has settled high or
+# is leaking. Raise it on larger installations with `systemctl set-property ms-core MemoryMax=…`,
+# which survives upgrades.
+MemoryMax=8G
+TasksMax=4096
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

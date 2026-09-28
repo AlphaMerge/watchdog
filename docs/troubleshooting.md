@@ -56,6 +56,13 @@ one pass gives the whole list. If the service started before the last upgrade an
 the release's own example is at `/etc/ms/core.json.new` and the pre-upgrade copy is the
 timestamped `.bak` beside it.
 
+**"TimescaleDB is running under the "apache" licence"** — migration 004's hint says to set
+`timescaledb.license = timescale`, and that works only on TimescaleDB's Community build. An
+Apache-only package — `timescaledb-2-oss-*`, or a distribution's own build without the TSL module,
+such as Debian 13's `postgresql-17-timescaledb` — refuses the setting, and PostgreSQL's log says
+it could not find the TSL module. Replace it with `timescaledb-2-postgresql-17` from the
+TimescaleDB repository ([installation, section 1](installation.md#1-the-database)).
+
 **The port is in use** — `api.port` defaults to 8080 and `probeEndpoint.port` to 23560, and they
 are separate listeners.
 
@@ -284,7 +291,9 @@ Covered in [`docs/runbook-backup-restore.md`](runbook-backup-restore.md), includ
 TimescaleDB-specific failures a hand-rolled `pg_restore` hits — the `COMMENT ON EXTENSION` abort,
 the superuser needed for `timescaledb_pre_restore()`, and the `_timescaledb_catalog` permissions.
 The one worth knowing here: **skipping restore mode produces a database that looks restored and
-has no hypertables in it.**
+has no hypertables in it.** And one `ms-restore` refuses rather than handles: **a dump restores
+only into the TimescaleDB version that took it**, and a rebuilt host usually has a newer one — the
+runbook's "The TimescaleDB version" says how to install the right one and bring it forward after.
 
 ## When none of this fits
 

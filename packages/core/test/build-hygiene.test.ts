@@ -593,3 +593,47 @@ describe('the CI workflows', () => {
     }
   });
 });
+
+describe('the smoke harnesses', () => {
+  // Each boots privileged systemd containers on the machine CI shares with whoever is developing
+  // on it. `smoke-packages.sh` removed its box only on the way out of a pass, so every failed
+  // assertion left one running, and a night of them is what loaded the VM (`H-21`). Bash runs an
+  // EXIT trap on `exit`, on `set -e`, and on the TERM that `timeout` sends.
+  it('trap EXIT, before starting a box, with a handler that removes it', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const dir = join(repoRoot, 'scripts');
+    const files = (await readdir(dir)).filter((name) => /^smoke-.+\.sh$/.test(name));
+    assert.ok(files.length > 0, `no smoke harnesses found in ${dir}`);
+
+    for (const file of files) {
+      const code = (await readFile(join(dir, file), 'utf8'))
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+      const run = code.search(/\bdocker run\b/);
+      if (run < 0) continue;
+
+      // At the top level: a trap set inside a function is set only if that function runs.
+      const trap = /^trap (\w+) EXIT$/m.exec(code);
+      assert.ok(trap !== null, `${file} starts a container and never traps EXIT`);
+      assert.ok(trap.index < run, `${file} starts a container before it traps EXIT`);
+
+      // The handler removes a container itself, or calls a function here that does. A function
+      // is one line (`fail() { …; }`) or runs to the first `}` in column 0. `docker rm -f` counts
+      // as a command, not as text: the handlers that keep a box print it for the reader.
+      const functions = new Map(
+        [...code.matchAll(/^(\w+)\(\) \{(?:.*\}$|[\s\S]*?^\})/gm)].map(
+          ([body, name = '']) => [name, body] as const,
+        ),
+      );
+      const removes = (body: string): boolean => /(^\s*|[{;&|]\s*)docker rm -f\b/m.test(body);
+      const handlerName = trap[1] ?? '';
+      const handler = functions.get(handlerName) ?? '';
+      const removers = [...functions].filter(([, body]) => removes(body)).map(([name]) => name);
+      assert.ok(
+        removes(handler) || removers.some((name) => new RegExp(`\\b${name}\\b`).test(handler)),
+        `${file}: ${handlerName} removes no container`,
+      );
+    }
+  });
+});

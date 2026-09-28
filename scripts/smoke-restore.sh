@@ -94,6 +94,20 @@ install_into() {
   docker exec "${name}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh --no-start' >/dev/null
   docker cp "${repo_root}/scripts/smoke/configure-core.sh" "${name}:/tmp/configure-core.sh"
   docker exec "${name}" bash /tmp/configure-core.sh >/dev/null
+  # A password with shell in it, on both hosts, so the restored core.json works on the target.
+  docker cp "${repo_root}/scripts/smoke/set-db-password.sh" "${name}:/tmp/set-db-password.sh"
+  docker exec -e MS_SMOKE_PASSWORD="${db_password}" "${name}" bash /tmp/set-db-password.sh >/dev/null
+}
+
+# **A password the way a generator writes one** (`H-21`): `ms-backup` and `ms-restore` `eval`ed
+# the configuration, so `$x9` aborted them under `set -u` and a backtick or `$(…)` ran as root.
+# The two commands name files; if either exists afterwards, a password was run.
+db_password='Tr0u$x9"b`touch /tmp/pwned-tick`$(touch /tmp/pwned-paren):c\d'
+not_run() {
+  if docker exec "$1" bash -c 'test -e /tmp/pwned-tick || test -e /tmp/pwned-paren'; then
+    echo "    FAILED — $2 ran part of the database password as a command" >&2
+    failed=1
+  fi
 }
 
 # **One token, minted from the origin, used on both hosts** (`U-20`). The shipped `core.json`
@@ -167,6 +181,16 @@ else
   echo "    FAILED — the archive is mode ${perms}; it decrypts every credential in the installation" >&2
   failed=1
 fi
+not_run "${origin}" "ms-backup"
+# The version a restore has to match, recorded where a disaster recovery will look for it.
+recorded="$(docker exec "${origin}" bash -c "tar -xzOf '${archive}' --wildcards '*/MANIFEST'" | sed -n 's/^timescaledb=//p')"
+running="$(docker exec "${origin}" su postgres -c "psql -d monitoring -tAc \"SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'\"")"
+if [ -n "${recorded}" ] && [ "${recorded}" = "${running}" ]; then
+  echo "    manifest: timescaledb=${recorded}"
+else
+  echo "    FAILED — the manifest records TimescaleDB '${recorded}', the database runs '${running}'" >&2
+  failed=1
+fi
 docker cp "${origin}:${archive}" /tmp/ms-smoke-backup.tar.gz
 
 # ── a different machine, which has never seen this installation ──────────────────────────────
@@ -175,8 +199,36 @@ echo "==> booting a clean target host"
 boot "${target}"
 install_into "${target}"
 
-echo "==> restoring onto it"
 docker cp /tmp/ms-smoke-backup.tar.gz "${target}:/tmp/restore.tar.gz"
+
+echo "==> asserting a restore refuses an archive taken with another TimescaleDB"
+# Both boxes come from one image, so a real mismatch cannot happen here; a manifest that names
+# another version is the same question asked of the script (`H-21`). The refusal has to come
+# before anything is written — not the database, and not /etc/ms either.
+docker exec "${target}" bash -c '
+  rm -rf /tmp/other && mkdir /tmp/other && tar -xzf /tmp/restore.tar.gz -C /tmp/other
+  sed -i "s/^timescaledb=.*/timescaledb=2.0.0/" /tmp/other/ms-backup-*/MANIFEST
+  tar -czf /tmp/other.tar.gz -C /tmp/other "$(ls /tmp/other)"'
+conf_before="$(docker exec "${target}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
+if docker exec "${target}" /opt/ms/bin/ms-restore /tmp/other.tar.gz >/tmp/other.log 2>&1; then
+  echo "    FAILED — restored an archive taken with TimescaleDB 2.0.0" >&2
+  failed=1
+elif grep -q 'taken with TimescaleDB 2.0.0' /tmp/other.log && grep -q 'Nothing has been restored' /tmp/other.log; then
+  tables="$(docker exec "${target}" su postgres -c "psql -d monitoring -tAc \"SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'\"")"
+  conf_after="$(docker exec "${target}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
+  if [ "${tables}" = "0" ] && [ "${conf_before}" = "${conf_after}" ]; then
+    echo "    refused before writing anything"
+  else
+    echo "    FAILED — refused, but after writing (${tables} tables, core.json changed: $([ "${conf_before}" = "${conf_after}" ] && echo no || echo yes))" >&2
+    failed=1
+  fi
+else
+  echo "    FAILED — it failed for another reason:" >&2
+  sed 's/^/      /' /tmp/other.log >&2
+  failed=1
+fi
+
+echo "==> restoring onto it"
 # The target was installed but never started, so its database is empty and this should succeed
 # outright. A refusal is only correct if the database has tables in it, and the message says so.
 if docker exec "${target}" /opt/ms/bin/ms-restore /tmp/restore.tar.gz > /tmp/restore.log 2>&1; then
@@ -197,6 +249,7 @@ else
   sed 's/^/      /' /tmp/restore.log >&2
   failed=1
 fi
+not_run "${target}" "ms-restore"
 
 echo "==> asserting a restore refuses to run under a live service"
 # The first step of the procedure, and the one whose absence would be silent: restoring under a
@@ -207,7 +260,7 @@ if docker exec "${target}" /opt/ms/bin/ms-restore /tmp/restore.tar.gz >/tmp/refu
   echo "    FAILED — restore ran with ms-core active" >&2
   failed=1
 else
-  if grep -q 'is running' /tmp/refuse.log; then
+  if grep -q 'ms-core is active; stop it first' /tmp/refuse.log; then
     echo "    refused while ms-core was active"
   else
     echo "    FAILED — it refused for the wrong reason:" >&2
@@ -216,6 +269,33 @@ else
   fi
 fi
 docker exec "${target}" systemctl stop ms-core >/dev/null 2>&1 || true
+
+# `activating` is the state that got through (`H-21`): a core waiting for a database that is not
+# there — how it is found in a disaster recovery — is not `active`, and it would have migrated
+# into the empty database alongside the restore.
+docker exec "${target}" systemctl stop postgresql
+docker exec "${target}" systemctl start --no-block ms-core
+sleep 3
+waiting="$(docker exec "${target}" systemctl is-active ms-core 2>/dev/null || true)"
+if [ "${waiting}" != "activating" ]; then
+  echo "    FAILED — ms-core was '${waiting}' with no database, not 'activating'; cannot ask" >&2
+  failed=1
+elif docker exec "${target}" /opt/ms/bin/ms-restore /tmp/restore.tar.gz >/tmp/refuse.log 2>&1; then
+  echo "    FAILED — restore ran with ms-core activating" >&2
+  failed=1
+elif grep -q 'ms-core is activating; stop it first' /tmp/refuse.log; then
+  echo "    refused while ms-core was activating, waiting for its database"
+else
+  echo "    FAILED — it refused for the wrong reason:" >&2
+  sed 's/^/      /' /tmp/refuse.log >&2
+  failed=1
+fi
+docker exec "${target}" systemctl stop ms-core >/dev/null 2>&1 || true
+docker exec "${target}" systemctl start postgresql
+for _ in $(seq 1 30); do
+  docker exec "${target}" pg_isready -q && break
+  sleep 1
+done
 
 echo "==> starting the restored installation"
 docker exec "${target}" systemctl start ms-core

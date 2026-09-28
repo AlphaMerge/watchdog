@@ -72,6 +72,25 @@ CREATE DATABASE monitoring OWNER monitoring;
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 ```
 
+**It has to be TimescaleDB's Community build, preloaded, under its Community licence.** `ms-core`
+relies on native compression, which is Timescale-licensed rather than Apache (`ADR-001`
+Decision 4), and migration 004 refuses to run without it. Four things, all of which the
+smoke-test boxes set up (`scripts/smoke/provision-postgres.sh`):
+
+- **The package with the licensed module in it.** From the TimescaleDB project's own repository
+  that is `timescaledb-2-postgresql-17`. Not `timescaledb-2-oss-postgresql-17`, and not a
+  distribution's own package unless it says it carries the TSL module: Debian 13's
+  `postgresql-17-timescaledb` is the Apache-only build. On an Apache-only build the licence
+  setting below is refused, because the module it names is not there, and migration 004 fails
+  again with the same message however often you set it.
+- **Preloaded**, in `postgresql.conf`, with PostgreSQL restarted afterwards:
+  `shared_preload_libraries = 'timescaledb'`.
+- **The Community licence**, `timescaledb.license = 'timescale'` in the same file. It is the full
+  package's default; say it anyway, so the file records what the installation depends on.
+- **At least the version the table above names.** An older one is refused at start-up.
+
+`SHOW timescaledb.license;` answers `timescale` when all of that is in place.
+
 The schema itself is not created here. `ms-core` migrates on startup, and refuses to start
 against a schema it does not recognise rather than running against one it might corrupt.
 
@@ -140,8 +159,10 @@ Then check it before restarting anything:
 sudo /opt/ms/bin/ms-core config check
 ```
 
-`config check` loads the file exactly as the service would, reports **every** problem rather than
-the first, and exits non-zero if the service would not start. It is worth running before a
+`config check` loads the file exactly as the service would — `/etc/ms/core.json`, unless
+`--config` names another — reports **every** problem rather than the first, and exits non-zero if
+the service would not start. A check that finds no file to read fails; it does not pass on the
+defaults. It is worth running before a
 restart every time, because the alternative is finding out from `journalctl` with the service
 already down.
 
@@ -237,19 +258,71 @@ and its core costs you the outage and not the data.
 ## Upgrading
 
 Install the new version the same way you installed the old one — `dpkg -i`, `rpm -U`, or unpack
-the new release and run `sudo ./install.sh`.
+the new release and run `sudo ./install.sh` (`sudo ./install-probe.sh` on a remote probe host).
 
-All three replace `/opt/ms/app`, `/opt/ms/bin` and `/opt/ms/web`, and **never overwrite anything
-in `/etc/ms`**. Each configuration file is copied to a timestamped `.bak` beside it, and the version
-this release ships is written alongside as `.json.new` so you can diff them.
+None of them **overwrite anything in `/etc/ms`**. Each configuration file is copied to a
+timestamped `.bak` beside it, and the version this release ships is written alongside as
+`.json.new` so you can diff them.
 
-Before restarting, the installer runs `config check` against every configuration file. **If a
-setting was renamed or made required, it stops there** — the new application is on disk, the old
-services are still running on the old version, and nothing has been restarted. Fix the
-configuration and `systemctl restart ms-core ms-probe`.
+**No old process runs on new files**, whichever way you install, but what you are left with when
+the new build refuses your configuration differs:
+
+- **The tarball** copies the new release in beside the running one and asks the *new* build
+  whether it can read your configuration (`config check`) while the old services are still
+  running. If a setting was renamed or made required, it stops there and says so: **nothing has
+  been changed**, and the old version is still installed and still running. Fix the configuration
+  and run the installer again. Otherwise it stops the services, moves the new release in, starts
+  them, and keeps the release it replaced at `/opt/ms/previous`.
+- **A package** stops the services before it unpacks, because the package manager replaces the
+  files itself and the new build can only be asked afterwards. If it refuses the configuration,
+  the new version is installed, **both services are left stopped**, and the message says so. Fix
+  the configuration, then `sudo systemctl reset-failed ms-core ms-probe` and
+  `sudo systemctl start ms-core ms-probe` — or, after a `.deb`, `sudo dpkg --configure -a`, which
+  asks again and starts them.
+
+`--no-start` and `MS_SETUP_NO_START=1` leave both services stopped, including any that were
+running before.
 
 Migrations run on startup and are reversible. A build started against a database migrated by a
 *newer* build refuses to start; install the matching release rather than migrating backwards.
+
+### The units are the release's
+
+The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them. **Do not
+edit them.** Put every change — the database password as an encrypted credential, a different
+memory ceiling — in a drop-in, which no upgrade touches:
+
+```bash
+sudo systemctl edit ms-core
+```
+
+`systemctl set-property ms-core MemoryMax=…` writes a drop-in as well. Releases before this one
+kept the units in `/etc/systemd/system` and overwrote them at every upgrade, edits included. The
+first upgrade to this one removes a unit there that is exactly as an earlier release shipped it,
+and **keeps one you edited**, naming it: a unit in `/etc/systemd/system` overrides the release's
+whole, so until you move your change into a drop-in and delete it, nothing a release changes in
+the unit applies.
+
+### Going back, after a tarball upgrade
+
+The release an upgrade replaced is at `/opt/ms/previous` until the next upgrade. If the new core
+has already migrated the database, undo that first, with the **new** build: the previous build's
+`migrate status` names the migrations it does not know, and `migrate down` removes that many.
+
+```bash
+sudo systemctl stop ms-probe ms-core
+sudo /opt/ms/previous/bin/ms-core migrate status --config /etc/ms/core.json
+sudo /opt/ms/bin/ms-core migrate down --steps 2        # however many it named
+cd /opt/ms && sudo mkdir rolled-back
+for entry in app bin web docs etc deploy libexec VERSION; do
+  [ -e "$entry" ] && sudo mv "$entry" rolled-back/
+done
+sudo mv previous/* . && sudo rmdir previous
+sudo systemctl start ms-core ms-probe
+```
+
+A package has no `previous`: install the earlier package version with `apt` or `dnf`, after the
+same `migrate down`.
 
 ## Uninstalling
 
@@ -261,11 +334,12 @@ From a tarball install:
 
 ```bash
 sudo systemctl disable --now ms-core ms-probe
-sudo rm -rf /opt/ms /etc/systemd/system/ms-{core,probe}.service
+sudo rm -rf /opt/ms /usr/lib/systemd/system/ms-{core,probe}.service
 sudo systemctl daemon-reload
 ```
 
-`/etc/ms`, `/var/lib/ms-*` and the database are left alone deliberately — they hold the
+`/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
+`/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the
 configuration, the credential-vault key and every reading ever taken. Remove them when you mean
 to, not as a side effect of removing the application.
 

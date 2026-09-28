@@ -3,8 +3,8 @@
 #
 # Run on the *core* host, which is where the probe-channel CA lives:
 #
-#     sudo /opt/ms/bin/ms-enrol web-dc2 > web-dc2.enrol
 #     sudo /opt/ms/bin/ms-enrol web-dc2 --out web-dc2.enrol
+#     sudo /opt/ms/bin/ms-enrol web-dc2 | ssh web-dc2 'umask 077; cat > web-dc2.enrol'
 #
 # Carry the file to the probe host and hand it to that host's installer:
 #
@@ -170,7 +170,14 @@ bundle="$(
 )"
 
 if [ -n "${out}" ]; then
-  ( umask 077; printf '%s\n' "${bundle}" > "${out}" )
+  # **A new file every time, and 0600 whatever was there** (`H-21`). `umask` decides a file's mode
+  # only when the file is created, so `--out` onto a bundle left from an earlier run kept that
+  # file's mode — whatever it had been given since. Written beside the target and renamed over it,
+  # the bundle is always a fresh inode that `mktemp` created 0600.
+  tmp="$(mktemp "${out}.XXXXXX")" || die "cannot write beside ${out}"
+  trap 'rm -rf "${work}" "${tmp}"' EXIT
+  printf '%s\n' "${bundle}" > "${tmp}"
+  mv -f "${tmp}" "${out}"
   cat >&2 <<SUMMARY
 ==> enrolment bundle for '${name}' written to ${out}
 
@@ -186,6 +193,15 @@ SUMMARY
 else
   # No --out: straight to stdout, for `ms-enrol name | ssh host 'cat > b.enrol'`. The warning
   # goes to stderr so it does not end up inside the bundle.
+  #
+  # **`sudo ms-enrol name > file` is the operator's shell creating the file** (`H-21`), before
+  # sudo runs and with that shell's umask — 0644 as often as not, which put a private key and the
+  # enrolment key where every account on the core host could read them. A regular file on stdout
+  # is made 0600 before a byte of the bundle is written to it, or refused.
+  if [ -f "/proc/$$/fd/1" ]; then
+    chmod 600 "/proc/$$/fd/1" 2>/dev/null \
+      || die "standard output is a file this cannot make private; use --out FILE instead"
+  fi
   printf '%s\n' "${bundle}"
   echo "==> enrolment bundle for '${name}' written to stdout (it contains a private key)" >&2
 fi

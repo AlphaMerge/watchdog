@@ -8,7 +8,10 @@
 #
 # Creates the service users, lays out /opt/ms, /etc/ms and /var/lib, installs the units and
 # starts the services. Re-running upgrades in place: configuration under /etc/ms is never
-# overwritten.
+# overwritten, the new build is asked whether it can read that configuration before anything
+# running is stopped, and the release it replaces is kept at /opt/ms/previous.
+#
+# `--no-start` installs and leaves both services stopped — including ones that were running.
 set -euo pipefail
 
 PREFIX=/opt/ms
@@ -22,7 +25,7 @@ while [ "$#" -gt 0 ]; do
     --core-only)  components=(core) ;;
     --no-start)   start_services=0 ;;
     --prefix)     PREFIX="$2"; shift ;;
-    -h|--help)    sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -45,47 +48,50 @@ esac
 command -v systemctl >/dev/null 2>&1 || die "systemd is required (systemctl not found)"
 command -v node >/dev/null 2>&1 || die "Node.js is required on PATH"
 command -v openssl >/dev/null 2>&1 || die "openssl is required (used to issue the probe-channel certificates)"
+[ -x "${here}/deploy/place-release.sh" ] || die "this does not look like an unpacked release (no deploy/place-release.sh)"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "${node_major}" -ge 22 ] || die "Node.js 22 or newer is required (found $(node -v))"
 
 echo "==> installing MonitoringSystem ${version} to ${PREFIX}"
 
+# Which services are up now, so that one this installer stops and `ms-setup` does not start — the
+# probe under `--core-only` — is started again rather than left down by an upgrade of the other.
+was_running=()
+for svc in core probe; do
+  case "$(systemctl is-active "ms-${svc}" 2>/dev/null || true)" in
+    active|activating|reloading) was_running+=("${svc}") ;;
+  esac
+done
+
 # --- application ---------------------------------------------------------------------------
-install -d -m 0755 "${PREFIX}"
-rm -rf "${PREFIX:?}/app" "${PREFIX:?}/bin" "${PREFIX:?}/web"
-cp -R "${here}/app" "${PREFIX}/app"
-cp -R "${here}/bin" "${PREFIX}/bin"
-chmod +x "${PREFIX}"/bin/*
-# The web UI, served by ms-core from api.webRoot. Optional: a tarball built without it, or a
-# deliberately headless install, simply leaves webRoot empty and no UI is served.
-if [ -d "${here}/web" ]; then
-  cp -R "${here}/web" "${PREFIX}/web"
-fi
-printf '%s\n' "${version}" > "${PREFIX}/VERSION"
-
-
-# The example configuration, the units and the docs, where `ms-setup` expects to find them —
-# the packages get these from dpkg/rpm, and the tarball puts them there itself so that setup
-# reads one layout regardless of which installer ran.
-install -d -m 0755 "${PREFIX}/etc" "${PREFIX}/deploy/systemd" "${PREFIX}/libexec"
-cp "${here}"/etc/*.json "${PREFIX}/etc/"
-cp "${here}"/deploy/systemd/*.service "${PREFIX}/deploy/systemd/"
-if [ -d "${here}/../docs" ]; then
-  rm -rf "${PREFIX:?}/docs"
-  cp -R "${here}/../docs" "${PREFIX}/docs"
-fi
-install -m 0755 "${here}/deploy/setup.sh" "${PREFIX}/libexec/ms-setup"
+#
+# **Copied in beside the running release, checked, and only then swapped in** (`H-21`), by the
+# script `install-probe.sh` uses too. This used to delete /opt/ms/app and copy the new one over
+# it with both services running, and a configuration this build refuses is now refused before
+# anything that is running has been touched.
+place_args=(--from "${here}" --prefix "${PREFIX}" --confdir "${CONFDIR}"
+            --components "$(IFS=,; echo "${components[*]}")")
+[ "${start_services}" -eq 1 ] || place_args+=(--no-start)
+"${here}/deploy/place-release.sh" "${place_args[@]}"
 
 # --- everything that is not file placement --------------------------------------------------
 #
 # **The same script the `.deb` and the `.rpm` run** (`H-05`): the service users, the
-# probe-channel PKI, the access key, the configuration that survives an upgrade, and the
-# `config check` that runs before anything is restarted. Three installers that each did this
+# probe-channel PKI, the access key, the configuration that survives an upgrade, the units, and
+# the `config check` that runs before anything is restarted. Three installers that each did this
 # their own way would be three chances for the one nobody smoke-tests to be wrong.
 setup_args=(--prefix "${PREFIX}" --confdir "${CONFDIR}" --components "$(IFS=,; echo "${components[*]}")")
 [ "${start_services}" -eq 1 ] || setup_args+=(--no-start)
 "${PREFIX}/libexec/ms-setup" "${setup_args[@]}"
+
+if [ "${start_services}" -eq 1 ]; then
+  for svc in ${was_running[@]+"${was_running[@]}"}; do
+    case " ${components[*]} " in *" ${svc} "*) continue ;; esac
+    echo "==> starting ms-${svc} again"
+    systemctl start "ms-${svc}.service"
+  done
+fi
 
 cat <<SUMMARY
 

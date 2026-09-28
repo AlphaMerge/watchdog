@@ -26,6 +26,12 @@ import { loadConfig } from './load.js';
  * **It does not connect to anything.** No database, no probe endpoint, no port. That is what
  * makes it safe to run against a live installation, and it is also the boundary of what it can
  * tell you: that the file parses and validates, not that the credentials in it are right.
+ *
+ * **A check that read no file is not a pass** (`H-21`). With neither `--config` nor
+ * `MS_CONFIG_FILE`, the loader validates the schema's defaults — which always validate — and this
+ * used to say "configuration is valid" and exit 0. That was the documented pre-restart check, run
+ * without a flag, on a `core.json` the restart then refused. The installed launchers now point at
+ * `/etc/ms` themselves; anything that still reaches here without a file is told so and fails.
  */
 
 export interface ConfigCheckOptions<T> {
@@ -47,8 +53,15 @@ export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
       argv: [...options.argv],
       ...(options.env === undefined ? {} : { env: options.env }),
     });
+    if (loaded.sources.file === null) {
+      options.writeError(
+        `no configuration file was read, so nothing about this installation was checked — ` +
+          `pass --config <file> or set MS_CONFIG_FILE (${options.service} reads /etc/ms when installed)`,
+      );
+      return 1;
+    }
     options.write(`configuration is valid for ${options.service} ${options.version}`);
-    options.write(`  file            ${loaded.sources.file ?? '(none — schema defaults only)'}`);
+    options.write(`  file            ${loaded.sources.file}`);
     if (loaded.sources.envOverrides.length > 0) {
       options.write(`  environment     ${loaded.sources.envOverrides.join(', ')}`);
     }

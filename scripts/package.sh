@@ -10,6 +10,9 @@
 #   bin/ms-backup, bin/ms-restore the backup and restore procedure (H-04)
 #   deploy/systemd/*.service      unit files
 #   deploy/winsw/*.xml            Windows service definitions
+#   deploy/setup.sh               the post-install every installer runs (H-05)
+#   deploy/place-release.sh       copy, check, stop, swap — the tarball installers' upgrade (H-21)
+#   docs/                         this release's documentation, which the units point at
 #   etc/{core,probe}.json         example configuration
 #   install.sh                    Linux installer
 #
@@ -171,11 +174,16 @@ ln -sfn ../../sensors "${stage}/app/node_modules/@ms/sensors"
 echo "==> staging launchers, units and examples"
 mkdir -p "${stage}/bin" "${stage}/deploy" "${stage}/etc"
 for svc in "${services[@]}"; do
+  # **The installed configuration unless told otherwise** (`H-21`). The unit sets MS_CONFIG_FILE
+  # and a hand-run `ms-core config check` or `migrate status` did not, so it read the schema's
+  # defaults: "valid" for a core.json the restart then refused, and a status taken of a database
+  # that was not this installation's. `--config` still wins, as it does over the variable.
   cat > "${stage}/bin/ms-${svc}" <<LAUNCHER
 #!/usr/bin/env bash
 set -euo pipefail
 here="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export MS_BUILD_VERSION="${version}"
+export MS_CONFIG_FILE="\${MS_CONFIG_FILE:-/etc/ms/${svc}.json}"
 exec "\${MS_NODE:-node}" "\${here}/../app/${svc}/dist/src/main.js" "\$@"
 LAUNCHER
   chmod +x "${stage}/bin/ms-${svc}"
@@ -193,7 +201,15 @@ mkdir -p "${stage}/deploy/systemd" "${stage}/deploy/winsw"
 # The shared post-install (`H-05`). `install.sh` copies it to ${PREFIX}/libexec/ms-setup, and the
 # .deb and .rpm ship it to the same place, so all three run one script rather than three.
 cp "${repo_root}/deploy/setup.sh" "${stage}/deploy/setup.sh"
-chmod +x "${stage}/deploy/setup.sh"
+# How both tarball installers put a release in place without touching the running one until the
+# new build has accepted the configuration (`H-21`).
+cp "${repo_root}/deploy/place-release.sh" "${stage}/deploy/place-release.sh"
+chmod +x "${stage}/deploy/setup.sh" "${stage}/deploy/place-release.sh"
+# The release's own documentation, staged here so that the tarball, the .deb and the .rpm all
+# install the same copy — the packages used to take the repository's and the tarball none, and
+# install.sh then copied whatever `docs` sat beside the directory it was unpacked in.
+rm -rf "${stage}/docs"
+cp -R "${repo_root}/docs" "${stage}/docs"
 for svc in "${services[@]}"; do
   cp "${repo_root}/deploy/systemd/ms-${svc}.service" "${stage}/deploy/systemd/ms-${svc}.service"
   cp "${repo_root}/deploy/winsw/ms-${svc}.xml" "${stage}/deploy/winsw/ms-${svc}.xml"

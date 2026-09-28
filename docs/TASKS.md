@@ -5512,10 +5512,24 @@ because each is a decision rather than a defect:
 
       **Not built:** a probe that sends only foreign results still counts as delivering for
       `P-74`'s watch. The gate is not measured: `test:perf`'s ingestion budgets call
-      `acceptResults` directly, so they do not include it. Its cost is a map lookup a result,
-      and one query a batch for the sensors a move or a delete has just cleared from the cache.
+      `acceptResults` directly, so they do not include it (`P-233`). Its cost is a map lookup a
+      result, and one query a batch for the sensors a move or a delete has just cleared from the
+      cache.
 
       Mutations caught: 18 of 18. Each was applied alone, built, and run against its own tests.
+
+- [ ] **P-233 — `test:perf`'s ingestion budgets bypass the probe gate** · S · P-228, P-15 · Found
+      landing `P-228`. `ingestion-performance.test.ts` and `replay-soak.test.ts` call
+      `acceptResults`, the in-process path. So no budget covers the path every probe result now
+      takes: `acceptProbeResults`, with its ownership cache in front of `#prepare` and the query
+      for sensors the cache does not hold. A perf claim about ingestion no longer describes
+      production. The expensive case is an ordinary one: a core starts with the cache empty, so
+      every probe's first batch after a restart is all misses.
+
+      **Done when:** the budgets drive `acceptProbeResults` from a probe object that owns the
+      sensors, with a realistic mix of warm and cold cache. The mix includes a first batch after a
+      core restart (all misses) and the clear that follows a move. The numbers are measured in a
+      quiet window and committed to `docs/findings/`.
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
@@ -15846,6 +15860,148 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       after the build; the staged application installs from the lockfile (`npm ci` against a
       staged lock) and `build.json` records the lock's hash; and each is mutated once — an old
       output behind a newer source, a `git` that errors, a lock changed after staging.
+
+- [x] **H-21 — An upgrade that keeps what the operator did, and a restore that can be followed**
+      · L · H-03, H-04, H-05 · Found on 2026-09-28 by review rounds 2 and 3 of the upgrade path,
+      each finding checked by two verifiers. Upgrade and backup/restore only: start-up recovery is
+      `P-222`'s. Thirteen defects:
+      - **Every upgrade overwrites the unit.** `setup.sh` copies `ms-*.service` into
+        `/etc/systemd/system` on every run. The unit's own comments tell the operator to edit it,
+        uncommenting `LoadCredentialEncrypted=` for the database password. An upgrade reverts
+        that, the core restarts with no password, and it ends `failed`.
+      - **A refusal skips `daemon-reload`.** When `config check` refuses, the new units are
+        already on disk, and the documented `systemctl restart` starts the new build under the
+        old definitions.
+      - **`ms-backup` and `ms-restore` `eval` the configuration.** A `$` in the database password
+        aborts the backup under `set -u`. A backtick or `$(…)` runs as root.
+      - **The documented `ms-core config check` reads no file.** Without `--config` it checks
+        schema defaults and exits 0. `migrate status` after a restore connects with defaults, not
+        the restored configuration.
+      - **`install-probe.sh` upgrades without the check or the backup** that installation.md
+        promises. Re-enrolling rewrites `probe.json` with no `.bak`.
+      - **`ms-enrol NAME > file` writes the private key with the caller's umask**, which is usually
+        0644. `--out` onto an existing file keeps that file's mode.
+      - **`install.sh` copies whatever `docs` sits beside the unpacked release** into
+        `/opt/ms/docs`, as root, on every upgrade. The release's own docs are never staged.
+      - **`ms-restore`'s nothing-is-running guard passes a core that is `activating`**, and
+        `P-215`'s database wait makes that state long-lived.
+      - **The tarball upgrade deletes and re-copies the live tree** under running services. Checks
+        in that window fail as real scan failures. A copy that fails part-way leaves no previous
+        version to go back to.
+      - **The `.deb` and `.rpm` keep the services up while files are swapped under them.** A
+        failed `postinst` or `%post` leaves the old processes on the new tree indefinitely.
+      - **A refusal says "still up on the previous version"** while the old processes run over the
+        new tree. An unattended restart then brings up the new build on the configuration it just
+        refused.
+      - **The restore ignores TimescaleDB versions.** It creates the newest extension and loads
+        catalog rows from whatever version took the dump. The archive does not record which
+        version that was.
+      - **installation.md never asks for the Community (TSL) build**, `shared_preload_libraries`,
+        `timescaledb.license` or a minimum version. Migration 004's hint cannot be followed on an
+        Apache-only build.
+
+      **Done when** units are vendor files that an upgrade replaces and an operator never edits,
+      with overrides in drop-ins. An edited unit from before this change is kept and named, not
+      overwritten. A refusal reloads units first. No script `eval`s a configuration value. The
+      installed launchers read `/etc/ms` without a flag, and a check that read no file does not
+      exit 0. The tarball installers ask the new build before a running service is touched, and
+      the packages, which cannot, stop the services before they unpack. No live service ever runs
+      on a tree being replaced, and a refusal says what is actually running. An archive records
+      its TimescaleDB version, and a restore checks it before it writes anything. The operator
+      docs say what PostgreSQL must be. The smoke tests, and a test that runs the scripts
+      themselves, cover each of these.
+
+
+      **Done.** One placement script for both tarball installers, `ms-setup` for every installer,
+      the probe host's included, and the packages stopping before they unpack:
+      - **Units.** The units ship in `/usr/lib/systemd/system`: package files in the `.deb` and
+        the `.rpm`, and `ms-setup` installs them for a tarball. Their comments now point at
+        `systemctl edit` drop-ins instead of asking for an edit. A unit an earlier release left in
+        `/etc/systemd/system` is removed when its sha256 is one of the ten that ever shipped, the
+        last two `P-227`'s (`LEGACY_STOCK_UNITS`, closed now). Anything else is kept, and the
+        installer names it with the three commands to move it into a drop-in. `daemon-reload`
+        and `enable` run before the configuration check, so a refusal leaves this release's
+        units loaded.
+      - **Placement.** `deploy/place-release.sh` copies the release into `/opt/ms/.incoming` and
+        runs `config check` with the new launcher while the old services are still running. A
+        refusal removes the copy and says "Nothing was changed", naming what is installed and
+        what is running, which is now true. Otherwise it stops both services, moves the release
+        in by rename, and keeps the old one at `/opt/ms/previous`. A copy that fails part-way
+        stops nothing. `install-probe.sh` now runs `place-release.sh` and then `ms-setup
+        --enrolment`, so a probe host gets the configuration check and a `.bak` taken before a
+        re-enrolment rewrites `probe.json`. A remote probe no longer mints an unused access key.
+      - **Packages.** The `.deb` has a `preinst` and the `.rpm` a `%pre` that stop the services
+        before unpacking on an upgrade. A refused configuration therefore leaves them stopped,
+        with a message that says so and gives `reset-failed`, `start` and `dpkg --configure -a`.
+      - **Starting.** `ms-setup` runs `reset-failed` before each restart. It tries every service
+        even when the first fails, and the refusal message lists each service's actual state.
+      - **The configuration file.** The launchers export
+        `MS_CONFIG_FILE=${MS_CONFIG_FILE:-/etc/ms/<svc>.json}`. `config check` with no file exits
+        1 and says so; the environment layer on its own does not rescue it.
+      - **Backup and restore.** `ms-backup` and `ms-restore` read the configuration positionally,
+        with no `eval`. A password goes only into a libpq password file in the 0600 staging
+        directory, and with no password in the file they leave libpq's environment alone.
+        `ms-restore` passes database names to `runuser` as arguments and the role to a psql
+        variable, and refuses a database or role name it would have to quote.
+      - **Restore order and versions.** The restore guard refuses any state but `inactive` and
+        `failed`. The MANIFEST records `timescaledb=` and `postgresql=`. The restore checks
+        everything that can refuse — connection, empty database, extension version — before it
+        writes `/etc/ms`. It creates the archived version with `CREATE EXTENSION … VERSION`,
+        refuses a mismatch with the four steps to take, and warns on an archive from before this
+        ticket.
+      - **`ms-enrol`.** `--out` writes a fresh `mktemp` file and renames it over the target. A
+        regular file on stdout is made 0600 through `/proc/$$/fd/1` before anything is written.
+      - **Docs.** `package.sh` stages `docs/`, and all three installers ship that copy.
+        installation.md §1 says what PostgreSQL must be: the Community build, not an Apache-only
+        package, which it names; `shared_preload_libraries`; `timescaledb.license`; and the version
+        in `P-226`'s table row. Also updated:
+        - installation.md: Upgrading (what each installer leaves on a refusal), the units, and
+          going back from `/opt/ms/previous`;
+        - administration.md: Backups and Upgrades;
+        - the runbook: "The TimescaleDB version", the credential route, and the new restore order;
+        - troubleshooting.md: the Apache-licence error and the version refusal;
+        - README.md.
+      - **A failed smoke takes its box down.** `smoke-packages.sh` removed its container only
+        after a pass, so each failed assertion left a privileged systemd box running on the
+        machine CI shares — `ms-smoke-deb-68453` was one. It now removes it from an `EXIT` trap,
+        which bash also runs on the TERM `timeout` sends. The other three harnesses already did,
+        and `build-hygiene.test.ts` now fails any `smoke-*.sh` that starts a box before trapping
+        `EXIT`.
+
+      **Migration 004's hint is unchanged, deliberately.** A migration's checksum covers its `up`
+      text, `RAISE … HINT` included, so rewording it would have made every installed database
+      refuse to start as drifted. `migrations/types.ts` now says so. The guidance is in the docs.
+
+      **Tests.** `deploy-scripts.test.ts` runs the scripts themselves, 24 cases, against stub
+      `systemctl`, `id`, `psql`, `pg_dump` and `pg_restore`. The `ms-setup` cases run only as root
+      in a throwaway container. Ten mutants were killed, one per defect above:
+      - the old guard;
+      - the old `eval` backup;
+      - no version check;
+      - stop before asking;
+      - reload after refusing;
+      - the first failure ends the start;
+      - any legacy unit removed;
+      - the old `--out` write;
+      - no stdout chmod;
+      - backup after the enrolment rewrite.
+
+      `config-check.test.ts` gains the no-file case. The smoke tests assert on real systemd:
+      - smoke-install: the units, a drop-in surviving, a stock unit cleared, `/opt/ms/previous`,
+        and a refusal that leaves both MainPIDs and `/opt/ms/app`'s inode unchanged;
+      - smoke-packages: a running probe found stopped after the upgrade, the drop-in applied, and
+        the stock unit gone;
+      - smoke-restore: a password containing `$`, a quote, a backtick and `$(…)` on both hosts, the
+        manifest's version, a mismatched manifest refused with the database and `core.json`
+        untouched, and an `activating` core refused;
+      - smoke-enrol: the re-enrolment `.bak` and `/opt/ms/previous`.
+
+      **Smoke results.** On the release built from the rebased commit, with both tarballs stamped
+      with it: smoke-enrol passed, and smoke-packages, `.deb` and `.rpm`, passed. smoke-install
+      and smoke-restore passed on the release built before the rebase onto `P-227`, `A-29`,
+      `A-36` and `A-38`, and were not rerun on this commit before it landed. Their paths changed:
+      migration 059 rebuilds an enum under the `sensor_state` hypertable, the kind of object a
+      dump and restore round trip gets wrong, and `P-227` changed how the core stops.
 
 ---
 

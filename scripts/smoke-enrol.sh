@@ -37,9 +37,15 @@ package() {
   "${repo_root}/scripts/dev.sh" "scripts/package.sh $*" >/dev/null
 }
 
-echo "==> building both packages"
-package
-package --probe-only
+# `scripts/smoke-enrol.sh CORE.tar.gz PROBE.tar.gz` tests two tarballs already built — the same
+# ones the other smoke tests were handed — rather than building both again.
+if [ "$#" -ge 2 ]; then
+  echo "==> using the tarballs given on the command line (not rebuilding)"
+else
+  echo "==> building both packages"
+  package
+  package --probe-only
+fi
 # `ms-[0-9]*` rather than `ms-*`: the probe package is `ms-probe-…`, which `ms-*` also matches,
 # and picking it up here would hand the core's installer a tarball with no core in it.
 newest() {
@@ -50,8 +56,13 @@ newest() {
   done
   printf '%s' "${newest}"
 }
-core_tarball="$(newest "${repo_root}"/release/ms-[0-9]*.tar.gz)"
-probe_tarball="$(newest "${repo_root}"/release/ms-probe-*.tar.gz)"
+if [ "$#" -ge 2 ]; then
+  core_tarball="$1"
+  probe_tarball="$2"
+else
+  core_tarball="$(newest "${repo_root}"/release/ms-[0-9]*.tar.gz)"
+  probe_tarball="$(newest "${repo_root}"/release/ms-probe-*.tar.gz)"
+fi
 [ -f "${core_tarball}" ] || { echo "no core tarball built" >&2; exit 1; }
 [ -f "${probe_tarball}" ] || { echo "no probe tarball built" >&2; exit 1; }
 echo "    core:  $(basename "${core_tarball}")"
@@ -188,7 +199,8 @@ echo "    ms-probe: ${state}"
 echo "==> asserting there is no core on the probe host"
 # The point of a probe-only package. A core service unit here would mean the operator can start
 # one by accident on a machine with no database.
-if docker exec "${probe_box}" test -e /etc/systemd/system/ms-core.service; then
+if docker exec "${probe_box}" test -e /usr/lib/systemd/system/ms-core.service || \
+   docker exec "${probe_box}" test -e /etc/systemd/system/ms-core.service; then
   note_failure "a core unit was installed on the probe host"
 else
   echo "    no ms-core unit: ok"
@@ -530,12 +542,25 @@ docker exec "${probe_box}" bash -c "
     cfg.probe.checkQueueMaxLength = 4242;
     writeFileSync(\"/etc/ms/probe.json\", JSON.stringify(cfg, null, 2) + \"\n\");
   '"
-docker exec "${probe_box}" bash -c 'cd /tmp/unpacked/ms-probe-* && ./install-probe.sh --no-start' >/dev/null
+# With the bundle again, the way a re-enrolment runs: the endpoint and key are rewritten in
+# place, so the file the operator had must be kept as a .bak first (`H-21`) — this installer did
+# its own copy of setup's work, and that step was not in it.
+docker exec "${probe_box}" bash -c 'cd /tmp/unpacked/ms-probe-* && ./install-probe.sh --enrolment /tmp/web-dc2.enrol --no-start' >/dev/null
 kept="$(docker exec "${probe_box}" node -p 'JSON.parse(require("node:fs").readFileSync("/etc/ms/probe.json","utf8")).probe.checkQueueMaxLength')"
 if [ "${kept}" = "4242" ]; then
   echo "    upgrade kept probe.json: ok"
 else
   note_failure "an upgrade overwrote the operator's configuration (checkQueueMaxLength is ${kept})"
+fi
+if docker exec "${probe_box}" bash -c 'grep -l "\"checkQueueMaxLength\": 4242" /etc/ms/probe.json.*.bak' >/dev/null 2>&1; then
+  echo "    re-enrolment backed up probe.json first: ok"
+else
+  note_failure "a re-enrolment rewrote probe.json with no .bak of the operator's file"
+fi
+if docker exec "${probe_box}" test -f /opt/ms/previous/VERSION; then
+  echo "    the release it replaced: kept at /opt/ms/previous"
+else
+  note_failure "the probe upgrade kept no previous release"
 fi
 
 echo "==> asserting the installer refuses an unusable bundle rather than half-installing"

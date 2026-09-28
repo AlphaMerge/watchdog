@@ -80,10 +80,14 @@ mkdir -p "${payload}/opt/ms"
 cp -R "${stage}/app" "${payload}/opt/ms/app"
 cp -R "${stage}/bin" "${payload}/opt/ms/bin"
 [ -d "${stage}/web" ] && cp -R "${stage}/web" "${payload}/opt/ms/web"
-[ -d "${repo_root}/docs" ] && cp -R "${repo_root}/docs" "${payload}/opt/ms/docs"
+[ -d "${stage}/docs" ] && cp -R "${stage}/docs" "${payload}/opt/ms/docs"
 install -d -m 0755 "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy/systemd" "${payload}/opt/ms/libexec"
 cp "${stage}"/etc/*.json "${payload}/opt/ms/etc/"
 cp "${stage}"/deploy/systemd/*.service "${payload}/opt/ms/deploy/systemd/"
+# **The units are package files, where an upgrade replaces them and rpm removes them** (`H-21`).
+# An operator's changes go in a drop-in (`systemctl edit`), under /etc, which rpm never touches.
+install -d -m 0755 "${payload}/usr/lib/systemd/system"
+cp "${stage}"/deploy/systemd/*.service "${payload}/usr/lib/systemd/system/"
 install -m 0755 "${repo_root}/deploy/setup.sh" "${payload}/opt/ms/libexec/ms-setup"
 printf '%s\n' "${version}" > "${payload}/opt/ms/VERSION"
 chmod +x "${payload}"/opt/ms/bin/*
@@ -98,8 +102,8 @@ chmod +x "${payload}"/opt/ms/bin/*
 # a README, a LICENSE, a benchmark script that some upstream published with `+x`. It only strips
 # from files with no shebang, so nothing that is ever executed is touched; the `.bin` shims all
 # have one and are left alone. Expected output, not something to chase.
-find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy" -type f -exec chmod 0644 {} + 2>/dev/null || true
-find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy" -type d -exec chmod 0755 {} + 2>/dev/null || true
+find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy" "${payload}/usr" -type f -exec chmod 0644 {} + 2>/dev/null || true
+find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy" "${payload}/usr" -type d -exec chmod 0755 {} + 2>/dev/null || true
 chmod 0644 "${payload}/opt/ms/VERSION"
 
 (cd "${top}/SOURCES" && tar -czf "${name}-${version}.tar.gz" "${name}-${version}")
@@ -146,11 +150,23 @@ The post-install checks for it and says what it found.
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
-cp -a opt %{buildroot}/
+cp -a opt usr %{buildroot}/
 
 %files
 %defattr(-,root,root,-)
 /opt/ms
+$(for svc in "${services[@]}"; do printf '/usr/lib/systemd/system/ms-%s.service\n' "${svc}"; done)
+
+%pre
+# **Stopped before the new files go in, on an upgrade** (\$1 = 2) (\`H-21\`). rpm renames each new
+# file into place and then erases what the old package had that this one does not, so the old
+# processes used to run over a mixed and then a new tree — and a %post that failed is only a
+# warning to rpm, so the transaction went on and they stayed there. %post starts them again.
+if [ "\$1" -gt 1 ]; then
+$(for svc in "${services[@]}"; do
+  printf '  systemctl stop "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
+done)
+fi
 
 %post
 # Runs on install (\$1 = 1) and on upgrade (\$1 = 2). \`ms-setup\` is idempotent for exactly this
@@ -172,11 +188,9 @@ fi
 # Same rule, same reason. /etc/ms, /var/lib/ms-* and the database are left alone on purpose:
 # they hold the configuration, the credential-vault key and every reading ever taken, and the
 # vault key is unrecoverable — removing it as a side effect of removing the application would
-# destroy every stored credential with it.
+# destroy every stored credential with it. The units are package files and go with it; an
+# operator's drop-ins are theirs, and stay.
 if [ "\$1" -eq 0 ]; then
-$(for svc in "${services[@]}"; do
-  printf '  rm -f "/etc/systemd/system/ms-%s.service"\n' "${svc}"
-done)
   systemctl daemon-reload >/dev/null 2>&1 || :
   echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2
 fi

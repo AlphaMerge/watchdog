@@ -39,6 +39,21 @@ matches() {
 
 fail() { echo "    FAIL: $*" >&2; exit 1; }
 
+# The box this run has up, if any. **A failure has to take it down too** (`H-21`): `fail` exits
+# from inside `one_format`, which removed its box only on the way out of a pass, so every failed
+# assertion left a privileged systemd container running on the machine — the one CI shares with
+# whoever is developing on it. `MS_SMOKE_KEEP=1` keeps it to look at, as in `smoke-install.sh`.
+box=''
+cleanup() {
+  [ -n "${box}" ] || return 0
+  if [ "${MS_SMOKE_KEEP:-0}" = "1" ]; then
+    echo "==> kept ${box} (docker rm -f ${box} removes it)"
+    return 0
+  fi
+  docker rm -f "${box}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
 # Reuse a staged tree if one is already there. In CI `scripts/package.sh` has run in this job
 # already, and rebuilding would be a second full build to produce identical bits — the same
 # reason `smoke-install.sh` takes a tarball on the command line.
@@ -103,6 +118,7 @@ one_format() {
   echo "======================================================================"
 
   docker rm -f "${container}" >/dev/null 2>&1 || true
+  box="${container}"
 
   # A real systemd, because the scriptlets enable and start units and a container without pid 1
   # would let a broken unit file pass. Same shape as `smoke-install.sh`.
@@ -198,7 +214,10 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
 
   # Not asserted active: these boxes have no database, by the decision above. What a package
   # owns is that the unit is installed and enabled, which is what these two check.
-  ${in} test -f /etc/systemd/system/ms-core.service || fail "ms-core.service was not installed"
+  # In /usr/lib, as a package file, and not in /etc, where an operator's drop-ins go (`H-21`).
+  ${in} test -f /usr/lib/systemd/system/ms-core.service || fail "ms-core.service was not installed"
+  ${in} test ! -e /etc/systemd/system/ms-core.service \
+    || fail "ms-core.service was written into /etc/systemd/system, where it overrides the package's"
   matches 'enabled' ${in} systemctl is-enabled ms-core.service || fail "ms-core.service is not enabled"
   matches 'enabled' ${in} systemctl is-enabled ms-probe.service || fail "ms-probe.service is not enabled"
   echo "    units: installed and enabled"
@@ -215,6 +234,24 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   local ca_before key_before
   ca_before="$(${in} sha256sum /etc/ms/tls/ca.crt | cut -d' ' -f1)"
   key_before="$(${in} sha256sum /etc/ms/access-key | cut -d' ' -f1)"
+
+  # **What the operator did to the units, and what an earlier release left** (`H-21`). A drop-in
+  # is the operator's and must survive; a unit an earlier release put in /etc, exactly as it
+  # shipped it, must go, or it goes on overriding every unit the package installs after it.
+  ${in} mkdir -p /etc/systemd/system/ms-probe.service.d
+  ${in} bash -c 'printf "[Service]\nEnvironment=MS_H21_DROP_IN=kept\n" > /etc/systemd/system/ms-probe.service.d/h21.conf'
+  docker cp "${repo_root}/scripts/smoke/legacy-units/ms-probe.service" \
+    "${container}:/etc/systemd/system/ms-probe.service"
+  ${in} systemctl daemon-reload
+
+  # **A running service, so that the upgrade has something to stop.** The probe starts without a
+  # core — it spools — which is what lets these database-less boxes run one. The package must stop
+  # it before its files are unpacked: it used to keep running over the new tree until `postinst`,
+  # and with MS_SETUP_NO_START nothing restarts it, so it stays stopped.
+  ${in} systemctl start ms-probe.service || {
+    ${in} journalctl -u ms-probe --no-pager -n 30 || true
+    fail "ms-probe would not start before the upgrade"
+  }
 
   ${in} bash -c "${upgrade_cmd/PKG/$(basename "${pkg}")}" 2>&1 | sed 's/^/    /' | tail -4
 
@@ -252,10 +289,31 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
     || fail "ms-probe.service is no longer enabled after the upgrade"
   echo "    units: still enabled after the upgrade"
 
+  local probe_state fragment environment
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" = "inactive" ] \
+    || fail "ms-probe is ${probe_state} after the upgrade — it ran on while the files were replaced"
+  echo "    ms-probe: stopped before the unpack, and left stopped (MS_SETUP_NO_START)"
+  ${in} test ! -e /etc/systemd/system/ms-probe.service \
+    || fail "the unit an earlier release left in /etc/systemd/system is still there"
+  # Compared resolved: on a merged-/usr Debian systemd names /lib/systemd/system, which is the
+  # same file through the /lib symlink, and RHEL names /usr/lib.
+  fragment="$(${in} systemctl show ms-probe.service -p FragmentPath --value)"
+  [ "$(${in} readlink -f "${fragment}")" = "$(${in} readlink -f /usr/lib/systemd/system/ms-probe.service)" ] \
+    || fail "ms-probe runs from ${fragment}, not the package's unit"
+  environment="$(${in} systemctl show ms-probe.service -p Environment --value)"
+  case "${environment}" in
+    *MS_H21_DROP_IN=kept*) ;;
+    *) fail "the operator's drop-in did not survive the upgrade (Environment=${environment})" ;;
+  esac
+  echo "    units: the earlier release's is gone, and the operator's drop-in applies"
+
   # --- removal -------------------------------------------------------------------------------
   echo "==> asserting removal stops the services and keeps the data"
   ${in} bash -c "${remove_cmd}" >/dev/null 2>&1 || fail "could not remove the package"
-  ${in} test ! -f /etc/systemd/system/ms-core.service || fail "the unit file survived removal"
+  ${in} test ! -f /usr/lib/systemd/system/ms-core.service || fail "the unit file survived removal"
+  ${in} test -f /etc/systemd/system/ms-probe.service.d/h21.conf \
+    || fail "removal deleted the operator's drop-in"
   ${in} test ! -d /opt/ms/app || fail "/opt/ms/app survived removal"
   echo "    application and units: gone"
 
@@ -267,6 +325,7 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   echo "    configuration, PKI and state: left in place, as documented"
 
   docker rm -f "${container}" >/dev/null 2>&1 || true
+  box=''
   echo "==> ${format} passed"
 }
 

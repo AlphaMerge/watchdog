@@ -1,0 +1,105 @@
+# MonitoringSystem probe.
+#
+# Runs the same code locally and at a remote site; the probe always dials out to the core
+# (WORKFLOW.MD §10), so no inbound firewall rule is needed at a remote site.
+
+[Unit]
+Description=MonitoringSystem probe
+Documentation=file:/opt/ms/docs
+After=network-online.target
+Wants=network-online.target
+# The local probe should follow the core, but must not fail if the core is down — it spools.
+After=ms-core.service
+# **The restart loop ends, where an operator sees it** (P-215). A probe whose work does not fit
+# under MemoryMax is killed a few seconds into every start and goes round every 10-14 s. After
+# five starts inside ten minutes systemd refuses the sixth: the unit is `failed`, `systemctl status`
+# says "start request repeated too quickly", and the core raises one or two alarms on the link
+# rather than one per round (36-45 an hour without this, 1-2 with it). It lives in [Unit]
+# because systemd 229 moved it there; in [Service] systemd warns and ignores it. Ten minutes rather
+# than five so that it also stops a probe that lasts a minute or two before the ceiling takes it:
+# any loop under two minutes a round. **Safe only because nothing a restart could fix costs a
+# start** (P-222): a listen address not assigned yet is waited for in the process, five minutes a
+# round, and a refused configuration exits 78, which is not restarted. The table is in
+# docs/administration.md, "What a start failure does". After raising the ceiling,
+# `systemctl reset-failed ms-probe` and start it. RestartSteps= would back off
+# instead of stopping, but needs systemd 254; Debian 12 and RHEL 9 ship 252.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=60
+
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5s
+# Exit 78 (EX_CONFIG) is a configuration the service refused to start with (P-215). Restarting
+# reads the same file and refuses again, every five seconds, for ever; stopping at once puts the
+# reason at the top of `systemctl status` instead of under a thousand copies of itself.
+RestartPreventExitStatus=78
+
+User=ms-probe
+Group=ms-probe
+
+Environment=NODE_ENV=production
+Environment=MS_CONFIG_FILE=/etc/ms/probe.json
+ExecStart=/opt/ms/bin/ms-probe
+
+WorkingDirectory=/var/lib/ms-probe
+StateDirectory=ms-probe
+LogsDirectory=ms-probe
+RuntimeDirectory=ms-probe
+
+KillSignal=SIGTERM
+KillMode=mixed
+# Longer than the core's: in-flight checks get their timeout before the spool is flushed.
+TimeoutStopSec=45
+
+# --- Capabilities ------------------------------------------------------------------------
+# CAP_NET_BIND_SERVICE: syslog on 514 and SNMP traps on 162 are privileged ports.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Uncomment to enable the raw-socket ICMP fast path instead of the system ping binary
+# (ADR-001 Decision 6, benchmarked in P-07). Adds CAP_NET_RAW to both lines.
+#AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+#CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# --- Hardening ---------------------------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ReadWritePaths=/var/lib/ms-probe /var/log/ms-probe
+# The probe speaks far more protocols than the core: AF_NETLINK is needed by some local
+# host-metric collectors, AF_PACKET is deliberately absent (we do not sniff — CAPABILITIES §15).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+
+# EXE/Script sensors run user-supplied code in child processes (ADR-001 Decision 3). Keep
+# SystemCallFilter permissive enough for them, and confine them further in P-03.
+SystemCallFilter=@system-service
+
+# --- Resource limits ---------------------------------------------------------------------
+# One memory ceiling, and it kills. No MemoryHigh (P-213): past it the kernel does not refuse or
+# kill, it throttles, and with no swap a throttled probe was measured at a standstill within 17 s
+# and killed by the watchdog below within 25 — then restarted into the same ceiling, stalled
+# again, and never gave up, with nothing saying why. Past MemoryMax the kernel kills at once —
+# measured with swap configured as well as without — and systemd records `oom-kill`. A probe whose
+# work does not fit is killed at every restart for as long as nothing changes (P-215). Probe
+# Health's `memoryLimitUsage` warns at 80% of it — early enough for a probe that has settled high
+# or is leaking, not for a start-up surge, which crosses the last 20% in seconds. Raise it with
+# `systemctl set-property ms-probe MemoryMax=…`, which survives upgrades.
+MemoryMax=6G
+TasksMax=8192
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -297,7 +297,9 @@ MS_API__PORT=9090 MS_DATABASE__SSL=true ms-core --config /etc/ms/core.json
 MS_DATABASE__PASSWORD__FROM_FILE=/run/credentials/ms-core.service/db-password
 ```
 
-which is how the systemd unit passes the database password via `LoadCredentialEncrypted=`.
+which is how a drop-in on the systemd unit passes the database password via
+`LoadCredentialEncrypted=` — `systemctl edit ms-core`, with the lines the unit's comments give.
+The unit itself is the release's and an upgrade replaces it.
 
 ## Installing
 

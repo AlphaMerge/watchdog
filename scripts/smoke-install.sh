@@ -312,9 +312,36 @@ fi
 # lose an operator's day: a configuration that the new build cannot read, a schema the new build
 # is behind or ahead of, a config file quietly replaced. This asserts the three that matter.
 
+echo "==> asserting the units are the release's, in /usr/lib"
+# `H-21`. An operator's changes go in a drop-in under /etc, which no upgrade touches; a unit in
+# /etc/systemd/system itself would override the release's whole, and be overwritten by the next.
+if docker exec "${container}" test -f /usr/lib/systemd/system/ms-core.service && \
+   ! docker exec "${container}" test -e /etc/systemd/system/ms-core.service; then
+  echo "    ms-core.service: /usr/lib/systemd/system, nothing in /etc"
+else
+  echo "    units: FAILED — not where an upgrade can replace them without an operator's edits" >&2
+  failed=1
+fi
+
+# What an upgrade must keep and what it must clear up: a drop-in of the operator's, and a unit an
+# earlier release left in /etc exactly as it shipped it, which would otherwise go on overriding
+# every unit installed after it.
+docker exec "${container}" mkdir -p /etc/systemd/system/ms-core.service.d
+docker exec "${container}" bash -c \
+  'printf "[Service]\nEnvironment=MS_H21_DROP_IN=kept\n" > /etc/systemd/system/ms-core.service.d/h21.conf'
+docker cp "${repo_root}/scripts/smoke/legacy-units/ms-probe.service" \
+  "${container}:/etc/systemd/system/ms-probe.service"
+docker exec "${container}" systemctl daemon-reload
+
 echo "==> asserting a re-run keeps the configuration and takes a backup"
 before="$(docker exec "${container}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
-docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh --no-start' >/dev/null
+# With a start, the way an upgrade is run: it stops both services, swaps the release in and
+# starts them again (`H-21`) — `--no-start` would now leave them stopped.
+docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/rerun.log 2>&1 || {
+  echo "    FAILED — the re-run did not succeed:" >&2
+  sed 's/^/      /' /tmp/rerun.log >&2
+  failed=1
+}
 after="$(docker exec "${container}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
 if [ "${before}" = "${after}" ]; then
   echo "    configuration: kept"
@@ -339,6 +366,33 @@ else
   failed=1
 fi
 
+echo "==> asserting the upgrade swapped the release in, and kept the units right"
+for svc in ms-core ms-probe; do
+  state="$(docker exec "${container}" systemctl is-active "${svc}" 2>/dev/null || true)"
+  printf '    %-9s %s\n' "${svc}:" "${state}"
+  [ "${state}" = "active" ] || { echo "    FAILED — ${svc} is not running after the upgrade" >&2; failed=1; }
+done
+if docker exec "${container}" test -f /opt/ms/previous/VERSION; then
+  echo "    previous release: kept at /opt/ms/previous"
+else
+  echo "    FAILED — the release it replaced was not kept" >&2
+  failed=1
+fi
+if docker exec "${container}" test -e /etc/systemd/system/ms-probe.service; then
+  echo "    FAILED — the unit an earlier release left in /etc is still overriding" >&2
+  failed=1
+else
+  echo "    earlier release's unit: removed"
+fi
+if matches 'MS_H21_DROP_IN=kept' docker exec "${container}" systemctl show ms-core -p Environment; then
+  echo "    operator's drop-in: kept, and applied"
+else
+  echo "    FAILED — the operator's drop-in did not survive the upgrade" >&2
+  failed=1
+fi
+docker exec "${container}" rm -rf /etc/systemd/system/ms-core.service.d
+docker exec "${container}" systemctl daemon-reload
+
 echo "==> asserting config check accepts what the services are running on"
 for svc in core probe; do
   if docker exec "${container}" /opt/ms/bin/ms-${svc} config check --config /etc/ms/${svc}.json >/dev/null 2>&1; then
@@ -349,13 +403,30 @@ for svc in core probe; do
     failed=1
   fi
 done
+# Without the flag, as the documentation runs it: the launcher reads /etc/ms (`H-21`). It used to
+# read no file, check the schema's defaults and say "valid" whatever core.json held.
+if matches 'file            /etc/ms/core.json' docker exec "${container}" /opt/ms/bin/ms-core config check; then
+  echo "    ms-core config check, no flag: reads /etc/ms/core.json"
+else
+  echo "    FAILED — ms-core config check with no flag did not read /etc/ms/core.json" >&2
+  failed=1
+fi
 
 echo "==> asserting an installer re-run refuses to restart onto a broken configuration"
 # The property this exists for: the old service keeps running. An upgrade that restarts into a
 # configuration the new build cannot read has taken the installation down to tell the operator
 # about a typo.
+# `H-21`: and nothing was touched — the same processes, on the same tree, told the truth about it.
 docker exec "${container}" cp /etc/ms/core.json /tmp/core.json.good
+pids_before="$(docker exec "${container}" systemctl show ms-core ms-probe -p MainPID --value | tr '\n' ' ')"
+# The directory's inode, not its contents: this re-runs the same tarball, so a swap would put
+# identical files in place, and only a new directory would show it happened.
+tree_before="$(docker exec "${container}" stat -c %i /opt/ms/app)"
 docker exec "${container}" bash -c 'echo "{\"api\": {\"port\": \"eighty-eighty\"}}" > /etc/ms/core.json'
+if docker exec "${container}" /opt/ms/bin/ms-core config check >/dev/null 2>&1; then
+  echo "    FAILED — ms-core config check with no flag passed a core.json that cannot load" >&2
+  failed=1
+fi
 if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/upgrade.log 2>&1; then
   echo "    FAILED — install.sh restarted onto a configuration that cannot load" >&2
   failed=1
@@ -366,6 +437,22 @@ else
     printf '    %-9s still %s\n' "${svc}:" "${state}"
     [ "${state}" = "active" ] || { echo "    FAILED — ${svc} was taken down by the refusal" >&2; failed=1; }
   done
+  pids_after="$(docker exec "${container}" systemctl show ms-core ms-probe -p MainPID --value | tr '\n' ' ')"
+  [ "${pids_before}" = "${pids_after}" ] || {
+    echo "    FAILED — the services were restarted (${pids_before}-> ${pids_after})" >&2
+    failed=1
+  }
+  tree_after="$(docker exec "${container}" stat -c %i /opt/ms/app)"
+  if [ "${tree_before}" != "${tree_after}" ] || \
+     docker exec "${container}" test -e /opt/ms/.incoming; then
+    echo "    FAILED — the refusal left the installed tree changed" >&2
+    failed=1
+  fi
+  grep -q 'Nothing was changed' /tmp/upgrade.log || {
+    echo "    FAILED — the refusal did not say that nothing was changed:" >&2
+    sed 's/^/      /' /tmp/upgrade.log >&2
+    failed=1
+  }
 fi
 docker exec "${container}" cp /tmp/core.json.good /etc/ms/core.json
 

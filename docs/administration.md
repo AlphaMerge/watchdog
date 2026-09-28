@@ -726,8 +726,10 @@ sudo /opt/ms/bin/ms-backup --out /var/backups/ms
 ```
 
 One timestamped `tar.gz` holding the database, both configuration files, the vault key and the
-probe-channel certificates. **Rehearse the restore onto a host that is not the one it came
-from** — restoring over the original proves almost nothing, because the data, the key and the
+probe-channel certificates, with a manifest that names the TimescaleDB version that took the
+dump. **A restore needs that same version** on the host it goes to, and `ms-restore` refuses
+before it writes anything when the host has another — the runbook says how to install the right
+one. **Rehearse the restore onto a host that is not the one it came from** — restoring over the original proves almost nothing, because the data, the key and the
 certificates are all already there and a restore that quietly did nothing would pass.
 
 The archive decrypts every monitored-device credential in the installation. Store it where the
@@ -739,8 +741,12 @@ database's own storage is stored, and no more widely.
 
 Covered in [`docs/installation.md`](installation.md#upgrading). The two things worth repeating:
 
-- **`config check` runs before anything restarts.** A renamed or newly-required setting stops the
-  upgrade with the old services still running on the old version.
+- **The new build reads your configuration before anything is replaced or restarted.** From the
+  tarball, a renamed or newly-required setting stops the upgrade with nothing changed and the old
+  version still running. A package has to unpack first, so it stops the services before it does,
+  and a refusal leaves them stopped, saying so. Either way, no old process runs on new files.
+- **The units are the release's, in `/usr/lib/systemd/system`.** Change them only with drop-ins —
+  `systemctl edit`, `systemctl set-property` — which no upgrade touches.
 - **A build refuses to start against a schema migrated by a newer build.** That refusal is
   correct. Install the matching release rather than migrating backwards.
 

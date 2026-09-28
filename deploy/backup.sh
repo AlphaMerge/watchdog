@@ -17,11 +17,6 @@
 # application itself, which comes from the release tarball. A backup of /opt/ms would be a copy
 # of something already reproducible, and restoring it over a newer install is a downgrade nobody
 # asked for.
-# The `cfg_*` variables are produced by an `eval` of generated assignments below. shellcheck
-# cannot follow that and reports each of them as referenced but never assigned; the directive is
-# file-scoped because it has to sit before the first command to be, and it is the reason the
-# generator emits a fixed, known set of names rather than whatever the config happens to hold.
-# shellcheck disable=SC2154
 set -euo pipefail
 
 CONFIG=/etc/ms/core.json
@@ -43,38 +38,89 @@ die() { echo "error: $*" >&2; exit 1; }
 
 [ -f "${CONFIG}" ] || die "no such configuration: ${CONFIG}"
 command -v pg_dump >/dev/null 2>&1 || die "pg_dump is required (install the PostgreSQL client)"
+command -v psql >/dev/null 2>&1 || die "psql is required (install the PostgreSQL client)"
 
 # Read the connection out of the configuration rather than asking for it again. A backup pointed
 # at a different database from the one the service uses is the kind of mistake that is only
 # discovered during a restore.
+#
+# **Nothing read from the configuration is handed to a shell parser** (`H-21`). This used to
+# `eval` generated `cfg_x="…"` assignments, so a database password with a `$` in it — which is
+# what password generators produce — aborted the backup under `set -u`, and one with a backtick or
+# `$(…)` in it ran as root. The values come back one per line and are read by position, and the
+# password never comes back at all: node writes it straight into a libpq password file inside
+# the private staging directory, which `pg_dump` and `psql` read and nothing else does.
+#
+# A configuration with no password leaves libpq's own environment alone, so an installation whose
+# password is a systemd credential rather than a line in core.json (`ms-core.service`'s drop-in)
+# can supply it the way libpq always takes one — `PGPASSWORD` or `PGPASSFILE`.
 read_config() {
   node -e '
-    const { readFileSync } = require("node:fs");
-    const cfg = JSON.parse(readFileSync(process.argv[1], "utf8"));
+    const { readFileSync, writeFileSync } = require("node:fs");
+    const [file, passFile] = process.argv.slice(1);
+    const cfg = JSON.parse(readFileSync(file, "utf8"));
     const db = cfg.database ?? {};
-    const out = {
-      host: db.host ?? "127.0.0.1",
-      port: db.port ?? 5432,
-      database: db.database ?? "monitoring",
-      user: db.user ?? "monitoring",
-      password: db.password ?? "",
-      dataDir: (cfg.service ?? {}).dataDir ?? "/var/lib/ms-core",
-      keyFile: (cfg.vault ?? {}).keyFile ?? "vault.key",
-    };
-    process.stdout.write(Object.entries(out).map(([k, v]) => `${k}=${String(v)}`).join("\n"));
-  ' "$1"
+    const fields = [
+      db.host ?? "127.0.0.1",
+      db.port ?? 5432,
+      db.database ?? "monitoring",
+      db.user ?? "monitoring",
+      (cfg.service ?? {}).dataDir ?? "/var/lib/ms-core",
+      (cfg.vault ?? {}).keyFile ?? "vault.key",
+    ].map(String);
+    if (fields.some((value) => /[\r\n\0]/.test(value))) {
+      console.error(`${file}: a database or path setting has a line break in it`);
+      process.exit(1);
+    }
+    const password = String(db.password ?? "");
+    if (password !== "") {
+      // libpq reads `host:port:database:user:password`, with `:` and `\` escaped by a backslash.
+      // Wildcards, because this file lives for one run and serves one connection.
+      const escaped = password.replace(/[\\:]/g, (c) => `\\${c}`);
+      writeFileSync(passFile, `*:*:*:*:${escaped}\n`, { mode: 0o600 });
+    }
+    process.stdout.write(`${fields.join("\n")}\n`);
+  ' "$1" "$2"
 }
 
-eval "$(read_config "${CONFIG}" | sed 's/^/cfg_/;s/=/="/;s/$/"/')"
+staging="$(mktemp -d)"
+trap 'rm -rf "${staging}"' EXIT
+chmod 700 "${staging}"
+
+config="$(read_config "${CONFIG}" "${staging}/pgpass")" || die "could not read ${CONFIG}"
+cfg_host="$(printf '%s\n' "${config}" | sed -n 1p)"
+cfg_port="$(printf '%s\n' "${config}" | sed -n 2p)"
+cfg_database="$(printf '%s\n' "${config}" | sed -n 3p)"
+cfg_user="$(printf '%s\n' "${config}" | sed -n 4p)"
+cfg_dataDir="$(printf '%s\n' "${config}" | sed -n 5p)"
+cfg_keyFile="$(printf '%s\n' "${config}" | sed -n 6p)"
+if [ -f "${staging}/pgpass" ]; then
+  export PGPASSFILE="${staging}/pgpass"
+  unset PGPASSWORD
+fi
 
 case "${cfg_keyFile}" in
   /*) key_path="${cfg_keyFile}" ;;
   *)  key_path="${cfg_dataDir}/${cfg_keyFile}" ;;
 esac
 
+psql_ms() {
+  psql --no-psqlrc --host="${cfg_host}" --port="${cfg_port}" --username="${cfg_user}" \
+    --dbname="${cfg_database}" -qtA "$@"
+}
+
+# **Which TimescaleDB took this dump, written into the archive** (`H-21`). A dump's
+# `_timescaledb_catalog` rows are laid out for the extension version that wrote them, and Timescale
+# restores only into the same version: 2.28 replaced a catalog table the dump COPYs into with a
+# view. A replacement host is built from whatever the repository serves on the day, so the one
+# fact a disaster recovery needs is the one the archive has to carry — `ms-restore` refuses a
+# mismatch with this version in the message.
+tsdb_version="$(psql_ms -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")" \
+  || die "could not reach ${cfg_database} on ${cfg_host}:${cfg_port} as ${cfg_user}"
+pg_version="$(psql_ms -c 'SHOW server_version')"
+[ -n "${tsdb_version}" ] || die "${cfg_database} has no timescaledb extension — is this the database ms-core uses?"
+
 stamp="$(date -u +%Y%m%dT%H%M%SZ)${label:+-${label}}"
-staging="$(mktemp -d)"
-trap 'rm -rf "${staging}"' EXIT
 work="${staging}/ms-backup-${stamp}"
 mkdir -p "${work}"
 
@@ -82,7 +128,7 @@ echo "==> backing up ${cfg_database} on ${cfg_host}:${cfg_port}"
 # --format=custom so `pg_restore` can rebuild in dependency order and parallelise; --no-owner and
 # --no-privileges because the role names on the machine this is restored onto are the restoring
 # operator's business, not this database's.
-PGPASSWORD="${cfg_password}" pg_dump \
+pg_dump \
   --host="${cfg_host}" --port="${cfg_port}" --username="${cfg_user}" \
   --dbname="${cfg_database}" \
   --format=custom --no-owner --no-privileges \
@@ -115,6 +161,8 @@ version=${version}
 host=$(hostname)
 database=${cfg_database}
 databaseHost=${cfg_host}:${cfg_port}
+timescaledb=${tsdb_version}
+postgresql=${pg_version}
 vaultKey=$([ -f "${key_path}" ] && echo present || echo MISSING)
 MANIFEST
 
