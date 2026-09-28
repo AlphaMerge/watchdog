@@ -471,6 +471,57 @@ export class ObjectRepository {
   }
 
   /**
+   * `ancestors` for a whole page of objects in one walk (`P-214`) — what a flat search result
+   * needs to say *which* `Ping` it is, without a breadcrumb request per row.
+   *
+   * The same chain as `ancestors`, root first and excluding the object, one walk per origin in a
+   * single statement. An id with no row gets no entry, rather than an empty path that would read
+   * as "directly under nothing": the object was deleted between the caller's read and this one.
+   */
+  async paths(q: Queryable, ids: readonly ObjectId[]): Promise<Map<ObjectId, ObjectRef[]>> {
+    const out = new Map<ObjectId, ObjectRef[]>();
+    if (ids.length === 0) return out;
+
+    const rows = await q.query<{
+      origin: string;
+      id: string;
+      kind: ObjectKind;
+      name: string;
+      depth: number;
+    }>(
+      `
+      WITH RECURSIVE chain AS (
+        SELECT o.id AS origin, o.id, o.parent_id, o.kind, o.name, 0 AS depth
+        FROM object o
+        WHERE o.id = ANY($1::bigint[])
+
+        UNION ALL
+
+        SELECT chain.origin, parent.id, parent.parent_id, parent.kind, parent.name, chain.depth + 1
+        FROM object parent
+        JOIN chain ON parent.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT origin, id, kind, name, depth FROM chain ORDER BY origin, depth DESC
+      `,
+      [ids],
+    );
+
+    for (const row of rows) {
+      const origin = Number(row.origin);
+      let path = out.get(origin);
+      if (path === undefined) {
+        path = [];
+        out.set(origin, path);
+      }
+      // Depth 0 is the object itself: read so that an existing root still gets its empty path,
+      // and left out of that path, as `ancestors` leaves it out of the breadcrumb.
+      if (row.depth > 0) path.push({ id: Number(row.id), kind: row.kind, name: row.name });
+    }
+    return out;
+  }
+
+  /**
    * A cache validator covering everything a response about this object can inherit (S-13).
    *
    * A digest of `(id, version)` for the object and every ancestor, in order. Two properties

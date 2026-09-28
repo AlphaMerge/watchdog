@@ -895,6 +895,63 @@ describe(
       assert.deepEqual(await ids('/api/v1/objects?host=10.20.30.40'), [access.id]);
     });
 
+    it('gives each search result its path through ?include=path, as the tree search asks', async () => {
+      // `P-214`. `TreeView` sends `include=path` and writes each match's path under it, so two
+      // sensors both called `Ping` say which device each is on. Through the route rather than
+      // the service, because `ms:objectSummary` is `additionalProperties: false`: a path the
+      // schema did not declare would be dropped by the serialiser with a 200.
+      const berlin = await createGroup(probeId, 'Berlin DC');
+      const munich = await createGroup(probeId, 'Munich DC');
+      const inBerlin = await createDevice(berlin, 'switch-01');
+      const inMunich = await createDevice(munich, 'switch-02');
+      for (const parentId of [inBerlin.id, inMunich.id]) {
+        const res = await post('/api/v1/objects', {
+          kind: 'sensor',
+          parentId,
+          name: 'Ping',
+          sensorType: 'icmp.ping',
+        });
+        assert.equal(res.statusCode, 201, res.body);
+      }
+
+      const res = await get('/api/v1/objects?q=Ping&kind=sensor&limit=200&include=path');
+      assert.equal(res.statusCode, 200, res.body);
+      const items = res.json<{
+        items: { name: string; path?: { id: number; kind: string; name: string }[] }[];
+      }>().items;
+
+      assert.deepEqual(
+        items.map((item) => item.path?.map((ancestor) => ancestor.name)).sort(),
+        [
+          ['Root', 'Local probe', 'Berlin DC', 'switch-01'],
+          ['Root', 'Local probe', 'Munich DC', 'switch-02'],
+        ].sort(),
+      );
+      assert.deepEqual(
+        items[0]?.path?.slice(0, 2),
+        [
+          { id: h.rootId, kind: 'root', name: 'Root' },
+          { id: probeId, kind: 'probe', name: 'Local probe' },
+        ],
+        'each step is a reference the UI can link, not just a name',
+      );
+
+      // Opt-in: without it, the listing is the listing it always was.
+      const plain = await get('/api/v1/objects?q=Ping&kind=sensor&limit=200');
+      assert.equal(plain.statusCode, 200);
+      assert.ok(
+        plain.json<{ items: Record<string, unknown>[] }>().items.every((item) => !('path' in item)),
+      );
+    });
+
+    it('refuses an include token the listing does not have', async () => {
+      // `ancestors` is the detail route's word for the same chain. Taking it here as well would
+      // make two names for one thing on one resource, so a listing that asks for it is told.
+      const res = await get('/api/v1/objects?include=ancestors');
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json<{ error: { code: string } }>().error.code, 'OBJECT_INVALID');
+    });
+
     it('rejects a cursor whose id is not a usable position', async () => {
       const hostile = Buffer.from(
         JSON.stringify({ v: 1, sort: 'name', name: 'x', id: 1e308 }),

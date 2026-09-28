@@ -123,6 +123,20 @@ export interface ObjectSummary {
    */
   readonly paused?: boolean;
   readonly effective?: Readonly<Record<string, ResolvedSetting>>;
+  /**
+   * This object's ancestors, root first and excluding itself — what `ancestors` returns for one
+   * object, here for every row (`P-214`). Only on a listing that asked for it: a search result
+   * needs it to tell one `Ping` from another, and a tree level already knows where it is.
+   */
+  readonly path?: readonly ObjectRef[];
+}
+
+/** What a listing carries beyond the summary. Each is opt-in, because each costs a query. */
+export interface ListExpansions {
+  /** Setting keys to resolve for every row, into `effective`. */
+  readonly effective?: readonly string[];
+  /** Every row's ancestors, into `path` — one walk for the page, not one per row. */
+  readonly path?: boolean;
 }
 
 /**

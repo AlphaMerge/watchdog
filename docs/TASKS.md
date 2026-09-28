@@ -4563,6 +4563,55 @@ because each is a decision rather than a defect:
       the loop end where an operator will see it; or keep both and say that the 80% warning is the
       signal — and `administration.md` says what a probe in that state looks like, and what to raise.
 
+- [x] **P-214 — tree search results promised the path and showed a name** · S · U-03, P-212 ·
+      `web-ui.md` said search results "come back flat, with the path written out", and so did
+      `TreeView`'s comment. They never did: a row was a glyph, the name, the kind, a device's host,
+      the tags and a sensor's badge, and `GET /objects` returned a `parentId` and nothing above it.
+      A search for `Ping` on any real installation was a column of identical lines, one per device,
+      and the only way to tell them apart was to open each. `2161909` narrowed the wording to say
+      so; this makes the promise true instead, and puts the wording back.
+
+      **`GET /objects?include=path`**: every item gets `path`, its ancestors root first and itself
+      excluded — exactly what `/objects/{id}/ancestors` returns, so a search row and the page it
+      links to cannot disagree about the way there. `ObjectRepository.paths(ids)` is `ancestors`
+      for a page: one recursive walk per origin, all in one statement, bounded by `MAX_WALK_DEPTH`
+      like every other walk. Attached by the service after the keyset query, the way `effective`
+      is, so the listing's own query is untouched; `ObjectService.list` now takes its expansions as
+      one object (`{ effective, path }`) rather than a positional key list. An id deleted between
+      the two reads gets **no** `path` rather than an empty one, which would say "the root". Opt-in,
+      because it is a second statement and the tree's own levels already know where they are. The
+      token list is the listing's own: `?include=ancestors`, the detail route's word, is a 400
+      rather than a second name for the same thing. `path` is declared on `ms:objectSummary`,
+      without which `additionalProperties: false` drops it with a 200; the route's description and
+      `api-reference.md` say what it is.
+
+      **The row** writes the path under the name as `Local probe › Berlin DC › switch-01`. The root
+      is left off, since it begins every path. It wraps rather than truncates, because the end of a
+      path — the device — is what tells two `Ping`s apart and an ellipsis cuts that first. Plain
+      text, not a link per step: two hundred rows of four links is a lot of `Tab`, and the match's
+      own page has the linked breadcrumb. A screen reader hears "in Local probe, Berlin DC,
+      switch-01" — the chevrons are `aria-hidden` and a visually hidden comma stands in for each.
+
+      **Visibility is `A-12`'s, unchanged.** The listing already returns every object to any
+      reader; a path names nothing the unfiltered listing does not, and ancestors of an object
+      somebody may read are what its breadcrumb already shows. When `A-12` filters the listing,
+      `path` follows the breadcrumb's rule rather than needing one of its own.
+
+      **Tests.** `objects-list.test.ts`, a fixture of 33 `Ping`s at two depths: each carries its
+      own path; every row's `path` equals `service.ancestors(id)`, the root's included (`[]`); a
+      listing that did not ask has no `path` key; a page of 33 costs the same statements as a page
+      of one, and exactly one more than the listing without paths — counted at the pool, so a loop
+      inside one repository call would still fail it; a missing id gets no entry. `api-routes`:
+      the tree's own request returns both `Ping`s with their paths through the serialiser, the
+      plain request carries none, and `include=ancestors` is a 400. `tree-search.test.tsx` (new,
+      vitest): the search asks once, with `include=path`, and never for `/ancestors`; the rows read
+      `Local probe › Berlin DC › switch-01` and `… › Munich DC › switch-02`; the spoken text is the
+      comma list; a probe (only the root above it) gets no path line. Mutated: `path` off the
+      schema, a breadcrumb walk per row, the object in its own path, no `include=path` in the
+      request, the root shown, and the spoken comma removed — each fails the test that guards it.
+      Seen in the browser against this branch's core on a scratch database: four `Ping`s, four
+      paths, wrapping at 375 px with no horizontal scroll, one request.
+
 
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day

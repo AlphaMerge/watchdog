@@ -42,6 +42,15 @@ export interface ObjectSummary {
   state?: SensorState;
   /** True when this object is itself manually paused (`M-08`), not when an ancestor is. */
   paused?: boolean;
+  /** Ancestors, root first — only from a listing asked for `include=path` (`P-214`). */
+  path?: ObjectRef[];
+}
+
+/** An object named rather than described: an ancestor, a breadcrumb step. */
+export interface ObjectRef {
+  id: number;
+  kind: ObjectKind;
+  name: string;
 }
 
 export interface ObjectDetail extends ObjectSummary {
@@ -374,7 +383,7 @@ export interface StateLogPage {
 
 /** `GET /objects/:id/ancestors` — root first, the object's parent last. */
 export interface AncestorsView {
-  items: { id: number; kind: ObjectKind; name: string }[];
+  items: ObjectRef[];
 }
 
 /**

@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import type { ObjectId } from '../src/objects/types.js';
+import type { Database } from '../src/db/pool.js';
+import type { ObjectId, ObjectRef, ObjectSummary } from '../src/objects/types.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -271,6 +272,156 @@ describe(
       assert.equal(sensor.sensorType, 'icmp.ping');
       assert.equal(sensor.host, undefined);
       assert.equal(group.host, undefined);
+    });
+  },
+);
+
+/**
+ * Counts the statements a service issues through its own pool (`P-214`).
+ *
+ * A proxy rather than a spy on the repository: the promise is about round trips to PostgreSQL,
+ * and a spy would still pass if the one repository call looped over its ids inside.
+ */
+function countingDatabase(db: Database): { db: Database; statements: () => number } {
+  let statements = 0;
+  const proxy = new Proxy(db, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      const method = value as (...args: unknown[]) => unknown;
+      if (property !== 'query') return method.bind(target);
+      return (...args: unknown[]) => {
+        statements += 1;
+        return method.apply(target, args);
+      };
+    },
+  });
+  return { db: proxy, statements: () => statements };
+}
+
+/**
+ * `include=path` (`P-214`): a flat search result that says where each match is.
+ *
+ * The tree's search box shows matches flat, and `web-ui.md` promised each came "with the path
+ * written out" while every row carried only a parent id — so two sensors called `Ping` on two
+ * devices were the same line twice. The fixture is exactly that, three times, at two depths.
+ */
+describe(
+  'object listing paths',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let h: Harness;
+    /** Where each `Ping` is, root left off, keyed by the sensor's id. */
+    const expected = new Map<ObjectId, string[]>();
+
+    before(async () => {
+      scratch = await createScratchDatabase('objpath');
+      h = await buildHarness(scratch.db);
+
+      const create = async (
+        input: Parameters<Harness['service']['create']>[1],
+      ): Promise<ObjectId> => (await h.service.create(testActor, input)).id;
+
+      const probe = await create({ kind: 'probe', parentId: h.rootId, name: 'Local probe' });
+      const berlin = await create({ kind: 'group', parentId: probe, name: 'Berlin DC' });
+      const munich = await create({ kind: 'group', parentId: probe, name: 'Munich DC' });
+      const rack = await create({ kind: 'group', parentId: munich, name: 'Rack 4' });
+
+      const ping = async (parentId: ObjectId, device: string, where: string[]): Promise<void> => {
+        const d = await create({ kind: 'device', parentId, name: device, host: '10.0.0.1' });
+        const s = await create({
+          kind: 'sensor',
+          parentId: d,
+          name: 'Ping',
+          sensorType: 'icmp.ping',
+        });
+        expected.set(s, [...where, device]);
+      };
+      await ping(berlin, 'switch-01', ['Local probe', 'Berlin DC']);
+      await ping(munich, 'switch-02', ['Local probe', 'Munich DC']);
+      await ping(rack, 'switch-03', ['Local probe', 'Munich DC', 'Rack 4']);
+      // Enough rows that a walk per row would show in the statement count below.
+      for (let i = 10; i < 40; i += 1) {
+        await ping(rack, `edge-${String(i)}`, ['Local probe', 'Munich DC', 'Rack 4']);
+      }
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    const page = { limit: 500, sort: 'name', cursor: null } as const;
+    const names = (path: readonly ObjectRef[] | undefined): string[] | undefined =>
+      path?.filter((ancestor) => ancestor.kind !== 'root').map((ancestor) => ancestor.name);
+
+    it('tells objects with the same name apart by where they are', async () => {
+      const { items } = await h.service.list({ q: 'Ping', kinds: ['sensor'] }, page, {
+        path: true,
+      });
+
+      assert.equal(items.length, expected.size);
+      for (const item of items) {
+        assert.deepEqual(names(item.path), expected.get(item.id), `the path of ${String(item.id)}`);
+      }
+    });
+
+    it('gives every row the chain its breadcrumb gives it', async () => {
+      // One implementation of "where is this" in the UI's eyes, even though there are two walks:
+      // a search row and the page it links to must not disagree about the way there.
+      const { items } = await h.service.list({}, page, { path: true });
+      assert.ok(
+        items.some((item) => item.kind === 'root'),
+        'the root is in the listing too',
+      );
+
+      for (const item of items) {
+        assert.deepEqual(
+          item.path,
+          await h.service.ancestors(item.id),
+          `${item.kind} ${item.name} (${String(item.id)})`,
+        );
+      }
+    });
+
+    it('leaves the path off a listing that did not ask for it', async () => {
+      // Opt-in, because it is a second statement: the tree's own levels already know where they
+      // are, and a page of five hundred children should not pay for a walk nobody reads.
+      const { items } = await h.service.list({}, page);
+      assert.ok(items.length > 0);
+      assert.ok(items.every((item: ObjectSummary) => !('path' in item)));
+    });
+
+    it('walks the whole page in one statement, however many rows it has', async () => {
+      const counting = countingDatabase(scratch.db);
+      const counted = await buildHarness(counting.db);
+
+      const statementsFor = async (limit: number, path: boolean): Promise<number> => {
+        const before = counting.statements();
+        const { items } = await counted.service.list(
+          { q: 'Ping', kinds: ['sensor'] },
+          { limit, sort: 'name', cursor: null },
+          { path },
+        );
+        assert.equal(items.length, Math.min(limit, expected.size));
+        return counting.statements() - before;
+      };
+
+      const plain = await statementsFor(1, false);
+      const one = await statementsFor(1, true);
+      const many = await statementsFor(100, true);
+
+      assert.equal(one - plain, 1, 'the paths cost one statement over the listing');
+      assert.equal(many, one, `and ${String(expected.size)} rows cost what one row does`);
+    });
+
+    it('gives an id with no object no path, rather than an empty one', async () => {
+      // An empty path is the root's — "directly under nothing". An object deleted between the
+      // listing and the walk is not that, so its row goes out without a path at all.
+      const paths = await h.repository.paths(scratch.db, [h.rootId, Number.MAX_SAFE_INTEGER]);
+      assert.deepEqual(paths.get(h.rootId), []);
+      assert.equal(paths.has(Number.MAX_SAFE_INTEGER), false);
+      assert.equal((await h.repository.paths(scratch.db, [])).size, 0);
     });
   },
 );

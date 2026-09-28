@@ -43,6 +43,7 @@ import type {
   CredentialView,
   DeleteExpectation,
   DeleteReport,
+  ListExpansions,
   MoveResult,
   ObjectDetail,
   ObjectFilter,
@@ -267,16 +268,20 @@ export class ObjectService {
   /**
    * Effective values are resolved for the whole page in one query per key. A route that looped
    * the single-object resolver would issue `rows × keys` round trips; `resolveForObjects`
-   * exists for exactly this.
+   * exists for exactly this. Paths are the same bargain: one walk for the page (`P-214`).
    */
   async list(
     filter: ObjectFilter,
     page: PageRequest,
-    effectiveKeys: readonly string[] = [],
+    expand: ListExpansions = {},
   ): Promise<Page<ObjectSummary>> {
     const result = await this.#repo.list(this.#db, filter, page);
-    if (effectiveKeys.length === 0 || result.items.length === 0) return result;
-    return { ...result, items: await this.#attachEffective(result.items, effectiveKeys) };
+    if (result.items.length === 0) return result;
+    let items = result.items;
+    const effectiveKeys = expand.effective ?? [];
+    if (effectiveKeys.length > 0) items = await this.#attachEffective(items, effectiveKeys);
+    if (expand.path === true) items = await this.#attachPaths(items);
+    return items === result.items ? result : { ...result, items };
   }
 
   async subtree(
@@ -2124,6 +2129,22 @@ export class ObjectService {
       if (mode === 'exclusive') await this.#repo.lockTreeExclusive(q);
       else await this.#repo.lockTreeShared(q);
       return fn(q, this.#repo);
+    });
+  }
+
+  /**
+   * A second statement rather than a column of the listing's own, as `#attachEffective` is: the
+   * listing's keyset query stays the one query it was, and a row whose object went between the
+   * two reads simply carries no path rather than a wrong one.
+   */
+  async #attachPaths(items: readonly ObjectSummary[]): Promise<ObjectSummary[]> {
+    const paths = await this.#repo.paths(
+      this.#db,
+      items.map((item) => item.id),
+    );
+    return items.map((item) => {
+      const path = paths.get(item.id);
+      return path === undefined ? item : { ...item, path };
     });
   }
 

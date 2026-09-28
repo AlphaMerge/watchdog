@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { request, useApi, ApiError } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
-import type { ObjectDetail, ObjectPage, ObjectSummary, SensorState } from '../api/types';
+import type { ObjectDetail, ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { VirtualList } from '../components/VirtualList';
@@ -40,10 +40,11 @@ const PAGE = 500;
  * carries every sensor beneath the root with its absolute path, and a rollup is one pass over
  * that.
  *
- * **Search goes to the server and comes back flat.** A filtered *tree* needs every match's
- * ancestors, which is a second round trip per match; a flat list is one request. Its rows do not
- * carry the path to each match — `GET /objects` returns a parent id, not ancestors — so two
- * sensors both called `Ping` read alike until one is opened.
+ * **Search goes to the server and comes back flat, with the path written out** — the matches
+ * side by side, rather than scattered across branches somebody would have to expand. The path
+ * comes with the page: `include=path` walks every row's ancestors in one statement (`P-214`),
+ * where a breadcrumb request per row would be two hundred of them. Before it did, two sensors
+ * both called `Ping` read alike until one was opened.
  */
 export function TreeView(): React.JSX.Element {
   const root = useApi<ObjectDetail>('/objects/root');
@@ -379,7 +380,8 @@ function TreeRow({
  * `q` matches names and device hosts as a substring (`P-212`; it matched names alone before,
  * whatever the placeholder said) and `tag` filters, both already on `GET /objects` — and both have
  * to run there rather than here, because the tree is loaded a level at a time and a client-side
- * filter would only ever search the branches somebody had already opened.
+ * filter would only ever search the branches somebody had already opened. `include=path` is what
+ * lets a row say where its match is.
  */
 function SearchResults({
   query,
@@ -390,7 +392,7 @@ function SearchResults({
   tag: string;
   live: ReadonlyMap<number, LiveState>;
 }): React.JSX.Element {
-  const params = new URLSearchParams({ limit: '200' });
+  const params = new URLSearchParams({ limit: '200', include: 'path' });
   if (query !== '') params.set('q', query);
   if (tag !== '') params.set('tag', tag);
   const found = useApi<ObjectPage>(`/objects?${params.toString()}`);
@@ -413,26 +415,31 @@ function SearchResults({
             <span aria-hidden="true" className="w-4 shrink-0 text-center text-text-muted">
               {KIND_GLYPH[object.kind] ?? '·'}
             </span>
-            <Link
-              to={`/objects/${String(object.id)}`}
-              className="truncate text-sm font-medium text-text hover:text-accent hover:underline"
-            >
-              {object.name}
-            </Link>
-            <span className="shrink-0 text-xs uppercase tracking-wide text-text-muted">
-              {object.kind}
-            </span>
-            {/* A device found by an address shows it, or the row does not say why it matched. */}
-            {object.host !== undefined && (
-              <span className="truncate font-mono text-xs text-text-muted">{object.host}</span>
-            )}
-            {object.tags.length > 0 && (
-              <span className="truncate font-mono text-xs text-text-muted">
-                {object.tags.join(', ')}
-              </span>
-            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-3">
+                <Link
+                  to={`/objects/${String(object.id)}`}
+                  className="truncate text-sm font-medium text-text hover:text-accent hover:underline"
+                >
+                  {object.name}
+                </Link>
+                <span className="shrink-0 text-xs uppercase tracking-wide text-text-muted">
+                  {object.kind}
+                </span>
+                {/* A device found by an address shows it, or the row does not say why it matched. */}
+                {object.host !== undefined && (
+                  <span className="truncate font-mono text-xs text-text-muted">{object.host}</span>
+                )}
+                {object.tags.length > 0 && (
+                  <span className="truncate font-mono text-xs text-text-muted">
+                    {object.tags.join(', ')}
+                  </span>
+                )}
+              </div>
+              {object.path !== undefined && <MatchPath path={object.path} />}
+            </div>
             {object.kind === 'sensor' && (
-              <span className="ml-auto shrink-0">
+              <span className="shrink-0">
                 <StatusBadge
                   state={live.get(object.id)?.state ?? object.state ?? 'unknown'}
                   size="sm"
@@ -448,5 +455,36 @@ function SearchResults({
         </p>
       )}
     </Card>
+  );
+}
+
+/**
+ * Where a search match is, as `Probe › Group › Device`.
+ *
+ * The root is left off: it begins every path, so it tells nobody anything. Wrapped rather than
+ * truncated, because the end of a path — the device — is the part that tells two `Ping`s apart,
+ * and an ellipsis would cut exactly that off first. Plain text rather than a link per step: two
+ * hundred rows of four links each is a lot of `Tab` to get past, and the match's own page has
+ * the linked breadcrumb.
+ */
+function MatchPath({ path }: { path: readonly ObjectRef[] }): React.JSX.Element | null {
+  const shown = path.filter((ancestor) => ancestor.kind !== 'root');
+  if (shown.length === 0) return null;
+  return (
+    <p className="break-words text-xs text-text-muted">
+      <span className="sr-only">in </span>
+      {shown.map((ancestor, index) => (
+        <Fragment key={ancestor.id}>
+          {/* A chevron is read aloud as punctuation, if at all; a comma is a pause. */}
+          {index > 0 && (
+            <>
+              <span aria-hidden="true"> › </span>
+              <span className="sr-only">, </span>
+            </>
+          )}
+          {ancestor.name}
+        </Fragment>
+      ))}
+    </p>
   );
 }

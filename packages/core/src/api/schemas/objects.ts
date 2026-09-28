@@ -85,6 +85,13 @@ export const objectSummarySchema = {
     state: { enum: SENSOR_STATES },
     paused: { type: 'boolean' },
     effective: { type: 'object', additionalProperties: { $ref: 'ms:resolvedSetting' } },
+    // `include=path` on the listing (`P-214`). Declared, because `additionalProperties: false`
+    // makes the serialiser drop whatever is not — silently, with a 200.
+    path: {
+      type: 'array',
+      items: { $ref: 'ms:objectRef' },
+      description: 'Ancestors, root first, excluding the object. Only when asked for.',
+    },
   },
 } as const;
 

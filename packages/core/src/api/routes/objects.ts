@@ -117,6 +117,7 @@ interface ListQuery {
   priorityMin?: number;
   sort?: ListSort;
   effective?: string | string[];
+  include?: string;
   cursor?: string;
   limit?: number;
 }
@@ -210,6 +211,14 @@ const listQuery = {
     priorityMin: { type: 'integer', minimum: 1, maximum: 5 },
     sort: { enum: ['name', 'id', 'manual'], default: 'name' },
     effective: { type: ['string', 'array'], items: { type: 'string' } },
+    include: {
+      type: 'string',
+      maxLength: 200,
+      description:
+        'Comma-separated expansions. `path` gives every item its ancestors, root first and ' +
+        'excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in ' +
+        'one walk.',
+    },
     cursor: { type: 'string', maxLength: 2048 },
     limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
   },
@@ -268,20 +277,26 @@ const countsResponse = {
 const INCLUDE_TOKENS = ['settings', 'channels', 'credentials', 'ancestors'] as const;
 type IncludeToken = (typeof INCLUDE_TOKENS)[number];
 
-function parseInclude(raw: string | undefined): Set<IncludeToken> {
-  const out = new Set<IncludeToken>();
+/** A listing's expansions. `path` is `ancestors` per row, named for what a row renders. */
+const LIST_INCLUDE_TOKENS = ['path'] as const;
+
+function parseTokens<T extends string>(raw: string | undefined, known: readonly T[]): Set<T> {
+  const out = new Set<T>();
   if (raw === undefined || raw === '') return out;
   for (const token of raw.split(',').map((t) => t.trim())) {
-    if (!(INCLUDE_TOKENS as readonly string[]).includes(token)) {
+    if (!(known as readonly string[]).includes(token)) {
       throw new ObjectError('OBJECT_INVALID', `unknown include token "${token}"`, {
         context: { phase: 'validate-query' },
-        details: { known: [...INCLUDE_TOKENS] },
+        details: { known: [...known] },
       });
     }
-    out.add(token as IncludeToken);
+    out.add(token as T);
   }
   return out;
 }
+
+const parseInclude = (raw: string | undefined): Set<IncludeToken> =>
+  parseTokens(raw, INCLUDE_TOKENS);
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugins are async by contract
 export async function objectRoutes(
@@ -328,7 +343,8 @@ export async function objectRoutes(
         description:
           'Flat filtered listing, keyset-paginated. `q` searches names and device hosts as a ' +
           'case-insensitive substring; `host` is an exact match on a device host. ' +
-          'Note: under sort=name an object renamed ' +
+          '`include=path` gives each item its ancestors, so a flat search result can say where ' +
+          'each match is. Note: under sort=name an object renamed ' +
           'mid-pagination can be returned twice or missed — inherent to keyset paging and ' +
           'acceptable for a UI. Anything that must be exact (bulk selection, config export) ' +
           'must use sort=id, which is immutable.',
@@ -364,6 +380,7 @@ export async function objectRoutes(
       const limit = query.limit ?? 100;
       const effective = asArray(query.effective);
       assertKnownSettingKeys(effective);
+      const include = parseTokens(query.include, LIST_INCLUDE_TOKENS);
 
       const page = await service.list(
         {
@@ -383,7 +400,7 @@ export async function objectRoutes(
           sort,
           cursor: query.cursor === undefined ? null : decodeCursor(query.cursor, sort),
         },
-        effective,
+        { effective, path: include.has('path') },
       );
 
       await reply.send(page);
