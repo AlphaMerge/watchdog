@@ -23,8 +23,12 @@ export {
   credentialKind,
   credentialKindIds,
   CREDENTIAL_KINDS,
+  declaredPublic,
+  publicFields,
   secretFields,
   splitCredential,
+  undeclaredKeys,
+  writeSchema,
   type CredentialKindDefinition,
 } from './credentials/index.js';
 

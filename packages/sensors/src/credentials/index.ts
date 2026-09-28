@@ -168,6 +168,69 @@ export function assertSplittable(definition: CredentialKindDefinition): void {
   }
 }
 
+/** The property names a kind declares and does not mark `writeOnly`: its public half (`A-43`). */
+export function publicFields(definition: CredentialKindDefinition): readonly string[] {
+  const properties = (definition.schema as { properties?: Record<string, JsonSchema> }).properties;
+  if (properties === undefined) return [];
+  return Object.entries(properties)
+    .filter(([, property]) => (property as { writeOnly?: boolean }).writeOnly !== true)
+    .map(([name]) => name);
+}
+
+/**
+ * What of a stored `public_params` its kind declares public (`A-43`).
+ *
+ * Every read of a credential set goes through this. Until `A-43` a write was never checked
+ * against its kind, so a mistyped secret key (`comunity` for `community`) was stored here in the
+ * clear, and a read returned it. A write can no longer do that; this is what keeps a row written
+ * before then from being returned.
+ */
+export function declaredPublic(
+  definition: CredentialKindDefinition,
+  stored: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const declared = new Set(publicFields(definition));
+  return Object.fromEntries(Object.entries(stored).filter(([key]) => declared.has(key)));
+}
+
+/** The keys of a stored `public_params` that its kind does not declare public (`A-43`). */
+export function undeclaredKeys(
+  definition: CredentialKindDefinition,
+  stored: Readonly<Record<string, unknown>>,
+): string[] {
+  const declared = new Set(publicFields(definition));
+  return Object.keys(stored).filter((key) => !declared.has(key));
+}
+
+/**
+ * The schema a submitted record is checked against before it is split (`A-43`).
+ *
+ * The kind's own, with the two differences a write needs. A secret may be `null`, which unsets
+ * it. On a set that already exists, a secret is never required, because one the write leaves out
+ * is kept. Everything else stands, `additionalProperties: false` above all: a key the kind does
+ * not declare is refused, where `splitCredential` would have stored it as public.
+ */
+export function writeSchema(definition: CredentialKindDefinition, existing: boolean): JsonSchema {
+  const schema = definition.schema as {
+    properties?: Record<string, JsonSchema>;
+    required?: readonly string[];
+  };
+  const secrets = new Set(secretFields(definition));
+  // A secret is a plain string (`assertSplittable`), so widening its type is the whole change,
+  // and an error still names the field rather than a branch of a combinator.
+  const properties = Object.fromEntries(
+    Object.entries(schema.properties ?? {}).map(([name, property]) =>
+      secrets.has(name) ? [name, { ...property, type: ['string', 'null'] }] : [name, property],
+    ),
+  );
+  const required = (schema.required ?? []).filter((name) => !(existing && secrets.has(name)));
+  return {
+    ...definition.schema,
+    properties,
+    ...(required.length === 0 ? {} : { required }),
+  };
+}
+
 /**
  * Splits a submitted record into what is stored in the clear and what is sealed.
  *

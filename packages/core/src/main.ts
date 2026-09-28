@@ -333,6 +333,9 @@ async function serve(): Promise<void> {
     { keyFile: vaultKeyFile, kinds: vault.kinds().map((kind) => kind.id) },
     'credential vault ready',
   );
+  // Once per set written before writes were checked against their kind (`A-43`). Core Health
+  // counts them for as long as they last; this says which they are.
+  await vault.warnOfUndeclaredKeys(db);
 
   // Built-ins, then whatever the operator wrote under <dataDir>/lookups, later winning by id
   // (M-06). Loaded before anything can report a reading, because a channel resolved without its
@@ -1272,6 +1275,7 @@ async function serve(): Promise<void> {
         const suppressed = await templateActivation.suppressed(q, now);
         return deliveryHealth.read(q, now, suppressed.templateIds);
       },
+      credentialsToReenter: async (q) => (await vault.setsWithUndeclaredKeys(q)).length,
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,

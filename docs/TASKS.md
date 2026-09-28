@@ -14577,6 +14577,72 @@ because each is a decision rather than a defect:
       half-built (on an injected clock or a short window, so the test itself does not take four
       minutes); and the documentation says the above.
 
+- [x] **A-43 — A mistyped credential key is stored in plaintext and returned** · S · A-05 ·
+      Security. Found 2026-09-29 by `D-12`'s sweep of open request schemas, and split out by
+      WatchDog to go first. `PUT /objects/:id/credentials/:kind` takes `values` as any object.
+      `vault.write` → `splitCredential` sorts each key only by whether the kind's schema marks it
+      `writeOnly`, and never applies that schema, although every kind is
+      `additionalProperties: false`. So a secret under a mistyped name (`{"comunity": "…"}` on
+      SNMP, `{"pasword": …}` on SSH) was stored in `public_params` in the clear, returned by
+      `GET /objects/:id/credentials` to anybody who could read the object, and recorded in the
+      `credential.set` audit entry's public fields. A value of the wrong type was stored too, and
+      failed on the probe.
+
+      **Done when:**
+      - a write is checked against its kind before the split: an undeclared key or a wrong type
+        is a 400 naming the field, `null` is still the unset, a secret the write leaves out is
+        still kept, and `required` binds only on a set's first write;
+      - a read returns only the keys the kind declares public, whatever is stored;
+      - the sets already holding an undeclared key are counted at start-up, logged once each by
+        kind and owner (never a key or a value) and counted on Core Health, and no migration
+        guesses which keys were secrets;
+      - the `credential.set` audit entry records only declared public keys;
+      - `administration.md` says that audit entries already written may hold such a value and
+        that nothing rewrites them;
+      - tests: the typo refused, with nothing stored and nothing audited; a row holding an
+        undeclared key neither returned nor sent to a probe, and counted.
+
+      **A-43 outcome.**
+      - **Checked before the split.** `writeSchema(definition, existing)` in
+        `sensors/credentials` is the kind's own schema with a secret's type widened to take
+        `null`, and with secrets dropped from `required` on a set that exists. No kind declares
+        `required` today, so that rule has nothing to bind yet. The vault compiles both forms of
+        each kind at construction, without defaults, so a write stores what it was sent. It reads
+        the existing row first and refuses before anything is split, stored or audited. The
+        refusal is `CREDENTIAL_INVALID`, a 400 like every `VaultError`. For an undeclared key it
+        names the key and lists the kind's fields, since a typo is the likely cause. It never
+        repeats a value.
+      - **One filter for every read.** `declaredPublic` is applied in the inheritance resolver,
+        which both reads go through: the API's `resolveCredentials` and the probe's
+        `resolveSealedCredentials`. An undeclared key stays in the row until the set is
+        re-entered, and nothing returns it. A kind this build does not know declares nothing.
+      - **The audit entry** is built from the declared public keys, although the check already
+        guarantees that. A key that reached the log could never be taken back.
+      - **Counted, not migrated.** `CredentialVault.setsWithUndeclaredKeys` finds the sets in one
+        query (`jsonb_object_keys` against each kind's declared list). At start-up
+        `warnOfUndeclaredKeys` logs each set by kind, object id and number of keys. Core Health's
+        new `credentialsToReenter` channel counts them at every reading, so it falls as sets are
+        re-entered, and any value is a warning. It is a gap when the database cannot be read,
+        as the other queue channels are.
+
+      Tests. `credential-vault` refuses `{"comunity": …}` with a 400 whose answer does not echo
+      the value, stores no row, and records no `credential.set` entry, with the value nowhere in
+      the audit. It also refuses a number for `community` and `v4` for `version`, each naming the
+      field; still unsets a secret with `null` and keeps one left out; and plants a row as a write
+      before `A-43` could leave it. That row's key is returned neither by `resolveCredentials`
+      nor to the probe, which still gets the real community. It is counted and warned of once,
+      and re-entering the set clears it. `core-health` reads the count through, and reads a gap
+      when the database fails.
+
+      Mutation 6/6:
+      - the write not checked (the typo test and the type test);
+      - the API's read or the probe's read unfiltered (the stored-row test, one mutant each);
+      - the count taking declared keys instead of undeclared ones (the stored-row test);
+      - Core Health dropping the count (its count test and its gap test);
+      - `null` no longer taking a secret away (three tests).
+      The audit summary's own filter is belt and braces behind the check, and no test can tell
+      it apart while the check stands.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct

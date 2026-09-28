@@ -1,3 +1,4 @@
+import { credentialKind, declaredPublic } from '@ms/sensors';
 import { AppError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { settingRegistry } from './registry.js';
@@ -348,7 +349,7 @@ export class InheritanceResolver {
 
     return rows.map((row) => ({
       kind: row.kind,
-      publicParams: row.public_params,
+      publicParams: publicOf(row.kind, row.public_params),
       source:
         row.depth === 0
           ? { kind: 'own', objectId: Number(row.object_id) }
@@ -422,7 +423,7 @@ export class InheritanceResolver {
       }
       forObject.set(row.kind, {
         kind: row.kind,
-        publicParams: row.public_params,
+        publicParams: publicOf(row.kind, row.public_params),
         secret: row.secret,
         keyId: row.key_id,
         // The object the record is stored on, not the sensor asking. The seal is bound to it,
@@ -488,4 +489,16 @@ export class InheritanceResolver {
     );
     return rows.length > 0;
   }
+}
+
+/**
+ * The public half of a stored credential set, as far as its kind declares it (`A-43`).
+ *
+ * Both reads come through here, the API's and the probe's. A key written before `A-43` that the
+ * kind does not declare may be a secret under a mistyped name, stored in the clear, so it is left
+ * out whatever it holds. A kind this build does not know declares nothing.
+ */
+function publicOf(kind: string, stored: Record<string, unknown>): Record<string, unknown> {
+  const definition = credentialKind(kind);
+  return definition === undefined ? {} : declaredPublic(definition, stored);
 }

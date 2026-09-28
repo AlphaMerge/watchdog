@@ -1008,6 +1008,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `resultsFutureDated` | Results refused as future-dated | results | 64-bit counter → rate |
 | `resultsPastDated` | Results refused as too old | results | 64-bit counter → rate |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
+| `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |
 
 Takes no parameters.
 

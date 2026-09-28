@@ -63,6 +63,7 @@ function sources(
     reportFormatsRefused: number;
     resultsFutureDated: number;
     resultsPastDated: number;
+    credentialsToReenter: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -111,6 +112,7 @@ function sources(
       probesDown: overrides.probesDown ?? 0,
       probesSilent: overrides.probesSilent ?? 0,
     }),
+    credentialsToReenter: () => Promise.resolve(overrides.credentialsToReenter ?? 0),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));
@@ -478,6 +480,13 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['resultsPastDated'], 5);
     });
 
+    it('counts the credential sets holding keys their kind does not declare (A-43)', async () => {
+      // Written before writes were checked against the kind: possibly a secret under a mistyped
+      // name, in the clear. The vault counts them; this is where an operator sees the number.
+      const reading = await build({ credentialsToReenter: 2 }).read();
+      assert.equal(reading['credentialsToReenter'], 2);
+    });
+
     it('counts what is actually queued in the housekeeping tables', async () => {
       await db.query(
         `INSERT INTO rollup_backfill (from_time, to_time, reason)
@@ -802,6 +811,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(channels['notifyFailed'], null);
       assert.equal(channels['backfillQueue'], null);
       assert.equal(channels['backfillParked'], null);
+      assert.equal(channels['credentialsToReenter'], null);
     });
 
     it('still throws for the sweep, which must not write a row of zeros', async () => {

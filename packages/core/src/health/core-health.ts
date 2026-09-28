@@ -116,6 +116,12 @@ export interface CoreHealthSources {
    * thirty seconds (`P-210`). Null where there is no ceiling, and before the first sample.
    */
   limitMemory: () => AvailableMemoryLow | null;
+  /**
+   * `CredentialVault.setsWithUndeclaredKeys` — the credential sets written before writes were
+   * checked against their kind that hold a key it does not declare (`A-43`). Counted at every
+   * reading rather than once at start-up, so it falls as the sets are re-entered.
+   */
+  credentialsToReenter: (q: Queryable) => Promise<number>;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -311,6 +317,7 @@ export class CoreHealthService {
       resultsFutureDated: discards.discardedFutureTime,
       resultsPastDated: discards.discardedPastTime,
       reactionsDeferred: ingestion.deferredReactions,
+      credentialsToReenter: queues.credentials,
     };
     return { reading, parkedError: queues.parked.lastError };
   }
@@ -431,6 +438,7 @@ export class CoreHealthService {
     backfill: number | null;
     parked: { count: number | null; lastError: string | null };
     reap: number | null;
+    credentials: number | null;
   }> {
     try {
       return await this.#db.tx(async (q) => ({
@@ -439,6 +447,7 @@ export class CoreHealthService {
         backfill: await count(q, 'SELECT count(*)::int AS n FROM rollup_backfill'),
         parked: await parkedBackfill(q),
         reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
+        credentials: await this.#sources.credentialsToReenter(q),
       }));
     } catch (error: unknown) {
       if (!degrade) throw error;
@@ -452,6 +461,7 @@ export class CoreHealthService {
         backfill: null,
         parked: { count: null, lastError: null },
         reap: null,
+        credentials: null,
       };
     }
   }

@@ -395,6 +395,21 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Alarm reactions waiting on a catch-up',
     unit: 'sensors',
   },
+  // `A-43`. Credential sets holding a key their kind does not declare, which only a set written
+  // before writes were checked against the kind can: possibly a secret under a mistyped name,
+  // stored in the clear. No read returns it. Re-entering the set removes it, and this falls with
+  // each one re-entered. **Any is the warning**: it names a job for an operator, and the core log
+  // says which sets, once, at start-up.
+  {
+    key: 'credentialsToReenter',
+    name: 'Credential sets to re-enter',
+    unit: 'sets',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'a credential set holds keys its kind does not declare; re-enter it (the core log says which)',
+    },
+  },
 ];
 
 export const coreHealth: SensorType = {

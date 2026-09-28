@@ -1,9 +1,13 @@
+import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
 import {
   assertSplittable,
   credentialKind,
   credentialKindIds,
+  declaredPublic,
+  publicFields,
   secretFields,
   splitCredential,
+  writeSchema,
   CREDENTIAL_KINDS,
   type CredentialKindDefinition,
 } from '@ms/sensors';
@@ -75,13 +79,27 @@ export class CredentialVault {
   readonly #sealer: VaultSealer;
   readonly #logger: Logger;
 
+  /**
+   * Each kind's write check, for a set that is new and for one that exists (`A-43`). Without
+   * defaults: a write stores what it was sent, and filling in `version: v2c` would store a
+   * choice nobody made.
+   */
+  readonly #checks = new Map<string, { created: ValidateFunction; existing: ValidateFunction }>();
+
   constructor(options: CredentialVaultOptions) {
     this.#resolver = options.resolver;
     this.#sealer = options.sealer;
     this.#logger = options.logger.child({ component: 'vault' });
     // Every kind, at construction, so a schema that could leak a secret into `public_params`
     // stops the core at boot rather than being discovered in a database column.
-    for (const definition of CREDENTIAL_KINDS) assertSplittable(definition);
+    const ajv = new Ajv({ allErrors: false, strict: false });
+    for (const definition of CREDENTIAL_KINDS) {
+      assertSplittable(definition);
+      this.#checks.set(definition.id, {
+        created: ajv.compile(writeSchema(definition, false)),
+        existing: ajv.compile(writeSchema(definition, true)),
+      });
+    }
   }
 
   /** The kinds an operator can store, with the schema a form is generated from. */
@@ -122,12 +140,21 @@ export class CredentialVault {
     values: Readonly<Record<string, unknown>>,
   ): Promise<CredentialWriteSummary> {
     const definition = this.definition(kind);
-    const { publicParams, secret } = splitCredential(definition, values);
-
     const [existing] = await q.query<{ secret: Buffer; key_id: string }>(
       'SELECT secret, key_id FROM credential_set WHERE object_id = $1 AND kind = $2',
       [objectId, kind],
     );
+
+    // **Checked against the kind before it is split** (`A-43`). `splitCredential` sorts by
+    // whether a key is a declared secret, so a secret under a mistyped name (`comunity`) was
+    // public by default: stored in the clear, returned by every read, and written to the audit
+    // log. The kind's schema refuses a key it does not declare, and nothing is stored.
+    const checks = this.#checks.get(definition.id);
+    /* c8 ignore next -- every kind `definition` returns was compiled in the constructor */
+    if (checks === undefined) throw new Error(`no write check for credential kind ${kind}`);
+    const check = existing === undefined ? checks.created : checks.existing;
+    if (!check(values)) throw invalidValues(definition, check.errors ?? []);
+    const { publicParams, secret } = splitCredential(definition, values);
 
     const held =
       existing === undefined
@@ -183,8 +210,53 @@ export class CredentialVault {
       created: existing === undefined,
       secretsSet,
       secretsKept,
-      publicParams,
+      // Only what the kind declares public, though the check above already made it so: this goes
+      // to the audit log, and a key that reached it could never be taken back (`A-43`).
+      publicParams: declaredPublic(definition, publicParams),
     };
+  }
+
+  /**
+   * The credential sets holding a public key their kind does not declare (`A-43`).
+   *
+   * Only a set written before `A-43` can hold one, since every write is checked now. Such a key
+   * may be a secret typed under the wrong name and stored in the clear, so no read returns it
+   * (`declaredPublic`) and Core Health counts the set until somebody re-enters it: a write
+   * replaces the public half, and the key goes with it. Which of these keys were secrets is not
+   * guessed at in a migration.
+   */
+  async setsWithUndeclaredKeys(
+    q: Queryable,
+  ): Promise<{ objectId: number; kind: string; keys: number }[]> {
+    const declared = Object.fromEntries(
+      CREDENTIAL_KINDS.map((definition) => [definition.id, publicFields(definition)]),
+    );
+    const rows = await q.query<{ object_id: string; kind: string; keys: number }>(
+      `SELECT cs.object_id::text AS object_id, cs.kind::text AS kind, count(*)::int AS keys
+       FROM credential_set cs
+       CROSS JOIN LATERAL jsonb_object_keys(cs.public_params) AS k(name)
+       WHERE NOT (COALESCE($1::jsonb -> cs.kind::text, '[]'::jsonb) ? k.name)
+       GROUP BY cs.object_id, cs.kind
+       ORDER BY cs.object_id, cs.kind`,
+      [JSON.stringify(declared)],
+    );
+    return rows.map((row) => ({ objectId: Number(row.object_id), kind: row.kind, keys: row.keys }));
+  }
+
+  /**
+   * Says, once per set, which credential sets hold keys their kind does not declare (`A-43`).
+   * Called at start-up. The kind and the owner, never a key or a value: either may be the secret.
+   */
+  async warnOfUndeclaredKeys(q: Queryable): Promise<number> {
+    const sets = await this.setsWithUndeclaredKeys(q);
+    for (const set of sets) {
+      this.#logger.warn(
+        { objectId: set.objectId, kind: set.kind, undeclaredKeys: set.keys },
+        'this credential set holds keys its kind does not declare, written before they were ' +
+          'refused; they are never returned, and re-entering the set removes them',
+      );
+    }
+    return sets.length;
   }
 
   /** Removes the credential set on this object. Returns false when there was none. */
@@ -275,3 +347,32 @@ export class CredentialVault {
 }
 
 export { VaultSealer };
+
+/**
+ * The refusal of a write its kind does not accept, naming the field (`A-43`).
+ *
+ * The field's name and never its value, which may be the secret. A key the kind does not declare
+ * is answered with the ones it does, since the likeliest cause is a typo.
+ */
+function invalidValues(
+  definition: CredentialKindDefinition,
+  errors: readonly ErrorObject[],
+): VaultError {
+  const [first] = errors;
+  const extra: unknown =
+    first?.keyword === 'additionalProperties' ? first.params['additionalProperty'] : null;
+  if (typeof extra === 'string') {
+    const fields = [...publicFields(definition), ...secretFields(definition)].sort();
+    return new VaultError(
+      'CREDENTIAL_INVALID',
+      `"${extra}" is not a field of ${definition.name} credentials, which has ` + fields.join(', '),
+      { kind: definition.id, field: extra },
+    );
+  }
+  const field = (first?.instancePath ?? '').replace(/^\//, '') || 'values';
+  return new VaultError(
+    'CREDENTIAL_INVALID',
+    `${field} ${first?.message ?? 'is not valid'} for ${definition.name} credentials`,
+    { kind: definition.id, field },
+  );
+}

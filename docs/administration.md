@@ -276,6 +276,17 @@ They are encrypted at rest with the **vault key**, at `/var/lib/ms-core/vault.ke
 Credentials are inherited like every other setting: set the SNMP community once on a group, and
 every device beneath it uses it. That is the point — rotating one is one edit, not four hundred.
 
+**A credential set holds only the fields its kind declares** (`A-43`). A write naming any other
+field is refused with a 400 that names it, and nothing is stored. Before this, a secret sent
+under a mistyped name (`comunity` for `community`) was stored as a *public* field, in the clear,
+and every read returned it. A set written that way still holds the key, but no read returns it,
+to the API or to a probe. Core Health's **Credential sets to re-enter** counts such sets, and at
+start-up the core log names each one by kind and object id, never by key or value. Re-enter the
+set, rotating the secret if it was one: the write replaces the public fields, and the key goes
+with them. **Audit entries written before `A-43` may hold such a value**, in the `credential.set`
+entry's public fields, and nothing rewrites them. Treat an audit export from before then as
+holding whatever was mistyped.
+
 **A check's message does not carry its secrets** (`S-19`). A message is often somebody else's
 words — a script's last lines of output, a driver's error, a server's banner — and it reaches the
 state log, notifications and reports. So before any result leaves the probe, every exact value of

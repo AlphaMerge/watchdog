@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { toHttpError } from '../src/api/errors.js';
 import type { ObjectId } from '../src/objects/types.js';
+import { VaultError } from '../src/vault/service.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -115,6 +117,94 @@ describe(
           () => h.service.setCredential(testActor, 999_999, 'snmp', { community: 'x' }),
           /does not exist/,
         );
+      });
+    });
+
+    describe('what a write may hold (A-43)', () => {
+      const TYPO = 'a-secret-under-the-wrong-name';
+
+      it('refuses a key its kind does not declare, storing and auditing nothing', async () => {
+        // `comunity`: the typo that stored a community string in the clear. `splitCredential`
+        // sorts by whether a key is a declared secret, so an undeclared one was public.
+        const refusal = await h.service
+          .setCredential(testActor, deviceId, 'snmp', { version: 'v2c', comunity: TYPO })
+          .then(
+            () => assert.fail('the mistyped key was accepted'),
+            (error: unknown) => error,
+          );
+        assert.ok(refusal instanceof VaultError);
+        assert.equal(refusal.code, 'CREDENTIAL_INVALID');
+        assert.match(refusal.message, /^"comunity" is not a field of SNMP credentials/);
+        assert.match(refusal.message, /\bcommunity\b/, 'the fields it does have, to spot a typo');
+        const answer = toHttpError(refusal);
+        assert.equal(answer.status, 400);
+        assert.equal(JSON.stringify(answer).includes(TYPO), false, 'the answer echoes the value');
+
+        const rows = await scratch.db.query('SELECT 1 FROM credential_set WHERE object_id = $1', [
+          deviceId,
+        ]);
+        assert.equal(rows.length, 0, 'something was stored');
+        assert.deepEqual(
+          h.audit.recorded.filter((entry) => entry.action === 'credential.set'),
+          [],
+        );
+        assert.equal(JSON.stringify(h.audit.recorded).includes(TYPO), false);
+      });
+
+      it('refuses a value of the wrong type, and one outside its enum, naming the field', async () => {
+        await assert.rejects(
+          () => h.service.setCredential(testActor, deviceId, 'snmp', { community: 5 }),
+          (error: unknown) =>
+            error instanceof VaultError && /^community must be string,null/.test(error.message),
+        );
+        await assert.rejects(
+          () => h.service.setCredential(testActor, deviceId, 'snmp', { version: 'v4' }),
+          (error: unknown) => error instanceof VaultError && /^version /.test(error.message),
+        );
+      });
+
+      it('still takes null as the unset, and keeps a secret the write leaves out', async () => {
+        await h.service.setCredential(testActor, deviceId, 'snmp', { community: COMMUNITY });
+        await h.service.setCredential(testActor, deviceId, 'snmp', { version: 'v1' });
+        let resolved = await h.vault.resolveFor([sensorId], ['snmp']);
+        assert.equal(resolved.get(sensorId)?.get('snmp')?.values['community'], COMMUNITY);
+        await h.service.setCredential(testActor, deviceId, 'snmp', { community: null });
+        resolved = await h.vault.resolveFor([sensorId], ['snmp']);
+        assert.equal(resolved.get(sensorId)?.get('snmp')?.values['community'], undefined);
+      });
+
+      it('returns no key a set written before it holds, to the API or the probe, and counts the set', async () => {
+        // A row as a write before `A-43` could leave it: the typo beside a declared field.
+        await h.service.setCredential(testActor, deviceId, 'snmp', {
+          version: 'v2c',
+          community: COMMUNITY,
+        });
+        await scratch.db.query(
+          `UPDATE credential_set SET public_params = public_params || $2::jsonb
+           WHERE object_id = $1`,
+          [deviceId, JSON.stringify({ comunity: TYPO })],
+        );
+
+        const [view] = await h.resolver.resolveCredentials(deviceId);
+        assert.deepEqual(view?.publicParams, { version: 'v2c' });
+        const resolved = await h.vault.resolveFor([sensorId], ['snmp']);
+        const values = resolved.get(sensorId)?.get('snmp')?.values ?? {};
+        assert.equal(JSON.stringify(values).includes(TYPO), false, 'the probe was sent it');
+        assert.equal(values['community'], COMMUNITY, 'and the real secret still reaches it');
+
+        assert.deepEqual(await h.vault.setsWithUndeclaredKeys(scratch.db), [
+          { objectId: deviceId, kind: 'snmp', keys: 1 },
+        ]);
+        assert.equal(await h.vault.warnOfUndeclaredKeys(scratch.db), 1);
+
+        // Re-entering it replaces the public half, and the key goes with it.
+        await h.service.setCredential(testActor, deviceId, 'snmp', { version: 'v2c' });
+        assert.deepEqual(await h.vault.setsWithUndeclaredKeys(scratch.db), []);
+        const [row] = await scratch.db.query<{ public_params: Record<string, unknown> }>(
+          'SELECT public_params FROM credential_set WHERE object_id = $1',
+          [deviceId],
+        );
+        assert.deepEqual(row?.public_params, { version: 'v2c' });
       });
     });
 

@@ -48,6 +48,7 @@ export function fixedCoreHealth(db: Database): CoreHealthService {
       queries: () => ({ refused: 2 }),
       ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
+      credentialsToReenter: () => Promise.resolve(0),
     },
     ingest: () => Promise.resolve(),
   });

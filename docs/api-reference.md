@@ -311,7 +311,7 @@ The credential kinds this build can use, with the JSON Schema a form is generate
 
 ### `PUT /api/v1/objects/{id}/credentials/{kind}`
 
-Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. The response carries no secret.
+Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

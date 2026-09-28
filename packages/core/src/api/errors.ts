@@ -187,10 +187,11 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
   }
 
   if (error instanceof VaultError) {
-    // A kind this build has no transport for, and nothing else: the vault's other failures are
-    // `VaultKeyError` and `VaultSealError` below, which are the operator's problem rather than
-    // the caller's. Naming the kinds that *do* work is the useful half — a form told only "no"
-    // cannot tell a typo from a feature that has not shipped.
+    // A kind this build has no transport for, or values its kind does not accept (`A-43`), and
+    // nothing else: the vault's other failures are `VaultKeyError` and `VaultSealError` below,
+    // which are the operator's problem rather than the caller's. Naming the kinds, or the fields,
+    // that *do* work is the useful half — a form told only "no" cannot tell a typo from a
+    // feature that has not shipped.
     return envelope(400, error.code, error.message, { ...error.context });
   }
 
