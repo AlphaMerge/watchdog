@@ -21,7 +21,9 @@ const registry: CheckRegistry = {
     // An `UNKNOWN_SENSOR_TYPE` naming the id, which is the message an operator needs: which
     // sensor type, and — when this build's profile left it out — why.
     if (!catalogue.has(sensorType)) return Promise.reject(missingTypeError(sensorType));
-    return catalogue.type(sensorType).execute(context);
+    // Through the catalogue, not the type: it is what scrubs the message of every secret the
+    // check held before the result leaves this worker (`S-19`).
+    return catalogue.execute(sensorType, context);
   },
 
   /**

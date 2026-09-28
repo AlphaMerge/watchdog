@@ -351,6 +351,65 @@ describe(
       assert.deepEqual(entry.after.params, { port: 162 }, 'the value, because it is not a secret');
     });
 
+    // ── a parameter the schema has since narrowed (`S-19`) ─────────────────────────────────
+
+    it('reads a sensor stored before its schema narrowed, and refuses it only on a write', async () => {
+      // `S-19` narrowed a script sensor's variables to `MS_VAR_*`. A sensor saved before that
+      // is not rewritten — renaming a variable changes what its script sees — so it has to stay
+      // readable, and renamable, until somebody writes its parameters. The probe refuses to run
+      // it meanwhile, naming the variable; `exe-script.test.ts` has that half.
+      const exeScript = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'exe.script');
+      assert.ok(exeScript !== undefined);
+      const scripted = await buildHarness(db, { types: [exeScript] });
+      const made = await scripted.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'licence count',
+        sensorType: 'exe.script',
+        params: { program: 'licences.sh', env: [{ name: 'MS_VAR_POOL', value: 'main' }] },
+      });
+      const stored = [{ name: 'API_URL', value: 'https://licences.example.invalid' }];
+      await db.query(
+        `UPDATE sensor_config SET params = jsonb_set(params, '{env}', $2::jsonb)
+         WHERE object_id = $1`,
+        [made.id, JSON.stringify(stored)],
+      );
+
+      const read = await scripted.service.get(made.id);
+      assert.deepEqual((read as { params?: Record<string, unknown> }).params?.['env'], stored);
+
+      const renamed = await scripted.service.update(
+        testActor,
+        made.id,
+        { kind: 'sensor', name: 'licences in use' },
+        { kind: 'none' },
+      );
+      assert.equal(renamed.name, 'licences in use');
+
+      const error = await rejects(() =>
+        scripted.service.update(
+          testActor,
+          made.id,
+          { kind: 'sensor', params: { program: 'licences.sh', env: stored } },
+          { kind: 'none' },
+        ),
+      );
+      assert.equal(error.code, 'OBJECT_INVALID');
+      const problems = error.details['problems'] as { path: string }[];
+      assert.ok(problems.some((problem) => problem.path === '/env/0/name'));
+
+      // And the fix goes through.
+      await scripted.service.update(
+        testActor,
+        made.id,
+        {
+          kind: 'sensor',
+          params: { program: 'licences.sh', env: [{ name: 'MS_VAR_API_URL', value: 'x' }] },
+        },
+        { kind: 'none' },
+      );
+    });
+
     // ── the registry over HTTP ──────────────────────────────────────────────────────────────
 
     it('publishes the catalogue the add-sensor form is generated from', async () => {

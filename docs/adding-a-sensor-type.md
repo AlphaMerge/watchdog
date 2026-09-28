@@ -291,6 +291,15 @@ The form (`U-08`) follows from the same annotation: a `writeOnly` parameter rend
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save
 unless somebody deliberately changed it.
 
+**The same annotation keeps a secret out of your messages** (`S-19`). A probe runs every check
+through `SensorCatalogue.execute`, which replaces each exact value of a `writeOnly` parameter,
+and of each secret field of the credentials the check was handed, with `••••••` in the message
+you return and in the message of anything you throw — so quoting a driver's error or a script's
+output verbatim is safe. It is exact matching and nothing more: values under four characters are
+left alone, and a secret you encode (a Basic `Authorization` header, a URL-encoded query string)
+is not recognised. If your type builds one of those, scrub it yourself before it reaches a
+message, as `http.transaction` does.
+
 ---
 
 ## What the catalogue checks when you register

@@ -3,6 +3,8 @@ import * as ajvFormats from 'ajv-formats';
 import type { FormatsPlugin } from 'ajv-formats';
 import type {
   ChannelDef,
+  CheckContext,
+  CheckExecution,
   CostHint,
   JsonSchema,
   PreviewInput,
@@ -10,6 +12,7 @@ import type {
   SensorType,
   SensorTypeDeclaration,
 } from './contract.js';
+import { scrubSecrets, secretsOfCheck } from './support/secrets.js';
 
 /**
  * `snmp.traffic`, `http.advanced`, `exe.script-advanced`.
@@ -171,6 +174,31 @@ export class SensorCatalogue {
     return this.#require(id);
   }
 
+  /**
+   * Runs a check, and keeps its secrets out of what it says (`S-19`).
+   *
+   * **The one place a message is scrubbed, for every type**, rather than each type remembering
+   * to: a script's output, a driver's error and a server's banner are other people's words, and a
+   * new type that forgot would leak into the state log and every notification. The message of a
+   * result and of a thrown error both leave here with every `writeOnly` parameter value and every
+   * secret credential field replaced — exactly the values, and only those long enough to be worth
+   * it; `support/secrets.ts` says what that does not catch. Readings are numbers and are not
+   * touched. The error keeps its class and its code, because the caller reads those.
+   */
+  async execute(id: string, context: CheckContext): Promise<CheckExecution> {
+    const type = this.#require(id);
+    const secrets = secretsOfCheck(this.writeOnlyPaths(id), context.params, context.credentials);
+    let execution: CheckExecution;
+    try {
+      execution = await type.execute(context);
+    } catch (error: unknown) {
+      throw scrubbedError(error, secrets);
+    }
+    return execution.message === undefined || secrets.length === 0
+      ? execution
+      : { ...execution, message: scrubSecrets(execution.message, secrets) };
+  }
+
   validate(id: string, params: Readonly<Record<string, unknown>>): ParamValidation {
     const validate = this.#validators.get(id);
     if (validate === undefined) {
@@ -292,6 +320,15 @@ export class SensorCatalogue {
     }
     return type;
   }
+}
+
+/** The same error with its message and stack scrubbed, or a new one saying what was thrown. */
+function scrubbedError(error: unknown, secrets: readonly string[]): Error {
+  if (!(error instanceof Error)) return new Error(scrubSecrets(String(error), secrets));
+  if (secrets.length === 0) return error;
+  error.message = scrubSecrets(error.message, secrets);
+  if (error.stack !== undefined) error.stack = scrubSecrets(error.stack, secrets);
+  return error;
 }
 
 /**

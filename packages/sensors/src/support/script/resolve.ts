@@ -80,43 +80,7 @@ export async function resolveProgram(
 ): Promise<ResolvedProgram> {
   const trimmed = name.trim();
   if (trimmed === '') throw new ScriptError('this sensor names no program to run');
-  if (isAbsolute(trimmed)) {
-    throw new ScriptError(
-      `"${trimmed}" is an absolute path, and a sensor may only name a program inside this ` +
-        'probe’s script directory',
-    );
-  }
-  if (!NAME.test(trimmed)) {
-    throw new ScriptError(
-      `"${trimmed}" is not a program name — letters, digits, dot, dash, underscore and a ` +
-        'forward slash for a subdirectory. Nothing here is run through a shell, so a name ' +
-        'needing anything else is a name pointing somewhere it should not',
-    );
-  }
-  if (trimmed.split('/').includes('..')) {
-    throw new ScriptError(`"${trimmed}" climbs out of the script directory`);
-  }
-
-  const root = await realpath(directory).catch(() => {
-    throw new ScriptError(
-      `this probe’s script directory ${directory} does not exist — create it, or correct ` +
-        '`probe.scriptDir`',
-    );
-  });
-
-  const candidate = join(root, trimmed);
-  const real = await realpath(candidate).catch(() => {
-    throw new ScriptError(`there is no program called "${trimmed}" in ${root}`);
-  });
-
-  // Resolved first, compared second: a symlink inside the directory pointing at `/bin/sh` is the
-  // obvious way around a comparison made on the name.
-  if (real !== root && !real.startsWith(root.endsWith(sep) ? root : root + sep)) {
-    throw new ScriptError(
-      `"${trimmed}" resolves to ${real}, which is outside this probe’s script directory — a ` +
-        'symbolic link out of it is not a way to widen what a sensor may run',
-    );
-  }
+  const real = await insideScriptDirectory(trimmed, 'program', directory);
 
   const info = await stat(real);
   if (!info.isFile()) throw new ScriptError(`"${trimmed}" is not a file`);
@@ -131,4 +95,74 @@ export async function resolveProgram(
   }
 
   return { file: real, directory: resolve(real, '..') };
+}
+
+/**
+ * Resolves a sensor's working directory, which is held to the rule its program is (`S-19`).
+ *
+ * **A directory inside the script directory, named the way a program is, or nothing.** Where a
+ * script runs is part of what it does: `source ./lib.sh`, a relative config file, a module found
+ * beside it. A working directory anywhere on the machine would let the person writing the sensor
+ * choose which of those files the operator's script reads, and the program allow-list would be
+ * guarding the front door only. Empty is the program's own directory, which is usually right.
+ */
+export async function resolveWorkingDirectory(
+  name: string,
+  program: ResolvedProgram,
+  directory: string = scriptDirectory(),
+): Promise<string> {
+  const trimmed = name.trim();
+  if (trimmed === '') return program.directory;
+  const real = await insideScriptDirectory(trimmed, 'directory', directory);
+  const info = await stat(real);
+  if (!info.isDirectory()) throw new ScriptError(`"${trimmed}" is not a directory`);
+  return real;
+}
+
+/**
+ * The one check both names pass: a relative name of plain characters, which resolves — symbolic
+ * links followed — to somewhere inside the script directory.
+ */
+async function insideScriptDirectory(
+  name: string,
+  what: 'program' | 'directory',
+  directory: string,
+): Promise<string> {
+  if (isAbsolute(name)) {
+    throw new ScriptError(
+      `"${name}" is an absolute path, and a sensor may only name a ${what} inside this ` +
+        'probe’s script directory',
+    );
+  }
+  if (!NAME.test(name)) {
+    throw new ScriptError(
+      `"${name}" is not a ${what} name — letters, digits, dot, dash, underscore and a ` +
+        'forward slash for a subdirectory. Nothing here is run through a shell, so a name ' +
+        'needing anything else is a name pointing somewhere it should not',
+    );
+  }
+  if (name.split('/').includes('..')) {
+    throw new ScriptError(`"${name}" climbs out of the script directory`);
+  }
+
+  const root = await realpath(directory).catch(() => {
+    throw new ScriptError(
+      `this probe’s script directory ${directory} does not exist — create it, or correct ` +
+        '`probe.scriptDir`',
+    );
+  });
+
+  const real = await realpath(join(root, name)).catch(() => {
+    throw new ScriptError(`there is no ${what} called "${name}" in ${root}`);
+  });
+
+  // Resolved first, compared second: a symlink inside the directory pointing at `/bin/sh` is the
+  // obvious way around a comparison made on the name.
+  if (real !== root && !real.startsWith(root.endsWith(sep) ? root : root + sep)) {
+    throw new ScriptError(
+      `"${name}" resolves to ${real}, which is outside this probe’s script directory — a ` +
+        'symbolic link out of it is not a way to widen what a sensor may reach',
+    );
+  }
+  return real;
 }

@@ -1,9 +1,19 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SensorCatalogue } from '../src/catalogue.js';
+import { SCRUBBED } from '../src/support/secrets.js';
 import { exeScript } from '../src/types/exe-script.js';
 import { exeScriptAdvanced } from '../src/types/exe-script-advanced.js';
 import { keyOf, parseAdvanced, parseSimple } from '../src/support/script/parse.js';
@@ -41,7 +51,22 @@ before(() => {
   script('silent.sh', 'exit 0');
   script('slow.sh', 'sleep 30');
   script('args.sh', 'echo "0:${#}:$1 $2"');
-  script('env.sh', 'echo "0:1:$MS_HOST|$MS_SECRET|$CUSTOM|${SHOULD_NOT_LEAK:-absent}"');
+  script('env.sh', 'echo "0:1:$MS_HOST|$MS_SECRET|$MS_VAR_CUSTOM|${SHOULD_NOT_LEAK:-absent}"');
+  script('base-env.sh', 'echo "0:1:${LANG:-unset}|${TZ:-unset}|${NODE_OPTIONS:-absent}"');
+  script('pwd.sh', 'echo "0:1:$(pwd -P)"');
+  script('leak.sh', 'echo "request failed with $MS_SECRET" >&2; exit 2');
+  script(
+    'leak-advanced.sh',
+    'echo "{\\"prtg\\":{\\"error\\":1,\\"text\\":\\"key $MS_SECRET refused\\"}}"',
+  );
+  // A bash script, because bash is what reads BASH_ENV and PS4, and one that leaves a mark when
+  // it runs at all — a refused sensor must not have reached it.
+  writeFileSync(
+    join(dir, 'bash-check.sh'),
+    `#!/bin/bash\ntouch "${join(dir, 'bash-ran')}"\necho "0:1:ok"\n`,
+    'utf8',
+  );
+  chmodSync(join(dir, 'bash-check.sh'), 0o755);
   script(
     'advanced.sh',
     'echo \'{"channels":[{"key":"value","value":3,"unit":"jobs"},{"key":"lag","name":"Replica lag","value":12.5,"unit":"s"}],"message":"two channels"}\'',
@@ -59,6 +84,7 @@ before(() => {
   writeFileSync(join(outside, 'evil.sh'), '#!/bin/sh\necho "0:666:owned"\n', 'utf8');
   chmodSync(join(outside, 'evil.sh'), 0o755);
   symlinkSync(join(outside, 'evil.sh'), join(dir, 'link-out.sh'));
+  symlinkSync(outside, join(dir, 'dir-out'));
 
   writeFileSync(join(dir, 'notexec.sh'), '#!/bin/sh\necho hi\n', 'utf8');
   chmodSync(join(dir, 'notexec.sh'), 0o644);
@@ -357,7 +383,7 @@ describe('exe.script', () => {
     try {
       const execution = await run(exeScript, {
         program: 'env.sh',
-        env: [{ name: 'CUSTOM', value: 'set-here' }],
+        env: [{ name: 'MS_VAR_CUSTOM', value: 'set-here' }],
         secret: 'api-key-1234',
       });
       assert.equal(
@@ -401,6 +427,154 @@ describe('exe.script', () => {
   it('runs in a process of its own, which is why P-03 came first', () => {
     assert.equal(exeScript.isolation, 'process');
     assert.equal(exeScriptAdvanced.isolation, 'process');
+  });
+});
+
+describe('what a sensor may hand a script (S-19)', () => {
+  const TYPES = [exeScript, exeScriptAdvanced];
+  const catalogue = new SensorCatalogue().register(exeScript).register(exeScriptAdvanced).seal();
+
+  /**
+   * Each of these was measured to run a command of the writer's choosing — the first three through
+   * a bash or node script as an unprivileged account — or reads something a loader or a library
+   * acts on. Lower case and the system's own names are here because the rule is the namespace,
+   * not the list.
+   */
+  const REFUSED = [
+    'BASH_ENV',
+    'PS4',
+    'SHELLOPTS',
+    'NODE_OPTIONS',
+    'LD_PRELOAD',
+    'PATH',
+    'https_proxy',
+    'MS_SECRET',
+    'MS_HOST',
+    'MS_VAR_lower',
+    'MS_VAR_',
+    'CUSTOM',
+  ];
+
+  it('lets a sensor set only MS_VAR_ variables, refused at the API', () => {
+    for (const type of TYPES) {
+      for (const name of REFUSED) {
+        const checked = catalogue.validate(type.id, {
+          program: 'ok.sh',
+          env: [{ name, value: 'x' }],
+        });
+        assert.equal(checked.valid, false, `${type.id} accepted ${name}`);
+      }
+      const fine = catalogue.validate(type.id, {
+        program: 'ok.sh',
+        env: [{ name: 'MS_VAR_API_URL', value: 'https://example.invalid' }],
+      });
+      assert.equal(fine.valid, true, type.id);
+    }
+  });
+
+  it('refuses one already stored at run time, naming it, before anything runs', async () => {
+    // A sensor saved before the rule: it goes Down saying which variable to rename, rather than
+    // running with the variable dropped or honoured.
+    const ran = join(dir, 'bash-ran');
+    for (const type of TYPES) {
+      for (const env of [
+        [{ name: 'BASH_ENV', value: `$(touch ${ran})` }],
+        [
+          { name: 'SHELLOPTS', value: 'xtrace' },
+          { name: 'PS4', value: `$(touch ${ran})` },
+        ],
+        [{ name: 'NODE_OPTIONS', value: '--import=data:text/javascript,1' }],
+      ]) {
+        const name = env[0]?.name ?? '';
+        await assert.rejects(
+          () => run(type, { program: 'bash-check.sh', env }),
+          new RegExp(
+            `sets the variable "${name}", and a sensor may set only MS_VAR_ names.*MS_VAR_${name}`,
+          ),
+          `${type.id} ${name}`,
+        );
+        assert.equal(existsSync(ran), false, `${type.id} ran the script with ${name}`);
+      }
+    }
+    // And the same script with a variable in the namespace runs, so the refusal is the name's.
+    await run(exeScript, { program: 'bash-check.sh', env: [{ name: 'MS_VAR_MODE', value: 'x' }] });
+    assert.equal(existsSync(ran), true);
+    rmSync(ran);
+  });
+
+  it('passes the locale and time zone the probe has, and nothing else of its environment', async () => {
+    const saved = {
+      LANG: process.env['LANG'],
+      TZ: process.env['TZ'],
+      NODE: process.env['NODE_OPTIONS'],
+    };
+    process.env['LANG'] = 'de_DE.UTF-8';
+    process.env['TZ'] = 'Europe/Berlin';
+    process.env['NODE_OPTIONS'] = '--no-warnings';
+    try {
+      const execution = await run(exeScript, { program: 'base-env.sh' });
+      assert.equal(execution.message, 'de_DE.UTF-8|Europe/Berlin|absent');
+    } finally {
+      for (const [name, value] of [
+        ['LANG', saved.LANG],
+        ['TZ', saved.TZ],
+        ['NODE_OPTIONS', saved.NODE],
+      ] as const) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it('runs in a working directory inside the script directory, and nowhere else', async () => {
+    const root = await realpath(dir);
+    assert.equal((await run(exeScript, { program: 'pwd.sh' })).message, root);
+    assert.equal(
+      (await run(exeScript, { program: 'pwd.sh', workingDirectory: 'sub' })).message,
+      join(root, 'sub'),
+    );
+    for (const [workingDirectory, why] of [
+      ['/', /absolute path, and a sensor may only name a directory inside/],
+      ['../', /climbs out/],
+      ['sub/../..', /climbs out/],
+      ['dir-out', /outside this probe’s script directory/],
+      ['ok.sh', /is not a directory/],
+      ['nowhere', /there is no directory called "nowhere"/],
+      ['sub; id', /is not a directory name/],
+    ] as const) {
+      for (const type of TYPES) {
+        await assert.rejects(
+          () => run(type, { program: 'pwd.sh', workingDirectory }),
+          why,
+          `${type.id} ${workingDirectory}`,
+        );
+      }
+    }
+  });
+
+  it('keeps its secret out of the message, whatever the script prints', async () => {
+    // Through the catalogue, which is how a probe runs every check.
+    for (const [type, program, said] of [
+      [exeScript, 'leak.sh', `request failed with ${SCRUBBED}`],
+      [exeScriptAdvanced, 'leak-advanced.sh', `key ${SCRUBBED} refused`],
+    ] as const) {
+      await assert.rejects(
+        () =>
+          catalogue.execute(type.id, {
+            sensorId: 3,
+            target: { host: 'device.example.invalid', ipVersion: 'auto' },
+            params: { program, secret: 'api-key-1234', timeoutMs: 10_000 },
+            credentials: {},
+            signal: new AbortController().signal,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(error.message.includes(said), `${type.id}: ${error.message}`);
+          assert.ok(!error.message.includes('api-key-1234'), type.id);
+          return true;
+        },
+      );
+    }
   });
 });
 

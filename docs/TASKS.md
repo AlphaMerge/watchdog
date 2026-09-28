@@ -428,6 +428,109 @@ because each is a decision rather than a defect:
 
       Tests: 12 in `declared-limits.test.ts`, 5 in `catalogue.test.ts` for the registration rules
       plus one asserting only the two self-monitoring types ship thresholds at all. Mutation 8/8.
+- [x] **S-19 — A script sensor's writer can run code as the probe, and a check can print its
+      secret** · M · T-19, A-05 · Found 2026-09-28 in `A-12`'s triage round 3.
+      - **Arbitrary environment variables.** `readEnv` in `exe-script-shared.ts` accepted any name
+        matching `^[A-Za-z_][A-Za-z0-9_]*$` and applied it after `PATH`.
+      - **An unchecked working directory.** `workingDirectory` was used as given.
+      - **Together they undid `resolveProgram`'s realpath allow-list.** An account with write on a
+        device could plausibly run code as `ms-probe`, which holds the probe's identity key and
+        every credential pushed to it.
+      - **Secrets in messages.** A script's last three lines of output went into the state
+        message while `MS_SECRET` was in its environment. The DB, mail, SNMP, SSH and EXE types
+        hold secrets and never scrubbed their messages; only `http.transaction` did.
+
+      **Done when:**
+      - Verified first which vectors actually run code, and whether any bar already limits who
+        may write these sensors.
+      - A sensor sets only variables from an allow-list, refused at the API and again on the
+        probe at run time.
+      - The working directory is confined the way the program is.
+      - One scrub point in the sensor contract, fed from each type's `writeOnly` params and each
+        credential kind's secret fields, covering every message before it leaves the probe.
+
+      **S-19 outcome.** Verified first, on the dev toolchain (bash 5.2, node 24, `/bin/sh` is
+      dash), as uid 65534 because bash ignores an inherited `PS4` as root:
+      - `BASH_ENV=$(…)` ran a command through a bash script.
+      - `SHELLOPTS=xtrace` with `PS4=$(…)` ran one through a bash script.
+      - `NODE_OPTIONS=--import=data:…` ran one through a node script.
+      - dash ignores `ENV` and `BASH_ENV`. `LD_PRELOAD`, `--require` and `PATH` each need a file
+        the writer cannot place.
+      - `MS_SECRET` reached the state message both through a script's own stderr and through an
+        injected xtrace.
+      - Nothing limited `exe.script` to anybody.
+
+      - **Variables: `MS_VAR_[A-Z0-9_]+` only.** An allow-list by namespace, because a deny-list
+        cannot be finished: every tool a script calls reads variables of its own (`OPENSSL_CONF`,
+        `GIT_SSH_COMMAND`, `PERL5OPT`, a proxy beside `SSLKEYLOGFILE`). The schema refuses any
+        other name. The probe refuses a stored one at run time, naming it and suggesting its
+        `MS_VAR_` form, before anything is spawned. A sensor saved earlier is not rewritten,
+        because renaming changes what its script sees. It stays readable and renamable, goes
+        Down saying which variable to rename, and a params write refuses the name until it is
+        renamed.
+      - **The environment is built from a stated base.** From the probe: `PATH`, `LANG`, `LC_*`
+        and `TZ`. The system's own: `MS_HOST`, `MS_SENSOR_ID` and `MS_SECRET`. Then the sensor's
+        `MS_VAR_*`. Nothing else is inherited. What the shipped unit gives the probe —
+        `NOTIFY_SOCKET`, `NODE_ENV`, `MS_CONFIG_FILE`, the `MS_*` overrides — stays with it.
+        `NOTIFY_SOCKET` in particular would let a script talk to systemd as the probe.
+      - **`workingDirectory`** is resolved by the same function as the program: a relative name
+        of plain characters, realpath'd, inside the script directory, and a directory.
+      - **No new bar.** With both closed, a writer controls a deployed program's arguments and
+        namespaced variables, which is PRTG's model. `processUid` would help, but it needs
+        `CAP_SETUID` and the shipped unit does not grant it, so `administration.md` says both.
+      - **The scrub is `SensorCatalogue.execute`, the probe's only path to a type.** It replaces
+        exact values of every `writeOnly` param, including nested ones, and of every credential
+        kind's secret fields, in a result's message and a thrown error's message and stack. A
+        credential kind this build does not know has all its strings scrubbed. It skips values
+        under 4 characters, and it cannot catch an encoded or partial secret. Both limits are
+        written down in `support/secrets.ts`, `administration.md` and `adding-a-sensor-type.md`,
+        and pinned by a test. Readings are not touched, and an error keeps its class and code.
+
+      Found on the way and reported rather than folded in: the probe's other shell-outs. `ping`
+      puts the device host last with no `--`, and the host is any 1–255 character string.
+      Measured with iputils 20221126: a host beginning with `-` takes the destination slot, so
+      ping exits "Destination address required" and sends nothing. There is no amplification or
+      option injection with a target, only a confusing failure message. The Windows types pass
+      the host through an environment variable.
+
+      Tests:
+      - `exe-script.test.ts`: 5 new, each run against both types.
+      - `secrets.test.ts`: 5.
+      - `catalogue-registry.test.ts` (probe): 1.
+      - `sensor-types.test.ts` (core): 1, a sensor stored before the rule.
+
+      Mutation 5/5:
+      - the namespace check skipped (1 fails);
+      - the working directory left unconfined (1 fails);
+      - a thrown error passed through unscrubbed (3 in sensors and the probe's 1 fail);
+      - the probe registry calling the type directly (1 fails);
+      - the length floor removed (1 fails).
+- [ ] **S-20 — A device host beginning with `-` is refused at the API** · S · S-19 · Found in
+      `S-19`'s sweep of the probe's shell-outs. A device's `host` is any 1–255 character string.
+      `icmp.ping` and `icmp.jitter` pass it to `ping` as the last argument with no `--` in front,
+      so a host like `-f` or `-c100000` is read as an option.
+
+      **Not exploitable today, and the reason holds for any `ping`.** One argv element in the only
+      positional slot cannot also supply a destination. iputils 20221126, measured: `-f`,
+      `-c100000`, `-s65000` and `-I lo` each exit 1 with "Destination address required" having
+      sent nothing, and `--help` exits 2. What it costs today is the motivating case: a sensor
+      that goes Down with `ping: usage error: Destination address required`. That message says
+      nothing about the device's host being the problem.
+
+      **Why fix it at the boundary rather than in `ping.ts`.** The next type that shells out may
+      not be `ping`, and may not be safe by the same accident. No DNS name, IPv4 or IPv6 address
+      begins with `-`, so refusing one where a host is written costs nothing legitimate. It covers
+      every later type for free.
+
+      **Done when:**
+      - A host beginning with `-` is refused wherever a device's host is written: create, update,
+        a created tree, bulk edit, discovery provisioning and a device template. The refusal is a
+        400 naming the field. The core refuses it, not only the schema, so a path that skips the
+        route is covered.
+      - A device already stored with such a host fails its checks with a sentence naming the host,
+        rather than ping's usage error. The probe refuses it before spawning anything.
+      - Tests at the API, the service and the probe, and `administration.md` or the API reference
+        says so.
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to
       1.55 ms (`docs/findings/2026-08-25-tree-build-measurement.md`).

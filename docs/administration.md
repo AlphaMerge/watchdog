@@ -261,6 +261,40 @@ They are encrypted at rest with the **vault key**, at `/var/lib/ms-core/vault.ke
 Credentials are inherited like every other setting: set the SNMP community once on a group, and
 every device beneath it uses it. That is the point — rotating one is one edit, not four hundred.
 
+**A check's message does not carry its secrets** (`S-19`). A message is often somebody else's
+words — a script's last lines of output, a driver's error, a server's banner — and it reaches the
+state log, notifications and reports. So before any result leaves the probe, every exact value of
+a write-only parameter of the sensor and of a secret credential field (a password, a private key,
+a community) is replaced by `••••••` in it, for every sensor type. Know its limits: it matches
+**exact** values only, so a secret the script printed base64-encoded, split, or partly is not
+caught; and it skips values **shorter than four characters**, which would otherwise turn ordinary
+words into markers. A secret that short is not much of one.
+
+## Script sensors
+
+The EXE/Script sensors run a program the operator put in the probe's **script directory**
+(`probe.scriptDir`; empty, the default, runs nothing). The directory is the boundary: a sensor
+names a file inside it, never a path, and whoever may add a sensor may therefore run only what
+somebody with the server's file system chose to deploy. What a sensor writer controls is the
+arguments and the variables — so treat both as untrusted input in every script you deploy.
+
+- **A sensor sets only `MS_VAR_*` variables.** Any other name is refused by the API, because
+  variables such as `BASH_ENV`, `PS4` with `SHELLOPTS`, and `NODE_OPTIONS` make bash or node run
+  code of the writer's choosing before the script's first line — measured, as the account the
+  probe runs as. A script also receives `MS_HOST`, `MS_SENSOR_ID`, `MS_SECRET` when a secret is
+  set, `PATH`, and the probe's own `LANG`, `LC_*` and `TZ`; nothing else of the probe's
+  environment.
+- **The working directory is inside the script directory too**, named as the program is. Empty
+  runs the program where it lives.
+- **Scripts run as the probe's account**, which holds the probe's identity and the credentials the
+  core sends it. `probe.processUid`/`processGid` run them as another account instead, but need the
+  probe to have `CAP_SETUID`, which the shipped unit does not grant.
+
+**On upgrade**, a script sensor that already sets a variable outside `MS_VAR_` is not rewritten —
+renaming a variable changes what its script sees. It goes **Down** with a message naming the
+variable, and saving it refuses the name until it is renamed; rename it in the sensor and in the
+script together.
+
 ---
 
 ## Inheritance
