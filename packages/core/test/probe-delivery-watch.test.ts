@@ -34,6 +34,7 @@ const UPTIME = 2_000_000;
 function link(over: Partial<Extract<ProbeLink, { connected: true }>> = {}): ProbeLink {
   return {
     connected: true,
+    gid: 'probe-gid',
     protocolVersion: 13,
     connectedAt: START,
     lastHeartbeatAt: START,

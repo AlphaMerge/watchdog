@@ -89,7 +89,7 @@ export interface CoreHealthSources {
    * describe a batch that was rejected and will be re-offered, while this one describes data
    * that is gone and a probe host that needs its clock fixed.
    */
-  ingestionDiscards: () => { discardedFutureTime: number };
+  ingestionDiscards: () => { discardedFutureTime: number; discardedPastTime: number };
   /**
    * The last housekeeping pass's view of the disk (`S-17`).
    *
@@ -254,6 +254,7 @@ export class CoreHealthService {
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
 
+    const discards = this.#sources.ingestionDiscards();
     const reading: CoreHealthReading = {
       ingestQueue: ingestion.queuedRows,
       writeLatency: ingestion.writeMs.p95,
@@ -307,7 +308,8 @@ export class CoreHealthService {
       reportsUndelivered: reports === null ? null : reports.undelivered,
       reportFormatsWaiting: reports === null ? null : reports.formatsWaiting,
       reportFormatsRefused: reports === null ? null : reports.formatsRefused,
-      resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
+      resultsFutureDated: discards.discardedFutureTime,
+      resultsPastDated: discards.discardedPastTime,
       reactionsDeferred: ingestion.deferredReactions,
     };
     return { reading, parkedError: queues.parked.lastError };

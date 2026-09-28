@@ -1006,6 +1006,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `reportFormatsWaiting` | Report formats waiting | formats | — |
 | `reportFormatsRefused` | Report formats refused | formats | 64-bit counter → rate |
 | `resultsFutureDated` | Results refused as future-dated | results | 64-bit counter → rate |
+| `resultsPastDated` | Results refused as too old | results | 64-bit counter → rate |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 
 Takes no parameters.
@@ -1066,6 +1067,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `spoolCorrupt` | Results unreadable | results | 64-bit counter → rate |
 | `spoolStalled` | Spool stalled for | s | default limits: error above 0.5 |
 | `clockJumps` | Clock jumps | jumps | 64-bit counter → rate |
+| `resultsFutureDated` | Results refused as future-dated (5 min) | results | default limits: warn above 0.5 |
+| `resultsPastDated` | Results refused as too old (5 min) | results | default limits: warn above 0.5 |
 | `cpu` | CPU | % | — |
 | `memory` | Memory (resident) | MB | — |
 | `memoryAvailable` | Memory available | % | default limits: error below 10, warn below 20 |

@@ -106,7 +106,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
           formatsRefused: 1,
         }),
         queries: () => ({ refused: 2 }),
-        ingestionDiscards: () => ({ discardedFutureTime: 0 }),
+        ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
         delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       },
       ingest: () => Promise.resolve(),
@@ -125,6 +125,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
   // `{ ...connected, health: … }` below would stop type-checking against the other arm.
   const connected: Extract<ProbeLink, { connected: true }> = {
     connected: true,
+    gid: 'probe-gid',
     protocolVersion: 7,
     connectedAt: new Date(),
     lastHeartbeatAt: new Date(),

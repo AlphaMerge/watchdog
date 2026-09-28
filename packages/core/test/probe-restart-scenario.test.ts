@@ -308,6 +308,7 @@ describe(
       if (!up) return { connected: false };
       return {
         connected: true,
+        gid: 'probe-gid',
         protocolVersion: PROTOCOL_VERSION,
         connectedAt: now,
         lastHeartbeatAt: now,

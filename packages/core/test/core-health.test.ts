@@ -62,6 +62,7 @@ function sources(
     reportFormatsWaiting: number;
     reportFormatsRefused: number;
     resultsFutureDated: number;
+    resultsPastDated: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -102,7 +103,10 @@ function sources(
       formatsRefused: overrides.reportFormatsRefused ?? 0,
     }),
     queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
-    ingestionDiscards: () => ({ discardedFutureTime: overrides.resultsFutureDated ?? 0 }),
+    ingestionDiscards: () => ({
+      discardedFutureTime: overrides.resultsFutureDated ?? 0,
+      discardedPastTime: overrides.resultsPastDated ?? 0,
+    }),
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
       probesSilent: overrides.probesSilent ?? 0,
@@ -468,8 +472,10 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       //
       // Zero on every healthy installation, so any movement is one probe host with a wrong
       // clock and names a fix an operator can carry out.
-      const reading = await build({ resultsFutureDated: 3 }).read();
+      const reading = await build({ resultsFutureDated: 3, resultsPastDated: 5 }).read();
       assert.equal(reading['resultsFutureDated'], 3);
+      // And the other way (`P-231`): older than anything is kept.
+      assert.equal(reading['resultsPastDated'], 5);
     });
 
     it('counts what is actually queued in the housekeeping tables', async () => {

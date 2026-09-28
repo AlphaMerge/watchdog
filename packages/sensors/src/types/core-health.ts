@@ -372,6 +372,16 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'results',
     counter: { bits: 64 },
   },
+  // `P-231`. The other way: stamped further back than anything here is kept, which is ten years
+  // by default and no genuine replay reaches. A device with no RTC that boots at 1970, a VM
+  // restored from an old snapshot. No limit, for the same reason as above; the probe it came
+  // from has its own channel, which does.
+  {
+    key: 'resultsPastDated',
+    name: 'Results refused as too old',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
   // `P-157`. Alarm reactions held back because the batch that carried them was a probe replaying
   // its spool: they are folded into the first batch that is not, which is what stops an outage
   // that began during a drain going unalarmed. `CLAUDE.md`: nothing is deferred silently.

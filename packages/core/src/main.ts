@@ -91,7 +91,7 @@ import { loadDeviceTemplates } from './device-templates/loader.js';
 import { ChannelResolver } from './ingestion/channels.js';
 import { ResultCacheInvalidator } from './ingestion/invalidation.js';
 import { Ingestor } from './ingestion/ingestor.js';
-import { IngestionService } from './ingestion/service.js';
+import { IngestionService, maxResultAgeMs } from './ingestion/service.js';
 import { HistoryService } from './timeseries/history.js';
 import { EngineError, type EngineCapabilities } from './timeseries/engine.js';
 import { SqlTimeSeriesStore, type TimeSeriesStore } from './timeseries/store.js';
@@ -1146,6 +1146,8 @@ async function serve(): Promise<void> {
     // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
     // own transaction, so the two can never disagree about what happened.
     states,
+    // Nothing older than the longest anything is kept (`P-231`); the retention decides it.
+    maxResultAgeMs: maxResultAgeMs(config.housekeeping.retention),
   });
 
   // A lost probe is one alarm, not a thousand (`R-05`). Built before the endpoint, which is
@@ -1280,7 +1282,10 @@ async function serve(): Promise<void> {
     db,
     logger,
     vouching,
-    sources: { link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId) },
+    sources: {
+      link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
+      timeRefusals: (gid) => ingestion.timeRefusals(gid),
+    },
     delivery: deliveryWatch,
     ingest: async (results) => {
       await ingestion.acceptResults('probe-health', {

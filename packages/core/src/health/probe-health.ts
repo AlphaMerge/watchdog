@@ -9,6 +9,7 @@ import {
 } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
+import type { TimeRefusals } from '../ingestion/service.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
@@ -32,6 +33,11 @@ import { MAX_WALK_DEPTH } from '../db/walk.js';
 export interface ProbeHealthSources {
   /** The live link, from the probe endpoint. Answers for a probe that is not connected. */
   link: (probeObjectId: number) => ProbeLink;
+  /**
+   * Results the core refused from this probe for their timestamp (`P-231`), by its GID. Absent
+   * on a build without ingestion, and then both channels gap.
+   */
+  timeRefusals?: (gid: string) => TimeRefusals;
 }
 
 export interface ProbeHealthServiceOptions {
@@ -138,6 +144,9 @@ export class ProbeHealthService {
     // and this is a fact about arrivals, which only the core can see. No protocol field, and it
     // therefore works against a probe of any version.
     const delivery = this.#delivery?.verdictFor(probeObjectId) ?? null;
+    // Also the core's, and for the same reason (`P-231`): a probe cannot see that its own clock
+    // is wrong, only the core it is compared against can.
+    const refused = this.#sources.timeRefusals?.(link.gid) ?? null;
 
     const reading: ProbeHealthReading = {
       ...blank(),
@@ -217,6 +226,8 @@ export class ProbeHealthService {
       spoolStalled:
         health?.spoolStalledMs === undefined ? null : round(health.spoolStalledMs / 1000, 1),
       clockJumps: health?.clockJumps ?? null,
+      resultsFutureDated: refused?.future ?? null,
+      resultsPastDated: refused?.past ?? null,
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,
       uptime: health?.uptimeSeconds ?? null,

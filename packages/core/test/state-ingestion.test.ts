@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import { PauseRepository } from '../src/objects/pause-repository.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
-import type { CheckResult, IngestionConfig } from '@ms/shared';
+import { pino } from 'pino';
+import type { CheckResult, HousekeepingConfig, IngestionConfig, Logger } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database, Queryable } from '../src/db/pool.js';
@@ -13,7 +14,11 @@ import type { LookupCatalogue } from '../src/lookups/catalogue.js';
 import { loadLookups } from '../src/lookups/loader.js';
 import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
-import { IngestionService } from '../src/ingestion/service.js';
+import {
+  IngestionService,
+  maxResultAgeMs,
+  TIME_REFUSAL_WINDOW_MS,
+} from '../src/ingestion/service.js';
 import { SensorStateService } from '../src/state/service.js';
 import { writeStateHistory } from '../src/state/runtime.js';
 import { resolveAcknowledgement } from '../src/state/acknowledgement.js';
@@ -1505,6 +1510,177 @@ describe(
         const soon = new Date(Date.now() + 60_000).toISOString();
         await deliver(near.service, near.ingestor, [result({ at: soon })], 'b9');
         assert.equal(near.service.stats().discardedFutureTime, 0);
+      });
+    });
+
+    describe('a result stamped before anything is kept (`P-231`)', () => {
+      /** Every retention a test does not name, at its default. */
+      function retention(
+        days: Partial<HousekeepingConfig['retention']>,
+      ): HousekeepingConfig['retention'] {
+        return {
+          rawDays: 40,
+          fiveMinuteDays: 365,
+          hourlyDays: 730,
+          dailyDays: 3_650,
+          auditDays: 730,
+          stateDays: 3_650,
+          reportDays: 90,
+          reportRunDays: 730,
+          ...days,
+        };
+      }
+
+      async function samples(): Promise<string | undefined> {
+        const rows = await db.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM sample s
+           JOIN channel c ON c.id = s.channel_id WHERE c.sensor_id = $1`,
+          [sensorId],
+        );
+        return rows[0]?.n;
+      }
+
+      it('is refused whole, and counted against the probe it came from', async () => {
+        // A device with no RTC boots at 1970. Stored, its readings would create chunks and a
+        // backfill for rows the next housekeeping pass drops from everywhere it wrote them, and
+        // nothing would have said which probe sent them.
+        const before = await samples();
+        const was = await runtime();
+
+        const wrong = build();
+        await deliver(
+          wrong.service,
+          wrong.ingestor,
+          [result({ at: '1970-01-01T00:02:00.000Z' })],
+          'b-1970',
+        );
+
+        assert.equal(wrong.service.stats().discardedPastTime, 1, 'refused, and counted');
+        assert.deepEqual(wrong.service.timeRefusals('probe-state'), { past: 1, future: 0 });
+        assert.deepEqual(
+          wrong.service.timeRefusals('another-probe'),
+          { past: 0, future: 0 },
+          'against the probe that sent it, and no other',
+        );
+        // Had the state machine seen it, it would have counted it stale: the sensor has results
+        // newer than 1970. Not stale is not seen.
+        assert.equal(wrong.states.stats().resultsStale, 0, 'the state machine never saw it');
+        assert.equal(await samples(), before, 'and none of its readings was written');
+        assert.deepEqual(await runtime(), was);
+      });
+
+      it('keeps anything the longest retention keeps, states included', async () => {
+        // The spool is bounded by bytes, not age, so a probe cut off for a month replays a month.
+        // Past the raw retention its readings still fill the rollup tiers where they hold nothing
+        // (`P-226`), and a result is a state as well, which counts towards uptime for as long as
+        // `stateDays`. So the bound is the longest of all of them, and no tier's alone.
+        const short = { rawDays: 7, fiveMinuteDays: 30, hourlyDays: 30, dailyDays: 30 };
+        assert.equal(maxResultAgeMs(retention({})), 3_650 * 86_400_000);
+        assert.equal(
+          maxResultAgeMs(retention({ ...short, stateDays: 400 })),
+          400 * 86_400_000,
+          'a state kept longer than any reading keeps the result',
+        );
+        assert.equal(
+          maxResultAgeMs(retention({ ...short, hourlyDays: 90, stateDays: 60 })),
+          90 * 86_400_000,
+          'and a reading kept longer than any state',
+        );
+        assert.equal(
+          maxResultAgeMs(
+            retention({ ...short, stateDays: 7, auditDays: 9_000, reportRunDays: 9_000 }),
+          ),
+          30 * 86_400_000,
+          'nothing a result does not carry counts',
+        );
+
+        const now = new Date(AT.getTime() + 60 * 60_000);
+        const { states, channels, ingestor } = build();
+        const service = new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          states,
+          resolver: channels,
+          maxResultAgeMs: maxResultAgeMs(retention({ ...short, stateDays: 400 })),
+          now: () => now,
+        });
+        const daysBack = (days: number): string =>
+          new Date(now.getTime() - days * 86_400_000).toISOString();
+        await deliver(
+          service,
+          ingestor,
+          [result({ at: daysBack(399) }), result({ at: daysBack(401) })],
+          'b-states',
+        );
+        assert.equal(service.stats().discardedPastTime, 1, 'only the one no retention keeps');
+      });
+
+      it('says so once a batch each way, not once a result', async () => {
+        // A probe whose clock is wrong is wrong for every result it sends, and `P-99` logged a line
+        // for each: thousands a minute, all saying one thing.
+        const lines: Record<string, unknown>[] = [];
+        const logger = pino(
+          { level: 'warn' },
+          { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+        ) as unknown as Logger;
+        const { states, channels, ingestor } = build();
+        const service = new IngestionService({
+          db,
+          logger,
+          ingestor,
+          states,
+          resolver: channels,
+        });
+        await deliver(
+          service,
+          ingestor,
+          [
+            result({ at: '2031-01-01T00:00:00.000Z' }),
+            result({ at: '2031-01-01T00:01:00.000Z' }),
+            result({ at: '2031-01-01T00:02:00.000Z' }),
+            result({ at: '1970-01-01T00:00:00.000Z' }),
+            result({ at: '1970-01-01T00:05:00.000Z' }),
+            result({ at: at(30) }),
+          ],
+          'b-mixed',
+        );
+
+        const refusals = lines.filter((line) => typeof line['refused'] === 'number');
+        assert.equal(refusals.length, 2, 'one line for each bound');
+        const ahead = refusals.find((line) => 'aheadMs' in line);
+        const behind = refusals.find((line) => 'behindMs' in line);
+        assert.ok(ahead && behind, 'one each way');
+        assert.equal(ahead['refused'], 3);
+        assert.equal(ahead['source'], 'probe-state');
+        assert.equal(ahead['earliest'], '2031-01-01T00:00:00.000Z');
+        assert.equal(ahead['latest'], '2031-01-01T00:02:00.000Z');
+        assert.equal(behind['refused'], 2);
+        assert.equal(behind['latest'], '1970-01-01T00:05:00.000Z');
+        assert.deepEqual(service.timeRefusals('probe-state'), { past: 2, future: 3 });
+      });
+
+      it('counts against the probe for five minutes, and in the total for good', async () => {
+        // Probe Health warns on the probe's count, so it has to fall back to nothing once the
+        // clock is right. The fleet's total on Core Health is a counter, and keeps it.
+        let monotonic = 0;
+        const { states, channels, ingestor } = build();
+        const service = new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          states,
+          resolver: channels,
+          monotonicMs: () => monotonic,
+        });
+        await deliver(service, ingestor, [result({ at: '1970-01-01T00:00:00.000Z' })], 'b-window');
+        assert.deepEqual(service.timeRefusals('probe-state'), { past: 1, future: 0 });
+
+        monotonic = TIME_REFUSAL_WINDOW_MS - 5_000;
+        assert.deepEqual(service.timeRefusals('probe-state'), { past: 1, future: 0 });
+        monotonic = TIME_REFUSAL_WINDOW_MS;
+        assert.deepEqual(service.timeRefusals('probe-state'), { past: 0, future: 0 });
+        assert.equal(service.stats().discardedPastTime, 1);
       });
     });
 

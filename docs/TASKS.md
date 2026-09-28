@@ -5083,6 +5083,56 @@ because each is a decision rather than a defect:
       Mutations caught: 21 of 21. Each was applied alone, built, and run against its own tests, and
       the build was checked against the source after every restore.
 
+- [x] **P-231 — ingestion bounded a result's timestamp in the future and not in the past** · S ·
+      P-99, P-226 · Found writing `P-226`. A probe with a clock years behind had every reading
+      stored as stamped. Raw chunks were created for 1970, a backfill was queued back to them,
+      and the next housekeeping pass dropped the lot. Nothing counted them or said which probe
+      sent them. The future bound (`P-99`) was counted for the whole fleet only, and logged a line
+      per result, which is thousands a minute from one wrong clock.
+
+      **Done:**
+      - **Refused past the longest retention anything has**: the four sample tiers and
+        `stateDays`, ten years by default (`maxResultAgeMs`). Not the raw retention. `P-226` keeps
+        a late reading past raw in the rollup tiers where they are empty, and a result is also a
+        state, which counts towards uptime for as long as `stateDays`. A probe's spool is bounded
+        by bytes, not age, so a month-long replay is genuine and is kept.
+      - **Whole results, before anything reads them.** One filter at the top of `#prepare` takes
+        both bounds, replacing the future bound's two checks. A refused result reaches no reading,
+        no state and no channel resolver (`P-144`'s rule, now by construction).
+      - **Counted per probe, over five minutes.** Ingestion keeps a `RecentCount` per probe GID
+        each way, a fixed ring of sixty five-second buckets on the monotonic clock. It holds sixty
+        numbers whatever a probe sends, which is why `P-228` shares it. Probe Health gains
+        `resultsFutureDated` and `resultsPastDated` as gauges, warning above 0.5. They see the
+        first batch after a core restart, where a counter's rate would gap, and they clear five
+        minutes after the clock is put right. The link carries the probe's GID so Probe Health can
+        ask. Core Health gains the fleet-wide `resultsPastDated` counter beside `P-99`'s.
+      - **Logged once a batch each way**, naming the source, the count and the span of the stamps.
+        `P-99`'s per-result line moves to the same form.
+      - `administration.md` has **A probe whose clock is wrong**: each direction, what happens to
+        the results, what says so, and the fix.
+
+      **Not built:** a clock behind by less than the bound is stored at the wrong time, and a
+      clock that steps back freezes the probe's sensors. That is `P-232`. The retention the bound
+      is computed from is read at start-up, like every other retention.
+
+      Mutations caught: 15 of 15. Each was applied alone, built, and run against its own tests.
+
+- [ ] **P-232 — a probe whose clock steps back freezes its sensors, and nothing says why** · M ·
+      P-231, P-169, M-02 · Found writing `P-231`. `isStaleResult` discards a result no newer than
+      a sensor's `last_result_at`, which is what makes an at-least-once protocol safe. A probe whose
+      clock steps back by N (an RTC reset at boot, NTP correcting a fast clock) sends results that
+      are all older than that watermark, so every one of its sensors drops every result for N and
+      stays in its last state. It is `P-99`'s freeze in reverse, and no alarm can fire meanwhile.
+      Nothing names the cause except the probe's own `clockJumps`, and only if the clock stepped
+      while the probe was running. A clock behind by less than `P-231`'s bound, without a step, is
+      stored at the wrong time, and nothing says so either.
+
+      **Done when:** Probe Health carries the probe's clock offset against the core's, from the
+      `sentAt` every batch has carried since `P-169`, with a default warning. The state machine
+      tells a duplicate from a clock that stepped back, or the freeze is otherwise bounded and
+      named. `state-machine.md` says which, and a table-driven test covers a step back, a step
+      forward, a duplicate and a replay.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

@@ -331,10 +331,35 @@ alarm.
 | `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17 and on any platform but Linux and Windows. The machine's figure, not the probe's own ceiling — that is the next row |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
+| `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 
 These thresholds ship as **defaults, not policy**. They are written once when the channel is
 created and never again — change or clear one and it is yours from then on, because a default
 that reappeared after somebody deliberately removed it would be worse than no default at all.
+
+### A probe whose clock is wrong
+
+A probe stamps every result with its own clock, and the core cannot measure again what the probe
+measured. So the core checks each stamp against its own clock and refuses what no clock could have
+produced, readings and state together. It never moves a stamp: a reading at a time nobody
+measured it would be a guess, and a gap is what this system shows instead.
+
+| The probe's clock is | Its results are | What says so |
+| --- | --- | --- |
+| Ahead of the core's by more than 15 minutes | **Refused** (`P-99`). Stored, one would freeze its sensor: nothing no newer than it is accepted afterwards, so a result stamped 2030 would stop the sensor until 2030 | `resultsFutureDated` on that probe's Probe Health, and on Core Health for the whole fleet. One log line a batch, naming the probe's GID and the span of the stamps |
+| Behind by more than anything is kept: the longest of the four retentions and `stateDays`, ten years by default | **Refused** (`P-231`). A device with no RTC that boots at 1970, or a VM restored from an old snapshot. No genuine replay is that old | `resultsPastDated`, the same way |
+| Behind by less | **Stored, at the wrong time.** The readings land in the past, where the rollup tiers take them only where they hold nothing. A clock that *steps* back freezes every one of the probe's sensors until it passes where it was, because a result no newer than a sensor's last one is taken for a duplicate | **Nothing yet**, except `clockJumps` if the clock stepped while the probe was running. `P-232` adds the probe's clock offset to Probe Health |
+| Ahead by less than 15 minutes | Stored as stamped | Nothing. Ordinary NTP drift |
+
+**The fix is the probe host's clock** (chrony or `systemd-timesyncd` on Linux, `w32time` on
+Windows), not anything on the core. The warning clears five minutes after the last refused
+batch, the window the two channels count over. The refused results are not recovered: they were
+measured at times nothing can place.
+
+The bound behind is deliberately that long. A probe's spool is bounded by size, not age, so a
+probe cut off for a month replays a month. Past the raw retention, its readings still fill the
+rollup tiers where they are empty, and its states still count towards uptime. A shorter bound
+would throw that away at the door.
 
 ### A service at its memory ceiling
 

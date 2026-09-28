@@ -209,6 +209,8 @@ export type ProbeLink =
   | { connected: false }
   | {
       connected: true;
+      /** What the probe's batches are counted under, in ingestion and everywhere else. */
+      gid: string;
       protocolVersion: number;
       connectedAt: Date;
       lastHeartbeatAt: Date | null;
@@ -1416,6 +1418,7 @@ export class ProbeEndpoint {
       if (session.probeObjectId !== probeObjectId) continue;
       return {
         connected: true,
+        gid: session.info.gid,
         protocolVersion: session.protocolVersion,
         connectedAt: session.info.connectedAt,
         lastHeartbeatAt: session.info.lastHeartbeatAt,

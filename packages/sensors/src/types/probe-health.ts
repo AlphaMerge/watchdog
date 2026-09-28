@@ -291,6 +291,36 @@ const CHANNELS: readonly ChannelDef[] = [
     },
   },
   { key: 'clockJumps', name: 'Clock jumps', unit: 'jumps', counter: { bits: 64 } },
+  // `P-231`. Results the core refused from this probe in the last five minutes, because no clock
+  // could have stamped them: more than fifteen minutes ahead of the core's, or older than
+  // anything the core keeps. Counted on the core, per probe, because a wrong clock is one host's
+  // and the probe cannot see it.
+  //
+  // **Counts over a window, not counters, so the warning clears itself and misses nothing.** A
+  // warning on a running count would stay for ever after one bad batch. A counter's rate would
+  // clear, but it gaps on the first reading after the core restarts or the probe reconnects from
+  // a long outage, which is when a wrong clock first shows. Warning rather than Error: the probe
+  // is working, and what is lost is the refused results, which its own sensors show as gaps.
+  {
+    key: 'resultsFutureDated',
+    name: 'Results refused as future-dated (5 min)',
+    unit: 'results',
+    limits: {
+      upperWarning: 0.5,
+      warningMessage:
+        "this probe's clock is ahead of the core's, and its results are being refused",
+    },
+  },
+  {
+    key: 'resultsPastDated',
+    name: 'Results refused as too old (5 min)',
+    unit: 'results',
+    limits: {
+      upperWarning: 0.5,
+      warningMessage:
+        "this probe's clock is further behind than the core keeps anything, and its results are being refused",
+    },
+  },
   { key: 'cpu', name: 'CPU', unit: '%' },
   { key: 'memory', name: 'Memory (resident)', unit: 'MB' },
   // **How much the machine has left, which is not how much the probe holds** (`P-208`). `P-206`'s

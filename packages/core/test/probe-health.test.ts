@@ -5,9 +5,16 @@ import {
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   type CheckResult,
+  type IngestionConfig,
   type ProbeHealthReport,
 } from '@ms/shared';
 import { ProbeHealthService, readingsFrom } from '../src/health/probe-health.js';
+import { ChannelResolver } from '../src/ingestion/channels.js';
+import { Ingestor } from '../src/ingestion/ingestor.js';
+import { IngestionService } from '../src/ingestion/service.js';
+import { loadLookups } from '../src/lookups/loader.js';
+import { PauseRepository } from '../src/objects/pause-repository.js';
+import { SensorStateService } from '../src/state/service.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -15,7 +22,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor } from './support/tree.js';
+import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import type { SensorToVouchFor } from '../src/objects/vouching.js';
 import { everyVoucherHolds } from './support/vouching.js';
 
@@ -84,11 +91,12 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
   let probeId = 0;
   let sensorId = 0;
   let orphanId = 0;
+  let harness: Harness;
 
   before(async () => {
     scratch = await createScratchDatabase('probehealth');
     db = scratch.db;
-    const harness = await buildHarness(db);
+    harness = await buildHarness(db);
 
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -142,6 +150,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     overrides: Partial<Extract<ProbeLink, { connected: true }>> = {},
   ): ProbeLink => ({
     connected: true,
+    gid: 'probe-gid',
     protocolVersion: PROTOCOL_VERSION,
     connectedAt: new Date('2026-08-28T00:00:00Z'),
     lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
@@ -260,6 +269,35 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       ).read(probeId);
       assert.equal(reading['checksCompleting'], 0);
       assert.equal(reading['checksBehind'], 12, 'and how much of the probe is affected');
+    });
+
+    it('carries what the core refused from this probe for its timestamps, by its GID', () => {
+      // `P-231`. Only the core can see that a probe's clock is wrong, and a total across the
+      // fleet cannot say which probe's is, so ingestion counts by the GID a batch arrives under
+      // and the link says which GID this probe is.
+      const asked: string[] = [];
+      const { reading } = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link: () => connected({ gid: 'probe-a' }),
+          timeRefusals: (gid) => {
+            asked.push(gid);
+            return { past: 2, future: 7 };
+          },
+        },
+        ingest: () => Promise.resolve(),
+      }).read(probeId);
+      assert.deepEqual(asked, ['probe-a']);
+      assert.equal(reading['resultsFutureDated'], 7);
+      assert.equal(reading['resultsPastDated'], 2);
+    });
+
+    it('gaps them on a core that does not count them, rather than reading zero', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['resultsFutureDated'], null);
+      assert.equal(reading['resultsPastDated'], null);
     });
 
     it('turns the probe Down when its worker pool has given up', () => {
@@ -434,6 +472,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       // report rather than one that cannot report.
       const old: ProbeLink = {
         connected: true,
+        gid: 'probe-gid',
         protocolVersion: 3,
         connectedAt: new Date('2026-08-28T00:00:00Z'),
         lastHeartbeatAt: new Date('2026-08-28T00:00:20Z'),
@@ -506,6 +545,88 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
+    });
+  });
+
+  describe('a probe whose clock was wrong (`P-231`)', () => {
+    const CONFIG: IngestionConfig = {
+      queueMaxRows: 200_000,
+      batchMaxRows: 5_000,
+      batchMaxDelayMs: 5,
+      slowDownAtPercent: 50,
+      retryAfterMs: 1_000,
+      replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
+    };
+
+    it('warns on the first reading that has refusals, and clears once they stop', async () => {
+      // **The warning has to see the first batch and clear itself.** A running count only goes
+      // up, so a limit on it would warn for ever after one bad batch. A counter's rate clears, but
+      // it is a gap on the first reading, and after every core restart, which is when a wrong
+      // clock first shows. So the channel is what the core refused in the last five minutes, a
+      // gauge. This goes through the whole path — the sweep, ingestion, the limit, the state
+      // machine — because each of them is a place that could miss it or latch it.
+      const lookups = await loadLookups({ logger: silent });
+      const states = new SensorStateService({
+        db,
+        logger: silent,
+        settings: harness.resolver,
+        pauses: new PauseRepository(),
+      });
+      const channels = new ChannelResolver({ logger: silent, lookups });
+      // Just behind the core's own clock, so that nothing here is a replay held back from
+      // reacting (`P-157`) or a result refused for its time.
+      let now = new Date(Date.now() - 5 * 60_000);
+      let future = 0;
+      const quiet: ProbeHealthReport = { ...FULL, spoolStalledMs: 0, sessionOverflows: 0 };
+
+      const sweep = async (): Promise<{ state: string; message: string }> => {
+        const ingestor = new Ingestor({ db, logger: silent, config: CONFIG });
+        const ingestion = new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          states,
+          resolver: channels,
+        });
+        await new ProbeHealthService({
+          db,
+          logger: silent,
+          vouching: everyVoucherHolds,
+          sources: {
+            link: () => connected({ lastHeartbeatAt: now, health: quiet }),
+            timeRefusals: () => ({ past: 0, future }),
+          },
+          ingest: async (results) => {
+            await ingestion.acceptResults('probe-health', {
+              type: 'results',
+              batchId: `probe-health-${now.toISOString()}`,
+              results: [...results],
+            });
+          },
+          now: () => now,
+        }).sweep();
+        await ingestor.stop();
+        now = new Date(now.getTime() + 30_000);
+        const rows = await db.query<{ state: string; message: string }>(
+          'SELECT state, message FROM sensor_runtime WHERE object_id = $1',
+          [sensorId],
+        );
+        assert.ok(rows[0]);
+        return rows[0];
+      };
+
+      future = 30;
+      const refusing = await sweep();
+      assert.equal(refusing.state, 'warning', 'on the very first reading this sensor has had');
+      assert.match(refusing.message, /clock is ahead of the core/u);
+
+      future = 0;
+      const fixed = await sweep();
+      assert.equal(fixed.state, 'up', `the window emptied: ${fixed.message}`);
+
+      future = 1;
+      const again = await sweep();
+      assert.equal(again.state, 'warning', 'one refused result is enough');
     });
   });
 

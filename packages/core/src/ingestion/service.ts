@@ -1,5 +1,12 @@
-import type { CheckResult, CoreToProbeMessage, Logger, ProbeToCoreMessage } from '@ms/shared';
+import type {
+  CheckResult,
+  CoreToProbeMessage,
+  HousekeepingConfig,
+  Logger,
+  ProbeToCoreMessage,
+} from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { RecentCount } from '../health/recent-count.js';
 import { rollUp, type ChannelOutcome, type ChannelReadingFacts } from '../state/limits.js';
 import { transformReading } from './scaling.js';
 import { parseCounter, rateFrom, type CounterSample } from './counters.js';
@@ -51,12 +58,60 @@ export interface IngestionServiceOptions {
    * high-water mark.
    */
   maxFutureSkewMs?: number;
+  /**
+   * How far behind this core's clock a result may be stamped before it is refused (`P-231`).
+   *
+   * **As long as anything here keeps anything**, from `maxResultAgeMs(retention)`, and no
+   * shorter. A probe's spool is bounded by bytes, not age, so a probe that was cut off for a
+   * month replays a month, and every day of it is worth having: past the raw retention its
+   * readings still fill the rollup tiers where they hold nothing (`P-226`), and its states still
+   * count towards uptime for as long as `stateDays`. A result older than all of that would be
+   * dropped by the next housekeeping pass from everywhere it was written, after creating chunks
+   * for it and queueing a backfill that has nothing to do. What it catches is a clock that is
+   * years out: a dead RTC back at 1970 or 2000, a VM restored from an old snapshot.
+   */
+  maxResultAgeMs?: number;
   /** The core's clock. Injectable so a test can state the skew rather than race it. */
   now?: () => Date;
+  /** A monotonic clock in milliseconds, for the refusal windows. Injectable for the same reason. */
+  monotonicMs?: () => number;
 }
 
 /** Fifteen minutes. See `maxFutureSkewMs`. */
 export const DEFAULT_MAX_FUTURE_SKEW_MS = 15 * 60_000;
+
+/** The longest anything is kept by default: `dailyDays` and `stateDays`, ten years. */
+export const DEFAULT_MAX_RESULT_AGE_MS = 3_650 * 86_400_000;
+
+/**
+ * The age past which nothing a result carries would be kept anywhere (`P-231`).
+ *
+ * The longest of the sample tiers' retention and the state history's, because a result is a
+ * state as well as readings and uptime comes from the state (`CLAUDE.md`). An installation that
+ * keeps its daily rollups for thirty days and its states for ten years still wants a two-month
+ * replay's states.
+ */
+export function maxResultAgeMs(retention: HousekeepingConfig['retention']): number {
+  const days = Math.max(
+    retention.rawDays,
+    retention.fiveMinuteDays,
+    retention.hourlyDays,
+    retention.dailyDays,
+    retention.stateDays,
+  );
+  return days * 86_400_000;
+}
+
+/** How far back `timeRefusals` counts: five minutes, ten Probe Health sweeps. */
+export const TIME_REFUSAL_WINDOW_MS = 5 * 60_000;
+
+/** Results one source has had refused for their timestamp in the last window, each way. */
+export interface TimeRefusals {
+  /** Stamped further back than anything is kept. */
+  readonly past: number;
+  /** Stamped further ahead of the core's clock than `maxFutureSkewMs`. */
+  readonly future: number;
+}
 
 export interface ResultStats {
   resultsReceived: number;
@@ -69,6 +124,8 @@ export interface ResultStats {
   discardedInvalidSentAt: number;
   /** Results stamped further ahead of this core's clock than `maxFutureSkewMs` (`P-99`). */
   discardedFutureTime: number;
+  /** Results stamped further back than `maxResultAgeMs` (`P-231`). */
+  discardedPastTime: number;
   /** Readings for sensors that no longer exist — a spool replayed after a deletion. */
   discardedUnknownSensor: number;
   /**
@@ -122,6 +179,7 @@ export class IngestionService {
   readonly #pacer: ReplayPacer | undefined;
   readonly #states: SensorStateService | undefined;
   readonly #maxFutureSkewMs: number;
+  readonly #maxResultAgeMs: number;
   readonly #now: () => Date;
 
   #resultsReceived = 0;
@@ -129,6 +187,14 @@ export class IngestionService {
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
   #discardedFutureTime = 0;
+  #discardedPastTime = 0;
+  /**
+   * The same two refusals by source and over a window, for Probe Health (`P-231`). A wrong clock
+   * is one probe's, and a total across the fleet cannot say which. Bounded by the sources with a
+   * refusal inside the window: an empty one is dropped when it is read.
+   */
+  readonly #refusedForTime = new Map<string, { past: RecentCount; future: RecentCount }>();
+  readonly #windowClock: { monotonicMs?: () => number };
   #discardedInvalidSentAt = 0;
   #discardedUnknownSensor = 0;
   readonly #counters = new CounterStore();
@@ -149,6 +215,9 @@ export class IngestionService {
     this.#pacer = options.pacer;
     this.#states = options.states;
     this.#maxFutureSkewMs = options.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS;
+    this.#maxResultAgeMs = options.maxResultAgeMs ?? DEFAULT_MAX_RESULT_AGE_MS;
+    this.#windowClock =
+      options.monotonicMs === undefined ? {} : { monotonicMs: options.monotonicMs };
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -160,6 +229,7 @@ export class IngestionService {
       discardedInvalidTime: this.#discardedInvalidTime,
       discardedInvalidSentAt: this.#discardedInvalidSentAt,
       discardedFutureTime: this.#discardedFutureTime,
+      discardedPastTime: this.#discardedPastTime,
       discardedUnknownSensor: this.#discardedUnknownSensor,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -173,13 +243,26 @@ export class IngestionService {
     };
   }
 
+  /**
+   * Results refused for their timestamp from one source in the last `TIME_REFUSAL_WINDOW_MS`.
+   * Zero for a source nothing has been refused from, which is a count and not a gap: every
+   * batch from it was looked at.
+   */
+  timeRefusals(source: string): TimeRefusals {
+    const windows = this.#refusedForTime.get(source);
+    if (windows === undefined) return { past: 0, future: 0 };
+    const refusals = { past: windows.past.count(), future: windows.future.count() };
+    if (refusals.past === 0 && refusals.future === 0) this.#refusedForTime.delete(source);
+    return refusals;
+  }
+
   /** Accepts a batch and returns the message to send back. Never throws. */
   async acceptResults(source: string, message: ResultsMessage): Promise<CoreToProbeMessage> {
     this.#resultsReceived += message.results.length;
 
     let prepared: Prepared;
     try {
-      prepared = await this.#prepare(message.results);
+      prepared = await this.#prepare(source, message.results);
     } catch (error: unknown) {
       this.#logger.error({ err: error, source }, 'could not prepare a results batch for storage');
       return {
@@ -300,11 +383,12 @@ export class IngestionService {
    * means the invariant holds even if a sensor type gets it wrong, and the count says so rather
    * than the readings quietly appearing in a graph.
    */
-  async #prepare(all: readonly CheckResult[]): Promise<Prepared> {
+  async #prepare(source: string, offered: readonly CheckResult[]): Promise<Prepared> {
+    for (const result of offered) this.#readingsReceived += result.channels.length;
+    const all = this.#believable(source, offered);
+
     const withReadings: CheckResult[] = [];
     for (const result of all) {
-      this.#readingsReceived += result.channels.length;
-
       if (result.outcome === 'error') {
         this.#discardedOnError += result.channels.length;
         continue;
@@ -351,16 +435,8 @@ export class IngestionService {
     // Keyed by the result itself rather than by sensor id: one batch can carry several scans of
     // the same sensor, and each of them is judged on its own readings.
     const outcomes = new Map<CheckResult, ChannelOutcome>();
-    // **Computed before the readings, because it governs them too** (`P-144`). The future bound
-    // below rejected the *result* — so the state machine never saw it — after this loop had
-    // already turned its readings into samples. A probe with a clock years out wrote graph points
-    // stamped 2030 that nothing would overwrite and no query would reach, and the sensor's own
-    // state never moved. Half of one result was believed and half was not, which is the one
-    // outcome a bound like this must not produce.
-    const horizon = this.#now().getTime() + this.#maxFutureSkewMs;
     for (const result of withReadings) {
       const at = new Date(result.at);
-      if (at.getTime() > horizon) continue;
       const readings: ChannelReadingFacts[] = [];
       for (const reading of result.channels) {
         const channel = resolved?.ids.get(`${String(result.sensorId)}:${reading.key}`);
@@ -436,39 +512,13 @@ export class IngestionService {
     }
 
     // Every result, whatever its outcome: a check that failed has no readings and is precisely
-    // the one the state machine exists for. Two timestamps are dropped — one that cannot be
-    // read, because a result that cannot be ordered against the last one cannot be folded into
-    // a machine that is a fold over time, and one too far in the future to be believed.
-    //
-    // **The future bound is not tidiness; without it one bad result freezes a sensor for ever**
-    // (`P-99`). `last_result_at` is a high-water mark: `isStaleResult` discards everything no
-    // newer, and `writeRuntimes` refuses to move a row backwards. A probe whose clock is years
-    // out — a VM restored from a snapshot, a dead RTC — sends one result stamped 2030 and every
-    // genuine result after it, including the ones reporting a real outage, is counted stale and
-    // dropped. No `sensor_state` row is ever written for that sensor again, its SLA reads 100%
-    // through a multi-day outage, no alarm can fire because the state never moves, and nothing
-    // self-heals: the only thing that reset `last_result_at` was a resume, and `P-97` stopped
-    // even that.
-    //
-    // Discarded rather than clamped. Clamping would write a reading at a time nobody measured
-    // it, and `CLAUDE.md` is explicit that a value the system cannot stand behind is a gap.
+    // the one the state machine exists for. One that cannot be read is dropped, because a result
+    // that cannot be ordered against the last one cannot be folded into a machine that is a fold
+    // over time. The ones no clock could have produced have already gone, in `#believable`.
     const results: SensorResult[] = [];
     for (const result of all) {
       const at = Date.parse(result.at);
       if (Number.isNaN(at)) continue;
-      if (at > horizon) {
-        this.#discardedFutureTime += 1;
-        this.#logger.warn(
-          {
-            sensorId: result.sensorId,
-            at: result.at,
-            skewMs: at - this.#now().getTime(),
-            allowedMs: this.#maxFutureSkewMs,
-          },
-          'a result is stamped too far in the future to be believed; check the probe host clock',
-        );
-        continue;
-      }
       results.push({
         sensorId: result.sensorId,
         at: new Date(at),
@@ -479,5 +529,103 @@ export class IngestionService {
     }
 
     return { samples, results, counters: counterSeen };
+  }
+
+  /**
+   * The results whose timestamps a clock could have produced: none further ahead of this core
+   * than `maxFutureSkewMs`, and none further back than anything is kept. The rest are counted,
+   * by source, and logged once a batch.
+   *
+   * **Whole results, before anything reads them** (`P-144`). The future bound once refused the
+   * *result*, so the state machine never saw it, after its readings had been turned into
+   * samples. A probe with a clock years out wrote graph points stamped 2030 that nothing would
+   * overwrite and no query would reach, and the sensor's own state never moved. Half of one
+   * result believed and half not is the one outcome a bound like this must not produce, and
+   * filtering here, first, is what makes it impossible rather than avoided: nothing below sees a
+   * refused result, not the readings, not the state machine, not the channel resolver.
+   *
+   * **The future bound is not tidiness; without it one bad result freezes a sensor for ever**
+   * (`P-99`). `last_result_at` is a high-water mark: `isStaleResult` discards everything no
+   * newer, and `writeRuntimes` refuses to move a row backwards. A probe whose clock is years out
+   * sends one result stamped 2030, and every genuine result after it, including the ones
+   * reporting a real outage, is counted stale and dropped. **The past bound is** (`P-231`): a
+   * result older than anything is kept would create chunks and a backfill for readings the next
+   * housekeeping pass drops, and until then nothing said which probe it came from.
+   *
+   * Discarded rather than clamped. Clamping would write a reading at a time nobody measured it,
+   * and `CLAUDE.md` is explicit that a value the system cannot stand behind is a gap. An
+   * unreadable timestamp is not judged here; the callers count it their own way.
+   */
+  #believable(source: string, offered: readonly CheckResult[]): readonly CheckResult[] {
+    const now = this.#now().getTime();
+    const horizon = now + this.#maxFutureSkewMs;
+    const floor = now - this.#maxResultAgeMs;
+    const past = new Refused();
+    const future = new Refused();
+    const kept: CheckResult[] = [];
+    for (const result of offered) {
+      const at = Date.parse(result.at);
+      if (at > horizon) future.add(at);
+      else if (at < floor) past.add(at);
+      else kept.push(result);
+    }
+    if (past.count === 0 && future.count === 0) return offered;
+
+    const windows = this.#refusedForTime.get(source) ?? {
+      past: new RecentCount(TIME_REFUSAL_WINDOW_MS, this.#windowClock),
+      future: new RecentCount(TIME_REFUSAL_WINDOW_MS, this.#windowClock),
+    };
+    windows.past.add(past.count);
+    windows.future.add(future.count);
+    this.#refusedForTime.set(source, windows);
+    this.#discardedPastTime += past.count;
+    this.#discardedFutureTime += future.count;
+
+    // Once a batch and not once a result: a probe whose clock is wrong is wrong for every result
+    // it sends, and a line each is thousands a minute saying one thing.
+    if (future.count > 0) {
+      this.#logger.warn(
+        {
+          source,
+          ...future.describe(),
+          aheadMs: future.earliest - now,
+          allowedMs: this.#maxFutureSkewMs,
+        },
+        'results stamped too far in the future to be believed were refused; check the probe host clock',
+      );
+    }
+    if (past.count > 0) {
+      this.#logger.warn(
+        {
+          source,
+          ...past.describe(),
+          behindMs: now - past.latest,
+          allowedMs: this.#maxResultAgeMs,
+        },
+        'results stamped older than anything this core keeps were refused; check the probe host clock',
+      );
+    }
+    return kept;
+  }
+}
+
+/** How many of a batch's results one bound refused, and the span of their timestamps. */
+class Refused {
+  count = 0;
+  earliest = Number.POSITIVE_INFINITY;
+  latest = Number.NEGATIVE_INFINITY;
+
+  add(at: number): void {
+    this.count += 1;
+    this.earliest = Math.min(this.earliest, at);
+    this.latest = Math.max(this.latest, at);
+  }
+
+  describe(): { refused: number; earliest: string; latest: string } {
+    return {
+      refused: this.count,
+      earliest: new Date(this.earliest).toISOString(),
+      latest: new Date(this.latest).toISOString(),
+    };
   }
 }
