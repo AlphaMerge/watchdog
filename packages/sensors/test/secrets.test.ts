@@ -95,6 +95,25 @@ describe('what a check may say', () => {
     );
   });
 
+  it('refuses a host beginning with "-" before any type sees it (S-20)', async () => {
+    // A device stored before the core refused such a host. A type handing it to a program would
+    // have it read as an option; here it is refused, naming the host, whatever the type.
+    let ran = false;
+    const catalogue = leaky(() => {
+      ran = true;
+      return Promise.resolve({ channels: [] });
+    });
+    await assert.rejects(
+      () =>
+        catalogue.execute('test.leaky', {
+          ...context(PARAMS),
+          target: { host: '-c100000', ipVersion: 'auto' },
+        }),
+      /^Error: this device's host "-c100000" begins with "-", which no address or name does/,
+    );
+    assert.equal(ran, false);
+  });
+
   it('replaces exact values and nothing else — the limits it states', () => {
     const secrets = ['abc', 'hunter2-long'];
     // Shorter than the floor: left, so ordinary text is not mangled.

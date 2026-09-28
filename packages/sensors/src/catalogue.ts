@@ -187,6 +187,14 @@ export class SensorCatalogue {
    */
   async execute(id: string, context: CheckContext): Promise<CheckExecution> {
     const type = this.#require(id);
+    // A device saved before the core refused such a host (`S-20`): refused here, by name, before
+    // any type hands it to a program that would read it as an option.
+    if (context.target.host.startsWith('-')) {
+      throw new Error(
+        `this device's host "${context.target.host}" begins with "-", which no address or name ` +
+          'does, and a program handed it would read it as an option — correct the device’s host',
+      );
+    }
     const secrets = secretsOfCheck(this.writeOnlyPaths(id), context.params, context.credentials);
     let execution: CheckExecution;
     try {

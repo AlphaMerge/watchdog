@@ -22,6 +22,7 @@ import { downSensorsIn, sensorsIn } from '../state/runtime.js';
 import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
 import { PauseRepository, flattenActor, type PauseCursor } from './pause-repository.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
+import { assertDeviceHost } from './device-host.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderSiblings } from './ordering.js';
 import { planTree, type TreeNodeInput, type TreePlanInput } from './tree-plan.js';
@@ -1536,6 +1537,7 @@ export class ObjectService {
 
   async create(writer: Writer, input: CreateObjectInput): Promise<ObjectDetail> {
     const actor = actorOf(writer);
+    if (input.kind === 'device') assertDeviceHost(input.host, { phase: 'create' });
     // Validation fills in the defaults the type declares, and what gets stored is the filled-in
     // version — so a sensor's row is complete rather than depending on which form created it.
     const normalised: CreateObjectInput =
@@ -1785,6 +1787,7 @@ export class ObjectService {
   /** A node's input as `create` would have normalised it, with its parent id filled in. */
   #normalisedFor(node: TreeNodeInput, parentId: ObjectId): CreateObjectInput {
     const withParent = { ...node, parentId } as CreateObjectInput;
+    if (withParent.kind === 'device') assertDeviceHost(withParent.host, { phase: 'createTree' });
     return withParent.kind === 'sensor'
       ? {
           ...withParent,
@@ -1800,6 +1803,9 @@ export class ObjectService {
     pre: Precondition,
   ): Promise<ObjectDetail> {
     const actor = actorOf(writer);
+    if (patch.kind === 'device' && patch.host !== undefined) {
+      assertDeviceHost(patch.host, { phase: 'update', objectId: id });
+    }
     return this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);

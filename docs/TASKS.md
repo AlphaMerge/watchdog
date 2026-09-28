@@ -505,7 +505,7 @@ because each is a decision rather than a defect:
       - a thrown error passed through unscrubbed (3 in sensors and the probe's 1 fail);
       - the probe registry calling the type directly (1 fails);
       - the length floor removed (1 fails).
-- [ ] **S-20 — A device host beginning with `-` is refused at the API** · S · S-19 · Found in
+- [x] **S-20 — A device host beginning with `-` is refused at the API** · S · S-19 · Found in
       `S-19`'s sweep of the probe's shell-outs. A device's `host` is any 1–255 character string.
       `icmp.ping` and `icmp.jitter` pass it to `ping` as the last argument with no `--` in front,
       so a host like `-f` or `-c100000` is read as an option.
@@ -531,6 +531,23 @@ because each is a decision rather than a defect:
         rather than ping's usage error. The probe refuses it before spawning anything.
       - Tests at the API, the service and the probe, and `administration.md` or the API reference
         says so.
+
+      **S-20 outcome.** `assertDeviceHost` (`objects/device-host.ts`) runs in `ObjectService` on
+      `create`, on each device node of `createTree` and on `update`, before the transaction opens.
+      Discovery provisions through `create`, and bulk never writes a host, so there is no other
+      path. The answer is a 400 `OBJECT_INVALID` with `details: { field: 'host' }` and a sentence
+      naming the host. A dash anywhere else is left alone (`core-sw-01.example.com`, `fe80::1`). A
+      clone copies stored hosts as they are.
+
+      On the probe, `SensorCatalogue.execute` — `S-19`'s choke point — refuses such a host for
+      every type before it runs, naming the host. So a device stored before this rule says what to
+      correct instead of `ping`'s usage error. `troubleshooting.md` says so under "A sensor is Down
+      and the device is fine".
+
+      Tests: `objects-service.test.ts` 1 (create with four hosts, a created tree, an update, and
+      nothing written), `api-routes.test.ts` 1, `secrets.test.ts` 1 and the probe's
+      `catalogue-registry.test.ts` 1. Mutation 3/3: the create check dropped (2 fail), the update
+      check dropped (1 fails), the probe's refusal dropped (2 fail).
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to
       1.55 ms (`docs/findings/2026-08-25-tree-build-measurement.md`).

@@ -142,6 +142,20 @@ describe(
       assert.ok(Object.keys(body.error.details).length > 0, 'the failure says what was wrong');
     });
 
+    it('refuses a device host beginning with "-", saying which field (S-20)', async () => {
+      const res = await post('/api/v1/objects', {
+        kind: 'device',
+        parentId: probeId,
+        name: 'dash',
+        host: '-f',
+      });
+      assert.equal(res.statusCode, 400);
+      const body = res.json<{ error: { code: string; message: string; details: unknown } }>();
+      assert.equal(body.error.code, 'OBJECT_INVALID');
+      assert.deepEqual(body.error.details, { field: 'host' });
+      assert.match(body.error.message, /^host "-f" begins with "-"/);
+    });
+
     it('rejects a group carrying a device-only field', async () => {
       const res = await post('/api/v1/objects', {
         kind: 'group',

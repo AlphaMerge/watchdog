@@ -75,6 +75,10 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
   what each path selects, without waiting for a scan.
 - **Timed out** — the timeout is a parameter on almost every type, and a filtered port takes the
   full timeout every scan.
+- **"this device's host … begins with `-`"** — every sensor on the device says it, because the
+  host is not an address or a name: a program handed it would read it as an option (`S-20`).
+  The core refuses such a host when one is written; a device saved before it did has this
+  instead of `ping`'s "Destination address required". Correct the device's host.
 
 ## A sensor is Unknown, not Down
 

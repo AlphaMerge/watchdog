@@ -130,6 +130,60 @@ describe(
         }
       });
 
+      it('refuses a host beginning with "-", on every write of one (S-20)', async () => {
+        // A program handed such a host reads it as an option. No address or name begins with
+        // one, so the refusal costs nothing, and it is the service's so no path skips it.
+        const hostError = (error: ObjectError): void => {
+          assert.equal(error.code, 'OBJECT_INVALID');
+          assert.equal(error.status, 400);
+          assert.deepEqual(error.details, { field: 'host' });
+          assert.match(
+            error.message,
+            /^host "-[^"]*" begins with "-", which no address or name does/,
+          );
+        };
+        for (const host of ['-f', '-c100000', '--help', '-I lo']) {
+          hostError(
+            await rejects(() =>
+              h.service.create(testActor, {
+                kind: 'device',
+                parentId: probeId,
+                name: 'dash',
+                host,
+              }),
+            ),
+          );
+        }
+        hostError(
+          await rejects(() =>
+            h.service.createTree(testActor, {
+              parentId: probeId,
+              nodes: [{ kind: 'device', name: 'dash-tree', host: '-f', ref: 'd' }],
+            }),
+          ),
+        );
+        const fine = await device(probeId, 'fine');
+        hostError(
+          await rejects(() =>
+            h.service.update(testActor, fine, { kind: 'device', host: '-f' }, { kind: 'none' }),
+          ),
+        );
+        const stored = await h.service.get(fine);
+        assert.equal(
+          stored.kind === 'device' ? stored.host : '',
+          '10.0.0.1',
+          'nothing was written',
+        );
+        const [{ n } = { n: '' }] = await scratch.db.query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM object WHERE name LIKE 'dash%'",
+        );
+        assert.equal(n, '0');
+
+        // A dash anywhere else is an ordinary host.
+        await device(probeId, 'dashed', 'core-sw-01.example.com');
+        await device(probeId, 'v6', 'fe80::1');
+      });
+
       it('records one audit entry per create', async () => {
         await group(probeId, 'Audited');
         assert.equal(h.audit.recorded.length, 1);

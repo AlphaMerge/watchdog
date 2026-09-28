@@ -47,4 +47,20 @@ describe('the probe’s check registry', () => {
       },
     );
   });
+
+  it('refuses a device host beginning with "-" before ping is spawned (S-20)', async () => {
+    // What this replaces is ping's own "Destination address required", which says nothing about
+    // the device's host being the problem.
+    await assert.rejects(
+      () =>
+        registry.execute('icmp.ping', {
+          sensorId: 1,
+          target: { host: '-f', ipVersion: 'auto' },
+          params: {},
+          credentials: {},
+          signal: new AbortController().signal,
+        }),
+      /this device's host "-f" begins with "-".*correct the device’s host/,
+    );
+  });
 });
