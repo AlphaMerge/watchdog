@@ -44,14 +44,26 @@ fail() { echo "    FAIL: $*" >&2; exit 1; }
 # reason `smoke-install.sh` takes a tarball on the command line.
 version="$(node -p "require('${repo_root}/package.json').version" 2>/dev/null \
   || sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "${repo_root}/package.json" | head -1)"
+# What the installed build must say it is (`H-13`): this checkout, as it stands. Worked out on the
+# host, as `smoke-install.sh` does it — `git` inside the toolchain container cannot reach a
+# worktree's repository, whose `.git` names a path on the host (`H-11`). **Asked of a reused
+# staged tree too**: one packaged from an older commit, tested as if it were this one, is the
+# exact claim this check exists to refuse. Empty only where there is no repository to ask.
+build_commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null || true)"
+build_dirty=0
+if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then build_dirty=1; fi
 if [ -d "${repo_root}/build/ms-${version}" ] && [ "${MS_SMOKE_REBUILD:-0}" != "1" ]; then
   echo "==> using the staged tree already at build/ms-${version}"
 else
   echo "==> building the release tree"
-  if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ] || command -v npm >/dev/null 2>&1; then
-    "${repo_root}/scripts/package.sh" >/dev/null
+  # In the toolchain container unless told otherwise, for the reason `smoke-install.sh` gives: a
+  # host npm can be present and wrong, and `command -v npm` cannot tell.
+  if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ]; then
+    MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
+      "${repo_root}/scripts/package.sh" >/dev/null
   else
-    "${repo_root}/scripts/dev.sh" "./scripts/package.sh" >/dev/null
+    "${repo_root}/scripts/dev.sh" \
+      "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} ./scripts/package.sh" >/dev/null
   fi
 fi
 
@@ -137,6 +149,42 @@ one_format() {
   ${in} id ms-core >/dev/null 2>&1 || fail "no ms-core service user"
   ${in} id ms-probe >/dev/null 2>&1 || fail "no ms-probe service user"
   echo "    configuration, PKI, access key and service users: present"
+
+  # --- which build this is ------------------------------------------------------------------
+  # **Provenance, asked of the launchers an operator runs** (`H-13`). The field test's first line
+  # is "say which build you are testing", and the answer has to be what this package says, not
+  # what a manifest beside it claims — so each service is asked through `/opt/ms/bin`, the way
+  # the unit starts it. `--help` reads the stamp and nothing else, which is what lets these boxes
+  # ask without a database. Compared with this checkout's commit, not merely checked for "a
+  # commit": a package reporting somebody else's would satisfy that.
+  echo "==> asserting the installed package says which build it is"
+  local stamped short suffix expected core_says probe_says
+  stamped="$(${in} cat /opt/ms/app/core/build.json 2>/dev/null | tr -d ' \n' || true)"
+  matches '"profile":"v1"' printf '%s' "${stamped}" \
+    || fail "the package is not the v1 candidate: ${stamped:-no build.json}"
+  if [ -n "${build_commit}" ]; then
+    local dirty_json=false
+    [ "${build_dirty}" = "1" ] && dirty_json=true
+    matches "\"commit\":\"${build_commit}\",\"dirty\":${dirty_json}" printf '%s' "${stamped}" \
+      || fail "the package says '${stamped}', and this checkout is ${build_commit} (dirty: \
+${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_REBUILD=1"
+  else
+    echo "    (no repository to ask: compared with the package's own manifest only)"
+  fi
+  short="$(printf '%s' "${stamped}" | sed -n 's/.*"commit":"\([0-9a-f]\{12\}\).*/\1/p')"
+  [ -n "${short}" ] || fail "the package names no commit: ${stamped}"
+  suffix=""
+  matches '"dirty":true' printf '%s' "${stamped}" && suffix=", with uncommitted changes"
+  expected="${version} (v1 profile, commit ${short}${suffix})"
+  core_says="$(${in} /opt/ms/bin/ms-core --help 2>&1 | head -1 || true)"
+  # `ms-probe` prints its usage for an unfinished `config` verb, and exits 2 for it.
+  probe_says="$(${in} /opt/ms/bin/ms-probe config 2>&1 | head -1 || true)"
+  [ "${core_says}" = "ms-core ${expected}" ] \
+    || fail "ms-core says '${core_says}', expected 'ms-core ${expected}'"
+  [ "${probe_says}" = "ms-probe ${expected}" ] \
+    || fail "ms-probe says '${probe_says}', expected 'ms-probe ${expected}'"
+  echo "    ${core_says}"
+  echo "    ${probe_says}"
 
   # The fonts a PDF report is drawn with (`E-06`, `E-12`). They are the files the core needs at
   # runtime that `tsc` does not produce, so they are the ones a packaging change can quietly drop —
