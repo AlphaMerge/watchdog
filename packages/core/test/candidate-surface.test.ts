@@ -7,6 +7,7 @@ import { after, before, describe, it } from 'node:test';
 import type { LightMyRequestResponse } from 'fastify';
 import { BUILT_IN_SENSOR_TYPES } from '@ms/sensors';
 import { BUILD_MANIFEST, readBuildStamp, type BuildStamp } from '@ms/shared';
+import { APP_ERROR_STATUS } from '../src/api/errors.js';
 import {
   baseOptions,
   concrete,
@@ -219,6 +220,34 @@ describe('the release candidate’s surface (`H-13`)', () => {
         extra,
         missing,
       ),
+    );
+  });
+
+  it('answers no refusal as the server’s fault (`P-221`)', async () => {
+    // A 5xx in this sweep is the harness's own stubs failing, which is `INTERNAL_ERROR`, or an
+    // `AppError` code at the status `APP_ERROR_STATUS` gives it. A 5xx carrying any other code is
+    // a refusal the client was told was the server's fault: a plain `AppError` with no status of
+    // its own used to reach the client as a masked 500.
+    const masked: string[] = [];
+    for (const key of candidates) {
+      const response = await ask(open, key);
+      const code = codeOf(response);
+      if (response.statusCode < 500 || code === undefined || code === 'INTERNAL_ERROR') continue;
+      if (APP_ERROR_STATUS.get(code)?.status === response.statusCode) continue;
+      masked.push(`${key}: ${String(response.statusCode)} ${code}`);
+    }
+    assert.deepEqual(masked, [], 'refusals answered as the server’s fault');
+
+    // And the two this ticket found, by name.
+    const template = await ask(open, 'GET /api/v1/device-templates/{templateId}');
+    assert.equal(template.statusCode, 404);
+    assert.equal(codeOf(template), 'DEVICE_TEMPLATE_NOT_FOUND');
+    const starting = await ask(open, 'GET /api/v1/core-health');
+    assert.equal(starting.statusCode, 503);
+    assert.equal(
+      starting.json<{ error: { message: string } }>().error.message,
+      'the core is still starting; ask again in a moment',
+      'the answer says it is starting, not "the request could not be completed"',
     );
   });
 

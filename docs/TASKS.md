@@ -4675,6 +4675,35 @@ because each is a decision rather than a defect:
       restarted, with the arithmetic in the findings as `P-215` did it. A measurement: book the
       window, because a CPU hog in the box flakes other sessions' timing tests.
 
+- [x] **P-221 — a plain `AppError` reached the client as a masked 500** · S · — · Found by
+      1a470a in `A-23`. `toHttpError` has a branch for each error class that carries a status of
+      its own, and a catch-all for any other `AppError`: a 500 with the message replaced. So a
+      plain `AppError` reported a client's mistake as the server's fault. `GET
+      /api/v1/device-templates/{id}` for a template that does not exist answered 500. Before
+      `abddb67`, so did a template with nothing in it to save. It also counted in every 5xx rate.
+      The two health routes' `CORE_STARTING` went out as 503, as the route set it, but the body
+      said "the request could not be completed" instead of "the core is still starting".
+
+      **Done**, in one place, `api/errors.ts`:
+      - **`APP_ERROR_STATUS`** gives every `AppError` code with no branch a status and says
+        whether its own sentence goes out: 404 for `DEVICE_TEMPLATE_NOT_FOUND`, 400 for
+        `IP_RANGE_INVALID`, 503 with its sentence for `CORE_STARTING`, and a deliberate 500,
+        masked, for the ten raised at start-up or inside the core.
+      - **An unmapped code cannot ship.** `error-statuses.test.ts` reads the source of `core`,
+        `shared` and `sensors` for every plain `new AppError('CODE'` and every unbranched
+        subclass's `super('CODE'`, however far down the family. It compares them with the table
+        in both directions and refuses a code passed as a variable. It found
+        `TLS_FILE_UNREADABLE`, which a line-by-line grep misses because it is written across three
+        lines.
+      - **The surface test sweeps for it.** `candidate-surface.test.ts` now fails on any 5xx that
+        carries an `AppError` code at a status other than the table's. It names the two cases
+        found: the missing template is 404, and `/core-health` while starting says so. The
+        harness passes a real, empty template catalogue, so the route reaches its own refusal.
+
+      Mutations caught: a new literal code thrown; a code passed as a variable; a subclass
+      passing a variable to `super`; a code dropped from the table (the enumeration and the sweep
+      both); a stale entry; the fallback reverted to always-500.
+
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
       `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a

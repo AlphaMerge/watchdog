@@ -31,6 +31,55 @@ export interface HttpError {
   body: HttpErrorBody;
 }
 
+/** What an `AppError` code answers: its status, and whether its own sentence goes with it. */
+export interface AppErrorAnswer {
+  readonly status: number;
+  /**
+   * A refusal's sentence is the answer, and the caller needs it to fix the request. A fault's
+   * message can carry a path, a statement or a key id, so it goes to the log and not the wire.
+   */
+  readonly says: boolean;
+}
+
+const MASKED = 'the request could not be completed';
+
+/**
+ * Every `AppError` code that no branch of `toHttpError` answers, and what it answers (`P-221`).
+ *
+ * **The fallback used to be the whole answer, and it was a 500 with the message replaced.** So a
+ * plain `AppError` reached the client as "the request could not be completed":
+ * `DEVICE_TEMPLATE_NOT_FOUND` for a template that does not exist, and before `A-23` a template
+ * with nothing in it to save. That reports a client's mistake as the server's fault, and counts
+ * it in every 5xx rate an operator watches. The classes with a status of their own have a branch
+ * below. Everything else is listed here by code, and `error-statuses.test.ts` reads the source for
+ * every code the core can throw and fails on any that this table does not name.
+ */
+export const APP_ERROR_STATUS: ReadonlyMap<string, AppErrorAnswer> = new Map([
+  // The caller's. They can fix it once they are told what it is.
+  ['DEVICE_TEMPLATE_NOT_FOUND', { status: 404, says: true }],
+  // Wrapped as `DISCOVERY_RANGE_INVALID` by the discovery routes. A parse that escapes some other
+  // way is still the caller's range.
+  ['IP_RANGE_INVALID', { status: 400, says: true }],
+  // The core's, and it will pass. 503 tells a client to ask again rather than to file a bug, and
+  // the sentence says as much.
+  ['CORE_STARTING', { status: 503, says: true }],
+  // The core's, and a fault. Each is raised at start-up or inside the core, and one that reaches
+  // a request is a bug whose detail is in the log.
+  ['ACCOUNT_NOT_CREATED', { status: 500, says: false }],
+  ['CONFIG_INVALID', { status: 500, says: false }],
+  // A register after sealing. Only the start-up loader registers a template; no route does.
+  ['DEVICE_TEMPLATE_INVALID', { status: 500, says: false }],
+  ['FRAME_INVALID', { status: 500, says: false }],
+  // The same, for the lookup catalogue.
+  ['LOOKUP_INVALID', { status: 500, says: false }],
+  ['MIGRATION_FAILED', { status: 500, says: false }],
+  ['PROTOCOL_INVALID', { status: 500, says: false }],
+  // Not 503: a database without TimescaleDB does not recover by being asked again.
+  ['STORAGE_ENGINE_UNAVAILABLE', { status: 500, says: false }],
+  ['TLS_FILE_UNREADABLE', { status: 500, says: false }],
+  ['TLS_NOT_CONFIGURED', { status: 500, says: false }],
+]);
+
 /**
  * Maps a thrown value onto one HTTP envelope.
  *
@@ -206,13 +255,18 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     return envelope(statusCode, code, describeError(error).message, { phase: 'parse-request' });
   }
 
-  // An unexpected failure says nothing beyond "it failed". Whatever it was is in the log,
-  // correlated by id; the caller gets no internals.
+  // Every other `AppError`, by its code (`P-221`). A code missing from the table cannot ship,
+  // because the test fails on it. One that arrives anyway, from a subclass that test cannot read,
+  // is the server's fault until somebody decides otherwise: whatever it was is in the log,
+  // correlated by id, and the caller gets no internals.
   if (error instanceof AppError) {
-    return envelope(500, error.code, 'the request could not be completed');
+    const answer = APP_ERROR_STATUS.get(error.code);
+    return answer?.says === true
+      ? envelope(answer.status, error.code, error.message, { ...error.context })
+      : envelope(answer?.status ?? 500, error.code, MASKED);
   }
 
-  return envelope(500, 'INTERNAL_ERROR', 'the request could not be completed');
+  return envelope(500, 'INTERNAL_ERROR', MASKED);
 }
 
 /** Anything that escapes as a 500 is a bug; log it with everything we know. */

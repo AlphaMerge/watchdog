@@ -9,6 +9,7 @@ import { LoginThrottle } from '../../src/auth/throttle.js';
 import { TokenService } from '../../src/auth/tokens.js';
 import { TotpService } from '../../src/auth/totp.js';
 import { DependencyRepository } from '../../src/dependencies/repository.js';
+import { DeviceTemplateCatalogue } from '../../src/device-templates/catalogue.js';
 import { LookupCatalogue } from '../../src/lookups/catalogue.js';
 import type { AuditSink } from '../../src/objects/audit.js';
 import type { AuditSinkSet } from '../../src/objects/audit-composition.js';
@@ -123,7 +124,9 @@ export function baseOptions(stamp: BuildStamp, required: boolean): ApiServerOpti
     lookups: new LookupCatalogue().seal(),
     schedules: stub,
     discovery: stub,
-    deviceTemplates: stub,
+    // Real and empty, rather than a stub, so that asking for a template reaches the route's own
+    // refusal (`P-221`) instead of failing on the stub.
+    deviceTemplates: new DeviceTemplateCatalogue((id) => catalogue.has(id)).seal(),
     provision: () => Promise.resolve(stub),
     rediscovery: stub,
     probeRegistry: stub,
